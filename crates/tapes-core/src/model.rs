@@ -71,6 +71,7 @@ pub struct Transcript {
     pub session: Session,
     pub turns: Vec<Turn>,
     pub truncated: bool,
+    pub notes: Vec<String>,
 }
 
 impl Serialize for Transcript {
@@ -83,6 +84,7 @@ impl Serialize for Transcript {
             session: &self.session,
             turns: &self.turns,
             truncated: self.truncated,
+            notes: &self.notes,
         }
         .serialize(serializer)
     }
@@ -105,6 +107,7 @@ impl<'de> Deserialize<'de> for Transcript {
             session: serialized.session,
             turns: serialized.turns,
             truncated: serialized.truncated,
+            notes: serialized.notes,
         })
     }
 }
@@ -115,6 +118,8 @@ struct TranscriptRef<'a> {
     session: &'a Session,
     turns: &'a [Turn],
     truncated: bool,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    notes: &'a Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -123,6 +128,8 @@ struct SerializedTranscript {
     session: Session,
     turns: Vec<Turn>,
     truncated: bool,
+    #[serde(default)]
+    notes: Vec<String>,
 }
 
 #[cfg(test)]
@@ -194,6 +201,7 @@ mod tests {
             session: session(),
             turns: vec![turn.clone()],
             truncated: true,
+            notes: vec!["One record was unavailable.".into()],
         };
 
         assert_round_trip(&model);
@@ -226,11 +234,13 @@ mod tests {
             session: session(),
             turns: Vec::new(),
             truncated: true,
+            notes: Vec::new(),
         };
 
         let value = serde_json::to_value(&transcript).unwrap();
         assert_eq!(value["schema"], json!(SESSION_SCHEMA));
         assert_eq!(value["truncated"], Value::Bool(true));
+        assert!(value.get("notes").is_none());
 
         let decoded: Transcript = serde_json::from_value(value).unwrap();
         assert!(decoded.truncated);
