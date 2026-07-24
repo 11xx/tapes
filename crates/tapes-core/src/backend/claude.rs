@@ -1,11 +1,12 @@
+use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 use anyhow::{anyhow, Result};
 use serde_json::Value;
 
 use super::{
-    home_path, jsonl_files, read_jsonl, session_file, time_range, timestamp, transcript, Backend,
-    Jsonl,
+    home_path, matching_session_file, read_jsonl, time_range, timestamp, transcript, Backend, Jsonl,
 };
 use crate::model::{Model, Role, Session, Transcript, Turn};
 
@@ -57,7 +58,7 @@ impl ClaudeBackend {
                     variant: None,
                 })
         });
-        let turns = read.values.iter().filter_map(parse_turn).collect();
+        let turns = read.values.iter().flat_map(parse_turns).collect();
 
         Ok((
             Session {
@@ -98,7 +99,7 @@ impl Backend for ClaudeBackend {
         let Some(root) = self.root.as_deref() else {
             return Ok(Vec::new());
         };
-        let mut sessions = jsonl_files(root)
+        let mut sessions = session_files(root)
             .into_iter()
             .take(limit)
             .filter_map(|path| self.parse(&path).ok().map(|(session, _, _)| session))
@@ -113,38 +114,116 @@ impl Backend for ClaudeBackend {
             .root
             .as_deref()
             .ok_or_else(|| anyhow!("claude store is unavailable"))?;
-        let path =
-            session_file(root, id).ok_or_else(|| anyhow!("claude session {id} is unavailable"))?;
+        let path = matching_session_file(session_files(root), id)
+            .ok_or_else(|| anyhow!("claude session {id} is unavailable"))?;
         let (session, turns, read) = self.parse(&path)?;
-        Ok(transcript(session, turns, tail, &read, Vec::new()))
+        let subagents = subagent_transcript_count(&path);
+        let notes = (subagents > 0)
+            .then(|| {
+                if subagents == 1 {
+                    "1 subagent transcript belongs to this session.".to_owned()
+                } else {
+                    format!("{subagents} subagent transcripts belong to this session.")
+                }
+            })
+            .into_iter()
+            .collect();
+        Ok(transcript(session, turns, tail, &read, notes))
     }
 }
 
-fn parse_turn(value: &Value) -> Option<Turn> {
-    let message = value.get("message")?;
-    let role = match message["role"].as_str()? {
+fn session_files(root: &Path) -> Vec<PathBuf> {
+    let mut files = fs::read_dir(root)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|project| {
+            project
+                .file_type()
+                .ok()
+                .filter(|kind| kind.is_dir())
+                .map(|_| project.path())
+        })
+        .flat_map(|project| fs::read_dir(project).into_iter().flatten().flatten())
+        .filter_map(|entry| {
+            let path = entry.path();
+            entry
+                .file_type()
+                .ok()
+                .filter(|kind| kind.is_file())
+                .and_then(|_| {
+                    path.extension()
+                        .is_some_and(|extension| extension == "jsonl")
+                        .then_some(path)
+                })
+        })
+        .collect::<Vec<_>>();
+    files.sort_by_key(|path| {
+        fs::metadata(path)
+            .and_then(|metadata| metadata.modified())
+            .unwrap_or(SystemTime::UNIX_EPOCH)
+    });
+    files.reverse();
+    files
+}
+
+fn subagent_transcript_count(path: &Path) -> usize {
+    let Some(session) = path.file_stem() else {
+        return 0;
+    };
+    let subagents = path.with_file_name(session).join("subagents");
+    fs::read_dir(subagents)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|entry| {
+            let path = entry.path();
+            entry.file_type().is_ok_and(|kind| kind.is_file())
+                && path
+                    .file_stem()
+                    .and_then(|stem| stem.to_str())
+                    .is_some_and(|stem| stem.starts_with("agent-"))
+                && path
+                    .extension()
+                    .is_some_and(|extension| extension == "jsonl")
+        })
+        .count()
+}
+
+fn parse_turns(value: &Value) -> Vec<Turn> {
+    let Some(message) = value.get("message") else {
+        return Vec::new();
+    };
+    let Some(message_role) = message["role"].as_str() else {
+        return Vec::new();
+    };
+    let role = match message_role {
         "user" => Role::User,
         "assistant" => Role::Assistant,
-        _ => return None,
+        _ => return Vec::new(),
     };
-    let text = content_text(&message["content"]);
-    (!text.is_empty()).then(|| Turn {
-        role,
-        text,
-        ts: timestamp(&value["timestamp"]),
-    })
-}
-
-fn content_text(content: &Value) -> String {
+    let ts = timestamp(&value["timestamp"]);
+    let content = &message["content"];
     if let Some(text) = content.as_str() {
-        return text.to_owned();
+        return turn(role, text.to_owned(), ts).into_iter().collect();
     }
+
     content
         .as_array()
         .into_iter()
         .flatten()
-        .filter(|block| block["type"] == "text")
-        .filter_map(|block| block["text"].as_str())
-        .collect::<Vec<_>>()
-        .join("\n")
+        .filter_map(|block| {
+            let (role, text) = match block["type"].as_str()? {
+                "text" => (role.clone(), block["text"].as_str()?.to_owned()),
+                "thinking" => (Role::Reasoning, block["thinking"].as_str()?.to_owned()),
+                "tool_use" | "tool_result" => (Role::Tool, block.to_string()),
+                _ => return None,
+            };
+            turn(role, text, ts)
+        })
+        .collect()
+}
+
+fn turn(role: Role, text: String, ts: Option<chrono::DateTime<chrono::Utc>>) -> Option<Turn> {
+    (!text.is_empty()).then_some(Turn { role, text, ts })
 }

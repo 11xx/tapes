@@ -57,6 +57,27 @@ fn every_file_backend_satisfies_shared_normalization_assertions() {
 }
 
 #[test]
+fn claude_lists_only_parent_sessions_and_reports_subagent_transcripts() {
+    let backend = ClaudeBackend::new(fixtures("claude"));
+    let sessions = backend.list(10).unwrap();
+
+    assert_eq!(
+        sessions
+            .iter()
+            .filter(|session| session.id == "session-claude")
+            .count(),
+        1
+    );
+    assert_eq!(sessions.len(), 2);
+
+    let transcript = backend.transcript("session-claude", 10).unwrap();
+    assert_eq!(
+        transcript.notes,
+        vec!["1 subagent transcript belongs to this session.".to_owned()]
+    );
+}
+
+#[test]
 fn malformed_lines_leave_parseable_turns_and_a_note() {
     let cases: Vec<(Box<dyn Backend>, &str)> = vec![
         (
@@ -118,8 +139,9 @@ fn deferred_opencode_backend_is_unavailable_without_erroring() {
 #[test]
 fn transcript_reads_are_capped_at_four_megabytes() {
     let root = std::env::temp_dir().join(format!("tapes-bounds-{}", std::process::id()));
-    fs::create_dir_all(&root).unwrap();
-    let path = root.join("bounded.jsonl");
+    let project = root.join("project");
+    fs::create_dir_all(&project).unwrap();
+    let path = project.join("bounded.jsonl");
     let mut file = BufWriter::new(File::create(&path).unwrap());
     file.write_all(b"{\"padding\":\"").unwrap();
     file.write_all(&vec![b'x'; 4 * 1024 * 1024]).unwrap();

@@ -154,7 +154,14 @@ pub(crate) fn jsonl_files(root: &Path) -> Vec<PathBuf> {
 }
 
 pub(crate) fn session_file(root: &Path, id: &str) -> Option<PathBuf> {
-    jsonl_files(root).into_iter().find(|path| {
+    matching_session_file(jsonl_files(root), id)
+}
+
+pub(crate) fn matching_session_file(
+    files: impl IntoIterator<Item = PathBuf>,
+    id: &str,
+) -> Option<PathBuf> {
+    files.into_iter().find(|path| {
         path.file_stem()
             .and_then(|stem| stem.to_str())
             .is_some_and(|stem| stem == id || stem.contains(id))
