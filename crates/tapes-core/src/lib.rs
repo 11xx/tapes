@@ -1,5 +1,6 @@
 use std::path::Path;
 
+pub mod backend;
 pub mod model;
 
 pub fn list(_harness: Option<&str>, _here: bool, _limit: Option<usize>) -> Vec<String> {
