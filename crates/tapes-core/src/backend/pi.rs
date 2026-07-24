@@ -73,10 +73,7 @@ impl PiBackend {
                     variant: variant.map(str::to_owned),
                 })
         });
-        let turns = active
-            .iter()
-            .filter_map(|value| parse_turn(value))
-            .collect();
+        let turns = active.iter().flat_map(|value| parse_turns(value)).collect();
 
         Ok((
             Session {
@@ -180,28 +177,51 @@ fn active_path<'a>(entries: &[&'a Value]) -> Vec<&'a Value> {
     path
 }
 
-fn parse_turn(value: &Value) -> Option<Turn> {
+fn parse_turns(value: &Value) -> Vec<Turn> {
     if value["type"] != "message" {
-        return None;
+        return Vec::new();
     }
     let message = &value["message"];
-    let role = match message["role"].as_str()? {
+    let Some(message_role) = message["role"].as_str() else {
+        return Vec::new();
+    };
+    let role = match message_role {
         "user" => Role::User,
         "assistant" => Role::Assistant,
-        "toolResult" => Role::Tool,
-        _ => return None,
+        "toolResult" => {
+            return vec![Turn {
+                role: Role::Tool,
+                text: message.to_string(),
+                ts: timestamp(&value["timestamp"]),
+            }];
+        }
+        _ => return Vec::new(),
     };
-    let text = message["content"]
+    let ts = timestamp(&value["timestamp"]);
+    let content = &message["content"];
+    if let Some(text) = content.as_str() {
+        return (!text.is_empty())
+            .then(|| Turn {
+                role,
+                text: text.to_owned(),
+                ts,
+            })
+            .into_iter()
+            .collect();
+    }
+
+    content
         .as_array()
         .into_iter()
         .flatten()
-        .filter(|block| block["type"] == "text")
-        .filter_map(|block| block["text"].as_str())
-        .collect::<Vec<_>>()
-        .join("\n");
-    (!text.is_empty()).then(|| Turn {
-        role,
-        text,
-        ts: timestamp(&value["timestamp"]),
-    })
+        .filter_map(|block| {
+            let (role, text) = match block["type"].as_str()? {
+                "text" => (role.clone(), block["text"].as_str()?.to_owned()),
+                "thinking" => (Role::Reasoning, block["thinking"].as_str()?.to_owned()),
+                "toolCall" => (Role::Tool, block.to_string()),
+                _ => return None,
+            };
+            (!text.is_empty()).then_some(Turn { role, text, ts })
+        })
+        .collect()
 }

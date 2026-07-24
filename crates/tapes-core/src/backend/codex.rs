@@ -62,7 +62,7 @@ impl CodexBackend {
                     variant: payload["effort"].as_str().map(str::to_owned),
                 })
             });
-        let turns = read.values.iter().filter_map(parse_turn).collect();
+        let turns = read.values.iter().flat_map(parse_turns).collect();
 
         Ok((
             Session {
@@ -127,27 +127,58 @@ impl Backend for CodexBackend {
     }
 }
 
-fn parse_turn(value: &Value) -> Option<Turn> {
-    if value["type"] != "response_item" || value["payload"]["type"] != "message" {
-        return None;
+fn parse_turns(value: &Value) -> Vec<Turn> {
+    if value["type"] != "response_item" {
+        return Vec::new();
     }
     let payload = &value["payload"];
-    let role = match payload["role"].as_str()? {
-        "user" => Role::User,
-        "assistant" => Role::Assistant,
-        _ => return None,
+    let ts = timestamp(&value["timestamp"]);
+    let (role, text) = match payload["type"].as_str() {
+        Some("message") => {
+            let role = match payload["role"].as_str() {
+                Some("user") => Role::User,
+                Some("assistant") => Role::Assistant,
+                _ => return Vec::new(),
+            };
+            let text = payload["content"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter(|block| {
+                    matches!(block["type"].as_str(), Some("input_text" | "output_text"))
+                })
+                .filter_map(|block| block["text"].as_str())
+                .collect::<Vec<_>>()
+                .join("\n");
+            (role, text)
+        }
+        Some("reasoning") => (Role::Reasoning, reasoning_text(payload)),
+        Some(
+            "function_call"
+            | "function_call_output"
+            | "custom_tool_call"
+            | "custom_tool_call_output",
+        ) => (Role::Tool, payload.to_string()),
+        _ => return Vec::new(),
     };
-    let text = payload["content"]
-        .as_array()
+    (!text.is_empty())
+        .then_some(Turn { role, text, ts })
         .into_iter()
-        .flatten()
-        .filter(|block| matches!(block["type"].as_str(), Some("input_text" | "output_text")))
+        .collect()
+}
+
+fn reasoning_text(payload: &Value) -> String {
+    let text = ["summary", "content"]
+        .into_iter()
+        .flat_map(|field| payload[field].as_array().into_iter().flatten())
         .filter_map(|block| block["text"].as_str())
         .collect::<Vec<_>>()
         .join("\n");
-    (!text.is_empty()).then(|| Turn {
-        role,
-        text,
-        ts: timestamp(&value["timestamp"]),
-    })
+    if !text.is_empty() {
+        text
+    } else if payload["encrypted_content"].as_str().is_some() {
+        "[encrypted reasoning]".to_owned()
+    } else {
+        String::new()
+    }
 }

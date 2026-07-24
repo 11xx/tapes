@@ -57,6 +57,34 @@ fn every_file_backend_satisfies_shared_normalization_assertions() {
 }
 
 #[test]
+fn every_file_backend_preserves_reasoning_and_tool_chronology() {
+    for (backend, id) in fixture_backends() {
+        let transcript = backend.transcript(id, 10).unwrap();
+        let roles = transcript
+            .turns
+            .iter()
+            .map(|turn| turn.role.clone())
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            roles,
+            vec![
+                Role::User,
+                Role::Reasoning,
+                Role::Tool,
+                Role::Tool,
+                Role::Assistant
+            ],
+            "{} chronology differs",
+            backend.harness()
+        );
+        assert_eq!(transcript.turns[1].text, "Consider the fixture.");
+        assert!(transcript.turns[2].text.contains("fixture_tool"));
+        assert!(transcript.turns[3].text.contains("Tool complete."));
+    }
+}
+
+#[test]
 fn claude_lists_only_parent_sessions_and_reports_subagent_transcripts() {
     let backend = ClaudeBackend::new(fixtures("claude"));
     let sessions = backend.list(10).unwrap();
