@@ -51,6 +51,7 @@ impl PiBackend {
             .or_else(|| {
                 path.file_stem()
                     .and_then(|stem| stem.to_str())
+                    .and_then(|stem| stem.rsplit('_').next())
                     .map(str::to_owned)
             })
             .ok_or_else(|| anyhow!("{} has no session id", path.display()))?;
