@@ -1,0 +1,154 @@
+# Claude Code JSONL schema (relevant fields)
+
+What `tapes`' claude backend reads, and why. The format is undocumented by its
+harness and drifts; check a real transcript before trusting any row here.
+
+## File location
+
+```
+~/.claude/projects/<encoded-cwd>/<session-uuid>.jsonl
+```
+
+`<encoded-cwd>` is the absolute path with each `/` replaced by `-`, with a leading `-`:
+
+| Cwd | Encoded |
+|---|---|
+| `/work/project` | `-work-project` |
+| `/home/user` | `-home-user` |
+| `/` | `-` |
+
+`$CLAUDE_HOME` (default `~/.claude`) and `$PROJECTS_DIR` are overridable for testing.
+
+## Top-level fields on every message
+
+| Field | Type | Notes |
+|---|---|---|
+| `type` | string | `user`, `assistant`, `system`, `file-history-snapshot`, `attachment`, `last-prompt`, `ai-title`, `mode`, `queue-operation` |
+| `timestamp` | ISO 8601 | UTC; missing on metadata messages |
+| `sessionId` | UUID | Same on every message in a thread |
+| `cwd` | string | Captured working directory; same on every message |
+| `gitBranch` | string | Branch at the time of the message |
+| `parentUuid` | UUID | Parent in the message tree (for subagent messages) |
+| `isSidechain` | bool | true for subagent / fork messages |
+| `uuid` | UUID | Unique per message |
+| `message` | object | The actual content (shape depends on `type`) |
+
+## `type: "user"` — the user role
+
+`message.content` is *either* a string (real prompt) *or* an array (tool result envelope).
+
+### Real prompt (string content)
+
+```json
+{
+  "type": "user",
+  "message": {
+    "role": "user",
+    "content": "what's the weather?"
+  }
+}
+```
+
+Marked "real" only if the content is non-empty and contains no `<local-command-caveat>` or `<command-name>` markers. `/command` invocations (`/clear`, `/compact`, `/help`, …) come through as user messages with content like `<command-name>/clear</command-name>...` and should be filtered out of "real" prompts.
+
+### Tool result (array content)
+
+```json
+{
+  "type": "user",
+  "message": {
+    "role": "user",
+    "content": [
+      {
+        "type": "tool_result",
+        "tool_use_id": "toolu_01ABC...",
+        "content": "Total Test time (real) =   1.61 sec",
+        "is_error": false
+      }
+    ]
+  }
+}
+```
+
+The `tool_use_id` references the assistant's `tool_use` block id. `is_error: true` is a hard error signal.
+
+## `type: "assistant"`
+
+`message.content` is an array of typed blocks:
+
+```json
+{
+  "type": "assistant",
+  "message": {
+    "role": "assistant",
+    "stop_reason": "end_turn",     // or "tool_use", "stop_sequence", "max_tokens"
+    "content": [
+      { "type": "thinking", "thinking": "...", "signature": "..." },
+      { "type": "text", "text": "..." },
+      { "type": "tool_use", "id": "toolu_01ABC...", "name": "Bash", "input": { ... } }
+    ]
+  }
+}
+```
+
+`stop_reason` is the spine of state detection:
+- `end_turn` — assistant finished its turn (could be cleanly completed OR could be session limit)
+- `tool_use` — assistant emitted a tool call; turn is still open
+- `stop_sequence` — stopped by a stop sequence (often the session-limit message)
+- `max_tokens` — truncated by the model's output limit
+
+`tool_use.input` is whatever the assistant passed to the tool — for `Bash`, it's `{ "command": "..." }`; for `Read`, `{ "file_path": "..." }`; etc. The `id` matches `tool_result.tool_use_id` in the next user message.
+
+## `type: "system"`
+
+`message.subtype` discriminates:
+
+| Subtype | Meaning | Useful fields |
+|---|---|---|
+| `turn_duration` | End-of-turn timing metadata | — |
+| `compact_boundary` | `/compact` happened | `compactMetadata.trigger`, `compactMetadata.preTokens`, `compactMetadata.postTokens`, `compactMetadata.preservedMessages.allUuids` |
+| `away_summary` | Snapshot written when the user was away (auto-detected) | `content` — a 1-2 sentence state description |
+| `local_command` | A local command's stdout | `content` |
+
+The `compact_boundary` event is critical for state detection: if it appears and a real user prompt follows it, the thread is `compacted_and_resumed`. If it appears and no real user prompt follows, it's `compacted_no_resume`.
+
+## `type: "file-history-snapshot"`
+
+```json
+{
+  "type": "file-history-snapshot",
+  "snapshot": {
+    "messageId": "...",
+    "timestamp": "...",
+    "trackedFileBackups": {
+      "src/ipc/IpcSocket.h": {
+        "backupFileName": null,
+        "version": 1,
+        "backupTime": "..."
+      }
+    }
+  }
+}
+```
+
+Note: `trackedFileBackups` is a **dict keyed by file path**, not a list. The values are metadata. Most snapshots are empty dicts. The *union of keys across all snapshots* is the full set of files the transcript recorded as touched.
+
+## Metadata types
+
+`mode`, `last-prompt`, `ai-title`, `queue-operation`, `attachment` are UI and
+metadata state carrying no conversation content, so they produce no turns.
+`ai-title` is the exception the backend does read: it is the only harness-
+supplied session title of the four.
+
+## Subagent transcripts
+
+A session's subagent threads live one level deeper, and each carries the
+**parent's** `sessionId`:
+
+```
+~/.claude/projects/<encoded-cwd>/<session-uuid>/subagents/agent-<id>.jsonl
+```
+
+Enumerating `<encoded-cwd>/*.jsonl` therefore lists sessions; recursing further
+lists the same session many times over. `tapes` enumerates at session depth and
+reports the subagent count as a transcript note.

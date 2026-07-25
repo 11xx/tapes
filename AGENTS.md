@@ -44,3 +44,11 @@ server, no session *writing* — `tapes` never mutates a harness's store.
 
 `docs/chain-plan.md` is the execution program. Per-slice briefs are in
 `docs/briefs/`, each one ready to feed to `arc brief <change> --body-file`.
+
+## Harness formats
+
+`docs/formats/` documents what each harness's store actually contains. The
+formats are undocumented by their harnesses and drift, so treat those files as
+a record of what was last verified, not as a spec — check a real transcript
+before relying on any claim in them, and update them in the change that
+learns something new.
