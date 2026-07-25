@@ -1,0 +1,96 @@
+{
+  "data": [
+    {
+      "id": "msg_fixture_assistant_final",
+      "time": {
+        "created": 1784663069000,
+        "completed": 1784663070000
+      },
+      "type": "assistant",
+      "agent": "build",
+      "model": {
+        "id": "kimi-k3",
+        "providerID": "opencode-go",
+        "variant": "max"
+      },
+      "content": [
+        {
+          "type": "text",
+          "text": "Fixture inspected.",
+          "time": {
+            "created": 1784663069001,
+            "completed": 1784663069999
+          }
+        }
+      ]
+    },
+    {
+      "id": "msg_fixture_assistant_work",
+      "time": {
+        "created": 1784663062000,
+        "completed": 1784663068000
+      },
+      "type": "assistant",
+      "agent": "build",
+      "model": {
+        "id": "kimi-k3",
+        "providerID": "opencode-go",
+        "variant": "max"
+      },
+      "content": [
+        {
+          "type": "reasoning",
+          "text": "Consider the fixture.",
+          "time": {
+            "created": 1784663062001,
+            "completed": 1784663062999
+          }
+        },
+        {
+          "type": "tool",
+          "id": "fixture_tool_call",
+          "name": "read",
+          "state": {
+            "status": "completed",
+            "input": {
+              "path": "fixture"
+            }
+          },
+          "time": {
+            "created": 1784663063000,
+            "completed": 1784663063999
+          }
+        },
+        {
+          "type": "tool",
+          "id": "fixture_tool_result",
+          "name": "read",
+          "state": {
+            "status": "completed",
+            "content": [
+              {
+                "type": "text",
+                "text": "Tool complete."
+              }
+            ]
+          },
+          "time": {
+            "created": 1784663064000,
+            "completed": 1784663067999
+          }
+        }
+      ]
+    },
+    {
+      "id": "msg_000000fixtureSharedUser001",
+      "time": {
+        "created": 1784592000000
+      },
+      "type": "user",
+      "text": "Inspect the fixture.",
+      "agents": [],
+      "files": []
+    }
+  ],
+  "cursor": {}
+}

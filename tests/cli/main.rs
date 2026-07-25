@@ -29,11 +29,14 @@ fn list_without_stores_is_empty_and_successful() {
     let output = tapes()
         .arg("list")
         .env("HOME", temporary_home)
+        .env("PATH", "/definitely/missing")
         .output()
         .unwrap();
 
     assert!(output.status.success());
-    assert!(output.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&output.stdout).contains("No harnesses available."));
+    assert!(String::from_utf8_lossy(&output.stdout)
+        .contains("Unavailable: claude, codex, opencode, pi"));
     assert!(output.stderr.is_empty());
 }
 

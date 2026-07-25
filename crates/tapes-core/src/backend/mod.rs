@@ -23,6 +23,15 @@ pub trait Backend {
     fn transcript(&self, id: &str, tail: usize) -> Result<Transcript>;
 }
 
+pub fn backends() -> Vec<Box<dyn Backend>> {
+    vec![
+        Box::new(claude::ClaudeBackend::default()),
+        Box::new(codex::CodexBackend::default()),
+        Box::new(opencode::OpenCodeBackend::default()),
+        Box::new(pi::PiBackend::default()),
+    ]
+}
+
 pub(crate) struct Jsonl {
     pub values: Vec<Value>,
     pub skipped: usize,
@@ -164,6 +173,12 @@ pub(crate) fn matching_session_file(
     files.into_iter().find(|path| {
         path.file_stem()
             .and_then(|stem| stem.to_str())
-            .is_some_and(|stem| stem == id || stem.contains(id))
+            .is_some_and(|stem| {
+                stem == id
+                    || stem
+                        .strip_suffix(id)
+                        .and_then(|prefix| prefix.chars().next_back())
+                        .is_some_and(|separator| !separator.is_alphanumeric())
+            })
     })
 }

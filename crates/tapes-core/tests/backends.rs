@@ -1,13 +1,17 @@
 use std::fs::{self, File};
 use std::io::{BufWriter, Write};
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
+use chrono::{TimeZone, Utc};
 use tapes_core::backend::claude::ClaudeBackend;
 use tapes_core::backend::codex::CodexBackend;
 use tapes_core::backend::opencode::OpenCodeBackend;
 use tapes_core::backend::pi::PiBackend;
 use tapes_core::backend::Backend;
-use tapes_core::model::Role;
+use tapes_core::model::{Role, Session, Transcript};
+use tapes_core::{list_with_backends, resolve_session, show_with_backends, ResolveError};
 
 fn fixtures(harness: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -15,7 +19,7 @@ fn fixtures(harness: &str) -> PathBuf {
         .join(harness)
 }
 
-fn fixture_backends() -> Vec<(Box<dyn Backend>, &'static str)> {
+fn file_fixture_backends() -> Vec<(Box<dyn Backend>, &'static str)> {
     vec![
         (
             Box::new(ClaudeBackend::new(fixtures("claude"))),
@@ -29,8 +33,43 @@ fn fixture_backends() -> Vec<(Box<dyn Backend>, &'static str)> {
     ]
 }
 
+fn fixture_backends() -> Vec<(Box<dyn Backend>, &'static str)> {
+    let mut backends = file_fixture_backends();
+    backends.insert(
+        2,
+        (
+            Box::new(OpenCodeBackend::new(opencode_fixture_program())),
+            "ses_000000fixtureSharedSession",
+        ),
+    );
+    backends
+}
+
+fn opencode_fixture_program() -> PathBuf {
+    static PROGRAM: OnceLock<PathBuf> = OnceLock::new();
+    PROGRAM
+        .get_or_init(|| {
+            let program = std::env::temp_dir()
+                .join(format!("tapes-opencode-fixture-{}", std::process::id()));
+            let list = fixtures("opencode").join("list.json");
+            let messages = fixtures("opencode").join("messages.json");
+            fs::write(
+                &program,
+                format!(
+                    "#!/bin/sh\ncase \"$4\" in\n  /api/session\\?*) exec /bin/cat '{}';;\n  /api/session/*/message) exec /bin/cat '{}';;\nesac\nexit 1\n",
+                    list.display(),
+                    messages.display()
+                ),
+            )
+            .unwrap();
+            fs::set_permissions(&program, fs::Permissions::from_mode(0o700)).unwrap();
+            program
+        })
+        .clone()
+}
+
 #[test]
-fn every_file_backend_satisfies_shared_normalization_assertions() {
+fn every_backend_satisfies_shared_normalization_assertions() {
     for (backend, id) in fixture_backends() {
         assert!(
             backend.available(),
@@ -53,6 +92,29 @@ fn every_file_backend_satisfies_shared_normalization_assertions() {
         let tailed = backend.transcript(id, 1).unwrap();
         assert_eq!(tailed.turns.len(), 1);
         assert!(tailed.truncated);
+    }
+}
+
+#[test]
+fn every_file_backend_resolves_full_ids_and_unambiguous_prefixes() {
+    for (backend, id) in file_fixture_backends() {
+        let sessions = backend.list(10).unwrap();
+        let prefix = (1..id.len())
+            .map(|length| &id[..length])
+            .find(|prefix| {
+                sessions
+                    .iter()
+                    .filter(|session| session.id.starts_with(prefix))
+                    .count()
+                    == 1
+            })
+            .expect("fixture has an unambiguous proper prefix");
+        let backends = vec![backend];
+
+        for query in [id, prefix] {
+            let transcript = show_with_backends(&backends, query, 10).unwrap();
+            assert_eq!(transcript.session.id, id);
+        }
     }
 }
 
@@ -114,7 +176,7 @@ fn malformed_lines_leave_parseable_turns_and_a_note() {
         ),
         (
             Box::new(CodexBackend::new(fixtures("codex"))),
-            "00000000-0000-0000-0000-000000000002",
+            "10000000-0000-0000-0000-000000000002",
         ),
         (Box::new(PiBackend::new(fixtures("pi"))), "malformed"),
     ];
@@ -157,11 +219,93 @@ fn codex_reads_model_and_effort_from_turn_context() {
 }
 
 #[test]
-fn deferred_opencode_backend_is_unavailable_without_erroring() {
-    let backend = OpenCodeBackend;
+fn opencode_is_unavailable_when_its_binary_is_absent() {
+    let backends: Vec<Box<dyn Backend>> = vec![
+        Box::new(CodexBackend::new(fixtures("codex"))),
+        Box::new(OpenCodeBackend::new("/definitely/missing/opencode2")),
+    ];
 
-    assert!(!backend.available());
-    assert!(backend.list(10).unwrap().is_empty());
+    assert!(!backends[1].available());
+    let result = list_with_backends(&backends, None, None, 10).unwrap();
+    assert!(!result.sessions.is_empty());
+    assert_eq!(result.unavailable, vec!["opencode"]);
+}
+
+#[test]
+fn list_filters_by_directory_and_bounds_each_backend() {
+    let backends: Vec<Box<dyn Backend>> = vec![Box::new(CodexBackend::new(fixtures("codex")))];
+
+    let result =
+        list_with_backends(&backends, None, Some(Path::new("/fixtures/project")), 1).unwrap();
+    assert_eq!(result.sessions.len(), 1);
+
+    let result =
+        list_with_backends(&backends, None, Some(Path::new("/different/project")), 10).unwrap();
+    assert!(result.sessions.is_empty());
+}
+
+#[derive(Clone)]
+struct ResolverFixture {
+    sessions: Vec<Session>,
+}
+
+impl Backend for ResolverFixture {
+    fn harness(&self) -> &'static str {
+        "fixture"
+    }
+
+    fn available(&self) -> bool {
+        true
+    }
+
+    fn list(&self, limit: usize) -> anyhow::Result<Vec<Session>> {
+        Ok(self.sessions.iter().take(limit).cloned().collect())
+    }
+
+    fn transcript(&self, _id: &str, _tail: usize) -> anyhow::Result<Transcript> {
+        unreachable!("resolver tests do not read transcripts")
+    }
+}
+
+fn resolver_session(id: &str) -> Session {
+    let timestamp = Utc.timestamp_opt(1_700_000_000, 0).unwrap();
+    Session {
+        id: id.into(),
+        harness: "fixture".into(),
+        model: None,
+        title: None,
+        directory: None,
+        started_at: timestamp,
+        last_activity_at: timestamp,
+        cost: None,
+        tokens: None,
+    }
+}
+
+#[test]
+fn resolver_accepts_only_unambiguous_prefixes() {
+    let backends: Vec<Box<dyn Backend>> = vec![Box::new(ResolverFixture {
+        sessions: vec![
+            resolver_session("ses_alpha"),
+            resolver_session("ses_alpine"),
+            resolver_session("ses_beta"),
+        ],
+    })];
+
+    let resolved = resolve_session(&backends, "ses_b").unwrap();
+    assert_eq!(resolved.session.id, "ses_beta");
+
+    let error = resolve_session(&backends, "ses_al").unwrap_err();
+    let ResolveError::Ambiguous { candidates, .. } = error else {
+        panic!("expected ambiguous prefix");
+    };
+    assert_eq!(
+        candidates
+            .into_iter()
+            .map(|candidate| candidate.id)
+            .collect::<Vec<_>>(),
+        vec!["ses_alpha", "ses_alpine"]
+    );
 }
 
 #[test]

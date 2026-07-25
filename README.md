@@ -10,6 +10,7 @@ behind an HTTP API.
 tapes list                      # every harness, newest first
 tapes list --harness opencode --here
 tapes show ses_07e16cc8 --tail 20
+tapes show ses_07e16cc8 --json
 tapes export ses_07e16cc8 --bundle /tmp/
 ```
 
@@ -33,6 +34,18 @@ A harness whose binary or store is absent reports itself unavailable; it
 never fails the command. Listing works with any subset installed.
 
 ## Output
+
+`list` merges sessions from every available harness and sorts them by last
+activity. `--limit` bounds each harness before merging, `--here` keeps sessions
+whose recorded directory is the current directory, and `--harness` selects one
+backend. Human output ends with an availability note when a backend cannot be
+read. JSON output is a `tapes-list/1` object containing `sessions` and
+`unavailable`.
+
+`show` accepts a full session ID or an unambiguous prefix. It searches every
+available backend, rejects ambiguous prefixes with the matching candidates,
+and prints normalized turns in chronological order. `--tail` bounds the turns
+returned. JSON output uses the `tapes-session/1` transcript schema.
 
 `export` writes a three-file bundle with a shared prefix:
 
