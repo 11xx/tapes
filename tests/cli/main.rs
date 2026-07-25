@@ -53,3 +53,20 @@ fn piped_help_does_not_panic() {
 
     assert!(!String::from_utf8_lossy(&output.stderr).contains("panic"));
 }
+
+#[test]
+fn exporting_an_unknown_session_writes_no_bundle_and_fails() {
+    let directory = std::env::temp_dir().join(format!("tapes-cli-export-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&directory);
+    let output = tapes()
+        .args(["export", "definitely-not-a-session"])
+        .arg("--bundle")
+        .arg(&directory)
+        .env("HOME", std::env::temp_dir().join("tapes-cli-empty-home"))
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty(), "the manifest is the only stdout");
+    assert!(!directory.exists(), "a failed export leaves nothing behind");
+}
