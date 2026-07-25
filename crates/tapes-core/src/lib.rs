@@ -118,6 +118,49 @@ pub fn resolve_session(
     backends: &[Box<dyn Backend>],
     query: &str,
 ) -> std::result::Result<ResolvedSession, ResolveError> {
+    // Fast path: an exact id never consults a listing. A backend that errors
+    // here is treated as a miss, so one broken store cannot stop another from
+    // resolving — the same tolerance `list` already applies.
+    // No `available()` probe here on purpose. Availability is a listing
+    // concern — `list` reports which harnesses it could not reach. On an
+    // exact-id path a miss is a miss however it arises, and probing costs a
+    // second process spawn for API-backed harnesses.
+    let mut located = Vec::new();
+    for (backend_index, backend) in backends.iter().enumerate() {
+        if let Ok(Some(session)) = backend.locate(query) {
+            if session.id == query {
+                located.push(ResolvedSession {
+                    backend_index,
+                    session,
+                });
+            }
+        }
+    }
+    match located.len() {
+        1 => return Ok(located.pop().expect("one match is present")),
+        0 => {}
+        _ => {
+            let mut candidates = located
+                .into_iter()
+                .map(|resolved| SessionCandidate {
+                    id: resolved.session.id,
+                    harness: resolved.session.harness,
+                })
+                .collect::<Vec<_>>();
+            candidates.sort_by(|left, right| {
+                left.id
+                    .cmp(&right.id)
+                    .then(left.harness.cmp(&right.harness))
+            });
+            return Err(ResolveError::Ambiguous {
+                query: query.to_owned(),
+                candidates,
+            });
+        }
+    }
+
+    // Fallback: a prefix query genuinely needs enumeration, because ambiguity
+    // can only be seen across the whole set.
     let mut matches = Vec::new();
     for (backend_index, backend) in backends.iter().enumerate() {
         if !backend.available() {

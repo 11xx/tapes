@@ -53,12 +53,16 @@ fn opencode_fixture_program() -> PathBuf {
                 .join(format!("tapes-opencode-fixture-{}", std::process::id()));
             let list = fixtures("opencode").join("list.json");
             let messages = fixtures("opencode").join("messages.json");
+            let session = fixtures("opencode").join("session.json");
+            // The message route must precede the bare-session route, or the
+            // wildcard would swallow it.
             fs::write(
                 &program,
                 format!(
-                    "#!/bin/sh\ncase \"$4\" in\n  /api/session\\?*) exec /bin/cat '{}';;\n  /api/session/*/message) exec /bin/cat '{}';;\nesac\nexit 1\n",
+                    "#!/bin/sh\ncase \"$4\" in\n  /api/session\\?*) exec /bin/cat '{}';;\n  /api/session/*/message) exec /bin/cat '{}';;\n  /api/session/*) exec /bin/cat '{}';;\nesac\nexit 1\n",
                     list.display(),
-                    messages.display()
+                    messages.display(),
+                    session.display()
                 ),
             )
             .unwrap();
@@ -244,9 +248,22 @@ fn list_filters_by_directory_and_bounds_each_backend() {
     assert!(result.sessions.is_empty());
 }
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 struct ResolverFixture {
     sessions: Vec<Session>,
+    /// Panic if `list` is called: proves an exact id never enumerates.
+    forbid_list: bool,
+    /// Fail `locate`: proves one broken backend cannot block another.
+    locate_errors: bool,
+}
+
+impl ResolverFixture {
+    fn with(sessions: Vec<Session>) -> Self {
+        Self {
+            sessions,
+            ..Self::default()
+        }
+    }
 }
 
 impl Backend for ResolverFixture {
@@ -259,7 +276,22 @@ impl Backend for ResolverFixture {
     }
 
     fn list(&self, limit: usize) -> anyhow::Result<Vec<Session>> {
+        assert!(
+            !self.forbid_list,
+            "an exact id must not enumerate the store"
+        );
         Ok(self.sessions.iter().take(limit).cloned().collect())
+    }
+
+    fn locate(&self, id: &str) -> anyhow::Result<Option<Session>> {
+        if self.locate_errors {
+            anyhow::bail!("fixture locate is broken");
+        }
+        Ok(self
+            .sessions
+            .iter()
+            .find(|session| session.id == id)
+            .cloned())
     }
 
     fn transcript(&self, _id: &str, _tail: usize) -> anyhow::Result<Transcript> {
@@ -284,13 +316,11 @@ fn resolver_session(id: &str) -> Session {
 
 #[test]
 fn resolver_accepts_only_unambiguous_prefixes() {
-    let backends: Vec<Box<dyn Backend>> = vec![Box::new(ResolverFixture {
-        sessions: vec![
-            resolver_session("ses_alpha"),
-            resolver_session("ses_alpine"),
-            resolver_session("ses_beta"),
-        ],
-    })];
+    let backends: Vec<Box<dyn Backend>> = vec![Box::new(ResolverFixture::with(vec![
+        resolver_session("ses_alpha"),
+        resolver_session("ses_alpine"),
+        resolver_session("ses_beta"),
+    ]))];
 
     let resolved = resolve_session(&backends, "ses_b").unwrap();
     assert_eq!(resolved.session.id, "ses_beta");
@@ -335,4 +365,60 @@ fn transcript_reads_are_capped_at_four_megabytes() {
     assert!(transcript.truncated);
     assert_eq!(transcript.turns.len(), 2);
     fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn exact_id_resolves_without_enumerating_the_store() {
+    // `list` panics, so resolution can only succeed through `locate`.
+    let backends: Vec<Box<dyn Backend>> = vec![Box::new(ResolverFixture {
+        sessions: vec![resolver_session("ses_alpha")],
+        forbid_list: true,
+        locate_errors: false,
+    })];
+
+    let resolved = resolve_session(&backends, "ses_alpha").unwrap();
+    assert_eq!(resolved.session.id, "ses_alpha");
+}
+
+#[test]
+fn exact_id_resolves_beyond_the_enumeration_limit() {
+    // More sessions than resolution would ever list, with the target last.
+    let mut sessions = (0..1_200)
+        .map(|index| resolver_session(&format!("ses_filler{index:05}")))
+        .collect::<Vec<_>>();
+    sessions.push(resolver_session("ses_buried"));
+    let backends: Vec<Box<dyn Backend>> = vec![Box::new(ResolverFixture {
+        sessions,
+        forbid_list: true,
+        locate_errors: false,
+    })];
+
+    let resolved = resolve_session(&backends, "ses_buried").unwrap();
+    assert_eq!(resolved.session.id, "ses_buried");
+}
+
+#[test]
+fn a_broken_locate_does_not_prevent_another_backend_resolving() {
+    let backends: Vec<Box<dyn Backend>> = vec![
+        Box::new(ResolverFixture {
+            sessions: vec![resolver_session("ses_other")],
+            forbid_list: false,
+            locate_errors: true,
+        }),
+        Box::new(ResolverFixture::with(vec![resolver_session("ses_alpha")])),
+    ];
+
+    let resolved = resolve_session(&backends, "ses_alpha").unwrap();
+    assert_eq!(resolved.session.id, "ses_alpha");
+}
+
+#[test]
+fn an_unknown_id_is_still_not_found() {
+    let backends: Vec<Box<dyn Backend>> =
+        vec![Box::new(ResolverFixture::with(vec![resolver_session(
+            "ses_alpha",
+        )]))];
+
+    let error = resolve_session(&backends, "ses_missing").unwrap_err();
+    assert!(matches!(error, ResolveError::NotFound(_)));
 }

@@ -20,6 +20,10 @@ pub trait Backend {
     fn harness(&self) -> &'static str;
     fn available(&self) -> bool;
     fn list(&self, limit: usize) -> Result<Vec<Session>>;
+    /// Locate one session by its exact id without enumerating the store.
+    /// `Ok(None)` means this backend does not hold it. Resolution calls this
+    /// before it calls `list`, so an exact id never pays for a listing.
+    fn locate(&self, id: &str) -> Result<Option<Session>>;
     fn transcript(&self, id: &str, tail: usize) -> Result<Transcript>;
 }
 
