@@ -7,11 +7,15 @@ use backend::Backend;
 use model::{Session, Transcript};
 
 pub mod backend;
+pub mod bundle;
 pub mod model;
 
 pub const LIST_SCHEMA: &str = "tapes-list/1";
 const DEFAULT_LIST_LIMIT: usize = 20;
 const RESOLVE_LIMIT: usize = 1_000;
+/// An export is a rescue: take the whole session the bounded read allows,
+/// not the window `show` defaults to.
+const EXPORT_TAIL: usize = usize::MAX;
 
 #[derive(Debug, Serialize)]
 pub struct SessionList {
@@ -181,6 +185,15 @@ pub fn show_with_backends(
     backends[resolved.backend_index].transcript(&resolved.session.id, tail)
 }
 
-pub fn export(_session: &str, _bundle: Option<&Path>) -> &'static str {
-    "export is not implemented"
+pub fn export(session: &str, bundle: Option<&Path>) -> Result<bundle::Bundle> {
+    export_with_backends(&backend::backends(), session, bundle)
+}
+
+pub fn export_with_backends(
+    backends: &[Box<dyn Backend>],
+    session: &str,
+    directory: Option<&Path>,
+) -> Result<bundle::Bundle> {
+    let transcript = show_with_backends(backends, session, EXPORT_TAIL)?;
+    bundle::export(&transcript, directory.unwrap_or_else(|| Path::new("/tmp")))
 }

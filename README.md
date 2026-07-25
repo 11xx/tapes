@@ -47,16 +47,24 @@ available backend, rejects ambiguous prefixes with the matching candidates,
 and prints normalized turns in chronological order. `--tail` bounds the turns
 returned. JSON output uses the `tapes-session/1` transcript schema.
 
-`export` writes a three-file bundle with a shared prefix:
+`export` writes a three-file bundle sharing one timestamped prefix, into
+`--bundle <dir>` or `/tmp`:
 
 - `.context.md` — exact operator turns and assistant-visible text. Read first.
-- `.json` — canonical normalized messages, state, evidence, cost, git.
-  Query selectively with `jq`.
-- `.trace.md` — complete reasoning and tool chronology, for grepping.
+- `.json` — the canonical `tapes-session/1` object plus turns, cost, tokens,
+  and the session directory's git head and branch when they resolve. Query
+  selectively with `jq`.
+- `.trace.md` — complete reasoning and tool chronology, for grepping. Each
+  tool turn is headed by its tool name, with the harness's raw envelope kept
+  beneath it.
 
 Read context first, query the JSON narrowly, and reach for the trace only
 when free-text search is genuinely easier. Never ingest a whole bundle
 because it exists.
+
+Stdout is a manifest of exactly those three paths and their sizes; nothing
+else goes there. Each file is written under a temporary name and renamed, so
+a bundle never looks complete while it is half written.
 
 ## Redaction
 

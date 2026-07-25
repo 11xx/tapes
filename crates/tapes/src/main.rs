@@ -2,6 +2,7 @@ use std::path::PathBuf;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
+use tapes_core::bundle::Bundle;
 use tapes_core::model::{Role, Session, Transcript};
 
 #[derive(Parser)]
@@ -83,7 +84,8 @@ fn dispatch(cli: Cli) -> Result<()> {
             }
         }
         Command::Export { session, bundle } => {
-            eprintln!("{}", tapes_core::export(&session, bundle.as_deref()));
+            let bundle = tapes_core::export(&session, bundle.as_deref())?;
+            print_manifest(&bundle);
         }
     }
     Ok(())
@@ -124,6 +126,24 @@ fn print_availability_note(result: &tapes_core::SessionList) {
         println!("No harnesses available.");
     }
     println!("Unavailable: {}", result.unavailable.join(", "));
+}
+
+/// The manifest is the whole stdout contract for `export`: three paths, three
+/// sizes, in the order a rescuer should read them.
+fn print_manifest(bundle: &Bundle) {
+    for file in bundle.files() {
+        println!("{}\t{}", file.path.display(), human_bytes(file.bytes));
+    }
+}
+
+fn human_bytes(bytes: u64) -> String {
+    const KIB: u64 = 1024;
+    const MIB: u64 = KIB * 1024;
+    match bytes {
+        bytes if bytes >= MIB => format!("{:.1} MiB", bytes as f64 / MIB as f64),
+        bytes if bytes >= KIB => format!("{:.1} KiB", bytes as f64 / KIB as f64),
+        bytes => format!("{bytes} B"),
+    }
 }
 
 fn print_transcript(transcript: &Transcript) {
