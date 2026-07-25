@@ -1,0 +1,66 @@
+# Codex rollout format
+
+What `tapes`' codex backend reads. The format is undocumented by its harness
+and drifts; check a real rollout before trusting any row here.
+
+## File location
+
+```
+$CODEX_HOME/sessions/<yyyy>/<mm>/<dd>/rollout-<timestamp>-<session-uuid>.jsonl
+```
+
+`$CODEX_HOME` defaults to `~/.codex`. The date directories are the write date,
+not the session's own timestamps, so discovery walks the tree rather than
+computing a path. The session id is the trailing UUID of the filename,
+separated from the timestamp by `-`.
+
+There is no non-interactive listing or reading command; file discovery is the
+only retrieval path.
+
+## Line shape
+
+Every line is `{"type": …, "timestamp": …, "payload": {…}}` with an RFC 3339
+`timestamp`. Three top-level types matter:
+
+| `type` | Carries |
+|---|---|
+| `session_meta` | `payload.id` (session UUID), `payload.cwd` |
+| `turn_context` | `payload.model`, `payload.effort`, `payload.cwd` |
+| `response_item` | the conversation itself, discriminated by `payload.type` |
+
+`turn_context` repeats whenever the model or effort changes, so the last one
+holds the session's final selection. `effort` is what the normalized model
+carries as the model variant.
+
+## `response_item` payloads
+
+| `payload.type` | Normalized as |
+|---|---|
+| `message` | a user or assistant turn, per `payload.role` |
+| `reasoning` | a reasoning turn |
+| `function_call`, `custom_tool_call` | a tool turn |
+| `function_call_output`, `custom_tool_call_output` | a tool turn |
+
+Message text lives in `payload.content[]` blocks of type `input_text` (user)
+or `output_text` (assistant). Tool payloads have no text field; `tapes` keeps
+the whole payload as the turn's text so nothing is lost, and the trace file
+heads each one with its `name` or marks it a result via `call_id`.
+
+Reasoning payloads are frequently encrypted, carrying a signature rather than
+readable text. That is absence, not failure — a session can legitimately yield
+reasoning turns with placeholder content.
+
+## Token accounting
+
+`payload.type == "token_count"` carries
+`info.total_token_usage.{input_tokens, cached_input_tokens,
+cache_write_input_tokens, output_tokens, reasoning_output_tokens,
+total_tokens}`. Codex reports no cost.
+
+## Lineage note
+
+The Python extractor this backend replaced opened with a docstring claiming it
+parsed OpenCode. The logic was codex-specific throughout and parsed live
+rollouts correctly; the docstring was stale from a copied file. Nothing in this
+document is inherited from that claim — every row above was checked against a
+real rollout.
