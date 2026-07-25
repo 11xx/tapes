@@ -11,7 +11,7 @@ use tapes_core::backend::opencode::OpenCodeBackend;
 use tapes_core::backend::pi::PiBackend;
 use tapes_core::backend::Backend;
 use tapes_core::model::{Role, Session, Transcript};
-use tapes_core::{list_with_backends, resolve_session, ResolveError};
+use tapes_core::{list_with_backends, resolve_session, show_with_backends, ResolveError};
 
 fn fixtures(harness: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -19,7 +19,7 @@ fn fixtures(harness: &str) -> PathBuf {
         .join(harness)
 }
 
-fn fixture_backends() -> Vec<(Box<dyn Backend>, &'static str)> {
+fn file_fixture_backends() -> Vec<(Box<dyn Backend>, &'static str)> {
     vec![
         (
             Box::new(ClaudeBackend::new(fixtures("claude"))),
@@ -29,12 +29,20 @@ fn fixture_backends() -> Vec<(Box<dyn Backend>, &'static str)> {
             Box::new(CodexBackend::new(fixtures("codex"))),
             "00000000-0000-0000-0000-000000000001",
         ),
+        (Box::new(PiBackend::new(fixtures("pi"))), "session-pi"),
+    ]
+}
+
+fn fixture_backends() -> Vec<(Box<dyn Backend>, &'static str)> {
+    let mut backends = file_fixture_backends();
+    backends.insert(
+        2,
         (
             Box::new(OpenCodeBackend::new(opencode_fixture_program())),
             "ses_000000fixtureSharedSession",
         ),
-        (Box::new(PiBackend::new(fixtures("pi"))), "session-pi"),
-    ]
+    );
+    backends
 }
 
 fn opencode_fixture_program() -> PathBuf {
@@ -84,6 +92,29 @@ fn every_backend_satisfies_shared_normalization_assertions() {
         let tailed = backend.transcript(id, 1).unwrap();
         assert_eq!(tailed.turns.len(), 1);
         assert!(tailed.truncated);
+    }
+}
+
+#[test]
+fn every_file_backend_resolves_full_ids_and_unambiguous_prefixes() {
+    for (backend, id) in file_fixture_backends() {
+        let sessions = backend.list(10).unwrap();
+        let prefix = (1..id.len())
+            .map(|length| &id[..length])
+            .find(|prefix| {
+                sessions
+                    .iter()
+                    .filter(|session| session.id.starts_with(prefix))
+                    .count()
+                    == 1
+            })
+            .expect("fixture has an unambiguous proper prefix");
+        let backends = vec![backend];
+
+        for query in [id, prefix] {
+            let transcript = show_with_backends(&backends, query, 10).unwrap();
+            assert_eq!(transcript.session.id, id);
+        }
     }
 }
 
@@ -145,7 +176,7 @@ fn malformed_lines_leave_parseable_turns_and_a_note() {
         ),
         (
             Box::new(CodexBackend::new(fixtures("codex"))),
-            "00000000-0000-0000-0000-000000000002",
+            "10000000-0000-0000-0000-000000000002",
         ),
         (Box::new(PiBackend::new(fixtures("pi"))), "malformed"),
     ];
