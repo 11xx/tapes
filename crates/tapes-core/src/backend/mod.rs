@@ -177,7 +177,8 @@ pub(crate) fn matching_session_file(
                 stem == id
                     || stem
                         .strip_suffix(id)
-                        .is_some_and(|prefix| prefix.ends_with('-'))
+                        .and_then(|prefix| prefix.chars().next_back())
+                        .is_some_and(|separator| !separator.is_alphanumeric())
             })
     })
 }
