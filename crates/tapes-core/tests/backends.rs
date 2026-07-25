@@ -489,3 +489,80 @@ fn a_broken_opencode_session_call_surfaces_the_failure() {
 
     fs::remove_file(&program).ok();
 }
+
+/// A program that answers the listing but fails or corrupts the single-session
+/// GET, so `locate` errors while `list` succeeds empty — the exact arrangement
+/// under which resolution used to return a bare NotFound.
+fn broken_opencode_program(tag: &str, session_case: &str) -> PathBuf {
+    let program = std::env::temp_dir().join(format!(
+        "tapes-opencode-broken-{}-{tag}",
+        std::process::id()
+    ));
+    fs::write(
+        &program,
+        format!(
+            "#!/bin/sh\ncase \"$4\" in\n  /api/session\\?*) echo '{{\"data\":[]}}';;\n  *) {session_case};;\nesac\n"
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&program, fs::Permissions::from_mode(0o700)).unwrap();
+    program
+}
+
+#[test]
+fn a_failing_opencode_call_surfaces_through_resolution_not_as_not_found() {
+    let program = broken_opencode_program("resolve", "exit 7");
+    let backends: Vec<Box<dyn Backend>> = vec![Box::new(OpenCodeBackend::new(&program))];
+
+    let error = resolve_session(&backends, "ses_anything").unwrap_err();
+    let ResolveError::BackendFailed { failures, .. } = error else {
+        panic!("a broken backend must not read as a missing session");
+    };
+    assert_eq!(failures.len(), 1);
+    assert_eq!(failures[0].0, "opencode");
+
+    fs::remove_file(&program).ok();
+}
+
+#[test]
+fn malformed_opencode_session_data_is_an_error_not_a_miss() {
+    let program = broken_opencode_program("malformed", "echo '{\"data\":{\"nope\":1}}'");
+    let backends: Vec<Box<dyn Backend>> = vec![Box::new(OpenCodeBackend::new(&program))];
+
+    let error = resolve_session(&backends, "ses_anything").unwrap_err();
+    assert!(
+        matches!(error, ResolveError::BackendFailed { .. }),
+        "a malformed session object is a failure, got: {error}"
+    );
+
+    fs::remove_file(&program).ok();
+}
+
+#[test]
+fn an_absent_opencode_session_is_still_a_plain_miss() {
+    // `data: null` is a well-formed answer meaning "no such session".
+    let program = broken_opencode_program("absent", "echo '{\"data\":null}'");
+    let backends: Vec<Box<dyn Backend>> = vec![Box::new(OpenCodeBackend::new(&program))];
+
+    let error = resolve_session(&backends, "ses_anything").unwrap_err();
+    assert!(
+        matches!(error, ResolveError::NotFound { .. }),
+        "an absent session must stay NotFound, got: {error}"
+    );
+
+    fs::remove_file(&program).ok();
+}
+
+#[test]
+fn a_hit_elsewhere_still_wins_over_a_broken_backend() {
+    let program = broken_opencode_program("hit-wins", "exit 7");
+    let backends: Vec<Box<dyn Backend>> = vec![
+        Box::new(OpenCodeBackend::new(&program)),
+        Box::new(ResolverFixture::with(vec![resolver_session("ses_alpha")])),
+    ];
+
+    let resolved = resolve_session(&backends, "ses_alpha").unwrap();
+    assert_eq!(resolved.session.id, "ses_alpha");
+
+    fs::remove_file(&program).ok();
+}

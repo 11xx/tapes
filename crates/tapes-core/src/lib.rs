@@ -43,6 +43,13 @@ pub enum ResolveError {
         query: String,
         candidates: Vec<SessionCandidate>,
     },
+    /// Nothing resolved and at least one backend failed while being asked.
+    /// Reported instead of `NotFound` because "the store is broken" sends an
+    /// operator somewhere entirely different from "no such session".
+    BackendFailed {
+        query: String,
+        failures: Vec<(String, String)>,
+    },
 }
 
 impl std::fmt::Display for ResolveError {
@@ -55,6 +62,13 @@ impl std::fmt::Display for ResolveError {
                         formatter,
                         " (the search stopped at {RESOLVE_LIMIT} sessions per harness; pass the full id to look it up directly)"
                     )?;
+                }
+                Ok(())
+            }
+            Self::BackendFailed { query, failures } => {
+                writeln!(formatter, "session {query} could not be resolved:")?;
+                for (harness, error) in failures {
+                    writeln!(formatter, "  {harness}: {error}")?;
                 }
                 Ok(())
             }
@@ -141,14 +155,18 @@ pub fn resolve_session(
     // exact-id path a miss is a miss however it arises, and probing costs a
     // second process spawn for API-backed harnesses.
     let mut located = Vec::new();
+    let mut failures = Vec::new();
     for (backend_index, backend) in backends.iter().enumerate() {
-        if let Ok(Some(session)) = backend.locate(query) {
-            if session.id == query {
-                located.push(ResolvedSession {
-                    backend_index,
-                    session,
-                });
-            }
+        match backend.locate(query) {
+            Ok(Some(session)) if session.id == query => located.push(ResolvedSession {
+                backend_index,
+                session,
+            }),
+            Ok(_) => {}
+            // Kept, not discarded: a hit elsewhere still wins, but if nothing
+            // resolves the real failure has to surface rather than hide behind
+            // "not found".
+            Err(error) => failures.push((backend.harness().to_owned(), format!("{error:#}"))),
         }
     }
     match located.len() {
@@ -209,6 +227,10 @@ pub fn resolve_session(
         matches.retain(|resolved| resolved.session.id == query);
     }
     match matches.len() {
+        0 if !failures.is_empty() => Err(ResolveError::BackendFailed {
+            query: query.to_owned(),
+            failures,
+        }),
         0 => Err(ResolveError::NotFound {
             query: query.to_owned(),
             truncated,
