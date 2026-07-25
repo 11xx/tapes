@@ -53,12 +53,16 @@ fn opencode_fixture_program() -> PathBuf {
                 .join(format!("tapes-opencode-fixture-{}", std::process::id()));
             let list = fixtures("opencode").join("list.json");
             let messages = fixtures("opencode").join("messages.json");
+            let session = fixtures("opencode").join("session.json");
+            // The message route must precede the bare-session route, or the
+            // wildcard would swallow it.
             fs::write(
                 &program,
                 format!(
-                    "#!/bin/sh\ncase \"$4\" in\n  /api/session\\?*) exec /bin/cat '{}';;\n  /api/session/*/message) exec /bin/cat '{}';;\nesac\nexit 1\n",
+                    "#!/bin/sh\ncase \"$4\" in\n  /api/session\\?*) exec /bin/cat '{}';;\n  /api/session/*/message) exec /bin/cat '{}';;\n  /api/session/*) exec /bin/cat '{}';;\nesac\nexit 1\n",
                     list.display(),
-                    messages.display()
+                    messages.display(),
+                    session.display()
                 ),
             )
             .unwrap();
@@ -244,9 +248,22 @@ fn list_filters_by_directory_and_bounds_each_backend() {
     assert!(result.sessions.is_empty());
 }
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 struct ResolverFixture {
     sessions: Vec<Session>,
+    /// Panic if `list` is called: proves an exact id never enumerates.
+    forbid_list: bool,
+    /// Fail `locate`: proves one broken backend cannot block another.
+    locate_errors: bool,
+}
+
+impl ResolverFixture {
+    fn with(sessions: Vec<Session>) -> Self {
+        Self {
+            sessions,
+            ..Self::default()
+        }
+    }
 }
 
 impl Backend for ResolverFixture {
@@ -259,7 +276,22 @@ impl Backend for ResolverFixture {
     }
 
     fn list(&self, limit: usize) -> anyhow::Result<Vec<Session>> {
+        assert!(
+            !self.forbid_list,
+            "an exact id must not enumerate the store"
+        );
         Ok(self.sessions.iter().take(limit).cloned().collect())
+    }
+
+    fn locate(&self, id: &str) -> anyhow::Result<Option<Session>> {
+        if self.locate_errors {
+            anyhow::bail!("fixture locate is broken");
+        }
+        Ok(self
+            .sessions
+            .iter()
+            .find(|session| session.id == id)
+            .cloned())
     }
 
     fn transcript(&self, _id: &str, _tail: usize) -> anyhow::Result<Transcript> {
@@ -284,13 +316,11 @@ fn resolver_session(id: &str) -> Session {
 
 #[test]
 fn resolver_accepts_only_unambiguous_prefixes() {
-    let backends: Vec<Box<dyn Backend>> = vec![Box::new(ResolverFixture {
-        sessions: vec![
-            resolver_session("ses_alpha"),
-            resolver_session("ses_alpine"),
-            resolver_session("ses_beta"),
-        ],
-    })];
+    let backends: Vec<Box<dyn Backend>> = vec![Box::new(ResolverFixture::with(vec![
+        resolver_session("ses_alpha"),
+        resolver_session("ses_alpine"),
+        resolver_session("ses_beta"),
+    ]))];
 
     let resolved = resolve_session(&backends, "ses_b").unwrap();
     assert_eq!(resolved.session.id, "ses_beta");
@@ -335,4 +365,204 @@ fn transcript_reads_are_capped_at_four_megabytes() {
     assert!(transcript.truncated);
     assert_eq!(transcript.turns.len(), 2);
     fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn exact_id_resolves_without_enumerating_the_store() {
+    // `list` panics, so resolution can only succeed through `locate`.
+    let backends: Vec<Box<dyn Backend>> = vec![Box::new(ResolverFixture {
+        sessions: vec![resolver_session("ses_alpha")],
+        forbid_list: true,
+        locate_errors: false,
+    })];
+
+    let resolved = resolve_session(&backends, "ses_alpha").unwrap();
+    assert_eq!(resolved.session.id, "ses_alpha");
+}
+
+#[test]
+fn exact_id_resolves_beyond_the_enumeration_limit() {
+    // More sessions than resolution would ever list, with the target last.
+    let mut sessions = (0..1_200)
+        .map(|index| resolver_session(&format!("ses_filler{index:05}")))
+        .collect::<Vec<_>>();
+    sessions.push(resolver_session("ses_buried"));
+    let backends: Vec<Box<dyn Backend>> = vec![Box::new(ResolverFixture {
+        sessions,
+        forbid_list: true,
+        locate_errors: false,
+    })];
+
+    let resolved = resolve_session(&backends, "ses_buried").unwrap();
+    assert_eq!(resolved.session.id, "ses_buried");
+}
+
+#[test]
+fn a_broken_locate_does_not_prevent_another_backend_resolving() {
+    let backends: Vec<Box<dyn Backend>> = vec![
+        Box::new(ResolverFixture {
+            sessions: vec![resolver_session("ses_other")],
+            forbid_list: false,
+            locate_errors: true,
+        }),
+        Box::new(ResolverFixture::with(vec![resolver_session("ses_alpha")])),
+    ];
+
+    let resolved = resolve_session(&backends, "ses_alpha").unwrap();
+    assert_eq!(resolved.session.id, "ses_alpha");
+}
+
+#[test]
+fn an_unknown_id_is_still_not_found() {
+    let backends: Vec<Box<dyn Backend>> =
+        vec![Box::new(ResolverFixture::with(vec![resolver_session(
+            "ses_alpha",
+        )]))];
+
+    let error = resolve_session(&backends, "ses_missing").unwrap_err();
+    let ResolveError::NotFound { truncated, .. } = error else {
+        panic!("expected not found");
+    };
+    assert!(!truncated, "a short store must not claim a capped search");
+}
+
+#[test]
+fn two_backends_holding_one_exact_id_are_ambiguous() {
+    let backends: Vec<Box<dyn Backend>> = vec![
+        Box::new(ResolverFixture::with(vec![resolver_session("shared-id")])),
+        Box::new(ResolverFixture::with(vec![resolver_session("shared-id")])),
+    ];
+
+    let error = resolve_session(&backends, "shared-id").unwrap_err();
+    let ResolveError::Ambiguous { candidates, .. } = error else {
+        panic!("expected ambiguity across backends");
+    };
+    assert_eq!(candidates.len(), 2);
+}
+
+#[test]
+fn a_capped_search_says_it_stopped_short() {
+    // Enough sessions that enumeration hits the cap, and a query that matches
+    // none of them, so the miss must admit the search was bounded.
+    let sessions = (0..1_200)
+        .map(|index| resolver_session(&format!("ses_filler{index:05}")))
+        .collect::<Vec<_>>();
+    let backends: Vec<Box<dyn Backend>> = vec![Box::new(ResolverFixture::with(sessions))];
+
+    let error = resolve_session(&backends, "nothing-matches-this").unwrap_err();
+    let ResolveError::NotFound { truncated, .. } = error else {
+        panic!("expected not found");
+    };
+    assert!(
+        truncated,
+        "a capped search must report that it stopped short"
+    );
+    assert!(error.to_string().contains("stopped at"));
+}
+
+#[test]
+fn a_broken_opencode_session_call_surfaces_the_failure() {
+    // A program that answers the listing but fails the single-session GET.
+    // locate must propagate that, not disguise it as a missing session:
+    // "the API is broken" and "no such session" send an operator to
+    // different places.
+    let program = std::env::temp_dir().join(format!(
+        "tapes-opencode-broken-{}-{}",
+        std::process::id(),
+        line!()
+    ));
+    fs::write(
+        &program,
+        "#!/bin/sh\ncase \"$4\" in\n  /api/session\\?*) echo '{\"data\":[]}';;\n  *) exit 7;;\nesac\n",
+    )
+    .unwrap();
+    fs::set_permissions(&program, fs::Permissions::from_mode(0o700)).unwrap();
+
+    let backend = OpenCodeBackend::new(&program);
+    let error = backend
+        .locate("ses_anything")
+        .expect_err("a failing session call must be an error, not a miss");
+    assert!(
+        !error.to_string().contains("is unavailable"),
+        "the real failure must survive, got: {error}"
+    );
+
+    fs::remove_file(&program).ok();
+}
+
+/// A program that answers the listing but fails or corrupts the single-session
+/// GET, so `locate` errors while `list` succeeds empty — the exact arrangement
+/// under which resolution used to return a bare NotFound.
+fn broken_opencode_program(tag: &str, session_case: &str) -> PathBuf {
+    let program = std::env::temp_dir().join(format!(
+        "tapes-opencode-broken-{}-{tag}",
+        std::process::id()
+    ));
+    fs::write(
+        &program,
+        format!(
+            "#!/bin/sh\ncase \"$4\" in\n  /api/session\\?*) echo '{{\"data\":[]}}';;\n  *) {session_case};;\nesac\n"
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&program, fs::Permissions::from_mode(0o700)).unwrap();
+    program
+}
+
+#[test]
+fn a_failing_opencode_call_surfaces_through_resolution_not_as_not_found() {
+    let program = broken_opencode_program("resolve", "exit 7");
+    let backends: Vec<Box<dyn Backend>> = vec![Box::new(OpenCodeBackend::new(&program))];
+
+    let error = resolve_session(&backends, "ses_anything").unwrap_err();
+    let ResolveError::BackendFailed { failures, .. } = error else {
+        panic!("a broken backend must not read as a missing session");
+    };
+    assert_eq!(failures.len(), 1);
+    assert_eq!(failures[0].0, "opencode");
+
+    fs::remove_file(&program).ok();
+}
+
+#[test]
+fn malformed_opencode_session_data_is_an_error_not_a_miss() {
+    let program = broken_opencode_program("malformed", "echo '{\"data\":{\"nope\":1}}'");
+    let backends: Vec<Box<dyn Backend>> = vec![Box::new(OpenCodeBackend::new(&program))];
+
+    let error = resolve_session(&backends, "ses_anything").unwrap_err();
+    assert!(
+        matches!(error, ResolveError::BackendFailed { .. }),
+        "a malformed session object is a failure, got: {error}"
+    );
+
+    fs::remove_file(&program).ok();
+}
+
+#[test]
+fn an_absent_opencode_session_is_still_a_plain_miss() {
+    // `data: null` is a well-formed answer meaning "no such session".
+    let program = broken_opencode_program("absent", "echo '{\"data\":null}'");
+    let backends: Vec<Box<dyn Backend>> = vec![Box::new(OpenCodeBackend::new(&program))];
+
+    let error = resolve_session(&backends, "ses_anything").unwrap_err();
+    assert!(
+        matches!(error, ResolveError::NotFound { .. }),
+        "an absent session must stay NotFound, got: {error}"
+    );
+
+    fs::remove_file(&program).ok();
+}
+
+#[test]
+fn a_hit_elsewhere_still_wins_over_a_broken_backend() {
+    let program = broken_opencode_program("hit-wins", "exit 7");
+    let backends: Vec<Box<dyn Backend>> = vec![
+        Box::new(OpenCodeBackend::new(&program)),
+        Box::new(ResolverFixture::with(vec![resolver_session("ses_alpha")])),
+    ];
+
+    let resolved = resolve_session(&backends, "ses_alpha").unwrap();
+    assert_eq!(resolved.session.id, "ses_alpha");
+
+    fs::remove_file(&program).ok();
 }

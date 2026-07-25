@@ -12,6 +12,8 @@ use crate::model::{Cost, Model, Role, Session, Tokens, Transcript, Turn};
 
 const MAX_API_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_API_SESSIONS: usize = 1_000;
+/// Every OpenCode session id carries this prefix.
+const SESSION_ID_PREFIX: &str = "ses_";
 
 #[derive(Clone, Debug)]
 pub struct OpenCodeBackend {
@@ -87,11 +89,31 @@ impl Backend for OpenCodeBackend {
         self.sessions(limit)
     }
 
+    /// One session GET rather than a listing page, so an exact id costs a
+    /// single request regardless of how many sessions the store holds.
+    fn locate(&self, id: &str) -> Result<Option<Session>> {
+        // OpenCode ids are self-identifying. Rejecting a foreign shape here
+        // avoids spawning the API for every claude, codex, or pi lookup —
+        // each spawn costs about a second.
+        if !id.starts_with(SESSION_ID_PREFIX) {
+            return Ok(None);
+        }
+        // A genuine miss is `Ok(None)`; a broken API or malformed payload is an
+        // error and must stay one. Resolution lets another backend win over a
+        // failing one, but reports the failure when nothing resolves — so
+        // collapsing the two here would hide real breakage from `show` and
+        // `export`.
+        let response = self.request(&format!("/api/session/{id}"))?;
+        let data = &response["data"];
+        if !data.is_object() {
+            return Ok(None);
+        }
+        parse_session(data).map(Some)
+    }
+
     fn transcript(&self, id: &str, tail: usize) -> Result<Transcript> {
         let session = self
-            .sessions(MAX_API_SESSIONS)?
-            .into_iter()
-            .find(|session| session.id == id)
+            .locate(id)?
             .ok_or_else(|| anyhow!("opencode session {id} is unavailable"))?;
         let response = self.request(&format!("/api/session/{id}/message"))?;
         parse_transcript(session, &response, tail)

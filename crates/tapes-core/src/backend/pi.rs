@@ -131,6 +131,18 @@ impl Backend for PiBackend {
         Ok(sessions)
     }
 
+    /// Locate by filename alone: no other session file is opened, so an exact
+    /// id costs one directory walk and one parse regardless of store size.
+    fn locate(&self, id: &str) -> Result<Option<Session>> {
+        let Some(root) = self.root.as_deref() else {
+            return Ok(None);
+        };
+        let Some(path) = session_file(root, id) else {
+            return Ok(None);
+        };
+        Ok(self.parse(&path).ok().map(|(session, _, _, _)| session))
+    }
+
     fn transcript(&self, id: &str, tail: usize) -> Result<Transcript> {
         let root = self
             .root

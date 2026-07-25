@@ -32,17 +32,46 @@ pub struct SessionCandidate {
 
 #[derive(Debug)]
 pub enum ResolveError {
-    NotFound(String),
+    NotFound {
+        query: String,
+        /// A backend returned exactly as many sessions as the enumeration cap
+        /// allows, so the search may have stopped short of the store. "I
+        /// stopped looking" is a different fact from "it is not there".
+        truncated: bool,
+    },
     Ambiguous {
         query: String,
         candidates: Vec<SessionCandidate>,
+    },
+    /// Nothing resolved and at least one backend failed while being asked.
+    /// Reported instead of `NotFound` because "the store is broken" sends an
+    /// operator somewhere entirely different from "no such session".
+    BackendFailed {
+        query: String,
+        failures: Vec<(String, String)>,
     },
 }
 
 impl std::fmt::Display for ResolveError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::NotFound(query) => write!(formatter, "session {query} was not found"),
+            Self::NotFound { query, truncated } => {
+                write!(formatter, "session {query} was not found")?;
+                if *truncated {
+                    write!(
+                        formatter,
+                        " (the search stopped at {RESOLVE_LIMIT} sessions per harness; pass the full id to look it up directly)"
+                    )?;
+                }
+                Ok(())
+            }
+            Self::BackendFailed { query, failures } => {
+                writeln!(formatter, "session {query} could not be resolved:")?;
+                for (harness, error) in failures {
+                    writeln!(formatter, "  {harness}: {error}")?;
+                }
+                Ok(())
+            }
             Self::Ambiguous { query, candidates } => {
                 writeln!(formatter, "session prefix {query} is ambiguous:")?;
                 for candidate in candidates {
@@ -118,7 +147,56 @@ pub fn resolve_session(
     backends: &[Box<dyn Backend>],
     query: &str,
 ) -> std::result::Result<ResolvedSession, ResolveError> {
+    // Fast path: an exact id never consults a listing. A backend that errors
+    // here does not stop another from resolving, but the error is kept: if
+    // nothing resolves it surfaces as `BackendFailed`, because "the store is
+    // broken" and "no such session" send an operator to different places.
+    // No `available()` probe here on purpose. Availability is a listing
+    // concern — `list` reports which harnesses it could not reach. On an
+    // exact-id path a miss is a miss however it arises, and probing costs a
+    // second process spawn for API-backed harnesses.
+    let mut located = Vec::new();
+    let mut failures = Vec::new();
+    for (backend_index, backend) in backends.iter().enumerate() {
+        match backend.locate(query) {
+            Ok(Some(session)) if session.id == query => located.push(ResolvedSession {
+                backend_index,
+                session,
+            }),
+            Ok(_) => {}
+            // Kept, not discarded: a hit elsewhere still wins, but if nothing
+            // resolves the real failure has to surface rather than hide behind
+            // "not found".
+            Err(error) => failures.push((backend.harness().to_owned(), format!("{error:#}"))),
+        }
+    }
+    match located.len() {
+        1 => return Ok(located.pop().expect("one match is present")),
+        0 => {}
+        _ => {
+            let mut candidates = located
+                .into_iter()
+                .map(|resolved| SessionCandidate {
+                    id: resolved.session.id,
+                    harness: resolved.session.harness,
+                })
+                .collect::<Vec<_>>();
+            candidates.sort_by(|left, right| {
+                left.id
+                    .cmp(&right.id)
+                    .then(left.harness.cmp(&right.harness))
+            });
+            return Err(ResolveError::Ambiguous {
+                query: query.to_owned(),
+                candidates,
+            });
+        }
+    }
+
+    // Fallback: a prefix query genuinely needs enumeration, because ambiguity
+    // can only be seen across the whole set.
     let mut matches = Vec::new();
+    let mut truncated = false;
     for (backend_index, backend) in backends.iter().enumerate() {
         if !backend.available() {
             continue;
@@ -126,6 +204,7 @@ pub fn resolve_session(
         let Ok(sessions) = backend.list(RESOLVE_LIMIT) else {
             continue;
         };
+        truncated |= sessions.len() >= RESOLVE_LIMIT;
         matches.extend(
             sessions
                 .into_iter()
@@ -149,7 +228,14 @@ pub fn resolve_session(
         matches.retain(|resolved| resolved.session.id == query);
     }
     match matches.len() {
-        0 => Err(ResolveError::NotFound(query.to_owned())),
+        0 if !failures.is_empty() => Err(ResolveError::BackendFailed {
+            query: query.to_owned(),
+            failures,
+        }),
+        0 => Err(ResolveError::NotFound {
+            query: query.to_owned(),
+            truncated,
+        }),
         1 => Ok(matches.pop().expect("one match is present")),
         _ => {
             let mut candidates = matches

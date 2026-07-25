@@ -1,0 +1,30 @@
+{
+  "data": {
+    "id": "ses_000000fixtureSharedSession",
+    "projectID": "0000000000000000000000000000000000000001",
+    "agent": "build",
+    "model": {
+      "id": "kimi-k3",
+      "providerID": "opencode-go",
+      "variant": "max"
+    },
+    "cost": 2.9737362000000003,
+    "tokens": {
+      "input": 132796,
+      "output": 36898,
+      "reasoning": 22925,
+      "cache": {
+        "read": 5593344,
+        "write": 0
+      }
+    },
+    "time": {
+      "created": 1784662770000,
+      "updated": 1784662790000
+    },
+    "title": "Synthetic opencode fixture session title",
+    "location": {
+      "directory": "/fixtures/shared-project"
+    }
+  }
+}
