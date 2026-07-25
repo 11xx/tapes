@@ -148,8 +148,9 @@ pub fn resolve_session(
     query: &str,
 ) -> std::result::Result<ResolvedSession, ResolveError> {
     // Fast path: an exact id never consults a listing. A backend that errors
-    // here is treated as a miss, so one broken store cannot stop another from
-    // resolving — the same tolerance `list` already applies.
+    // here does not stop another from resolving, but the error is kept: if
+    // nothing resolves it surfaces as `BackendFailed`, because "the store is
+    // broken" and "no such session" send an operator to different places.
     // No `available()` probe here on purpose. Availability is a listing
     // concern — `list` reports which harnesses it could not reach. On an
     // exact-id path a miss is a miss however it arises, and probing costs a

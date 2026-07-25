@@ -99,9 +99,10 @@ impl Backend for OpenCodeBackend {
             return Ok(None);
         }
         // A genuine miss is `Ok(None)`; a broken API or malformed payload is an
-        // error and must stay one. Resolution tolerates `Err` as a miss on its
-        // own, so collapsing the two here would only hide real failures from
-        // `show` and `export`.
+        // error and must stay one. Resolution lets another backend win over a
+        // failing one, but reports the failure when nothing resolves — so
+        // collapsing the two here would hide real breakage from `show` and
+        // `export`.
         let response = self.request(&format!("/api/session/{id}"))?;
         let data = &response["data"];
         if !data.is_object() {
