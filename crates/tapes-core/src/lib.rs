@@ -32,7 +32,13 @@ pub struct SessionCandidate {
 
 #[derive(Debug)]
 pub enum ResolveError {
-    NotFound(String),
+    NotFound {
+        query: String,
+        /// A backend returned exactly as many sessions as the enumeration cap
+        /// allows, so the search may have stopped short of the store. "I
+        /// stopped looking" is a different fact from "it is not there".
+        truncated: bool,
+    },
     Ambiguous {
         query: String,
         candidates: Vec<SessionCandidate>,
@@ -42,7 +48,16 @@ pub enum ResolveError {
 impl std::fmt::Display for ResolveError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::NotFound(query) => write!(formatter, "session {query} was not found"),
+            Self::NotFound { query, truncated } => {
+                write!(formatter, "session {query} was not found")?;
+                if *truncated {
+                    write!(
+                        formatter,
+                        " (the search stopped at {RESOLVE_LIMIT} sessions per harness; pass the full id to look it up directly)"
+                    )?;
+                }
+                Ok(())
+            }
             Self::Ambiguous { query, candidates } => {
                 writeln!(formatter, "session prefix {query} is ambiguous:")?;
                 for candidate in candidates {
@@ -162,6 +177,7 @@ pub fn resolve_session(
     // Fallback: a prefix query genuinely needs enumeration, because ambiguity
     // can only be seen across the whole set.
     let mut matches = Vec::new();
+    let mut truncated = false;
     for (backend_index, backend) in backends.iter().enumerate() {
         if !backend.available() {
             continue;
@@ -169,6 +185,7 @@ pub fn resolve_session(
         let Ok(sessions) = backend.list(RESOLVE_LIMIT) else {
             continue;
         };
+        truncated |= sessions.len() >= RESOLVE_LIMIT;
         matches.extend(
             sessions
                 .into_iter()
@@ -192,7 +209,10 @@ pub fn resolve_session(
         matches.retain(|resolved| resolved.session.id == query);
     }
     match matches.len() {
-        0 => Err(ResolveError::NotFound(query.to_owned())),
+        0 => Err(ResolveError::NotFound {
+            query: query.to_owned(),
+            truncated,
+        }),
         1 => Ok(matches.pop().expect("one match is present")),
         _ => {
             let mut candidates = matches

@@ -98,14 +98,16 @@ impl Backend for OpenCodeBackend {
         if !id.starts_with(SESSION_ID_PREFIX) {
             return Ok(None);
         }
-        let Ok(response) = self.request(&format!("/api/session/{id}")) else {
-            return Ok(None);
-        };
+        // A genuine miss is `Ok(None)`; a broken API or malformed payload is an
+        // error and must stay one. Resolution tolerates `Err` as a miss on its
+        // own, so collapsing the two here would only hide real failures from
+        // `show` and `export`.
+        let response = self.request(&format!("/api/session/{id}"))?;
         let data = &response["data"];
         if !data.is_object() {
             return Ok(None);
         }
-        Ok(parse_session(data).ok())
+        parse_session(data).map(Some)
     }
 
     fn transcript(&self, id: &str, tail: usize) -> Result<Transcript> {

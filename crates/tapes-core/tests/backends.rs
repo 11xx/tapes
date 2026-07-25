@@ -420,5 +420,72 @@ fn an_unknown_id_is_still_not_found() {
         )]))];
 
     let error = resolve_session(&backends, "ses_missing").unwrap_err();
-    assert!(matches!(error, ResolveError::NotFound(_)));
+    let ResolveError::NotFound { truncated, .. } = error else {
+        panic!("expected not found");
+    };
+    assert!(!truncated, "a short store must not claim a capped search");
+}
+
+#[test]
+fn two_backends_holding_one_exact_id_are_ambiguous() {
+    let backends: Vec<Box<dyn Backend>> = vec![
+        Box::new(ResolverFixture::with(vec![resolver_session("shared-id")])),
+        Box::new(ResolverFixture::with(vec![resolver_session("shared-id")])),
+    ];
+
+    let error = resolve_session(&backends, "shared-id").unwrap_err();
+    let ResolveError::Ambiguous { candidates, .. } = error else {
+        panic!("expected ambiguity across backends");
+    };
+    assert_eq!(candidates.len(), 2);
+}
+
+#[test]
+fn a_capped_search_says_it_stopped_short() {
+    // Enough sessions that enumeration hits the cap, and a query that matches
+    // none of them, so the miss must admit the search was bounded.
+    let sessions = (0..1_200)
+        .map(|index| resolver_session(&format!("ses_filler{index:05}")))
+        .collect::<Vec<_>>();
+    let backends: Vec<Box<dyn Backend>> = vec![Box::new(ResolverFixture::with(sessions))];
+
+    let error = resolve_session(&backends, "nothing-matches-this").unwrap_err();
+    let ResolveError::NotFound { truncated, .. } = error else {
+        panic!("expected not found");
+    };
+    assert!(
+        truncated,
+        "a capped search must report that it stopped short"
+    );
+    assert!(error.to_string().contains("stopped at"));
+}
+
+#[test]
+fn a_broken_opencode_session_call_surfaces_the_failure() {
+    // A program that answers the listing but fails the single-session GET.
+    // locate must propagate that, not disguise it as a missing session:
+    // "the API is broken" and "no such session" send an operator to
+    // different places.
+    let program = std::env::temp_dir().join(format!(
+        "tapes-opencode-broken-{}-{}",
+        std::process::id(),
+        line!()
+    ));
+    fs::write(
+        &program,
+        "#!/bin/sh\ncase \"$4\" in\n  /api/session\\?*) echo '{\"data\":[]}';;\n  *) exit 7;;\nesac\n",
+    )
+    .unwrap();
+    fs::set_permissions(&program, fs::Permissions::from_mode(0o700)).unwrap();
+
+    let backend = OpenCodeBackend::new(&program);
+    let error = backend
+        .locate("ses_anything")
+        .expect_err("a failing session call must be an error, not a miss");
+    assert!(
+        !error.to_string().contains("is unavailable"),
+        "the real failure must survive, got: {error}"
+    );
+
+    fs::remove_file(&program).ok();
 }
