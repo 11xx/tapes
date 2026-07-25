@@ -37,13 +37,15 @@ server, no session *writing* — `tapes` never mutates a harness's store.
   assertions against a per-harness fixture, including a malformed-line
   fixture per format. A parser that only works on one real session is not
   tested.
-- Verify a claim about a harness's format **before** writing it into a brief
-  or a comment. The formats are undocumented and change; check the fixture.
-
-## The chain
-
-`docs/chain-plan.md` is the execution program. Per-slice briefs are in
-`docs/briefs/`, each one ready to feed to `arc brief <change> --body-file`.
+- **Fixtures reproduce the real convention, filenames included.** A fixture
+  named for the test rather than for the harness tests the parser and not the
+  tool: pi's `<timestamp>_<uuid>.jsonl` is where its session id lives, and a
+  fixture that skips that hid a resolver that could not read any pi session.
+- Verify a claim about a harness's format **before** writing it into code, a
+  comment, or `docs/formats/`. The formats are undocumented and drift.
+- **Build the binary and drive it before approving.** Every blocking defect
+  this repo has had passed build, clippy, and the full test suite, and was
+  visible only by running the thing against a real store.
 
 ## Harness formats
 
