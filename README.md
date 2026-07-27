@@ -66,6 +66,41 @@ Stdout is a manifest of exactly those three paths and their sizes; nothing
 else goes there. Each file is written under a temporary name and renamed, so
 a bundle never looks complete while it is half written.
 
+## Integrating
+
+`tapes` is meant to be the one reader of transcript stores on a machine. If you
+are writing a tool, a skill, or an agent instruction that needs a session, plug
+into it here rather than reaching into a store yourself.
+
+**Discovery.** The binary is on `PATH`. There is no config file, no daemon, and
+no environment to prepare — `tapes list --here --limit 5` works from any
+directory and answers "what ran here recently". Harness stores are located by
+the backends, so a caller never needs a path.
+
+**The cheap probe first.** `tapes show <id> --tail 40` answers "is there
+anything here worth having?" without exporting. Reach for `export` only after
+that says yes; a bundle costs context, and the tail usually settles it.
+
+**Contracts you can build on.** `tapes-list/1` and `tapes-session/1` are
+versioned JSON; a breaking shape change bumps the version. `export` prints
+exactly three paths and their sizes on stdout, in reading order, and writes each
+file under a temporary name before renaming — so a bundle is never observed
+half-written. A harness whose binary or store is absent reports itself
+unavailable and never fails the command, which means a caller can run against
+any subset of harnesses without branching on what is installed.
+
+**Two signals worth reading rather than ignoring.** A `truncated` transcript is
+a window, not the whole session. Transcript `notes` carry what the normalized
+model has no field for — abandoned branches, subagent transcripts, skipped
+unparseable lines, page boundaries. Either one means a caller's picture is
+partial, and a tool that reports a conclusion without checking them will state
+more than it knows.
+
+**Do not write a second parser.** Four separate extractors preceded this tool
+and drifted apart; that drift is the reason it exists. If `tapes` cannot express
+something you need, add it here — a caller that hand-parses a store is a fifth
+extractor with the same future.
+
 ## Redaction
 
 `tapes` prints what a transcript contains and performs no redaction.
