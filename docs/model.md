@@ -24,7 +24,9 @@ reader-facing notes. The flag is true when a read bound was reached and the
 turns are only a window into the transcript. Notes preserve harness-specific
 facts that do not fit the normalized fields, such as abandoned pi branches or
 the number of malformed lines skipped while reading. They are prose rather
-than a structured API and are omitted from JSON when empty.
+than a structured API and are omitted from JSON when empty. Both signals reach
+a human reader too: `show` closes a truncated render with a note saying so,
+beside whatever notes the read produced.
 
 ## JSON contract
 

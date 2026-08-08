@@ -4,6 +4,23 @@ fn tapes() -> Command {
     Command::new(env!("CARGO_BIN_EXE_tapes"))
 }
 
+/// Bare `tapes` is a guide request, not a usage error; every mistyped
+/// invocation still fails at clap's exit code 2.
+#[test]
+fn bare_invocation_guides_while_misuse_still_fails() {
+    let guide = tapes().output().unwrap();
+    assert!(guide.status.success());
+    let text = String::from_utf8_lossy(&guide.stdout);
+    for command in ["tapes list", "tapes show", "tapes export"] {
+        assert!(text.contains(command), "guide omits `{command}`");
+    }
+
+    for arguments in [vec!["bogus"], vec!["show"], vec!["list", "--nope"]] {
+        let misuse = tapes().args(&arguments).output().unwrap();
+        assert_eq!(misuse.status.code(), Some(2), "{arguments:?} exited wrong");
+    }
+}
+
 #[test]
 fn list_help_exits_successfully() {
     assert!(tapes().args(["list", "--help"]).status().unwrap().success());
