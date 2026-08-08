@@ -160,6 +160,14 @@ fn human_bytes(bytes: u64) -> String {
 }
 
 fn print_transcript(transcript: &Transcript) {
+    print!("{}", render_transcript(transcript));
+}
+
+/// The human render carries the same two partiality signals the JSON does.
+/// `--tail` is the recommended first probe, so a window that does not say it
+/// is one would be read as the whole session.
+fn render_transcript(transcript: &Transcript) -> String {
+    let mut out = String::new();
     for turn in &transcript.turns {
         let role = match turn.role {
             Role::User => "user",
@@ -168,14 +176,18 @@ fn print_transcript(transcript: &Transcript) {
             Role::Reasoning => "reasoning",
         };
         if let Some(ts) = turn.ts {
-            println!("[{role} {}]\n{}", ts.to_rfc3339(), turn.text);
+            out.push_str(&format!("[{role} {}]\n{}\n", ts.to_rfc3339(), turn.text));
         } else {
-            println!("[{role}]\n{}", turn.text);
+            out.push_str(&format!("[{role}]\n{}\n", turn.text));
         }
     }
-    for note in &transcript.notes {
-        println!("Note: {note}");
+    if transcript.truncated {
+        out.push_str("Note: Truncated — earlier turns are not shown.\n");
     }
+    for note in &transcript.notes {
+        out.push_str(&format!("Note: {note}\n"));
+    }
+    out
 }
 
 fn reset_sigpipe() {
@@ -188,5 +200,46 @@ fn reset_sigpipe() {
 
     unsafe {
         signal(SIGPIPE, SIG_DFL);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Utc;
+    use tapes_core::model::Turn;
+
+    fn transcript(truncated: bool) -> Transcript {
+        Transcript {
+            session: Session {
+                id: "s1".to_owned(),
+                harness: "claude".to_owned(),
+                model: None,
+                title: None,
+                directory: None,
+                started_at: Utc::now(),
+                last_activity_at: Utc::now(),
+                cost: None,
+                tokens: None,
+            },
+            turns: vec![Turn {
+                role: Role::User,
+                text: "fix the parser".to_owned(),
+                ts: None,
+            }],
+            truncated,
+            notes: vec!["Skipped 1 unparseable line.".to_owned()],
+        }
+    }
+
+    #[test]
+    fn the_human_render_says_when_it_is_a_window() {
+        let windowed = render_transcript(&transcript(true));
+        assert!(windowed.contains("Truncated"), "{windowed}");
+        assert!(windowed.contains("Skipped 1 unparseable line."));
+
+        let whole = render_transcript(&transcript(false));
+        assert!(!whole.contains("Truncated"), "{whole}");
+        assert!(whole.contains("Skipped 1 unparseable line."));
     }
 }

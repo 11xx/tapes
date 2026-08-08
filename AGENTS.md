@@ -6,10 +6,12 @@ server, no session *writing* — `tapes` never mutates a harness's store.
 
 ## Invariants
 
-- **Absence is a fact, not an error.** A harness whose binary, store, or
-  session is missing reports itself unavailable and exits 0. A field a
-  harness cannot supply is omitted, never invented or defaulted. `list` must
-  work with any subset of harnesses installed.
+- **Absence is a fact, not an error.** A harness whose binary or store is
+  missing reports itself unavailable and exits 0; `list` must work with any
+  subset of harnesses installed. Asking for a specific session is the one
+  place absence is an error, because the caller named something that is not
+  there. A field a harness cannot supply is omitted, never invented or
+  defaulted.
 - **Reads are bounded.** Transcripts reach hundreds of megabytes. Every
   reader caps what it pulls into memory and every command caps what it
   returns. A tool that hangs on a large session is worse than no tool.
