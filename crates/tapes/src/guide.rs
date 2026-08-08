@@ -16,17 +16,27 @@ disturb a live session.
 
 FIND IT
   tapes list                     Every available harness, newest first.
-  tapes list --here --limit 5    What ran in this directory recently.
+  tapes list --here              What ran in this exact directory.
   tapes list --harness codex     One backend.
+
+  --limit bounds each harness before the merge and before --here filters, and
+  defaults to 20. A directory whose sessions are older than that shows nothing
+  until the limit is raised, so an empty list is not by itself evidence that
+  nothing ran there.
 
   A session is named by its full id or an unambiguous prefix; an ambiguous
   prefix lists its candidates and fails rather than guessing. A harness whose
-  binary or store is absent reports itself unavailable and never fails the
-  command, so a caller never has to branch on what is installed.
+  binary or store is absent reports itself unavailable and never fails a
+  listing, so a caller never has to branch on what is installed — but show and
+  export still fail when the session they were given cannot be resolved.
 
 PROBE BEFORE EXPORTING
   tapes show <id> --tail 40      A window, costing no bundle.
-  tapes show <id> --json         The whole transcript as tapes-session/1.
+  tapes show <id> --json         The same turns as tapes-session/1.
+
+  show returns the last 100 turns unless --tail says otherwise, and marks the
+  result truncated whenever it dropped any. It is the probe, not the archive;
+  export is what takes every turn the reader could reach.
 
   Retrieval is cheap; ingestion is not. The tail usually settles whether a
   dead session holds anything worth having. Rescue one that holds something
@@ -48,8 +58,12 @@ EXPORT, THEN INGEST PROGRESSIVELY
      and the session directory's git head and branch when they resolve. Query
      it for facts; do not print it.
   3. .trace.md, only when free-text search is genuinely easier than JSON.
-     Complete reasoning and tool chronology, each tool turn headed by its
-     tool name.
+     Every reasoning and tool turn the transcript carries, in order. A tool
+     turn is headed by the tool's name where its envelope carries one, by
+     `result` for a bare result, and by `unnamed` otherwise.
+
+  A bundle holds what the transcript held, and reads are capped, so a large
+  session exports as a window and says so.
 
   Never ingest a whole bundle merely because it exists. A large trace read in
   full buys little over the context file and costs the budget the actual work
@@ -84,9 +98,10 @@ SIGNALS THAT THE PICTURE IS PARTIAL
   large remainder means the user changed direction; a claude session's
   subagent transcripts, which live in separate files and whose endings are not
   the parent's; lines that would not parse; an opencode page boundary. Codex
-  reasoning is frequently encrypted, so a reasoning turn without text is not
-  an absence of reasoning. Read both signals and state what is missing rather
-  than writing over the gap.
+  reasoning is frequently encrypted and arrives as `[encrypted reasoning]`, so
+  that placeholder marks reasoning you cannot read rather than reasoning that
+  did not happen. Read both signals and state what is missing rather than
+  writing over the gap.
 
 CARRY IT FORWARD
   Bundles are working material, not artifacts — leave them in /tmp. What

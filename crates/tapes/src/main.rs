@@ -27,10 +27,11 @@ enum Command {
         /// Restrict results to one harness.
         #[arg(long)]
         harness: Option<String>,
-        /// Restrict results to the current repository.
+        /// Restrict results to sessions recorded in the current directory.
         #[arg(long)]
         here: bool,
-        /// Return at most this many sessions.
+        /// Take at most this many sessions from each harness, before --here
+        /// filters and before the merge [default: 20].
         #[arg(long)]
         limit: Option<usize>,
         /// Render results as JSON.

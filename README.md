@@ -42,21 +42,24 @@ that a command.
 | pi | `~/.pi/agent/sessions`, append-only tree | file discovery |
 
 A harness whose binary or store is absent reports itself unavailable; it
-never fails the command. Listing works with any subset installed.
+never fails a listing. Listing works with any subset installed.
 
 ## Output
 
 `list` merges sessions from every available harness and sorts them by last
-activity. `--limit` bounds each harness before merging, `--here` keeps sessions
-whose recorded directory is the current directory, and `--harness` selects one
-backend. Human output ends with an availability note when a backend cannot be
+activity. `--limit` bounds each harness before merging and defaults to 20,
+`--here` keeps sessions whose recorded directory is the current directory, and
+`--harness` selects one backend. The bound applies before the directory filter,
+so an empty `--here` listing may only mean the matches are older than the
+limit. Human output ends with an availability note when a backend cannot be
 read. JSON output is a `tapes-list/1` object containing `sessions` and
 `unavailable`.
 
 `show` accepts a full session ID or an unambiguous prefix. It searches every
 available backend, rejects ambiguous prefixes with the matching candidates,
 and prints normalized turns in chronological order. `--tail` bounds the turns
-returned. JSON output uses the `tapes-session/1` transcript schema.
+returned and defaults to the last 100; a transcript that dropped any is marked
+`truncated`. JSON output uses the `tapes-session/1` transcript schema.
 
 `export` writes a three-file bundle sharing one timestamped prefix, into
 `--bundle <dir>` or `/tmp`:
@@ -65,9 +68,10 @@ returned. JSON output uses the `tapes-session/1` transcript schema.
 - `.json` — the canonical `tapes-session/1` object plus turns, cost, tokens,
   and the session directory's git head and branch when they resolve. Query
   selectively with `jq`.
-- `.trace.md` — complete reasoning and tool chronology, for grepping. Each
-  tool turn is headed by its tool name, with the harness's raw envelope kept
-  beneath it.
+- `.trace.md` — every reasoning and tool turn the transcript carries, in
+  order, for grepping. A tool turn is headed by the tool's name where its
+  envelope carries one, by `result` for a bare result, and by `unnamed`
+  otherwise, with the harness's raw envelope kept beneath it.
 
 Read context first, query the JSON narrowly, and reach for the trace only
 when free-text search is genuinely easier. Never ingest a whole bundle
@@ -84,12 +88,12 @@ are writing a tool, a skill, or an agent instruction that needs a session, plug
 into it here rather than reaching into a store yourself.
 
 **Discovery.** The binary is on `PATH`. There is no config file, no daemon, and
-no environment to prepare — `tapes list --here --limit 5` works from any
-directory and answers "what ran here recently". Harness stores are located by
-the backends, so a caller never needs a path. An agent that has never used the
-tool runs `tapes` bare and gets the same briefing this section describes,
-which is why an instruction file can point at the command instead of
-restating it.
+no environment to prepare — `tapes list --here` works from any directory and
+answers "what ran here", bounded by the per-harness `--limit`. Harness stores
+are located by the backends, so a caller never needs a path. An agent that has
+never used the tool runs `tapes` bare and gets the same briefing this section
+describes, which is why an instruction file can point at the command instead
+of restating it.
 
 **The cheap probe first.** `tapes show <id> --tail 40` answers "is there
 anything here worth having?" without exporting. Reach for `export` only after
@@ -100,8 +104,9 @@ versioned JSON; a breaking shape change bumps the version. `export` prints
 exactly three paths and their sizes on stdout, in reading order, and writes each
 file under a temporary name before renaming — so a bundle is never observed
 half-written. A harness whose binary or store is absent reports itself
-unavailable and never fails the command, which means a caller can run against
-any subset of harnesses without branching on what is installed.
+unavailable and never fails a listing, which means a caller can run against any
+subset of harnesses without branching on what is installed; `show` and `export`
+still fail when the session they were given cannot be resolved.
 
 **Two signals worth reading rather than ignoring.** A `truncated` transcript is
 a window, not the whole session. Transcript `notes` carry what the normalized
