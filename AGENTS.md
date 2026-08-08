@@ -25,6 +25,10 @@ server, no session *writing* — `tapes` never mutates a harness's store.
 
 ## Working here
 
+- The CLI is the only workflow surface a caller needs: bare `tapes` teaches
+  the retrieval order and the judgment around it, and `--help` carries each
+  command's contract. Keep both accurate when behavior changes; there is no
+  external skill to fall back on.
 - The repo dogfoods arc: run non-trivial changes through
   `begin` → implement → `snapshot` → `review` → `verify --all` → `integrate`
   with `ARC_HARNESS`/`ARC_SESSION` set. Gates live in `.arc/gates.toml`:

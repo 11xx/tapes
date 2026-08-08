@@ -1,3 +1,5 @@
+mod guide;
+
 use std::path::PathBuf;
 
 use anyhow::Result;
@@ -6,10 +8,16 @@ use tapes_core::bundle::Bundle;
 use tapes_core::model::{Role, Session, Transcript};
 
 #[derive(Parser)]
-#[command(name = "tapes", about = "Read and export coding-agent sessions")]
+#[command(
+    name = "tapes",
+    about = "Read and export coding-agent sessions",
+    after_help = "Run `tapes` with no arguments for the workflow guide."
+)]
 struct Cli {
+    /// Absent prints the workflow guide: what tapes owns, the order the
+    /// commands are used in, and how to judge what comes back.
     #[command(subcommand)]
-    command: Command,
+    command: Option<Command>,
 }
 
 #[derive(Subcommand)]
@@ -56,7 +64,11 @@ fn main() -> Result<()> {
 }
 
 fn dispatch(cli: Cli) -> Result<()> {
-    match cli.command {
+    let Some(command) = cli.command else {
+        guide::print();
+        return Ok(());
+    };
+    match command {
         Command::List {
             harness,
             here,

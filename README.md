@@ -7,12 +7,23 @@ as something you can query — whether it lives in a JSONL file on disk or
 behind an HTTP API.
 
 ```
+tapes                           # the workflow guide
 tapes list                      # every harness, newest first
 tapes list --harness opencode --here
 tapes show ses_07e16cc8 --tail 20
 tapes show ses_07e16cc8 --json
 tapes export ses_07e16cc8 --bundle /tmp/
 ```
+
+## Orientation
+
+`tapes` with no arguments prints the workflow guide: what the tool owns, the
+order the commands are meant to be used in, when a dead session is worth
+rescuing at all, how to ingest a bundle progressively, how to read why a
+session ended, and what the export contains that must not leave `/tmp`. It is
+the whole briefing an agent needs before its first command, so no separate
+document has to be loaded first; `tapes --help` remains the per-command
+reference.
 
 ## Why this exists
 
@@ -75,7 +86,10 @@ into it here rather than reaching into a store yourself.
 **Discovery.** The binary is on `PATH`. There is no config file, no daemon, and
 no environment to prepare — `tapes list --here --limit 5` works from any
 directory and answers "what ran here recently". Harness stores are located by
-the backends, so a caller never needs a path.
+the backends, so a caller never needs a path. An agent that has never used the
+tool runs `tapes` bare and gets the same briefing this section describes,
+which is why an instruction file can point at the command instead of
+restating it.
 
 **The cheap probe first.** `tapes show <id> --tail 40` answers "is there
 anything here worth having?" without exporting. Reach for `export` only after
