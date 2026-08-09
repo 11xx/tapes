@@ -7,7 +7,7 @@ use anyhow::{anyhow, Context, Result};
 use chrono::{TimeZone, Utc};
 use serde_json::Value;
 
-use super::Backend;
+use super::{Backend, Listing, Query};
 use crate::model::{Cost, Model, Role, Session, Tokens, Transcript, Turn};
 
 const MAX_API_BYTES: u64 = 8 * 1024 * 1024;
@@ -85,8 +85,40 @@ impl Backend for OpenCodeBackend {
         self.sessions(1).is_ok()
     }
 
-    fn list(&self, limit: usize) -> Result<Vec<Session>> {
-        self.sessions(limit)
+    fn list(&self, query: &Query) -> Result<Listing> {
+        let Some(scope) = query.scope else {
+            let sessions = self.sessions(query.limit)?;
+            // The API pages, and a caller asking for more than a page gets a
+            // page. That bound is reported rather than passed off as the whole
+            // store.
+            let scan_truncated = sessions.len() >= MAX_API_SESSIONS;
+            return Ok(Listing {
+                scanned: sessions.len(),
+                sessions,
+                scan_truncated,
+            });
+        };
+        // The API pages globally and carries each session's directory, so the
+        // scope is applied to a full page rather than to the caller's limit —
+        // otherwise a project's sessions could fall off the end of a page
+        // spent on other projects.
+        let page = self.sessions(MAX_API_SESSIONS)?;
+        let scanned = page.len();
+        let sessions = page
+            .into_iter()
+            .filter(|session| {
+                session
+                    .directory
+                    .as_deref()
+                    .is_some_and(|directory| scope.contains(directory))
+            })
+            .take(query.limit)
+            .collect();
+        Ok(Listing {
+            sessions,
+            scanned,
+            scan_truncated: scanned >= MAX_API_SESSIONS,
+        })
     }
 
     /// One session GET rather than a listing page, so an exact id costs a

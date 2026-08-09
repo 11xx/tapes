@@ -3,9 +3,10 @@ mod guide;
 use std::path::PathBuf;
 
 use anyhow::Result;
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 use tapes_core::bundle::Bundle;
 use tapes_core::model::{Role, Session, Transcript};
+use tapes_core::{Selection, Where};
 
 #[derive(Parser)]
 #[command(
@@ -20,6 +21,83 @@ struct Cli {
     command: Option<Command>,
 }
 
+/// Which project's sessions a command may see.
+#[derive(Args)]
+struct ScopeArgs {
+    /// Restrict to the project containing the current directory: every
+    /// worktree of its repository, or the directory's subtree when it is not
+    /// in one.
+    #[arg(long, conflicts_with_all = ["project", "global"])]
+    here: bool,
+    /// Restrict to the project containing this path.
+    #[arg(long, conflicts_with = "global")]
+    project: Option<PathBuf>,
+    /// Look at every session on the machine.
+    #[arg(long)]
+    global: bool,
+}
+
+impl ScopeArgs {
+    fn within(&self) -> Where<'_> {
+        match (&self.project, self.here) {
+            (Some(path), _) => Where::Project(path),
+            (None, true) => Where::Here,
+            (None, false) => Where::Global,
+        }
+    }
+
+    /// `--latest` answers "the session I was just in", so it looks at this
+    /// project unless told otherwise. `list` keeps the opposite default: it
+    /// is the survey, and a survey that hides other projects would be a
+    /// surprise.
+    fn within_or_here(&self) -> Where<'_> {
+        match (&self.project, self.global) {
+            (Some(path), _) => Where::Project(path),
+            (None, true) => Where::Global,
+            (None, false) => Where::Here,
+        }
+    }
+}
+
+/// Which session a command acts on: one named, or the latest in scope.
+/// A named session is looked up by id across every store, so every flag that
+/// narrows a *search* is a contradiction beside one — and silently ignoring
+/// them would answer a question the caller did not ask.
+#[derive(Args)]
+struct SelectionArgs {
+    /// Session identifier, full or an unambiguous prefix.
+    #[arg(
+        required_unless_present = "latest",
+        conflicts_with_all = ["latest", "exclude", "harness", "here", "project", "global"]
+    )]
+    session: Option<String>,
+    /// Take the most recent session in scope instead of naming one.
+    #[arg(long)]
+    latest: bool,
+    /// Pass over this session when taking the latest. Repeatable. An agent
+    /// asking from inside its own session passes its own id here.
+    #[arg(long, requires = "latest")]
+    exclude: Vec<String>,
+    /// With --latest, take the most recent session of one harness.
+    #[arg(long, requires = "latest")]
+    harness: Option<String>,
+    #[command(flatten)]
+    scope: ScopeArgs,
+}
+
+impl SelectionArgs {
+    fn selection(&self) -> Selection<'_> {
+        match &self.session {
+            Some(session) => Selection::Id(session),
+            None => Selection::Latest {
+                within: self.scope.within_or_here(),
+                harness: self.harness.as_deref(),
+                exclude: &self.exclude,
+            },
+        }
+    }
+}
+
 #[derive(Subcommand)]
 enum Command {
     /// List available sessions.
@@ -27,11 +105,10 @@ enum Command {
         /// Restrict results to one harness.
         #[arg(long)]
         harness: Option<String>,
-        /// Restrict results to sessions recorded in the current directory.
-        #[arg(long)]
-        here: bool,
-        /// Take at most this many sessions from each harness, before --here
-        /// filters and before the merge [default: 20].
+        #[command(flatten)]
+        scope: ScopeArgs,
+        /// Take at most this many sessions from each harness [default: 20].
+        /// The scope applies first, so a bound never hides a match.
         #[arg(long)]
         limit: Option<usize>,
         /// Render results as JSON.
@@ -40,8 +117,8 @@ enum Command {
     },
     /// Show one session.
     Show {
-        /// Session identifier.
-        session: String,
+        #[command(flatten)]
+        selection: SelectionArgs,
         /// Show only the final number of messages.
         #[arg(long)]
         tail: Option<usize>,
@@ -51,8 +128,8 @@ enum Command {
     },
     /// Export one session.
     Export {
-        /// Session identifier.
-        session: String,
+        #[command(flatten)]
+        selection: SelectionArgs,
         /// Directory for the exported bundle.
         #[arg(long)]
         bundle: Option<PathBuf>,
@@ -72,11 +149,11 @@ fn dispatch(cli: Cli) -> Result<()> {
     match command {
         Command::List {
             harness,
-            here,
+            scope,
             limit,
             json,
         } => {
-            let result = tapes_core::list(harness.as_deref(), here, limit)?;
+            let result = tapes_core::list(harness.as_deref(), scope.within(), limit)?;
             if json {
                 println!("{}", serde_json::to_string(&result)?);
             } else {
@@ -85,19 +162,19 @@ fn dispatch(cli: Cli) -> Result<()> {
             }
         }
         Command::Show {
-            session,
+            selection,
             tail,
             json,
         } => {
-            let transcript = tapes_core::show(&session, tail)?;
+            let transcript = tapes_core::show(selection.selection(), tail)?;
             if json {
                 println!("{}", serde_json::to_string(&transcript)?);
             } else {
                 print_transcript(&transcript);
             }
         }
-        Command::Export { session, bundle } => {
-            let bundle = tapes_core::export(&session, bundle.as_deref())?;
+        Command::Export { selection, bundle } => {
+            let bundle = tapes_core::export(selection.selection(), bundle.as_deref())?;
             print_manifest(&bundle);
         }
     }
@@ -132,6 +209,12 @@ fn print_session_list(sessions: &[Session]) {
 }
 
 fn print_availability_note(result: &tapes_core::SessionList) {
+    if result.scan_truncated {
+        println!(
+            "The search stopped early after {} candidates; older sessions were not inspected.",
+            result.scanned
+        );
+    }
     if result.unavailable.is_empty() {
         return;
     }

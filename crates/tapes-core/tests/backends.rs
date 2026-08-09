@@ -9,9 +9,12 @@ use tapes_core::backend::claude::ClaudeBackend;
 use tapes_core::backend::codex::CodexBackend;
 use tapes_core::backend::opencode::OpenCodeBackend;
 use tapes_core::backend::pi::PiBackend;
-use tapes_core::backend::Backend;
+use tapes_core::backend::{Backend, Listing, Query};
 use tapes_core::model::{Role, Session, Transcript};
-use tapes_core::{list_with_backends, resolve_session, show_with_backends, ResolveError};
+use tapes_core::{
+    latest_with_backends, list_with_backends, resolve_session, scope::Scope, show_with_backends,
+    ResolveError, Selection,
+};
 
 fn fixtures(harness: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -81,7 +84,7 @@ fn every_backend_satisfies_shared_normalization_assertions() {
             backend.harness()
         );
 
-        let sessions = backend.list(10).unwrap();
+        let sessions = backend.list(&Query::unscoped(10)).unwrap().sessions;
         let listed = sessions.iter().find(|session| session.id == id).unwrap();
         assert_eq!(listed.harness, backend.harness());
         assert!(listed.started_at <= listed.last_activity_at);
@@ -102,7 +105,7 @@ fn every_backend_satisfies_shared_normalization_assertions() {
 #[test]
 fn every_file_backend_resolves_full_ids_and_unambiguous_prefixes() {
     for (backend, id) in file_fixture_backends() {
-        let sessions = backend.list(10).unwrap();
+        let sessions = backend.list(&Query::unscoped(10)).unwrap().sessions;
         let prefix = (1..id.len())
             .map(|length| &id[..length])
             .find(|prefix| {
@@ -116,7 +119,7 @@ fn every_file_backend_resolves_full_ids_and_unambiguous_prefixes() {
         let backends = vec![backend];
 
         for query in [id, prefix] {
-            let transcript = show_with_backends(&backends, query, 10).unwrap();
+            let transcript = show_with_backends(&backends, Selection::Id(query), 10).unwrap();
             assert_eq!(transcript.session.id, id);
         }
     }
@@ -153,7 +156,7 @@ fn every_file_backend_preserves_reasoning_and_tool_chronology() {
 #[test]
 fn claude_lists_only_parent_sessions_and_reports_subagent_transcripts() {
     let backend = ClaudeBackend::new(fixtures("claude"));
-    let sessions = backend.list(10).unwrap();
+    let sessions = backend.list(&Query::unscoped(10)).unwrap().sessions;
 
     assert_eq!(
         sessions
@@ -235,17 +238,262 @@ fn opencode_is_unavailable_when_its_binary_is_absent() {
     assert_eq!(result.unavailable, vec!["opencode"]);
 }
 
+/// A store holding one session per directory, newest last, in codex's format.
+/// Built rather than checked in because scoping is about directories that
+/// exist on disk: a recorded path that is gone cannot be attributed to any
+/// project.
+fn scoped_store(name: &str, directories: &[&Path]) -> PathBuf {
+    let root = std::env::temp_dir().join(format!("tapes-scoped-{name}"));
+    let _ = fs::remove_dir_all(&root);
+    let day = root.join("2026/08/09");
+    fs::create_dir_all(&day).unwrap();
+    for (index, directory) in directories.iter().enumerate() {
+        let id = format!("00000000-0000-0000-0000-00000000000{index}");
+        let path = day.join(format!("rollout-2026-08-09T00-00-0{index}-{id}.jsonl"));
+        fs::write(
+            &path,
+            format!(
+                concat!(
+                    r#"{{"timestamp":"2026-08-09T00:00:0{index}Z","type":"session_meta","payload":{{"id":"{id}","cwd":"{directory}"}}}}"#,
+                    "\n",
+                    r#"{{"timestamp":"2026-08-09T00:00:0{index}Z","type":"response_item","payload":{{"type":"message","role":"user","content":[{{"type":"input_text","text":"hello"}}]}}}}"#,
+                    "\n"
+                ),
+                index = index,
+                id = id,
+                directory = directory.display()
+            ),
+        )
+        .unwrap();
+        // Candidates are walked in modification order, so the store's own
+        // recency has to be real rather than incidental.
+        File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(
+                std::time::SystemTime::UNIX_EPOCH
+                    + std::time::Duration::from_secs(1_800_000_000 + index as u64),
+            )
+            .unwrap();
+    }
+    root
+}
+
 #[test]
-fn list_filters_by_directory_and_bounds_each_backend() {
-    let backends: Vec<Box<dyn Backend>> = vec![Box::new(CodexBackend::new(fixtures("codex")))];
+fn a_scoped_listing_finds_the_project_past_the_limit() {
+    let mine = std::env::temp_dir().join("tapes-scoped-mine/nested");
+    let theirs = std::env::temp_dir().join("tapes-scoped-theirs");
+    fs::create_dir_all(&mine).unwrap();
+    fs::create_dir_all(&theirs).unwrap();
+    // The project's session is the older of the two, so a limit applied
+    // before the scope would return the other one and report nothing.
+    let root = scoped_store("listing", &[&mine, &theirs]);
+    let backends: Vec<Box<dyn Backend>> = vec![Box::new(CodexBackend::new(&root))];
+    let scope = Scope::at(mine.parent().unwrap()).unwrap();
 
-    let result =
-        list_with_backends(&backends, None, Some(Path::new("/fixtures/project")), 1).unwrap();
+    let result = list_with_backends(&backends, None, Some(&scope), 1).unwrap();
     assert_eq!(result.sessions.len(), 1);
+    assert_eq!(
+        result.sessions[0].directory.as_deref(),
+        Some(mine.as_path())
+    );
+    assert_eq!(result.scanned, 2);
+    assert!(!result.scan_truncated);
 
-    let result =
-        list_with_backends(&backends, None, Some(Path::new("/different/project")), 10).unwrap();
-    assert!(result.sessions.is_empty());
+    let elsewhere = Scope::at(&theirs).unwrap();
+    let result = list_with_backends(&backends, None, Some(&elsewhere), 10).unwrap();
+    assert_eq!(result.sessions.len(), 1);
+    assert_eq!(
+        result.sessions[0].directory.as_deref(),
+        Some(theirs.as_path())
+    );
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+/// The probe decides whether a candidate is skipped without parsing it, so a
+/// disagreement between the probe's rule and the parse's rule is a lost
+/// session rather than a slow one. Codex is where the two could diverge: past
+/// the bounded read the tail carries only `turn_context`, whose `cwd` a
+/// resumed session can have moved away from the `session_meta` the probe sees.
+#[test]
+fn the_probe_and_the_parse_place_a_session_in_the_same_directory() {
+    let opening = std::env::temp_dir().join("tapes-scoped-opening");
+    let later = std::env::temp_dir().join("tapes-scoped-later");
+    fs::create_dir_all(&opening).unwrap();
+    fs::create_dir_all(&later).unwrap();
+    let root = std::env::temp_dir().join("tapes-store-moved");
+    let _ = fs::remove_dir_all(&root);
+    let day = root.join("2026/08/09");
+    fs::create_dir_all(&day).unwrap();
+
+    let id = "00000000-0000-0000-0000-0000000000aa";
+    let mut file = BufWriter::new(
+        File::create(day.join(format!("rollout-2026-08-09T00-00-00-{id}.jsonl"))).unwrap(),
+    );
+    writeln!(
+        file,
+        r#"{{"timestamp":"2026-08-09T00:00:00Z","type":"session_meta","payload":{{"id":"{id}","cwd":"{}"}}}}"#,
+        opening.display()
+    )
+    .unwrap();
+    let filler = "y".repeat(4096);
+    for index in 0..1200 {
+        writeln!(
+            file,
+            r#"{{"timestamp":"2026-08-09T00:00:01Z","type":"turn_context","payload":{{"cwd":"{}","model":"m-{index}"}}}}"#,
+            later.display()
+        )
+        .unwrap();
+        writeln!(
+            file,
+            r#"{{"timestamp":"2026-08-09T00:00:01Z","type":"response_item","payload":{{"type":"message","role":"user","content":[{{"type":"input_text","text":"{filler}"}}]}}}}"#
+        )
+        .unwrap();
+    }
+    drop(file);
+
+    let backend = CodexBackend::new(&root);
+    let parsed = backend.transcript(id, 1).unwrap().session.directory;
+    let backends: Vec<Box<dyn Backend>> = vec![Box::new(CodexBackend::new(&root))];
+    let scope = Scope::at(parsed.as_deref().expect("a directory was parsed")).unwrap();
+    let result = list_with_backends(&backends, None, Some(&scope), 10).unwrap();
+    assert_eq!(
+        result.sessions.len(),
+        1,
+        "a scoped listing lost the session the parse places in that scope"
+    );
+
+    fs::remove_dir_all(root).unwrap();
+    fs::remove_dir_all(opening).unwrap();
+    fs::remove_dir_all(later).unwrap();
+}
+
+/// The cheap directory probe reads a fixed window of a file's opening. A
+/// session whose first line is larger than that window is not placed by the
+/// probe, and must still be placed by the full read — a probe that could hide
+/// a session would be a wrong answer rather than a fast one.
+#[test]
+fn a_session_the_probe_cannot_place_is_still_found() {
+    let project = std::env::temp_dir().join("tapes-scoped-unprobeable");
+    fs::create_dir_all(&project).unwrap();
+    let root = std::env::temp_dir().join("tapes-store-unprobeable");
+    let _ = fs::remove_dir_all(&root);
+    let day = root.join("2026/08/09");
+    fs::create_dir_all(&day).unwrap();
+
+    let id = "00000000-0000-0000-0000-0000000000ff";
+    let mut file = BufWriter::new(
+        File::create(day.join(format!("rollout-2026-08-09T00-00-00-{id}.jsonl"))).unwrap(),
+    );
+    // One opening line wider than the probe window, so the `cwd` on it is
+    // outside anything a bounded head read can see.
+    writeln!(
+        file,
+        r#"{{"timestamp":"2026-08-09T00:00:00Z","type":"response_item","payload":{{"type":"message","role":"user","content":[{{"type":"input_text","text":"{}"}}]}}}}"#,
+        "x".repeat(128 * 1024)
+    )
+    .unwrap();
+    writeln!(
+        file,
+        r#"{{"timestamp":"2026-08-09T00:00:01Z","type":"turn_context","payload":{{"cwd":"{}"}}}}"#,
+        project.display()
+    )
+    .unwrap();
+    drop(file);
+
+    let backends: Vec<Box<dyn Backend>> = vec![Box::new(CodexBackend::new(&root))];
+    let scope = Scope::at(&project).unwrap();
+    let result = list_with_backends(&backends, None, Some(&scope), 10).unwrap();
+    assert_eq!(result.sessions.len(), 1, "the probe hid a session in scope");
+
+    fs::remove_dir_all(root).unwrap();
+    fs::remove_dir_all(project).unwrap();
+}
+
+/// pi writes the working directory once, on its header line, and the bounded
+/// read keeps only a transcript's tail. Past that window the header is gone
+/// and nothing later repeats it, so a session this size would otherwise
+/// normalize with no directory at all — invisible to every scoped listing.
+#[test]
+fn a_transcript_past_the_read_window_still_reports_its_directory() {
+    let root = std::env::temp_dir().join("tapes-pi-oversized");
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
+    let path = root.join("2026-01-01T10-00-00-000Z_session-huge.jsonl");
+
+    let mut file = BufWriter::new(File::create(&path).unwrap());
+    writeln!(
+        file,
+        r#"{{"type":"session","version":3,"id":"session-huge","timestamp":"2026-01-01T10:00:00Z","cwd":"/fixtures/project"}}"#
+    )
+    .unwrap();
+    let filler = "x".repeat(4096);
+    for index in 0..1200 {
+        writeln!(
+            file,
+            r#"{{"type":"message","id":"user-{index}","parentId":null,"timestamp":"2026-01-01T10:00:01Z","message":{{"role":"user","content":[{{"type":"text","text":"{filler}"}}]}}}}"#
+        )
+        .unwrap();
+    }
+    drop(file);
+    assert!(fs::metadata(&path).unwrap().len() > 4 * 1024 * 1024);
+
+    let backend = PiBackend::new(&root);
+    let sessions = backend.list(&Query::unscoped(10)).unwrap().sessions;
+    let session = sessions
+        .iter()
+        .find(|session| session.id == "session-huge")
+        .expect("an oversized session is still listed");
+    assert_eq!(
+        session.directory.as_deref(),
+        Some(Path::new("/fixtures/project"))
+    );
+    assert_eq!(
+        backend
+            .transcript("session-huge", 1)
+            .unwrap()
+            .session
+            .directory
+            .as_deref(),
+        Some(Path::new("/fixtures/project"))
+    );
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn the_latest_in_scope_needs_no_id_and_honours_exclusions() {
+    let project = std::env::temp_dir().join("tapes-scoped-latest-project");
+    fs::create_dir_all(&project).unwrap();
+    let root = scoped_store("latest", &[&project, &project]);
+    let backends: Vec<Box<dyn Backend>> = vec![Box::new(CodexBackend::new(&root))];
+    let scope = Scope::at(&project).unwrap();
+
+    let newest = latest_with_backends(&backends, None, Some(&scope), &[]).unwrap();
+    assert_eq!(newest.session.id, "00000000-0000-0000-0000-000000000001");
+
+    // What an agent asking from inside its own session passes.
+    let previous = latest_with_backends(
+        &backends,
+        None,
+        Some(&scope),
+        std::slice::from_ref(&newest.session.id),
+    )
+    .unwrap();
+    assert_eq!(previous.session.id, "00000000-0000-0000-0000-000000000000");
+
+    let exhausted = latest_with_backends(
+        &backends,
+        None,
+        Some(&scope),
+        &[newest.session.id, previous.session.id],
+    );
+    assert!(exhausted.is_err());
+
+    fs::remove_dir_all(root).unwrap();
+    fs::remove_dir_all(project).unwrap();
 }
 
 #[derive(Clone, Default)]
@@ -275,12 +523,14 @@ impl Backend for ResolverFixture {
         true
     }
 
-    fn list(&self, limit: usize) -> anyhow::Result<Vec<Session>> {
+    fn list(&self, query: &Query) -> anyhow::Result<Listing> {
         assert!(
             !self.forbid_list,
             "an exact id must not enumerate the store"
         );
-        Ok(self.sessions.iter().take(limit).cloned().collect())
+        Ok(Listing::from_sessions(
+            self.sessions.iter().take(query.limit).cloned().collect(),
+        ))
     }
 
     fn locate(&self, id: &str) -> anyhow::Result<Option<Session>> {

@@ -8,6 +8,7 @@ use chrono::{DateTime, Utc};
 use serde_json::Value;
 
 use crate::model::{Session, Transcript, Turn};
+use crate::scope::Scope;
 
 pub mod claude;
 pub mod codex;
@@ -15,11 +16,59 @@ pub mod opencode;
 pub mod pi;
 
 const MAX_TRANSCRIPT_BYTES: u64 = 4 * 1024 * 1024;
+/// Enough of a file's opening to carry any harness's session header, and
+/// small enough that probing a whole store stays cheap.
+const HEAD_PROBE_BYTES: u64 = 64 * 1024;
+
+/// What a listing asks for.
+///
+/// The scope travels with the query rather than filtering the result, because
+/// a limit applied before the scope answers a different question: "the newest
+/// sessions, of which these happen to be the project's" instead of "the
+/// project's newest sessions".
+pub struct Query<'a> {
+    pub scope: Option<&'a Scope>,
+    /// Sessions to return, per harness.
+    pub limit: usize,
+    /// Candidates a backend may inspect before it gives up. Bounds the search
+    /// for a project whose sessions are all old, or absent.
+    pub ceiling: usize,
+}
+
+impl Query<'_> {
+    pub fn unscoped(limit: usize) -> Self {
+        Self {
+            scope: None,
+            limit,
+            ceiling: usize::MAX,
+        }
+    }
+}
+
+/// What a listing found, and how hard it looked. `scanned` is candidates
+/// inspected, not sessions returned: a caller reading an empty scoped listing
+/// needs to know whether the store was exhausted or the search stopped.
+#[derive(Debug, Default)]
+pub struct Listing {
+    pub sessions: Vec<Session>,
+    pub scanned: usize,
+    pub scan_truncated: bool,
+}
+
+impl Listing {
+    pub fn from_sessions(sessions: Vec<Session>) -> Self {
+        Self {
+            scanned: sessions.len(),
+            sessions,
+            scan_truncated: false,
+        }
+    }
+}
 
 pub trait Backend {
     fn harness(&self) -> &'static str;
     fn available(&self) -> bool;
-    fn list(&self, limit: usize) -> Result<Vec<Session>>;
+    fn list(&self, query: &Query) -> Result<Listing>;
     /// Locate one session by its exact id without enumerating the store.
     /// `Ok(None)` means this backend does not hold it. Resolution calls this
     /// before it calls `list`, so an exact id never pays for a listing.
@@ -85,6 +134,91 @@ pub(crate) fn read_jsonl(path: &Path) -> Result<Jsonl> {
         skipped,
         truncated,
     })
+}
+
+/// Parse the opening of a JSONL file. Every harness writes what it knows
+/// about a session at the top, and `read_jsonl` reads the *end* of a file, so
+/// a large transcript loses its own header without this.
+pub(crate) fn head_jsonl(path: &Path) -> Vec<Value> {
+    let Ok(file) = File::open(path) else {
+        return Vec::new();
+    };
+    let mut bytes = Vec::new();
+    if file.take(HEAD_PROBE_BYTES).read_to_end(&mut bytes).is_err() {
+        return Vec::new();
+    }
+    // A read that filled the window stopped somewhere inside a line, so the
+    // remainder after the last newline is a fragment. A shorter read reached
+    // the end of the file, where a final line without a trailing newline is
+    // whole.
+    let complete = if bytes.len() as u64 == HEAD_PROBE_BYTES {
+        bytes
+            .iter()
+            .rposition(|byte| *byte == b'\n')
+            .map_or(&[][..], |newline| &bytes[..newline])
+    } else {
+        &bytes
+    };
+    complete
+        .split(|byte| *byte == b'\n')
+        .filter_map(|line| serde_json::from_slice(line).ok())
+        .collect()
+}
+
+/// The working directory a session recorded, read from the file's opening
+/// alone. `pick` is the harness's own answer to "where is the cwd on this
+/// line", tried against each line in turn.
+pub(crate) fn head_directory(
+    path: &Path,
+    pick: impl Fn(&Value) -> Option<&str>,
+) -> Option<PathBuf> {
+    head_jsonl(path).iter().find_map(pick).map(PathBuf::from)
+}
+
+/// Walk mtime-ordered candidates newest first, keeping those the query's
+/// scope accepts, until the limit is filled or the ceiling is reached.
+///
+/// `probe` answers "which directory was this recorded in" cheaply, and is only
+/// called when a scope needs the answer. It must answer with the same rule
+/// `parse` uses, so that a candidate it places outside the scope is one the
+/// full read would place there too — otherwise skipping would lose sessions.
+/// A candidate it cannot place at all is parsed and judged on what the full
+/// read reports, so a probe that misses costs time and never a session.
+pub(crate) fn list_files(
+    files: Vec<PathBuf>,
+    query: &Query,
+    probe: impl Fn(&Path) -> Option<PathBuf>,
+    parse: impl Fn(&Path) -> Option<Session>,
+) -> Listing {
+    let mut listing = Listing::default();
+    for path in files {
+        if listing.sessions.len() >= query.limit {
+            return listing;
+        }
+        if listing.scanned >= query.ceiling {
+            listing.scan_truncated = true;
+            return listing;
+        }
+        listing.scanned += 1;
+        if let Some(scope) = query.scope {
+            if probe(&path).is_some_and(|directory| !scope.contains(&directory)) {
+                continue;
+            }
+        }
+        let Some(session) = parse(&path) else {
+            continue;
+        };
+        let placed = query.scope.is_none_or(|scope| {
+            session
+                .directory
+                .as_deref()
+                .is_some_and(|directory| scope.contains(directory))
+        });
+        if placed {
+            listing.sessions.push(session);
+        }
+    }
+    listing
 }
 
 pub(crate) fn timestamp(value: &Value) -> Option<DateTime<Utc>> {

@@ -9,13 +9,23 @@ harness and drifts; check a real transcript before trusting any row here.
 ~/.claude/projects/<encoded-cwd>/<session-uuid>.jsonl
 ```
 
-`<encoded-cwd>` is the absolute path with each `/` replaced by `-`, with a leading `-`:
+`<encoded-cwd>` is the absolute path with each `/` replaced by `-`, with a
+leading `-`. A `.` is replaced the same way, and other punctuation is assumed
+to be — the encoding has only been observed, never documented by the harness:
 
 | Cwd | Encoded |
 |---|---|
 | `/work/project` | `-work-project` |
 | `/home/user` | `-home-user` |
+| `/home/user/.config/emacs` | `-home-user--config-emacs` |
 | `/` | `-` |
+
+The encoding is not injective: a literal `-` in a directory name and a `/`
+both encode to `-`, so a name cannot be decoded back to a path. It also
+records the spelling the session used, so the same directory reached through
+a symlink produces a different name. `tapes` therefore never treats these
+names as an index of which project a session belongs to — the `cwd` field
+inside the transcript is the only authoritative answer.
 
 `$CLAUDE_HOME` (default `~/.claude`) and `$PROJECTS_DIR` are overridable for testing.
 

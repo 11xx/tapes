@@ -6,7 +6,8 @@ use anyhow::{anyhow, Result};
 use serde_json::Value;
 
 use super::{
-    home_path, matching_session_file, read_jsonl, time_range, timestamp, transcript, Backend, Jsonl,
+    head_directory, home_path, list_files, matching_session_file, read_jsonl, time_range,
+    timestamp, transcript, Backend, Jsonl, Listing, Query,
 };
 use crate::model::{Model, Role, Session, Transcript, Turn};
 
@@ -37,11 +38,12 @@ impl ClaudeBackend {
                     .map(str::to_owned)
             })
             .ok_or_else(|| anyhow!("{} has no session id", path.display()))?;
-        let directory = read
-            .values
-            .iter()
-            .find_map(|value| value["cwd"].as_str())
-            .map(PathBuf::from);
+        // The opening is read first, by the same rule a scoped listing's cheap
+        // probe uses, so the probe's answer and this one cannot disagree. It
+        // also covers a transcript past the bounded read whose remaining tail
+        // is all tool output and carries no `cwd`.
+        let directory = head_directory(path, claude_cwd)
+            .or_else(|| read.values.iter().find_map(claude_cwd).map(PathBuf::from));
         let title = read
             .values
             .iter()
@@ -95,22 +97,25 @@ impl Backend for ClaudeBackend {
         self.root.as_deref().is_some_and(Path::is_dir)
     }
 
-    fn list(&self, limit: usize) -> Result<Vec<Session>> {
+    fn list(&self, query: &Query) -> Result<Listing> {
         let Some(root) = self.root.as_deref() else {
-            return Ok(Vec::new());
+            return Ok(Listing::default());
         };
-        let mut sessions = session_files(root)
-            .into_iter()
-            .take(limit)
-            .filter_map(|path| self.parse(&path).ok().map(|(session, _, _)| session))
-            .collect::<Vec<_>>();
-        sessions.sort_by_key(|session| session.last_activity_at);
-        sessions.reverse();
-        Ok(sessions)
+        let mut listing = list_files(
+            session_files(root),
+            query,
+            |path| head_directory(path, claude_cwd),
+            |path| self.parse(path).ok().map(|(session, _, _)| session),
+        );
+        listing
+            .sessions
+            .sort_by_key(|session| session.last_activity_at);
+        listing.sessions.reverse();
+        Ok(listing)
     }
 
-    /// Locate by filename alone: no other session file is opened, so an exact
-    /// id costs one directory walk and one parse regardless of store size.
+    /// Locate by filename: no other session file is parsed, though the store
+    /// is still walked to find it.
     fn locate(&self, id: &str) -> Result<Option<Session>> {
         let Some(root) = self.root.as_deref() else {
             return Ok(None);
@@ -144,6 +149,19 @@ impl Backend for ClaudeBackend {
     }
 }
 
+/// Claude repeats the working directory on every message line.
+fn claude_cwd(value: &Value) -> Option<&str> {
+    value["cwd"].as_str()
+}
+
+/// Claude names each project directory after the working directory it
+/// recorded, which looks like a way to select a scope's sessions without
+/// opening a file. It is not one, and this backend deliberately does not do
+/// it: the encoding is lossy, and a session recorded through a symlinked
+/// spelling of a path lands in a directory whose name no canonical scope
+/// root reproduces. Narrowing on the name would hide it, and a filter that
+/// can produce false negatives is a wrong answer rather than a fast one.
+/// The per-file directory probe is cheap enough to make the trade unnecessary.
 fn session_files(root: &Path) -> Vec<PathBuf> {
     let mut files = fs::read_dir(root)
         .into_iter()
