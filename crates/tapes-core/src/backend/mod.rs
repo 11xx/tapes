@@ -147,12 +147,18 @@ pub(crate) fn head_jsonl(path: &Path) -> Vec<Value> {
     if file.take(HEAD_PROBE_BYTES).read_to_end(&mut bytes).is_err() {
         return Vec::new();
     }
-    // The read almost certainly stopped mid-line; a partial trailing line is
-    // dropped rather than counted as unparseable.
-    let complete = bytes
-        .iter()
-        .rposition(|byte| *byte == b'\n')
-        .map_or(&[][..], |newline| &bytes[..newline]);
+    // A read that filled the window stopped somewhere inside a line, so the
+    // remainder after the last newline is a fragment. A shorter read reached
+    // the end of the file, where a final line without a trailing newline is
+    // whole.
+    let complete = if bytes.len() as u64 == HEAD_PROBE_BYTES {
+        bytes
+            .iter()
+            .rposition(|byte| *byte == b'\n')
+            .map_or(&[][..], |newline| &bytes[..newline])
+    } else {
+        &bytes
+    };
     complete
         .split(|byte| *byte == b'\n')
         .filter_map(|line| serde_json::from_slice(line).ok())
@@ -172,9 +178,10 @@ pub(crate) fn head_directory(
 /// Walk mtime-ordered candidates newest first, keeping those the query's
 /// scope accepts, until the limit is filled or the ceiling is reached.
 ///
-/// `probe` answers "which directory was this recorded in" cheaply; it is only
-/// called when a scope needs the answer. `parse` pays the full read, and only
-/// for a candidate that survived.
+/// `probe` answers "which directory was this recorded in" cheaply, and is only
+/// called when a scope needs the answer. It is strictly an optimization: a
+/// candidate it cannot place is parsed and judged on the directory the full
+/// read reports, so a probe that misses costs time and never a session.
 pub(crate) fn list_files(
     files: Vec<PathBuf>,
     query: &Query,
@@ -192,14 +199,20 @@ pub(crate) fn list_files(
         }
         listing.scanned += 1;
         if let Some(scope) = query.scope {
-            let Some(directory) = probe(&path) else {
-                continue;
-            };
-            if !scope.contains(&directory) {
+            if probe(&path).is_some_and(|directory| !scope.contains(&directory)) {
                 continue;
             }
         }
-        if let Some(session) = parse(&path) {
+        let Some(session) = parse(&path) else {
+            continue;
+        };
+        let placed = query.scope.is_none_or(|scope| {
+            session
+                .directory
+                .as_deref()
+                .is_some_and(|directory| scope.contains(directory))
+        });
+        if placed {
             listing.sessions.push(session);
         }
     }

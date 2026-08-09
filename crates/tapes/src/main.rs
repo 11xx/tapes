@@ -60,10 +60,16 @@ impl ScopeArgs {
 }
 
 /// Which session a command acts on: one named, or the latest in scope.
+/// A named session is looked up by id across every store, so every flag that
+/// narrows a *search* is a contradiction beside one — and silently ignoring
+/// them would answer a question the caller did not ask.
 #[derive(Args)]
 struct SelectionArgs {
     /// Session identifier, full or an unambiguous prefix.
-    #[arg(required_unless_present = "latest", conflicts_with = "latest")]
+    #[arg(
+        required_unless_present = "latest",
+        conflicts_with_all = ["latest", "exclude", "harness", "here", "project", "global"]
+    )]
     session: Option<String>,
     /// Take the most recent session in scope instead of naming one.
     #[arg(long)]

@@ -46,6 +46,10 @@ fn export_help_exits_successfully() {
 fn selection_and_scope_flags_are_mutually_exclusive() {
     for arguments in [
         vec!["show", "some-id", "--latest"],
+        vec!["show", "some-id", "--project", "/tmp"],
+        vec!["show", "some-id", "--exclude", "other-id"],
+        vec!["show", "some-id", "--harness", "codex"],
+        vec!["export", "some-id", "--global"],
         vec!["show", "--exclude", "some-id"],
         vec!["show", "--latest", "--here", "--global"],
         vec!["export", "--latest", "--project", "/tmp", "--global"],

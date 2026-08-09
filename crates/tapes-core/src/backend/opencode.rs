@@ -87,7 +87,16 @@ impl Backend for OpenCodeBackend {
 
     fn list(&self, query: &Query) -> Result<Listing> {
         let Some(scope) = query.scope else {
-            return Ok(Listing::from_sessions(self.sessions(query.limit)?));
+            let sessions = self.sessions(query.limit)?;
+            // The API pages, and a caller asking for more than a page gets a
+            // page. That bound is reported rather than passed off as the whole
+            // store.
+            let scan_truncated = sessions.len() >= MAX_API_SESSIONS;
+            return Ok(Listing {
+                scanned: sessions.len(),
+                sessions,
+                scan_truncated,
+            });
         };
         // The API pages globally and carries each session's directory, so the
         // scope is applied to a full page rather than to the caller's limit —

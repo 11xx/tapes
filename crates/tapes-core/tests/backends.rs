@@ -312,6 +312,48 @@ fn a_scoped_listing_finds_the_project_past_the_limit() {
     fs::remove_dir_all(root).unwrap();
 }
 
+/// The cheap directory probe reads a fixed window of a file's opening. A
+/// session whose first line is larger than that window is not placed by the
+/// probe, and must still be placed by the full read — a probe that could hide
+/// a session would be a wrong answer rather than a fast one.
+#[test]
+fn a_session_the_probe_cannot_place_is_still_found() {
+    let project = std::env::temp_dir().join("tapes-scoped-unprobeable");
+    fs::create_dir_all(&project).unwrap();
+    let root = std::env::temp_dir().join("tapes-store-unprobeable");
+    let _ = fs::remove_dir_all(&root);
+    let day = root.join("2026/08/09");
+    fs::create_dir_all(&day).unwrap();
+
+    let id = "00000000-0000-0000-0000-0000000000ff";
+    let mut file = BufWriter::new(
+        File::create(day.join(format!("rollout-2026-08-09T00-00-00-{id}.jsonl"))).unwrap(),
+    );
+    // One opening line wider than the probe window, so the `cwd` on it is
+    // outside anything a bounded head read can see.
+    writeln!(
+        file,
+        r#"{{"timestamp":"2026-08-09T00:00:00Z","type":"response_item","payload":{{"type":"message","role":"user","content":[{{"type":"input_text","text":"{}"}}]}}}}"#,
+        "x".repeat(128 * 1024)
+    )
+    .unwrap();
+    writeln!(
+        file,
+        r#"{{"timestamp":"2026-08-09T00:00:01Z","type":"turn_context","payload":{{"cwd":"{}"}}}}"#,
+        project.display()
+    )
+    .unwrap();
+    drop(file);
+
+    let backends: Vec<Box<dyn Backend>> = vec![Box::new(CodexBackend::new(&root))];
+    let scope = Scope::at(&project).unwrap();
+    let result = list_with_backends(&backends, None, Some(&scope), 10).unwrap();
+    assert_eq!(result.sessions.len(), 1, "the probe hid a session in scope");
+
+    fs::remove_dir_all(root).unwrap();
+    fs::remove_dir_all(project).unwrap();
+}
+
 /// pi writes the working directory once, on its header line, and the bounded
 /// read keeps only a transcript's tail. Past that window the header is gone
 /// and nothing later repeats it, so a session this size would otherwise

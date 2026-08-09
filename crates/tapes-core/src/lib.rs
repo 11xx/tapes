@@ -19,6 +19,10 @@ const RESOLVE_LIMIT: usize = 1_000;
 /// it stopped looking. Well above any store seen in practice, so it bounds a
 /// pathological one without truncating a real search.
 const SCAN_CEILING: usize = 5_000;
+/// How many of the newest candidates `--latest` considers before choosing by
+/// recorded activity. Small enough to stay cheap, wide enough to absorb a
+/// store whose file times disagree with its transcripts.
+const LATEST_WINDOW: usize = 5;
 /// An export is a rescue: take the whole session the bounded read allows,
 /// not the window `show` defaults to.
 const EXPORT_TAIL: usize = usize::MAX;
@@ -237,8 +241,11 @@ pub fn latest_with_backends(
     scope: Option<&Scope>,
     exclude: &[String],
 ) -> Result<ResolvedSession> {
-    // One more than the exclusions guarantees a survivor if any exists.
-    let listed = list_scoped(backends, harness, scope, exclude.len() + 1)?;
+    // A store is walked in modification order, which is a proxy for recency
+    // and not the same as it: a transcript restored or touched after a newer
+    // one sorts ahead of it. Taking a small window and choosing by recorded
+    // activity costs a few extra parses and removes that skew.
+    let listed = list_scoped(backends, harness, scope, exclude.len() + LATEST_WINDOW)?;
     let scoped = if scope.is_some() {
         "in this project"
     } else {
@@ -248,7 +255,8 @@ pub fn latest_with_backends(
         .sessions
         .into_iter()
         .zip(listed.origins)
-        .find(|(session, _)| !exclude.contains(&session.id))
+        .filter(|(session, _)| !exclude.contains(&session.id))
+        .max_by_key(|(session, _)| session.last_activity_at)
         .map(|(session, backend_index)| ResolvedSession {
             backend_index,
             session,
@@ -256,9 +264,7 @@ pub fn latest_with_backends(
         .ok_or_else(|| {
             let mut message = format!("no session was found {scoped}");
             if listed.scan_truncated {
-                message.push_str(&format!(
-                    " (the search stopped after {SCAN_CEILING} candidates per harness)"
-                ));
+                message.push_str(" (the search stopped before every candidate had been inspected)");
             }
             if !listed.unavailable.is_empty() {
                 message.push_str(&format!("; unavailable: {}", listed.unavailable.join(", ")));

@@ -21,12 +21,11 @@ to be — the encoding has only been observed, never documented by the harness:
 | `/` | `-` |
 
 The encoding is not injective: a literal `-` in a directory name and a `/`
-both encode to `-`, so a name cannot be decoded back to a path. `tapes` only
-ever encodes forward — it computes the names a project *could* have written to
-narrow the store before opening files, and treats the `cwd` field inside a
-transcript as the authoritative answer. A narrowing that matches nothing falls
-back to reading the whole store, because this convention is undocumented and
-may change.
+both encode to `-`, so a name cannot be decoded back to a path. It also
+records the spelling the session used, so the same directory reached through
+a symlink produces a different name. `tapes` therefore never treats these
+names as an index of which project a session belongs to — the `cwd` field
+inside the transcript is the only authoritative answer.
 
 `$CLAUDE_HOME` (default `~/.claude`) and `$PROJECTS_DIR` are overridable for testing.
 

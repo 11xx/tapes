@@ -10,7 +10,6 @@ use super::{
     timestamp, transcript, Backend, Jsonl, Listing, Query,
 };
 use crate::model::{Model, Role, Session, Transcript, Turn};
-use crate::scope::Scope;
 
 #[derive(Clone, Debug)]
 pub struct ClaudeBackend {
@@ -104,12 +103,8 @@ impl Backend for ClaudeBackend {
         let Some(root) = self.root.as_deref() else {
             return Ok(Listing::default());
         };
-        let files = match query.scope {
-            Some(scope) => scoped_session_files(root, scope),
-            None => session_files(root),
-        };
         let mut listing = list_files(
-            files,
+            session_files(root),
             query,
             |path| head_directory(path, |value| value["cwd"].as_str()),
             |path| self.parse(path).ok().map(|(session, _, _)| session),
@@ -156,63 +151,16 @@ impl Backend for ClaudeBackend {
     }
 }
 
-/// Narrow the store to the project directories a scope could have written,
-/// before any file is opened. Claude names each project directory after the
-/// cwd it recorded, so a scope's own paths encode forward into the names to
-/// look for.
-///
-/// The encoding is not injective — `/` and a literal `-` both become `-` — so
-/// this can only ever over-select, and the parsed `cwd` stays authoritative.
-/// A narrowing that finds nothing falls back to the whole store: the naming
-/// convention is undocumented and drifts, and a pre-filter that could produce
-/// false *negatives* would turn an optimization into a wrong answer.
-fn scoped_session_files(root: &Path, scope: &Scope) -> Vec<PathBuf> {
-    let prefixes = scope
-        .roots()
-        .iter()
-        .map(|path| project_slug(path))
-        .collect::<Vec<_>>();
-    let narrowed = project_directories(root)
-        .into_iter()
-        .filter(|project| {
-            project
-                .file_name()
-                .and_then(|name| name.to_str())
-                .is_some_and(|name| {
-                    let name = name.to_ascii_lowercase();
-                    prefixes.iter().any(|prefix| name.starts_with(prefix))
-                })
-        })
-        .collect::<Vec<_>>();
-    if narrowed.is_empty() {
-        return session_files(root);
-    }
-    sorted_transcripts(narrowed)
-}
-
-/// A path as claude names the project directory holding its sessions:
-/// `/home/user/.config` becomes `-home-user--config`. Every character that is
-/// not alphanumeric encodes to `-`, which covers more than the separator alone
-/// and keeps the result an over-approximation.
-fn project_slug(path: &Path) -> String {
-    path.to_string_lossy()
-        .chars()
-        .map(|character| {
-            if character.is_ascii_alphanumeric() {
-                character.to_ascii_lowercase()
-            } else {
-                '-'
-            }
-        })
-        .collect()
-}
-
+/// Claude names each project directory after the working directory it
+/// recorded, which looks like a way to select a scope's sessions without
+/// opening a file. It is not one, and this backend deliberately does not do
+/// it: the encoding is lossy, and a session recorded through a symlinked
+/// spelling of a path lands in a directory whose name no canonical scope
+/// root reproduces. Narrowing on the name would hide it, and a filter that
+/// can produce false negatives is a wrong answer rather than a fast one.
+/// The per-file directory probe is cheap enough to make the trade unnecessary.
 fn session_files(root: &Path) -> Vec<PathBuf> {
-    sorted_transcripts(project_directories(root))
-}
-
-fn project_directories(root: &Path) -> Vec<PathBuf> {
-    fs::read_dir(root)
+    let mut files = fs::read_dir(root)
         .into_iter()
         .flatten()
         .flatten()
@@ -223,12 +171,6 @@ fn project_directories(root: &Path) -> Vec<PathBuf> {
                 .filter(|kind| kind.is_dir())
                 .map(|_| project.path())
         })
-        .collect()
-}
-
-fn sorted_transcripts(projects: Vec<PathBuf>) -> Vec<PathBuf> {
-    let mut files = projects
-        .into_iter()
         .flat_map(|project| fs::read_dir(project).into_iter().flatten().flatten())
         .filter_map(|entry| {
             let path = entry.path();

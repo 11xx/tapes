@@ -19,8 +19,8 @@ START WITHOUT AN ID
   tapes show --latest --exclude <your own id>
   tapes export --latest
 
-  --latest takes the most recent session in scope, so finding one costs no
-  listing, no reading of ids, and no choosing between them. The scope is the
+  --latest takes the most recent session in scope, so nothing has to read a
+  table of ids and choose between them. The scope is the
   project holding the current directory: every worktree of its repository, or
   the directory's subtree when it is not in one. --project <path> asks about
   another project and --global drops the scope entirely.
