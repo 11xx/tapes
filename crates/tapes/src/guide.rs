@@ -14,21 +14,41 @@ append-only tree. tapes finds one, normalizes it into a single model, and
 hands it back. It never writes to a harness store, so no command here can
 disturb a live session.
 
+START WITHOUT AN ID
+  tapes show --latest --tail 40  The newest session of this project.
+  tapes show --latest --exclude <your own id>
+  tapes export --latest
+
+  --latest takes the most recent session in scope, so finding one costs no
+  listing, no reading of ids, and no choosing between them. The scope is the
+  project holding the current directory: every worktree of its repository, or
+  the directory's subtree when it is not in one. --project <path> asks about
+  another project and --global drops the scope entirely.
+
+  Asking from inside a live session usually returns that session — it is the
+  newest one there. Nothing in a store distinguishes the session asking from
+  the session that just died, so pass --exclude <id> for any session you
+  already hold. A harness that tells an agent its own session id makes this
+  exact; without one, read the first turns and check whose they are.
+
 FIND IT
   tapes list                     Every available harness, newest first.
-  tapes list --here              What ran in this exact directory.
+  tapes list --here              This project, across every worktree.
   tapes list --harness codex     One backend.
 
-  --limit bounds each harness before the merge and before --here filters, and
-  defaults to 20. A directory whose sessions are older than that shows nothing
-  until the limit is raised, so an empty list is not by itself evidence that
-  nothing ran there.
+  --limit bounds each harness and defaults to 20. The scope applies first, so
+  a scoped listing cannot be emptied by a bound spent on other projects. An
+  empty scoped list means the search found nothing — unless it says it stopped
+  early, which is a different fact and is reported when it happens.
 
   A session is named by its full id or an unambiguous prefix; an ambiguous
   prefix lists its candidates and fails rather than guessing. A harness whose
   binary or store is absent reports itself unavailable and never fails a
   listing, so a caller never has to branch on what is installed — but show and
   export still fail when the session they were given cannot be resolved.
+
+  A session recorded in a directory that no longer exists cannot be placed in
+  any project, so a scoped search will not find it. Its id still resolves.
 
 PROBE BEFORE EXPORTING
   tapes show <id> --tail 40      A window, costing no bundle.
@@ -47,7 +67,7 @@ PROBE BEFORE EXPORTING
   redoing the task is faster than reconstructing it.
 
 EXPORT, THEN INGEST PROGRESSIVELY
-  tapes export <id> [--bundle <dir>]
+  tapes export <id|--latest> [--bundle <dir>]
 
   Three files share one timestamped prefix, and stdout is exactly their paths
   and sizes, in the order they are meant to be read:

@@ -4,8 +4,8 @@ use anyhow::{anyhow, Result};
 use serde_json::Value;
 
 use super::{
-    home_path, jsonl_files, read_jsonl, session_file, time_range, timestamp, transcript, Backend,
-    Jsonl,
+    head_directory, home_path, jsonl_files, list_files, read_jsonl, session_file, time_range,
+    timestamp, transcript, Backend, Jsonl, Listing, Query,
 };
 use crate::model::{Model, Role, Session, Transcript, Turn};
 
@@ -49,7 +49,11 @@ impl CodexBackend {
                     .find(|value| value["type"] == "turn_context")
                     .and_then(|value| value["payload"]["cwd"].as_str())
             })
-            .map(PathBuf::from);
+            .map(PathBuf::from)
+            // Past the bounded read the `session_meta` header is outside the
+            // window, and a session with no later `turn_context` in it has no
+            // other record of where it ran.
+            .or_else(|| head_directory(path, codex_cwd));
         let model = read
             .values
             .iter()
@@ -101,22 +105,25 @@ impl Backend for CodexBackend {
         self.root.as_deref().is_some_and(Path::is_dir)
     }
 
-    fn list(&self, limit: usize) -> Result<Vec<Session>> {
+    fn list(&self, query: &Query) -> Result<Listing> {
         let Some(root) = self.root.as_deref() else {
-            return Ok(Vec::new());
+            return Ok(Listing::default());
         };
-        let mut sessions = jsonl_files(root)
-            .into_iter()
-            .take(limit)
-            .filter_map(|path| self.parse(&path).ok().map(|(session, _, _)| session))
-            .collect::<Vec<_>>();
-        sessions.sort_by_key(|session| session.last_activity_at);
-        sessions.reverse();
-        Ok(sessions)
+        let mut listing = list_files(
+            jsonl_files(root),
+            query,
+            |path| head_directory(path, codex_cwd),
+            |path| self.parse(path).ok().map(|(session, _, _)| session),
+        );
+        listing
+            .sessions
+            .sort_by_key(|session| session.last_activity_at);
+        listing.sessions.reverse();
+        Ok(listing)
     }
 
-    /// Locate by filename alone: no other session file is opened, so an exact
-    /// id costs one directory walk and one parse regardless of store size.
+    /// Locate by filename: no other session file is parsed, though the store
+    /// is still walked to find it.
     fn locate(&self, id: &str) -> Result<Option<Session>> {
         let Some(root) = self.root.as_deref() else {
             return Ok(None);
@@ -136,6 +143,15 @@ impl Backend for CodexBackend {
             session_file(root, id).ok_or_else(|| anyhow!("codex session {id} is unavailable"))?;
         let (session, turns, read) = self.parse(&path)?;
         Ok(transcript(session, turns, tail, &read, Vec::new()))
+    }
+}
+
+/// Codex records the working directory in its `session_meta` header and
+/// repeats it on every `turn_context`, so either line answers the question.
+fn codex_cwd(value: &Value) -> Option<&str> {
+    match value["type"].as_str() {
+        Some("session_meta") | Some("turn_context") => value["payload"]["cwd"].as_str(),
+        _ => None,
     }
 }
 

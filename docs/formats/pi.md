@@ -37,7 +37,7 @@ needs and the normalized model has no field for it.
 
 | `type` | Carries |
 |---|---|
-| `session` | the header: `id`, `timestamp`, `cwd` |
+| `session` | the header: `id`, `timestamp`, `cwd` — written once, on the first line, and never repeated |
 | `model_change` | `provider`, `modelId` |
 | `thinking_level_change` | `thinkingLevel`, which the model carries as its variant |
 | `message` | the conversation, under `message.role` |

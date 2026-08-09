@@ -9,13 +9,24 @@ harness and drifts; check a real transcript before trusting any row here.
 ~/.claude/projects/<encoded-cwd>/<session-uuid>.jsonl
 ```
 
-`<encoded-cwd>` is the absolute path with each `/` replaced by `-`, with a leading `-`:
+`<encoded-cwd>` is the absolute path with each `/` replaced by `-`, with a
+leading `-`. A `.` is replaced the same way, and other punctuation is assumed
+to be — the encoding has only been observed, never documented by the harness:
 
 | Cwd | Encoded |
 |---|---|
 | `/work/project` | `-work-project` |
 | `/home/user` | `-home-user` |
+| `/home/user/.config/emacs` | `-home-user--config-emacs` |
 | `/` | `-` |
+
+The encoding is not injective: a literal `-` in a directory name and a `/`
+both encode to `-`, so a name cannot be decoded back to a path. `tapes` only
+ever encodes forward — it computes the names a project *could* have written to
+narrow the store before opening files, and treats the `cwd` field inside a
+transcript as the authoritative answer. A narrowing that matches nothing falls
+back to reading the whole store, because this convention is undocumented and
+may change.
 
 `$CLAUDE_HOME` (default `~/.claude`) and `$PROJECTS_DIR` are overridable for testing.
 

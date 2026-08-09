@@ -6,9 +6,11 @@ use anyhow::{anyhow, Result};
 use serde_json::Value;
 
 use super::{
-    home_path, matching_session_file, read_jsonl, time_range, timestamp, transcript, Backend, Jsonl,
+    head_directory, home_path, list_files, matching_session_file, read_jsonl, time_range,
+    timestamp, transcript, Backend, Jsonl, Listing, Query,
 };
 use crate::model::{Model, Role, Session, Transcript, Turn};
+use crate::scope::Scope;
 
 #[derive(Clone, Debug)]
 pub struct ClaudeBackend {
@@ -41,7 +43,10 @@ impl ClaudeBackend {
             .values
             .iter()
             .find_map(|value| value["cwd"].as_str())
-            .map(PathBuf::from);
+            .map(PathBuf::from)
+            // A transcript past the bounded read keeps only its tail, which
+            // for a session that ended in tool output carries no `cwd`.
+            .or_else(|| head_directory(path, |value| value["cwd"].as_str()));
         let title = read
             .values
             .iter()
@@ -95,22 +100,29 @@ impl Backend for ClaudeBackend {
         self.root.as_deref().is_some_and(Path::is_dir)
     }
 
-    fn list(&self, limit: usize) -> Result<Vec<Session>> {
+    fn list(&self, query: &Query) -> Result<Listing> {
         let Some(root) = self.root.as_deref() else {
-            return Ok(Vec::new());
+            return Ok(Listing::default());
         };
-        let mut sessions = session_files(root)
-            .into_iter()
-            .take(limit)
-            .filter_map(|path| self.parse(&path).ok().map(|(session, _, _)| session))
-            .collect::<Vec<_>>();
-        sessions.sort_by_key(|session| session.last_activity_at);
-        sessions.reverse();
-        Ok(sessions)
+        let files = match query.scope {
+            Some(scope) => scoped_session_files(root, scope),
+            None => session_files(root),
+        };
+        let mut listing = list_files(
+            files,
+            query,
+            |path| head_directory(path, |value| value["cwd"].as_str()),
+            |path| self.parse(path).ok().map(|(session, _, _)| session),
+        );
+        listing
+            .sessions
+            .sort_by_key(|session| session.last_activity_at);
+        listing.sessions.reverse();
+        Ok(listing)
     }
 
-    /// Locate by filename alone: no other session file is opened, so an exact
-    /// id costs one directory walk and one parse regardless of store size.
+    /// Locate by filename: no other session file is parsed, though the store
+    /// is still walked to find it.
     fn locate(&self, id: &str) -> Result<Option<Session>> {
         let Some(root) = self.root.as_deref() else {
             return Ok(None);
@@ -144,8 +156,63 @@ impl Backend for ClaudeBackend {
     }
 }
 
+/// Narrow the store to the project directories a scope could have written,
+/// before any file is opened. Claude names each project directory after the
+/// cwd it recorded, so a scope's own paths encode forward into the names to
+/// look for.
+///
+/// The encoding is not injective — `/` and a literal `-` both become `-` — so
+/// this can only ever over-select, and the parsed `cwd` stays authoritative.
+/// A narrowing that finds nothing falls back to the whole store: the naming
+/// convention is undocumented and drifts, and a pre-filter that could produce
+/// false *negatives* would turn an optimization into a wrong answer.
+fn scoped_session_files(root: &Path, scope: &Scope) -> Vec<PathBuf> {
+    let prefixes = scope
+        .roots()
+        .iter()
+        .map(|path| project_slug(path))
+        .collect::<Vec<_>>();
+    let narrowed = project_directories(root)
+        .into_iter()
+        .filter(|project| {
+            project
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| {
+                    let name = name.to_ascii_lowercase();
+                    prefixes.iter().any(|prefix| name.starts_with(prefix))
+                })
+        })
+        .collect::<Vec<_>>();
+    if narrowed.is_empty() {
+        return session_files(root);
+    }
+    sorted_transcripts(narrowed)
+}
+
+/// A path as claude names the project directory holding its sessions:
+/// `/home/user/.config` becomes `-home-user--config`. Every character that is
+/// not alphanumeric encodes to `-`, which covers more than the separator alone
+/// and keeps the result an over-approximation.
+fn project_slug(path: &Path) -> String {
+    path.to_string_lossy()
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() {
+                character.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect()
+}
+
 fn session_files(root: &Path) -> Vec<PathBuf> {
-    let mut files = fs::read_dir(root)
+    sorted_transcripts(project_directories(root))
+}
+
+fn project_directories(root: &Path) -> Vec<PathBuf> {
+    fs::read_dir(root)
         .into_iter()
         .flatten()
         .flatten()
@@ -156,6 +223,12 @@ fn session_files(root: &Path) -> Vec<PathBuf> {
                 .filter(|kind| kind.is_dir())
                 .map(|_| project.path())
         })
+        .collect()
+}
+
+fn sorted_transcripts(projects: Vec<PathBuf>) -> Vec<PathBuf> {
+    let mut files = projects
+        .into_iter()
         .flat_map(|project| fs::read_dir(project).into_iter().flatten().flatten())
         .filter_map(|entry| {
             let path = entry.path();

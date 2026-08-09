@@ -5,8 +5,8 @@ use anyhow::{anyhow, Result};
 use serde_json::Value;
 
 use super::{
-    home_path, jsonl_files, read_jsonl, session_file, time_range, timestamp, transcript, Backend,
-    Jsonl,
+    head_directory, home_path, jsonl_files, list_files, read_jsonl, session_file, time_range,
+    timestamp, transcript, Backend, Jsonl, Listing, Query,
 };
 use crate::model::{Model, Role, Session, Transcript, Turn};
 
@@ -57,7 +57,12 @@ impl PiBackend {
             .ok_or_else(|| anyhow!("{} has no session id", path.display()))?;
         let directory = header
             .and_then(|value| value["cwd"].as_str())
-            .map(PathBuf::from);
+            .map(PathBuf::from)
+            // pi writes the working directory once, in the header line. Past
+            // the bounded read that line is outside the window and nothing
+            // later repeats it, so the session would otherwise normalize with
+            // no directory at all.
+            .or_else(|| head_directory(path, pi_cwd));
         let variant = active.iter().rev().find_map(|value| {
             (value["type"] == "thinking_level_change")
                 .then(|| value["thinkingLevel"].as_str())
@@ -117,18 +122,21 @@ impl Backend for PiBackend {
         self.root.as_deref().is_some_and(Path::is_dir)
     }
 
-    fn list(&self, limit: usize) -> Result<Vec<Session>> {
+    fn list(&self, query: &Query) -> Result<Listing> {
         let Some(root) = self.root.as_deref() else {
-            return Ok(Vec::new());
+            return Ok(Listing::default());
         };
-        let mut sessions = jsonl_files(root)
-            .into_iter()
-            .take(limit)
-            .filter_map(|path| self.parse(&path).ok().map(|(session, _, _, _)| session))
-            .collect::<Vec<_>>();
-        sessions.sort_by_key(|session| session.last_activity_at);
-        sessions.reverse();
-        Ok(sessions)
+        let mut listing = list_files(
+            jsonl_files(root),
+            query,
+            |path| head_directory(path, pi_cwd),
+            |path| self.parse(path).ok().map(|(session, _, _, _)| session),
+        );
+        listing
+            .sessions
+            .sort_by_key(|session| session.last_activity_at);
+        listing.sessions.reverse();
+        Ok(listing)
     }
 
     /// Locate by filename alone: no other session file is opened, so an exact
@@ -163,6 +171,13 @@ impl Backend for PiBackend {
             .collect();
         Ok(transcript(session, turns, tail, &read, notes))
     }
+}
+
+/// pi records the working directory once, on the `session` header line.
+fn pi_cwd(value: &Value) -> Option<&str> {
+    (value["type"] == "session")
+        .then(|| value["cwd"].as_str())
+        .flatten()
 }
 
 fn active_path<'a>(entries: &[&'a Value]) -> Vec<&'a Value> {

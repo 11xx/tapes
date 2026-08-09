@@ -40,6 +40,22 @@ fn export_help_exits_successfully() {
         .success());
 }
 
+/// Selecting a session stays explicit: an id or `--latest`, never a silent
+/// default, and never two scopes at once.
+#[test]
+fn selection_and_scope_flags_are_mutually_exclusive() {
+    for arguments in [
+        vec!["show", "some-id", "--latest"],
+        vec!["show", "--exclude", "some-id"],
+        vec!["show", "--latest", "--here", "--global"],
+        vec!["export", "--latest", "--project", "/tmp", "--global"],
+        vec!["list", "--here", "--global"],
+    ] {
+        let misuse = tapes().args(&arguments).output().unwrap();
+        assert_eq!(misuse.status.code(), Some(2), "{arguments:?} was accepted");
+    }
+}
+
 #[test]
 fn list_without_stores_is_empty_and_successful() {
     let temporary_home = std::env::temp_dir().join(format!("tapes-test-{}", std::process::id()));

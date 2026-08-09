@@ -3,16 +3,22 @@ use std::path::Path;
 use anyhow::{anyhow, Result};
 use serde::Serialize;
 
-use backend::Backend;
+use backend::{Backend, Listing, Query};
 use model::{Session, Transcript};
+use scope::Scope;
 
 pub mod backend;
 pub mod bundle;
 pub mod model;
+pub mod scope;
 
 pub const LIST_SCHEMA: &str = "tapes-list/1";
 const DEFAULT_LIST_LIMIT: usize = 20;
 const RESOLVE_LIMIT: usize = 1_000;
+/// Candidates a scoped listing may inspect per harness before it reports that
+/// it stopped looking. Well above any store seen in practice, so it bounds a
+/// pathological one without truncating a real search.
+const SCAN_CEILING: usize = 5_000;
 /// An export is a rescue: take the whole session the bounded read allows,
 /// not the window `show` defaults to.
 const EXPORT_TAIL: usize = usize::MAX;
@@ -22,6 +28,12 @@ pub struct SessionList {
     pub schema: &'static str,
     pub sessions: Vec<Session>,
     pub unavailable: Vec<String>,
+    /// Candidate sessions inspected to produce this list, across every
+    /// harness. A scoped listing reads more than it returns.
+    pub scanned: usize,
+    /// A backend stopped at its scan ceiling with candidates left. The listing
+    /// is a view, not the set — "I stopped looking" is not "it is not there".
+    pub scan_truncated: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -91,15 +103,33 @@ pub struct ResolvedSession {
     pub session: Session,
 }
 
-pub fn list(harness: Option<&str>, here: bool, limit: Option<usize>) -> Result<SessionList> {
-    let directory = here
-        .then(std::env::current_dir)
-        .transpose()
-        .map_err(anyhow::Error::from)?;
+/// Where a command looks: one project, or every session on the machine.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Where<'a> {
+    /// The project containing the current directory.
+    Here,
+    /// The project containing a named path.
+    Project(&'a Path),
+    #[default]
+    Global,
+}
+
+impl Where<'_> {
+    pub fn resolve(&self) -> Result<Option<Scope>> {
+        match self {
+            Self::Here => Scope::here().map(Some),
+            Self::Project(path) => Scope::at(path).map(Some),
+            Self::Global => Ok(None),
+        }
+    }
+}
+
+pub fn list(harness: Option<&str>, within: Where, limit: Option<usize>) -> Result<SessionList> {
+    let scope = within.resolve()?;
     list_with_backends(
         &backend::backends(),
         harness,
-        directory.as_deref(),
+        scope.as_ref(),
         limit.unwrap_or(DEFAULT_LIST_LIMIT),
     )
 }
@@ -107,40 +137,134 @@ pub fn list(harness: Option<&str>, here: bool, limit: Option<usize>) -> Result<S
 pub fn list_with_backends(
     backends: &[Box<dyn Backend>],
     harness: Option<&str>,
-    directory: Option<&Path>,
+    scope: Option<&Scope>,
     limit: usize,
 ) -> Result<SessionList> {
+    let listed = list_scoped(backends, harness, scope, limit)?;
+    Ok(SessionList {
+        schema: LIST_SCHEMA,
+        sessions: listed.sessions,
+        unavailable: listed.unavailable,
+        scanned: listed.scanned,
+        scan_truncated: listed.scan_truncated,
+    })
+}
+
+struct Listed {
+    sessions: Vec<Session>,
+    /// Which backend each session came from, positionally — kept so a
+    /// selection can go straight to its transcript without resolving the id
+    /// against every store again.
+    origins: Vec<usize>,
+    unavailable: Vec<String>,
+    scanned: usize,
+    scan_truncated: bool,
+}
+
+fn list_scoped(
+    backends: &[Box<dyn Backend>],
+    harness: Option<&str>,
+    scope: Option<&Scope>,
+    limit: usize,
+) -> Result<Listed> {
     if let Some(harness) = harness {
         if !backends.iter().any(|backend| backend.harness() == harness) {
             return Err(anyhow!("unknown harness: {harness}"));
         }
     }
 
-    let mut sessions = Vec::new();
+    let query = Query {
+        scope,
+        limit,
+        ceiling: if scope.is_some() {
+            SCAN_CEILING
+        } else {
+            usize::MAX
+        },
+    };
+    let mut found: Vec<(Session, usize)> = Vec::new();
     let mut unavailable = Vec::new();
-    for backend in backends
+    let mut scanned = 0;
+    let mut scan_truncated = false;
+    for (index, backend) in backends
         .iter()
-        .filter(|backend| harness.is_none_or(|name| backend.harness() == name))
+        .enumerate()
+        .filter(|(_, backend)| harness.is_none_or(|name| backend.harness() == name))
     {
         if !backend.available() {
             unavailable.push(backend.harness().to_owned());
             continue;
         }
-        match backend.list(limit) {
-            Ok(listed) => sessions.extend(listed.into_iter().filter(|session| {
-                directory.is_none_or(|directory| session.directory.as_deref() == Some(directory))
-            })),
+        match backend.list(&query) {
+            Ok(Listing {
+                sessions,
+                scanned: inspected,
+                scan_truncated: truncated,
+            }) => {
+                scanned += inspected;
+                scan_truncated |= truncated;
+                found.extend(sessions.into_iter().map(|session| (session, index)));
+            }
             Err(_) => unavailable.push(backend.harness().to_owned()),
         }
     }
-    sessions.sort_by_key(|session| session.last_activity_at);
-    sessions.reverse();
+    found.sort_by_key(|(session, _)| session.last_activity_at);
+    found.reverse();
 
-    Ok(SessionList {
-        schema: LIST_SCHEMA,
+    let (sessions, origins) = found.into_iter().unzip();
+    Ok(Listed {
         sessions,
+        origins,
         unavailable,
+        scanned,
+        scan_truncated,
     })
+}
+
+/// The most recent session in scope, with the sessions named in `exclude`
+/// passed over.
+///
+/// Excluding is the caller's job because it is the only party that can do it.
+/// An agent asking this question from inside its own live session is usually
+/// the newest session in scope, and nothing observable in a store separates
+/// "the session asking" from "the session that just died" — two stores can be
+/// identical and differ only in who invoked. So the tool reports the latest
+/// and takes the caller's word for what to skip, rather than inferring it from
+/// recency and silently discarding the crash it exists to recover.
+pub fn latest_with_backends(
+    backends: &[Box<dyn Backend>],
+    harness: Option<&str>,
+    scope: Option<&Scope>,
+    exclude: &[String],
+) -> Result<ResolvedSession> {
+    // One more than the exclusions guarantees a survivor if any exists.
+    let listed = list_scoped(backends, harness, scope, exclude.len() + 1)?;
+    let scoped = if scope.is_some() {
+        "in this project"
+    } else {
+        "on this machine"
+    };
+    listed
+        .sessions
+        .into_iter()
+        .zip(listed.origins)
+        .find(|(session, _)| !exclude.contains(&session.id))
+        .map(|(session, backend_index)| ResolvedSession {
+            backend_index,
+            session,
+        })
+        .ok_or_else(|| {
+            let mut message = format!("no session was found {scoped}");
+            if listed.scan_truncated {
+                message.push_str(&format!(
+                    " (the search stopped after {SCAN_CEILING} candidates per harness)"
+                ));
+            }
+            if !listed.unavailable.is_empty() {
+                message.push_str(&format!("; unavailable: {}", listed.unavailable.join(", ")));
+            }
+            anyhow!(message)
+        })
 }
 
 pub fn resolve_session(
@@ -201,12 +325,13 @@ pub fn resolve_session(
         if !backend.available() {
             continue;
         }
-        let Ok(sessions) = backend.list(RESOLVE_LIMIT) else {
+        let Ok(listing) = backend.list(&Query::unscoped(RESOLVE_LIMIT)) else {
             continue;
         };
-        truncated |= sessions.len() >= RESOLVE_LIMIT;
+        truncated |= listing.sessions.len() >= RESOLVE_LIMIT;
         matches.extend(
-            sessions
+            listing
+                .sessions
                 .into_iter()
                 .filter(|session| session.id.starts_with(query))
                 .map(|session| ResolvedSession {
@@ -258,28 +383,56 @@ pub fn resolve_session(
     }
 }
 
-pub fn show(session: &str, tail: Option<usize>) -> Result<Transcript> {
-    show_with_backends(&backend::backends(), session, tail.unwrap_or(100))
+/// Which session a command was asked for: one named by the caller, or the
+/// latest in a scope.
+#[derive(Clone, Debug)]
+pub enum Selection<'a> {
+    Id(&'a str),
+    Latest {
+        within: Where<'a>,
+        harness: Option<&'a str>,
+        exclude: &'a [String],
+    },
+}
+
+impl Selection<'_> {
+    fn resolve(&self, backends: &[Box<dyn Backend>]) -> Result<ResolvedSession> {
+        match self {
+            Self::Id(id) => Ok(resolve_session(backends, id)?),
+            Self::Latest {
+                within,
+                harness,
+                exclude,
+            } => {
+                let scope = within.resolve()?;
+                latest_with_backends(backends, *harness, scope.as_ref(), exclude)
+            }
+        }
+    }
+}
+
+pub fn show(selection: Selection, tail: Option<usize>) -> Result<Transcript> {
+    show_with_backends(&backend::backends(), selection, tail.unwrap_or(100))
 }
 
 pub fn show_with_backends(
     backends: &[Box<dyn Backend>],
-    session: &str,
+    selection: Selection,
     tail: usize,
 ) -> Result<Transcript> {
-    let resolved = resolve_session(backends, session)?;
+    let resolved = selection.resolve(backends)?;
     backends[resolved.backend_index].transcript(&resolved.session.id, tail)
 }
 
-pub fn export(session: &str, bundle: Option<&Path>) -> Result<bundle::Bundle> {
-    export_with_backends(&backend::backends(), session, bundle)
+pub fn export(selection: Selection, bundle: Option<&Path>) -> Result<bundle::Bundle> {
+    export_with_backends(&backend::backends(), selection, bundle)
 }
 
 pub fn export_with_backends(
     backends: &[Box<dyn Backend>],
-    session: &str,
+    selection: Selection,
     directory: Option<&Path>,
 ) -> Result<bundle::Bundle> {
-    let transcript = show_with_backends(backends, session, EXPORT_TAIL)?;
+    let transcript = show_with_backends(backends, selection, EXPORT_TAIL)?;
     bundle::export(&transcript, directory.unwrap_or_else(|| Path::new("/tmp")))
 }
