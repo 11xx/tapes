@@ -236,14 +236,16 @@ fn list_scoped(
 /// and takes the caller's word for what to skip, rather than inferring it from
 /// recency and silently discarding the crash it exists to recover.
 ///
-/// "Most recent" is judged over the newest [`LATEST_WINDOW`] candidates a
-/// store offers, ordered by file modification time, and settled among them by
-/// recorded activity. Ordering the whole store by recorded activity would mean
-/// parsing all of it, which the bounded-read invariant rules out — so a
-/// transcript whose file time was disturbed far out of line with its contents,
-/// by a restore or a copy, can sit outside the window and be missed. The
-/// window absorbs ordinary skew; nothing stateless absorbs an arbitrary
-/// amount, and `list` plus an explicit id remains exact.
+/// "Most recent" is judged over the newest [`LATEST_WINDOW`] candidates each
+/// store offers, and settled among them by recorded activity. What "newest"
+/// means before that is the store's own answer, not this one's: file
+/// modification time for the file-backed harnesses, and the API's ordering
+/// within a single page for opencode. Establishing it independently would mean
+/// reading every session, which the bounded-read invariant rules out — so a
+/// transcript whose file time was disturbed by a restore or a copy, or an
+/// opencode session sitting beyond the page the API returns, can fall outside
+/// the window. A listing reports the page bound through `scan_truncated`;
+/// `list` plus an explicit id remains exact.
 pub fn latest_with_backends(
     backends: &[Box<dyn Backend>],
     harness: Option<&str>,

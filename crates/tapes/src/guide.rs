@@ -25,11 +25,13 @@ START WITHOUT AN ID
   the directory's subtree when it is not in one. --project <path> asks about
   another project and --global drops the scope entirely.
 
-  "Most recent" is judged across the newest few sessions a store offers,
-  ordered by file time and settled by recorded activity. Ordering a whole
-  store by activity would mean parsing all of it, so a transcript whose file
-  time was disturbed by a restore or a copy can fall outside that window.
-  When it matters exactly, list and name the id.
+  "Most recent" is settled by recorded activity across the newest few sessions
+  each store offers — but which ones those are is the store's own answer: file
+  time for the file-backed harnesses, one page of the API for opencode.
+  Establishing it independently would mean reading every session, so a
+  transcript whose file time was disturbed by a restore, or an opencode
+  session past that page, can fall outside the window. When it matters
+  exactly, list and name the id.
 
   Asking from inside a live session usually returns that session — it is the
   newest one there. Nothing in a store distinguishes the session asking from
