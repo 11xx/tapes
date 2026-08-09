@@ -38,14 +38,12 @@ impl ClaudeBackend {
                     .map(str::to_owned)
             })
             .ok_or_else(|| anyhow!("{} has no session id", path.display()))?;
-        let directory = read
-            .values
-            .iter()
-            .find_map(|value| value["cwd"].as_str())
-            .map(PathBuf::from)
-            // A transcript past the bounded read keeps only its tail, which
-            // for a session that ended in tool output carries no `cwd`.
-            .or_else(|| head_directory(path, |value| value["cwd"].as_str()));
+        // The opening is read first, by the same rule a scoped listing's cheap
+        // probe uses, so the probe's answer and this one cannot disagree. It
+        // also covers a transcript past the bounded read whose remaining tail
+        // is all tool output and carries no `cwd`.
+        let directory = head_directory(path, claude_cwd)
+            .or_else(|| read.values.iter().find_map(claude_cwd).map(PathBuf::from));
         let title = read
             .values
             .iter()
@@ -106,7 +104,7 @@ impl Backend for ClaudeBackend {
         let mut listing = list_files(
             session_files(root),
             query,
-            |path| head_directory(path, |value| value["cwd"].as_str()),
+            |path| head_directory(path, claude_cwd),
             |path| self.parse(path).ok().map(|(session, _, _)| session),
         );
         listing
@@ -149,6 +147,11 @@ impl Backend for ClaudeBackend {
             .collect();
         Ok(transcript(session, turns, tail, &read, notes))
     }
+}
+
+/// Claude repeats the working directory on every message line.
+fn claude_cwd(value: &Value) -> Option<&str> {
+    value["cwd"].as_str()
 }
 
 /// Claude names each project directory after the working directory it

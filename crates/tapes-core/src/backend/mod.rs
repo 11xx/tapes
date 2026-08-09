@@ -179,8 +179,10 @@ pub(crate) fn head_directory(
 /// scope accepts, until the limit is filled or the ceiling is reached.
 ///
 /// `probe` answers "which directory was this recorded in" cheaply, and is only
-/// called when a scope needs the answer. It is strictly an optimization: a
-/// candidate it cannot place is parsed and judged on the directory the full
+/// called when a scope needs the answer. It must answer with the same rule
+/// `parse` uses, so that a candidate it places outside the scope is one the
+/// full read would place there too — otherwise skipping would lose sessions.
+/// A candidate it cannot place at all is parsed and judged on what the full
 /// read reports, so a probe that misses costs time and never a session.
 pub(crate) fn list_files(
     files: Vec<PathBuf>,

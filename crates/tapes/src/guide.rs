@@ -25,6 +25,12 @@ START WITHOUT AN ID
   the directory's subtree when it is not in one. --project <path> asks about
   another project and --global drops the scope entirely.
 
+  "Most recent" is judged across the newest few sessions a store offers,
+  ordered by file time and settled by recorded activity. Ordering a whole
+  store by activity would mean parsing all of it, so a transcript whose file
+  time was disturbed by a restore or a copy can fall outside that window.
+  When it matters exactly, list and name the id.
+
   Asking from inside a live session usually returns that session — it is the
   newest one there. Nothing in a store distinguishes the session asking from
   the session that just died, so pass --exclude <id> for any session you

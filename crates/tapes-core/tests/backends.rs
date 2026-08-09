@@ -312,6 +312,64 @@ fn a_scoped_listing_finds_the_project_past_the_limit() {
     fs::remove_dir_all(root).unwrap();
 }
 
+/// The probe decides whether a candidate is skipped without parsing it, so a
+/// disagreement between the probe's rule and the parse's rule is a lost
+/// session rather than a slow one. Codex is where the two could diverge: past
+/// the bounded read the tail carries only `turn_context`, whose `cwd` a
+/// resumed session can have moved away from the `session_meta` the probe sees.
+#[test]
+fn the_probe_and_the_parse_place_a_session_in_the_same_directory() {
+    let opening = std::env::temp_dir().join("tapes-scoped-opening");
+    let later = std::env::temp_dir().join("tapes-scoped-later");
+    fs::create_dir_all(&opening).unwrap();
+    fs::create_dir_all(&later).unwrap();
+    let root = std::env::temp_dir().join("tapes-store-moved");
+    let _ = fs::remove_dir_all(&root);
+    let day = root.join("2026/08/09");
+    fs::create_dir_all(&day).unwrap();
+
+    let id = "00000000-0000-0000-0000-0000000000aa";
+    let mut file = BufWriter::new(
+        File::create(day.join(format!("rollout-2026-08-09T00-00-00-{id}.jsonl"))).unwrap(),
+    );
+    writeln!(
+        file,
+        r#"{{"timestamp":"2026-08-09T00:00:00Z","type":"session_meta","payload":{{"id":"{id}","cwd":"{}"}}}}"#,
+        opening.display()
+    )
+    .unwrap();
+    let filler = "y".repeat(4096);
+    for index in 0..1200 {
+        writeln!(
+            file,
+            r#"{{"timestamp":"2026-08-09T00:00:01Z","type":"turn_context","payload":{{"cwd":"{}","model":"m-{index}"}}}}"#,
+            later.display()
+        )
+        .unwrap();
+        writeln!(
+            file,
+            r#"{{"timestamp":"2026-08-09T00:00:01Z","type":"response_item","payload":{{"type":"message","role":"user","content":[{{"type":"input_text","text":"{filler}"}}]}}}}"#
+        )
+        .unwrap();
+    }
+    drop(file);
+
+    let backend = CodexBackend::new(&root);
+    let parsed = backend.transcript(id, 1).unwrap().session.directory;
+    let backends: Vec<Box<dyn Backend>> = vec![Box::new(CodexBackend::new(&root))];
+    let scope = Scope::at(parsed.as_deref().expect("a directory was parsed")).unwrap();
+    let result = list_with_backends(&backends, None, Some(&scope), 10).unwrap();
+    assert_eq!(
+        result.sessions.len(),
+        1,
+        "a scoped listing lost the session the parse places in that scope"
+    );
+
+    fs::remove_dir_all(root).unwrap();
+    fs::remove_dir_all(opening).unwrap();
+    fs::remove_dir_all(later).unwrap();
+}
+
 /// The cheap directory probe reads a fixed window of a file's opening. A
 /// session whose first line is larger than that window is not placed by the
 /// probe, and must still be placed by the full read — a probe that could hide

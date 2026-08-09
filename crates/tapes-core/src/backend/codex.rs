@@ -40,20 +40,27 @@ impl CodexBackend {
                     .map(str::to_owned)
             })
             .ok_or_else(|| anyhow!("{} has no session id", path.display()))?;
-        let directory = metadata
-            .and_then(|value| value["cwd"].as_str())
+        // The file's opening is consulted first, and by the same rule the
+        // scoped listing's cheap probe uses. Reading it here rather than only
+        // as a fallback is what makes the probe's answer and this one the
+        // same answer: a session the probe places outside a scope is one this
+        // parse would place there too, so skipping it can never lose it. On a
+        // transcript within the read window the opening is `session_meta`,
+        // which is what the tail lookup would have found anyway.
+        let directory = head_directory(path, codex_cwd)
+            .or_else(|| {
+                metadata
+                    .and_then(|value| value["cwd"].as_str())
+                    .map(PathBuf::from)
+            })
             .or_else(|| {
                 read.values
                     .iter()
                     .rev()
                     .find(|value| value["type"] == "turn_context")
                     .and_then(|value| value["payload"]["cwd"].as_str())
-            })
-            .map(PathBuf::from)
-            // Past the bounded read the `session_meta` header is outside the
-            // window, and a session with no later `turn_context` in it has no
-            // other record of where it ran.
-            .or_else(|| head_directory(path, codex_cwd));
+                    .map(PathBuf::from)
+            });
         let model = read
             .values
             .iter()

@@ -235,6 +235,15 @@ fn list_scoped(
 /// identical and differ only in who invoked. So the tool reports the latest
 /// and takes the caller's word for what to skip, rather than inferring it from
 /// recency and silently discarding the crash it exists to recover.
+///
+/// "Most recent" is judged over the newest [`LATEST_WINDOW`] candidates a
+/// store offers, ordered by file modification time, and settled among them by
+/// recorded activity. Ordering the whole store by recorded activity would mean
+/// parsing all of it, which the bounded-read invariant rules out — so a
+/// transcript whose file time was disturbed far out of line with its contents,
+/// by a restore or a copy, can sit outside the window and be missed. The
+/// window absorbs ordinary skew; nothing stateless absorbs an arbitrary
+/// amount, and `list` plus an explicit id remains exact.
 pub fn latest_with_backends(
     backends: &[Box<dyn Backend>],
     harness: Option<&str>,

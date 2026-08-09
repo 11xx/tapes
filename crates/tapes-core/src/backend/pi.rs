@@ -55,14 +55,15 @@ impl PiBackend {
                     .map(str::to_owned)
             })
             .ok_or_else(|| anyhow!("{} has no session id", path.display()))?;
-        let directory = header
-            .and_then(|value| value["cwd"].as_str())
-            .map(PathBuf::from)
-            // pi writes the working directory once, in the header line. Past
-            // the bounded read that line is outside the window and nothing
-            // later repeats it, so the session would otherwise normalize with
-            // no directory at all.
-            .or_else(|| head_directory(path, pi_cwd));
+        // pi writes the working directory once, in the header line, so past
+        // the bounded read nothing repeats it and the session would otherwise
+        // normalize with no directory at all. Reading the opening first also
+        // makes this the same answer a scoped listing's cheap probe gives.
+        let directory = head_directory(path, pi_cwd).or_else(|| {
+            header
+                .and_then(|value| value["cwd"].as_str())
+                .map(PathBuf::from)
+        });
         let variant = active.iter().rev().find_map(|value| {
             (value["type"] == "thinking_level_change")
                 .then(|| value["thinkingLevel"].as_str())
