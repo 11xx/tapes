@@ -1,11 +1,12 @@
 mod guide;
+mod liveness;
 
 use std::path::PathBuf;
 
 use anyhow::Result;
 use clap::{Args, Parser, Subcommand};
 use tapes_core::bundle::Bundle;
-use tapes_core::model::{Role, Session, Transcript};
+use tapes_core::model::{LiveState, Role, Session, Transcript};
 use tapes_core::{Selection, Where};
 
 #[derive(Parser)]
@@ -100,7 +101,8 @@ impl SelectionArgs {
 
 #[derive(Subcommand)]
 enum Command {
-    /// List available sessions.
+    /// List available sessions. When harness-status is reachable, matching
+    /// sessions are marked with their present-tense working or idle state.
     List {
         /// Restrict results to one harness.
         #[arg(long)]
@@ -111,18 +113,21 @@ enum Command {
         /// The scope applies first, so a bound never hides a match.
         #[arg(long)]
         limit: Option<usize>,
-        /// Render results as JSON.
+        /// Render results as JSON. Matching sessions may include an optional
+        /// `live` field supplied by harness-status.
         #[arg(long)]
         json: bool,
     },
-    /// Show one session.
+    /// Show one session. The human header marks a matching live session when
+    /// harness-status is reachable.
     Show {
         #[command(flatten)]
         selection: SelectionArgs,
         /// Show only the final number of messages.
         #[arg(long)]
         tail: Option<usize>,
-        /// Render the session as JSON.
+        /// Render the session as JSON. The session may include an optional
+        /// `live` field supplied by harness-status.
         #[arg(long)]
         json: bool,
     },
@@ -153,7 +158,8 @@ fn dispatch(cli: Cli) -> Result<()> {
             limit,
             json,
         } => {
-            let result = tapes_core::list(harness.as_deref(), scope.within(), limit)?;
+            let mut result = tapes_core::list(harness.as_deref(), scope.within(), limit)?;
+            liveness::annotate(&mut result.sessions);
             if json {
                 println!("{}", serde_json::to_string(&result)?);
             } else {
@@ -166,7 +172,8 @@ fn dispatch(cli: Cli) -> Result<()> {
             tail,
             json,
         } => {
-            let transcript = tapes_core::show(selection.selection(), tail)?;
+            let mut transcript = tapes_core::show(selection.selection(), tail)?;
+            liveness::annotate(std::slice::from_mut(&mut transcript.session));
             if json {
                 println!("{}", serde_json::to_string(&transcript)?);
             } else {
@@ -193,9 +200,10 @@ fn print_session_list(sessions: &[Session]) {
                 |variant| format!("{} ({variant})", model.id),
             )
         });
+        let id = format!("{}{}", session.id, live_marker(session));
         println!(
             "{}\t{}\t{}\t{}\t{}\t{}",
-            session.id,
+            id,
             session.harness,
             model,
             session.title.as_deref().unwrap_or_default(),
@@ -251,6 +259,14 @@ fn print_transcript(transcript: &Transcript) {
 /// is one would be read as the whole session.
 fn render_transcript(transcript: &Transcript) -> String {
     let mut out = String::new();
+    if transcript.session.live.is_some() {
+        out.push_str(&format!(
+            "# {} {}{}\n",
+            transcript.session.harness,
+            transcript.session.id,
+            live_marker(&transcript.session)
+        ));
+    }
     for turn in &transcript.turns {
         let role = match turn.role {
             Role::User => "user",
@@ -271,6 +287,14 @@ fn render_transcript(transcript: &Transcript) -> String {
         out.push_str(&format!("Note: {note}\n"));
     }
     out
+}
+
+fn live_marker(session: &Session) -> String {
+    match session.live {
+        Some(LiveState::Working) => " [working]".to_owned(),
+        Some(LiveState::Idle) => " [idle]".to_owned(),
+        None => String::new(),
+    }
 }
 
 fn reset_sigpipe() {
@@ -302,6 +326,7 @@ mod tests {
                 directory: None,
                 started_at: Utc::now(),
                 last_activity_at: Utc::now(),
+                live: None,
                 cost: None,
                 tokens: None,
             },
@@ -324,5 +349,6 @@ mod tests {
         let whole = render_transcript(&transcript(false));
         assert!(!whole.contains("Truncated"), "{whole}");
         assert!(whole.contains("Skipped 1 unparseable line."));
+        assert!(whole.starts_with("[user]"), "{whole}");
     }
 }

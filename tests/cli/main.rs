@@ -1,7 +1,74 @@
+use std::fs;
+use std::os::unix::fs::PermissionsExt;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+
+use serde_json::Value;
+
+const CODEX_SESSION_ONE: &str = include_str!(
+    "../fixtures/codex/rollout-2026-01-01T10-00-00-00000000-0000-0000-0000-000000000001.jsonl"
+);
+const CODEX_SESSION_TWO: &str = include_str!(
+    "../fixtures/codex/rollout-2026-01-01T11-00-00-10000000-0000-0000-0000-000000000002.jsonl"
+);
 
 fn tapes() -> Command {
     Command::new(env!("CARGO_BIN_EXE_tapes"))
+}
+
+fn fixture_store(name: &str) -> (PathBuf, PathBuf) {
+    let root = std::env::temp_dir().join(format!("tapes-cli-live-{name}-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&root);
+    let sessions = root.join("sessions/2026/01/01");
+    fs::create_dir_all(&sessions).unwrap();
+    fs::write(
+        sessions.join("rollout-2026-01-01T10-00-00-00000000-0000-0000-0000-000000000001.jsonl"),
+        CODEX_SESSION_ONE,
+    )
+    .unwrap();
+    fs::write(
+        sessions.join("rollout-2026-01-01T11-00-00-10000000-0000-0000-0000-000000000002.jsonl"),
+        CODEX_SESSION_TWO,
+    )
+    .unwrap();
+    (root.clone(), root.join("home"))
+}
+
+fn fake_status(root: &Path, body: &str, exit: i32) -> (PathBuf, PathBuf) {
+    let bin = root.join("bin");
+    let snapshot = root.join("snapshot.json");
+    let calls = root.join("calls");
+    fs::create_dir_all(&bin).unwrap();
+    fs::write(&snapshot, body).unwrap();
+    let program = bin.join("harness-status");
+    fs::write(
+        &program,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' call >> '{}'\ncat '{}'\nexit {}\n",
+            calls.display(),
+            snapshot.display(),
+            exit
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&program, fs::Permissions::from_mode(0o700)).unwrap();
+    (bin, calls)
+}
+
+fn with_fixture_env(command: &mut Command, codex_home: &Path, home: &Path, bin: &Path) {
+    command
+        .env("CODEX_HOME", codex_home)
+        .env("HOME", home)
+        .env("PATH", format!("{}:/usr/bin:/bin", bin.display()));
+}
+
+fn session<'a>(value: &'a Value, id: &str) -> &'a Value {
+    value["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|session| session["id"] == id)
+        .unwrap()
 }
 
 /// Bare `tapes` is a guide request, not a usage error; every mistyped
@@ -75,6 +142,130 @@ fn list_without_stores_is_empty_and_successful() {
     assert!(String::from_utf8_lossy(&output.stdout)
         .contains("Unavailable: claude, codex, opencode, pi"));
     assert!(output.stderr.is_empty());
+}
+
+#[test]
+fn list_joins_one_bounded_status_snapshot_and_maps_states() {
+    let (codex_home, home) = fixture_store("list");
+    let snapshot = r#"{"threads":[
+      {"id":"00000000-0000-0000-0000-000000000001","harness":"codex","state":"working"},
+      {"id":"10000000-0000-0000-0000-000000000002","harness":"codex","state":"attention"}
+    ]}"#;
+    let (bin, calls) = fake_status(&codex_home, snapshot, 0);
+    let mut command = tapes();
+    command.args(["list", "--global", "--json"]);
+    with_fixture_env(&mut command, &codex_home, &home, &bin);
+    let output = command.output().unwrap();
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        session(&value, "00000000-0000-0000-0000-000000000001")["live"],
+        "working"
+    );
+    assert_eq!(
+        session(&value, "10000000-0000-0000-0000-000000000002")["live"],
+        "idle"
+    );
+    assert_eq!(fs::read_to_string(calls).unwrap().lines().count(), 1);
+    let _ = fs::remove_dir_all(codex_home);
+}
+
+#[test]
+fn show_human_header_marks_matching_live_state() {
+    let (codex_home, home) = fixture_store("show");
+    let snapshot = r#"{"threads":[{"id":"00000000-0000-0000-0000-000000000001","harness":"codex","state":"working"}]}"#;
+    let (bin, calls) = fake_status(&codex_home, snapshot, 0);
+    let mut command = tapes();
+    command.args([
+        "show",
+        "00000000-0000-0000-0000-000000000001",
+        "--tail",
+        "1",
+    ]);
+    with_fixture_env(&mut command, &codex_home, &home, &bin);
+    let output = command.output().unwrap();
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(text.starts_with("# codex 00000000-0000-0000-0000-000000000001 [working]\n"));
+    assert_eq!(fs::read_to_string(calls).unwrap().lines().count(), 1);
+    let _ = fs::remove_dir_all(codex_home);
+}
+
+#[test]
+fn show_json_carries_matching_live_state() {
+    let (codex_home, home) = fixture_store("show-json");
+    let snapshot = r#"{"threads":[{"id":"10000000-0000-0000-0000-000000000002","harness":"codex","state":"idle"}]}"#;
+    let (bin, calls) = fake_status(&codex_home, snapshot, 0);
+    let mut command = tapes();
+    command.args([
+        "show",
+        "10000000-0000-0000-0000-000000000002",
+        "--tail",
+        "1",
+        "--json",
+    ]);
+    with_fixture_env(&mut command, &codex_home, &home, &bin);
+    let output = command.output().unwrap();
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["session"]["live"], "idle");
+    assert_eq!(fs::read_to_string(calls).unwrap().lines().count(), 1);
+    let _ = fs::remove_dir_all(codex_home);
+}
+
+#[test]
+fn unusable_status_is_optional_and_export_omits_volatile_state() {
+    let (codex_home, home) = fixture_store("optional");
+    let (bin, calls) = fake_status(&codex_home, "{not-json", 17);
+    let mut list_command = tapes();
+    list_command.args(["list", "--global", "--json"]);
+    with_fixture_env(&mut list_command, &codex_home, &home, &bin);
+    let list_output = list_command.output().unwrap();
+
+    assert!(list_output.status.success());
+    let value: Value = serde_json::from_slice(&list_output.stdout).unwrap();
+    assert!(session(&value, "00000000-0000-0000-0000-000000000001")["live"].is_null());
+    assert_eq!(fs::read_to_string(&calls).unwrap().lines().count(), 1);
+
+    let bundle = codex_home.join("bundle");
+    let mut export_command = tapes();
+    export_command
+        .args(["export", "00000000-0000-0000-0000-000000000001", "--bundle"])
+        .arg(&bundle);
+    with_fixture_env(&mut export_command, &codex_home, &home, &bin);
+    let export_output = export_command.output().unwrap();
+    assert!(
+        export_output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&export_output.stderr)
+    );
+    assert_eq!(fs::read_to_string(&calls).unwrap().lines().count(), 1);
+    let json_path = fs::read_dir(&bundle)
+        .unwrap()
+        .flatten()
+        .map(|entry| entry.path())
+        .find(|path| {
+            path.extension()
+                .is_some_and(|extension| extension == "json")
+        })
+        .unwrap();
+    assert!(!fs::read_to_string(json_path).unwrap().contains("\"live\""));
+    let _ = fs::remove_dir_all(codex_home);
 }
 
 #[test]

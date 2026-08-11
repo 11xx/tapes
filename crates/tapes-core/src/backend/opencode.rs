@@ -187,6 +187,7 @@ fn parse_session(value: &Value) -> Result<Session> {
         directory: value["location"]["directory"].as_str().map(PathBuf::from),
         started_at,
         last_activity_at,
+        live: None,
         cost: value["cost"].as_f64().map(|usd| Cost { usd }),
         tokens,
     })
