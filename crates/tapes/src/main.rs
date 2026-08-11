@@ -101,8 +101,10 @@ impl SelectionArgs {
 
 #[derive(Subcommand)]
 enum Command {
-    /// List available sessions. When harness-status is reachable, matching
-    /// sessions are marked with their present-tense working or idle state.
+    /// List available sessions. Human output keeps the exact session id in
+    /// the ID column and puts any present-tense state in a separate LIVE
+    /// column. If harness-status is unavailable, malformed, oversized, or
+    /// slower than its 250 ms deadline, LIVE is blank.
     List {
         /// Restrict results to one harness.
         #[arg(long)]
@@ -192,7 +194,7 @@ fn print_session_list(sessions: &[Session]) {
     if sessions.is_empty() {
         return;
     }
-    println!("ID\tHARNESS\tMODEL\tTITLE\tDIRECTORY\tLAST ACTIVITY");
+    println!("ID\tLIVE\tHARNESS\tMODEL\tTITLE\tDIRECTORY\tLAST ACTIVITY");
     for session in sessions {
         let model = session.model.as_ref().map_or_else(String::new, |model| {
             model.variant.as_ref().map_or_else(
@@ -200,10 +202,10 @@ fn print_session_list(sessions: &[Session]) {
                 |variant| format!("{} ({variant})", model.id),
             )
         });
-        let id = format!("{}{}", session.id, live_marker(session));
         println!(
-            "{}\t{}\t{}\t{}\t{}\t{}",
-            id,
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}",
+            session.id,
+            live_label(session),
             session.harness,
             model,
             human_title(session),
@@ -213,6 +215,14 @@ fn print_session_list(sessions: &[Session]) {
                 .map_or_else(String::new, |path| path.display().to_string()),
             human_timestamp(session.last_activity_at)
         );
+    }
+}
+
+fn live_label(session: &Session) -> &'static str {
+    match session.live {
+        Some(LiveState::Working) => "working",
+        Some(LiveState::Idle) => "idle",
+        None => "",
     }
 }
 

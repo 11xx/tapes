@@ -61,8 +61,10 @@ OpenCode row keeps both title fields absent in list, show, and export metadata.
 JSON output is a `tapes-list/1` object containing `sessions`, `unavailable`,
 `scanned`, and `scan_truncated`. When the optional `harness-status` command
 supplies a usable snapshot, matching sessions also carry `live: "working"` or
-`live: "idle"`; an unavailable authority leaves the field out. Human output
-marks those sessions with the same state.
+`live: "idle"`; an unavailable, malformed, oversized, or slow authority leaves
+the field out. Unknown states are ignored per thread so recognized entries
+remain usable. Human list output keeps the exact session id in its first
+column and uses a separate `LIVE` column for that state.
 
 `show` accepts a full session ID or an unambiguous prefix. It searches every
 available backend, rejects ambiguous prefixes with the matching candidates,

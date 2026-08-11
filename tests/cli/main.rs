@@ -2,6 +2,7 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
@@ -48,6 +49,23 @@ fn fake_status(root: &Path, body: &str, exit: i32) -> (PathBuf, PathBuf) {
             calls.display(),
             snapshot.display(),
             exit
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&program, fs::Permissions::from_mode(0o700)).unwrap();
+    (bin, calls)
+}
+
+fn fake_stalled_status(root: &Path) -> (PathBuf, PathBuf) {
+    let bin = root.join("bin");
+    let calls = root.join("calls");
+    fs::create_dir_all(&bin).unwrap();
+    let program = bin.join("harness-status");
+    fs::write(
+        &program,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' call >> '{}'\nsleep 5 &\nexit 0\n",
+            calls.display()
         ),
     )
     .unwrap();
@@ -191,6 +209,99 @@ fn list_joins_one_bounded_status_snapshot_and_maps_states() {
         session(&value, "10000000-0000-0000-0000-000000000002")["live"],
         "idle"
     );
+    assert_eq!(fs::read_to_string(calls).unwrap().lines().count(), 1);
+    let _ = fs::remove_dir_all(codex_home);
+}
+
+#[test]
+fn human_list_keeps_id_column_exact() {
+    let (codex_home, home) = fixture_store("human-list");
+    let snapshot = r#"{"threads":[
+      {"id":"00000000-0000-0000-0000-000000000001","harness":"codex","state":"working"},
+      {"id":"10000000-0000-0000-0000-000000000002","harness":"codex","state":"idle"}
+    ]}"#;
+    let (bin, _) = fake_status(&codex_home, snapshot, 0);
+    let mut command = tapes();
+    command.args(["list", "--global"]);
+    with_fixture_env(&mut command, &codex_home, &home, &bin);
+    let output = command.output().unwrap();
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let text = String::from_utf8_lossy(&output.stdout);
+    let mut rows = text.lines().filter_map(|line| {
+        let fields: Vec<_> = line.split('\t').collect();
+        (fields.len() == 7).then_some(fields)
+    });
+    assert_eq!(
+        text.lines().next(),
+        Some("ID\tLIVE\tHARNESS\tMODEL\tTITLE\tDIRECTORY\tLAST ACTIVITY")
+    );
+    let first = rows
+        .by_ref()
+        .find(|row| row[0] != "ID")
+        .expect("first session row");
+    let second = rows.find(|row| row[0] != "ID").expect("second session row");
+    assert!(rows.next().is_none(), "unexpected extra tabular row");
+    assert_eq!(first[0], "10000000-0000-0000-0000-000000000002");
+    assert_eq!(first[1], "idle");
+    assert_eq!(second[0], "00000000-0000-0000-0000-000000000001");
+    assert_eq!(second[1], "working");
+    let _ = fs::remove_dir_all(codex_home);
+}
+
+#[test]
+fn liveness_tolerates_unknown_states() {
+    let (codex_home, home) = fixture_store("unknown-state");
+    let snapshot = r#"{"threads":[
+      {"id":"00000000-0000-0000-0000-000000000001","harness":"codex","state":"working"},
+      {"id":"10000000-0000-0000-0000-000000000002","harness":"codex","state":"waiting-for-future"}
+    ]}"#;
+    let (bin, _) = fake_status(&codex_home, snapshot, 0);
+    let mut command = tapes();
+    command.args(["list", "--global", "--json"]);
+    with_fixture_env(&mut command, &codex_home, &home, &bin);
+    let output = command.output().unwrap();
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        session(&value, "00000000-0000-0000-0000-000000000001")["live"],
+        "working"
+    );
+    assert!(session(&value, "10000000-0000-0000-0000-000000000002")["live"].is_null());
+    let _ = fs::remove_dir_all(codex_home);
+}
+
+#[test]
+fn liveness_times_out_stalled_authority() {
+    let (codex_home, home) = fixture_store("timeout");
+    let (bin, calls) = fake_stalled_status(&codex_home);
+    let mut command = tapes();
+    command.args(["list", "--global", "--json"]);
+    with_fixture_env(&mut command, &codex_home, &home, &bin);
+    let started = Instant::now();
+    let output = command.output().unwrap();
+    let elapsed = started.elapsed();
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        elapsed < Duration::from_millis(1500),
+        "stalled authority took {elapsed:?}"
+    );
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(session(&value, "00000000-0000-0000-0000-000000000001")["live"].is_null());
     assert_eq!(fs::read_to_string(calls).unwrap().lines().count(), 1);
     let _ = fs::remove_dir_all(codex_home);
 }

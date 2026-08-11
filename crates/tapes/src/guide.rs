@@ -65,10 +65,13 @@ FIND IT
   A session recorded in a directory that no longer exists cannot be placed in
   any project, so a scoped search will not find it. Its id still resolves.
 
-  When the optional harness-status command answers, list marks matching
-  sessions as [working] or [idle], and the JSON form carries the same `live`
-  field. A missing, failed, or malformed status snapshot leaves that field
-  out and does not change retrieval. show applies the same join to its header.
+  When the optional harness-status command answers, list puts matching
+  sessions' working or idle state in its separate LIVE column, and the JSON
+  form carries the same `live` field. A missing, failed, malformed, oversized,
+  or status snapshot slower than 250 ms leaves that field out and does not
+  change retrieval.
+  An unrecognized state for one thread is ignored while recognized states for
+  other threads remain usable. show applies the same join to its header.
 
 PROBE BEFORE EXPORTING
   tapes show <id> --tail 40      A window, costing no bundle.

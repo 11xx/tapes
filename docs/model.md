@@ -15,9 +15,12 @@ session and is omitted from listings.
 `LiveState` is either `working` or `idle`. It is an optional present-tense
 annotation joined by session id from the `harness-status` command; recording
 backends leave it absent. The authority's `working` state maps to `working`,
-while `completed`, `idle`, and `attention` map to `idle`. If the authority is
-unavailable or its snapshot is unusable, live state remains absent. The field
-is added to `list` and `show` output only and is not written to export bundles.
+while `completed`, `idle`, and `attention` map to `idle`. Unknown states are
+ignored per thread so known entries remain usable. If the authority is
+unavailable, malformed, oversized, or slower than its 250 ms wall-clock
+deadline, live state remains absent. The field is added to `list` and `show`
+output only and is not written to export bundles. Human list output places it
+in a separate `LIVE` column after the exact `ID` column.
 
 `title` is the harness-recorded value and remains absent when the harness did
 not provide one. `derived_title` is a bounded hint made from the first
