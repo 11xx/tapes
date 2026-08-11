@@ -144,21 +144,9 @@ fn session<'a>(value: &'a Value, id: &str) -> &'a Value {
 
 fn titleless_opencode_program(root: &Path) -> PathBuf {
     let program = root.join("opencode2");
-    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/opencode");
-    let list = fixtures.join("list-no-title.json");
-    let messages = fixtures.join("messages-no-title.json");
-    let session = fixtures.join("session-no-title.json");
-    std::fs::write(
-        &program,
-        format!(
-            "#!/bin/sh\ncase \"$4\" in\n  /api/session\\?*) exec /bin/cat '{}';;\n  /api/session/*/message) exec /bin/cat '{}';;\n  /api/session/*) exec /bin/cat '{}';;\nesac\nexit 1\n",
-            list.display(),
-            messages.display(),
-            session.display()
-        ),
-    )
-    .unwrap();
-    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let fixture =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/opencode/opencode2");
+    std::os::unix::fs::symlink(fixture, &program).unwrap();
     program
 }
 
