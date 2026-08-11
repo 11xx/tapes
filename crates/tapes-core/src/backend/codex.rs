@@ -73,24 +73,28 @@ impl CodexBackend {
                     variant: payload["effort"].as_str().map(str::to_owned),
                 })
             });
-        let turns = read.values.iter().flat_map(parse_turns).collect();
+        let turns = read.values.iter().flat_map(parse_turns).collect::<Vec<_>>();
 
-        Ok((
-            Session {
-                id,
-                harness: "codex".into(),
-                model,
-                title: None,
-                directory,
-                started_at,
-                last_activity_at,
-                live: None,
-                cost: None,
-                tokens: None,
-            },
-            turns,
-            read,
-        ))
+        let session = Session {
+            id,
+            harness: "codex".into(),
+            model,
+            title: None,
+            derived_title: None,
+            directory,
+            started_at,
+            last_activity_at,
+            live: None,
+            cost: None,
+            tokens: None,
+        };
+        let session = if read.truncated {
+            session
+        } else {
+            session.with_derived_title(&turns)
+        };
+
+        Ok((session, turns, read))
     }
 }
 

@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use anyhow::Result;
 use clap::{Args, Parser, Subcommand};
 use tapes_core::bundle::Bundle;
-use tapes_core::model::{LiveState, Role, Session, Transcript};
+use tapes_core::model::{human_timestamp, human_title, LiveState, Role, Session, Transcript};
 use tapes_core::{Selection, Where};
 
 #[derive(Parser)]
@@ -206,12 +206,12 @@ fn print_session_list(sessions: &[Session]) {
             id,
             session.harness,
             model,
-            session.title.as_deref().unwrap_or_default(),
+            human_title(session),
             session
                 .directory
                 .as_deref()
                 .map_or_else(String::new, |path| path.display().to_string()),
-            session.last_activity_at.to_rfc3339()
+            human_timestamp(session.last_activity_at)
         );
     }
 }
@@ -275,7 +275,11 @@ fn render_transcript(transcript: &Transcript) -> String {
             Role::Reasoning => "reasoning",
         };
         if let Some(ts) = turn.ts {
-            out.push_str(&format!("[{role} {}]\n{}\n", ts.to_rfc3339(), turn.text));
+            out.push_str(&format!(
+                "[{role} {}]\n{}\n",
+                human_timestamp(ts),
+                turn.text
+            ));
         } else {
             out.push_str(&format!("[{role}]\n{}\n", turn.text));
         }
@@ -323,6 +327,7 @@ mod tests {
                 harness: "claude".to_owned(),
                 model: None,
                 title: None,
+                derived_title: None,
                 directory: None,
                 started_at: Utc::now(),
                 last_activity_at: Utc::now(),

@@ -181,6 +181,7 @@ fn parse_session(value: &Value) -> Result<Session> {
         harness: "opencode".into(),
         model,
         title: value["title"].as_str().map(str::to_owned),
+        derived_title: None,
         directory: value["location"]["directory"].as_str().map(PathBuf::from),
         started_at,
         last_activity_at,
@@ -199,17 +200,20 @@ fn parse_transcript(session: Session, response: &Value, tail: usize) -> Result<T
         .rev()
         .flat_map(parse_message)
         .collect::<Vec<_>>();
+    let page_truncated = response["cursor"]["next"].as_str().is_some();
     let tail_truncated = turns.len() > tail;
     if tail_truncated {
         turns.drain(..turns.len() - tail);
     }
-    let page_truncated = response["cursor"]["next"].as_str().is_some();
     let notes = page_truncated
         .then(|| "Older OpenCode messages are outside the API page.".to_owned())
         .into_iter()
         .collect();
 
     Ok(Transcript {
+        // The session endpoint is the normalized source of metadata. Message
+        // reads stay a transcript operation and do not invent a title that a
+        // title-less API listing could not provide without extra per-row work.
         session,
         turns,
         truncated: page_truncated || tail_truncated,

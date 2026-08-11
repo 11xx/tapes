@@ -49,6 +49,13 @@ FIND IT
   empty scoped list means the search found nothing — unless it says it stopped
   early, which is a different fact and is reported when it happens.
 
+  File-backed harnesses may show a bounded first-meaningful-user-turn hint
+  prefixed with ~ when a harness recorded no title. JSON keeps that hint as
+  derived_title and leaves the recorded title absent. OpenCode's API-backed
+  listing does not fetch messages to invent titles, so title-less OpenCode
+  metadata stays absent in list, show, and export. Human timestamps use whole
+  RFC 3339 seconds with Z; JSON keeps recorded precision.
+
   A session is named by its full id or an unambiguous prefix; an ambiguous
   prefix lists its candidates and fails rather than guessing. A harness whose
   binary or store is absent reports itself unavailable and never fails a

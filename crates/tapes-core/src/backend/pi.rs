@@ -79,25 +79,31 @@ impl PiBackend {
                     variant: variant.map(str::to_owned),
                 })
         });
-        let turns = active.iter().flat_map(|value| parse_turns(value)).collect();
+        let turns = active
+            .iter()
+            .flat_map(|value| parse_turns(value))
+            .collect::<Vec<_>>();
 
-        Ok((
-            Session {
-                id,
-                harness: "pi".into(),
-                model,
-                title: None,
-                directory,
-                started_at,
-                last_activity_at,
-                live: None,
-                cost: None,
-                tokens: None,
-            },
-            turns,
-            read,
-            abandoned,
-        ))
+        let session = Session {
+            id,
+            harness: "pi".into(),
+            model,
+            title: None,
+            derived_title: None,
+            directory,
+            started_at,
+            last_activity_at,
+            live: None,
+            cost: None,
+            tokens: None,
+        };
+        let session = if read.truncated {
+            session
+        } else {
+            session.with_derived_title(&turns)
+        };
+
+        Ok((session, turns, read, abandoned))
     }
 }
 

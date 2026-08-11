@@ -8,7 +8,7 @@ use chrono::Utc;
 use serde::Serialize;
 use serde_json::Value;
 
-use crate::model::{Role, Session, Transcript, SESSION_SCHEMA};
+use crate::model::{human_timestamp, human_title, Role, Session, Transcript, SESSION_SCHEMA};
 
 /// One exported file: where it landed and how big it is.
 pub struct BundleFile {
@@ -160,7 +160,8 @@ fn write_header(out: &mut String, transcript: &Transcript, kind: &str) {
     let session = &transcript.session;
     let _ = writeln!(out, "# {} {} ({kind})", session.harness, session.id);
     let _ = writeln!(out);
-    if let Some(title) = &session.title {
+    let title = human_title(session);
+    if !title.is_empty() {
         let _ = writeln!(out, "- title: {title}");
     }
     if let Some(model) = &session.model {
@@ -179,7 +180,7 @@ fn write_header(out: &mut String, transcript: &Transcript, kind: &str) {
     let _ = writeln!(
         out,
         "- last activity: {}",
-        session.last_activity_at.to_rfc3339()
+        human_timestamp(session.last_activity_at)
     );
     if transcript.truncated {
         let _ = writeln!(out, "- truncated: this is a window, not the whole session");
@@ -193,7 +194,7 @@ fn write_header(out: &mut String, transcript: &Transcript, kind: &str) {
 fn write_turn_heading(out: &mut String, speaker: &str, ts: Option<chrono::DateTime<Utc>>) {
     match ts {
         Some(ts) => {
-            let _ = writeln!(out, "## {speaker} — {}", ts.to_rfc3339());
+            let _ = writeln!(out, "## {speaker} — {}", human_timestamp(ts));
         }
         None => {
             let _ = writeln!(out, "## {speaker}");
@@ -265,6 +266,7 @@ mod tests {
                     variant: Some("max".into()),
                 }),
                 title: Some("A rescue".into()),
+                derived_title: None,
                 directory: None,
                 started_at: ts,
                 last_activity_at: ts,
@@ -381,6 +383,33 @@ mod tests {
             serde_json::from_str(&fs::read_to_string(&bundle.json.path).unwrap()).unwrap();
 
         assert!(value["session"].get("live").is_none());
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn markdown_marks_derived_titles_and_formats_timestamps_for_humans() {
+        let mut transcript = transcript();
+        let ts = Utc.timestamp_opt(1_700_000_000, 123_456_789).unwrap();
+        transcript.session.title = None;
+        transcript.session.derived_title = Some("Inspect the fixture".into());
+        transcript.session.last_activity_at = ts;
+        for turn in &mut transcript.turns {
+            turn.ts = Some(ts);
+        }
+
+        let directory =
+            std::env::temp_dir().join(format!("tapes-bundle-{}-derived-title", std::process::id()));
+        let _ = fs::remove_dir_all(&directory);
+        let bundle = export(&transcript, &directory).unwrap();
+        let context = fs::read_to_string(&bundle.context.path).unwrap();
+        let trace = fs::read_to_string(&bundle.trace.path).unwrap();
+
+        assert!(context.contains("- title: ~Inspect the fixture"));
+        assert!(context.contains("- last activity: 2023-11-14T22:13:20Z"));
+        assert!(trace.contains("## user — 2023-11-14T22:13:20Z"));
+        assert!(!context.contains(".123456789Z"));
+        assert!(!trace.contains(".123456789Z"));
+
         fs::remove_dir_all(directory).unwrap();
     }
 
