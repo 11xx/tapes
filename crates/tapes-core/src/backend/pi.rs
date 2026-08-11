@@ -152,14 +152,14 @@ impl Backend for PiBackend {
         Ok(self.parse(&path).ok().map(|(session, _, _, _)| session))
     }
 
-    fn transcript(&self, id: &str, tail: usize) -> Result<Transcript> {
+    fn transcript(&self, session: &Session, tail: usize) -> Result<Transcript> {
         let root = self
             .root
             .as_deref()
             .ok_or_else(|| anyhow!("pi store is unavailable"))?;
-        let path =
-            session_file(root, id).ok_or_else(|| anyhow!("pi session {id} is unavailable"))?;
-        let (session, turns, read, abandoned) = self.parse(&path)?;
+        let path = session_file(root, &session.id)
+            .ok_or_else(|| anyhow!("pi session {} is unavailable", session.id))?;
+        let (turns, read, abandoned) = read_transcript(&path)?;
         let notes = (abandoned > 0)
             .then(|| {
                 if abandoned == 1 {
@@ -170,8 +170,33 @@ impl Backend for PiBackend {
             })
             .into_iter()
             .collect();
-        Ok(transcript(session, turns, tail, &read, notes))
+        Ok(transcript(session.clone(), turns, tail, &read, notes))
     }
+}
+
+fn read_transcript(path: &Path) -> Result<(Vec<Turn>, Jsonl, usize)> {
+    let read = read_jsonl(path)?;
+    let entries = read
+        .values
+        .iter()
+        .filter(|value| value["type"] != "session")
+        .collect::<Vec<_>>();
+    let active = active_path(&entries);
+    let active_ids = active
+        .iter()
+        .filter_map(|entry| entry["id"].as_str())
+        .collect::<HashSet<_>>();
+    let abandoned = entries
+        .iter()
+        .filter(|entry| {
+            entry["id"]
+                .as_str()
+                .is_some_and(|id| !active_ids.contains(id))
+        })
+        .count();
+    let turns = active.iter().flat_map(|value| parse_turns(value)).collect();
+
+    Ok((turns, read, abandoned))
 }
 
 /// pi records the working directory once, on the `session` header line.

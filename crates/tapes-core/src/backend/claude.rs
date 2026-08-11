@@ -126,14 +126,14 @@ impl Backend for ClaudeBackend {
         Ok(self.parse(&path).ok().map(|(session, _, _)| session))
     }
 
-    fn transcript(&self, id: &str, tail: usize) -> Result<Transcript> {
+    fn transcript(&self, session: &Session, tail: usize) -> Result<Transcript> {
         let root = self
             .root
             .as_deref()
             .ok_or_else(|| anyhow!("claude store is unavailable"))?;
-        let path = matching_session_file(session_files(root), id)
-            .ok_or_else(|| anyhow!("claude session {id} is unavailable"))?;
-        let (session, turns, read) = self.parse(&path)?;
+        let path = matching_session_file(session_files(root), &session.id)
+            .ok_or_else(|| anyhow!("claude session {} is unavailable", session.id))?;
+        let (turns, read) = read_transcript(&path)?;
         let subagents = subagent_transcript_count(&path);
         let notes = (subagents > 0)
             .then(|| {
@@ -145,8 +145,14 @@ impl Backend for ClaudeBackend {
             })
             .into_iter()
             .collect();
-        Ok(transcript(session, turns, tail, &read, notes))
+        Ok(transcript(session.clone(), turns, tail, &read, notes))
     }
+}
+
+fn read_transcript(path: &Path) -> Result<(Vec<Turn>, Jsonl)> {
+    let read = read_jsonl(path)?;
+    let turns = read.values.iter().flat_map(parse_turns).collect();
+    Ok((turns, read))
 }
 
 /// Claude repeats the working directory on every message line.

@@ -141,16 +141,22 @@ impl Backend for CodexBackend {
         Ok(self.parse(&path).ok().map(|(session, _, _)| session))
     }
 
-    fn transcript(&self, id: &str, tail: usize) -> Result<Transcript> {
+    fn transcript(&self, session: &Session, tail: usize) -> Result<Transcript> {
         let root = self
             .root
             .as_deref()
             .ok_or_else(|| anyhow!("codex store is unavailable"))?;
-        let path =
-            session_file(root, id).ok_or_else(|| anyhow!("codex session {id} is unavailable"))?;
-        let (session, turns, read) = self.parse(&path)?;
-        Ok(transcript(session, turns, tail, &read, Vec::new()))
+        let path = session_file(root, &session.id)
+            .ok_or_else(|| anyhow!("codex session {} is unavailable", session.id))?;
+        let (turns, read) = read_transcript(&path)?;
+        Ok(transcript(session.clone(), turns, tail, &read, Vec::new()))
     }
+}
+
+fn read_transcript(path: &Path) -> Result<(Vec<Turn>, Jsonl)> {
+    let read = read_jsonl(path)?;
+    let turns = read.values.iter().flat_map(parse_turns).collect();
+    Ok((turns, read))
 }
 
 /// Codex records the working directory in its `session_meta` header and
