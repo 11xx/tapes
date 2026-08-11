@@ -84,6 +84,7 @@ impl CodexBackend {
                 directory,
                 started_at,
                 last_activity_at,
+                live: None,
                 cost: None,
                 tokens: None,
             },

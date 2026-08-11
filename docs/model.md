@@ -7,9 +7,17 @@ knowing which harness stored them.
 ## Types
 
 `Session` identifies the harness and session, records its first and latest
-activity timestamps, and may carry a model, title, working directory, cost,
-and token counts. Both timestamps are required UTC values. A record that
-cannot supply timestamps is not a session and is omitted from listings.
+activity timestamps, and may carry a model, title, working directory, present
+live state, cost, and token counts. Both timestamps are required UTC values. A
+record that cannot supply timestamps is not a session and is omitted from
+listings.
+
+`LiveState` is either `working` or `idle`. It is an optional present-tense
+annotation joined by session id from the `harness-status` command; recording
+backends leave it absent. The authority's `working` state maps to `working`,
+while `completed`, `idle`, and `attention` map to `idle`. If the authority is
+unavailable or its snapshot is unusable, live state remains absent. The field
+is added to `list` and `show` output only and is not written to export bundles.
 
 `Model` contains the model identifier and an optional variant. The variant
 also carries an effort level when the harness records one. `Cost` contains a

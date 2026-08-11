@@ -17,10 +17,22 @@ pub struct Session {
     pub directory: Option<PathBuf>,
     pub started_at: DateTime<Utc>,
     pub last_activity_at: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub live: Option<LiveState>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cost: Option<Cost>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tokens: Option<Tokens>,
+}
+
+/// The present-tense state supplied by the optional harness-status authority.
+/// Recording backends do not populate it, because a transcript cannot answer
+/// whether its session is running now.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LiveState {
+    Working,
+    Idle,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -167,6 +179,7 @@ mod tests {
             directory: Some("/work/tapes".into()),
             started_at: timestamp(1_700_000_000),
             last_activity_at: timestamp(1_700_000_100),
+            live: None,
             cost: Some(Cost { usd: 0.25 }),
             tokens: Some(Tokens {
                 input: Some(100),

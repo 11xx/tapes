@@ -619,6 +619,7 @@ fn resolver_session(id: &str) -> Session {
         directory: None,
         started_at: timestamp,
         last_activity_at: timestamp,
+        live: None,
         cost: None,
         tokens: None,
     }

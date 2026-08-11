@@ -58,6 +58,11 @@ FIND IT
   A session recorded in a directory that no longer exists cannot be placed in
   any project, so a scoped search will not find it. Its id still resolves.
 
+  When the optional harness-status command answers, list marks matching
+  sessions as [working] or [idle], and the JSON form carries the same `live`
+  field. A missing, failed, or malformed status snapshot leaves that field
+  out and does not change retrieval. show applies the same join to its header.
+
 PROBE BEFORE EXPORTING
   tapes show <id> --tail 40      A window, costing no bundle.
   tapes show <id> --json         The same turns as tapes-session/1.
@@ -65,6 +70,10 @@ PROBE BEFORE EXPORTING
   show returns the last 100 turns unless --tail says otherwise, and marks the
   result truncated whenever it dropped any. It is the probe, not the archive;
   export is what takes every turn the reader could reach.
+
+  Live state is a present-tense annotation, not part of an export bundle.
+  Export reads only the recording, so a status authority that is unavailable
+  or changes cannot alter the rescue files.
 
   Retrieval is cheap; ingestion is not. The tail usually settles whether a
   dead session holds anything worth having. Rescue one that holds something

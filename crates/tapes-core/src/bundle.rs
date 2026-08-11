@@ -52,11 +52,13 @@ struct BundleJson<'a> {
 
 pub fn export(transcript: &Transcript, directory: &Path) -> Result<Bundle> {
     let prefix = directory.join(bundle_stem(&transcript.session));
-    let git = git_context(transcript.session.directory.as_deref());
+    let mut session = transcript.session.clone();
+    session.live = None;
+    let git = git_context(session.directory.as_deref());
 
     let json = serde_json::to_string_pretty(&BundleJson {
         schema: SESSION_SCHEMA,
-        session: &transcript.session,
+        session: &session,
         turns: &transcript.turns,
         truncated: transcript.truncated,
         notes: &transcript.notes,
@@ -250,7 +252,7 @@ mod tests {
     use chrono::TimeZone;
 
     use super::*;
-    use crate::model::{Model, Turn};
+    use crate::model::{LiveState, Model, Turn};
 
     fn transcript() -> Transcript {
         let ts = Utc.timestamp_opt(1_700_000_000, 0).unwrap();
@@ -266,6 +268,7 @@ mod tests {
                 directory: None,
                 started_at: ts,
                 last_activity_at: ts,
+                live: None,
                 cost: None,
                 tokens: None,
             },
@@ -363,6 +366,21 @@ mod tests {
         assert_eq!(value["notes"][0], "1 entry belongs to an abandoned branch.");
         assert!(value.get("git").is_none());
 
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn json_omits_volatile_live_state() {
+        let directory =
+            std::env::temp_dir().join(format!("tapes-bundle-{}-live-state", std::process::id()));
+        let _ = fs::remove_dir_all(&directory);
+        let mut transcript = transcript();
+        transcript.session.live = Some(LiveState::Working);
+        let bundle = export(&transcript, &directory).unwrap();
+        let value: Value =
+            serde_json::from_str(&fs::read_to_string(&bundle.json.path).unwrap()).unwrap();
+
+        assert!(value["session"].get("live").is_none());
         fs::remove_dir_all(directory).unwrap();
     }
 

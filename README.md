@@ -54,13 +54,18 @@ current directory. The scope applies before the bound, so a scoped listing
 cannot be emptied by a limit spent on other projects. Human output ends with an
 availability note when a backend cannot be read, and says so when a search
 stopped early. JSON output is a `tapes-list/1` object containing `sessions`,
-`unavailable`, `scanned`, and `scan_truncated`.
+`unavailable`, `scanned`, and `scan_truncated`. When the optional
+`harness-status` command supplies a usable snapshot, matching sessions also
+carry `live: "working"` or `live: "idle"`; an unavailable authority leaves the
+field out. Human output marks those sessions with the same state.
 
 `show` accepts a full session ID or an unambiguous prefix. It searches every
 available backend, rejects ambiguous prefixes with the matching candidates,
 and prints normalized turns in chronological order. `--tail` bounds the turns
 returned and defaults to the last 100; a transcript that dropped any is marked
-`truncated`. JSON output uses the `tapes-session/1` transcript schema.
+`truncated`. JSON output uses the `tapes-session/1` transcript schema, with the
+optional `live` annotation when the authority answers. The human header marks
+the same state.
 
 `show` and `export` also take `--latest` in place of an ID, which resolves the
 most recent session in scope. `--exclude <id>` is repeatable and passes over
@@ -79,6 +84,9 @@ scope.
   order, for grepping. A tool turn is headed by the tool's name where its
   envelope carries one, by `result` for a bare result, and by `unnamed`
   otherwise, with the harness's raw envelope kept beneath it.
+
+Export bundles contain the recording only; volatile `live` state is never
+written to rescue files.
 
 Read context first, query the JSON narrowly, and reach for the trace only
 when free-text search is genuinely easier. Never ingest a whole bundle
