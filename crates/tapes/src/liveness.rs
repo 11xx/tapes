@@ -119,7 +119,10 @@ fn read_status(child: &mut Child, stdout: &mut ChildStdout) -> Option<(Vec<u8>, 
             }
         }
 
-        let timeout = remaining_millis(deadline)?;
+        let Some(timeout) = remaining_millis(deadline) else {
+            terminate_child(child);
+            return None;
+        };
         if stdout_open {
             let mut descriptor = libc::pollfd {
                 fd: stdout.as_raw_fd(),
