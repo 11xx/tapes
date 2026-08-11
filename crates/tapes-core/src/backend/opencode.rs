@@ -201,11 +201,6 @@ fn parse_transcript(session: Session, response: &Value, tail: usize) -> Result<T
         .flat_map(parse_message)
         .collect::<Vec<_>>();
     let page_truncated = response["cursor"]["next"].as_str().is_some();
-    let session = if page_truncated {
-        session
-    } else {
-        session.with_derived_title(&turns)
-    };
     let tail_truncated = turns.len() > tail;
     if tail_truncated {
         turns.drain(..turns.len() - tail);
@@ -216,6 +211,9 @@ fn parse_transcript(session: Session, response: &Value, tail: usize) -> Result<T
         .collect();
 
     Ok(Transcript {
+        // The session endpoint is the normalized source of metadata. Message
+        // reads stay a transcript operation and do not invent a title that a
+        // title-less API listing could not provide without extra per-row work.
         session,
         turns,
         truncated: page_truncated || tail_truncated,

@@ -82,6 +82,33 @@ fn opencode_fixture_program() -> PathBuf {
         .clone()
 }
 
+fn opencode_titleless_fixture_program() -> PathBuf {
+    static PROGRAM: OnceLock<PathBuf> = OnceLock::new();
+    PROGRAM
+        .get_or_init(|| {
+            let program = std::env::temp_dir().join(format!(
+                "tapes-opencode-titleless-fixture-{}",
+                std::process::id()
+            ));
+            let list = fixtures("opencode").join("list-no-title.json");
+            let messages = fixtures("opencode").join("messages-no-title.json");
+            let session = fixtures("opencode").join("session-no-title.json");
+            fs::write(
+                &program,
+                format!(
+                    "#!/bin/sh\ncase \"$4\" in\n  /api/session\\?*) exec /bin/cat '{}';;\n  /api/session/*/message) exec /bin/cat '{}';;\n  /api/session/*) exec /bin/cat '{}';;\nesac\nexit 1\n",
+                    list.display(),
+                    messages.display(),
+                    session.display()
+                ),
+            )
+            .unwrap();
+            fs::set_permissions(&program, fs::Permissions::from_mode(0o700)).unwrap();
+            program
+        })
+        .clone()
+}
+
 fn opencode_counting_fixture_program() -> (PathBuf, PathBuf) {
     let stem = format!("tapes-opencode-counting-{}-{}", std::process::id(), line!());
     let program = std::env::temp_dir().join(&stem);
@@ -164,6 +191,42 @@ fn show_reuses_resolved_opencode_session() {
 
     fs::remove_file(program).unwrap();
     fs::remove_file(calls).unwrap();
+}
+
+#[test]
+fn titleless_opencode_metadata_stays_titleless_through_message_reads() {
+    let backend = OpenCodeBackend::new(opencode_titleless_fixture_program());
+    let listed = backend
+        .list(&Query::unscoped(10))
+        .unwrap()
+        .sessions
+        .into_iter()
+        .next()
+        .unwrap();
+
+    assert_eq!(listed.id, "ses_titleless_fixture");
+    assert!(listed.title.is_none());
+    assert!(listed.derived_title.is_none());
+
+    let transcript = backend.transcript(&listed, 10).unwrap();
+    assert!(transcript.session.title.is_none());
+    assert!(transcript.session.derived_title.is_none());
+    assert_eq!(transcript.turns[0].text, "Inspect the title-less fixture.");
+}
+
+#[test]
+fn codex_skips_instruction_wrappers_when_deriving_title() {
+    let backend = CodexBackend::new(fixtures("codex"));
+    let session = located(&backend, "10000000-0000-0000-0000-000000000003");
+
+    assert!(session.title.is_none());
+    assert_eq!(
+        session.derived_title.as_deref(),
+        Some("Implement the readable title.")
+    );
+
+    let transcript = backend.transcript(&session, 10).unwrap();
+    assert_eq!(transcript.session, session);
 }
 
 #[test]

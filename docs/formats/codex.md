@@ -46,6 +46,12 @@ or `output_text` (assistant). Tool payloads have no text field; `tapes` keeps
 the whole payload as the turn's text so nothing is lost, and the trace file
 heads each one with its `name` or marks it a result via `call_id`.
 
+Some Codex invocations inject a leading user record containing a heading such
+as `# AGENTS.md instructions for …`, an `<INSTRUCTIONS>` block, and a
+`<recommended_plugins>` block before the human request. The normalized
+derived title ignores that wrapper and chooses the first later user turn with
+meaningful content; an instruction-only record does not become the title.
+
 Reasoning payloads are frequently encrypted, carrying a signature rather than
 readable text. That is absence, not failure — a session can legitimately yield
 reasoning turns with placeholder content.

@@ -205,6 +205,13 @@ so scripted consumers should call the HTTP endpoints directly with `curl`.
 honest failure beats two with different failure modes. The store is documented
 here because it explains the API's shape, not because `tapes` reads it.
 
+The session-list and session-info responses are the normalized metadata source
+for `tapes`. A title-less OpenCode session therefore keeps both `title` and
+`derived_title` absent: deriving a first-user-turn hint would require an extra
+message request per row, which would make listing unbounded and unexpectedly
+expensive. Message reads preserve that same metadata rather than inventing a
+title after listing.
+
 ## Resume / fork primitives
 
 - Resume in the TUI: `opencode2 --session ses_<id>` (global store; cwd not required)

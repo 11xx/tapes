@@ -90,8 +90,8 @@ impl Session {
         if self.title.is_none() {
             self.derived_title = turns
                 .iter()
-                .find(|turn| turn.role == Role::User)
-                .and_then(|turn| derive_title(&turn.text));
+                .filter(|turn| turn.role == Role::User)
+                .find_map(|turn| derive_title(&turn.text));
         }
         self
     }
@@ -102,6 +102,7 @@ impl Session {
 /// before whitespace is collapsed; unknown content remains untouched.
 pub fn derive_title(text: &str) -> Option<String> {
     let mut cleaned = text.to_owned();
+    strip_leading_agents_heading(&mut cleaned);
     for tag in [
         "environment_context",
         "collaboration_mode",
@@ -109,6 +110,8 @@ pub fn derive_title(text: &str) -> Option<String> {
         "apps_instructions",
         "plugins_instructions",
         "skills_instructions",
+        "INSTRUCTIONS",
+        "recommended_plugins",
     ] {
         strip_envelope(&mut cleaned, tag);
     }
@@ -132,6 +135,20 @@ pub fn derive_title(text: &str) -> Option<String> {
     } else {
         Some(bounded)
     }
+}
+
+fn strip_leading_agents_heading(text: &mut String) {
+    let leading = text.len() - text.trim_start().len();
+    let remainder = &text[leading..];
+    let Some(remainder) = remainder.strip_prefix("# AGENTS.md instructions for ") else {
+        return;
+    };
+    let Some(newline) = remainder.find('\n') else {
+        text.truncate(leading);
+        return;
+    };
+    let end = leading + text.len() - remainder.len() + newline + 1;
+    text.replace_range(leading..end, " ");
 }
 
 fn strip_envelope(text: &mut String, tag: &str) {
@@ -334,10 +351,33 @@ mod tests {
     #[test]
     fn derived_title_removes_known_envelopes_and_collapses_whitespace() {
         let title = derive_title(
-            "<environment_context>\n  <cwd>/work</cwd>\n</environment_context>\n\n  inspect\n   the   fixture  ",
+            "# AGENTS.md instructions for /work\n\n<INSTRUCTIONS>\nfollow the repository rules\n</INSTRUCTIONS>\n<recommended_plugins>\n- one-plugin\n</recommended_plugins>\n<environment_context>\n  <cwd>/work</cwd>\n</environment_context>\n\n  inspect\n   the   fixture  ",
         );
 
         assert_eq!(title.as_deref(), Some("inspect the fixture"));
+    }
+
+    #[test]
+    fn derived_title_skips_instruction_only_user_turns() {
+        let mut session = session();
+        session.title = None;
+        let session = session.with_derived_title(&[
+            Turn {
+                role: Role::User,
+                text: "# AGENTS.md instructions for /work\n<INSTRUCTIONS>rules</INSTRUCTIONS>\n<recommended_plugins>plugins</recommended_plugins>".into(),
+                ts: None,
+            },
+            Turn {
+                role: Role::User,
+                text: "Implement the readable title.".into(),
+                ts: None,
+            },
+        ]);
+
+        assert_eq!(
+            session.derived_title.as_deref(),
+            Some("Implement the readable title.")
+        );
     }
 
     #[test]

@@ -71,6 +71,26 @@ fn session<'a>(value: &'a Value, id: &str) -> &'a Value {
         .unwrap()
 }
 
+fn titleless_opencode_program(root: &Path) -> PathBuf {
+    let program = root.join("opencode2");
+    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/opencode");
+    let list = fixtures.join("list-no-title.json");
+    let messages = fixtures.join("messages-no-title.json");
+    let session = fixtures.join("session-no-title.json");
+    std::fs::write(
+        &program,
+        format!(
+            "#!/bin/sh\ncase \"$4\" in\n  /api/session\\?*) exec /bin/cat '{}';;\n  /api/session/*/message) exec /bin/cat '{}';;\n  /api/session/*) exec /bin/cat '{}';;\nesac\nexit 1\n",
+            list.display(),
+            messages.display(),
+            session.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+    program
+}
+
 /// Bare `tapes` is a guide request, not a usage error; every mistyped
 /// invocation still fails at clap's exit code 2.
 #[test]
@@ -315,7 +335,7 @@ fn human_renderers_show_derived_titles_and_whole_second_timestamps() {
             "\n",
             r#"{"timestamp":"2026-01-01T10:00:01.123456789Z","type":"turn_context","payload":{"cwd":"/fixtures/project","model":"gpt-fixture","effort":"high"}}"#,
             "\n",
-            r#"{"timestamp":"2026-01-01T10:00:02.987654321Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<environment_context>\n  <cwd>/fixtures/project</cwd>\n</environment_context>\n\nInspect the fixture."}]}}"#,
+            r##"{"timestamp":"2026-01-01T10:00:02.987654321Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"# AGENTS.md instructions for /fixtures/project\n\n<INSTRUCTIONS>\nFollow the repository instructions before acting.\n</INSTRUCTIONS>\n\n<recommended_plugins>\n- Fixture helper\n</recommended_plugins>\n\n<environment_context>\n  <cwd>/fixtures/project</cwd>\n</environment_context>\n\nInspect the fixture."}]}}"##,
             "\n",
             r#"{"timestamp":"2026-01-01T10:00:03.123456789Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Fixture inspected."}]}}"#,
             "\n",
@@ -343,6 +363,11 @@ fn human_renderers_show_derived_titles_and_whole_second_timestamps() {
     );
     let list_text = String::from_utf8_lossy(&list.stdout);
     assert!(list_text.contains("~Inspect the fixture."), "{list_text}");
+    assert!(
+        !list_text.contains("# AGENTS.md instructions"),
+        "{list_text}"
+    );
+    assert!(!list_text.contains("recommended_plugins"), "{list_text}");
     assert!(list_text.contains("2026-01-01T10:00:06Z"), "{list_text}");
     assert!(!list_text.contains(".123456789Z"), "{list_text}");
     assert!(!list_text.contains("+00:00"), "{list_text}");
@@ -384,6 +409,67 @@ fn human_renderers_show_derived_titles_and_whole_second_timestamps() {
         show_value["session"]["derived_title"],
         "Inspect the fixture."
     );
+
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn opencode_titleless_cli_keeps_metadata_absent_without_message_title_derivation() {
+    let root = std::env::temp_dir().join(format!(
+        "tapes-cli-opencode-titleless-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    let _program = titleless_opencode_program(&root);
+    let id = "ses_titleless_fixture";
+
+    let command = |arguments: &[&str]| {
+        tapes()
+            .args(arguments)
+            .env("HOME", root.join("home"))
+            .env("PATH", &root)
+            .output()
+            .unwrap()
+    };
+
+    let list = command(&["list", "--harness", "opencode", "--json"]);
+    assert!(
+        list.status.success(),
+        "{}",
+        String::from_utf8_lossy(&list.stderr)
+    );
+    let list_value: serde_json::Value = serde_json::from_slice(&list.stdout).unwrap();
+    let listed = &list_value["sessions"][0];
+    assert_eq!(listed["id"], id);
+    assert!(listed.get("title").is_none());
+    assert!(listed.get("derived_title").is_none());
+
+    let show = command(&["show", id, "--json"]);
+    assert!(
+        show.status.success(),
+        "{}",
+        String::from_utf8_lossy(&show.stderr)
+    );
+    let show_value: serde_json::Value = serde_json::from_slice(&show.stdout).unwrap();
+    assert!(show_value["session"].get("title").is_none());
+    assert!(show_value["session"].get("derived_title").is_none());
+
+    let bundle = root.join("bundle");
+    let bundle_argument = bundle.to_str().unwrap().to_owned();
+    let export = command(&["export", id, "--bundle", &bundle_argument]);
+    assert!(
+        export.status.success(),
+        "{}",
+        String::from_utf8_lossy(&export.stderr)
+    );
+    let context = std::fs::read_dir(&bundle)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find(|path| path.extension().is_some_and(|extension| extension == "md"))
+        .map(|path| std::fs::read_to_string(path).unwrap())
+        .unwrap();
+    assert!(!context.contains("- title:"), "{context}");
 
     std::fs::remove_dir_all(root).unwrap();
 }

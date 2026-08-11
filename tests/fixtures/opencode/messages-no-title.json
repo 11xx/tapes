@@ -1,0 +1,39 @@
+{
+  "data": [
+    {
+      "id": "msg_titleless_assistant",
+      "time": {
+        "created": 1784663069000,
+        "completed": 1784663070000
+      },
+      "type": "assistant",
+      "agent": "build",
+      "model": {
+        "id": "kimi-k3",
+        "providerID": "opencode-go",
+        "variant": "max"
+      },
+      "content": [
+        {
+          "type": "text",
+          "text": "Fixture inspected.",
+          "time": {
+            "created": 1784663069001,
+            "completed": 1784663069999
+          }
+        }
+      ]
+    },
+    {
+      "id": "msg_titleless_user",
+      "time": {
+        "created": 1784663062000
+      },
+      "type": "user",
+      "text": "Inspect the title-less fixture.",
+      "agents": [],
+      "files": []
+    }
+  ],
+  "cursor": {}
+}
