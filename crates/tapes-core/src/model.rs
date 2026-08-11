@@ -102,19 +102,7 @@ impl Session {
 /// before whitespace is collapsed; unknown content remains untouched.
 pub fn derive_title(text: &str) -> Option<String> {
     let mut cleaned = text.to_owned();
-    strip_leading_agents_heading(&mut cleaned);
-    for tag in [
-        "environment_context",
-        "collaboration_mode",
-        "permissions_instructions",
-        "apps_instructions",
-        "plugins_instructions",
-        "skills_instructions",
-        "INSTRUCTIONS",
-        "recommended_plugins",
-    ] {
-        strip_envelope(&mut cleaned, tag);
-    }
+    strip_known_envelopes(&mut cleaned);
 
     let collapsed = cleaned.split_whitespace().collect::<Vec<_>>().join(" ");
     if collapsed.is_empty() {
@@ -137,35 +125,61 @@ pub fn derive_title(text: &str) -> Option<String> {
     }
 }
 
-fn strip_leading_agents_heading(text: &mut String) {
-    let leading = text.len() - text.trim_start().len();
-    let remainder = &text[leading..];
-    let Some(remainder) = remainder.strip_prefix("# AGENTS.md instructions for ") else {
-        return;
-    };
-    let Some(newline) = remainder.find('\n') else {
-        text.truncate(leading);
-        return;
-    };
-    let end = leading + text.len() - remainder.len() + newline + 1;
-    text.replace_range(leading..end, " ");
+fn strip_known_envelopes(text: &mut String) {
+    loop {
+        let mut changed = strip_leading_agents_heading(text);
+        for tag in [
+            "environment_context",
+            "collaboration_mode",
+            "permissions_instructions",
+            "apps_instructions",
+            "plugins_instructions",
+            "skills_instructions",
+            "INSTRUCTIONS",
+            "recommended_plugins",
+        ] {
+            changed |= strip_envelope(text, tag);
+        }
+        if !changed {
+            break;
+        }
+    }
 }
 
-fn strip_envelope(text: &mut String, tag: &str) {
+fn strip_leading_agents_heading(text: &mut String) -> bool {
+    let leading = text.len() - text.trim_start().len();
+    let remainder = &text[leading..];
+    let Some(after_prefix) = remainder.strip_prefix("# AGENTS.md instructions") else {
+        return false;
+    };
+    let prefix_len = remainder.len() - after_prefix.len();
+    let Some(newline) = after_prefix.find('\n') else {
+        text.truncate(leading);
+        return true;
+    };
+    let end = leading + prefix_len + newline + 1;
+    text.replace_range(leading..end, " ");
+    true
+}
+
+fn strip_envelope(text: &mut String, tag: &str) -> bool {
     let opening = format!("<{tag}>");
     let closing = format!("</{tag}>");
     let mut search_from = 0;
+    let mut changed = false;
     while let Some(relative_start) = text[search_from..].find(&opening) {
         let start = search_from + relative_start;
         let content_start = start + opening.len();
         let Some(relative_end) = text[content_start..].find(&closing) else {
             text.replace_range(start.., "");
-            return;
+            return true;
         };
         let end = content_start + relative_end + closing.len();
         text.replace_range(start..end, " ");
+        changed = true;
         search_from = start + 1;
     }
+    changed
 }
 
 /// Format a timestamp for human output without exposing fractional precision
@@ -352,6 +366,15 @@ mod tests {
     fn derived_title_removes_known_envelopes_and_collapses_whitespace() {
         let title = derive_title(
             "# AGENTS.md instructions for /work\n\n<INSTRUCTIONS>\nfollow the repository rules\n</INSTRUCTIONS>\n<recommended_plugins>\n- one-plugin\n</recommended_plugins>\n<environment_context>\n  <cwd>/work</cwd>\n</environment_context>\n\n  inspect\n   the   fixture  ",
+        );
+
+        assert_eq!(title.as_deref(), Some("inspect the fixture"));
+    }
+
+    #[test]
+    fn derived_title_handles_plugins_before_heading_and_leading_whitespace() {
+        let title = derive_title(
+            "\n  <recommended_plugins>\n- one-plugin\n</recommended_plugins>\n\n  # AGENTS.md instructions\n\n<INSTRUCTIONS>\nfollow the repository rules\n</INSTRUCTIONS>\n\n  inspect the fixture  ",
         );
 
         assert_eq!(title.as_deref(), Some("inspect the fixture"));
