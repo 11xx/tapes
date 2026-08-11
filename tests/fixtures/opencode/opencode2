@@ -1,0 +1,91 @@
+#!/bin/sh
+set -eu
+
+# The checked-in executable is addressed through temporary symlink aliases.
+# Their basenames select the response set, while the resolved path locates the
+# JSON fixtures without relying on process-global environment variables.
+invoked=$0
+case $invoked in
+  */*) ;;
+  *)
+    original_ifs=$IFS
+    IFS=:
+    for directory in $PATH; do
+      if [ -x "$directory/$invoked" ]; then
+        invoked=$directory/$invoked
+        break
+      fi
+    done
+    IFS=$original_ifs
+    ;;
+esac
+resolved=$(/usr/bin/readlink -f "$invoked")
+fixture_dir=${resolved%/*}
+name=${invoked##*/}
+case $invoked in
+  *opencode-titleless*) name=opencode2-titleless ;;
+esac
+path=${4:-}
+
+case $name in
+  opencode2)
+    list=list.json
+    messages=messages.json
+    session=session.json
+    mode=normal
+    ;;
+  opencode2-titleless*)
+    list=list-no-title.json
+    messages=messages-no-title.json
+    session=session-no-title.json
+    mode=normal
+    ;;
+  opencode2-counting*)
+    list=list.json
+    messages=messages.json
+    session=session.json
+    mode=counting
+    ;;
+  opencode2-broken-resolve*|opencode2-broken-hit-wins*)
+    mode=exit
+    ;;
+  opencode2-broken-malformed*)
+    mode=malformed
+    ;;
+  opencode2-broken-absent*)
+    mode=absent
+    ;;
+  *)
+    exit 1
+    ;;
+esac
+
+if [ "$mode" = counting ]; then
+  printf '%s\n' "$path" >> "${invoked}.calls"
+fi
+
+case $path in
+  /api/session\?*)
+    case $mode in
+      exit|malformed|absent) printf '%s\n' '{"data":[]}' ;;
+      *) /bin/cat "$fixture_dir/$list" ;;
+    esac
+    ;;
+  /api/session/*/message)
+    case $mode in
+      exit|malformed|absent) exit 7 ;;
+      *) /bin/cat "$fixture_dir/$messages" ;;
+    esac
+    ;;
+  /api/session/*)
+    case $mode in
+      exit) exit 7 ;;
+      malformed) printf '%s\n' '{"data":{"nope":1}}' ;;
+      absent) printf '%s\n' '{"data":null}' ;;
+      *) /bin/cat "$fixture_dir/$session" ;;
+    esac
+    ;;
+  *)
+    exit 1
+    ;;
+esac

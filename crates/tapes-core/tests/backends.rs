@@ -2,7 +2,7 @@ use std::fs::{self, File};
 use std::io::{BufWriter, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use chrono::{TimeZone, Utc};
 use tapes_core::backend::claude::ClaudeBackend;
@@ -56,80 +56,86 @@ fn located(backend: &dyn Backend, id: &str) -> Session {
 }
 
 fn opencode_fixture_program() -> PathBuf {
-    static PROGRAM: OnceLock<PathBuf> = OnceLock::new();
-    PROGRAM
-        .get_or_init(|| {
-            let program = std::env::temp_dir()
-                .join(format!("tapes-opencode-fixture-{}", std::process::id()));
-            let list = fixtures("opencode").join("list.json");
-            let messages = fixtures("opencode").join("messages.json");
-            let session = fixtures("opencode").join("session.json");
-            // The message route must precede the bare-session route, or the
-            // wildcard would swallow it.
-            fs::write(
-                &program,
-                format!(
-                    "#!/bin/sh\ncase \"$4\" in\n  /api/session\\?*) exec /bin/cat '{}';;\n  /api/session/*/message) exec /bin/cat '{}';;\n  /api/session/*) exec /bin/cat '{}';;\nesac\nexit 1\n",
-                    list.display(),
-                    messages.display(),
-                    session.display()
-                ),
-            )
-            .unwrap();
-            fs::set_permissions(&program, fs::Permissions::from_mode(0o700)).unwrap();
-            program
-        })
-        .clone()
+    fixtures("opencode").join("opencode2")
 }
 
-fn opencode_titleless_fixture_program() -> PathBuf {
-    static PROGRAM: OnceLock<PathBuf> = OnceLock::new();
-    PROGRAM
-        .get_or_init(|| {
-            let program = std::env::temp_dir().join(format!(
-                "tapes-opencode-titleless-fixture-{}",
-                std::process::id()
-            ));
-            let list = fixtures("opencode").join("list-no-title.json");
-            let messages = fixtures("opencode").join("messages-no-title.json");
-            let session = fixtures("opencode").join("session-no-title.json");
-            fs::write(
-                &program,
-                format!(
-                    "#!/bin/sh\ncase \"$4\" in\n  /api/session\\?*) exec /bin/cat '{}';;\n  /api/session/*/message) exec /bin/cat '{}';;\n  /api/session/*) exec /bin/cat '{}';;\nesac\nexit 1\n",
-                    list.display(),
-                    messages.display(),
-                    session.display()
-                ),
-            )
-            .unwrap();
-            fs::set_permissions(&program, fs::Permissions::from_mode(0o700)).unwrap();
-            program
-        })
-        .clone()
+static OPENCODE_ALIAS_COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+struct OpenCodeAlias {
+    path: PathBuf,
+    calls: Option<PathBuf>,
 }
 
-fn opencode_counting_fixture_program() -> (PathBuf, PathBuf) {
-    let stem = format!("tapes-opencode-counting-{}-{}", std::process::id(), line!());
-    let program = std::env::temp_dir().join(&stem);
-    let calls = std::env::temp_dir().join(format!("{stem}.calls"));
-    let _ = fs::remove_file(&calls);
-    let list = fixtures("opencode").join("list.json");
-    let messages = fixtures("opencode").join("messages.json");
-    let session = fixtures("opencode").join("session.json");
-    fs::write(
-        &program,
-        format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$4\" >> '{}'\ncase \"$4\" in\n  /api/session\\?*) exec /bin/cat '{}';;\n  /api/session/*/message) exec /bin/cat '{}';;\n  /api/session/*) exec /bin/cat '{}';;\nesac\nexit 1\n",
-            calls.display(),
-            list.display(),
-            messages.display(),
-            session.display()
-        ),
-    )
-    .unwrap();
-    fs::set_permissions(&program, fs::Permissions::from_mode(0o700)).unwrap();
-    (program, calls)
+impl OpenCodeAlias {
+    fn new(tag: &str) -> Self {
+        let serial = OPENCODE_ALIAS_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let path =
+            std::env::temp_dir().join(format!("opencode2-{tag}-{}-{serial}", std::process::id()));
+        let _ = fs::remove_file(&path);
+        std::os::unix::fs::symlink(opencode_fixture_program(), &path).unwrap();
+        Self { path, calls: None }
+    }
+
+    fn counting() -> Self {
+        let mut alias = Self::new("counting");
+        let calls = PathBuf::from(format!("{}.calls", alias.path.display()));
+        let _ = fs::remove_file(&calls);
+        alias.calls = Some(calls);
+        alias
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+
+    fn calls(&self) -> &Path {
+        self.calls
+            .as_deref()
+            .expect("only a counting OpenCode alias has a call log")
+    }
+}
+
+impl Drop for OpenCodeAlias {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+        if let Some(calls) = &self.calls {
+            let _ = fs::remove_file(calls);
+        }
+    }
+}
+
+fn opencode_alias_program(tag: &str) -> OpenCodeAlias {
+    OpenCodeAlias::new(tag)
+}
+
+fn opencode_titleless_fixture_program() -> OpenCodeAlias {
+    opencode_alias_program("titleless")
+}
+
+fn opencode_counting_fixture_program() -> OpenCodeAlias {
+    OpenCodeAlias::counting()
+}
+
+#[test]
+fn opencode_fixture_executables_are_stable() {
+    let source = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/backends.rs"));
+    assert!(
+        !source.contains(concat!("fs", "::set_permissions")),
+        "OpenCode backend tests must not chmod executable files at runtime"
+    );
+    assert!(
+        !source.contains(concat!("#!", "/bin/sh")),
+        "OpenCode backend tests must not write shell executable bytes at runtime"
+    );
+
+    let program = opencode_fixture_program();
+    let metadata = fs::metadata(&program).unwrap();
+    assert!(metadata.is_file(), "checked-in OpenCode fixture is missing");
+    assert_ne!(metadata.permissions().mode() & 0o111, 0);
+    assert!(!fs::symlink_metadata(&program)
+        .unwrap()
+        .file_type()
+        .is_symlink());
 }
 
 #[test]
@@ -169,14 +175,14 @@ fn every_backend_satisfies_shared_normalization_assertions() {
 
 #[test]
 fn show_reuses_resolved_opencode_session() {
-    let (program, calls) = opencode_counting_fixture_program();
+    let program = opencode_counting_fixture_program();
     let id = "ses_000000fixtureSharedSession";
-    let backends: Vec<Box<dyn Backend>> = vec![Box::new(OpenCodeBackend::new(&program))];
+    let backends: Vec<Box<dyn Backend>> = vec![Box::new(OpenCodeBackend::new(program.path()))];
 
     let transcript = show_with_backends(&backends, Selection::Id(id), 10).unwrap();
     assert_eq!(transcript.session.id, id);
 
-    let routes = fs::read_to_string(&calls)
+    let routes = fs::read_to_string(program.calls())
         .unwrap()
         .lines()
         .map(str::to_owned)
@@ -188,14 +194,13 @@ fn show_reuses_resolved_opencode_session() {
             format!("/api/session/{id}/message")
         ]
     );
-
-    fs::remove_file(program).unwrap();
-    fs::remove_file(calls).unwrap();
 }
 
 #[test]
 fn titleless_opencode_metadata_stays_titleless_through_message_reads() {
-    let backend = OpenCodeBackend::new(opencode_titleless_fixture_program());
+    let program = opencode_titleless_fixture_program();
+    let alias_path = program.path().to_owned();
+    let backend = OpenCodeBackend::new(program.path());
     let listed = backend
         .list(&Query::unscoped(10))
         .unwrap()
@@ -212,6 +217,26 @@ fn titleless_opencode_metadata_stays_titleless_through_message_reads() {
     assert!(transcript.session.title.is_none());
     assert!(transcript.session.derived_title.is_none());
     assert_eq!(transcript.turns[0].text, "Inspect the title-less fixture.");
+
+    drop(program);
+    assert!(
+        !alias_path.exists(),
+        "titleless OpenCode alias was not removed"
+    );
+}
+
+#[test]
+fn opencode_aliases_remove_their_owned_paths_on_drop() {
+    let program = OpenCodeAlias::counting();
+    let alias_path = program.path().to_owned();
+    let calls_path = program.calls().to_owned();
+    fs::write(&calls_path, "/api/session?order=desc&limit=10\n").unwrap();
+    assert!(alias_path.exists());
+    assert!(calls_path.exists());
+
+    drop(program);
+    assert!(!alias_path.exists());
+    assert!(!calls_path.exists());
 }
 
 #[test]
@@ -855,19 +880,9 @@ fn a_broken_opencode_session_call_surfaces_the_failure() {
     // locate must propagate that, not disguise it as a missing session:
     // "the API is broken" and "no such session" send an operator to
     // different places.
-    let program = std::env::temp_dir().join(format!(
-        "tapes-opencode-broken-{}-{}",
-        std::process::id(),
-        line!()
-    ));
-    fs::write(
-        &program,
-        "#!/bin/sh\ncase \"$4\" in\n  /api/session\\?*) echo '{\"data\":[]}';;\n  *) exit 7;;\nesac\n",
-    )
-    .unwrap();
-    fs::set_permissions(&program, fs::Permissions::from_mode(0o700)).unwrap();
+    let program = broken_opencode_program("resolve");
 
-    let backend = OpenCodeBackend::new(&program);
+    let backend = OpenCodeBackend::new(program.path());
     let error = backend
         .locate("ses_anything")
         .expect_err("a failing session call must be an error, not a miss");
@@ -875,33 +890,19 @@ fn a_broken_opencode_session_call_surfaces_the_failure() {
         !error.to_string().contains("is unavailable"),
         "the real failure must survive, got: {error}"
     );
-
-    fs::remove_file(&program).ok();
 }
 
 /// A program that answers the listing but fails or corrupts the single-session
 /// GET, so `locate` errors while `list` succeeds empty — the exact arrangement
 /// under which resolution used to return a bare NotFound.
-fn broken_opencode_program(tag: &str, session_case: &str) -> PathBuf {
-    let program = std::env::temp_dir().join(format!(
-        "tapes-opencode-broken-{}-{tag}",
-        std::process::id()
-    ));
-    fs::write(
-        &program,
-        format!(
-            "#!/bin/sh\ncase \"$4\" in\n  /api/session\\?*) echo '{{\"data\":[]}}';;\n  *) {session_case};;\nesac\n"
-        ),
-    )
-    .unwrap();
-    fs::set_permissions(&program, fs::Permissions::from_mode(0o700)).unwrap();
-    program
+fn broken_opencode_program(tag: &str) -> OpenCodeAlias {
+    opencode_alias_program(&format!("broken-{tag}"))
 }
 
 #[test]
 fn a_failing_opencode_call_surfaces_through_resolution_not_as_not_found() {
-    let program = broken_opencode_program("resolve", "exit 7");
-    let backends: Vec<Box<dyn Backend>> = vec![Box::new(OpenCodeBackend::new(&program))];
+    let program = broken_opencode_program("resolve");
+    let backends: Vec<Box<dyn Backend>> = vec![Box::new(OpenCodeBackend::new(program.path()))];
 
     let error = resolve_session(&backends, "ses_anything").unwrap_err();
     let ResolveError::BackendFailed { failures, .. } = error else {
@@ -909,49 +910,41 @@ fn a_failing_opencode_call_surfaces_through_resolution_not_as_not_found() {
     };
     assert_eq!(failures.len(), 1);
     assert_eq!(failures[0].0, "opencode");
-
-    fs::remove_file(&program).ok();
 }
 
 #[test]
 fn malformed_opencode_session_data_is_an_error_not_a_miss() {
-    let program = broken_opencode_program("malformed", "echo '{\"data\":{\"nope\":1}}'");
-    let backends: Vec<Box<dyn Backend>> = vec![Box::new(OpenCodeBackend::new(&program))];
+    let program = broken_opencode_program("malformed");
+    let backends: Vec<Box<dyn Backend>> = vec![Box::new(OpenCodeBackend::new(program.path()))];
 
     let error = resolve_session(&backends, "ses_anything").unwrap_err();
     assert!(
         matches!(error, ResolveError::BackendFailed { .. }),
         "a malformed session object is a failure, got: {error}"
     );
-
-    fs::remove_file(&program).ok();
 }
 
 #[test]
 fn an_absent_opencode_session_is_still_a_plain_miss() {
     // `data: null` is a well-formed answer meaning "no such session".
-    let program = broken_opencode_program("absent", "echo '{\"data\":null}'");
-    let backends: Vec<Box<dyn Backend>> = vec![Box::new(OpenCodeBackend::new(&program))];
+    let program = broken_opencode_program("absent");
+    let backends: Vec<Box<dyn Backend>> = vec![Box::new(OpenCodeBackend::new(program.path()))];
 
     let error = resolve_session(&backends, "ses_anything").unwrap_err();
     assert!(
         matches!(error, ResolveError::NotFound { .. }),
         "an absent session must stay NotFound, got: {error}"
     );
-
-    fs::remove_file(&program).ok();
 }
 
 #[test]
 fn a_hit_elsewhere_still_wins_over_a_broken_backend() {
-    let program = broken_opencode_program("hit-wins", "exit 7");
+    let program = broken_opencode_program("hit-wins");
     let backends: Vec<Box<dyn Backend>> = vec![
-        Box::new(OpenCodeBackend::new(&program)),
+        Box::new(OpenCodeBackend::new(program.path())),
         Box::new(ResolverFixture::with(vec![resolver_session("ses_alpha")])),
     ];
 
     let resolved = resolve_session(&backends, "ses_alpha").unwrap();
     assert_eq!(resolved.session.id, "ses_alpha");
-
-    fs::remove_file(&program).ok();
 }
