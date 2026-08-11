@@ -142,12 +142,50 @@ fn session<'a>(value: &'a Value, id: &str) -> &'a Value {
         .unwrap()
 }
 
-fn titleless_opencode_program(root: &Path) -> PathBuf {
+struct TemporaryDirectory {
+    path: PathBuf,
+}
+
+impl TemporaryDirectory {
+    fn new(path: PathBuf) -> Self {
+        let _ = fs::remove_dir_all(&path);
+        fs::create_dir_all(&path).unwrap();
+        Self { path }
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for TemporaryDirectory {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.path);
+    }
+}
+
+struct OpenCodeAlias {
+    path: PathBuf,
+}
+
+impl OpenCodeAlias {
+    fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for OpenCodeAlias {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
+}
+
+fn titleless_opencode_program(root: &Path) -> OpenCodeAlias {
     let program = root.join("opencode2");
     let fixture =
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/opencode/opencode2");
     std::os::unix::fs::symlink(fixture, &program).unwrap();
-    program
+    OpenCodeAlias { path: program }
 }
 
 /// Bare `tapes` is a guide request, not a usage error; every mistyped
@@ -624,20 +662,19 @@ fn human_renderers_show_derived_titles_and_whole_second_timestamps() {
 
 #[test]
 fn opencode_titleless_cli_keeps_metadata_absent_without_message_title_derivation() {
-    let root = std::env::temp_dir().join(format!(
+    let root = TemporaryDirectory::new(std::env::temp_dir().join(format!(
         "tapes-cli-opencode-titleless-{}",
         std::process::id()
-    ));
-    let _ = std::fs::remove_dir_all(&root);
-    std::fs::create_dir_all(&root).unwrap();
-    let _program = titleless_opencode_program(&root);
+    )));
+    let program = titleless_opencode_program(root.path());
+    let alias_path = program.path().to_owned();
     let id = "ses_titleless_fixture";
 
     let command = |arguments: &[&str]| {
         tapes()
             .args(arguments)
-            .env("HOME", root.join("home"))
-            .env("PATH", &root)
+            .env("HOME", root.path().join("home"))
+            .env("PATH", root.path())
             .output()
             .unwrap()
     };
@@ -664,7 +701,7 @@ fn opencode_titleless_cli_keeps_metadata_absent_without_message_title_derivation
     assert!(show_value["session"].get("title").is_none());
     assert!(show_value["session"].get("derived_title").is_none());
 
-    let bundle = root.join("bundle");
+    let bundle = root.path().join("bundle");
     let bundle_argument = bundle.to_str().unwrap().to_owned();
     let export = command(&["export", id, "--bundle", &bundle_argument]);
     assert!(
@@ -680,5 +717,9 @@ fn opencode_titleless_cli_keeps_metadata_absent_without_message_title_derivation
         .unwrap();
     assert!(!context.contains("- title:"), "{context}");
 
-    std::fs::remove_dir_all(root).unwrap();
+    drop(program);
+    assert!(
+        !alias_path.exists(),
+        "titleless OpenCode alias was not removed"
+    );
 }
