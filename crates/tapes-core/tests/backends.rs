@@ -518,6 +518,10 @@ fn a_transcript_past_the_read_window_still_reports_its_directory() {
         session.directory.as_deref(),
         Some(Path::new("/fixtures/project"))
     );
+    assert!(
+        session.derived_title.is_none(),
+        "a bounded tail cannot prove which user turn was first"
+    );
     assert_eq!(
         backend
             .transcript(session, 1)

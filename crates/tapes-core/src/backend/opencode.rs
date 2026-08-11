@@ -200,12 +200,16 @@ fn parse_transcript(session: Session, response: &Value, tail: usize) -> Result<T
         .rev()
         .flat_map(parse_message)
         .collect::<Vec<_>>();
-    let session = session.with_derived_title(&turns);
+    let page_truncated = response["cursor"]["next"].as_str().is_some();
+    let session = if page_truncated {
+        session
+    } else {
+        session.with_derived_title(&turns)
+    };
     let tail_truncated = turns.len() > tail;
     if tail_truncated {
         turns.drain(..turns.len() - tail);
     }
-    let page_truncated = response["cursor"]["next"].as_str().is_some();
     let notes = page_truncated
         .then(|| "Older OpenCode messages are outside the API page.".to_owned())
         .into_iter()

@@ -84,25 +84,26 @@ impl PiBackend {
             .flat_map(|value| parse_turns(value))
             .collect::<Vec<_>>();
 
-        Ok((
-            Session {
-                id,
-                harness: "pi".into(),
-                model,
-                title: None,
-                derived_title: None,
-                directory,
-                started_at,
-                last_activity_at,
-                live: None,
-                cost: None,
-                tokens: None,
-            }
-            .with_derived_title(&turns),
-            turns,
-            read,
-            abandoned,
-        ))
+        let session = Session {
+            id,
+            harness: "pi".into(),
+            model,
+            title: None,
+            derived_title: None,
+            directory,
+            started_at,
+            last_activity_at,
+            live: None,
+            cost: None,
+            tokens: None,
+        };
+        let session = if read.truncated {
+            session
+        } else {
+            session.with_derived_title(&turns)
+        };
+
+        Ok((session, turns, read, abandoned))
     }
 }
 
