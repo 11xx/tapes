@@ -143,12 +143,9 @@ impl Backend for OpenCodeBackend {
         parse_session(data).map(Some)
     }
 
-    fn transcript(&self, id: &str, tail: usize) -> Result<Transcript> {
-        let session = self
-            .locate(id)?
-            .ok_or_else(|| anyhow!("opencode session {id} is unavailable"))?;
-        let response = self.request(&format!("/api/session/{id}/message"))?;
-        parse_transcript(session, &response, tail)
+    fn transcript(&self, session: &Session, tail: usize) -> Result<Transcript> {
+        let response = self.request(&format!("/api/session/{}/message", session.id))?;
+        parse_transcript(session.clone(), &response, tail)
     }
 }
 

@@ -438,7 +438,7 @@ pub fn show_with_backends(
     tail: usize,
 ) -> Result<Transcript> {
     let resolved = selection.resolve(backends)?;
-    backends[resolved.backend_index].transcript(&resolved.session.id, tail)
+    backends[resolved.backend_index].transcript(&resolved.session, tail)
 }
 
 pub fn export(selection: Selection, bundle: Option<&Path>) -> Result<bundle::Bundle> {

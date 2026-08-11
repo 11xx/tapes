@@ -48,6 +48,13 @@ fn fixture_backends() -> Vec<(Box<dyn Backend>, &'static str)> {
     backends
 }
 
+fn located(backend: &dyn Backend, id: &str) -> Session {
+    backend
+        .locate(id)
+        .unwrap()
+        .unwrap_or_else(|| panic!("fixture session {id} is missing"))
+}
+
 fn opencode_fixture_program() -> PathBuf {
     static PROGRAM: OnceLock<PathBuf> = OnceLock::new();
     PROGRAM
@@ -75,6 +82,29 @@ fn opencode_fixture_program() -> PathBuf {
         .clone()
 }
 
+fn opencode_counting_fixture_program() -> (PathBuf, PathBuf) {
+    let stem = format!("tapes-opencode-counting-{}-{}", std::process::id(), line!());
+    let program = std::env::temp_dir().join(&stem);
+    let calls = std::env::temp_dir().join(format!("{stem}.calls"));
+    let _ = fs::remove_file(&calls);
+    let list = fixtures("opencode").join("list.json");
+    let messages = fixtures("opencode").join("messages.json");
+    let session = fixtures("opencode").join("session.json");
+    fs::write(
+        &program,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$4\" >> '{}'\ncase \"$4\" in\n  /api/session\\?*) exec /bin/cat '{}';;\n  /api/session/*/message) exec /bin/cat '{}';;\n  /api/session/*) exec /bin/cat '{}';;\nesac\nexit 1\n",
+            calls.display(),
+            list.display(),
+            messages.display(),
+            session.display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&program, fs::Permissions::from_mode(0o700)).unwrap();
+    (program, calls)
+}
+
 #[test]
 fn every_backend_satisfies_shared_normalization_assertions() {
     for (backend, id) in fixture_backends() {
@@ -89,17 +119,43 @@ fn every_backend_satisfies_shared_normalization_assertions() {
         assert_eq!(listed.harness, backend.harness());
         assert!(listed.started_at <= listed.last_activity_at);
 
-        let transcript = backend.transcript(id, 10).unwrap();
+        let transcript = backend.transcript(listed, 10).unwrap();
         assert_eq!(transcript.session, *listed);
         assert!(transcript.turns.len() >= 2);
         assert_eq!(transcript.turns.first().unwrap().role, Role::User);
         assert_eq!(transcript.turns.last().unwrap().role, Role::Assistant);
         assert!(transcript.turns.iter().all(|turn| !turn.text.is_empty()));
 
-        let tailed = backend.transcript(id, 1).unwrap();
+        let tailed = backend.transcript(listed, 1).unwrap();
         assert_eq!(tailed.turns.len(), 1);
         assert!(tailed.truncated);
     }
+}
+
+#[test]
+fn show_reuses_resolved_opencode_session() {
+    let (program, calls) = opencode_counting_fixture_program();
+    let id = "ses_000000fixtureSharedSession";
+    let backends: Vec<Box<dyn Backend>> = vec![Box::new(OpenCodeBackend::new(&program))];
+
+    let transcript = show_with_backends(&backends, Selection::Id(id), 10).unwrap();
+    assert_eq!(transcript.session.id, id);
+
+    let routes = fs::read_to_string(&calls)
+        .unwrap()
+        .lines()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        routes,
+        vec![
+            format!("/api/session/{id}"),
+            format!("/api/session/{id}/message")
+        ]
+    );
+
+    fs::remove_file(program).unwrap();
+    fs::remove_file(calls).unwrap();
 }
 
 #[test]
@@ -128,7 +184,8 @@ fn every_file_backend_resolves_full_ids_and_unambiguous_prefixes() {
 #[test]
 fn every_file_backend_preserves_reasoning_and_tool_chronology() {
     for (backend, id) in fixture_backends() {
-        let transcript = backend.transcript(id, 10).unwrap();
+        let session = located(backend.as_ref(), id);
+        let transcript = backend.transcript(&session, 10).unwrap();
         let roles = transcript
             .turns
             .iter()
@@ -167,7 +224,8 @@ fn claude_lists_only_parent_sessions_and_reports_subagent_transcripts() {
     );
     assert_eq!(sessions.len(), 2);
 
-    let transcript = backend.transcript("session-claude", 10).unwrap();
+    let session = located(&backend, "session-claude");
+    let transcript = backend.transcript(&session, 10).unwrap();
     assert_eq!(
         transcript.notes,
         vec!["1 subagent transcript belongs to this session.".to_owned()]
@@ -189,7 +247,8 @@ fn malformed_lines_leave_parseable_turns_and_a_note() {
     ];
 
     for (backend, id) in cases {
-        let transcript = backend.transcript(id, 10).unwrap();
+        let session = located(backend.as_ref(), id);
+        let transcript = backend.transcript(&session, 10).unwrap();
         assert_eq!(transcript.turns.len(), 2);
         assert_eq!(
             transcript.notes,
@@ -200,9 +259,9 @@ fn malformed_lines_leave_parseable_turns_and_a_note() {
 
 #[test]
 fn pi_reports_entries_outside_the_active_leaf_path() {
-    let transcript = PiBackend::new(fixtures("pi"))
-        .transcript("session-pi", 10)
-        .unwrap();
+    let backend = PiBackend::new(fixtures("pi"));
+    let session = located(&backend, "session-pi");
+    let transcript = backend.transcript(&session, 10).unwrap();
 
     assert_eq!(
         transcript.notes,
@@ -216,9 +275,9 @@ fn pi_reports_entries_outside_the_active_leaf_path() {
 
 #[test]
 fn codex_reads_model_and_effort_from_turn_context() {
-    let transcript = CodexBackend::new(fixtures("codex"))
-        .transcript("00000000-0000-0000-0000-000000000001", 10)
-        .unwrap();
+    let backend = CodexBackend::new(fixtures("codex"));
+    let session = located(&backend, "00000000-0000-0000-0000-000000000001");
+    let transcript = backend.transcript(&session, 10).unwrap();
     let model = transcript.session.model.unwrap();
 
     assert_eq!(model.id, "gpt-fixture");
@@ -355,7 +414,8 @@ fn the_probe_and_the_parse_place_a_session_in_the_same_directory() {
     drop(file);
 
     let backend = CodexBackend::new(&root);
-    let parsed = backend.transcript(id, 1).unwrap().session.directory;
+    let session = located(&backend, id);
+    let parsed = backend.transcript(&session, 1).unwrap().session.directory;
     let backends: Vec<Box<dyn Backend>> = vec![Box::new(CodexBackend::new(&root))];
     let scope = Scope::at(parsed.as_deref().expect("a directory was parsed")).unwrap();
     let result = list_with_backends(&backends, None, Some(&scope), 10).unwrap();
@@ -452,7 +512,7 @@ fn a_transcript_past_the_read_window_still_reports_its_directory() {
     );
     assert_eq!(
         backend
-            .transcript("session-huge", 1)
+            .transcript(session, 1)
             .unwrap()
             .session
             .directory
@@ -544,7 +604,7 @@ impl Backend for ResolverFixture {
             .cloned())
     }
 
-    fn transcript(&self, _id: &str, _tail: usize) -> anyhow::Result<Transcript> {
+    fn transcript(&self, _session: &Session, _tail: usize) -> anyhow::Result<Transcript> {
         unreachable!("resolver tests do not read transcripts")
     }
 }
@@ -610,7 +670,9 @@ fn transcript_reads_are_capped_at_four_megabytes() {
     .unwrap();
     file.flush().unwrap();
 
-    let transcript = ClaudeBackend::new(&root).transcript("bounded", 10).unwrap();
+    let backend = ClaudeBackend::new(&root);
+    let session = located(&backend, "bounded");
+    let transcript = backend.transcript(&session, 10).unwrap();
 
     assert!(transcript.truncated);
     assert_eq!(transcript.turns.len(), 2);

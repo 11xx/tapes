@@ -67,13 +67,23 @@ impl Listing {
 
 pub trait Backend {
     fn harness(&self) -> &'static str;
+    /// Report whether listing is likely to work for this backend.
+    ///
+    /// This is an advisory listing hint, not a precondition for other
+    /// methods. Exact-id resolution deliberately skips it, and callers may
+    /// still invoke `locate` or `transcript` when it returns `false` so those
+    /// methods can report their own absence or failure.
     fn available(&self) -> bool;
     fn list(&self, query: &Query) -> Result<Listing>;
     /// Locate one session by its exact id without enumerating the store.
     /// `Ok(None)` means this backend does not hold it. Resolution calls this
     /// before it calls `list`, so an exact id never pays for a listing.
     fn locate(&self, id: &str) -> Result<Option<Session>>;
-    fn transcript(&self, id: &str, tail: usize) -> Result<Transcript>;
+    /// Read a transcript for a session already resolved by this backend.
+    /// Implementations must use the supplied normalized session rather than
+    /// locating it again; the transcript read may still need to open the
+    /// underlying record to collect turns.
+    fn transcript(&self, session: &Session, tail: usize) -> Result<Transcript>;
 }
 
 pub fn backends() -> Vec<Box<dyn Backend>> {
