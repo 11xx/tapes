@@ -60,7 +60,7 @@ impl ClaudeBackend {
                     variant: None,
                 })
         });
-        let turns = read.values.iter().flat_map(parse_turns).collect();
+        let turns = read.values.iter().flat_map(parse_turns).collect::<Vec<_>>();
 
         Ok((
             Session {
@@ -68,13 +68,15 @@ impl ClaudeBackend {
                 harness: "claude".into(),
                 model,
                 title,
+                derived_title: None,
                 directory,
                 started_at,
                 last_activity_at,
                 live: None,
                 cost: None,
                 tokens: None,
-            },
+            }
+            .with_derived_title(&turns),
             turns,
             read,
         ))

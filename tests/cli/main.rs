@@ -298,3 +298,92 @@ fn exporting_an_unknown_session_writes_no_bundle_and_fails() {
     assert!(output.stdout.is_empty(), "the manifest is the only stdout");
     assert!(!directory.exists(), "a failed export leaves nothing behind");
 }
+
+#[test]
+fn human_renderers_show_derived_titles_and_whole_second_timestamps() {
+    let root = std::env::temp_dir().join(format!("tapes-cli-human-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let id = "00000000-0000-0000-0000-0000000000aa";
+    let path = root
+        .join("sessions/2026/01/01")
+        .join(format!("rollout-2026-01-01T10-00-00-{id}.jsonl"));
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(
+        &path,
+        concat!(
+            r#"{"timestamp":"2026-01-01T10:00:00.123456789Z","type":"session_meta","payload":{"id":"00000000-0000-0000-0000-0000000000aa","cwd":"/fixtures/project"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-01-01T10:00:01.123456789Z","type":"turn_context","payload":{"cwd":"/fixtures/project","model":"gpt-fixture","effort":"high"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-01-01T10:00:02.987654321Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<environment_context>\n  <cwd>/fixtures/project</cwd>\n</environment_context>\n\nInspect the fixture."}]}}"#,
+            "\n",
+            r#"{"timestamp":"2026-01-01T10:00:03.123456789Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Fixture inspected."}]}}"#,
+            "\n",
+            r#"{"timestamp":"2026-01-01T10:00:06.123456789Z","type":"event","payload":{}}"#,
+            "\n"
+        ),
+    )
+    .unwrap();
+
+    let command = |arguments: &[&str]| {
+        tapes()
+            .args(arguments)
+            .env("HOME", root.join("home"))
+            .env("CODEX_HOME", &root)
+            .env("PATH", "/definitely/missing")
+            .output()
+            .unwrap()
+    };
+
+    let list = command(&["list", "--harness", "codex"]);
+    assert!(
+        list.status.success(),
+        "{}",
+        String::from_utf8_lossy(&list.stderr)
+    );
+    let list_text = String::from_utf8_lossy(&list.stdout);
+    assert!(list_text.contains("~Inspect the fixture."), "{list_text}");
+    assert!(list_text.contains("2026-01-01T10:00:06Z"), "{list_text}");
+    assert!(!list_text.contains(".123456789Z"), "{list_text}");
+    assert!(!list_text.contains("+00:00"), "{list_text}");
+
+    let list_json = command(&["list", "--harness", "codex", "--json"]);
+    assert!(list_json.status.success());
+    let list_value: serde_json::Value = serde_json::from_slice(&list_json.stdout).unwrap();
+    let session = &list_value["sessions"][0];
+    assert!(session.get("title").is_none());
+    assert_eq!(session["derived_title"], "Inspect the fixture.");
+    assert_eq!(
+        session["last_activity_at"],
+        "2026-01-01T10:00:06.123456789Z"
+    );
+
+    let show = command(&["show", id]);
+    assert!(
+        show.status.success(),
+        "{}",
+        String::from_utf8_lossy(&show.stderr)
+    );
+    let show_text = String::from_utf8_lossy(&show.stdout);
+    assert!(
+        show_text.contains("[user 2026-01-01T10:00:02Z]"),
+        "{show_text}"
+    );
+    assert!(!show_text.contains(".987654321Z"), "{show_text}");
+    assert!(!show_text.contains("+00:00"), "{show_text}");
+
+    let show_json = command(&["show", id, "--json"]);
+    assert!(show_json.status.success());
+    let show_value: serde_json::Value = serde_json::from_slice(&show_json.stdout).unwrap();
+    assert_eq!(
+        show_value["turns"][0]["ts"],
+        "2026-01-01T10:00:02.987654321Z"
+    );
+    assert!(show_value["session"].get("title").is_none());
+    assert_eq!(
+        show_value["session"]["derived_title"],
+        "Inspect the fixture."
+    );
+
+    std::fs::remove_dir_all(root).unwrap();
+}

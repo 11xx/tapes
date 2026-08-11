@@ -1,9 +1,11 @@
 use std::path::PathBuf;
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, SecondsFormat, Utc};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 pub const SESSION_SCHEMA: &str = "tapes-session/1";
+/// Maximum length of a title derived from the first user turn.
+pub const DERIVED_TITLE_MAX_CHARS: usize = 96;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Session {
@@ -13,6 +15,10 @@ pub struct Session {
     pub model: Option<Model>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+    /// A bounded human-facing hint derived from the first user turn when the
+    /// harness did not record a title. It never replaces `title`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub derived_title: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub directory: Option<PathBuf>,
     pub started_at: DateTime<Utc>,
@@ -76,6 +82,88 @@ pub enum Role {
     Assistant,
     Tool,
     Reasoning,
+}
+
+impl Session {
+    /// Preserve recorded title absence while adding a bounded display hint.
+    pub fn with_derived_title(mut self, turns: &[Turn]) -> Self {
+        if self.title.is_none() {
+            self.derived_title = turns
+                .iter()
+                .find(|turn| turn.role == Role::User)
+                .and_then(|turn| derive_title(&turn.text));
+        }
+        self
+    }
+}
+
+/// Turn the first user message into a compact, human-readable listing hint.
+/// Harness envelopes that are known to surround the user message are removed
+/// before whitespace is collapsed; unknown content remains untouched.
+pub fn derive_title(text: &str) -> Option<String> {
+    let mut cleaned = text.to_owned();
+    for tag in [
+        "environment_context",
+        "collaboration_mode",
+        "permissions_instructions",
+        "apps_instructions",
+        "plugins_instructions",
+        "skills_instructions",
+    ] {
+        strip_envelope(&mut cleaned, tag);
+    }
+
+    let collapsed = cleaned.split_whitespace().collect::<Vec<_>>().join(" ");
+    if collapsed.is_empty() {
+        return None;
+    }
+    let mut chars = collapsed.chars();
+    let bounded = chars
+        .by_ref()
+        .take(DERIVED_TITLE_MAX_CHARS)
+        .collect::<String>();
+    if chars.next().is_some() {
+        let mut truncated = bounded
+            .chars()
+            .take(DERIVED_TITLE_MAX_CHARS.saturating_sub(1))
+            .collect::<String>();
+        truncated.push('\u{2026}');
+        Some(truncated)
+    } else {
+        Some(bounded)
+    }
+}
+
+fn strip_envelope(text: &mut String, tag: &str) {
+    let opening = format!("<{tag}>");
+    let closing = format!("</{tag}>");
+    let mut search_from = 0;
+    while let Some(relative_start) = text[search_from..].find(&opening) {
+        let start = search_from + relative_start;
+        let content_start = start + opening.len();
+        let Some(relative_end) = text[content_start..].find(&closing) else {
+            text.replace_range(start.., "");
+            return;
+        };
+        let end = content_start + relative_end + closing.len();
+        text.replace_range(start..end, " ");
+        search_from = start + 1;
+    }
+}
+
+/// Format a timestamp for human output without exposing fractional precision
+/// or an offset spelling that varies by renderer.
+pub fn human_timestamp(timestamp: DateTime<Utc>) -> String {
+    timestamp.to_rfc3339_opts(SecondsFormat::Secs, true)
+}
+
+/// Render a title without making a derived hint look like harness metadata.
+pub fn human_title(session: &Session) -> String {
+    match (&session.title, &session.derived_title) {
+        (Some(title), _) => title.clone(),
+        (None, Some(title)) => format!("~{title}"),
+        (None, None) => String::new(),
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -176,6 +264,7 @@ mod tests {
                 variant: Some("high".into()),
             }),
             title: Some("Build the model".into()),
+            derived_title: None,
             directory: Some("/work/tapes".into()),
             started_at: timestamp(1_700_000_000),
             last_activity_at: timestamp(1_700_000_100),
@@ -237,8 +326,46 @@ mod tests {
         let object = value.as_object().unwrap();
 
         assert!(!object.contains_key("title"));
+        assert!(!object.contains_key("derived_title"));
         assert!(!object.contains_key("model"));
         assert!(!object.contains_key("cost"));
+    }
+
+    #[test]
+    fn derived_title_removes_known_envelopes_and_collapses_whitespace() {
+        let title = derive_title(
+            "<environment_context>\n  <cwd>/work</cwd>\n</environment_context>\n\n  inspect\n   the   fixture  ",
+        );
+
+        assert_eq!(title.as_deref(), Some("inspect the fixture"));
+    }
+
+    #[test]
+    fn derived_title_is_bounded_and_marks_truncation() {
+        let title = derive_title(&"word ".repeat(DERIVED_TITLE_MAX_CHARS));
+        let title = title.unwrap();
+
+        assert_eq!(title.chars().count(), DERIVED_TITLE_MAX_CHARS);
+        assert!(title.ends_with('\u{2026}'));
+    }
+
+    #[test]
+    fn derived_title_does_not_replace_recorded_title() {
+        let session = session().with_derived_title(&[Turn {
+            role: Role::User,
+            text: "A different request".into(),
+            ts: None,
+        }]);
+
+        assert_eq!(session.title.as_deref(), Some("Build the model"));
+        assert!(session.derived_title.is_none());
+    }
+
+    #[test]
+    fn human_timestamp_uses_whole_seconds_and_z() {
+        let timestamp = Utc.timestamp_opt(1_700_000_000, 123_456_789).unwrap();
+
+        assert_eq!(human_timestamp(timestamp), "2023-11-14T22:13:20Z");
     }
 
     #[test]

@@ -118,6 +118,14 @@ fn every_backend_satisfies_shared_normalization_assertions() {
         let listed = sessions.iter().find(|session| session.id == id).unwrap();
         assert_eq!(listed.harness, backend.harness());
         assert!(listed.started_at <= listed.last_activity_at);
+        if listed.title.is_none() {
+            assert_eq!(
+                listed.derived_title.as_deref(),
+                Some("Inspect the fixture.")
+            );
+        } else {
+            assert!(listed.derived_title.is_none());
+        }
 
         let transcript = backend.transcript(listed, 10).unwrap();
         assert_eq!(transcript.session, *listed);
@@ -616,6 +624,7 @@ fn resolver_session(id: &str) -> Session {
         harness: "fixture".into(),
         model: None,
         title: None,
+        derived_title: None,
         directory: None,
         started_at: timestamp,
         last_activity_at: timestamp,

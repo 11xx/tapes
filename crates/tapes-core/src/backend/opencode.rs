@@ -181,6 +181,7 @@ fn parse_session(value: &Value) -> Result<Session> {
         harness: "opencode".into(),
         model,
         title: value["title"].as_str().map(str::to_owned),
+        derived_title: None,
         directory: value["location"]["directory"].as_str().map(PathBuf::from),
         started_at,
         last_activity_at,
@@ -199,6 +200,7 @@ fn parse_transcript(session: Session, response: &Value, tail: usize) -> Result<T
         .rev()
         .flat_map(parse_message)
         .collect::<Vec<_>>();
+    let session = session.with_derived_title(&turns);
     let tail_truncated = turns.len() > tail;
     if tail_truncated {
         turns.drain(..turns.len() - tail);
