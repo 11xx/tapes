@@ -203,7 +203,7 @@ impl OpenCodeBackend {
             .collect::<Result<Vec<_>>>()?;
         let response = json!({
             "data": messages,
-            "cursor": truncated.then(|| json!({ "next": "database" })).unwrap_or_default()
+            "cursor": if truncated { json!({ "next": "database" }) } else { Value::Null }
         });
         parse_transcript(session, &response, tail)
     }
@@ -333,8 +333,8 @@ fn database_message(row: &Value, parts: Vec<Value>) -> Option<Result<Value>> {
     let mut parts = parts;
     let user_text = parts
         .iter()
-        .filter_map(|part| (part["type"] == "text").then(|| part["text"].as_str()))
-        .flatten()
+        .filter(|part| part["type"] == "text")
+        .filter_map(|part| part["text"].as_str())
         .collect::<Vec<_>>()
         .join("\n");
     for part in &mut parts {
