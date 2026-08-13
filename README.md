@@ -39,7 +39,7 @@ that a command.
 | :-- | :-- | :-- |
 | claude | `~/.claude/projects/<slug>/<session>.jsonl` | file discovery |
 | codex | `$CODEX_HOME/sessions/<y>/<m>/<d>/rollout-*.jsonl` | file discovery |
-| opencode | SQLite behind an HTTP API | `opencode2 api --standalone` |
+| opencode | SQLite behind the CLI | `opencode db --format tsv` |
 | pi | `~/.pi/agent/sessions`, append-only tree | file discovery |
 
 A harness whose binary or store is absent reports itself unavailable; it

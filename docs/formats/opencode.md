@@ -183,11 +183,19 @@ Notes:
   export starts at seq 1. The reducer tolerates both.
 - `session.model` is a JSON string; `time_compacting` (when set) is the
   compaction signal for the projection-less path.
-- The old `opencode.db` (v1 store) is **not** read — v1 sessions are only
-  supported via their Markdown export (same format). `opencode2 migrate`
-  converts v1 data into the v2 store.
+- The current `opencode` executable stores v1 sessions in `opencode.db`; the
+  CLI database path below reads its `session`, `message`, and `part` tables.
+  The separate v2 store is used by `opencode2`.
 
-## 5. Live HTTP API (not used by default — reference)
+## 5. Current CLI database path
+
+Current `opencode` releases expose the v1 session projection through the
+read-only `opencode db --format tsv` command. `tapes` uses SELECTs against the
+`session`, `message`, and `part` tables for the default `opencode` executable;
+the bounded message and part reads are normalized to the same model as the v2
+API path.
+
+## 6. Live HTTP API (legacy reference)
 
 The `opencode2 serve` background service exposes:
 
@@ -201,9 +209,9 @@ The `opencode2 serve` background service exposes:
 Auth: HTTP basic, credentials from `opencode2 pair` (URL/username/password).
 Known hazard: `opencode2 api …` truncates large payloads on stdout (~196 KB),
 so scripted consumers should call the HTTP endpoints directly with `curl`.
-`tapes` calls the API and never opens the SQLite file: one code path with
-honest failure beats two with different failure modes. The store is documented
-here because it explains the API's shape, not because `tapes` reads it.
+The `opencode2` compatibility path calls the API and never opens the SQLite
+file. The current CLI path uses its own read-only database query command, so
+the beta executable is supported but not required.
 
 The session-list and session-info responses are the normalized metadata source
 for `tapes`. A title-less OpenCode session therefore keeps both `title` and

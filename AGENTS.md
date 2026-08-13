@@ -21,7 +21,7 @@ server, no session *writing* — `tapes` never mutates a harness's store.
   branches, opencode's event sourcing — is reported explicitly rather than
   dropped.
 - **Never mutate a harness store.** Opening a session store is read-only,
-  always. `opencode2 api` calls are GETs.
+  always. OpenCode database queries are SELECTs.
 - The three-file bundle contract — `.context.md`, `.json`, `.trace.md` — is
   settled. Extend it; do not redesign it.
 
