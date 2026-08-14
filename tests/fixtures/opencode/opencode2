@@ -46,6 +46,9 @@ case $name in
     session=session.json
     mode=counting
     ;;
+  opencode)
+    mode=database
+    ;;
   opencode2-broken-resolve*|opencode2-broken-hit-wins*)
     mode=exit
     ;;
@@ -62,6 +65,10 @@ esac
 
 if [ "$mode" = counting ]; then
   printf '%s\n' "$path" >> "${invoked}.calls"
+fi
+
+if [ "$mode" = database ]; then
+  exit 0
 fi
 
 case $path in

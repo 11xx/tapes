@@ -82,18 +82,27 @@ impl OpenCodeBackend {
         let bytes = self.command_bytes(&["db", "--format", "tsv", query], "opencode database")?;
         let text =
             String::from_utf8(bytes).context("opencode database returned non-UTF-8 output")?;
-        let mut lines = text.lines();
-        if lines.next() != Some("row") {
-            return Err(anyhow!("opencode database returned unexpected columns"));
-        }
-        lines
-            .filter(|line| !line.is_empty())
-            .map(|line| {
-                serde_json::from_str(line).context("opencode database returned an invalid row")
-            })
-            .collect()
+        parse_database_rows(&text)
     }
+}
 
+fn parse_database_rows(text: &str) -> Result<Vec<Value>> {
+    if text.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut lines = text.lines();
+    match lines.next() {
+        None => return Ok(Vec::new()),
+        Some("row") => {}
+        Some(_) => return Err(anyhow!("opencode database returned unexpected columns")),
+    }
+    lines
+        .filter(|line| !line.is_empty())
+        .map(|line| serde_json::from_str(line).context("opencode database returned an invalid row"))
+        .collect()
+}
+
+impl OpenCodeBackend {
     fn uses_database(&self) -> bool {
         Path::new(&self.program)
             .file_name()
@@ -209,21 +218,39 @@ impl OpenCodeBackend {
     }
 }
 
-fn default_program() -> OsString {
+fn installed_programs() -> Vec<OsString> {
     ["opencode", "opencode2"]
         .into_iter()
-        .find(|program| {
+        .filter(|program| {
             std::env::var_os("PATH").is_some_and(|path| {
                 std::env::split_paths(&path).any(|directory| directory.join(program).is_file())
             })
         })
         .map(OsString::from)
+        .collect()
+}
+
+fn default_program() -> OsString {
+    installed_programs()
+        .into_iter()
+        .next()
         .unwrap_or_else(|| OsString::from("opencode"))
 }
 
 impl Default for OpenCodeBackend {
     fn default() -> Self {
         Self::new(default_program())
+    }
+}
+
+impl OpenCodeBackend {
+    pub(crate) fn defaults() -> Vec<Self> {
+        let programs = installed_programs();
+        if programs.is_empty() {
+            vec![Self::default()]
+        } else {
+            programs.into_iter().map(Self::new).collect()
+        }
     }
 }
 
@@ -558,6 +585,12 @@ mod tests {
         .unwrap();
 
         assert!(parse_sessions(&fixture).is_err());
+    }
+
+    #[test]
+    fn empty_database_output_is_a_miss() {
+        assert!(parse_database_rows("").unwrap().is_empty());
+        assert!(parse_database_rows("\n").unwrap().is_empty());
     }
 
     #[test]

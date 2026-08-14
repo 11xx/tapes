@@ -9,8 +9,8 @@
 pub const GUIDE: &str = r#"tapes — read and export coding-agent sessions across harnesses.
 
 A session is a recording, and each harness keeps its own in a private store:
-claude and codex as JSONL files, opencode behind an HTTP API, pi as an
-append-only tree. tapes finds one, normalizes it into a single model, and
+claude and codex as JSONL files, opencode behind its stable database or beta
+API, pi as an append-only tree. tapes finds one, normalizes it into a single model, and
 hands it back. It never writes to a harness store, so no command here can
 disturb a live session.
 

@@ -191,9 +191,9 @@ Notes:
 
 Current `opencode` releases expose the v1 session projection through the
 read-only `opencode db --format tsv` command. `tapes` uses SELECTs against the
-`session`, `message`, and `part` tables for the default `opencode` executable;
-the bounded message and part reads are normalized to the same model as the v2
-API path.
+`session`, `message`, and `part` tables for the stable executable, and the API
+path for `opencode2`. When both commands are installed, both stores are read
+and their sessions are merged under the `opencode` harness.
 
 ## 6. Live HTTP API (legacy reference)
 
@@ -210,8 +210,9 @@ Auth: HTTP basic, credentials from `opencode2 pair` (URL/username/password).
 Known hazard: `opencode2 api …` truncates large payloads on stdout (~196 KB),
 so scripted consumers should call the HTTP endpoints directly with `curl`.
 The `opencode2` compatibility path calls the API and never opens the SQLite
-file. The current CLI path uses its own read-only database query command, so
-the beta executable is supported but not required.
+file. The stable executable uses its own read-only database query command;
+when both commands are installed, each path remains available so sessions
+from either store can be resolved.
 
 The session-list and session-info responses are the normalized metadata source
 for `tapes`. A title-less OpenCode session therefore keeps both `title` and

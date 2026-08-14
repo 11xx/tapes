@@ -87,12 +87,17 @@ pub trait Backend {
 }
 
 pub fn backends() -> Vec<Box<dyn Backend>> {
-    vec![
+    let mut backends: Vec<Box<dyn Backend>> = vec![
         Box::new(claude::ClaudeBackend::default()),
         Box::new(codex::CodexBackend::default()),
-        Box::new(opencode::OpenCodeBackend::default()),
-        Box::new(pi::PiBackend::default()),
-    ]
+    ];
+    backends.extend(
+        opencode::OpenCodeBackend::defaults()
+            .into_iter()
+            .map(|backend| Box::new(backend) as Box<dyn Backend>),
+    );
+    backends.push(Box::new(pi::PiBackend::default()));
+    backends
 }
 
 pub(crate) struct Jsonl {

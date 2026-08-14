@@ -1,3 +1,4 @@
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use anyhow::{anyhow, Result};
@@ -187,7 +188,8 @@ fn list_scoped(
         },
     };
     let mut found: Vec<(Session, usize)> = Vec::new();
-    let mut unavailable = Vec::new();
+    let mut available_harnesses = HashSet::new();
+    let mut unavailable_harnesses = Vec::new();
     let mut scanned = 0;
     let mut scan_truncated = false;
     for (index, backend) in backends
@@ -196,7 +198,7 @@ fn list_scoped(
         .filter(|(_, backend)| harness.is_none_or(|name| backend.harness() == name))
     {
         if !backend.available() {
-            unavailable.push(backend.harness().to_owned());
+            unavailable_harnesses.push(backend.harness());
             continue;
         }
         match backend.list(&query) {
@@ -205,17 +207,38 @@ fn list_scoped(
                 scanned: inspected,
                 scan_truncated: truncated,
             }) => {
+                available_harnesses.insert(backend.harness().to_owned());
                 scanned += inspected;
                 scan_truncated |= truncated;
                 found.extend(sessions.into_iter().map(|session| (session, index)));
             }
-            Err(_) => unavailable.push(backend.harness().to_owned()),
+            Err(_) => unavailable_harnesses.push(backend.harness()),
         }
     }
     found.sort_by_key(|(session, _)| session.last_activity_at);
     found.reverse();
 
-    let (sessions, origins) = found.into_iter().unzip();
+    // A harness may have more than one installed store, such as stable
+    // OpenCode and opencode2. Keep the public limit per harness, not per store.
+    let mut returned = HashMap::<String, usize>::new();
+    let (sessions, origins) = found
+        .into_iter()
+        .filter_map(|(session, origin)| {
+            let count = returned.entry(session.harness.clone()).or_default();
+            if *count >= limit {
+                return None;
+            }
+            *count += 1;
+            Some((session, origin))
+        })
+        .unzip();
+    let mut unavailable = Vec::new();
+    for harness in unavailable_harnesses {
+        if available_harnesses.contains(harness) || unavailable.iter().any(|name| name == harness) {
+            continue;
+        }
+        unavailable.push(harness.to_owned());
+    }
     Ok(Listed {
         sessions,
         origins,

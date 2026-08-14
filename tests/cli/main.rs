@@ -181,7 +181,11 @@ impl Drop for OpenCodeAlias {
 }
 
 fn titleless_opencode_program(root: &Path) -> OpenCodeAlias {
-    let program = root.join("opencode2");
+    opencode_program(root, "opencode2")
+}
+
+fn opencode_program(root: &Path, name: &str) -> OpenCodeAlias {
+    let program = root.join(name);
     let fixture =
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/opencode/opencode2");
     std::os::unix::fs::symlink(fixture, &program).unwrap();
@@ -722,4 +726,30 @@ fn opencode_titleless_cli_keeps_metadata_absent_without_message_title_derivation
         !alias_path.exists(),
         "titleless OpenCode alias was not removed"
     );
+}
+
+#[test]
+fn opencode2_session_resolves_when_stable_cli_is_also_installed() {
+    let root = TemporaryDirectory::new(std::env::temp_dir().join(format!(
+        "tapes-cli-opencode2-with-stable-{}",
+        std::process::id()
+    )));
+    let _stable = opencode_program(root.path(), "opencode");
+    let _beta = opencode_program(root.path(), "opencode2");
+    let id = "ses_000000fixtureSharedSession";
+
+    let output = tapes()
+        .args(["show", id, "--json"])
+        .env("HOME", root.path().join("home"))
+        .env("PATH", root.path())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["session"]["id"], id);
+    assert_eq!(value["turns"][0]["text"], "Inspect the fixture.");
 }
