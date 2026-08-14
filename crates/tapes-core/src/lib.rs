@@ -215,6 +215,13 @@ fn list_scoped(
             Err(_) => unavailable_harnesses.push(backend.harness()),
         }
     }
+    // Stable OpenCode and opencode2 can expose the same global session id from
+    // different projections. The first backend wins, preserving one session
+    // row and its transcript origin instead of inventing ambiguity.
+    let mut opencode_ids = HashSet::new();
+    found.retain(|(session, origin)| {
+        backends[*origin].harness() != "opencode" || opencode_ids.insert(session.id.clone())
+    });
     found.sort_by_key(|(session, _)| session.last_activity_at);
     found.reverse();
 
@@ -334,6 +341,13 @@ pub fn resolve_session(
             Err(error) => failures.push((backend.harness().to_owned(), format!("{error:#}"))),
         }
     }
+    if located.len() > 1
+        && located
+            .iter()
+            .all(|resolved| backends[resolved.backend_index].harness() == "opencode")
+    {
+        return Ok(located.remove(0));
+    }
     match located.len() {
         1 => return Ok(located.pop().expect("one match is present")),
         0 => {}
@@ -380,6 +394,12 @@ pub fn resolve_session(
                 }),
         );
     }
+
+    let mut opencode_ids = HashSet::new();
+    matches.retain(|resolved| {
+        backends[resolved.backend_index].harness() != "opencode"
+            || opencode_ids.insert(resolved.session.id.clone())
+    });
 
     let exact = matches
         .iter()

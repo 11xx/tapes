@@ -197,6 +197,24 @@ fn show_reuses_resolved_opencode_session() {
 }
 
 #[test]
+fn duplicate_opencode_projections_are_not_ambiguous() {
+    let first = opencode_counting_fixture_program();
+    let second = opencode_counting_fixture_program();
+    let id = "ses_000000fixtureSharedSession";
+    let backends: Vec<Box<dyn Backend>> = vec![
+        Box::new(OpenCodeBackend::new(first.path())),
+        Box::new(OpenCodeBackend::new(second.path())),
+    ];
+
+    let resolved = resolve_session(&backends, id).unwrap();
+    assert_eq!(resolved.backend_index, 0);
+
+    let listing = list_with_backends(&backends, Some("opencode"), None, 10).unwrap();
+    assert_eq!(listing.sessions.len(), 1);
+    assert_eq!(listing.sessions[0].id, id);
+}
+
+#[test]
 fn titleless_opencode_metadata_stays_titleless_through_message_reads() {
     let program = opencode_titleless_fixture_program();
     let alias_path = program.path().to_owned();

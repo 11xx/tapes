@@ -194,6 +194,8 @@ read-only `opencode db --format tsv` command. `tapes` uses SELECTs against the
 `session`, `message`, and `part` tables for the stable executable, and the API
 path for `opencode2`. When both commands are installed, both stores are read
 and their sessions are merged under the `opencode` harness.
+If both projections contain the same session id, the stable executable's
+projection is retained rather than reporting the shared record as ambiguous.
 
 ## 6. Live HTTP API (legacy reference)
 
