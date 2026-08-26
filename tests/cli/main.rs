@@ -753,3 +753,89 @@ fn opencode2_session_resolves_when_stable_cli_is_also_installed() {
     assert_eq!(value["session"]["id"], id);
     assert_eq!(value["turns"][0]["text"], "Inspect the fixture.");
 }
+
+#[test]
+fn opencode_listing_is_the_deduplicated_union_of_database_and_api_sessions() {
+    let root = TemporaryDirectory::new(std::env::temp_dir().join(format!(
+        "tapes-cli-opencode-composition-{}",
+        std::process::id()
+    )));
+    let _stable = opencode_program(root.path(), "opencode");
+    let _beta = opencode_program(root.path(), "opencode2");
+
+    let output = tapes()
+        .args(["list", "--harness", "opencode", "--global", "--json"])
+        .env("HOME", root.path().join("home"))
+        .env("PATH", root.path())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let mut ids = value["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|session| session["id"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    ids.sort_unstable();
+    assert_eq!(
+        ids,
+        vec![
+            "ses_000000fixtureSharedSession",
+            "ses_api_only_fixture",
+            "ses_database_only_fixture"
+        ]
+    );
+    assert_eq!(
+        value["sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|session| session["id"] == "ses_000000fixtureSharedSession")
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn opencode_database_transcripts_preserve_normalized_turn_roles_and_text() {
+    let root = TemporaryDirectory::new(std::env::temp_dir().join(format!(
+        "tapes-cli-opencode-database-transcript-{}",
+        std::process::id()
+    )));
+    let _stable = opencode_program(root.path(), "opencode");
+    let _beta = opencode_program(root.path(), "opencode2");
+    let id = "ses_database_only_fixture";
+
+    let output = tapes()
+        .args(["show", id, "--json"])
+        .env("HOME", root.path().join("home"))
+        .env("PATH", root.path())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["session"]["id"], id);
+    let turns = value["turns"].as_array().unwrap();
+    assert_eq!(turns.len(), 4);
+    assert_eq!(turns[0]["role"], "user");
+    assert_eq!(turns[0]["text"], "Inspect the database fixture.");
+    assert_eq!(turns[1]["role"], "reasoning");
+    assert_eq!(turns[1]["text"], "Reason through the database projection.");
+    assert_eq!(turns[2]["role"], "tool");
+    let tool_text = turns[2]["text"].as_str().unwrap();
+    assert!(tool_text.contains("\"tool\":\"read\""), "{tool_text}");
+    assert!(tool_text.contains("Database fixture read."), "{tool_text}");
+    assert_eq!(turns[3]["role"], "assistant");
+    assert_eq!(turns[3]["text"], "Database-backed answer.");
+}

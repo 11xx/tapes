@@ -26,6 +26,7 @@ case $invoked in
   *opencode-titleless*) name=opencode2-titleless ;;
 esac
 path=${4:-}
+query=${4:-}
 
 case $name in
   opencode2)
@@ -67,7 +68,59 @@ if [ "$mode" = counting ]; then
   printf '%s\n' "$path" >> "${invoked}.calls"
 fi
 
+database_rows() {
+  printf '%s\n' row
+  /bin/cat "$fixture_dir/$1"
+}
+
 if [ "$mode" = database ]; then
+  case "$query" in
+    *"FROM session ORDER BY time_updated DESC LIMIT "*)
+      database_rows database-sessions.json
+      ;;
+    *"FROM session WHERE id = "*)
+      case "$query" in
+        *"ses_000000fixtureSharedSession"*)
+          database_rows database-locate-shared.json
+          ;;
+        *"ses_database_only_fixture"*)
+          database_rows database-locate-database-only.json
+          ;;
+        *)
+          exit 0
+          ;;
+      esac
+      ;;
+    *"FROM message WHERE session_id = "*)
+      case "$query" in
+        *"ses_000000fixtureSharedSession"*)
+          database_rows database-messages-shared.json
+          ;;
+        *"ses_database_only_fixture"*)
+          database_rows database-messages-database-only.json
+          ;;
+        *)
+          exit 0
+          ;;
+      esac
+      ;;
+    *"FROM part WHERE session_id = "*)
+      case "$query" in
+        *"ses_000000fixtureSharedSession"*)
+          database_rows database-parts-shared.json
+          ;;
+        *"ses_database_only_fixture"*)
+          database_rows database-parts-database-only.json
+          ;;
+        *)
+          exit 0
+          ;;
+      esac
+      ;;
+    *)
+      exit 1
+      ;;
+  esac
   exit 0
 fi
 
@@ -89,7 +142,26 @@ case $path in
       exit) exit 7 ;;
       malformed) printf '%s\n' '{"data":{"nope":1}}' ;;
       absent) printf '%s\n' '{"data":null}' ;;
-      *) /bin/cat "$fixture_dir/$session" ;;
+      *)
+        case "$name" in
+          opencode2-titleless*)
+            /bin/cat "$fixture_dir/$session"
+            ;;
+          *)
+            case "$path" in
+              /api/session/ses_000000fixtureSharedSession)
+                /bin/cat "$fixture_dir/session.json"
+                ;;
+              /api/session/ses_api_only_fixture)
+                /bin/cat "$fixture_dir/session-api-only.json"
+                ;;
+              *)
+                printf '%s\n' '{"data":null}'
+                ;;
+            esac
+            ;;
+        esac
+        ;;
     esac
     ;;
   *)
