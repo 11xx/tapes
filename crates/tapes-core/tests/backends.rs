@@ -210,8 +210,16 @@ fn duplicate_opencode_projections_are_not_ambiguous() {
     assert_eq!(resolved.backend_index, 0);
 
     let listing = list_with_backends(&backends, Some("opencode"), None, 10).unwrap();
-    assert_eq!(listing.sessions.len(), 1);
-    assert_eq!(listing.sessions[0].id, id);
+    let listed = listing
+        .sessions
+        .iter()
+        .map(|session| session.id.clone())
+        .collect::<Vec<_>>();
+    assert!(listed.iter().any(|session| session == id));
+    let mut distinct = listed.clone();
+    distinct.sort();
+    distinct.dedup();
+    assert_eq!(distinct.len(), listed.len(), "{listed:?}");
 }
 
 #[test]

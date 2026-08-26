@@ -1,0 +1,1 @@
+{"id":"ses_database_only_fixture","title":"Database-only fixture session","directory":"/fixtures/database-project","time_created":1784663100000,"time_updated":1784663190000,"model":"{\"id\":\"fixture-db-model\",\"variant\":\"balanced\"}","cost":0.75,"tokens_input":240,"tokens_output":80,"tokens_reasoning":30,"tokens_cache_read":100,"tokens_cache_write":0}
