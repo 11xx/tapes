@@ -72,7 +72,10 @@ struct SelectionArgs {
         conflicts_with_all = ["latest", "exclude", "harness", "here", "project", "global"]
     )]
     session: Option<String>,
-    /// Take the most recent session in scope instead of naming one.
+    /// Take the most recent session in scope instead of naming one. A
+    /// caller asking from inside a live session is usually itself the most
+    /// recent one in its own project, so reaching an older session takes
+    /// `--exclude <own-id>`.
     #[arg(long)]
     latest: bool,
     /// Pass over this session when taking the latest. Repeatable. An agent
@@ -174,12 +177,13 @@ fn dispatch(cli: Cli) -> Result<()> {
             tail,
             json,
         } => {
+            let by_latest = selection.latest;
             let mut transcript = tapes_core::show(selection.selection(), tail)?;
             liveness::annotate(std::slice::from_mut(&mut transcript.session));
             if json {
                 println!("{}", serde_json::to_string(&transcript)?);
             } else {
-                print_transcript(&transcript);
+                print_transcript(&transcript, by_latest);
             }
         }
         Command::Export { selection, bundle } => {
@@ -229,7 +233,8 @@ fn live_label(session: &Session) -> &'static str {
 fn print_availability_note(result: &tapes_core::SessionList) {
     if result.scan_truncated {
         println!(
-            "The search stopped early after {} candidates; older sessions were not inspected.",
+            "The search stopped early after {} candidates; older sessions were not inspected. \
+             Raise --limit to widen the scan, or `tapes export` a session once it is found.",
             result.scanned
         );
     }
@@ -260,16 +265,18 @@ fn human_bytes(bytes: u64) -> String {
     }
 }
 
-fn print_transcript(transcript: &Transcript) {
-    print!("{}", render_transcript(transcript));
+fn print_transcript(transcript: &Transcript, by_latest: bool) {
+    print!("{}", render_transcript(transcript, by_latest));
 }
 
 /// The human render carries the same two partiality signals the JSON does.
 /// `--tail` is the recommended first probe, so a window that does not say it
-/// is one would be read as the whole session.
-fn render_transcript(transcript: &Transcript) -> String {
+/// is one would be read as the whole session. A session reached by `--latest`
+/// names itself, because the caller did not name it and may have been handed
+/// its own session.
+fn render_transcript(transcript: &Transcript, by_latest: bool) -> String {
     let mut out = String::new();
-    if transcript.session.live.is_some() {
+    if transcript.session.live.is_some() || by_latest {
         out.push_str(&format!(
             "# {} {}{}\n",
             transcript.session.harness,
@@ -294,8 +301,17 @@ fn render_transcript(transcript: &Transcript) -> String {
             out.push_str(&format!("[{role}]\n{}\n", turn.text));
         }
     }
+    if by_latest {
+        out.push_str(&format!(
+            "Note: --latest picked the newest session in scope. Pass --exclude {} to reach the one before it.\n",
+            transcript.session.id
+        ));
+    }
     if transcript.truncated {
-        out.push_str("Note: Truncated — earlier turns are not shown.\n");
+        out.push_str(
+            "Note: Truncated — earlier turns are not shown. Use --tail N for a larger window, \
+             or `tapes export` for the whole session.\n",
+        );
     }
     for note in &transcript.notes {
         out.push_str(&format!("Note: {note}\n"));
@@ -357,13 +373,28 @@ mod tests {
 
     #[test]
     fn the_human_render_says_when_it_is_a_window() {
-        let windowed = render_transcript(&transcript(true));
+        let windowed = render_transcript(&transcript(true), false);
         assert!(windowed.contains("Truncated"), "{windowed}");
+        assert!(windowed.contains("--tail N"), "{windowed}");
+        assert!(windowed.contains("tapes export"), "{windowed}");
         assert!(windowed.contains("Skipped 1 unparseable line."));
 
-        let whole = render_transcript(&transcript(false));
+        let whole = render_transcript(&transcript(false), false);
         assert!(!whole.contains("Truncated"), "{whole}");
         assert!(whole.contains("Skipped 1 unparseable line."));
         assert!(whole.starts_with("[user]"), "{whole}");
+    }
+
+    /// A caller that did not name a session is told which one it got and how
+    /// to step past it, since the newest session in a project is usually the
+    /// caller itself.
+    #[test]
+    fn latest_names_the_session_it_picked_and_how_to_skip_it() {
+        let picked = render_transcript(&transcript(false), true);
+        assert!(picked.starts_with("# claude s1"), "{picked}");
+        assert!(picked.contains("--exclude s1"), "{picked}");
+
+        let named = render_transcript(&transcript(false), false);
+        assert!(!named.contains("--exclude"), "{named}");
     }
 }
