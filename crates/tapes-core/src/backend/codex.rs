@@ -4,8 +4,9 @@ use anyhow::{anyhow, Result};
 use serde_json::Value;
 
 use super::{
-    head_directory, home_path, jsonl_files, list_files, read_jsonl, session_file, time_range,
-    timestamp, trailing_record, transcript, Backend, Jsonl, Listing, Query,
+    head_directory, home_path, jsonl_files, list_files, list_files_with_search, read_jsonl,
+    session_file, time_range, timestamp, trailing_record, transcript, Backend, Jsonl, Listing,
+    ParsedFile, Query,
 };
 use crate::model::{Model, Role, Session, TrailingRecord, Transcript, Turn};
 
@@ -81,6 +82,7 @@ impl CodexBackend {
             model,
             title: None,
             derived_title: None,
+            derived_title_truncated: None,
             directory,
             started_at,
             last_activity_at,
@@ -126,6 +128,29 @@ impl Backend for CodexBackend {
             query,
             |path| head_directory(path, codex_cwd),
             |path| self.parse(path).ok().map(|(session, _, _)| session),
+        );
+        listing
+            .sessions
+            .sort_by_key(|session| session.last_activity_at);
+        listing.sessions.reverse();
+        Ok(listing)
+    }
+
+    fn list_with_search(&self, query: &Query, needle: &str, tail: usize) -> Result<Listing> {
+        let Some(root) = self.root.as_deref() else {
+            return Ok(Listing::default());
+        };
+        let mut listing = list_files_with_search(
+            jsonl_files(root),
+            query,
+            needle,
+            tail,
+            |path| head_directory(path, codex_cwd),
+            |path| {
+                self.parse(path)
+                    .ok()
+                    .map(|(session, turns, _)| ParsedFile { session, turns })
+            },
         );
         listing
             .sessions

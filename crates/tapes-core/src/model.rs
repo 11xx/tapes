@@ -19,6 +19,11 @@ pub struct Session {
     /// harness did not record a title. It never replaces `title`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub derived_title: Option<String>,
+    /// Whether `derived_title` was shortened to the display bound. Present
+    /// alongside a derived title so JSON consumers can distinguish a complete
+    /// hint from one whose trailing text was omitted.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub derived_title_truncated: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub directory: Option<PathBuf>,
     pub started_at: DateTime<Utc>,
@@ -105,10 +110,14 @@ impl Session {
     /// Preserve recorded title absence while adding a bounded display hint.
     pub fn with_derived_title(mut self, turns: &[Turn]) -> Self {
         if self.title.is_none() {
-            self.derived_title = turns
+            if let Some((title, truncated)) = turns
                 .iter()
                 .filter(|turn| turn.role == Role::User)
-                .find_map(|turn| derive_title(&turn.text));
+                .find_map(|turn| derive_title_info(&turn.text))
+            {
+                self.derived_title = Some(title);
+                self.derived_title_truncated = Some(truncated);
+            }
         }
         self
     }
@@ -118,6 +127,10 @@ impl Session {
 /// Harness envelopes that are known to surround the user message are removed
 /// before whitespace is collapsed; unknown content remains untouched.
 pub fn derive_title(text: &str) -> Option<String> {
+    derive_title_info(text).map(|(title, _)| title)
+}
+
+fn derive_title_info(text: &str) -> Option<(String, bool)> {
     let mut cleaned = text.to_owned();
     strip_known_envelopes(&mut cleaned);
 
@@ -136,9 +149,9 @@ pub fn derive_title(text: &str) -> Option<String> {
             .take(DERIVED_TITLE_MAX_CHARS.saturating_sub(1))
             .collect::<String>();
         truncated.push('\u{2026}');
-        Some(truncated)
+        Some((truncated, true))
     } else {
-        Some(bounded)
+        Some((bounded, false))
     }
 }
 
@@ -320,6 +333,7 @@ mod tests {
             }),
             title: Some("Build the model".into()),
             derived_title: None,
+            derived_title_truncated: None,
             directory: Some("/work/tapes".into()),
             started_at: timestamp(1_700_000_000),
             last_activity_at: timestamp(1_700_000_100),
@@ -386,6 +400,7 @@ mod tests {
 
         assert!(!object.contains_key("title"));
         assert!(!object.contains_key("derived_title"));
+        assert!(!object.contains_key("derived_title_truncated"));
         assert!(!object.contains_key("model"));
         assert!(!object.contains_key("cost"));
     }
@@ -438,6 +453,51 @@ mod tests {
 
         assert_eq!(title.chars().count(), DERIVED_TITLE_MAX_CHARS);
         assert!(title.ends_with('\u{2026}'));
+    }
+
+    #[test]
+    fn derived_title_json_exposes_whether_the_hint_was_truncated() {
+        let mut complete = session();
+        complete.title = None;
+        let complete = complete.with_derived_title(&[Turn {
+            role: Role::User,
+            text: "A short request".into(),
+            ts: None,
+        }]);
+        let complete_json = serde_json::to_value(complete).unwrap();
+        assert_eq!(complete_json["derived_title"], "A short request");
+        assert_eq!(complete_json["derived_title_truncated"], false);
+
+        let mut shortened = session();
+        shortened.title = None;
+        let shortened = shortened.with_derived_title(&[Turn {
+            role: Role::User,
+            text: "word ".repeat(DERIVED_TITLE_MAX_CHARS),
+            ts: None,
+        }]);
+        let shortened_json = serde_json::to_value(shortened).unwrap();
+        assert_eq!(shortened_json["derived_title_truncated"], true);
+        assert!(shortened_json["derived_title"]
+            .as_str()
+            .unwrap()
+            .ends_with('…'));
+    }
+
+    #[test]
+    fn a_literal_ellipsis_does_not_claim_truncation() {
+        let mut session = session();
+        session.title = None;
+        let session = session.with_derived_title(&[Turn {
+            role: Role::User,
+            text: "A complete request…".into(),
+            ts: None,
+        }]);
+
+        assert_eq!(
+            session.derived_title.as_deref(),
+            Some("A complete request…")
+        );
+        assert_eq!(session.derived_title_truncated, Some(false));
     }
 
     #[test]

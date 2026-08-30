@@ -41,6 +41,11 @@ normalized trailing-record kind stays the top-level `event_msg`. When one of
 these kinds is the final record after the newest rendered turn, the backend
 reports its kind and top-level timestamp as `trailing_record`.
 
+The normalized reader retains only a bounded 4 MiB tail for transcript reads.
+On a rollout whose model-bearing `turn_context` falls before that tail, the
+normalized `model` is absent even though the full file records the model; JSON
+preserves that absence rather than inventing a value.
+
 ## `response_item` payloads
 
 | `payload.type` | Normalized as |

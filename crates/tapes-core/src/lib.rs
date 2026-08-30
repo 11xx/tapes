@@ -14,6 +14,9 @@ pub mod model;
 pub mod scope;
 
 pub const LIST_SCHEMA: &str = "tapes-list/1";
+/// Number of normalized turns a `list --search` query inspects per session.
+/// Keeping this fixed makes the listing's cost predictable for callers.
+pub const LIST_SEARCH_TAIL: usize = 32;
 const DEFAULT_LIST_LIMIT: usize = 20;
 const RESOLVE_LIMIT: usize = 1_000;
 /// Candidates a scoped listing may inspect per harness before it reports that
@@ -39,6 +42,9 @@ pub struct SessionList {
     /// store is gone" and "one row in it is corrupt" are different facts and
     /// a reader that conflates them mis-states both.
     pub unreadable: Vec<String>,
+    /// Sessions for which a requested bounded content search could not be
+    /// answered. A read failure is not a non-match.
+    pub unsearched: Vec<String>,
     /// Candidate sessions inspected to produce this list, across every
     /// harness. A scoped listing reads more than it returns.
     pub scanned: usize,
@@ -146,14 +152,26 @@ pub fn list_with_filters(
     model: Option<&str>,
     directory: Option<&str>,
 ) -> Result<SessionList> {
+    list_with_filters_and_search(harness, within, limit, model, directory, None)
+}
+
+pub fn list_with_filters_and_search(
+    harness: Option<&str>,
+    within: Where,
+    limit: Option<usize>,
+    model: Option<&str>,
+    directory: Option<&str>,
+    search: Option<&str>,
+) -> Result<SessionList> {
     let scope = within.resolve()?;
-    list_with_backends_filtered(
+    list_with_backends_filtered_and_search(
         &backend::backends(),
         harness,
         scope.as_ref(),
         limit.unwrap_or(DEFAULT_LIST_LIMIT),
         model,
         directory,
+        search,
     )
 }
 
@@ -163,7 +181,7 @@ pub fn list_with_backends(
     scope: Option<&Scope>,
     limit: usize,
 ) -> Result<SessionList> {
-    list_with_backends_filtered(backends, harness, scope, limit, None, None)
+    list_with_backends_filtered_and_search(backends, harness, scope, limit, None, None, None)
 }
 
 pub fn list_with_backends_filtered(
@@ -174,12 +192,25 @@ pub fn list_with_backends_filtered(
     model: Option<&str>,
     directory: Option<&str>,
 ) -> Result<SessionList> {
-    let listed = list_scoped(backends, harness, scope, limit, model, directory)?;
+    list_with_backends_filtered_and_search(backends, harness, scope, limit, model, directory, None)
+}
+
+pub fn list_with_backends_filtered_and_search(
+    backends: &[Box<dyn Backend>],
+    harness: Option<&str>,
+    scope: Option<&Scope>,
+    limit: usize,
+    model: Option<&str>,
+    directory: Option<&str>,
+    search: Option<&str>,
+) -> Result<SessionList> {
+    let listed = list_scoped(backends, harness, scope, limit, model, directory, search)?;
     Ok(SessionList {
         schema: LIST_SCHEMA,
         sessions: listed.sessions,
         unavailable: listed.unavailable,
         unreadable: listed.unreadable,
+        unsearched: listed.unsearched,
         scanned: listed.scanned,
         scan_truncated: listed.scan_truncated,
     })
@@ -193,6 +224,7 @@ struct Listed {
     origins: Vec<usize>,
     unavailable: Vec<String>,
     unreadable: Vec<String>,
+    unsearched: Vec<String>,
     scanned: usize,
     scan_truncated: bool,
 }
@@ -204,6 +236,7 @@ fn list_scoped(
     limit: usize,
     model: Option<&str>,
     directory: Option<&str>,
+    search: Option<&str>,
 ) -> Result<Listed> {
     if let Some(harness) = harness {
         if !backends.iter().any(|backend| backend.harness() == harness) {
@@ -211,9 +244,17 @@ fn list_scoped(
         }
     }
 
+    // Content search is a filter, so the backend must inspect candidates until
+    // it has found the requested result set rather than spending the limit on
+    // sessions whose recent turns do not match.
+    let candidate_limit = if search.is_some() && limit > 0 {
+        usize::MAX
+    } else {
+        limit
+    };
     let query = Query::scoped_with_filters(
         scope,
-        limit,
+        candidate_limit,
         if scope.is_some() {
             SCAN_CEILING
         } else {
@@ -226,6 +267,7 @@ fn list_scoped(
     let mut available_harnesses = HashSet::new();
     let mut unavailable_harnesses = Vec::new();
     let mut unreadable_sessions = Vec::new();
+    let mut unsearched_sessions = Vec::new();
     let mut scanned = 0;
     let mut scan_truncated = false;
     for (index, backend) in backends
@@ -237,15 +279,22 @@ fn list_scoped(
             unavailable_harnesses.push(backend.harness());
             continue;
         }
-        match backend.list(&query) {
+        let listing = if let Some(needle) = search {
+            backend.list_with_search(&query, needle, LIST_SEARCH_TAIL)
+        } else {
+            backend.list(&query)
+        };
+        match listing {
             Ok(Listing {
                 sessions,
                 unavailable,
+                unsearched,
                 scanned: inspected,
                 scan_truncated: truncated,
             }) => {
                 available_harnesses.insert(backend.harness().to_owned());
                 unreadable_sessions.extend(unavailable);
+                unsearched_sessions.extend(unsearched);
                 scanned += inspected;
                 scan_truncated |= truncated;
                 found.extend(sessions.into_iter().map(|session| (session, index)));
@@ -289,6 +338,7 @@ fn list_scoped(
         origins,
         unavailable,
         unreadable: unreadable_sessions,
+        unsearched: unsearched_sessions,
         scanned,
         scan_truncated,
     })
@@ -330,6 +380,7 @@ pub fn latest_with_backends(
         harness,
         scope,
         exclude.len() + LATEST_WINDOW,
+        None,
         None,
         None,
     )?;

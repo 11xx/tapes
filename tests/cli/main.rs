@@ -271,6 +271,8 @@ fn list_help_exits_successfully() {
     assert!(help.contains("full model identity"), "{help}");
     assert!(help.contains("id (variant)"), "{help}");
     assert!(help.contains("directory path"), "{help}");
+    assert!(help.contains("last 32 normalized turns"), "{help}");
+    assert!(help.contains("unsearched"), "{help}");
 }
 
 #[test]
@@ -482,6 +484,52 @@ fn list_filters_metadata_case_insensitively_and_before_limit() {
         "10000000-0000-0000-0000-000000000002"
     );
     assert_eq!(limited_value["scanned"], 3);
+
+    fs::remove_dir_all(codex_home).unwrap();
+}
+
+#[test]
+fn list_searches_recent_fixture_turns_before_the_limit_and_survives_a_bad_line() {
+    let (codex_home, home) = filter_fixture_store("search");
+    let mut command = tapes();
+    command.args([
+        "list",
+        "--global",
+        "--harness",
+        "codex",
+        "--search",
+        "VALID",
+        "--limit",
+        "1",
+        "--json",
+    ]);
+    with_fixture_env(
+        &mut command,
+        &codex_home,
+        &home,
+        Path::new("/definitely/missing"),
+    );
+    let output = command.output().unwrap();
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("last 32 normalized turns"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        value["sessions"][0]["id"],
+        "10000000-0000-0000-0000-000000000002"
+    );
+    assert_eq!(value["sessions"].as_array().unwrap().len(), 1);
+    assert_eq!(value["scanned"], 4);
+    assert_eq!(value["scan_truncated"], false);
+    assert!(value["unsearched"].as_array().unwrap().is_empty());
 
     fs::remove_dir_all(codex_home).unwrap();
 }
@@ -860,6 +908,7 @@ fn human_renderers_show_derived_titles_and_whole_second_timestamps() {
     let session = &list_value["sessions"][0];
     assert!(session.get("title").is_none());
     assert_eq!(session["derived_title"], "Inspect the fixture.");
+    assert_eq!(session["derived_title_truncated"], false);
     assert_eq!(
         session["last_activity_at"],
         "2026-01-01T10:00:06.123456789Z"
@@ -891,8 +940,73 @@ fn human_renderers_show_derived_titles_and_whole_second_timestamps() {
         show_value["session"]["derived_title"],
         "Inspect the fixture."
     );
+    assert_eq!(show_value["session"]["derived_title_truncated"], false);
 
     std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn list_json_marks_derived_title_truncation_without_changing_the_title_text() {
+    let root = std::env::temp_dir().join(format!(
+        "tapes-cli-derived-title-marker-{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&root);
+    let sessions = root.join("sessions/2026/01/01");
+    fs::create_dir_all(&sessions).unwrap();
+    fs::write(
+        sessions.join("rollout-2026-01-01T10-00-00-00000000-0000-0000-0000-000000000001.jsonl"),
+        CODEX_SESSION_ONE,
+    )
+    .unwrap();
+    let long_id = "00000000-0000-0000-0000-0000000000bb";
+    let long_request = "word ".repeat(96);
+    fs::write(
+        sessions.join(format!(
+            "rollout-2026-01-01T09-00-00-{long_id}.jsonl"
+        )),
+        format!(
+            concat!(
+                r#"{{"timestamp":"2026-01-01T09:00:00Z","type":"session_meta","payload":{{"id":"{long_id}","cwd":"/fixtures/project"}}}}"#,
+                "\n",
+                r#"{{"timestamp":"2026-01-01T09:00:01Z","type":"turn_context","payload":{{"cwd":"/fixtures/project","model":"gpt-fixture","effort":"low"}}}}"#,
+                "\n",
+                r#"{{"timestamp":"2026-01-01T09:00:02Z","type":"response_item","payload":{{"type":"message","role":"user","content":[{{"type":"input_text","text":"{long_request}"}}]}}}}"#,
+                "\n"
+            ),
+            long_id = long_id,
+            long_request = long_request
+        ),
+    )
+    .unwrap();
+
+    let mut command = tapes();
+    command.args(["list", "--global", "--harness", "codex", "--json"]);
+    command
+        .env("HOME", root.join("home"))
+        .env("CODEX_HOME", &root)
+        .env("PATH", "/definitely/missing");
+    let output = command.output().unwrap();
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let complete = session(&value, "00000000-0000-0000-0000-000000000001");
+    assert_eq!(complete["derived_title"], "Inspect the fixture.");
+    assert_eq!(complete["derived_title_truncated"], false);
+
+    let shortened = session(&value, long_id);
+    assert_eq!(shortened["derived_title_truncated"], true);
+    assert_eq!(
+        shortened["derived_title"].as_str().unwrap().chars().count(),
+        96
+    );
+    assert!(shortened["derived_title"].as_str().unwrap().ends_with('…'));
+
+    fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
@@ -925,6 +1039,7 @@ fn opencode_titleless_cli_keeps_metadata_absent_without_message_title_derivation
     assert_eq!(listed["id"], id);
     assert!(listed.get("title").is_none());
     assert!(listed.get("derived_title").is_none());
+    assert!(listed.get("derived_title_truncated").is_none());
 
     let show = command(&["show", id, "--json"]);
     assert!(
@@ -935,6 +1050,9 @@ fn opencode_titleless_cli_keeps_metadata_absent_without_message_title_derivation
     let show_value: serde_json::Value = serde_json::from_slice(&show.stdout).unwrap();
     assert!(show_value["session"].get("title").is_none());
     assert!(show_value["session"].get("derived_title").is_none());
+    assert!(show_value["session"]
+        .get("derived_title_truncated")
+        .is_none());
 
     let bundle = root.path().join("bundle");
     let bundle_argument = bundle.to_str().unwrap().to_owned();

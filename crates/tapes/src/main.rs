@@ -128,6 +128,13 @@ enum Command {
         /// Sessions without a directory never match.
         #[arg(long, value_name = "SUBSTRING")]
         directory: Option<String>,
+        /// Match case-insensitively against the last 32 normalized turns in
+        /// each candidate session. The fixed tail keeps listing bounded; a
+        /// match outside it is not considered. Search is applied before
+        /// --limit, and a failed bounded read is reported as unsearched. A
+        /// short preflight notice is written to stderr before scanning.
+        #[arg(long, value_name = "SUBSTRING")]
+        search: Option<String>,
         /// Render results as JSON. Matching sessions may include an optional
         /// `live` field supplied by harness-status.
         #[arg(long)]
@@ -174,14 +181,21 @@ fn dispatch(cli: Cli) -> Result<()> {
             limit,
             model,
             directory,
+            search,
             json,
         } => {
-            let mut result = tapes_core::list_with_filters(
+            if search.is_some() {
+                eprintln!(
+                    "Searching the last 32 normalized turns of each candidate session before applying --limit."
+                );
+            }
+            let mut result = tapes_core::list_with_filters_and_search(
                 harness.as_deref(),
                 scope.within(),
                 limit,
                 model.as_deref(),
                 directory.as_deref(),
+                search.as_deref(),
             )?;
             liveness::annotate(&mut result.sessions);
             if json {
@@ -257,6 +271,9 @@ fn print_availability_note(result: &tapes_core::SessionList) {
     }
     for session in &result.unreadable {
         println!("Unreadable: {session}");
+    }
+    for session in &result.unsearched {
+        println!("Unsearched: {session}");
     }
     if result.unavailable.is_empty() {
         return;
@@ -415,6 +432,7 @@ mod tests {
                 model: None,
                 title: None,
                 derived_title: None,
+                derived_title_truncated: None,
                 directory: None,
                 started_at: Utc::now(),
                 last_activity_at: Utc::now(),

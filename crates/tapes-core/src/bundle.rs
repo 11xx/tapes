@@ -272,6 +272,7 @@ mod tests {
                 }),
                 title: Some("A rescue".into()),
                 derived_title: None,
+                derived_title_truncated: None,
                 directory: None,
                 started_at: ts,
                 last_activity_at: ts,

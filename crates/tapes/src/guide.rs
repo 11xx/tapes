@@ -43,6 +43,7 @@ FIND IT
   tapes list                     Every available harness, newest first.
   tapes list --here              This project, across every worktree.
   tapes list --harness codex     One backend.
+  tapes list --search <text>     Recent content, across matching sessions.
 
   --limit bounds each harness and defaults to 20. The scope applies first, so
   a scoped listing cannot be emptied by a bound spent on other projects. An
@@ -56,11 +57,20 @@ FIND IT
   directory never matches. Both filters are applied before the per-harness
   limit and compose with --harness and the scope flags.
 
+  --search <text> matches case-insensitively against the last 32 normalized
+  turns in each candidate session. The fixed tail keeps a listing bounded, so
+  a non-match means only that those recent turns did not contain the text. It
+  is applied before the per-harness limit. A session whose bounded read fails
+  is omitted from sessions and named in unsearched instead of being treated as
+  a non-match; a preflight notice is written to stderr before scanning, and a
+  stopped candidate scan is still reported as scan_truncated.
+
   File-backed harnesses may show a bounded first-meaningful-user-turn hint
   prefixed with ~ when a harness recorded no title. JSON keeps that hint as
-  derived_title and leaves the recorded title absent. OpenCode's API-backed
-  listing does not fetch messages to invent titles, so title-less OpenCode
-  metadata stays absent in list, show, and export. Human timestamps use whole
+  derived_title and leaves the recorded title absent; derived_title_truncated
+  says whether the hint was shortened. OpenCode's API-backed
+  listing does not fetch messages merely to invent titles, so title-less OpenCode
+  title metadata stays absent in list, show, and export. Human timestamps use whole
   RFC 3339 seconds with Z; JSON keeps recorded precision.
 
   A session is named by its full id or an unambiguous prefix; an ambiguous
@@ -69,6 +79,10 @@ FIND IT
   listing. If one stored session row cannot be read, listing keeps every other
   session and reports that one as unreadable, with its id and the diagnostic —
   a separate fact from an unavailable harness, since the store itself was fine.
+  A content search that cannot read one candidate's bounded tail reports that
+  session separately in unsearched. A Codex row without model metadata can
+  mean its model-bearing turn_context was before the bounded file tail; JSON
+  leaves model absent rather than inventing one.
   Show and export still fail when the session they were given cannot be
   resolved.
 
