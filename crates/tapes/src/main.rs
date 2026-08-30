@@ -301,6 +301,16 @@ fn render_transcript(transcript: &Transcript, by_latest: bool) -> String {
             out.push_str(&format!("[{role}]\n{}\n", turn.text));
         }
     }
+    if let Some(newest) = transcript.turns.iter().rev().find_map(|turn| turn.ts) {
+        if transcript.session.last_activity_at > newest {
+            out.push_str(&format!(
+                "Note: The store records activity at {}, after the newest turn rendered here ({}). \
+                 What came later is a record `show` does not render as a turn.\n",
+                human_timestamp(transcript.session.last_activity_at),
+                human_timestamp(newest)
+            ));
+        }
+    }
     if by_latest {
         out.push_str(&format!(
             "Note: --latest picked the newest session in scope. Pass --exclude {} to reach the one before it.\n",
@@ -343,7 +353,7 @@ fn reset_sigpipe() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::Utc;
+    use chrono::{DateTime, Utc};
     use tapes_core::model::Turn;
 
     fn transcript(truncated: bool) -> Transcript {
@@ -383,6 +393,29 @@ mod tests {
         assert!(!whole.contains("Truncated"), "{whole}");
         assert!(whole.contains("Skipped 1 unparseable line."));
         assert!(whole.starts_with("[user]"), "{whole}");
+    }
+
+    /// `list` reads activity from the newest record in the store, `show`
+    /// renders only turns, and a session whose last record is harness state
+    /// leaves the two disagreeing. The render says so rather than leaving a
+    /// reader to open the raw store.
+    #[test]
+    fn a_stamp_past_the_newest_rendered_turn_is_named() {
+        let newest_turn = "2026-08-23T23:24:52Z".parse::<DateTime<Utc>>().unwrap();
+        let mut session = transcript(false);
+        session.turns[0].ts = Some(newest_turn);
+        session.session.last_activity_at = "2026-08-23T23:27:56Z".parse().unwrap();
+        let rendered = render_transcript(&session, false);
+        assert!(rendered.contains("does not render as a turn"), "{rendered}");
+        assert!(rendered.contains("23:27:56"), "{rendered}");
+        assert!(rendered.contains("23:24:52"), "{rendered}");
+
+        session.session.last_activity_at = newest_turn;
+        let agreeing = render_transcript(&session, false);
+        assert!(
+            !agreeing.contains("does not render as a turn"),
+            "{agreeing}"
+        );
     }
 
     /// A caller that did not name a session is told which one it got and how
