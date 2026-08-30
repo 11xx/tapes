@@ -130,12 +130,24 @@ impl Where<'_> {
 }
 
 pub fn list(harness: Option<&str>, within: Where, limit: Option<usize>) -> Result<SessionList> {
+    list_with_filters(harness, within, limit, None, None)
+}
+
+pub fn list_with_filters(
+    harness: Option<&str>,
+    within: Where,
+    limit: Option<usize>,
+    model: Option<&str>,
+    directory: Option<&str>,
+) -> Result<SessionList> {
     let scope = within.resolve()?;
-    list_with_backends(
+    list_with_backends_filtered(
         &backend::backends(),
         harness,
         scope.as_ref(),
         limit.unwrap_or(DEFAULT_LIST_LIMIT),
+        model,
+        directory,
     )
 }
 
@@ -145,7 +157,18 @@ pub fn list_with_backends(
     scope: Option<&Scope>,
     limit: usize,
 ) -> Result<SessionList> {
-    let listed = list_scoped(backends, harness, scope, limit)?;
+    list_with_backends_filtered(backends, harness, scope, limit, None, None)
+}
+
+pub fn list_with_backends_filtered(
+    backends: &[Box<dyn Backend>],
+    harness: Option<&str>,
+    scope: Option<&Scope>,
+    limit: usize,
+    model: Option<&str>,
+    directory: Option<&str>,
+) -> Result<SessionList> {
+    let listed = list_scoped(backends, harness, scope, limit, model, directory)?;
     Ok(SessionList {
         schema: LIST_SCHEMA,
         sessions: listed.sessions,
@@ -171,6 +194,8 @@ fn list_scoped(
     harness: Option<&str>,
     scope: Option<&Scope>,
     limit: usize,
+    model: Option<&str>,
+    directory: Option<&str>,
 ) -> Result<Listed> {
     if let Some(harness) = harness {
         if !backends.iter().any(|backend| backend.harness() == harness) {
@@ -178,15 +203,17 @@ fn list_scoped(
         }
     }
 
-    let query = Query {
+    let query = Query::scoped_with_filters(
         scope,
         limit,
-        ceiling: if scope.is_some() {
+        if scope.is_some() {
             SCAN_CEILING
         } else {
             usize::MAX
         },
-    };
+        model,
+        directory,
+    );
     let mut found: Vec<(Session, usize)> = Vec::new();
     let mut available_harnesses = HashSet::new();
     let mut unavailable_harnesses = Vec::new();
@@ -286,7 +313,14 @@ pub fn latest_with_backends(
     // and not the same as it: a transcript restored or touched after a newer
     // one sorts ahead of it. Taking a small window and choosing by recorded
     // activity costs a few extra parses and removes that skew.
-    let listed = list_scoped(backends, harness, scope, exclude.len() + LATEST_WINDOW)?;
+    let listed = list_scoped(
+        backends,
+        harness,
+        scope,
+        exclude.len() + LATEST_WINDOW,
+        None,
+        None,
+    )?;
     let scoped = if scope.is_some() {
         "in this project"
     } else {

@@ -35,9 +35,15 @@ when deriving it would require an extra message request; this keeps listing
 bounded and keeps show/export metadata consistent with listing metadata.
 
 `Model` contains the model identifier and an optional variant. The variant
-also carries an effort level when the harness records one. `Cost` contains a
-single USD value. `Tokens` can independently record input, output, reasoning,
-cache-read, and cache-write counts.
+also carries an effort level when the harness records one. Its identity is the
+identifier alone, or `id (variant)` when a variant exists; `list --model` uses
+that full identity for case-insensitive substring matching and does not match
+sessions whose model is absent. `list --directory` likewise performs a
+case-insensitive substring match against the recorded path and does not match
+sessions whose directory is absent. Both filters are applied before the
+per-harness listing bound. `Cost` contains a single USD value. `Tokens` can
+independently record input, output, reasoning, cache-read, and cache-write
+counts.
 
 `Turn` contains a role, text, and optional UTC timestamp. Roles are `user`,
 `assistant`, `tool`, and `reasoning`.

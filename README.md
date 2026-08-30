@@ -50,12 +50,18 @@ never fails a listing. Listing works with any subset installed.
 `list` merges sessions from every available harness and sorts them by last
 activity. `--limit` bounds each harness and defaults to 20, `--harness` selects
 one backend, and `--here` restricts the listing to the project holding the
-current directory. The scope applies before the bound, so a scoped listing
-cannot be emptied by a limit spent on other projects. Human output ends with an
-availability note when a backend cannot be read, and says so when a search
-stopped early. File-backed harnesses may show a bounded first-meaningful-user-
-turn hint prefixed with `~` when no recorded title exists; JSON keeps that hint
-in `derived_title` and leaves the recorded `title` absent. OpenCode's
+current directory. `--model <substring>` matches case-insensitively against the
+full model identity shown in the `MODEL` column (`id (variant)` when a variant
+exists); a session without a model never matches. `--directory <substring>`
+matches case-insensitively against the recorded directory path; a session
+without a directory never matches. Both filters are applied by the library
+before the per-harness bound, and compose with the harness and scope filters.
+The scope applies before the bound, so a scoped listing cannot be emptied by a
+limit spent on other projects. Human output ends with an availability note when
+a backend cannot be read, and says so when a search stopped early. File-backed
+harnesses may show a bounded first-meaningful-user-turn hint prefixed with `~`
+when no recorded title exists; JSON keeps that hint in `derived_title` and
+leaves the recorded `title` absent. OpenCode's
 API-backed listing does not fetch messages to invent titles, so a title-less
 OpenCode row keeps both title fields absent in list, show, and export metadata.
 JSON output is a `tapes-list/1` object containing `sessions`, `unavailable`,

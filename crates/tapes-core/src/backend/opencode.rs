@@ -264,32 +264,28 @@ impl Backend for OpenCodeBackend {
     }
 
     fn list(&self, query: &Query) -> Result<Listing> {
-        let Some(scope) = query.scope else {
-            let sessions = self.sessions(query.limit)?;
-            // The backend pages, and a caller asking for more than a page gets
-            // a page. That bound is reported rather than passed off as the
-            // whole store.
-            let scan_truncated = sessions.len() >= MAX_API_SESSIONS;
-            return Ok(Listing {
-                scanned: sessions.len(),
-                sessions,
-                scan_truncated,
-            });
+        // The backend pages globally and carries metadata for every session,
+        // so scope and metadata filters are applied to a full page rather
+        // than to the caller's limit. Otherwise matching sessions could fall
+        // off the end of a page spent on other projects or models.
+        let candidate_limit = if query.scope.is_some() || query.has_filters() {
+            MAX_API_SESSIONS
+        } else {
+            query.limit
         };
-        // The backend pages globally and carries each session's directory, so
-        // the scope is applied to a full page rather than to the caller's limit
-        // — otherwise a project's sessions could fall off the end of a page
-        // spent on other projects.
-        let page = self.sessions(MAX_API_SESSIONS)?;
+        let page = self.sessions(candidate_limit)?;
         let scanned = page.len();
         let sessions = page
             .into_iter()
             .filter(|session| {
-                session
-                    .directory
-                    .as_deref()
-                    .is_some_and(|directory| scope.contains(directory))
+                query.scope.is_none_or(|scope| {
+                    session
+                        .directory
+                        .as_deref()
+                        .is_some_and(|directory| scope.contains(directory))
+                })
             })
+            .filter(|session| query.matches(session))
             .take(query.limit)
             .collect();
         Ok(Listing {
