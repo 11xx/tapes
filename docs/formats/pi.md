@@ -42,6 +42,11 @@ needs and the normalized model has no field for it.
 | `thinking_level_change` | `thinkingLevel`, which the model carries as its variant |
 | `message` | the conversation, under `message.role` |
 
+`model_change` and `thinking_level_change` are timestamped state entries rather
+than turns. When either is the final entry on the active path after the newest
+rendered turn, the backend reports its kind and timestamp as
+`trailing_record`. The `session` header is not a trailing record.
+
 ## Message content
 
 `message.role` is `user`, `assistant`, or `toolResult` — the tool result is a

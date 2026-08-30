@@ -6,9 +6,9 @@ use serde_json::Value;
 
 use super::{
     head_directory, home_path, jsonl_files, list_files, read_jsonl, session_file, time_range,
-    timestamp, transcript, Backend, Jsonl, Listing, Query,
+    timestamp, trailing_record, transcript, Backend, Jsonl, Listing, Query,
 };
-use crate::model::{Model, Role, Session, Transcript, Turn};
+use crate::model::{Model, Role, Session, TrailingRecord, Transcript, Turn};
 
 #[derive(Clone, Debug)]
 pub struct PiBackend {
@@ -166,7 +166,7 @@ impl Backend for PiBackend {
             .ok_or_else(|| anyhow!("pi store is unavailable"))?;
         let path = session_file(root, &session.id)
             .ok_or_else(|| anyhow!("pi session {} is unavailable", session.id))?;
-        let (turns, read, abandoned) = read_transcript(&path)?;
+        let (turns, read, abandoned, trailing_record) = read_transcript(&path)?;
         let notes = (abandoned > 0)
             .then(|| {
                 if abandoned == 1 {
@@ -177,11 +177,18 @@ impl Backend for PiBackend {
             })
             .into_iter()
             .collect();
-        Ok(transcript(session.clone(), turns, tail, &read, notes))
+        Ok(transcript(
+            session.clone(),
+            turns,
+            tail,
+            &read,
+            trailing_record,
+            notes,
+        ))
     }
 }
 
-fn read_transcript(path: &Path) -> Result<(Vec<Turn>, Jsonl, usize)> {
+fn read_transcript(path: &Path) -> Result<(Vec<Turn>, Jsonl, usize, Option<TrailingRecord>)> {
     let read = read_jsonl(path)?;
     let entries = read
         .values
@@ -202,8 +209,13 @@ fn read_transcript(path: &Path) -> Result<(Vec<Turn>, Jsonl, usize)> {
         })
         .count();
     let turns = active.iter().flat_map(|value| parse_turns(value)).collect();
+    let trailing_record = trailing_record(
+        active.iter().copied(),
+        |value| !parse_turns(value).is_empty(),
+        pi_trailing_kind,
+    );
 
-    Ok((turns, read, abandoned))
+    Ok((turns, read, abandoned, trailing_record))
 }
 
 /// pi records the working directory once, on the `session` header line.
@@ -211,6 +223,14 @@ fn pi_cwd(value: &Value) -> Option<&str> {
     (value["type"] == "session")
         .then(|| value["cwd"].as_str())
         .flatten()
+}
+
+fn pi_trailing_kind(value: &Value) -> Option<&'static str> {
+    match value["type"].as_str()? {
+        "model_change" => Some("model_change"),
+        "thinking_level_change" => Some("thinking_level_change"),
+        _ => None,
+    }
 }
 
 fn active_path<'a>(entries: &[&'a Value]) -> Vec<&'a Value> {

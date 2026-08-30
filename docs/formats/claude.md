@@ -33,7 +33,7 @@ inside the transcript is the only authoritative answer.
 
 | Field | Type | Notes |
 |---|---|---|
-| `type` | string | `user`, `assistant`, `system`, `file-history-snapshot`, `attachment`, `last-prompt`, `ai-title`, `mode`, `queue-operation` |
+| `type` | string | `user`, `assistant`, `system`, `file-history-snapshot`, `attachment`, `last-prompt`, `ai-title`, `mode`, `permission-mode`, `atis-latch`, `queue-operation` |
 | `timestamp` | ISO 8601 | UTC; missing on metadata messages |
 | `sessionId` | UUID | Same on every message in a thread |
 | `cwd` | string | Captured working directory; same on every message |
@@ -149,6 +149,13 @@ Note: `trackedFileBackups` is a **dict keyed by file path**, not a list. The val
 metadata state carrying no conversation content, so they produce no turns.
 `ai-title` is the exception the backend does read: it is the only harness-
 supplied session title of the four.
+
+When the final records after the newest rendered turn are the verified
+metadata kinds `last-prompt`, `ai-title`, `mode`, `permission-mode`, or
+`atis-latch`, the backend reports that final kind as `trailing_record.kind`.
+These records have no top-level `timestamp` in the observed store, so
+`trailing_record.timestamp` remains absent rather than borrowing a timestamp
+from a neighboring turn.
 
 ## Subagent transcripts
 

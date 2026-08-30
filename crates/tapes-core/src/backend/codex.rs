@@ -5,9 +5,9 @@ use serde_json::Value;
 
 use super::{
     head_directory, home_path, jsonl_files, list_files, read_jsonl, session_file, time_range,
-    timestamp, transcript, Backend, Jsonl, Listing, Query,
+    timestamp, trailing_record, transcript, Backend, Jsonl, Listing, Query,
 };
-use crate::model::{Model, Role, Session, Transcript, Turn};
+use crate::model::{Model, Role, Session, TrailingRecord, Transcript, Turn};
 
 #[derive(Clone, Debug)]
 pub struct CodexBackend {
@@ -153,15 +153,27 @@ impl Backend for CodexBackend {
             .ok_or_else(|| anyhow!("codex store is unavailable"))?;
         let path = session_file(root, &session.id)
             .ok_or_else(|| anyhow!("codex session {} is unavailable", session.id))?;
-        let (turns, read) = read_transcript(&path)?;
-        Ok(transcript(session.clone(), turns, tail, &read, Vec::new()))
+        let (turns, read, trailing_record) = read_transcript(&path)?;
+        Ok(transcript(
+            session.clone(),
+            turns,
+            tail,
+            &read,
+            trailing_record,
+            Vec::new(),
+        ))
     }
 }
 
-fn read_transcript(path: &Path) -> Result<(Vec<Turn>, Jsonl)> {
+fn read_transcript(path: &Path) -> Result<(Vec<Turn>, Jsonl, Option<TrailingRecord>)> {
     let read = read_jsonl(path)?;
     let turns = read.values.iter().flat_map(parse_turns).collect();
-    Ok((turns, read))
+    let trailing_record = trailing_record(
+        read.values.iter(),
+        |value| !parse_turns(value).is_empty(),
+        codex_trailing_kind,
+    );
+    Ok((turns, read, trailing_record))
 }
 
 /// Codex records the working directory in its `session_meta` header and
@@ -169,6 +181,16 @@ fn read_transcript(path: &Path) -> Result<(Vec<Turn>, Jsonl)> {
 fn codex_cwd(value: &Value) -> Option<&str> {
     match value["type"].as_str() {
         Some("session_meta") | Some("turn_context") => value["payload"]["cwd"].as_str(),
+        _ => None,
+    }
+}
+
+fn codex_trailing_kind(value: &Value) -> Option<&'static str> {
+    match value["type"].as_str()? {
+        "session_meta" => Some("session_meta"),
+        "turn_context" => Some("turn_context"),
+        "event_msg" => Some("event_msg"),
+        "world_state" => Some("world_state"),
         _ => None,
     }
 }

@@ -91,6 +91,11 @@ PROBE BEFORE EXPORTING
   result truncated whenever it dropped any. It is the probe, not the archive;
   export is what takes every turn the reader could reach.
 
+  When a backend can verify a non-turn record after the newest rendered turn,
+  show names that trailing record's kind and timestamp. JSON carries the
+  optional `trailing_record` object; source timestamps that are absent stay
+  absent rather than being inferred.
+
   Live state is a present-tense annotation, not part of an export bundle.
   Export reads only the recording, so a status authority that is unavailable
   or changes cannot alter the rescue files.

@@ -381,6 +381,43 @@ fn every_file_backend_preserves_reasoning_and_tool_chronology() {
 }
 
 #[test]
+fn verified_file_backends_report_their_final_non_turn_record() {
+    let cases: Vec<(Box<dyn Backend>, &str, &str)> = vec![
+        (
+            Box::new(ClaudeBackend::new(fixtures("claude"))),
+            "session-claude",
+            "atis-latch",
+        ),
+        (
+            Box::new(CodexBackend::new(fixtures("codex"))),
+            "00000000-0000-0000-0000-000000000001",
+            "event_msg",
+        ),
+        (
+            Box::new(PiBackend::new(fixtures("pi"))),
+            "session-pi",
+            "thinking_level_change",
+        ),
+    ];
+
+    for (backend, id, expected_kind) in cases {
+        let session = located(backend.as_ref(), id);
+        let transcript = backend.transcript(&session, 10).unwrap();
+        let trailing = transcript
+            .trailing_record
+            .as_ref()
+            .unwrap_or_else(|| panic!("{} did not report its fixture suffix", backend.harness()));
+
+        assert_eq!(trailing.kind, expected_kind);
+        if backend.harness() == "claude" {
+            assert!(trailing.timestamp.is_none());
+        } else {
+            assert!(trailing.timestamp.is_some());
+        }
+    }
+}
+
+#[test]
 fn claude_lists_only_parent_sessions_and_reports_subagent_transcripts() {
     let backend = ClaudeBackend::new(fixtures("claude"));
     let sessions = backend.list(&Query::unscoped(10)).unwrap().sessions;
@@ -420,6 +457,11 @@ fn malformed_lines_leave_parseable_turns_and_a_note() {
         let session = located(backend.as_ref(), id);
         let transcript = backend.transcript(&session, 10).unwrap();
         assert_eq!(transcript.turns.len(), 2);
+        assert!(
+            transcript.trailing_record.is_none(),
+            "{} reported a trailing record after its final turn",
+            backend.harness()
+        );
         assert_eq!(
             transcript.notes,
             vec!["Skipped 1 unparseable line.".to_owned()]

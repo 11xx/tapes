@@ -5,3 +5,4 @@
 {"timestamp":"2026-01-01T10:00:04Z","type":"response_item","payload":{"type":"function_call","name":"fixture_tool","arguments":"{\"path\":\"fixture\"}","call_id":"call-1"}}
 {"timestamp":"2026-01-01T10:00:05Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call-1","output":"Tool complete."}}
 {"timestamp":"2026-01-01T10:00:06Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Fixture inspected."}]}}
+{"timestamp":"2026-01-01T10:00:07Z","type":"event_msg","payload":{"type":"task_complete"}}
