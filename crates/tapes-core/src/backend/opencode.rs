@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::{OsStr, OsString};
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -8,7 +8,7 @@ use anyhow::{anyhow, Context, Result};
 use chrono::{TimeZone, Utc};
 use serde_json::{json, Value};
 
-use super::{Backend, Listing, Query};
+use super::{filter_listing_search_parallel, Backend, Listing, Query};
 use crate::model::{Cost, Model, Role, Session, Tokens, Transcript, Turn};
 
 const MAX_COMMAND_BYTES: u64 = 8 * 1024 * 1024;
@@ -99,6 +99,30 @@ impl OpenCodeBackend {
         let text =
             String::from_utf8(bytes).context("opencode database returned non-UTF-8 output")?;
         parse_database_rows_lossy(&text)
+    }
+
+    fn database_search_ids(&self, needle: &str) -> Result<Option<HashSet<String>>> {
+        if !needle.bytes().all(|byte| byte.is_ascii_alphanumeric()) {
+            return Ok(None);
+        }
+        let needle = sql_literal(needle);
+        let uncertain = sql_literal(r"\u");
+        let rows = self.database(&format!(
+            "SELECT json_object('id', session_id) AS row FROM ( \
+                 SELECT DISTINCT session_id FROM message \
+                 WHERE instr(lower(data), lower({needle})) > 0 \
+                    OR instr(data, {uncertain}) > 0 \
+                    OR length(CAST(data AS BLOB)) != length(data) \
+                 UNION \
+                 SELECT DISTINCT session_id FROM part \
+                 WHERE instr(lower(data), lower({needle})) > 0 \
+                    OR instr(data, {uncertain}) > 0 \
+                    OR length(CAST(data AS BLOB)) != length(data))"
+        ))?;
+        rows.iter()
+            .map(|row| required_string(row, "id"))
+            .collect::<Result<HashSet<_>>>()
+            .map(Some)
     }
 }
 
@@ -372,6 +396,26 @@ impl Backend for OpenCodeBackend {
         page.scanned = scanned;
         page.scan_truncated = scanned >= MAX_API_SESSIONS;
         Ok(page)
+    }
+
+    fn list_with_search(&self, query: &Query, needle: &str, tail: usize) -> Result<Listing> {
+        let listing = self.list(query)?;
+        if !self.uses_database() {
+            return Ok(filter_listing_search_parallel(self, listing, needle, tail));
+        }
+        let ids = match self.database_search_ids(needle) {
+            Ok(Some(ids)) => ids,
+            Ok(None) | Err(_) => {
+                return Ok(filter_listing_search_parallel(self, listing, needle, tail));
+            }
+        };
+        let mut candidates = listing;
+        candidates
+            .sessions
+            .retain(|session| ids.contains(&session.id));
+        Ok(filter_listing_search_parallel(
+            self, candidates, needle, tail,
+        ))
     }
 
     /// One session GET rather than a listing page, so an exact id costs a

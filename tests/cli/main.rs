@@ -516,6 +516,11 @@ fn list_searches_recent_fixture_turns_before_the_limit_and_survives_a_bad_line()
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("last 32 normalized turns"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let value: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(
         value["sessions"][0]["id"],

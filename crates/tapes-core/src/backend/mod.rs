@@ -16,6 +16,9 @@ pub mod opencode;
 pub mod pi;
 
 const MAX_TRANSCRIPT_BYTES: u64 = 4 * 1024 * 1024;
+/// Keep a content search from monopolizing a large machine while still
+/// allowing independent file reads to overlap.
+const MAX_SEARCH_WORKERS: usize = 8;
 /// Enough of a file's opening to carry any harness's session header, and
 /// small enough that probing a whole store stays cheap.
 const HEAD_PROBE_BYTES: u64 = 64 * 1024;
@@ -140,21 +143,7 @@ pub trait Backend {
     /// override this to search while their existing candidate parse is open;
     /// the default reuses the backend's bounded transcript path.
     fn list_with_search(&self, query: &Query, needle: &str, tail: usize) -> Result<Listing> {
-        let mut listing = self.list(query)?;
-        let mut matching = Vec::new();
-        for session in listing.sessions {
-            match self.search(&session, needle, tail) {
-                Ok(true) => matching.push(session),
-                Ok(false) => {}
-                Err(error) => listing.unsearched.push(format!(
-                    "{} session {}: {error:#}",
-                    self.harness(),
-                    session.id
-                )),
-            }
-        }
-        listing.sessions = matching;
-        Ok(listing)
+        Ok(filter_listing_search(self, self.list(query)?, needle, tail))
     }
     /// Locate one session by its exact id without enumerating the store.
     /// `Ok(None)` means this backend does not hold it. Resolution calls this
@@ -176,6 +165,74 @@ pub trait Backend {
             .iter()
             .any(|turn| turn.text.to_lowercase().contains(&needle)))
     }
+}
+
+pub(crate) fn filter_listing_search<B: Backend + ?Sized>(
+    backend: &B,
+    mut listing: Listing,
+    needle: &str,
+    tail: usize,
+) -> Listing {
+    let mut matching = Vec::new();
+    for session in listing.sessions {
+        match backend.search(&session, needle, tail) {
+            Ok(true) => matching.push(session),
+            Ok(false) => {}
+            Err(error) => listing.unsearched.push(format!(
+                "{} session {}: {error:#}",
+                backend.harness(),
+                session.id
+            )),
+        }
+    }
+    listing.sessions = matching;
+    listing
+}
+
+pub(crate) fn filter_listing_search_parallel<B: Backend + Sync + ?Sized>(
+    backend: &B,
+    mut listing: Listing,
+    needle: &str,
+    tail: usize,
+) -> Listing {
+    if listing.sessions.is_empty() {
+        return listing;
+    }
+    let worker_count = std::thread::available_parallelism()
+        .map_or(1, std::num::NonZeroUsize::get)
+        .min(MAX_SEARCH_WORKERS)
+        .min(listing.sessions.len());
+    let chunk_size = listing.sessions.len().div_ceil(worker_count);
+    let sessions = std::mem::take(&mut listing.sessions);
+    let searched = std::thread::scope(|scope| {
+        let handles = sessions
+            .chunks(chunk_size)
+            .map(|chunk| {
+                scope.spawn(|| {
+                    chunk
+                        .iter()
+                        .map(|session| (session, backend.search(session, needle, tail)))
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect::<Vec<_>>();
+        handles
+            .into_iter()
+            .flat_map(|handle| handle.join().expect("content search worker panicked"))
+            .collect::<Vec<_>>()
+    });
+    for (session, result) in searched {
+        match result {
+            Ok(true) => listing.sessions.push(session.clone()),
+            Ok(false) => {}
+            Err(error) => listing.unsearched.push(format!(
+                "{} session {}: {error:#}",
+                backend.harness(),
+                session.id
+            )),
+        }
+    }
+    listing
 }
 
 pub fn backends() -> Vec<Box<dyn Backend>> {
@@ -248,6 +305,43 @@ pub(crate) fn read_jsonl(path: &Path) -> Result<Jsonl> {
     })
 }
 
+/// A negative result is safe only for plain ASCII JSON. JSON permits any
+/// character to be written as a `\u` escape, and non-ASCII case folding can
+/// change the characters a search sees, so those inputs stay candidates for
+/// the normal parser. A raw hit is only a reason to parse; it is not a match.
+fn raw_tail_may_contain(path: &Path, needle: &str) -> bool {
+    if needle.is_empty() || !needle.bytes().all(|byte| byte.is_ascii_alphanumeric()) {
+        return true;
+    }
+    let Ok(mut file) = File::open(path) else {
+        return true;
+    };
+    let Ok(len) = file.metadata().map(|metadata| metadata.len()) else {
+        return true;
+    };
+    let start = len.saturating_sub(MAX_TRANSCRIPT_BYTES);
+    if file.seek(SeekFrom::Start(start)).is_err() {
+        return true;
+    }
+    let mut bytes = Vec::new();
+    if file
+        .take(MAX_TRANSCRIPT_BYTES)
+        .read_to_end(&mut bytes)
+        .is_err()
+    {
+        return true;
+    }
+    if bytes.iter().any(|byte| *byte >= 0x80) || bytes.windows(2).any(|window| window == b"\\u") {
+        return true;
+    }
+    bytes.windows(needle.len()).any(|window| {
+        window
+            .iter()
+            .zip(needle.bytes())
+            .all(|(byte, expected)| byte.eq_ignore_ascii_case(&expected))
+    })
+}
+
 /// Parse the opening of a JSONL file. Every harness writes what it knows
 /// about a session at the top, and `read_jsonl` reads the *end* of a file, so
 /// a large transcript loses its own header without this.
@@ -310,28 +404,93 @@ pub(crate) fn list_files(
     })
 }
 
-/// Parse each file once and retain only candidates whose final normalized turns
-/// contain the needle. The file parser already caps the bytes it reads, and
-/// `tail` caps the turns considered by the content search.
+/// Search file-backed candidates with a conservative raw prefilter, then retain
+/// only candidates whose final normalized turns contain the needle. The file
+/// parser already caps the bytes it reads, and `tail` caps the turns considered
+/// by the content search. Worker reads preserve candidate order before the
+/// caller applies scope and result limits.
 pub(crate) fn list_files_with_search(
     files: Vec<PathBuf>,
     query: &Query,
     needle: &str,
     tail: usize,
     probe: impl Fn(&Path) -> Option<PathBuf>,
-    parse: impl Fn(&Path) -> Option<ParsedFile>,
+    parse: impl Fn(&Path) -> Option<ParsedFile> + Sync,
 ) -> Listing {
     let needle = needle.to_lowercase();
-    list_files_inner(files, query, probe, move |path| {
-        parse(path).filter(|parsed| {
-            parsed
-                .turns
-                .iter()
-                .rev()
-                .take(tail)
-                .any(|turn| turn.text.to_lowercase().contains(&needle))
+    if query.limit == 0 {
+        return Listing::default();
+    }
+    let candidate_count = files.len().min(query.ceiling);
+    let scan_truncated = files.len() > candidate_count;
+    let candidates = files
+        .into_iter()
+        .take(candidate_count)
+        .filter(|path| {
+            query
+                .scope
+                .is_none_or(|scope| probe(path).is_none_or(|directory| scope.contains(&directory)))
         })
-    })
+        .collect::<Vec<_>>();
+    if candidates.is_empty() {
+        return Listing {
+            scanned: candidate_count,
+            scan_truncated,
+            ..Listing::default()
+        };
+    }
+    let worker_count = std::thread::available_parallelism()
+        .map_or(1, std::num::NonZeroUsize::get)
+        .min(MAX_SEARCH_WORKERS)
+        .min(candidates.len());
+    let chunk_size = candidates.len().div_ceil(worker_count);
+    let parsed = std::thread::scope(|scope| {
+        let handles = candidates
+            .chunks(chunk_size)
+            .map(|chunk| {
+                scope.spawn(|| {
+                    chunk
+                        .iter()
+                        .map(|path| {
+                            if !raw_tail_may_contain(path, &needle) {
+                                return None;
+                            }
+                            parse(path).and_then(|parsed| {
+                                let matched = parsed
+                                    .turns
+                                    .iter()
+                                    .rev()
+                                    .take(tail)
+                                    .any(|turn| turn.text.to_lowercase().contains(&needle));
+                                matched.then_some(parsed.session)
+                            })
+                        })
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect::<Vec<_>>();
+        handles
+            .into_iter()
+            .flat_map(|handle| handle.join().expect("file search worker panicked"))
+            .collect::<Vec<_>>()
+    });
+    let mut listing = Listing {
+        scanned: candidate_count,
+        scan_truncated,
+        ..Listing::default()
+    };
+    for session in parsed.into_iter().flatten() {
+        let placed = query.scope.is_none_or(|scope| {
+            session
+                .directory
+                .as_deref()
+                .is_some_and(|directory| scope.contains(directory))
+        });
+        if placed && query.matches(&session) && listing.sessions.len() < query.limit {
+            listing.sessions.push(session);
+        }
+    }
+    listing
 }
 
 fn list_files_inner(
@@ -494,4 +653,52 @@ pub(crate) fn matching_session_file(
                         .is_some_and(|separator| !separator.is_alphanumeric())
             })
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use super::*;
+
+    #[test]
+    fn raw_prefilter_skips_a_definite_miss_but_not_a_hit() {
+        let path = std::env::temp_dir().join(format!("tapes-raw-prefilter-{}", std::process::id()));
+        let _ = fs::remove_file(&path);
+        fs::write(&path, br#"{"text":"other"}"#).unwrap();
+        assert!(!raw_tail_may_contain(&path, "needle"));
+
+        fs::write(&path, br#"{"text":"NEEDLE"}"#).unwrap();
+        assert!(raw_tail_may_contain(&path, "needle"));
+
+        fs::write(&path, br#"{"text":"\u006e\u0065\u0065\u0064\u006c\u0065"}"#).unwrap();
+        assert!(raw_tail_may_contain(&path, "needle"));
+
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn list_search_does_not_parse_a_raw_definite_miss() {
+        let path =
+            std::env::temp_dir().join(format!("tapes-raw-prefilter-list-{}", std::process::id()));
+        let _ = fs::remove_file(&path);
+        fs::write(&path, br#"{"text":"other"}"#).unwrap();
+        let parsed = AtomicBool::new(false);
+        let listing = list_files_with_search(
+            vec![path.clone()],
+            &Query::unscoped(10),
+            "needle",
+            32,
+            |_| None,
+            |_| {
+                parsed.store(true, Ordering::Relaxed);
+                None
+            },
+        );
+
+        assert_eq!(listing.scanned, 1);
+        assert!(listing.sessions.is_empty());
+        assert!(!parsed.load(Ordering::Relaxed));
+        fs::remove_file(path).unwrap();
+    }
 }

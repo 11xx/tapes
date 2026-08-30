@@ -61,6 +61,8 @@ turns in each candidate session. The fixed tail keeps the read bounded, so a
 non-match says only that those recent turns did not contain the text. Search is
 applied before the per-harness bound. If a candidate's bounded read fails, it
 is named in `unsearched` rather than silently treated as a non-match.
+The command writes a short preflight notice to stderr before scanning; JSON
+results remain on stdout.
 The scope applies before the bound, so a scoped listing cannot be emptied by a
 limit spent on other projects. Human output ends with an availability note when
 a backend cannot be read, a separate line for each stored session row that

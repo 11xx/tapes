@@ -86,6 +86,9 @@ if [ "$mode" = database ] || [ "$mode" = database-malformed ]; then
         database_rows database-sessions.json
       fi
       ;;
+    *"SELECT json_object('id', session_id) AS row FROM ("*)
+      database_rows database-search.json
+      ;;
     *"FROM session WHERE id = "*)
       case "$query" in
         *"ses_truncated_fixture"*)

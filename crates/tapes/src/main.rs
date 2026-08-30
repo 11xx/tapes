@@ -131,7 +131,8 @@ enum Command {
         /// Match case-insensitively against the last 32 normalized turns in
         /// each candidate session. The fixed tail keeps listing bounded; a
         /// match outside it is not considered. Search is applied before
-        /// --limit, and a failed bounded read is reported as unsearched.
+        /// --limit, and a failed bounded read is reported as unsearched. A
+        /// short preflight notice is written to stderr before scanning.
         #[arg(long, value_name = "SUBSTRING")]
         search: Option<String>,
         /// Render results as JSON. Matching sessions may include an optional
@@ -183,6 +184,11 @@ fn dispatch(cli: Cli) -> Result<()> {
             search,
             json,
         } => {
+            if search.is_some() {
+                eprintln!(
+                    "Searching the last 32 normalized turns of each candidate session before applying --limit."
+                );
+            }
             let mut result = tapes_core::list_with_filters_and_search(
                 harness.as_deref(),
                 scope.within(),

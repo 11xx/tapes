@@ -62,7 +62,8 @@ FIND IT
   a non-match means only that those recent turns did not contain the text. It
   is applied before the per-harness limit. A session whose bounded read fails
   is omitted from sessions and named in unsearched instead of being treated as
-  a non-match; a stopped candidate scan is still reported as scan_truncated.
+  a non-match; a preflight notice is written to stderr before scanning, and a
+  stopped candidate scan is still reported as scan_truncated.
 
   File-backed harnesses may show a bounded first-meaningful-user-turn hint
   prefixed with ~ when a harness recorded no title. JSON keeps that hint as

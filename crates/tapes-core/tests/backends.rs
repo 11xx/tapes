@@ -92,6 +92,20 @@ impl OpenCodeAlias {
         )
     }
 
+    fn database() -> Self {
+        let serial = OPENCODE_ALIAS_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let directory = std::env::temp_dir().join(format!(
+            "tapes-opencode-database-{}-{serial}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&directory).unwrap();
+        Self::link(
+            directory.join("opencode"),
+            opencode_fixture_program(),
+            Some(directory),
+        )
+    }
+
     fn link(path: PathBuf, target: PathBuf, cleanup_dir: Option<PathBuf>) -> Self {
         let _ = fs::remove_file(&path);
         std::os::unix::fs::symlink(target, &path).unwrap();
@@ -359,6 +373,36 @@ fn opencode_metadata_filters_apply_before_the_listing_limit() {
     assert_eq!(result.sessions.len(), 1);
     assert_eq!(result.sessions[0].id, "ses_api_only_fixture");
     assert_eq!(result.scanned, 2);
+}
+
+#[test]
+fn opencode_database_search_prefilters_candidates_before_bounded_reads() {
+    let program = OpenCodeAlias::database();
+    let backends: Vec<Box<dyn Backend>> = vec![Box::new(OpenCodeBackend::new(program.path()))];
+
+    let result = list_with_backends_filtered_and_search(
+        &backends,
+        Some("opencode"),
+        None,
+        10,
+        None,
+        None,
+        Some("FIXTURE"),
+    )
+    .unwrap();
+
+    assert_eq!(
+        result
+            .sessions
+            .iter()
+            .map(|session| session.id.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            "ses_database_only_fixture",
+            "ses_000000fixtureSharedSession"
+        ]
+    );
+    assert!(result.unsearched.is_empty());
 }
 
 #[test]
