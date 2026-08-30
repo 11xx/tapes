@@ -254,6 +254,9 @@ fn print_availability_note(result: &tapes_core::SessionList) {
             result.scanned
         );
     }
+    for session in &result.unreadable {
+        println!("Unreadable: {session}");
+    }
     if result.unavailable.is_empty() {
         return;
     }

@@ -66,8 +66,11 @@ FIND IT
   A session is named by its full id or an unambiguous prefix; an ambiguous
   prefix lists its candidates and fails rather than guessing. A harness whose
   binary or store is absent reports itself unavailable and never fails a
-  listing, so a caller never has to branch on what is installed — but show and
-  export still fail when the session they were given cannot be resolved.
+  listing. If one stored session row cannot be read, listing keeps every other
+  session and reports that one as unreadable, with its id and the diagnostic —
+  a separate fact from an unavailable harness, since the store itself was fine.
+  Show and export still fail when the session they were given cannot be
+  resolved.
 
   A session recorded in a directory that no longer exists cannot be placed in
   any project, so a scoped search will not find it. Its id still resolves.

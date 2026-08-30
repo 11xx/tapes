@@ -32,7 +32,13 @@ const EXPORT_TAIL: usize = usize::MAX;
 pub struct SessionList {
     pub schema: &'static str,
     pub sessions: Vec<Session>,
+    /// Harnesses that could not be read at all.
     pub unavailable: Vec<String>,
+    /// Sessions a readable harness could not normalize, each named with its
+    /// id and the diagnostic. Kept apart from `unavailable`, because "this
+    /// store is gone" and "one row in it is corrupt" are different facts and
+    /// a reader that conflates them mis-states both.
+    pub unreadable: Vec<String>,
     /// Candidate sessions inspected to produce this list, across every
     /// harness. A scoped listing reads more than it returns.
     pub scanned: usize,
@@ -173,6 +179,7 @@ pub fn list_with_backends_filtered(
         schema: LIST_SCHEMA,
         sessions: listed.sessions,
         unavailable: listed.unavailable,
+        unreadable: listed.unreadable,
         scanned: listed.scanned,
         scan_truncated: listed.scan_truncated,
     })
@@ -185,6 +192,7 @@ struct Listed {
     /// against every store again.
     origins: Vec<usize>,
     unavailable: Vec<String>,
+    unreadable: Vec<String>,
     scanned: usize,
     scan_truncated: bool,
 }
@@ -217,6 +225,7 @@ fn list_scoped(
     let mut found: Vec<(Session, usize)> = Vec::new();
     let mut available_harnesses = HashSet::new();
     let mut unavailable_harnesses = Vec::new();
+    let mut unreadable_sessions = Vec::new();
     let mut scanned = 0;
     let mut scan_truncated = false;
     for (index, backend) in backends
@@ -231,10 +240,12 @@ fn list_scoped(
         match backend.list(&query) {
             Ok(Listing {
                 sessions,
+                unavailable,
                 scanned: inspected,
                 scan_truncated: truncated,
             }) => {
                 available_harnesses.insert(backend.harness().to_owned());
+                unreadable_sessions.extend(unavailable);
                 scanned += inspected;
                 scan_truncated |= truncated;
                 found.extend(sessions.into_iter().map(|session| (session, index)));
@@ -277,6 +288,7 @@ fn list_scoped(
         sessions,
         origins,
         unavailable,
+        unreadable: unreadable_sessions,
         scanned,
         scan_truncated,
     })

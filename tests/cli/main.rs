@@ -238,6 +238,14 @@ fn opencode_program(root: &Path, name: &str) -> OpenCodeAlias {
     OpenCodeAlias { path: program }
 }
 
+fn malformed_opencode_program(root: &Path) -> OpenCodeAlias {
+    let program = root.join("opencode");
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/fixtures/opencode/opencode-malformed-row");
+    std::os::unix::fs::symlink(fixture, &program).unwrap();
+    OpenCodeAlias { path: program }
+}
+
 /// Bare `tapes` is a guide request, not a usage error; every mistyped
 /// invocation still fails at clap's exit code 2.
 #[test]
@@ -942,6 +950,105 @@ fn opencode_listing_is_the_deduplicated_union_of_database_and_api_sessions() {
             .count(),
         1
     );
+}
+
+#[test]
+fn malformed_opencode_database_row_is_unreadable_without_breaking_listing() {
+    let root = TemporaryDirectory::new(std::env::temp_dir().join(format!(
+        "tapes-cli-opencode-malformed-row-{}",
+        std::process::id()
+    )));
+    let _stable = malformed_opencode_program(root.path());
+
+    let list = |json: bool| {
+        let mut arguments = vec!["list", "--harness", "opencode", "--global"];
+        if json {
+            arguments.push("--json");
+        }
+        tapes()
+            .args(arguments)
+            .env("HOME", root.path().join("home"))
+            .env("PATH", root.path())
+            .output()
+            .unwrap()
+    };
+
+    let json = list(true);
+    assert!(
+        json.status.success(),
+        "{}",
+        String::from_utf8_lossy(&json.stderr)
+    );
+    let value: Value = serde_json::from_slice(&json.stdout).unwrap();
+    let mut ids = value["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|session| session["id"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    ids.sort_unstable();
+    assert_eq!(
+        ids,
+        vec![
+            "ses_000000fixtureSharedSession",
+            "ses_database_only_fixture"
+        ]
+    );
+    let unreadable = value["unreadable"].as_array().unwrap();
+    assert_eq!(value["scanned"], 3);
+    assert_eq!(unreadable.len(), 1);
+    assert!(unreadable[0]
+        .as_str()
+        .unwrap()
+        .contains("ses_truncated_fixture"));
+    assert!(unreadable[0]
+        .as_str()
+        .unwrap()
+        .contains("EOF while parsing a string"));
+    // A corrupt row says nothing about the harness, which was read fine.
+    assert!(
+        value["unavailable"].as_array().unwrap().is_empty(),
+        "{value}"
+    );
+
+    let human = list(false);
+    assert!(
+        human.status.success(),
+        "{}",
+        String::from_utf8_lossy(&human.stderr)
+    );
+    let human_text = String::from_utf8_lossy(&human.stdout);
+    assert!(
+        human_text.contains("ses_database_only_fixture"),
+        "{human_text}"
+    );
+    assert!(
+        human_text.contains("ses_000000fixtureSharedSession"),
+        "{human_text}"
+    );
+    assert!(
+        human_text.contains("Unreadable: opencode session ses_truncated_fixture:"),
+        "{human_text}"
+    );
+    assert!(
+        human_text.contains("EOF while parsing a string"),
+        "{human_text}"
+    );
+    assert!(
+        !human_text.contains("No harnesses available."),
+        "{human_text}"
+    );
+
+    let show = tapes()
+        .args(["show", "ses_truncated_fixture", "--json"])
+        .env("HOME", root.path().join("home"))
+        .env("PATH", root.path())
+        .output()
+        .unwrap();
+    assert!(!show.status.success());
+    let error = String::from_utf8_lossy(&show.stderr);
+    assert!(error.contains("ses_truncated_fixture"), "{error}");
+    assert!(error.contains("EOF while parsing a string"), "{error}");
 }
 
 #[test]

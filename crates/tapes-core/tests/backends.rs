@@ -64,6 +64,7 @@ static OPENCODE_ALIAS_COUNTER: AtomicUsize = AtomicUsize::new(0);
 struct OpenCodeAlias {
     path: PathBuf,
     calls: Option<PathBuf>,
+    cleanup_dir: Option<PathBuf>,
 }
 
 impl OpenCodeAlias {
@@ -71,9 +72,31 @@ impl OpenCodeAlias {
         let serial = OPENCODE_ALIAS_COUNTER.fetch_add(1, Ordering::Relaxed);
         let path =
             std::env::temp_dir().join(format!("opencode2-{tag}-{}-{serial}", std::process::id()));
+        Self::link(path, opencode_fixture_program(), None)
+    }
+
+    fn malformed_database() -> Self {
+        let serial = OPENCODE_ALIAS_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let directory = std::env::temp_dir().join(format!(
+            "tapes-opencode-malformed-row-{}-{serial}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&directory).unwrap();
+        Self::link(
+            directory.join("opencode"),
+            fixtures("opencode").join("opencode-malformed-row"),
+            Some(directory),
+        )
+    }
+
+    fn link(path: PathBuf, target: PathBuf, cleanup_dir: Option<PathBuf>) -> Self {
         let _ = fs::remove_file(&path);
-        std::os::unix::fs::symlink(opencode_fixture_program(), &path).unwrap();
-        Self { path, calls: None }
+        std::os::unix::fs::symlink(target, &path).unwrap();
+        Self {
+            path,
+            calls: None,
+            cleanup_dir,
+        }
     }
 
     fn counting() -> Self {
@@ -100,6 +123,9 @@ impl Drop for OpenCodeAlias {
         let _ = fs::remove_file(&self.path);
         if let Some(calls) = &self.calls {
             let _ = fs::remove_file(calls);
+        }
+        if let Some(directory) = &self.cleanup_dir {
+            let _ = fs::remove_dir(directory);
         }
     }
 }
@@ -128,14 +154,16 @@ fn opencode_fixture_executables_are_stable() {
         "OpenCode backend tests must not write shell executable bytes at runtime"
     );
 
-    let program = opencode_fixture_program();
-    let metadata = fs::metadata(&program).unwrap();
-    assert!(metadata.is_file(), "checked-in OpenCode fixture is missing");
-    assert_ne!(metadata.permissions().mode() & 0o111, 0);
-    assert!(!fs::symlink_metadata(&program)
-        .unwrap()
-        .file_type()
-        .is_symlink());
+    for name in ["opencode2", "opencode-malformed-row"] {
+        let program = fixtures("opencode").join(name);
+        let metadata = fs::metadata(&program).unwrap();
+        assert!(metadata.is_file(), "checked-in OpenCode fixture is missing");
+        assert_ne!(metadata.permissions().mode() & 0o111, 0);
+        assert!(!fs::symlink_metadata(&program)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+    }
 }
 
 #[test]
@@ -397,6 +425,29 @@ fn malformed_lines_leave_parseable_turns_and_a_note() {
             vec!["Skipped 1 unparseable line.".to_owned()]
         );
     }
+}
+
+#[test]
+fn malformed_opencode_database_rows_leave_other_sessions_and_a_diagnostic() {
+    let program = OpenCodeAlias::malformed_database();
+    let backend = OpenCodeBackend::new(program.path());
+    let listing = backend.list(&Query::unscoped(10)).unwrap();
+
+    assert_eq!(listing.scanned, 3);
+    assert_eq!(
+        listing
+            .sessions
+            .iter()
+            .map(|session| session.id.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            "ses_database_only_fixture",
+            "ses_000000fixtureSharedSession"
+        ]
+    );
+    assert_eq!(listing.unavailable.len(), 1);
+    assert!(listing.unavailable[0].contains("ses_truncated_fixture"));
+    assert!(listing.unavailable[0].contains("EOF while parsing a string"));
 }
 
 #[test]

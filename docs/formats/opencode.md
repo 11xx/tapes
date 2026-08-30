@@ -196,6 +196,10 @@ path for `opencode2`. When both commands are installed, both stores are read
 and their sessions are merged under the `opencode` harness.
 If both projections contain the same session id, the stable executable's
 projection is retained rather than reporting the shared record as ambiguous.
+The database command emits a `row` header followed by one JSON object per
+session row. Listing parses those rows independently: a row that cannot be
+parsed is reported in the listing's `unreadable` field with its session id and
+parse diagnostic, while an exact lookup of that id preserves the parse error.
 
 ## 6. Live HTTP API (legacy reference)
 

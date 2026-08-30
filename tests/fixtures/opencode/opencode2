@@ -1,9 +1,9 @@
 #!/bin/sh
 set -eu
 
-# The checked-in executable is addressed through temporary symlink aliases.
-# Their basenames select the response set, while the resolved path locates the
-# JSON fixtures without relying on process-global environment variables.
+# The checked-in executable is addressed through temporary symlink aliases and
+# small fixture wrappers. Their names select the response set, while the
+# resolved path locates the JSON fixtures without process-global configuration.
 invoked=$0
 case $invoked in
   */*) ;;
@@ -64,6 +64,10 @@ case $name in
     ;;
 esac
 
+if [ "${5:-}" = malformed-row ]; then
+  mode=database-malformed
+fi
+
 if [ "$mode" = counting ]; then
   printf '%s\n' "$path" >> "${invoked}.calls"
 fi
@@ -73,13 +77,20 @@ database_rows() {
   /bin/cat "$fixture_dir/$1"
 }
 
-if [ "$mode" = database ]; then
+if [ "$mode" = database ] || [ "$mode" = database-malformed ]; then
   case "$query" in
     *"FROM session ORDER BY time_updated DESC LIMIT "*)
-      database_rows database-sessions.json
+      if [ "$mode" = database-malformed ]; then
+        database_rows database-sessions-malformed.json
+      else
+        database_rows database-sessions.json
+      fi
       ;;
     *"FROM session WHERE id = "*)
       case "$query" in
+        *"ses_truncated_fixture"*)
+          database_rows database-locate-truncated.json
+          ;;
         *"ses_000000fixtureSharedSession"*)
           database_rows database-locate-shared.json
           ;;
