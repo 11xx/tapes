@@ -48,14 +48,22 @@ counts.
 `Turn` contains a role, text, and optional UTC timestamp. Roles are `user`,
 `assistant`, `tool`, and `reasoning`.
 
-`Transcript` contains a session, its turns, a `truncated` flag, and optional
-reader-facing notes. The flag is true when a read bound was reached and the
-turns are only a window into the transcript. Notes preserve harness-specific
-facts that do not fit the normalized fields, such as abandoned pi branches or
-the number of malformed lines skipped while reading. They are prose rather
-than a structured API and are omitted from JSON when empty. Both signals reach
-a human reader too: `show` closes a truncated render with a note saying so,
-beside whatever notes the read produced.
+`TrailingRecord` identifies a verified final record after the newest rendered
+turn when that record does not become a turn. It carries the source `kind` and
+an optional UTC `timestamp`; the timestamp stays absent when the source record
+does not provide one. `Transcript` omits `trailing_record` when no verified
+trailing record is available.
+
+`Transcript` contains a session, its turns, a `truncated` flag, an optional
+`trailing_record`, and optional reader-facing notes. The flag is true when a
+read bound was reached and the turns are only a window into the transcript.
+Notes preserve harness-specific facts that do not fit the normalized fields,
+such as abandoned pi branches or the number of malformed lines skipped while
+reading. They are prose rather than a structured API and are omitted from JSON
+when empty. Both signals reach a human reader too: `show` closes a truncated
+render with a note saying so, beside whatever notes the read produced. When a
+trailing record is available, `show` names its kind and timestamp when one was
+recorded.
 
 ## JSON contract
 
@@ -80,6 +88,7 @@ Absent values are omitted from JSON rather than emitted as `null`, empty
 strings, empty note arrays, or invented defaults. This distinction applies to
 session metadata, model variants, every token counter, turn timestamps, and
 transcript notes. `derived_title` is present only when the bounded first user
-turn produced a useful hint. JSON timestamps retain their recorded precision;
-human list, show, and Markdown renderings use RFC 3339 whole seconds with a
-`Z` suffix.
+turn produced a useful hint. `trailing_record` and its `timestamp` are omitted
+when their source facts are unavailable. JSON timestamps retain their recorded
+precision; human list, show, and Markdown renderings use RFC 3339 whole seconds
+with a `Z` suffix.

@@ -650,6 +650,87 @@ fn show_json_carries_matching_live_state() {
 }
 
 #[test]
+fn show_names_a_trailing_record_in_human_and_json_output() {
+    let (codex_home, home) = fixture_store("trailing-record");
+
+    let mut human_command = tapes();
+    human_command.args([
+        "show",
+        "00000000-0000-0000-0000-000000000001",
+        "--tail",
+        "1",
+    ]);
+    with_fixture_env(&mut human_command, &codex_home, &home, &codex_home);
+    let human = human_command.output().unwrap();
+    assert!(
+        human.status.success(),
+        "{}",
+        String::from_utf8_lossy(&human.stderr)
+    );
+    let text = String::from_utf8_lossy(&human.stdout);
+    assert!(
+        text.contains("The newest trailing record is `event_msg` at 2026-01-01T10:00:07Z"),
+        "{text}"
+    );
+
+    let mut json_command = tapes();
+    json_command.args([
+        "show",
+        "00000000-0000-0000-0000-000000000001",
+        "--tail",
+        "1",
+        "--json",
+    ]);
+    with_fixture_env(&mut json_command, &codex_home, &home, &codex_home);
+    let json_output = json_command.output().unwrap();
+    assert!(json_output.status.success());
+    let value: Value = serde_json::from_slice(&json_output.stdout).unwrap();
+    assert_eq!(
+        value["trailing_record"],
+        serde_json::json!({
+            "kind": "event_msg",
+            "timestamp": "2026-01-01T10:00:07Z"
+        })
+    );
+
+    let _ = fs::remove_dir_all(codex_home);
+}
+
+#[test]
+fn show_omits_an_absent_trailing_record_in_human_and_json_output() {
+    let (codex_home, home) = fixture_store("no-trailing-record");
+
+    let mut human_command = tapes();
+    human_command.args([
+        "show",
+        "10000000-0000-0000-0000-000000000002",
+        "--tail",
+        "1",
+    ]);
+    with_fixture_env(&mut human_command, &codex_home, &home, &codex_home);
+    let human = human_command.output().unwrap();
+    assert!(human.status.success());
+    let text = String::from_utf8_lossy(&human.stdout);
+    assert!(!text.contains("trailing record"), "{text}");
+
+    let mut json_command = tapes();
+    json_command.args([
+        "show",
+        "10000000-0000-0000-0000-000000000002",
+        "--tail",
+        "1",
+        "--json",
+    ]);
+    with_fixture_env(&mut json_command, &codex_home, &home, &codex_home);
+    let json_output = json_command.output().unwrap();
+    assert!(json_output.status.success());
+    let value: Value = serde_json::from_slice(&json_output.stdout).unwrap();
+    assert!(value.get("trailing_record").is_none());
+
+    let _ = fs::remove_dir_all(codex_home);
+}
+
+#[test]
 fn unusable_status_is_optional_and_export_omits_volatile_state() {
     let (codex_home, home) = fixture_store("optional");
     let (bin, calls) = fake_status(&codex_home, "{not-json", 17);

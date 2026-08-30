@@ -7,9 +7,9 @@ use serde_json::Value;
 
 use super::{
     head_directory, home_path, list_files, matching_session_file, read_jsonl, time_range,
-    timestamp, transcript, Backend, Jsonl, Listing, Query,
+    timestamp, trailing_record, transcript, Backend, Jsonl, Listing, Query,
 };
-use crate::model::{Model, Role, Session, Transcript, Turn};
+use crate::model::{Model, Role, Session, TrailingRecord, Transcript, Turn};
 
 #[derive(Clone, Debug)]
 pub struct ClaudeBackend {
@@ -138,7 +138,7 @@ impl Backend for ClaudeBackend {
             .ok_or_else(|| anyhow!("claude store is unavailable"))?;
         let path = matching_session_file(session_files(root), &session.id)
             .ok_or_else(|| anyhow!("claude session {} is unavailable", session.id))?;
-        let (turns, read) = read_transcript(&path)?;
+        let (turns, read, trailing_record) = read_transcript(&path)?;
         let subagents = subagent_transcript_count(&path);
         let notes = (subagents > 0)
             .then(|| {
@@ -150,19 +150,42 @@ impl Backend for ClaudeBackend {
             })
             .into_iter()
             .collect();
-        Ok(transcript(session.clone(), turns, tail, &read, notes))
+        Ok(transcript(
+            session.clone(),
+            turns,
+            tail,
+            &read,
+            trailing_record,
+            notes,
+        ))
     }
 }
 
-fn read_transcript(path: &Path) -> Result<(Vec<Turn>, Jsonl)> {
+fn read_transcript(path: &Path) -> Result<(Vec<Turn>, Jsonl, Option<TrailingRecord>)> {
     let read = read_jsonl(path)?;
     let turns = read.values.iter().flat_map(parse_turns).collect();
-    Ok((turns, read))
+    let trailing_record = trailing_record(
+        read.values.iter(),
+        |value| !parse_turns(value).is_empty(),
+        claude_trailing_kind,
+    );
+    Ok((turns, read, trailing_record))
 }
 
 /// Claude repeats the working directory on every message line.
 fn claude_cwd(value: &Value) -> Option<&str> {
     value["cwd"].as_str()
+}
+
+fn claude_trailing_kind(value: &Value) -> Option<&'static str> {
+    match value["type"].as_str()? {
+        "last-prompt" => Some("last-prompt"),
+        "ai-title" => Some("ai-title"),
+        "mode" => Some("mode"),
+        "permission-mode" => Some("permission-mode"),
+        "atis-latch" => Some("atis-latch"),
+        _ => None,
+    }
 }
 
 /// Claude names each project directory after the working directory it

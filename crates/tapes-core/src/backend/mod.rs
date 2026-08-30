@@ -7,7 +7,7 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde_json::Value;
 
-use crate::model::{Session, Transcript, Turn};
+use crate::model::{Session, TrailingRecord, Transcript, Turn};
 use crate::scope::Scope;
 
 pub mod claude;
@@ -313,11 +313,34 @@ pub(crate) fn time_range(values: &[Value]) -> Option<(DateTime<Utc>, DateTime<Ut
     )
 }
 
+/// Report the final verified record after the last record that rendered a
+/// turn. A newer unrecognized record suppresses an older candidate: naming the
+/// older one would misidentify the store's actual ending.
+pub(crate) fn trailing_record<'a, I, R, K>(
+    values: I,
+    renders_turn: R,
+    known_kind: K,
+) -> Option<TrailingRecord>
+where
+    I: IntoIterator<Item = &'a Value>,
+    R: Fn(&Value) -> bool,
+    K: Fn(&Value) -> Option<&'static str>,
+{
+    let values = values.into_iter().collect::<Vec<_>>();
+    let last_turn = values.iter().rposition(|value| renders_turn(value))?;
+    let value = values.get(last_turn + 1..)?.last().copied()?;
+    Some(TrailingRecord {
+        kind: known_kind(value)?.to_owned(),
+        timestamp: timestamp(&value["timestamp"]),
+    })
+}
+
 pub(crate) fn transcript(
     session: Session,
     mut turns: Vec<Turn>,
     tail: usize,
     read: &Jsonl,
+    trailing_record: Option<TrailingRecord>,
     mut notes: Vec<String>,
 ) -> Transcript {
     let tail_truncated = turns.len() > tail;
@@ -333,6 +356,7 @@ pub(crate) fn transcript(
         session,
         turns,
         truncated: read.truncated || tail_truncated,
+        trailing_record,
         notes,
     }
 }

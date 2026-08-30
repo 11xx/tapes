@@ -81,9 +81,12 @@ available backend, rejects ambiguous prefixes with the matching candidates,
 and prints normalized turns in chronological order. Human timestamps are RFC
 3339 whole seconds with `Z`; JSON preserves the recorded timestamp precision.
 `--tail` bounds the turns returned and defaults to the last 100; a transcript
-that dropped any is marked `truncated`. JSON output uses the
-`tapes-session/1` transcript schema, with the optional `live` annotation when
-the authority answers. The human header marks the same state.
+that dropped any is marked `truncated`. When a backend verifies a final
+non-turn record, human output names its kind and timestamp and JSON carries an
+optional `trailing_record` object; unavailable source timestamps remain absent.
+JSON output uses the `tapes-session/1` transcript schema, with the optional
+`live` annotation when the authority answers. The human header marks the same
+state.
 
 `show` and `export` also take `--latest` in place of an ID, which resolves the
 most recent session in scope. `--exclude <id>` is repeatable and passes over
@@ -96,8 +99,8 @@ scope.
 
 - `.context.md` — exact operator turns and assistant-visible text. Read first.
 - `.json` — the canonical `tapes-session/1` object plus turns, cost, tokens,
-  and the session directory's git head and branch when they resolve. Query
-  selectively with `jq`.
+  any verified `trailing_record`, and the session directory's git head and
+  branch when they resolve. Query selectively with `jq`.
 - `.trace.md` — every reasoning and tool turn the transcript carries, in
   order, for grepping. A tool turn is headed by the tool's name where its
   envelope carries one, by `result` for a bare result, and by `unnamed`

@@ -20,17 +20,26 @@ only retrieval path.
 ## Line shape
 
 Every line is `{"type": …, "timestamp": …, "payload": {…}}` with an RFC 3339
-`timestamp`. Three top-level types matter:
+`timestamp`. The top-level types relevant to `tapes` are:
 
 | `type` | Carries |
 |---|---|
 | `session_meta` | `payload.id` (session UUID), `payload.cwd` |
 | `turn_context` | `payload.model`, `payload.effort`, `payload.cwd` |
 | `response_item` | the conversation itself, discriminated by `payload.type` |
+| `event_msg` | harness lifecycle and accounting state, discriminated by `payload.type` |
+| `world_state` | harness state outside the conversation |
 
 `turn_context` repeats whenever the model or effort changes, so the last one
 holds the session's final selection. `effort` is what the normalized model
 carries as the model variant.
+
+Real rollouts also contain timestamped non-turn records. The verified
+top-level kinds are `session_meta`, `turn_context`, `event_msg`, and
+`world_state`; `event_msg` carries a more specific `payload.type`, but the
+normalized trailing-record kind stays the top-level `event_msg`. When one of
+these kinds is the final record after the newest rendered turn, the backend
+reports its kind and top-level timestamp as `trailing_record`.
 
 ## `response_item` payloads
 

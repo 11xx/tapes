@@ -134,15 +134,16 @@ enum Command {
         json: bool,
     },
     /// Show one session. The human header marks a matching live session when
-    /// harness-status is reachable.
+    /// harness-status is reachable, and a verified trailing record is named
+    /// when the store ends after its last rendered turn.
     Show {
         #[command(flatten)]
         selection: SelectionArgs,
         /// Show only the final number of messages.
         #[arg(long)]
         tail: Option<usize>,
-        /// Render the session as JSON. The session may include an optional
-        /// `live` field supplied by harness-status.
+        /// Render the session as JSON. The session may include optional
+        /// `live` and `trailing_record` fields supplied by its authorities.
         #[arg(long)]
         json: bool,
     },
@@ -320,16 +321,7 @@ fn render_transcript(transcript: &Transcript, by_latest: bool) -> String {
             out.push_str(&format!("[{role}]\n{}\n", turn.text));
         }
     }
-    if let Some(newest) = transcript.turns.iter().rev().find_map(|turn| turn.ts) {
-        if transcript.session.last_activity_at > newest {
-            out.push_str(&format!(
-                "Note: The store records activity at {}, after the newest turn rendered here ({}). \
-                 What came later is a record `show` does not render as a turn.\n",
-                human_timestamp(transcript.session.last_activity_at),
-                human_timestamp(newest)
-            ));
-        }
-    }
+    render_activity_note(&mut out, transcript);
     if by_latest {
         out.push_str(&format!(
             "Note: --latest picked the newest session in scope. Pass --exclude {} to reach the one before it.\n",
@@ -346,6 +338,46 @@ fn render_transcript(transcript: &Transcript, by_latest: bool) -> String {
         out.push_str(&format!("Note: {note}\n"));
     }
     out
+}
+
+fn render_activity_note(out: &mut String, transcript: &Transcript) {
+    let newest_turn = transcript.turns.iter().rev().find_map(|turn| turn.ts);
+    let Some(trailing_record) = transcript.trailing_record.as_ref() else {
+        if let Some(newest_turn) = newest_turn {
+            if transcript.session.last_activity_at > newest_turn {
+                out.push_str(&format!(
+                    "Note: The store records activity at {}, after the newest turn rendered here ({}). \
+                     What came later is a record `show` does not render as a turn.\n",
+                    human_timestamp(transcript.session.last_activity_at),
+                    human_timestamp(newest_turn)
+                ));
+            }
+        }
+        return;
+    };
+
+    let label = match trailing_record.timestamp {
+        Some(timestamp) => format!(
+            "`{}` at {}",
+            trailing_record.kind,
+            human_timestamp(timestamp)
+        ),
+        None => format!("`{}` (timestamp unavailable)", trailing_record.kind),
+    };
+    if let Some(newest_turn) = newest_turn {
+        if transcript.session.last_activity_at > newest_turn {
+            out.push_str(&format!(
+                "Note: The store records activity at {}, after the newest turn rendered here ({}). \
+                 The newest trailing record is {label}; `show` does not render it as a turn.\n",
+                human_timestamp(transcript.session.last_activity_at),
+                human_timestamp(newest_turn)
+            ));
+            return;
+        }
+    }
+    out.push_str(&format!(
+        "Note: The newest trailing record is {label}; `show` does not render it as a turn.\n"
+    ));
 }
 
 fn live_marker(session: &Session) -> String {
@@ -373,7 +405,7 @@ fn reset_sigpipe() {
 mod tests {
     use super::*;
     use chrono::{DateTime, Utc};
-    use tapes_core::model::Turn;
+    use tapes_core::model::{TrailingRecord, Turn};
 
     fn transcript(truncated: bool) -> Transcript {
         Transcript {
@@ -396,6 +428,7 @@ mod tests {
                 ts: None,
             }],
             truncated,
+            trailing_record: None,
             notes: vec!["Skipped 1 unparseable line.".to_owned()],
         }
     }
@@ -434,6 +467,25 @@ mod tests {
         assert!(
             !agreeing.contains("does not render as a turn"),
             "{agreeing}"
+        );
+    }
+
+    #[test]
+    fn a_verified_trailing_record_names_its_kind_and_timestamp() {
+        let newest_turn = "2026-08-23T23:24:52Z".parse::<DateTime<Utc>>().unwrap();
+        let trailing_timestamp = "2026-08-23T23:27:56Z".parse::<DateTime<Utc>>().unwrap();
+        let mut transcript = transcript(false);
+        transcript.turns[0].ts = Some(newest_turn);
+        transcript.session.last_activity_at = trailing_timestamp;
+        transcript.trailing_record = Some(TrailingRecord {
+            kind: "event_msg".to_owned(),
+            timestamp: Some(trailing_timestamp),
+        });
+
+        let rendered = render_transcript(&transcript, false);
+        assert!(
+            rendered.contains("The newest trailing record is `event_msg` at 2026-08-23T23:27:56Z"),
+            "{rendered}"
         );
     }
 

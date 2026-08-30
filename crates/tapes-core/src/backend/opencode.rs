@@ -591,6 +591,7 @@ fn parse_transcript(session: Session, response: &Value, tail: usize) -> Result<T
         session,
         turns,
         truncated: page_truncated || tail_truncated,
+        trailing_record: None,
         notes,
     })
 }

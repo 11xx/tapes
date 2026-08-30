@@ -86,6 +86,13 @@ pub struct Turn {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TrailingRecord {
+    pub kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timestamp: Option<DateTime<Utc>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Role {
     User,
@@ -212,6 +219,7 @@ pub struct Transcript {
     pub session: Session,
     pub turns: Vec<Turn>,
     pub truncated: bool,
+    pub trailing_record: Option<TrailingRecord>,
     pub notes: Vec<String>,
 }
 
@@ -225,6 +233,7 @@ impl Serialize for Transcript {
             session: &self.session,
             turns: &self.turns,
             truncated: self.truncated,
+            trailing_record: self.trailing_record.as_ref(),
             notes: &self.notes,
         }
         .serialize(serializer)
@@ -248,6 +257,7 @@ impl<'de> Deserialize<'de> for Transcript {
             session: serialized.session,
             turns: serialized.turns,
             truncated: serialized.truncated,
+            trailing_record: serialized.trailing_record,
             notes: serialized.notes,
         })
     }
@@ -259,6 +269,8 @@ struct TranscriptRef<'a> {
     session: &'a Session,
     turns: &'a [Turn],
     truncated: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    trailing_record: Option<&'a TrailingRecord>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     notes: &'a Vec<String>,
 }
@@ -269,6 +281,8 @@ struct SerializedTranscript {
     session: Session,
     turns: Vec<Turn>,
     truncated: bool,
+    #[serde(default)]
+    trailing_record: Option<TrailingRecord>,
     #[serde(default)]
     notes: Vec<String>,
 }
@@ -344,6 +358,10 @@ mod tests {
             session: session(),
             turns: vec![turn.clone()],
             truncated: true,
+            trailing_record: Some(TrailingRecord {
+                kind: "event_msg".into(),
+                timestamp: Some(timestamp(1_700_000_060)),
+            }),
             notes: vec!["One record was unavailable.".into()],
         };
 
@@ -447,6 +465,7 @@ mod tests {
             session: session(),
             turns: Vec::new(),
             truncated: true,
+            trailing_record: None,
             notes: Vec::new(),
         };
 
@@ -458,5 +477,27 @@ mod tests {
         let decoded: Transcript = serde_json::from_value(value).unwrap();
         assert!(decoded.truncated);
         assert_eq!(decoded, transcript);
+    }
+
+    #[test]
+    fn transcript_omits_an_absent_trailing_record_and_timestamp() {
+        let mut transcript = Transcript {
+            session: session(),
+            turns: Vec::new(),
+            truncated: false,
+            trailing_record: Some(TrailingRecord {
+                kind: "last-prompt".into(),
+                timestamp: None,
+            }),
+            notes: Vec::new(),
+        };
+
+        let value = serde_json::to_value(&transcript).unwrap();
+        assert_eq!(value["trailing_record"]["kind"], "last-prompt");
+        assert!(value["trailing_record"].get("timestamp").is_none());
+
+        transcript.trailing_record = None;
+        let value = serde_json::to_value(&transcript).unwrap();
+        assert!(value.get("trailing_record").is_none());
     }
 }

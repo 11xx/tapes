@@ -8,7 +8,9 @@ use chrono::Utc;
 use serde::Serialize;
 use serde_json::Value;
 
-use crate::model::{human_timestamp, human_title, Role, Session, Transcript, SESSION_SCHEMA};
+use crate::model::{
+    human_timestamp, human_title, Role, Session, TrailingRecord, Transcript, SESSION_SCHEMA,
+};
 
 /// One exported file: where it landed and how big it is.
 pub struct BundleFile {
@@ -44,6 +46,8 @@ struct BundleJson<'a> {
     session: &'a Session,
     turns: &'a [crate::model::Turn],
     truncated: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    trailing_record: Option<&'a TrailingRecord>,
     #[serde(skip_serializing_if = "<[String]>::is_empty")]
     notes: &'a [String],
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -61,6 +65,7 @@ pub fn export(transcript: &Transcript, directory: &Path) -> Result<Bundle> {
         session: &session,
         turns: &transcript.turns,
         truncated: transcript.truncated,
+        trailing_record: transcript.trailing_record.as_ref(),
         notes: &transcript.notes,
         git: git.as_ref(),
     })
@@ -253,7 +258,7 @@ mod tests {
     use chrono::TimeZone;
 
     use super::*;
-    use crate::model::{LiveState, Model, Turn};
+    use crate::model::{LiveState, Model, TrailingRecord, Turn};
 
     fn transcript() -> Transcript {
         let ts = Utc.timestamp_opt(1_700_000_000, 0).unwrap();
@@ -297,6 +302,7 @@ mod tests {
                 },
             ],
             truncated: false,
+            trailing_record: None,
             notes: vec!["1 entry belongs to an abandoned branch.".into()],
         }
     }
@@ -367,6 +373,33 @@ mod tests {
         assert_eq!(value["turns"].as_array().unwrap().len(), 4);
         assert_eq!(value["notes"][0], "1 entry belongs to an abandoned branch.");
         assert!(value.get("git").is_none());
+
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn json_carries_a_trailing_record() {
+        let directory = std::env::temp_dir().join(format!(
+            "tapes-bundle-{}-trailing-record",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&directory);
+        let mut transcript = transcript();
+        transcript.trailing_record = Some(TrailingRecord {
+            kind: "event_msg".into(),
+            timestamp: Some(Utc.timestamp_opt(1_700_000_001, 0).unwrap()),
+        });
+        let bundle = export(&transcript, &directory).unwrap();
+        let value: Value =
+            serde_json::from_str(&fs::read_to_string(&bundle.json.path).unwrap()).unwrap();
+
+        assert_eq!(
+            value["trailing_record"],
+            serde_json::json!({
+                "kind": "event_msg",
+                "timestamp": "2023-11-14T22:13:21Z"
+            })
+        );
 
         fs::remove_dir_all(directory).unwrap();
     }
