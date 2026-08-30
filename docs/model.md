@@ -28,11 +28,17 @@ meaningful user turn for human discovery; it is separate so consumers can tell
 recorded metadata from a display aid. Known instruction envelopes are removed
 and whitespace is collapsed before the hint is capped at 96 Unicode
 characters, using an ellipsis when it is shortened. Human renderers prefix
-this hint with `~`; JSON retains the two fields separately. A bounded reader
+this hint with `~`; JSON retains the recorded title, derived hint, and
+truncation marker separately. A bounded reader
 that cannot see the first user turn leaves the hint absent rather than labeling
 a later turn as the first. API-backed metadata readers also leave it absent
 when deriving it would require an extra message request; this keeps listing
 bounded and keeps show/export metadata consistent with listing metadata.
+`derived_title_truncated` is present with the derived hint and is `true` when
+the hint was shortened, or `false` when the present hint is complete. For
+Codex, an absent `model` can mean that the model-bearing `turn_context` was
+before the bounded 4 MiB file-tail read; the reader preserves that absence
+rather than inventing a model.
 
 `Model` contains the model identifier and an optional variant. The variant
 also carries an effort level when the harness records one. Its identity is the
@@ -92,3 +98,11 @@ turn produced a useful hint. `trailing_record` and its `timestamp` are omitted
 when their source facts are unavailable. JSON timestamps retain their recorded
 precision; human list, show, and Markdown renderings use RFC 3339 whole seconds
 with a `Z` suffix.
+
+A serialized list is a `tapes-list/1` object with `sessions`, `unavailable`,
+`unreadable`, `unsearched`, `scanned`, and `scan_truncated`. `unsearched` is
+populated only for a requested content search when a candidate's bounded read
+fails; its entries name the session and diagnostic. It is distinct from
+`unreadable`, which describes a session that could not be normalized at all.
+`list --search` inspects the last 32 normalized turns per candidate before the
+per-harness result limit.

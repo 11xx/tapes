@@ -108,6 +108,8 @@ pub struct Listing {
     /// These use the same vocabulary as the public listing's `unavailable`
     /// field, while a command or store failure still names the whole harness.
     pub unavailable: Vec<String>,
+    /// Candidates whose bounded content search could not be answered.
+    pub unsearched: Vec<String>,
     pub scanned: usize,
     pub scan_truncated: bool,
 }
@@ -118,6 +120,7 @@ impl Listing {
             scanned: sessions.len(),
             sessions,
             unavailable: Vec::new(),
+            unsearched: Vec::new(),
             scan_truncated: false,
         }
     }
@@ -133,6 +136,26 @@ pub trait Backend {
     /// methods can report their own absence or failure.
     fn available(&self) -> bool;
     fn list(&self, query: &Query) -> Result<Listing>;
+    /// List sessions after a bounded content search. File-backed backends can
+    /// override this to search while their existing candidate parse is open;
+    /// the default reuses the backend's bounded transcript path.
+    fn list_with_search(&self, query: &Query, needle: &str, tail: usize) -> Result<Listing> {
+        let mut listing = self.list(query)?;
+        let mut matching = Vec::new();
+        for session in listing.sessions {
+            match self.search(&session, needle, tail) {
+                Ok(true) => matching.push(session),
+                Ok(false) => {}
+                Err(error) => listing.unsearched.push(format!(
+                    "{} session {}: {error:#}",
+                    self.harness(),
+                    session.id
+                )),
+            }
+        }
+        listing.sessions = matching;
+        Ok(listing)
+    }
     /// Locate one session by its exact id without enumerating the store.
     /// `Ok(None)` means this backend does not hold it. Resolution calls this
     /// before it calls `list`, so an exact id never pays for a listing.
@@ -142,6 +165,17 @@ pub trait Backend {
     /// locating it again; the transcript read may still need to open the
     /// underlying record to collect turns.
     fn transcript(&self, session: &Session, tail: usize) -> Result<Transcript>;
+    /// Search only the bounded tail requested by a listing. The default keeps
+    /// this path aligned with each backend's existing transcript reader, so a
+    /// backend cannot accidentally grow a second unbounded parser for search.
+    fn search(&self, session: &Session, needle: &str, tail: usize) -> Result<bool> {
+        let needle = needle.to_lowercase();
+        let transcript = self.transcript(session, tail)?;
+        Ok(transcript
+            .turns
+            .iter()
+            .any(|turn| turn.text.to_lowercase().contains(&needle)))
+    }
 }
 
 pub fn backends() -> Vec<Box<dyn Backend>> {
@@ -162,6 +196,11 @@ pub(crate) struct Jsonl {
     pub values: Vec<Value>,
     pub skipped: usize,
     pub truncated: bool,
+}
+
+pub(crate) struct ParsedFile {
+    pub session: Session,
+    pub turns: Vec<Turn>,
 }
 
 pub(crate) fn read_jsonl(path: &Path) -> Result<Jsonl> {
@@ -263,6 +302,44 @@ pub(crate) fn list_files(
     probe: impl Fn(&Path) -> Option<PathBuf>,
     parse: impl Fn(&Path) -> Option<Session>,
 ) -> Listing {
+    list_files_inner(files, query, probe, |path| {
+        parse(path).map(|session| ParsedFile {
+            session,
+            turns: Vec::new(),
+        })
+    })
+}
+
+/// Parse each file once and retain only candidates whose final normalized turns
+/// contain the needle. The file parser already caps the bytes it reads, and
+/// `tail` caps the turns considered by the content search.
+pub(crate) fn list_files_with_search(
+    files: Vec<PathBuf>,
+    query: &Query,
+    needle: &str,
+    tail: usize,
+    probe: impl Fn(&Path) -> Option<PathBuf>,
+    parse: impl Fn(&Path) -> Option<ParsedFile>,
+) -> Listing {
+    let needle = needle.to_lowercase();
+    list_files_inner(files, query, probe, move |path| {
+        parse(path).filter(|parsed| {
+            parsed
+                .turns
+                .iter()
+                .rev()
+                .take(tail)
+                .any(|turn| turn.text.to_lowercase().contains(&needle))
+        })
+    })
+}
+
+fn list_files_inner(
+    files: Vec<PathBuf>,
+    query: &Query,
+    probe: impl Fn(&Path) -> Option<PathBuf>,
+    parse: impl Fn(&Path) -> Option<ParsedFile>,
+) -> Listing {
     let mut listing = Listing::default();
     for path in files {
         if listing.sessions.len() >= query.limit {
@@ -278,9 +355,10 @@ pub(crate) fn list_files(
                 continue;
             }
         }
-        let Some(session) = parse(&path) else {
+        let Some(parsed) = parse(&path) else {
             continue;
         };
+        let session = parsed.session;
         let placed = query.scope.is_none_or(|scope| {
             session
                 .directory

@@ -56,17 +56,28 @@ exists); a session without a model never matches. `--directory <substring>`
 matches case-insensitively against the recorded directory path; a session
 without a directory never matches. Both filters are applied by the library
 before the per-harness bound, and compose with the harness and scope filters.
+`--search <substring>` matches case-insensitively against the last 32 normalized
+turns in each candidate session. The fixed tail keeps the read bounded, so a
+non-match says only that those recent turns did not contain the text. Search is
+applied before the per-harness bound. If a candidate's bounded read fails, it
+is named in `unsearched` rather than silently treated as a non-match.
 The scope applies before the bound, so a scoped listing cannot be emptied by a
 limit spent on other projects. Human output ends with an availability note when
 a backend cannot be read, a separate line for each stored session row that
-cannot be read, and says so when a search stopped early. File-backed harnesses
+cannot be read, a separate line for each candidate a content search could not
+read, and says so when a search stopped early. File-backed harnesses
 may show a bounded first-meaningful-user-turn hint prefixed with `~` when no
-recorded title exists; JSON keeps that hint in `derived_title` and leaves the
-recorded `title` absent. OpenCode's API-backed listing does not fetch messages
-to invent titles, so a title-less OpenCode row keeps both title fields absent
-in list, show, and export metadata. JSON output is a `tapes-list/1` object
-containing `sessions`, `unavailable`, `unreadable`, `scanned`, and
-`scan_truncated`. `unavailable` names harnesses that could not be read at all;
+recorded title exists; JSON keeps that hint in `derived_title`, leaves the
+recorded `title` absent, and adds `derived_title_truncated: true` when the hint
+was shortened (`false` means the present hint is complete). OpenCode's
+API-backed listing does not fetch messages merely to invent titles, so a
+title-less OpenCode row keeps title metadata absent in
+list, show, and export. A Codex row without `model` may have its
+model-bearing `turn_context` before the bounded 4 MiB file-tail read; the
+absence is preserved rather than filled with a guess. JSON output is a
+`tapes-list/1` object containing `sessions`, `unavailable`, `unreadable`,
+`unsearched`, `scanned`, and `scan_truncated`. `unavailable` names harnesses
+that could not be read at all;
 `unreadable` names sessions a readable harness could not normalize, each with
 its id and diagnostic. They stay apart because a corrupt row says nothing about
 the store holding it. When the optional `harness-status` command

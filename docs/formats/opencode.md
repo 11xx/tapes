@@ -222,10 +222,11 @@ from either store can be resolved.
 
 The session-list and session-info responses are the normalized metadata source
 for `tapes`. A title-less OpenCode session therefore keeps both `title` and
-`derived_title` absent: deriving a first-user-turn hint would require an extra
-message request per row, which would make listing unbounded and unexpectedly
-expensive. Message reads preserve that same metadata rather than inventing a
-title after listing.
+`derived_title` absent in an ordinary listing: deriving a first-user-turn hint
+would require an extra message request per row, which would make listing
+unbounded and unexpectedly expensive. An explicit content search may read the
+bounded message tail, but that read preserves the same metadata rather than
+inventing a title after listing.
 
 ## Resume / fork primitives
 

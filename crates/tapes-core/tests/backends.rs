@@ -1,7 +1,9 @@
+use std::cell::Cell;
 use std::fs::{self, File};
 use std::io::{BufWriter, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use chrono::{TimeZone, Utc};
@@ -10,10 +12,11 @@ use tapes_core::backend::codex::CodexBackend;
 use tapes_core::backend::opencode::OpenCodeBackend;
 use tapes_core::backend::pi::PiBackend;
 use tapes_core::backend::{Backend, Listing, Query};
-use tapes_core::model::{Role, Session, Transcript};
+use tapes_core::model::{Role, Session, Transcript, Turn};
 use tapes_core::{
-    latest_with_backends, list_with_backends, list_with_backends_filtered, resolve_session,
-    scope::Scope, show_with_backends, ResolveError, Selection,
+    latest_with_backends, list_with_backends, list_with_backends_filtered,
+    list_with_backends_filtered_and_search, resolve_session, scope::Scope, show_with_backends,
+    ResolveError, Selection, LIST_SEARCH_TAIL,
 };
 
 fn fixtures(harness: &str) -> PathBuf {
@@ -199,6 +202,65 @@ fn every_backend_satisfies_shared_normalization_assertions() {
         assert_eq!(tailed.turns.len(), 1);
         assert!(tailed.truncated);
     }
+}
+
+#[test]
+fn every_backend_searches_normalized_fixture_turns() {
+    for (backend, id) in fixture_backends() {
+        let session = located(backend.as_ref(), id);
+
+        assert!(
+            backend
+                .search(&session, "FIXTURE", LIST_SEARCH_TAIL)
+                .unwrap(),
+            "{} fixture was not searchable",
+            backend.harness()
+        );
+        assert!(!backend
+            .search(&session, "not in this fixture", LIST_SEARCH_TAIL)
+            .unwrap());
+    }
+}
+
+#[test]
+fn malformed_lines_do_not_hide_searchable_turns() {
+    let cases: Vec<(Box<dyn Backend>, &str)> = vec![
+        (
+            Box::new(ClaudeBackend::new(fixtures("claude"))),
+            "malformed",
+        ),
+        (
+            Box::new(CodexBackend::new(fixtures("codex"))),
+            "10000000-0000-0000-0000-000000000002",
+        ),
+        (Box::new(PiBackend::new(fixtures("pi"))), "malformed"),
+    ];
+
+    for (backend, id) in cases {
+        let session = located(backend.as_ref(), id);
+        assert!(backend.search(&session, "VALID", LIST_SEARCH_TAIL).unwrap());
+    }
+}
+
+#[test]
+fn list_search_uses_each_backend_search_path_before_the_limit() {
+    let backends = fixture_backends()
+        .into_iter()
+        .map(|(backend, _)| backend)
+        .collect::<Vec<_>>();
+    let result = list_with_backends_filtered_and_search(
+        &backends,
+        None,
+        None,
+        1,
+        None,
+        None,
+        Some("fixture"),
+    )
+    .unwrap();
+
+    assert_eq!(result.sessions.len(), 4);
+    assert!(result.unsearched.is_empty());
 }
 
 #[test]
@@ -957,6 +1019,161 @@ fn the_latest_in_scope_needs_no_id_and_honours_exclusions() {
     fs::remove_dir_all(project).unwrap();
 }
 
+struct SearchFixture {
+    session: Session,
+    requested_tail: Rc<Cell<usize>>,
+    fail: bool,
+}
+
+impl Backend for SearchFixture {
+    fn harness(&self) -> &'static str {
+        "fixture"
+    }
+
+    fn available(&self) -> bool {
+        true
+    }
+
+    fn list(&self, query: &Query) -> anyhow::Result<Listing> {
+        assert_eq!(
+            query.limit,
+            usize::MAX,
+            "content search must inspect candidates before applying --limit"
+        );
+        Ok(Listing::from_sessions(vec![self.session.clone()]))
+    }
+
+    fn locate(&self, id: &str) -> anyhow::Result<Option<Session>> {
+        Ok((self.session.id == id).then(|| self.session.clone()))
+    }
+
+    fn transcript(&self, session: &Session, tail: usize) -> anyhow::Result<Transcript> {
+        self.requested_tail.set(tail);
+        if self.fail {
+            anyhow::bail!("bounded search read failed");
+        }
+        Ok(Transcript {
+            session: session.clone(),
+            turns: vec![Turn {
+                role: Role::User,
+                text: "needle".into(),
+                ts: None,
+            }],
+            truncated: false,
+            notes: Vec::new(),
+        })
+    }
+}
+
+#[test]
+fn list_search_uses_a_fixed_tail_before_applying_the_limit() {
+    let requested_tail = Rc::new(Cell::new(0));
+    let backends: Vec<Box<dyn Backend>> = vec![Box::new(SearchFixture {
+        session: resolver_session("search-session"),
+        requested_tail: Rc::clone(&requested_tail),
+        fail: false,
+    })];
+
+    let result = list_with_backends_filtered_and_search(
+        &backends,
+        Some("fixture"),
+        None,
+        1,
+        None,
+        None,
+        Some("NEEDLE"),
+    )
+    .unwrap();
+
+    assert_eq!(result.sessions.len(), 1);
+    assert_eq!(requested_tail.get(), LIST_SEARCH_TAIL);
+    assert!(result.unsearched.is_empty());
+}
+
+#[test]
+fn file_search_does_not_match_before_the_fixed_recent_turn_window() {
+    let root = std::env::temp_dir().join(format!("tapes-search-window-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&root);
+    let day = root.join("2026/08/09");
+    fs::create_dir_all(&day).unwrap();
+    let id = "00000000-0000-0000-0000-0000000000cc";
+    let path = day.join(format!("rollout-2026-08-09T00-00-00-{id}.jsonl"));
+    let mut file = BufWriter::new(File::create(&path).unwrap());
+    writeln!(
+        file,
+        r#"{{"timestamp":"2026-08-09T00:00:00Z","type":"session_meta","payload":{{"id":"{id}","cwd":"/fixtures/project"}}}}"#
+    )
+    .unwrap();
+    for index in 0..33 {
+        let text = match index {
+            0 => "old needle",
+            32 => "recent needle",
+            _ => "filler",
+        };
+        writeln!(
+            file,
+            r#"{{"timestamp":"2026-08-09T00:00:{index:02}Z","type":"response_item","payload":{{"type":"message","role":"user","content":[{{"type":"input_text","text":"{text}"}}]}}}}"#
+        )
+        .unwrap();
+    }
+    drop(file);
+
+    let backend: Vec<Box<dyn Backend>> = vec![Box::new(CodexBackend::new(&root))];
+    let old = list_with_backends_filtered_and_search(
+        &backend,
+        Some("codex"),
+        None,
+        10,
+        None,
+        None,
+        Some("old needle"),
+    )
+    .unwrap();
+    assert!(old.sessions.is_empty());
+
+    let recent = list_with_backends_filtered_and_search(
+        &backend,
+        Some("codex"),
+        None,
+        10,
+        None,
+        None,
+        Some("RECENT NEEDLE"),
+    )
+    .unwrap();
+    assert_eq!(recent.sessions.len(), 1);
+    assert_eq!(recent.sessions[0].id, id);
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn a_failed_bounded_search_is_reported_as_unsearched() {
+    let requested_tail = Rc::new(Cell::new(0));
+    let backends: Vec<Box<dyn Backend>> = vec![Box::new(SearchFixture {
+        session: resolver_session("unsearched-session"),
+        requested_tail,
+        fail: true,
+    })];
+
+    let result = list_with_backends_filtered_and_search(
+        &backends,
+        Some("fixture"),
+        None,
+        1,
+        None,
+        None,
+        Some("needle"),
+    )
+    .unwrap();
+
+    assert!(result.sessions.is_empty());
+    assert_eq!(
+        result.unsearched,
+        vec!["fixture session unsearched-session: bounded search read failed"]
+    );
+}
+
 #[derive(Clone, Default)]
 struct ResolverFixture {
     sessions: Vec<Session>,
@@ -1018,6 +1235,7 @@ fn resolver_session(id: &str) -> Session {
         model: None,
         title: None,
         derived_title: None,
+        derived_title_truncated: None,
         directory: None,
         started_at: timestamp,
         last_activity_at: timestamp,
