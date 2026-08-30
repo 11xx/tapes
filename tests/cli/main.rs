@@ -176,6 +176,7 @@ fn with_fixture_env(command: &mut Command, codex_home: &Path, home: &Path, bin: 
     command
         .env("CODEX_HOME", codex_home)
         .env("HOME", home)
+        .env_remove("XDG_DATA_HOME")
         .env("PATH", format!("{}:/usr/bin:/bin", bin.display()));
 }
 
@@ -1248,6 +1249,46 @@ fn malformed_opencode_database_row_is_unreadable_without_breaking_listing() {
     let error = String::from_utf8_lossy(&show.stderr);
     assert!(error.contains("ses_truncated_fixture"), "{error}");
     assert!(error.contains("EOF while parsing a string"), "{error}");
+}
+
+#[test]
+fn database_prefilter_failure_is_visible_while_the_safe_fallback_runs() {
+    let root = TemporaryDirectory::new(std::env::temp_dir().join(format!(
+        "tapes-cli-opencode-prefilter-failure-{}",
+        std::process::id()
+    )));
+    let _stable = opencode_program(root.path(), "opencode");
+    let mut command = tapes();
+    command.args([
+        "list",
+        "--harness",
+        "opencode",
+        "--global",
+        "--search",
+        "PREFILTERERROR",
+        "--json",
+    ]);
+    with_fixture_env(
+        &mut command,
+        &root.path().join("codex"),
+        &root.path().join("home"),
+        root.path(),
+    );
+
+    let output = command.output().unwrap();
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(value["sessions"].as_array().unwrap().is_empty());
+    assert_eq!(value["unsearched"].as_array().unwrap().len(), 1);
+    assert!(value["unsearched"][0]
+        .as_str()
+        .unwrap()
+        .contains("opencode search prefilter failed"));
 }
 
 #[test]

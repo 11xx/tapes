@@ -1,4 +1,5 @@
 use std::cell::Cell;
+use std::collections::HashSet;
 use std::fs::{self, File};
 use std::io::{BufWriter, Write};
 use std::os::unix::fs::PermissionsExt;
@@ -406,6 +407,119 @@ fn opencode_database_search_prefilters_candidates_before_bounded_reads() {
 }
 
 #[test]
+fn opencode_database_search_prefilter_failure_is_visible_before_fallback() {
+    let program = OpenCodeAlias::database();
+    let backends: Vec<Box<dyn Backend>> = vec![Box::new(OpenCodeBackend::new(program.path()))];
+
+    let result = list_with_backends_filtered_and_search(
+        &backends,
+        Some("opencode"),
+        None,
+        10,
+        None,
+        None,
+        Some("PREFILTERERROR"),
+    )
+    .unwrap();
+
+    assert!(result.sessions.is_empty());
+    assert_eq!(result.unsearched.len(), 1);
+    assert!(result.unsearched[0].contains("opencode search prefilter failed"));
+    assert!(result.unsearched[0].contains("searched without prefilter"));
+}
+
+#[test]
+fn opencode_v2_only_search_keeps_all_genuine_fixture_matches() {
+    let api = OpenCodeAlias::counting();
+    let backends: Vec<Box<dyn Backend>> = vec![Box::new(OpenCodeBackend::new(api.path()))];
+
+    let result = list_with_backends_filtered_and_search(
+        &backends,
+        Some("opencode"),
+        None,
+        10,
+        None,
+        None,
+        Some("fixture"),
+    )
+    .unwrap();
+    let ids = result
+        .sessions
+        .iter()
+        .map(|session| session.id.as_str())
+        .collect::<HashSet<_>>();
+
+    assert_eq!(
+        ids,
+        HashSet::from(["ses_000000fixtureSharedSession", "ses_api_only_fixture"])
+    );
+    assert!(result.unsearched.is_empty());
+}
+
+#[test]
+fn opencode_search_uses_the_first_projection_before_deduplicating() {
+    let stable = OpenCodeAlias::database();
+    let api = OpenCodeAlias::new("counting");
+    let backends: Vec<Box<dyn Backend>> = vec![
+        Box::new(OpenCodeBackend::new(stable.path())),
+        Box::new(OpenCodeBackend::new(api.path())),
+    ];
+
+    let result = list_with_backends_filtered_and_search(
+        &backends,
+        Some("opencode"),
+        None,
+        10,
+        None,
+        None,
+        Some("complete"),
+    )
+    .unwrap();
+    let ids = result
+        .sessions
+        .iter()
+        .map(|session| session.id.as_str())
+        .collect::<HashSet<_>>();
+
+    assert_eq!(
+        ids,
+        HashSet::from(["ses_database_only_fixture", "ses_api_only_fixture"])
+    );
+    assert!(!ids.contains("ses_000000fixtureSharedSession"));
+    assert!(result.unsearched.is_empty());
+}
+
+#[test]
+fn a_failed_second_opencode_projection_is_not_a_silent_non_match() {
+    let stable = OpenCodeAlias::database();
+    let broken_api = OpenCodeAlias::new("broken-list");
+    let backends: Vec<Box<dyn Backend>> = vec![
+        Box::new(OpenCodeBackend::new(stable.path())),
+        Box::new(OpenCodeBackend::new(broken_api.path())),
+    ];
+
+    let result = list_with_backends_filtered_and_search(
+        &backends,
+        Some("opencode"),
+        None,
+        10,
+        None,
+        None,
+        Some("fixture"),
+    )
+    .unwrap();
+
+    assert!(result
+        .unsearched
+        .iter()
+        .any(|diagnostic| diagnostic.contains("opencode v2 search could not list candidates")));
+    assert!(result
+        .unsearched
+        .iter()
+        .any(|diagnostic| diagnostic.contains("search could not reconcile duplicate projections")));
+}
+
+#[test]
 fn opencode_aliases_remove_their_owned_paths_on_drop() {
     let program = OpenCodeAlias::counting();
     let alias_path = program.path().to_owned();
@@ -596,6 +710,28 @@ fn malformed_opencode_database_rows_leave_other_sessions_and_a_diagnostic() {
     assert_eq!(listing.unavailable.len(), 1);
     assert!(listing.unavailable[0].contains("ses_truncated_fixture"));
     assert!(listing.unavailable[0].contains("EOF while parsing a string"));
+}
+
+#[test]
+fn malformed_opencode_database_rows_do_not_hide_searchable_sessions() {
+    let program = OpenCodeAlias::malformed_database();
+    let backends: Vec<Box<dyn Backend>> = vec![Box::new(OpenCodeBackend::new(program.path()))];
+
+    let result = list_with_backends_filtered_and_search(
+        &backends,
+        Some("opencode"),
+        None,
+        10,
+        None,
+        None,
+        Some("FIXTURE"),
+    )
+    .unwrap();
+
+    assert_eq!(result.sessions.len(), 2);
+    assert_eq!(result.unreadable.len(), 1);
+    assert!(result.unreadable[0].contains("ses_truncated_fixture"));
+    assert!(result.unsearched.is_empty());
 }
 
 #[test]

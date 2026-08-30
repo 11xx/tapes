@@ -102,7 +102,8 @@ with a `Z` suffix.
 A serialized list is a `tapes-list/1` object with `sessions`, `unavailable`,
 `unreadable`, `unsearched`, `scanned`, and `scan_truncated`. `unsearched` is
 populated only for a requested content search when a candidate's bounded read
-fails; its entries name the session and diagnostic. It is distinct from
+fails or a search stage falls back; its entries name the session or search
+stage and diagnostic. It is distinct from
 `unreadable`, which describes a session that could not be normalized at all.
 `list --search` inspects the last 32 normalized turns per candidate before the
 per-harness result limit.
