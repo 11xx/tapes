@@ -49,6 +49,13 @@ FIND IT
   empty scoped list means the search found nothing — unless it says it stopped
   early, which is a different fact and is reported when it happens.
 
+  --model <substring> matches case-insensitively against the full model
+  identity shown in MODEL: `id (variant)` when a variant exists. A session
+  without a model never matches. --directory <substring> matches
+  case-insensitively against the recorded directory path; a session without a
+  directory never matches. Both filters are applied before the per-harness
+  limit and compose with --harness and the scope flags.
+
   File-backed harnesses may show a bounded first-meaningful-user-turn hint
   prefixed with ~ when a harness recorded no title. JSON keeps that hint as
   derived_title and leaves the recorded title absent. OpenCode's API-backed

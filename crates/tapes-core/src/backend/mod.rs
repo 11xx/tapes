@@ -22,10 +22,10 @@ const HEAD_PROBE_BYTES: u64 = 64 * 1024;
 
 /// What a listing asks for.
 ///
-/// The scope travels with the query rather than filtering the result, because
-/// a limit applied before the scope answers a different question: "the newest
-/// sessions, of which these happen to be the project's" instead of "the
-/// project's newest sessions".
+/// The scope and metadata filters travel with the query rather than filtering
+/// the result in a caller, because a limit applied before any of them answers
+/// a different question: "the newest sessions, of which these happen to
+/// match" instead of "the newest matching sessions".
 pub struct Query<'a> {
     pub scope: Option<&'a Scope>,
     /// Sessions to return, per harness.
@@ -33,15 +33,68 @@ pub struct Query<'a> {
     /// Candidates a backend may inspect before it gives up. Bounds the search
     /// for a project whose sessions are all old, or absent.
     pub ceiling: usize,
+    /// Lowercase substring of the full model identity, when filtering.
+    pub model: Option<String>,
+    /// Lowercase substring of a session's directory path, when filtering.
+    pub directory: Option<String>,
 }
 
-impl Query<'_> {
+impl<'a> Query<'a> {
     pub fn unscoped(limit: usize) -> Self {
         Self {
             scope: None,
             limit,
             ceiling: usize::MAX,
+            model: None,
+            directory: None,
         }
+    }
+
+    pub fn unscoped_with_filters(
+        limit: usize,
+        model: Option<&str>,
+        directory: Option<&str>,
+    ) -> Self {
+        Self {
+            model: model.map(str::to_lowercase),
+            directory: directory.map(str::to_lowercase),
+            ..Self::unscoped(limit)
+        }
+    }
+
+    pub(crate) fn scoped_with_filters(
+        scope: Option<&'a Scope>,
+        limit: usize,
+        ceiling: usize,
+        model: Option<&str>,
+        directory: Option<&str>,
+    ) -> Self {
+        Self {
+            scope,
+            limit,
+            ceiling,
+            model: model.map(str::to_lowercase),
+            directory: directory.map(str::to_lowercase),
+        }
+    }
+
+    pub(crate) fn has_filters(&self) -> bool {
+        self.model.is_some() || self.directory.is_some()
+    }
+
+    pub(crate) fn matches(&self, session: &Session) -> bool {
+        let model_matches = self.model.as_ref().is_none_or(|needle| {
+            session
+                .model
+                .as_ref()
+                .is_some_and(|model| model.identity().to_lowercase().contains(needle))
+        });
+        let directory_matches = self.directory.as_ref().is_none_or(|needle| {
+            session.directory.as_deref().is_some_and(|directory| {
+                directory.to_string_lossy().to_lowercase().contains(needle)
+            })
+        });
+        model_matches && directory_matches
     }
 }
 
@@ -195,8 +248,8 @@ pub(crate) fn head_directory(
     head_jsonl(path).iter().find_map(pick).map(PathBuf::from)
 }
 
-/// Walk mtime-ordered candidates newest first, keeping those the query's
-/// scope accepts, until the limit is filled or the ceiling is reached.
+/// Walk mtime-ordered candidates newest first, keeping those the query accepts
+/// for scope and metadata, until the limit is filled or the ceiling is reached.
 ///
 /// `probe` answers "which directory was this recorded in" cheaply, and is only
 /// called when a scope needs the answer. It must answer with the same rule
@@ -234,7 +287,7 @@ pub(crate) fn list_files(
                 .as_deref()
                 .is_some_and(|directory| scope.contains(directory))
         });
-        if placed {
+        if placed && query.matches(&session) {
             listing.sessions.push(session);
         }
     }

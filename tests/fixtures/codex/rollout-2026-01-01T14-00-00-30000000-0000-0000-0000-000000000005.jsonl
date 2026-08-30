@@ -1,0 +1,4 @@
+{"timestamp":"2026-01-01T14:00:00Z","type":"session_meta","payload":{"id":"30000000-0000-0000-0000-000000000005","session_id":"30000000-0000-0000-0000-000000000005","timestamp":"2026-01-01T14:00:00Z","cwd":"/fixtures/other-project","model_provider":"openai"}}
+{"timestamp":"2026-01-01T14:00:01Z","type":"turn_context","payload":{"cwd":"/fixtures/other-project","model":"other-fixture","effort":"low"}}
+{"timestamp":"2026-01-01T14:00:02Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Inspect the other model fixture."}]}}
+{"timestamp":"2026-01-01T14:00:03Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Other model inspected."}]}}

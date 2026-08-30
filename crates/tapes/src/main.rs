@@ -115,9 +115,19 @@ enum Command {
         #[command(flatten)]
         scope: ScopeArgs,
         /// Take at most this many sessions from each harness [default: 20].
-        /// The scope applies first, so a bound never hides a match.
+        /// The scope and metadata filters apply first, so a bound never hides
+        /// a match.
         #[arg(long)]
         limit: Option<usize>,
+        /// Match case-insensitively against the full model identity shown in
+        /// the MODEL column: the id and, when present, its `id (variant)`
+        /// spelling. Sessions without a model never match.
+        #[arg(long, value_name = "SUBSTRING")]
+        model: Option<String>,
+        /// Match case-insensitively against the recorded directory path.
+        /// Sessions without a directory never match.
+        #[arg(long, value_name = "SUBSTRING")]
+        directory: Option<String>,
         /// Render results as JSON. Matching sessions may include an optional
         /// `live` field supplied by harness-status.
         #[arg(long)]
@@ -161,9 +171,17 @@ fn dispatch(cli: Cli) -> Result<()> {
             harness,
             scope,
             limit,
+            model,
+            directory,
             json,
         } => {
-            let mut result = tapes_core::list(harness.as_deref(), scope.within(), limit)?;
+            let mut result = tapes_core::list_with_filters(
+                harness.as_deref(),
+                scope.within(),
+                limit,
+                model.as_deref(),
+                directory.as_deref(),
+            )?;
             liveness::annotate(&mut result.sessions);
             if json {
                 println!("{}", serde_json::to_string(&result)?);
@@ -200,12 +218,10 @@ fn print_session_list(sessions: &[Session]) {
     }
     println!("ID\tLIVE\tHARNESS\tMODEL\tTITLE\tDIRECTORY\tLAST ACTIVITY");
     for session in sessions {
-        let model = session.model.as_ref().map_or_else(String::new, |model| {
-            model.variant.as_ref().map_or_else(
-                || model.id.clone(),
-                |variant| format!("{} ({variant})", model.id),
-            )
-        });
+        let model = session
+            .model
+            .as_ref()
+            .map_or_else(String::new, |model| model.identity());
         println!(
             "{}\t{}\t{}\t{}\t{}\t{}\t{}",
             session.id,

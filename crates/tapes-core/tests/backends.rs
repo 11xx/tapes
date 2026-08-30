@@ -12,8 +12,8 @@ use tapes_core::backend::pi::PiBackend;
 use tapes_core::backend::{Backend, Listing, Query};
 use tapes_core::model::{Role, Session, Transcript};
 use tapes_core::{
-    latest_with_backends, list_with_backends, resolve_session, scope::Scope, show_with_backends,
-    ResolveError, Selection,
+    latest_with_backends, list_with_backends, list_with_backends_filtered, resolve_session,
+    scope::Scope, show_with_backends, ResolveError, Selection,
 };
 
 fn fixtures(harness: &str) -> PathBuf {
@@ -280,6 +280,26 @@ fn titleless_opencode_metadata_stays_titleless_through_message_reads() {
 }
 
 #[test]
+fn opencode_metadata_filters_apply_before_the_listing_limit() {
+    let backends: Vec<Box<dyn Backend>> =
+        vec![Box::new(OpenCodeBackend::new(opencode_fixture_program()))];
+
+    let result = list_with_backends_filtered(
+        &backends,
+        Some("opencode"),
+        None,
+        1,
+        Some("FIXTURE-API"),
+        Some("API-PROJECT"),
+    )
+    .unwrap();
+
+    assert_eq!(result.sessions.len(), 1);
+    assert_eq!(result.sessions[0].id, "ses_api_only_fixture");
+    assert_eq!(result.scanned, 2);
+}
+
+#[test]
 fn opencode_aliases_remove_their_owned_paths_on_drop() {
     let program = OpenCodeAlias::counting();
     let alias_path = program.path().to_owned();
@@ -510,6 +530,168 @@ fn scoped_store(name: &str, directories: &[&Path]) -> PathBuf {
             .unwrap();
     }
     root
+}
+
+fn filtered_store(name: &str) -> PathBuf {
+    let root = std::env::temp_dir().join(format!("tapes-filtered-{name}"));
+    let _ = fs::remove_dir_all(&root);
+    let day = root.join("2026/08/09");
+    fs::create_dir_all(&day).unwrap();
+    let sessions = [
+        ("wanted-a", "wanted-model", "/fixtures/wanted-project"),
+        ("wanted-b", "wanted-model", "/fixtures/wanted-project"),
+        ("other", "other-model", "/fixtures/other-project"),
+    ];
+    for (index, (id, model, directory)) in sessions.iter().enumerate() {
+        let path = day.join(format!("rollout-2026-08-09T00-00-0{index}-{id}.jsonl"));
+        let mut file = BufWriter::new(File::create(&path).unwrap());
+        writeln!(
+            file,
+            r#"{{"timestamp":"2026-08-09T00:00:0{index}Z","type":"session_meta","payload":{{"id":"{id}","cwd":"{directory}"}}}}"#
+        )
+        .unwrap();
+        writeln!(
+            file,
+            r#"{{"timestamp":"2026-08-09T00:00:0{index}Z","type":"turn_context","payload":{{"cwd":"{directory}","model":"{model}","effort":"low"}}}}"#
+        )
+        .unwrap();
+        writeln!(
+            file,
+            r#"{{"timestamp":"2026-08-09T00:00:0{index}Z","type":"response_item","payload":{{"type":"message","role":"user","content":[{{"type":"input_text","text":"hello"}}]}}}}"#
+        )
+        .unwrap();
+        writeln!(
+            file,
+            r#"{{"timestamp":"2026-08-09T00:00:0{index}Z","type":"response_item","payload":{{"type":"message","role":"assistant","content":[{{"type":"output_text","text":"hello"}}]}}}}"#
+        )
+        .unwrap();
+        drop(file);
+        File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(
+                std::time::SystemTime::UNIX_EPOCH
+                    + std::time::Duration::from_secs(1_800_000_000 + index as u64),
+            )
+            .unwrap();
+    }
+    root
+}
+
+#[test]
+fn metadata_filters_are_case_insensitive_and_keep_absent_values_absent() {
+    let backends: Vec<Box<dyn Backend>> = vec![Box::new(CodexBackend::new(fixtures("codex")))];
+
+    let all = list_with_backends(&backends, Some("codex"), None, 10).unwrap();
+    assert!(all
+        .sessions
+        .iter()
+        .any(|session| session.id == "20000000-0000-0000-0000-000000000004"));
+    assert!(all.sessions.iter().any(|session| {
+        session.id == "20000000-0000-0000-0000-000000000004" && session.model.is_none()
+    }));
+
+    let models = list_with_backends_filtered(
+        &backends,
+        Some("codex"),
+        None,
+        10,
+        Some("GPT-FIXTURE"),
+        None,
+    )
+    .unwrap();
+    assert_eq!(models.sessions.len(), 3);
+    assert!(models
+        .sessions
+        .iter()
+        .all(|session| session.model.is_some()));
+    assert!(!models
+        .sessions
+        .iter()
+        .any(|session| session.id == "30000000-0000-0000-0000-000000000005"));
+
+    let high_variant = list_with_backends_filtered(
+        &backends,
+        Some("codex"),
+        None,
+        10,
+        Some("GPT-FIXTURE (HIGH)"),
+        None,
+    )
+    .unwrap();
+    assert_eq!(
+        high_variant
+            .sessions
+            .iter()
+            .map(|session| session.id.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            "10000000-0000-0000-0000-000000000003",
+            "00000000-0000-0000-0000-000000000001"
+        ]
+    );
+
+    let directory = list_with_backends_filtered(
+        &backends,
+        Some("codex"),
+        None,
+        10,
+        None,
+        Some("OTHER-PROJECT"),
+    )
+    .unwrap();
+    assert_eq!(directory.sessions.len(), 1);
+    assert_eq!(
+        directory.sessions[0].id,
+        "30000000-0000-0000-0000-000000000005"
+    );
+
+    let composed = list_with_backends_filtered(
+        &backends,
+        Some("codex"),
+        None,
+        10,
+        Some("OTHER-FIXTURE"),
+        Some("other-project"),
+    )
+    .unwrap();
+    assert_eq!(composed.sessions.len(), 1);
+    assert_eq!(
+        composed.sessions[0].id,
+        "30000000-0000-0000-0000-000000000005"
+    );
+
+    let missing_model =
+        list_with_backends_filtered(&backends, Some("codex"), None, 10, Some("anything"), None)
+            .unwrap();
+    assert!(!missing_model
+        .sessions
+        .iter()
+        .any(|session| session.id == "20000000-0000-0000-0000-000000000004"));
+}
+
+#[test]
+fn metadata_filters_fill_the_limit_after_rejecting_candidates() {
+    let root = filtered_store("before-limit");
+    let backends: Vec<Box<dyn Backend>> = vec![Box::new(CodexBackend::new(&root))];
+
+    let result =
+        list_with_backends_filtered(&backends, Some("codex"), None, 2, Some("WANTED"), None)
+            .unwrap();
+
+    assert_eq!(
+        result
+            .sessions
+            .iter()
+            .map(|session| session.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["wanted-b", "wanted-a"]
+    );
+    assert_eq!(result.scanned, 3);
+    assert!(!result.scan_truncated);
+
+    fs::remove_dir_all(root).unwrap();
 }
 
 #[test]

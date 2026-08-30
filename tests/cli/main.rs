@@ -13,6 +13,12 @@ const CODEX_SESSION_ONE: &str = include_str!(
 const CODEX_SESSION_TWO: &str = include_str!(
     "../fixtures/codex/rollout-2026-01-01T11-00-00-10000000-0000-0000-0000-000000000002.jsonl"
 );
+const CODEX_SESSION_NO_MODEL: &str = include_str!(
+    "../fixtures/codex/rollout-2026-01-01T13-00-00-20000000-0000-0000-0000-000000000004.jsonl"
+);
+const CODEX_SESSION_OTHER_MODEL: &str = include_str!(
+    "../fixtures/codex/rollout-2026-01-01T14-00-00-30000000-0000-0000-0000-000000000005.jsonl"
+);
 
 fn tapes() -> Command {
     Command::new(env!("CARGO_BIN_EXE_tapes"))
@@ -33,6 +39,46 @@ fn fixture_store(name: &str) -> (PathBuf, PathBuf) {
         CODEX_SESSION_TWO,
     )
     .unwrap();
+    (root.clone(), root.join("home"))
+}
+
+fn filter_fixture_store(name: &str) -> (PathBuf, PathBuf) {
+    let root = std::env::temp_dir().join(format!("tapes-cli-filter-{name}-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&root);
+    let sessions = root.join("sessions/2026/01/01");
+    fs::create_dir_all(&sessions).unwrap();
+    let files = [
+        (
+            "rollout-2026-01-01T10-00-00-00000000-0000-0000-0000-000000000001.jsonl",
+            CODEX_SESSION_ONE,
+            1_800_000_000,
+        ),
+        (
+            "rollout-2026-01-01T11-00-00-10000000-0000-0000-0000-000000000002.jsonl",
+            CODEX_SESSION_TWO,
+            1_800_000_001,
+        ),
+        (
+            "rollout-2026-01-01T13-00-00-20000000-0000-0000-0000-000000000004.jsonl",
+            CODEX_SESSION_NO_MODEL,
+            1_800_000_002,
+        ),
+        (
+            "rollout-2026-01-01T14-00-00-30000000-0000-0000-0000-000000000005.jsonl",
+            CODEX_SESSION_OTHER_MODEL,
+            1_800_000_003,
+        ),
+    ];
+    for (filename, contents, modified) in files {
+        let path = sessions.join(filename);
+        fs::write(&path, contents).unwrap();
+        fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(modified))
+            .unwrap();
+    }
     (root.clone(), root.join("home"))
 }
 
@@ -219,7 +265,12 @@ fn bare_invocation_guides_while_misuse_still_fails() {
 
 #[test]
 fn list_help_exits_successfully() {
-    assert!(tapes().args(["list", "--help"]).status().unwrap().success());
+    let output = tapes().args(["list", "--help"]).output().unwrap();
+    assert!(output.status.success());
+    let help = String::from_utf8_lossy(&output.stdout);
+    assert!(help.contains("full model identity"), "{help}");
+    assert!(help.contains("id (variant)"), "{help}");
+    assert!(help.contains("directory path"), "{help}");
 }
 
 #[test]
@@ -342,6 +393,97 @@ fn human_list_keeps_id_column_exact() {
     assert_eq!(second[0], "00000000-0000-0000-0000-000000000001");
     assert_eq!(second[1], "working");
     let _ = fs::remove_dir_all(codex_home);
+}
+
+#[test]
+fn list_filters_metadata_case_insensitively_and_before_limit() {
+    let (codex_home, home) = filter_fixture_store("metadata");
+    let command = |arguments: &[&str]| {
+        let mut command = tapes();
+        command.args(arguments);
+        with_fixture_env(
+            &mut command,
+            &codex_home,
+            &home,
+            Path::new("/definitely/missing"),
+        );
+        command.output().unwrap()
+    };
+
+    let model = command(&[
+        "list",
+        "--global",
+        "--harness",
+        "codex",
+        "--model",
+        "GPT-FIXTURE",
+        "--json",
+    ]);
+    assert!(
+        model.status.success(),
+        "{}",
+        String::from_utf8_lossy(&model.stderr)
+    );
+    let model_value: Value = serde_json::from_slice(&model.stdout).unwrap();
+    let model_ids = model_value["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|session| session["id"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        model_ids,
+        vec![
+            "10000000-0000-0000-0000-000000000002",
+            "00000000-0000-0000-0000-000000000001"
+        ]
+    );
+
+    let without_filter = command(&["list", "--global", "--harness", "codex", "--json"]);
+    assert!(without_filter.status.success());
+    let all: Value = serde_json::from_slice(&without_filter.stdout).unwrap();
+    assert_eq!(all["sessions"].as_array().unwrap().len(), 4);
+    let no_model = session(&all, "20000000-0000-0000-0000-000000000004");
+    assert!(no_model.get("model").is_none());
+
+    let directory = command(&[
+        "list",
+        "--global",
+        "--harness",
+        "codex",
+        "--directory",
+        "OTHER-PROJECT",
+        "--json",
+    ]);
+    assert!(directory.status.success());
+    let directory_value: Value = serde_json::from_slice(&directory.stdout).unwrap();
+    assert_eq!(directory_value["sessions"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        directory_value["sessions"][0]["id"],
+        "30000000-0000-0000-0000-000000000005"
+    );
+
+    let limited = command(&[
+        "list",
+        "--global",
+        "--harness",
+        "codex",
+        "--model",
+        "gpt",
+        "--limit",
+        "1",
+        "--json",
+    ]);
+    assert!(limited.status.success());
+    let limited_value: Value = serde_json::from_slice(&limited.stdout).unwrap();
+    assert_eq!(limited_value["sessions"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        limited_value["sessions"][0]["id"],
+        "10000000-0000-0000-0000-000000000002"
+    );
+    assert_eq!(limited_value["scanned"], 3);
+
+    fs::remove_dir_all(codex_home).unwrap();
 }
 
 #[test]

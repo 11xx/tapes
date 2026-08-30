@@ -48,6 +48,16 @@ pub struct Model {
     pub variant: Option<String>,
 }
 
+impl Model {
+    /// The identity shown in list output and used by model filters.
+    pub fn identity(&self) -> String {
+        self.variant.as_ref().map_or_else(
+            || self.id.clone(),
+            |variant| format!("{} ({variant})", self.id),
+        )
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Cost {
     pub usd: f64,

@@ -344,29 +344,29 @@ impl Backend for OpenCodeBackend {
     }
 
     fn list(&self, query: &Query) -> Result<Listing> {
-        let Some(scope) = query.scope else {
-            let mut listing = self.session_listing(query.limit)?;
-            // The backend pages, and a caller asking for more than a page gets
-            // a page. That bound is reported rather than passed off as the
-            // whole store.
-            listing.scan_truncated = listing.scanned >= MAX_API_SESSIONS;
-            return Ok(listing);
+        // The backend pages globally and carries metadata for every session,
+        // so scope and metadata filters are applied to a full page rather
+        // than to the caller's limit. Otherwise matching sessions could fall
+        // off the end of a page spent on other projects or models.
+        let candidate_limit = if query.scope.is_some() || query.has_filters() {
+            MAX_API_SESSIONS
+        } else {
+            query.limit
         };
-        // The backend pages globally and carries each session's directory, so
-        // the scope is applied to a full page rather than to the caller's limit
-        // — otherwise a project's sessions could fall off the end of a page
-        // spent on other projects.
-        let mut page = self.session_listing(MAX_API_SESSIONS)?;
+        let mut page = self.session_listing(candidate_limit)?;
         let scanned = page.scanned;
         page.sessions = page
             .sessions
             .into_iter()
             .filter(|session| {
-                session
-                    .directory
-                    .as_deref()
-                    .is_some_and(|directory| scope.contains(directory))
+                query.scope.is_none_or(|scope| {
+                    session
+                        .directory
+                        .as_deref()
+                        .is_some_and(|directory| scope.contains(directory))
+                })
             })
+            .filter(|session| query.matches(session))
             .take(query.limit)
             .collect();
         page.scanned = scanned;
