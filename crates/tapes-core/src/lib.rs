@@ -43,7 +43,8 @@ pub struct SessionList {
     /// a reader that conflates them mis-states both.
     pub unreadable: Vec<String>,
     /// Sessions for which a requested bounded content search could not be
-    /// answered. A read failure is not a non-match.
+    /// answered, plus diagnostics from a search-stage fallback. A read
+    /// failure is not a non-match.
     pub unsearched: Vec<String>,
     /// Candidate sessions inspected to produce this list, across every
     /// harness. A scoped listing reads more than it returns.
@@ -270,6 +271,17 @@ fn list_scoped(
     let mut unsearched_sessions = Vec::new();
     let mut scanned = 0;
     let mut scan_truncated = false;
+    let mut selected_harness_counts = HashMap::<String, usize>::new();
+    if search.is_some() {
+        for backend in backends.iter().filter(|backend| {
+            harness.is_none_or(|name| backend.harness() == name) && backend.available()
+        }) {
+            *selected_harness_counts
+                .entry(backend.harness().to_owned())
+                .or_default() += 1;
+        }
+    }
+    let mut seen_search_candidates = HashMap::<String, HashSet<String>>::new();
     for (index, backend) in backends
         .iter()
         .enumerate()
@@ -279,6 +291,34 @@ fn list_scoped(
             unavailable_harnesses.push(backend.harness());
             continue;
         }
+        // Some harnesses expose the same session through more than one
+        // projection. Search obeys the same first-source rule as resolution:
+        // a later projection cannot turn an earlier projection's non-match
+        // into a match for the same global id.
+        let candidate_ids = if search.is_some()
+            && selected_harness_counts
+                .get(backend.harness())
+                .is_some_and(|count| *count > 1)
+        {
+            match backend.list(&query) {
+                Ok(listing) => Some(
+                    listing
+                        .sessions
+                        .into_iter()
+                        .map(|session| session.id)
+                        .collect::<HashSet<_>>(),
+                ),
+                Err(error) => {
+                    unsearched_sessions.push(format!(
+                        "{} search could not reconcile duplicate projections: {error:#}",
+                        backend.harness()
+                    ));
+                    None
+                }
+            }
+        } else {
+            None
+        };
         let listing = if let Some(needle) = search {
             backend.list_with_search(&query, needle, LIST_SEARCH_TAIL)
         } else {
@@ -286,12 +326,19 @@ fn list_scoped(
         };
         match listing {
             Ok(Listing {
-                sessions,
+                mut sessions,
                 unavailable,
                 unsearched,
                 scanned: inspected,
                 scan_truncated: truncated,
             }) => {
+                if let Some(candidate_ids) = candidate_ids {
+                    let seen = seen_search_candidates
+                        .entry(backend.harness().to_owned())
+                        .or_default();
+                    sessions.retain(|session| !seen.contains(&session.id));
+                    seen.extend(candidate_ids);
+                }
                 available_harnesses.insert(backend.harness().to_owned());
                 unreadable_sessions.extend(unavailable);
                 unsearched_sessions.extend(unsearched);
@@ -299,7 +346,19 @@ fn list_scoped(
                 scan_truncated |= truncated;
                 found.extend(sessions.into_iter().map(|session| (session, index)));
             }
-            Err(_) => unavailable_harnesses.push(backend.harness()),
+            Err(error) => {
+                if search.is_some() {
+                    unsearched_sessions
+                        .push(format!("{} search failed: {error:#}", backend.harness()));
+                }
+                if let Some(candidate_ids) = candidate_ids {
+                    seen_search_candidates
+                        .entry(backend.harness().to_owned())
+                        .or_default()
+                        .extend(candidate_ids);
+                }
+                unavailable_harnesses.push(backend.harness());
+            }
         }
     }
     // Stable OpenCode and opencode2 can expose the same global session id from

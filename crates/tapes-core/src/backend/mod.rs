@@ -111,7 +111,8 @@ pub struct Listing {
     /// These use the same vocabulary as the public listing's `unavailable`
     /// field, while a command or store failure still names the whole harness.
     pub unavailable: Vec<String>,
-    /// Candidates whose bounded content search could not be answered.
+    /// Candidates whose bounded content search could not be answered, plus
+    /// diagnostics from a search stage that had to fall back.
     pub unsearched: Vec<String>,
     pub scanned: usize,
     pub scan_truncated: bool,

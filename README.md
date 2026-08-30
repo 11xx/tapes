@@ -61,9 +61,22 @@ turns in each candidate session. The fixed tail keeps the read bounded, so a
 non-match says only that those recent turns did not contain the text. Search is
 applied before the per-harness bound. If a candidate's bounded read fails, it
 is named in `unsearched` rather than silently treated as a non-match.
-The database-backed OpenCode path uses a read-only SQL prefilter that returns
-candidate ids before transferring bounded transcript projections; raw message
-bodies are not transferred during that prefilter or confirmation read.
+If a database prefilter fails, its diagnostic is also recorded in `unsearched`
+while the safe unfiltered confirmation fallback runs; an unsupported prefilter
+is not an error.
+The database-backed OpenCode v1 path uses a read-only SQL prefilter that
+returns candidate ids before transferring bounded transcript projections; raw
+message bodies are not transferred during that prefilter or confirmation
+read. OpenCode2 has no content-search endpoint: its session-list `search`
+filter is title-only and its message endpoint is per-session. When the v2
+database covers the API listing, `tapes` uses a read-only `sqlite3` prefilter
+over its materialized messages; otherwise it uses one short-lived local API
+server for enumeration and the GET confirmation reads. A no-match OpenCode2
+search must still inspect every candidate that survives metadata filters when
+no v2 database prefilter is available; server reuse removes per-session
+process startup, not that necessary scan. When stable and v2 both expose an
+id, search uses the stable projection just as resolution does; a later
+projection cannot resurrect its non-match.
 The command writes a short preflight notice to stderr before scanning; JSON
 results remain on stdout.
 The scope applies before the bound, so a scoped listing cannot be emptied by a

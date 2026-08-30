@@ -53,6 +53,9 @@ case $name in
   opencode2-broken-resolve*|opencode2-broken-hit-wins*)
     mode=exit
     ;;
+  opencode2-broken-list*)
+    mode=broken-list
+    ;;
   opencode2-broken-malformed*)
     mode=malformed
     ;;
@@ -87,7 +90,14 @@ if [ "$mode" = database ] || [ "$mode" = database-malformed ]; then
       fi
       ;;
     *"SELECT json_object('id', session_id) AS row FROM ("*)
-      database_rows database-search.json
+      case "$query" in
+        *"'prefiltererror'"*)
+          printf '%s\n' row '{"id":'
+          ;;
+        *)
+          database_rows database-search.json
+          ;;
+      esac
       ;;
     *"FROM session WHERE id = "*)
       case "$query" in
@@ -144,6 +154,7 @@ fi
 case $path in
   /api/session\?*)
     case $mode in
+      broken-list) exit 7 ;;
       exit|malformed|absent) printf '%s\n' '{"data":[]}' ;;
       *) /bin/cat "$fixture_dir/$list" ;;
     esac

@@ -1,14 +1,17 @@
 use std::collections::{HashMap, HashSet};
 use std::ffi::{OsStr, OsString};
-use std::io::Read;
+use std::io::{Read, Write};
+use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Context, Result};
 use chrono::{TimeZone, Utc};
 use serde_json::{json, Value};
 
-use super::{filter_listing_search_parallel, Backend, Listing, Query};
+use super::{filter_listing_search, filter_listing_search_parallel, Backend, Listing, Query};
 use crate::model::{Cost, Model, Role, Session, Tokens, Transcript, Turn};
 
 const MAX_COMMAND_BYTES: u64 = 8 * 1024 * 1024;
@@ -19,6 +22,12 @@ const MAX_DB_TEXT_CHARS: usize = 4_000;
 const MAX_DB_TOOL_CHARS: usize = 2_000;
 /// Keep each SQL prefilter query small without limiting the union of matches.
 const MAX_DB_SEARCH_IDS: usize = 256;
+/// A v2 message this large may still make the API confirmation ambiguous if its
+/// output is truncated by a client, so keep its session as a candidate.
+const MAX_V2_PREFILTER_MESSAGE_BYTES: usize = 64 * 1024;
+const API_SERVER_START_TIMEOUT: Duration = Duration::from_secs(5);
+const API_SERVER_RETRY_DELAY: Duration = Duration::from_millis(10);
+const API_RESPONSE_TIMEOUT: Duration = Duration::from_secs(30);
 /// Every OpenCode session id carries this prefix.
 const SESSION_ID_PREFIX: &str = "ses_";
 
@@ -34,6 +43,240 @@ struct InvalidDatabaseRow {
     error: String,
 }
 
+#[derive(Clone, Copy, Debug)]
+struct OpenCodeApiClient {
+    port: u16,
+}
+
+struct OpenCodeApiServer {
+    client: OpenCodeApiClient,
+    child: std::process::Child,
+}
+
+impl Drop for OpenCodeApiServer {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+impl OpenCodeApiServer {
+    fn start(program: &OsStr) -> Result<Self> {
+        let listener = TcpListener::bind(("127.0.0.1", 0))
+            .context("failed to reserve a local port for the opencode API")?;
+        let port = listener
+            .local_addr()
+            .context("failed to inspect the reserved opencode API port")?
+            .port();
+        drop(listener);
+
+        let port_text = port.to_string();
+        let mut child = Command::new(program)
+            .args(["serve", "--hostname", "127.0.0.1", "--port", &port_text])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .env_remove("OPENCODE_SERVER_PASSWORD")
+            .spawn()
+            .with_context(|| {
+                format!(
+                    "failed to start the opencode API server with {}",
+                    program.to_string_lossy()
+                )
+            })?;
+        let client = OpenCodeApiClient { port };
+        let deadline = Instant::now() + API_SERVER_START_TIMEOUT;
+        loop {
+            if let Some(status) = child
+                .try_wait()
+                .context("failed to check the opencode API server")?
+            {
+                return Err(anyhow!("opencode API server exited with {status}"));
+            }
+            if TcpStream::connect(("127.0.0.1", port)).is_ok() {
+                return Ok(Self { client, child });
+            }
+            if Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(anyhow!("opencode API server did not become ready"));
+            }
+            thread::sleep(API_SERVER_RETRY_DELAY);
+        }
+    }
+}
+
+impl OpenCodeApiClient {
+    fn request(&self, path: &str) -> Result<Value> {
+        let mut stream = TcpStream::connect(("127.0.0.1", self.port))
+            .context("failed to connect to the opencode API server")?;
+        stream
+            .set_read_timeout(Some(API_RESPONSE_TIMEOUT))
+            .context("failed to bound the opencode API read")?;
+        let request = format!(
+            "GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nAccept: application/json\r\nConnection: close\r\n\r\n",
+            self.port
+        );
+        stream
+            .write_all(request.as_bytes())
+            .context("failed to request the opencode API")?;
+
+        let mut bytes = Vec::new();
+        stream
+            .take(MAX_COMMAND_BYTES + 1)
+            .read_to_end(&mut bytes)
+            .context("failed to read the opencode API response")?;
+        if bytes.len() as u64 > MAX_COMMAND_BYTES {
+            return Err(anyhow!(
+                "opencode API response exceeded {MAX_COMMAND_BYTES} bytes"
+            ));
+        }
+        let separator = bytes
+            .windows(4)
+            .position(|window| window == b"\r\n\r\n")
+            .ok_or_else(|| anyhow!("opencode API response has no header terminator"))?;
+        let headers = &bytes[..separator];
+        let body = &bytes[separator + 4..];
+        let status = http_status(headers)?;
+        if !(200..300).contains(&status) {
+            return Err(anyhow!("opencode API server returned HTTP {status}"));
+        }
+        let body = if is_chunked(headers)? {
+            decode_chunked_body(body)?
+        } else {
+            body.to_vec()
+        };
+        serde_json::from_slice(&body).context("opencode API server returned invalid JSON")
+    }
+
+    fn search(&self, session: &Session, needle: &str, tail: usize) -> Result<bool> {
+        let response = self.request(&format!("/api/session/{}/message", session.id))?;
+        let transcript = parse_transcript(session.clone(), &response, tail)?;
+        let needle = needle.to_lowercase();
+        Ok(transcript
+            .turns
+            .iter()
+            .any(|turn| turn.text.to_lowercase().contains(&needle)))
+    }
+
+    fn sessions(&self, limit: usize) -> Result<Vec<Session>> {
+        let response = self.request(&format!("/api/session?order=desc&limit={limit}"))?;
+        parse_sessions(&response)
+    }
+}
+
+fn http_status(headers: &[u8]) -> Result<u16> {
+    let line_end = headers
+        .iter()
+        .position(|byte| *byte == b'\n')
+        .unwrap_or(headers.len());
+    let line = std::str::from_utf8(&headers[..line_end])
+        .context("opencode API response has invalid headers")?
+        .trim_end_matches('\r');
+    line.split_whitespace()
+        .nth(1)
+        .ok_or_else(|| anyhow!("opencode API response has no status"))?
+        .parse()
+        .context("opencode API response has an invalid status")
+}
+
+fn is_chunked(headers: &[u8]) -> Result<bool> {
+    let headers =
+        std::str::from_utf8(headers).context("opencode API response has invalid headers")?;
+    Ok(headers.lines().any(|line| {
+        line.split_once(':').is_some_and(|(name, value)| {
+            name.eq_ignore_ascii_case("transfer-encoding")
+                && value
+                    .split(',')
+                    .any(|encoding| encoding.trim().eq_ignore_ascii_case("chunked"))
+        })
+    }))
+}
+
+fn decode_chunked_body(body: &[u8]) -> Result<Vec<u8>> {
+    let mut decoded = Vec::new();
+    let mut offset = 0;
+    loop {
+        let line_end = body[offset..]
+            .windows(2)
+            .position(|window| window == b"\r\n")
+            .map(|end| offset + end)
+            .ok_or_else(|| anyhow!("opencode API response has an incomplete chunk size"))?;
+        let size = std::str::from_utf8(&body[offset..line_end])
+            .context("opencode API response has an invalid chunk size")?
+            .split(';')
+            .next()
+            .unwrap_or_default()
+            .trim();
+        let size = usize::from_str_radix(size, 16)
+            .context("opencode API response has an invalid chunk size")?;
+        offset = line_end + 2;
+        if size == 0 {
+            return Ok(decoded);
+        }
+        let chunk_end = offset
+            .checked_add(size)
+            .and_then(|end| end.checked_add(2))
+            .ok_or_else(|| anyhow!("opencode API chunk size overflowed"))?;
+        if chunk_end > body.len() || &body[offset + size..chunk_end] != b"\r\n" {
+            return Err(anyhow!("opencode API response has an incomplete chunk"));
+        }
+        if decoded.len().saturating_add(size) > MAX_COMMAND_BYTES as usize {
+            return Err(anyhow!(
+                "opencode API response exceeded {MAX_COMMAND_BYTES} bytes"
+            ));
+        }
+        decoded.extend_from_slice(&body[offset..offset + size]);
+        offset = chunk_end;
+    }
+}
+
+const MAX_API_SEARCH_WORKERS: usize = 8;
+
+fn filter_listing_search_api(
+    mut listing: Listing,
+    client: &OpenCodeApiClient,
+    needle: &str,
+    tail: usize,
+) -> Listing {
+    if listing.sessions.is_empty() {
+        return listing;
+    }
+    let worker_count = thread::available_parallelism()
+        .map_or(1, std::num::NonZeroUsize::get)
+        .min(MAX_API_SEARCH_WORKERS)
+        .min(listing.sessions.len());
+    let chunk_size = listing.sessions.len().div_ceil(worker_count);
+    let sessions = std::mem::take(&mut listing.sessions);
+    let searched = thread::scope(|scope| {
+        let handles = sessions
+            .chunks(chunk_size)
+            .map(|chunk| {
+                scope.spawn(|| {
+                    chunk
+                        .iter()
+                        .map(|session| (session, client.search(session, needle, tail)))
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect::<Vec<_>>();
+        handles
+            .into_iter()
+            .flat_map(|handle| handle.join().expect("content search worker panicked"))
+            .collect::<Vec<_>>()
+    });
+    for (session, result) in searched {
+        match result {
+            Ok(true) => listing.sessions.push(session.clone()),
+            Ok(false) => {}
+            Err(error) => listing
+                .unsearched
+                .push(format!("{} session {}: {error:#}", "opencode", session.id)),
+        }
+    }
+    listing
+}
+
 #[derive(Clone, Debug)]
 pub struct OpenCodeBackend {
     program: OsString,
@@ -47,13 +290,17 @@ impl OpenCodeBackend {
     }
 
     fn command_bytes(&self, args: &[&str], source: &str) -> Result<Vec<u8>> {
-        let mut child = Command::new(&self.program)
+        self.command_bytes_with(&self.program, args, source)
+    }
+
+    fn command_bytes_with(&self, program: &OsStr, args: &[&str], source: &str) -> Result<Vec<u8>> {
+        let mut child = Command::new(program)
             .args(args)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .spawn()
-            .with_context(|| format!("failed to run {}", self.program.to_string_lossy()))?;
+            .with_context(|| format!("failed to run {}", program.to_string_lossy()))?;
         let mut bytes = Vec::new();
         child
             .stdout
@@ -97,10 +344,30 @@ impl OpenCodeBackend {
     }
 
     fn database_rows(&self, query: &str) -> Result<DatabaseRows> {
+        if self.is_default_program("opencode") && program_available(OsStr::new("sqlite3")) {
+            if let Some(database) = database_path("opencode.db").filter(|path| path.is_file()) {
+                let database = database
+                    .to_str()
+                    .ok_or_else(|| anyhow!("opencode database path is not UTF-8"))?;
+                let bytes = self.command_bytes_with(
+                    OsStr::new("sqlite3"),
+                    &["-readonly", "-batch", "-tabs", "-header", database, query],
+                    "opencode database",
+                )?;
+                let text = String::from_utf8(bytes)
+                    .context("opencode database returned non-UTF-8 output")?;
+                return parse_database_rows_lossy(&text);
+            }
+        }
         let bytes = self.command_bytes(&["db", "--format", "tsv", query], "opencode database")?;
         let text =
             String::from_utf8(bytes).context("opencode database returned non-UTF-8 output")?;
         parse_database_rows_lossy(&text)
+    }
+
+    fn is_default_program(&self, name: &str) -> bool {
+        Path::new(&self.program).components().count() == 1
+            && Path::new(&self.program).file_name() == Some(OsStr::new(name))
     }
 
     fn database_search_ids(
@@ -126,6 +393,77 @@ impl OpenCodeBackend {
         }
         Ok(Some(matching))
     }
+
+    fn v2_database_search_ids(
+        &self,
+        needle: &str,
+        candidates: &[Session],
+    ) -> Result<Option<HashSet<String>>> {
+        if !self.is_default_program("opencode2") {
+            return Ok(None);
+        }
+        if !program_available(OsStr::new("sqlite3")) {
+            return Ok(None);
+        }
+        let Some(database) = database_path("opencode-next.db") else {
+            return Ok(None);
+        };
+        if !database.is_file() {
+            return Ok(None);
+        }
+        let candidate_ids = candidates
+            .iter()
+            .map(|session| session.id.clone())
+            .collect::<Vec<_>>();
+        let Some(needle) = search_needle_literal(needle) else {
+            return Ok(None);
+        };
+
+        let mut matching = HashSet::new();
+        for ids in candidate_ids.chunks(MAX_DB_SEARCH_IDS) {
+            let id_list = sql_id_list(ids);
+            let coverage = self.sqlite_json(
+                &database,
+                &format!("SELECT count(*) AS count FROM session WHERE id IN ({id_list})"),
+            )?;
+            let count = coverage
+                .as_array()
+                .and_then(|rows| rows.first())
+                .and_then(|row| row["count"].as_u64())
+                .ok_or_else(|| anyhow!("opencode v2 database returned no session count"))?;
+            if count != ids.len() as u64 {
+                return Ok(None);
+            }
+
+            let rows = self.sqlite_json(&database, &v2_database_search_query(&needle, ids))?;
+            let rows = rows
+                .as_array()
+                .ok_or_else(|| anyhow!("opencode v2 database returned a non-array result"))?;
+            matching.extend(
+                rows.iter()
+                    .map(|row| required_string(row, "id"))
+                    .collect::<Result<Vec<_>>>()?,
+            );
+        }
+        Ok(Some(matching))
+    }
+
+    fn sqlite_json(&self, database: &Path, query: &str) -> Result<Value> {
+        let database = database
+            .to_str()
+            .ok_or_else(|| anyhow!("opencode v2 database path is not UTF-8"))?;
+        let args = ["-readonly", "-batch", "-json", database, query];
+        let bytes =
+            self.command_bytes_with(OsStr::new("sqlite3"), &args, "opencode v2 database")?;
+        parse_sqlite_json(&bytes)
+    }
+}
+
+fn parse_sqlite_json(bytes: &[u8]) -> Result<Value> {
+    if bytes.iter().all(u8::is_ascii_whitespace) {
+        return Ok(Value::Array(Vec::new()));
+    }
+    serde_json::from_slice(bytes).context("opencode v2 database returned invalid JSON output")
 }
 
 fn strict_database_rows(rows: DatabaseRows) -> Result<Vec<Value>> {
@@ -351,6 +689,68 @@ impl OpenCodeBackend {
             programs.into_iter().map(Self::new).collect()
         }
     }
+
+    fn filter_sessions(&self, query: &Query, sessions: Vec<Session>) -> Listing {
+        let scanned = sessions.len();
+        let sessions = sessions
+            .into_iter()
+            .filter(|session| {
+                query.scope.is_none_or(|scope| {
+                    session
+                        .directory
+                        .as_deref()
+                        .is_some_and(|directory| scope.contains(directory))
+                })
+            })
+            .filter(|session| query.matches(session))
+            .take(query.limit)
+            .collect();
+        Listing {
+            sessions,
+            scanned,
+            scan_truncated: scanned >= MAX_API_SESSIONS,
+            ..Listing::default()
+        }
+    }
+
+    fn api_listing(&self, query: &Query, client: &OpenCodeApiClient) -> Result<Listing> {
+        let candidate_limit = if query.scope.is_some() || query.has_filters() {
+            MAX_API_SESSIONS
+        } else {
+            query.limit
+        };
+        Ok(self.filter_sessions(
+            query,
+            client.sessions(candidate_limit.min(MAX_API_SESSIONS))?,
+        ))
+    }
+
+    fn filter_v2_search(
+        &self,
+        mut listing: Listing,
+        needle: &str,
+        tail: usize,
+        client: Option<&OpenCodeApiClient>,
+    ) -> Listing {
+        let prefilter_error = match self.v2_database_search_ids(needle, &listing.sessions) {
+            Ok(Some(ids)) => {
+                listing.sessions.retain(|session| ids.contains(&session.id));
+                None
+            }
+            Ok(None) => None,
+            Err(error) => Some(error),
+        };
+        let mut searched = match client {
+            Some(client) => filter_listing_search_api(listing, client, needle, tail),
+            None => filter_listing_search_parallel(self, listing, needle, tail),
+        };
+        if let Some(error) = prefilter_error {
+            searched.unsearched.push(format!(
+                "opencode v2 search prefilter failed: {error:#}; searched without prefilter"
+            ));
+        }
+        searched
+    }
 }
 
 impl Backend for OpenCodeBackend {
@@ -375,45 +775,54 @@ impl Backend for OpenCodeBackend {
         } else {
             query.limit
         };
-        let mut page = self.session_listing(candidate_limit)?;
-        let scanned = page.scanned;
-        page.sessions = page
-            .sessions
-            .into_iter()
-            .filter(|session| {
-                query.scope.is_none_or(|scope| {
-                    session
-                        .directory
-                        .as_deref()
-                        .is_some_and(|directory| scope.contains(directory))
-                })
-            })
-            .filter(|session| query.matches(session))
-            .take(query.limit)
-            .collect();
-        page.scanned = scanned;
-        page.scan_truncated = scanned >= MAX_API_SESSIONS;
-        Ok(page)
+        let page = self.session_listing(candidate_limit)?;
+        let unavailable = page.unavailable;
+        let mut filtered = self.filter_sessions(query, page.sessions);
+        filtered.scanned = page.scanned;
+        filtered.scan_truncated = page.scanned >= MAX_API_SESSIONS;
+        filtered.unavailable = unavailable;
+        Ok(filtered)
     }
 
     fn list_with_search(&self, query: &Query, needle: &str, tail: usize) -> Result<Listing> {
-        let listing = self.list(query)?;
         if !self.uses_database() {
-            return Ok(filter_listing_search_parallel(self, listing, needle, tail));
+            if let Ok(server) = OpenCodeApiServer::start(&self.program) {
+                if let Ok(listing) = self.api_listing(query, &server.client) {
+                    return Ok(self.filter_v2_search(listing, needle, tail, Some(&server.client)));
+                }
+            }
+            let listing = match self.list(query) {
+                Ok(listing) => listing,
+                Err(error) => {
+                    return Ok(Listing {
+                        unsearched: vec![format!(
+                            "opencode v2 search could not list candidates: {error:#}"
+                        )],
+                        ..Listing::default()
+                    });
+                }
+            };
+            return Ok(self.filter_v2_search(listing, needle, tail, None));
         }
+        let listing = self.list(query)?;
         let ids = match self.database_search_ids(needle, &listing.sessions) {
             Ok(Some(ids)) => ids,
-            Ok(None) | Err(_) => {
-                return Ok(filter_listing_search_parallel(self, listing, needle, tail));
+            Ok(None) => {
+                return Ok(filter_listing_search(self, listing, needle, tail));
+            }
+            Err(error) => {
+                let mut fallback = filter_listing_search(self, listing, needle, tail);
+                fallback.unsearched.push(format!(
+                    "opencode search prefilter failed: {error:#}; searched without prefilter"
+                ));
+                return Ok(fallback);
             }
         };
         let mut candidates = listing;
         candidates
             .sessions
             .retain(|session| ids.contains(&session.id));
-        Ok(filter_listing_search_parallel(
-            self, candidates, needle, tail,
-        ))
+        Ok(filter_listing_search(self, candidates, needle, tail))
     }
 
     /// One session GET rather than a listing page, so an exact id costs a
@@ -454,11 +863,31 @@ fn sql_literal(value: &str) -> String {
     format!("'{}'", value.replace('\'', "''"))
 }
 
+fn search_needle_literal(needle: &str) -> Option<String> {
+    needle
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric())
+        .then(|| sql_literal(&needle.to_lowercase()))
+}
+
+fn sql_id_list(ids: &[String]) -> String {
+    ids.iter()
+        .map(|id| sql_literal(id))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn database_path(name: &str) -> Option<PathBuf> {
+    let data_home = std::env::var_os("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/share"))
+        })?;
+    Some(data_home.join("opencode").join(name))
+}
+
 fn database_search_queries(needle: &str, candidate_ids: &[String]) -> Option<Vec<String>> {
-    if !needle.bytes().all(|byte| byte.is_ascii_alphanumeric()) {
-        return None;
-    }
-    let needle = sql_literal(&needle.to_lowercase());
+    let needle = search_needle_literal(needle)?;
     Some(
         candidate_ids
             .chunks(MAX_DB_SEARCH_IDS)
@@ -468,29 +897,44 @@ fn database_search_queries(needle: &str, candidate_ids: &[String]) -> Option<Vec
 }
 
 fn database_search_query(needle: &str, candidate_ids: &[String]) -> String {
-    let candidate_ids = candidate_ids
-        .iter()
-        .map(|id| sql_literal(id))
-        .collect::<Vec<_>>()
-        .join(", ");
-    // `json_tree` sees escaped strings after JSON decoding. SQLite's `lower`
-    // is ASCII-only; the replacements cover the non-ASCII code points whose
-    // lowercase forms can expose the ASCII letters handled here.
-    let part_match = format!(
-        "json_valid(data) = 0 \
-         OR instr(lower(data), {needle}) > 0 \
-         OR EXISTS ( \
-             SELECT 1 FROM json_tree(CASE WHEN json_valid(data) = 1 THEN data ELSE '{{}}' END) \
-             WHERE instr(lower(CAST(key AS TEXT)), {needle}) > 0 \
-                OR instr(lower(replace(replace(CAST(value AS TEXT), char(8490), 'k'), char(304), 'i')), {needle}) > 0))"
-    );
+    let candidate_ids = sql_id_list(candidate_ids);
     format!(
         "SELECT json_object('id', session_id) AS row FROM ( \
              SELECT DISTINCT session_id FROM message \
              WHERE session_id IN ({candidate_ids}) AND json_valid(data) = 0 \
              UNION \
              SELECT DISTINCT session_id FROM part \
-             WHERE session_id IN ({candidate_ids}) AND ({part_match}))"
+             WHERE session_id IN ({candidate_ids}) AND ({}))",
+        json_search_predicate(needle)
+    )
+}
+
+fn v2_database_search_query(needle: &str, candidate_ids: &[String]) -> String {
+    let candidate_ids = sql_id_list(candidate_ids);
+    format!(
+        "SELECT id FROM ( \
+             SELECT DISTINCT session_id AS id FROM session_message \
+             WHERE session_id IN ({candidate_ids}) AND ({} OR length(CAST(data AS BLOB)) > {MAX_V2_PREFILTER_MESSAGE_BYTES}) \
+             UNION \
+             SELECT session_id AS id FROM session_message \
+             WHERE session_id IN ({candidate_ids}) \
+             GROUP BY session_id \
+             HAVING sum(length(CAST(data AS BLOB))) > {MAX_COMMAND_BYTES})",
+        json_search_predicate(needle)
+    )
+}
+
+fn json_search_predicate(needle: &str) -> String {
+    // `json_tree` sees escaped strings after JSON decoding. SQLite's `lower`
+    // is ASCII-only; the replacements cover the non-ASCII code points whose
+    // lowercase forms can expose the ASCII letters handled here.
+    format!(
+        "json_valid(data) = 0 \
+         OR instr(lower(data), {needle}) > 0 \
+         OR EXISTS ( \
+             SELECT 1 FROM json_tree(CASE WHEN json_valid(data) = 1 THEN data ELSE '{{}}' END) \
+             WHERE instr(lower(CAST(key AS TEXT)), {needle}) > 0 \
+                OR instr(lower(replace(replace(CAST(value AS TEXT), char(8490), 'k'), char(304), 'i')), {needle}) > 0)"
     )
 }
 
@@ -784,6 +1228,24 @@ mod tests {
     }
 
     #[test]
+    fn v2_prefilter_searches_materialized_messages_without_limiting_matches() {
+        let query = v2_database_search_query("'quota'", &["ses_fixture".to_owned()]);
+
+        assert!(query.contains("FROM session_message"));
+        assert!(query.contains("json_tree(CASE"));
+        assert!(query.contains("json_valid(data) = 0"));
+        assert!(query.contains("length(CAST(data AS BLOB)) > 65536"));
+        assert!(!query.contains("FROM event"));
+        assert!(!query.contains("LIMIT"));
+    }
+
+    #[test]
+    fn empty_sqlite_json_output_is_an_empty_result_set() {
+        assert_eq!(parse_sqlite_json(b"").unwrap(), json!([]));
+        assert_eq!(parse_sqlite_json(b"\n").unwrap(), json!([]));
+    }
+
+    #[test]
     fn database_message_query_projects_only_bounded_metadata() {
         let query = database_message_query("'ses_fixture'");
 
@@ -791,6 +1253,21 @@ mod tests {
         assert!(query.contains("json_extract(data, '$.time')"));
         assert!(!query.contains("'data', data"));
         assert!(query.contains("LIMIT 1001"));
+    }
+
+    #[test]
+    fn chunked_api_responses_are_decoded_before_json_parsing() {
+        assert_eq!(
+            decode_chunked_body(b"7\r\n{\"data\"\r\n5\r\n:[1]}\r\n0\r\n\r\n").unwrap(),
+            br#"{"data":[1]}"#
+        );
+    }
+
+    #[test]
+    fn api_status_parser_accepts_success_and_rejects_malformed_headers() {
+        assert_eq!(http_status(b"HTTP/1.1 200 OK\r\n").unwrap(), 200);
+        assert_eq!(http_status(b"HTTP/1.1 204 No Content\r\n").unwrap(), 204);
+        assert!(http_status(b"not http\r\n").is_err());
     }
 
     #[test]

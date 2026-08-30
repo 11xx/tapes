@@ -185,17 +185,23 @@ Notes:
   compaction signal for the projection-less path.
 - The current `opencode` executable stores v1 sessions in `opencode.db`; the
   CLI database path below reads its `session`, `message`, and `part` tables.
-  The separate v2 store is used by `opencode2`.
+  The separate v2 store is used by `opencode2`. Its `event` table records the
+  event stream and `session_message.data` holds the materialized message shape
+  exposed by the API, but the installed v2 CLI has no read-only database
+  command.
 
-## 5. Current CLI database path
+## 5. Current database path
 
-Current `opencode` releases expose the v1 session projection through the
-read-only `opencode db --format tsv` command. `tapes` uses SELECTs against the
-`session`, `message`, and `part` tables for the stable executable, and the API
-path for `opencode2`. When both commands are installed, both stores are read
-and their sessions are merged under the `opencode` harness.
+For the default stable executable, `tapes` opens `opencode.db` through
+`sqlite3 -readonly` when that command is available. It otherwise uses
+`opencode db --format tsv`. Both routes issue SELECTs against the `session`,
+`message`, and `part` tables. OpenCode2 uses its API as the authoritative read
+path. When both commands are installed, both stores are read and their
+sessions are merged under the `opencode` harness.
 If both projections contain the same session id, the stable executable's
 projection is retained rather than reporting the shared record as ambiguous.
+Search applies that rule to candidates before accepting matches, so a later
+v2 projection cannot turn a stable projection's non-match into a match.
 The database command emits a `row` header followed by one JSON object per
 session row. Listing parses those rows independently: a row that cannot be
 parsed is reported in the listing's `unreadable` field with its session id and
@@ -221,6 +227,24 @@ non-matching session but may not reject a possible match. Candidate ids are
 queried in batches of 256; batching is an output-size bound, not a result
 limit, and the batches are unioned before confirmation.
 
+OpenCode2's session-list `search` parameter is a title filter, not a content
+filter. Its message endpoint can page one session at a time with `limit` and
+`before`, but it has no global transcript-search operation. The API-backed
+reader first uses an explicit read-only `sqlite3` prefilter over
+`session_message.data` when the v2 session table covers every
+listed session. Otherwise it starts one local server for enumeration and uses
+bounded HTTP GET reads for each candidate against that server.
+The v2 prefilter returns only session ids, retains invalid or larger messages
+as uncertain candidates, and checks the `session` table coverage before using
+an empty result as a definitive non-match. Its 64 KiB per-message and 8 MiB
+per-session uncertainty bounds reduce work without hiding a read failure.
+Without full database coverage, a no-match search necessarily costs one
+confirmation read per candidate after metadata filters; the shared server
+removes repeated process startup but cannot change that v2 API contract. If a
+SQL prefilter fails, `tapes` keeps the safe per-session fallback and adds the
+prefilter diagnostic to `unsearched`; an unsupported prefilter is distinct and
+falls back without that error note.
+
 ## 6. Live HTTP API (legacy reference)
 
 The `opencode2 serve` background service exposes:
@@ -235,8 +259,10 @@ The `opencode2 serve` background service exposes:
 Auth: HTTP basic, credentials from `opencode2 pair` (URL/username/password).
 Known hazard: `opencode2 api …` truncates large payloads on stdout (~196 KB),
 so scripted consumers should call the HTTP endpoints directly with `curl`.
-The `opencode2` compatibility path calls the API and never opens the SQLite
-file. The stable executable uses its own read-only database query command;
+The `opencode2` compatibility path uses the API for authoritative reads and
+may query `opencode-next.db` through `sqlite3 -readonly` only as a candidate
+prefilter. The stable executable uses `sqlite3 -readonly` when available and
+falls back to its database query command;
 when both commands are installed, each path remains available so sessions
 from either store can be resolved.
 
