@@ -107,6 +107,9 @@ if [ "$mode" = database ] || [ "$mode" = database-malformed ]; then
       ;;
     *"FROM message WHERE session_id = "*)
       case "$query" in
+        *"'data', data"*)
+          database_rows database-messages-truncated.json
+          ;;
         *"ses_000000fixtureSharedSession"*)
           database_rows database-messages-shared.json
           ;;

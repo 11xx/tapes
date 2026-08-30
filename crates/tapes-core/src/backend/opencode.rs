@@ -17,6 +17,8 @@ const MAX_DB_MESSAGES: usize = 1_000;
 const MAX_DB_PARTS: usize = 5_000;
 const MAX_DB_TEXT_CHARS: usize = 4_000;
 const MAX_DB_TOOL_CHARS: usize = 2_000;
+/// Keep each SQL prefilter query small without limiting the union of matches.
+const MAX_DB_SEARCH_IDS: usize = 256;
 /// Every OpenCode session id carries this prefix.
 const SESSION_ID_PREFIX: &str = "ses_";
 
@@ -101,28 +103,28 @@ impl OpenCodeBackend {
         parse_database_rows_lossy(&text)
     }
 
-    fn database_search_ids(&self, needle: &str) -> Result<Option<HashSet<String>>> {
-        if !needle.bytes().all(|byte| byte.is_ascii_alphanumeric()) {
+    fn database_search_ids(
+        &self,
+        needle: &str,
+        candidates: &[Session],
+    ) -> Result<Option<HashSet<String>>> {
+        let candidate_ids = candidates
+            .iter()
+            .map(|session| session.id.clone())
+            .collect::<Vec<_>>();
+        let Some(queries) = database_search_queries(needle, &candidate_ids) else {
             return Ok(None);
+        };
+        let mut matching = HashSet::new();
+        for query in queries {
+            let rows = self.database(&query)?;
+            matching.extend(
+                rows.iter()
+                    .map(|row| required_string(row, "id"))
+                    .collect::<Result<Vec<_>>>()?,
+            );
         }
-        let needle = sql_literal(needle);
-        let uncertain = sql_literal(r"\u");
-        let rows = self.database(&format!(
-            "SELECT json_object('id', session_id) AS row FROM ( \
-                 SELECT DISTINCT session_id FROM message \
-                 WHERE instr(lower(data), lower({needle})) > 0 \
-                    OR instr(data, {uncertain}) > 0 \
-                    OR length(CAST(data AS BLOB)) != length(data) \
-                 UNION \
-                 SELECT DISTINCT session_id FROM part \
-                 WHERE instr(lower(data), lower({needle})) > 0 \
-                    OR instr(data, {uncertain}) > 0 \
-                    OR length(CAST(data AS BLOB)) != length(data))"
-        ))?;
-        rows.iter()
-            .map(|row| required_string(row, "id"))
-            .collect::<Result<HashSet<_>>>()
-            .map(Some)
+        Ok(Some(matching))
     }
 }
 
@@ -247,11 +249,7 @@ impl OpenCodeBackend {
 
     fn database_transcript(&self, session: Session, tail: usize) -> Result<Transcript> {
         let id = sql_literal(&session.id);
-        let mut message_rows = self.database(&format!(
-            "SELECT json_object('id', id, 'time_created', time_created, 'data', data) AS row \
-             FROM message WHERE session_id = {id} ORDER BY time_created DESC LIMIT {}",
-            MAX_DB_MESSAGES + 1
-        ))?;
+        let mut message_rows = self.database(&database_message_query(&id))?;
         let mut truncated = message_rows.len() > MAX_DB_MESSAGES;
         message_rows.truncate(MAX_DB_MESSAGES);
 
@@ -403,7 +401,7 @@ impl Backend for OpenCodeBackend {
         if !self.uses_database() {
             return Ok(filter_listing_search_parallel(self, listing, needle, tail));
         }
-        let ids = match self.database_search_ids(needle) {
+        let ids = match self.database_search_ids(needle, &listing.sessions) {
             Ok(Some(ids)) => ids,
             Ok(None) | Err(_) => {
                 return Ok(filter_listing_search_parallel(self, listing, needle, tail));
@@ -454,6 +452,57 @@ impl Backend for OpenCodeBackend {
 
 fn sql_literal(value: &str) -> String {
     format!("'{}'", value.replace('\'', "''"))
+}
+
+fn database_search_queries(needle: &str, candidate_ids: &[String]) -> Option<Vec<String>> {
+    if !needle.bytes().all(|byte| byte.is_ascii_alphanumeric()) {
+        return None;
+    }
+    let needle = sql_literal(&needle.to_lowercase());
+    Some(
+        candidate_ids
+            .chunks(MAX_DB_SEARCH_IDS)
+            .map(|ids| database_search_query(&needle, ids))
+            .collect(),
+    )
+}
+
+fn database_search_query(needle: &str, candidate_ids: &[String]) -> String {
+    let candidate_ids = candidate_ids
+        .iter()
+        .map(|id| sql_literal(id))
+        .collect::<Vec<_>>()
+        .join(", ");
+    // `json_tree` sees escaped strings after JSON decoding. SQLite's `lower`
+    // is ASCII-only; the replacements cover the non-ASCII code points whose
+    // lowercase forms can expose the ASCII letters handled here.
+    let part_match = format!(
+        "json_valid(data) = 0 \
+         OR instr(lower(data), {needle}) > 0 \
+         OR EXISTS ( \
+             SELECT 1 FROM json_tree(CASE WHEN json_valid(data) = 1 THEN data ELSE '{{}}' END) \
+             WHERE instr(lower(CAST(key AS TEXT)), {needle}) > 0 \
+                OR instr(lower(replace(replace(CAST(value AS TEXT), char(8490), 'k'), char(304), 'i')), {needle}) > 0))"
+    );
+    format!(
+        "SELECT json_object('id', session_id) AS row FROM ( \
+             SELECT DISTINCT session_id FROM message \
+             WHERE session_id IN ({candidate_ids}) AND json_valid(data) = 0 \
+             UNION \
+             SELECT DISTINCT session_id FROM part \
+             WHERE session_id IN ({candidate_ids}) AND ({part_match}))"
+    )
+}
+
+fn database_message_query(id: &str) -> String {
+    format!(
+        "SELECT json_object( \
+             'id', id, 'time_created', time_created, 'data', \
+             json_object('role', json_extract(data, '$.role'), \
+                         'time', json_extract(data, '$.time'))) AS row \
+         FROM message WHERE session_id = {id} ORDER BY time_created DESC LIMIT {}",
+        MAX_DB_MESSAGES + 1
+    )
 }
 
 fn database_data(row: &Value) -> Result<Value> {
@@ -713,6 +762,35 @@ mod tests {
     fn empty_database_output_is_a_miss() {
         assert!(parse_database_rows_lossy("").unwrap().values.is_empty());
         assert!(parse_database_rows_lossy("\n").unwrap().values.is_empty());
+    }
+
+    #[test]
+    fn database_search_prefilter_batches_without_limiting_matches() {
+        let candidate_ids = (0..=MAX_DB_SEARCH_IDS)
+            .map(|index| format!("ses_{index:03}"))
+            .collect::<Vec<_>>();
+
+        let queries = database_search_queries("quota", &candidate_ids).unwrap();
+
+        assert_eq!(queries.len(), 2);
+        assert!(queries[0].contains("'ses_000'"));
+        assert!(!queries[0].contains("'ses_256'"));
+        assert!(queries[1].contains("'ses_256'"));
+        assert!(queries.iter().all(|query| query.contains("json_tree(CASE")));
+        assert!(queries
+            .iter()
+            .all(|query| query.contains("json_valid(data) = 0")));
+        assert!(queries.iter().all(|query| !query.contains("LIMIT")));
+    }
+
+    #[test]
+    fn database_message_query_projects_only_bounded_metadata() {
+        let query = database_message_query("'ses_fixture'");
+
+        assert!(query.contains("json_extract(data, '$.role')"));
+        assert!(query.contains("json_extract(data, '$.time')"));
+        assert!(!query.contains("'data', data"));
+        assert!(query.contains("LIMIT 1001"));
     }
 
     #[test]

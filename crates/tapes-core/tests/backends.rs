@@ -599,6 +599,28 @@ fn malformed_opencode_database_rows_leave_other_sessions_and_a_diagnostic() {
 }
 
 #[test]
+fn malformed_opencode_database_rows_do_not_hide_searchable_sessions() {
+    let program = OpenCodeAlias::malformed_database();
+    let backends: Vec<Box<dyn Backend>> = vec![Box::new(OpenCodeBackend::new(program.path()))];
+
+    let result = list_with_backends_filtered_and_search(
+        &backends,
+        Some("opencode"),
+        None,
+        10,
+        None,
+        None,
+        Some("FIXTURE"),
+    )
+    .unwrap();
+
+    assert_eq!(result.sessions.len(), 2);
+    assert_eq!(result.unreadable.len(), 1);
+    assert!(result.unreadable[0].contains("ses_truncated_fixture"));
+    assert!(result.unsearched.is_empty());
+}
+
+#[test]
 fn pi_reports_entries_outside_the_active_leaf_path() {
     let backend = PiBackend::new(fixtures("pi"));
     let session = located(&backend, "session-pi");

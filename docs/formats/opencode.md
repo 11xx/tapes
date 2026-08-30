@@ -201,6 +201,26 @@ session row. Listing parses those rows independently: a row that cannot be
 parsed is reported in the listing's `unreadable` field with its session id and
 parse diagnostic, while an exact lookup of that id preserves the parse error.
 
+The `message.data` column is the complete JSON message record and is not a
+bounded transcript field. In a verified v1 store, no stored `data` value
+was exactly 65,536 bytes, while 47 `message.data` values exceeded 65,536 bytes
+and one exceeded 8 MiB. Two session-level raw message projections exceeded 8
+MiB after their rows were combined. The 65,536-byte EOF boundary therefore
+belongs to the OpenCode/Bun SQLite result-string path, not to a SQLite column
+width; the shorter EOF diagnostic at column 129 is the same raw-message
+projection failure class. The 8 MiB error is `tapes`' child-command response
+cap. A reader must project only the message fields it consumes (`role` and
+`time`) and keep the bounded part projection; it must not transfer raw
+`message.data`.
+
+For content search, the database path first runs a read-only SQL prefilter over
+the listed session ids. It searches JSON-decoded part values (and preserves
+invalid JSON rows as candidates) and returns ids only. The bounded normalized
+transcript read remains the authority, so the prefilter may retain a
+non-matching session but may not reject a possible match. Candidate ids are
+queried in batches of 256; batching is an output-size bound, not a result
+limit, and the batches are unioned before confirmation.
+
 ## 6. Live HTTP API (legacy reference)
 
 The `opencode2 serve` background service exposes:
