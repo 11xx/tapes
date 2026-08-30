@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -19,6 +19,18 @@ const MAX_DB_TEXT_CHARS: usize = 4_000;
 const MAX_DB_TOOL_CHARS: usize = 2_000;
 /// Every OpenCode session id carries this prefix.
 const SESSION_ID_PREFIX: &str = "ses_";
+
+#[derive(Debug, Default)]
+struct DatabaseRows {
+    values: Vec<Value>,
+    invalid: Vec<InvalidDatabaseRow>,
+}
+
+#[derive(Debug)]
+struct InvalidDatabaseRow {
+    id: Option<String>,
+    error: String,
+}
 
 #[derive(Clone, Debug)]
 pub struct OpenCodeBackend {
@@ -79,27 +91,63 @@ impl OpenCodeBackend {
     }
 
     fn database(&self, query: &str) -> Result<Vec<Value>> {
+        strict_database_rows(self.database_rows(query)?)
+    }
+
+    fn database_rows(&self, query: &str) -> Result<DatabaseRows> {
         let bytes = self.command_bytes(&["db", "--format", "tsv", query], "opencode database")?;
         let text =
             String::from_utf8(bytes).context("opencode database returned non-UTF-8 output")?;
-        parse_database_rows(&text)
+        parse_database_rows_lossy(&text)
     }
 }
 
-fn parse_database_rows(text: &str) -> Result<Vec<Value>> {
+fn strict_database_rows(rows: DatabaseRows) -> Result<Vec<Value>> {
+    if let Some(row) = rows.invalid.into_iter().next() {
+        return Err(anyhow!(
+            "opencode database returned an invalid row: {}",
+            row.error
+        ));
+    }
+    Ok(rows.values)
+}
+
+fn parse_database_rows_lossy(text: &str) -> Result<DatabaseRows> {
     if text.trim().is_empty() {
-        return Ok(Vec::new());
+        return Ok(DatabaseRows::default());
     }
     let mut lines = text.lines();
     match lines.next() {
-        None => return Ok(Vec::new()),
+        None => return Ok(DatabaseRows::default()),
         Some("row") => {}
         Some(_) => return Err(anyhow!("opencode database returned unexpected columns")),
     }
-    lines
-        .filter(|line| !line.is_empty())
-        .map(|line| serde_json::from_str(line).context("opencode database returned an invalid row"))
-        .collect()
+    let mut rows = DatabaseRows::default();
+    for line in lines.filter(|line| !line.is_empty()) {
+        match serde_json::from_str(line) {
+            Ok(value) => rows.values.push(value),
+            Err(error) => rows.invalid.push(InvalidDatabaseRow {
+                id: database_row_id(line).map(str::to_owned),
+                error: error.to_string(),
+            }),
+        }
+    }
+    Ok(rows)
+}
+
+fn database_row_id(line: &str) -> Option<&str> {
+    let key_end = line.find("\"id\"")? + "\"id\"".len();
+    let remainder = line[key_end..].trim_start().strip_prefix(':')?.trim_start();
+    let value = remainder.strip_prefix('"')?;
+    let end = value.find('"')?;
+    Some(&value[..end])
+}
+
+fn session_diagnostic(id: Option<&str>, error: String) -> String {
+    match id {
+        Some(id) => format!("opencode session {id}: {error}"),
+        None => format!("opencode session with unknown id: {error}"),
+    }
 }
 
 impl OpenCodeBackend {
@@ -111,15 +159,20 @@ impl OpenCodeBackend {
 
     fn sessions(&self, limit: usize) -> Result<Vec<Session>> {
         let limit = limit.min(MAX_API_SESSIONS);
-        if self.uses_database() {
-            return self.database_sessions(limit);
-        }
         let response = self.request(&format!("/api/session?order=desc&limit={limit}"))?;
         parse_sessions(&response)
     }
 
-    fn database_sessions(&self, limit: usize) -> Result<Vec<Session>> {
-        let rows = self.database(&format!(
+    fn session_listing(&self, limit: usize) -> Result<Listing> {
+        let limit = limit.min(MAX_API_SESSIONS);
+        if self.uses_database() {
+            return self.database_sessions(limit);
+        }
+        Ok(Listing::from_sessions(self.sessions(limit)?))
+    }
+
+    fn database_sessions(&self, limit: usize) -> Result<Listing> {
+        let rows = self.database_rows(&format!(
             "SELECT json_object( \
                  'id', id, 'title', title, 'directory', directory, \
                  'time_created', time_created, 'time_updated', time_updated, \
@@ -129,7 +182,28 @@ impl OpenCodeBackend {
                  'tokens_cache_write', tokens_cache_write) AS row \
              FROM session ORDER BY time_updated DESC LIMIT {limit}"
         ))?;
-        rows.iter().map(parse_database_session).collect()
+        let scanned = rows.values.len() + rows.invalid.len();
+        let mut listing = Listing {
+            scanned,
+            ..Listing::default()
+        };
+        for row in rows.values {
+            match parse_database_session(&row) {
+                Ok(session) => listing.sessions.push(session),
+                Err(error) => listing
+                    .unavailable
+                    .push(session_diagnostic(row["id"].as_str(), error.to_string())),
+            }
+        }
+        listing
+            .unavailable
+            .extend(rows.invalid.into_iter().map(|row| {
+                session_diagnostic(
+                    row.id.as_deref(),
+                    format!("opencode database returned an invalid row: {}", row.error),
+                )
+            }));
+        Ok(listing)
     }
 
     fn database_locate(&self, id: &str) -> Result<Option<Session>> {
@@ -221,13 +295,16 @@ impl OpenCodeBackend {
 fn installed_programs() -> Vec<OsString> {
     ["opencode", "opencode2"]
         .into_iter()
-        .filter(|program| {
-            std::env::var_os("PATH").is_some_and(|path| {
-                std::env::split_paths(&path).any(|directory| directory.join(program).is_file())
-            })
-        })
+        .filter(|program| program_available(OsStr::new(program)))
         .map(OsString::from)
         .collect()
+}
+
+fn program_available(program: &OsStr) -> bool {
+    Path::new(program).is_file()
+        || std::env::var_os("PATH").is_some_and(|path| {
+            std::env::split_paths(&path).any(|directory| directory.join(program).is_file())
+        })
 }
 
 fn default_program() -> OsString {
@@ -260,29 +337,29 @@ impl Backend for OpenCodeBackend {
     }
 
     fn available(&self) -> bool {
-        self.sessions(1).is_ok()
+        // This is only an executable-presence hint. Parsing here would turn a
+        // bad row into a false whole-backend absence before `list` can report
+        // it as a session-specific diagnostic.
+        program_available(&self.program)
     }
 
     fn list(&self, query: &Query) -> Result<Listing> {
         let Some(scope) = query.scope else {
-            let sessions = self.sessions(query.limit)?;
+            let mut listing = self.session_listing(query.limit)?;
             // The backend pages, and a caller asking for more than a page gets
             // a page. That bound is reported rather than passed off as the
             // whole store.
-            let scan_truncated = sessions.len() >= MAX_API_SESSIONS;
-            return Ok(Listing {
-                scanned: sessions.len(),
-                sessions,
-                scan_truncated,
-            });
+            listing.scan_truncated = listing.scanned >= MAX_API_SESSIONS;
+            return Ok(listing);
         };
         // The backend pages globally and carries each session's directory, so
         // the scope is applied to a full page rather than to the caller's limit
         // — otherwise a project's sessions could fall off the end of a page
         // spent on other projects.
-        let page = self.sessions(MAX_API_SESSIONS)?;
-        let scanned = page.len();
-        let sessions = page
+        let mut page = self.session_listing(MAX_API_SESSIONS)?;
+        let scanned = page.scanned;
+        page.sessions = page
+            .sessions
             .into_iter()
             .filter(|session| {
                 session
@@ -292,11 +369,9 @@ impl Backend for OpenCodeBackend {
             })
             .take(query.limit)
             .collect();
-        Ok(Listing {
-            sessions,
-            scanned,
-            scan_truncated: scanned >= MAX_API_SESSIONS,
-        })
+        page.scanned = scanned;
+        page.scan_truncated = scanned >= MAX_API_SESSIONS;
+        Ok(page)
     }
 
     /// One session GET rather than a listing page, so an exact id costs a
@@ -589,8 +664,8 @@ mod tests {
 
     #[test]
     fn empty_database_output_is_a_miss() {
-        assert!(parse_database_rows("").unwrap().is_empty());
-        assert!(parse_database_rows("\n").unwrap().is_empty());
+        assert!(parse_database_rows_lossy("").unwrap().values.is_empty());
+        assert!(parse_database_rows_lossy("\n").unwrap().values.is_empty());
     }
 
     #[test]

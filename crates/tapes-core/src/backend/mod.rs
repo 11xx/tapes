@@ -51,6 +51,10 @@ impl Query<'_> {
 #[derive(Debug, Default)]
 pub struct Listing {
     pub sessions: Vec<Session>,
+    /// Diagnostics for individual candidates that could not be normalized.
+    /// These use the same vocabulary as the public listing's `unavailable`
+    /// field, while a command or store failure still names the whole harness.
+    pub unavailable: Vec<String>,
     pub scanned: usize,
     pub scan_truncated: bool,
 }
@@ -60,6 +64,7 @@ impl Listing {
         Self {
             scanned: sessions.len(),
             sessions,
+            unavailable: Vec::new(),
             scan_truncated: false,
         }
     }

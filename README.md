@@ -52,14 +52,19 @@ activity. `--limit` bounds each harness and defaults to 20, `--harness` selects
 one backend, and `--here` restricts the listing to the project holding the
 current directory. The scope applies before the bound, so a scoped listing
 cannot be emptied by a limit spent on other projects. Human output ends with an
-availability note when a backend cannot be read, and says so when a search
-stopped early. File-backed harnesses may show a bounded first-meaningful-user-
-turn hint prefixed with `~` when no recorded title exists; JSON keeps that hint
-in `derived_title` and leaves the recorded `title` absent. OpenCode's
-API-backed listing does not fetch messages to invent titles, so a title-less
-OpenCode row keeps both title fields absent in list, show, and export metadata.
-JSON output is a `tapes-list/1` object containing `sessions`, `unavailable`,
-`scanned`, and `scan_truncated`. When the optional `harness-status` command
+availability note when a backend cannot be read, a separate line for each
+stored session row that cannot be read, and says so when a search stopped
+early. File-backed harnesses may show a bounded
+first-meaningful-user-turn hint prefixed with `~` when no recorded title exists;
+JSON keeps that hint in `derived_title` and leaves the recorded `title` absent.
+OpenCode's API-backed listing does not fetch messages to invent titles, so a
+title-less OpenCode row keeps both title fields absent in list, show, and export
+metadata. JSON output is a `tapes-list/1` object containing `sessions`,
+`unavailable`, `unreadable`, `scanned`, and `scan_truncated`. `unavailable`
+names harnesses that could not be read at all; `unreadable` names sessions a
+readable harness could not normalize, each with its id and diagnostic. They
+stay apart because a corrupt row says nothing about the store holding it. When
+the optional `harness-status` command
 supplies a usable snapshot, matching sessions also carry `live: "working"` or
 `live: "idle"`; an unavailable, malformed, oversized, or slow authority leaves
 the field out. Unknown states are ignored per thread so recognized entries
