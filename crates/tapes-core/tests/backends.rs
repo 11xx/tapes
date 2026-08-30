@@ -1060,6 +1060,7 @@ impl Backend for SearchFixture {
                 ts: None,
             }],
             truncated: false,
+            trailing_record: None,
             notes: Vec::new(),
         })
     }
