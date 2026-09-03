@@ -79,10 +79,26 @@ reasoning turns with placeholder content.
 
 ## Token accounting
 
-`payload.type == "token_count"` carries
-`info.total_token_usage.{input_tokens, cached_input_tokens,
-cache_write_input_tokens, output_tokens, reasoning_output_tokens,
-total_tokens}`. Codex reports no cost.
+An `event_msg` with `payload.type == "token_count"` follows every model
+response. Its `info.total_token_usage` is the session's running total and
+`info.last_token_usage` is that one response, each with `input_tokens`,
+`cached_input_tokens`, `cache_write_input_tokens`, `output_tokens`,
+`reasoning_output_tokens`, and `total_tokens`. `info` is null on an event that
+carries no usage yet; `rate_limits` rides alongside and is not accounting.
+Codex reports no cost.
+
+The normalized `tokens` are the running total from the newest `token_count`
+event with usage in the bounded read: `input` from `input_tokens`,
+`cache_read` from `cached_input_tokens`, `cache_write` from
+`cache_write_input_tokens`, `output` from `output_tokens`, and `reasoning`
+from `reasoning_output_tokens`; `total_tokens` has no normalized field. A
+counter the event did not write stays absent, a counter written as zero is
+zero, and an event without usage is passed over for an older one. A window
+with no such event reports no tokens rather than zero. The totals are
+cumulative across the session: in every rollout checked they never decrease,
+across model and effort changes and across compaction, so the newest event
+is the whole session's accounting so far, not the accounting of the window.
+`last_token_usage` is per response and is not normalized.
 
 ## Lineage note
 
