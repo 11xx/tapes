@@ -12,11 +12,22 @@ use chrono::{TimeZone, Utc};
 use serde_json::{json, Value};
 
 use super::{filter_listing_search, filter_listing_search_parallel, Backend, Listing, Query};
-use crate::model::{Cost, Model, Role, Session, SourceBound, Tokens, Transcript, Truncation, Turn};
+use crate::model::{
+    human_bytes, Cost, Model, Role, Session, SourceBound, Tokens, Transcript, Truncation, Turn,
+};
 
 const MAX_COMMAND_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_API_SESSIONS: usize = 1_000;
 const MAX_DB_MESSAGES: usize = 1_000;
+/// Messages the API transcript read will page through before it stops and
+/// reports the bound; the same ceiling the database read applies.
+const MAX_API_MESSAGES: usize = 1_000;
+/// Messages per API page. Small enough that a page of a heavy session fits
+/// the transport bound, large enough that a default `show` needs few pages.
+const MESSAGE_PAGE: usize = 50;
+/// Fewer messages than this per page would spend a process spawn per turn on
+/// a session whose newest messages carry no text.
+const MIN_MESSAGE_PAGE: usize = 8;
 const MAX_DB_PARTS: usize = 5_000;
 const MAX_DB_TEXT_CHARS: usize = 4_000;
 const MAX_DB_TOOL_CHARS: usize = 2_000;
@@ -30,6 +41,25 @@ const API_SERVER_RETRY_DELAY: Duration = Duration::from_millis(10);
 const API_RESPONSE_TIMEOUT: Duration = Duration::from_secs(30);
 /// Every OpenCode session id carries this prefix.
 const SESSION_ID_PREFIX: &str = "ses_";
+
+/// A response the transport refused to carry whole. Typed so a paged read can
+/// tell it from every other failure and ask for a smaller page.
+#[derive(Debug)]
+struct ResponseTooLarge {
+    source: String,
+}
+
+impl std::fmt::Display for ResponseTooLarge {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{} response exceeded {MAX_COMMAND_BYTES} bytes",
+            self.source
+        )
+    }
+}
+
+impl std::error::Error for ResponseTooLarge {}
 
 #[derive(Debug, Default)]
 struct DatabaseRows {
@@ -127,9 +157,10 @@ impl OpenCodeApiClient {
             .read_to_end(&mut bytes)
             .context("failed to read the opencode API response")?;
         if bytes.len() as u64 > MAX_COMMAND_BYTES {
-            return Err(anyhow!(
-                "opencode API response exceeded {MAX_COMMAND_BYTES} bytes"
-            ));
+            return Err(ResponseTooLarge {
+                source: "opencode API".to_owned(),
+            }
+            .into());
         }
         let separator = bytes
             .windows(4)
@@ -150,8 +181,14 @@ impl OpenCodeApiClient {
     }
 
     fn search(&self, session: &Session, needle: &str, tail: usize) -> Result<bool> {
-        let response = self.request(&format!("/api/session/{}/message", session.id))?;
-        let transcript = parse_transcript(session.clone(), &response, tail, Vec::new())?;
+        let pages = paged_messages(&|path| self.request(path), &session.id, tail)?;
+        let transcript = parse_transcript(
+            session.clone(),
+            &pages.messages,
+            tail,
+            pages.source,
+            pages.notes,
+        );
         let needle = needle.to_lowercase();
         Ok(transcript
             .turns
@@ -316,9 +353,10 @@ impl OpenCodeBackend {
             child
                 .wait()
                 .with_context(|| format!("failed to reap {source} process"))?;
-            return Err(anyhow!(
-                "{source} response exceeded {MAX_COMMAND_BYTES} bytes"
-            ));
+            return Err(ResponseTooLarge {
+                source: source.to_owned(),
+            }
+            .into());
         }
         let status = child
             .wait()
@@ -697,7 +735,13 @@ impl OpenCodeBackend {
                 database_message(row, parts.remove(row["id"].as_str()?).unwrap_or_default())
             })
             .collect::<Result<Vec<_>>>()?;
-        parse_transcript(session, &json!({ "data": messages }), tail, source)
+        Ok(parse_transcript(
+            session,
+            &messages,
+            tail,
+            source,
+            Vec::new(),
+        ))
     }
 }
 
@@ -909,8 +953,14 @@ impl Backend for OpenCodeBackend {
         if self.uses_database() {
             return self.database_transcript(session.clone(), tail);
         }
-        let response = self.request(&format!("/api/session/{}/message", session.id))?;
-        parse_transcript(session.clone(), &response, tail, Vec::new())
+        let pages = paged_messages(&|path| self.request(path), &session.id, tail)?;
+        Ok(parse_transcript(
+            session.clone(),
+            &pages.messages,
+            tail,
+            pages.source,
+            pages.notes,
+        ))
     }
 }
 
@@ -1163,30 +1213,111 @@ fn parse_session(value: &Value) -> Result<Session> {
     })
 }
 
-/// Normalize one message page. `source` carries the bounds the caller's read
-/// already reached; a page cursor pointing past this page adds one more. The
-/// session endpoint is the normalized source of metadata, so a message read
-/// does not invent a title that a title-less listing could not provide.
+/// What a paged read handed over: newest-first messages, the bound it stopped
+/// at if it did, and anything a reader should know that has no field.
+struct MessagePages {
+    messages: Vec<Value>,
+    source: Vec<SourceBound>,
+    notes: Vec<String>,
+}
+
+/// Newest-first message pages, fetched until the requested number of turns is
+/// in hand, the store runs out, or the message ceiling is reached. The
+/// endpoint answers every page with a `cursor.next`, including the page after
+/// its last message, so a page shorter than asked for is the only sign the
+/// store is exhausted; a follow-up page carries the cursor and no `order`,
+/// which the endpoint refuses to combine. A page the transport cannot carry is
+/// retried one message at a time, and the page size doubles back up while
+/// pages fit; every failed attempt costs a full transport bound of transfer,
+/// so one retry at the floor beats a ladder of them. A single message too
+/// large to carry is the store's own
+/// limit: the read stops before it and says so, handing over the newer
+/// messages it has, unless that message is the newest one and nothing is
+/// readable at all.
+fn paged_messages(
+    request: &dyn Fn(&str) -> Result<Value>,
+    id: &str,
+    tail: usize,
+) -> Result<MessagePages> {
+    let mut messages = Vec::new();
+    let mut notes = Vec::new();
+    let mut turns = 0;
+    let mut cursor: Option<String> = None;
+    let page_size = tail.clamp(MIN_MESSAGE_PAGE, MESSAGE_PAGE);
+    let mut limit = page_size;
+    let mut exhausted = false;
+    while !exhausted && turns < tail && messages.len() < MAX_API_MESSAGES {
+        let path = match &cursor {
+            None => format!("/api/session/{id}/message?limit={limit}&order=desc"),
+            Some(cursor) => format!("/api/session/{id}/message?limit={limit}&cursor={cursor}"),
+        };
+        let page = match request(&path) {
+            Ok(page) => page,
+            Err(error) if error.downcast_ref::<ResponseTooLarge>().is_some() => {
+                if limit > 1 {
+                    limit = 1;
+                    continue;
+                }
+                if messages.is_empty() {
+                    return Err(error);
+                }
+                notes.push(format!(
+                    "The message older than the {} fetched is larger than the {} transport \
+                     bound; the read stopped before it.",
+                    messages.len(),
+                    human_bytes(MAX_COMMAND_BYTES)
+                ));
+                break;
+            }
+            Err(error) => return Err(error),
+        };
+        let data = page["data"]
+            .as_array()
+            .ok_or_else(|| match page["message"].as_str() {
+                Some(message) => anyhow!("opencode message request failed: {message}"),
+                None => anyhow!("opencode message response has no data array"),
+            })?;
+        exhausted = data.len() < limit;
+        turns += data
+            .iter()
+            .map(|message| parse_message(message).len())
+            .sum::<usize>();
+        messages.extend(data.iter().cloned());
+        cursor = page["cursor"]["next"].as_str().map(str::to_owned);
+        exhausted |= cursor.is_none();
+        limit = (limit * 2).min(page_size);
+    }
+    let source = (!exhausted)
+        .then(|| SourceBound::RecordPage {
+            records: messages.len(),
+            of: "messages".to_owned(),
+        })
+        .into_iter()
+        .collect();
+    Ok(MessagePages {
+        messages,
+        source,
+        notes,
+    })
+}
+
+/// Normalize newest-first messages into a chronological transcript. `source`
+/// carries the bounds the read reached and `notes` what the read learned that
+/// has no field. The session endpoint is the normalized source of metadata,
+/// so a message read does not invent a title that a title-less listing could
+/// not provide.
 fn parse_transcript(
     session: Session,
-    response: &Value,
+    messages: &[Value],
     tail: usize,
-    mut source: Vec<SourceBound>,
-) -> Result<Transcript> {
-    let messages = response["data"]
-        .as_array()
-        .ok_or_else(|| anyhow!("opencode message response has no data array"))?;
+    source: Vec<SourceBound>,
+    notes: Vec<String>,
+) -> Transcript {
     let mut turns = messages
         .iter()
         .rev()
         .flat_map(parse_message)
         .collect::<Vec<_>>();
-    if response["cursor"]["next"].as_str().is_some() {
-        source.push(SourceBound::RecordPage {
-            records: messages.len(),
-            of: "messages".to_owned(),
-        });
-    }
     let total = turns.len();
     for (ordinal, turn) in turns.iter_mut().enumerate() {
         turn.ordinal = ordinal;
@@ -1199,13 +1330,7 @@ fn parse_transcript(
         source,
     };
 
-    Ok(Transcript::new(
-        session,
-        turns,
-        truncation,
-        None,
-        Vec::new(),
-    ))
+    Transcript::new(session, turns, truncation, None, notes)
 }
 
 fn parse_message(message: &Value) -> Vec<Turn> {

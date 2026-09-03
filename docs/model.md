@@ -100,8 +100,8 @@ turns, carries `returned`, `omitted`, `omitted_from` (always `head`, since a
 window keeps the newest turns), and the `bound` in force; a larger `--tail` or
 `export` recovers what it omitted. Its `source` lists bounds the reader itself
 reached, each tagged by `kind`: `file-tail` with the `bytes` read from the end
-of a recording file, `record-page` with the newest `records` fetched and what
-they are (`of`), and `turn-text` with how many `turns` carry text cut at
+of a recording file, `record-page` with the newest `records` fetched before
+the read stopped and what they are (`of`), and `turn-text` with how many `turns` carry text cut at
 `chars` characters. How much lies beyond a source bound is unknown, and no
 request through `tapes` passes it: `export` reads with an unbounded window and
 still reports the same `source` entries.

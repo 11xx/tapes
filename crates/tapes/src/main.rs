@@ -367,8 +367,8 @@ fn render_truncation_notes(out: &mut String, truncation: &Truncation) {
                 human_bytes(*bytes)
             )),
             SourceBound::RecordPage { records, of } => out.push_str(&format!(
-                "Note: Only the newest {records} {of} were fetched from the store; older ones \
-                 were not read, and no window reaches them.\n"
+                "Note: Only the newest {records} {of} were fetched from the store; anything \
+                 older was not read, and no window reaches it.\n"
             )),
             SourceBound::TurnText { turns, chars } => {
                 let (noun, verb) = if *turns == 1 {

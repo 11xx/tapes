@@ -1590,3 +1590,87 @@ fn show_gives_every_turn_a_coordinate_a_consumer_can_write_down() {
 
     fs::remove_dir_all(codex_home).unwrap();
 }
+
+/// `show --tail 1` on a session whose whole message projection exceeds the
+/// transport bound returns the one turn, names the page bound, and never asks
+/// for the unpaged projection.
+#[test]
+fn show_tail_on_an_oversized_opencode_session_stays_bounded() {
+    let root = TemporaryDirectory::new(std::env::temp_dir().join(format!(
+        "tapes-cli-opencode-oversized-{}",
+        std::process::id()
+    )));
+    let program = opencode_program(root.path(), "opencode2");
+    let id = "ses_oversized_fixture";
+    let run = |args: &[&str]| {
+        let output = tapes()
+            .args(args)
+            .env("HOME", root.path().join("home"))
+            .env("PATH", root.path())
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        output.stdout
+    };
+
+    let value: Value =
+        serde_json::from_slice(&run(&["show", id, "--tail", "1", "--json"])).unwrap();
+    assert_eq!(value["turns"].as_array().unwrap().len(), 1);
+    assert_eq!(value["truncated"], true);
+    assert_eq!(
+        value["truncation"]["source"],
+        serde_json::json!([{ "kind": "record-page", "records": 8, "of": "messages" }])
+    );
+
+    let human = String::from_utf8(run(&["show", id, "--tail", "1"])).unwrap();
+    assert!(
+        human.contains("Only the newest 8 messages were fetched from the store"),
+        "{human}"
+    );
+
+    let calls = fs::read_to_string(format!("{}.calls", program.path().display())).unwrap();
+    assert!(
+        calls
+            .lines()
+            .filter(|line| line.contains("/message"))
+            .all(|line| line.contains("limit=")),
+        "{calls}"
+    );
+}
+
+/// A window wide enough to reach a message the transport cannot carry still
+/// renders every turn before it, and the human output names where and why the
+/// read stopped.
+#[test]
+fn show_renders_what_precedes_a_message_the_transport_cannot_carry() {
+    let root = TemporaryDirectory::new(std::env::temp_dir().join(format!(
+        "tapes-cli-opencode-oversized-giant-{}",
+        std::process::id()
+    )));
+    let _program = opencode_program(root.path(), "opencode2");
+    let output = tapes()
+        .args(["show", "ses_giant_message_fixture", "--tail", "120"])
+        .env("HOME", root.path().join("home"))
+        .env("PATH", root.path())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(text.contains("[assistant #99 "), "{text}");
+    assert!(
+        text.contains("Only the newest 100 messages were fetched from the store"),
+        "{text}"
+    );
+    assert!(
+        text.contains("is larger than the 8 MiB transport bound; the read stopped before it"),
+        "{text}"
+    );
+}
