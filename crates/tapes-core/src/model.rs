@@ -34,6 +34,11 @@ pub struct Session {
     pub cost: Option<Cost>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tokens: Option<Tokens>,
+    /// Where `tapes` read this session from, as an opaque coordinate: a
+    /// recording file's path, or a store and the endpoint within it. A
+    /// consumer writes it down beside the id and does not parse it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub store: Option<String>,
 }
 
 /// The present-tense state supplied by the optional harness-status authority.
@@ -88,6 +93,16 @@ pub struct Turn {
     pub text: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ts: Option<DateTime<Utc>>,
+    /// Position in the session's normalized turn sequence: zero-based and
+    /// dense from the first turn the reader reaches. Assigned when a
+    /// transcript is assembled, so a turn outside one carries zero.
+    #[serde(default)]
+    pub ordinal: usize,
+    /// The harness's own id for the record this turn came from, when it
+    /// records one. Several turns can share it: one record can carry a
+    /// message, its reasoning, and its tool calls.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_id: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -123,6 +138,10 @@ impl Truncation {
             omitted: total - returned,
             omitted_from: End::Head,
             bound,
+            ordinals: (returned > 0).then(|| OrdinalRange {
+                first: total - returned,
+                last: total - 1,
+            }),
         })
     }
 }
@@ -135,6 +154,16 @@ pub struct TurnWindow {
     pub omitted_from: End,
     /// The window size that was in force.
     pub bound: usize,
+    /// The ordinals the window holds, so a reference outside it is known to
+    /// be outside rather than absent. An empty window holds none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ordinals: Option<OrdinalRange>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OrdinalRange {
+    pub first: usize,
+    pub last: usize,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -455,6 +484,7 @@ mod tests {
                 cache_read: Some(10),
                 cache_write: Some(5),
             }),
+            store: None,
         }
     }
 
@@ -476,6 +506,8 @@ mod tests {
             role: Role::Assistant,
             text: "Done".into(),
             ts: Some(timestamp(1_700_000_050)),
+            ordinal: 0,
+            native_id: None,
         };
         let transcript = Transcript {
             session: session(),
@@ -542,11 +574,15 @@ mod tests {
                 role: Role::User,
                 text: "# AGENTS.md instructions for /work\n<INSTRUCTIONS>rules</INSTRUCTIONS>\n<recommended_plugins>plugins</recommended_plugins>".into(),
                 ts: None,
+                ordinal: 0,
+                native_id: None,
             },
             Turn {
                 role: Role::User,
                 text: "Implement the readable title.".into(),
                 ts: None,
+                ordinal: 0,
+                native_id: None,
             },
         ]);
 
@@ -573,6 +609,8 @@ mod tests {
             role: Role::User,
             text: "A short request".into(),
             ts: None,
+            ordinal: 0,
+            native_id: None,
         }]);
         let complete_json = serde_json::to_value(complete).unwrap();
         assert_eq!(complete_json["derived_title"], "A short request");
@@ -584,6 +622,8 @@ mod tests {
             role: Role::User,
             text: "word ".repeat(DERIVED_TITLE_MAX_CHARS),
             ts: None,
+            ordinal: 0,
+            native_id: None,
         }]);
         let shortened_json = serde_json::to_value(shortened).unwrap();
         assert_eq!(shortened_json["derived_title_truncated"], true);
@@ -601,6 +641,8 @@ mod tests {
             role: Role::User,
             text: "A complete request…".into(),
             ts: None,
+            ordinal: 0,
+            native_id: None,
         }]);
 
         assert_eq!(
@@ -616,6 +658,8 @@ mod tests {
             role: Role::User,
             text: "A different request".into(),
             ts: None,
+            ordinal: 0,
+            native_id: None,
         }]);
 
         assert_eq!(session.title.as_deref(), Some("Build the model"));
@@ -676,7 +720,7 @@ mod tests {
         assert_eq!(
             value["truncation"],
             json!({
-                "window": { "returned": 100, "omitted": 47, "omitted_from": "head", "bound": 100 },
+                "window": { "returned": 100, "omitted": 47, "omitted_from": "head", "bound": 100, "ordinals": { "first": 47, "last": 146 } },
                 "source": [
                     { "kind": "file-tail", "bytes": 4_194_304 },
                     { "kind": "record-page", "records": 1000, "of": "messages" },
@@ -700,6 +744,34 @@ mod tests {
         let value = serde_json::to_value(&whole).unwrap();
         assert!(value.get("truncation").is_none(), "{value}");
         assert_eq!(value["truncated"], false);
+    }
+
+    #[test]
+    fn a_turn_carries_its_ordinal_and_omits_an_absent_native_id() {
+        let turn = Turn {
+            role: Role::User,
+            text: "hello".into(),
+            ts: None,
+            ordinal: 12,
+            native_id: None,
+        };
+        let value = serde_json::to_value(&turn).unwrap();
+        assert_eq!(value["ordinal"], 12);
+        assert!(value.get("native_id").is_none(), "{value}");
+        assert!(value.get("ts").is_none(), "{value}");
+
+        let named = Turn {
+            native_id: Some("msg_1".into()),
+            ..turn
+        };
+        let value = serde_json::to_value(&named).unwrap();
+        assert_eq!(value["native_id"], "msg_1");
+        assert_round_trip(&named);
+
+        let mut session = session();
+        session.store = None;
+        let value = serde_json::to_value(&session).unwrap();
+        assert!(value.get("store").is_none(), "{value}");
     }
 
     #[test]

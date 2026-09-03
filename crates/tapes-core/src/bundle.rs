@@ -10,7 +10,7 @@ use serde_json::Value;
 
 use crate::model::{
     human_bytes, human_timestamp, human_title, Role, Session, SourceBound, TrailingRecord,
-    Transcript, Truncation, SESSION_SCHEMA,
+    Transcript, Truncation, Turn, SESSION_SCHEMA,
 };
 
 /// One exported file: where it landed and how big it is.
@@ -142,7 +142,7 @@ fn render_context(transcript: &Transcript) -> String {
             Role::Assistant => "assistant",
             Role::Tool | Role::Reasoning => continue,
         };
-        write_turn_heading(&mut out, speaker, turn.ts);
+        write_turn_heading(&mut out, speaker, turn);
         out.push_str(turn.text.trim_end());
         out.push_str("\n\n");
     }
@@ -155,12 +155,12 @@ fn render_trace(transcript: &Transcript) -> String {
     write_header(&mut out, transcript, "trace");
     for turn in &transcript.turns {
         match turn.role {
-            Role::User => write_turn_heading(&mut out, "user", turn.ts),
-            Role::Assistant => write_turn_heading(&mut out, "assistant", turn.ts),
-            Role::Reasoning => write_turn_heading(&mut out, "reasoning", turn.ts),
+            Role::User => write_turn_heading(&mut out, "user", turn),
+            Role::Assistant => write_turn_heading(&mut out, "assistant", turn),
+            Role::Reasoning => write_turn_heading(&mut out, "reasoning", turn),
             Role::Tool => {
                 let label = tool_label(&turn.text);
-                write_turn_heading(&mut out, &format!("tool: {label}"), turn.ts);
+                write_turn_heading(&mut out, &format!("tool: {label}"), turn);
             }
         }
         out.push_str(turn.text.trim_end());
@@ -228,13 +228,20 @@ fn write_header(out: &mut String, transcript: &Transcript, kind: &str) {
     let _ = writeln!(out);
 }
 
-fn write_turn_heading(out: &mut String, speaker: &str, ts: Option<chrono::DateTime<Utc>>) {
-    match ts {
+/// Each heading names the turn's ordinal, so a line quoted from the bundle
+/// can be traced back to the same turn `show` renders.
+fn write_turn_heading(out: &mut String, speaker: &str, turn: &Turn) {
+    match turn.ts {
         Some(ts) => {
-            let _ = writeln!(out, "## {speaker} — {}", human_timestamp(ts));
+            let _ = writeln!(
+                out,
+                "## {speaker} #{} — {}",
+                turn.ordinal,
+                human_timestamp(ts)
+            );
         }
         None => {
-            let _ = writeln!(out, "## {speaker}");
+            let _ = writeln!(out, "## {speaker} #{}", turn.ordinal);
         }
     }
     let _ = writeln!(out);
@@ -311,27 +318,36 @@ mod tests {
                 live: None,
                 cost: None,
                 tokens: None,
+                store: None,
             },
             turns: vec![
                 Turn {
                     role: Role::User,
                     text: "fix the parser".into(),
                     ts: Some(ts),
+                    ordinal: 0,
+                    native_id: None,
                 },
                 Turn {
                     role: Role::Reasoning,
                     text: "the parser drops empty lines".into(),
                     ts: Some(ts),
+                    ordinal: 0,
+                    native_id: None,
                 },
                 Turn {
                     role: Role::Tool,
                     text: r#"{"name":"shell","input":{"command":"cargo test"}}"#.into(),
                     ts: Some(ts),
+                    ordinal: 0,
+                    native_id: None,
                 },
                 Turn {
                     role: Role::Assistant,
                     text: "fixed it".into(),
                     ts: Some(ts),
+                    ordinal: 0,
+                    native_id: None,
                 },
             ],
             truncated: false,
@@ -473,7 +489,7 @@ mod tests {
 
         assert!(context.contains("- title: ~Inspect the fixture"));
         assert!(context.contains("- last activity: 2023-11-14T22:13:20Z"));
-        assert!(trace.contains("## user — 2023-11-14T22:13:20Z"));
+        assert!(trace.contains("## user #0 — 2023-11-14T22:13:20Z"));
         assert!(!context.contains(".123456789Z"));
         assert!(!trace.contains(".123456789Z"));
 

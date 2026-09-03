@@ -923,7 +923,7 @@ fn human_renderers_show_derived_titles_and_whole_second_timestamps() {
     );
     let show_text = String::from_utf8_lossy(&show.stdout);
     assert!(
-        show_text.contains("[user 2026-01-01T10:00:02Z]"),
+        show_text.contains("[user #0 2026-01-01T10:00:02Z]"),
         "{show_text}"
     );
     assert!(!show_text.contains(".987654321Z"), "{show_text}");
@@ -1442,7 +1442,7 @@ fn show_distinguishes_the_turn_window_from_source_truncation() {
     assert_eq!(
         value["truncation"],
         serde_json::json!({
-            "window": { "returned": 100, "omitted": 47, "omitted_from": "head", "bound": 100 }
+            "window": { "returned": 100, "omitted": 47, "omitted_from": "head", "bound": 100, "ordinals": { "first": 47, "last": 146 } }
         })
     );
 
@@ -1520,4 +1520,73 @@ fn opencode_database_reads_name_cut_turn_text_as_a_source_bound() {
         "{text}"
     );
     assert!(!text.contains("Use --tail"), "{text}");
+}
+
+/// A consumer re-finds a turn from the session id and the ordinal alone, so
+/// ordinals count the whole normalized sequence even under a window, the
+/// window names the ordinals it holds, and the session names where it was
+/// read from.
+#[test]
+fn show_gives_every_turn_a_coordinate_a_consumer_can_write_down() {
+    let (codex_home, home) = fixture_store("source-reference");
+    let id = "00000000-0000-0000-0000-000000000001";
+    let run = |args: &[&str]| {
+        let mut command = tapes();
+        command.args(args);
+        with_fixture_env(
+            &mut command,
+            &codex_home,
+            &home,
+            Path::new("/definitely/missing"),
+        );
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        output.stdout
+    };
+
+    let whole: Value = serde_json::from_slice(&run(&["show", id, "--json"])).unwrap();
+    let turns = whole["turns"].as_array().unwrap();
+    for (index, turn) in turns.iter().enumerate() {
+        assert_eq!(turn["ordinal"], index, "{turn}");
+    }
+    assert!(
+        whole["session"]["store"]
+            .as_str()
+            .unwrap()
+            .ends_with(&format!("{id}.jsonl")),
+        "{}",
+        whole["session"]
+    );
+    assert!(whole.get("truncation").is_none());
+
+    let last = turns.len() - 1;
+    let windowed: Value =
+        serde_json::from_slice(&run(&["show", id, "--tail", "1", "--json"])).unwrap();
+    assert_eq!(windowed["turns"][0]["ordinal"], last);
+    assert_eq!(windowed["turns"][0]["text"], turns[last]["text"]);
+    assert_eq!(
+        windowed["truncation"]["window"]["ordinals"],
+        serde_json::json!({ "first": last, "last": last })
+    );
+
+    let again: Value = serde_json::from_slice(&run(&["show", id, "--json"])).unwrap();
+    assert_eq!(
+        again["turns"], whole["turns"],
+        "ordinals are stable across reads"
+    );
+
+    let human = String::from_utf8(run(&["show", id])).unwrap();
+    assert!(human.contains("[user #0 "), "{human}");
+    assert!(human.contains(&format!(" #{last} ")), "{human}");
+
+    let listed: Value =
+        serde_json::from_slice(&run(&["list", "--global", "--harness", "codex", "--json"]))
+            .unwrap();
+    assert_eq!(session(&listed, id)["store"], whole["session"]["store"]);
+
+    fs::remove_dir_all(codex_home).unwrap();
 }
