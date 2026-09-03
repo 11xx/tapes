@@ -97,6 +97,82 @@ pub struct TrailingRecord {
     pub timestamp: Option<DateTime<Utc>>,
 }
 
+/// Why a transcript is not the whole session, one entry per cause. The two
+/// halves call for different recoveries: a window is reopened wider with
+/// `--tail` or `export`; a source bound was reached by the reader itself, and
+/// no request through `tapes` reaches past it.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Truncation {
+    /// The requested turn window dropped turns the read had produced.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window: Option<TurnWindow>,
+    /// Bounds the source read reached. How much lies beyond each is unknown.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub source: Vec<SourceBound>,
+}
+
+impl Truncation {
+    pub fn is_empty(&self) -> bool {
+        self.window.is_none() && self.source.is_empty()
+    }
+
+    /// A window that dropped turns, or nothing when every turn fit.
+    pub fn window(returned: usize, total: usize, bound: usize) -> Option<TurnWindow> {
+        (total > returned).then(|| TurnWindow {
+            returned,
+            omitted: total - returned,
+            omitted_from: End::Head,
+            bound,
+        })
+    }
+}
+
+/// A turn window keeps the newest turns, so what it omits is always the head.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TurnWindow {
+    pub returned: usize,
+    pub omitted: usize,
+    pub omitted_from: End,
+    /// The window size that was in force.
+    pub bound: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum End {
+    Head,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum SourceBound {
+    /// Only the final `bytes` of the recording file were read.
+    FileTail { bytes: u64 },
+    /// Only the newest `records` of the named record kind were fetched from
+    /// the store; older ones exist and were not read.
+    RecordPage { records: usize, of: String },
+    /// `turns` turns carry text the store read cut at `chars` characters.
+    TurnText { turns: usize, chars: usize },
+}
+
+/// Format a byte count for human output without false precision.
+pub fn human_bytes(bytes: u64) -> String {
+    const UNITS: [&str; 4] = ["bytes", "KiB", "MiB", "GiB"];
+    let mut value = bytes as f64;
+    let mut unit = 0;
+    while value >= 1024.0 && unit < UNITS.len() - 1 {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{bytes} bytes")
+    } else if value.fract() == 0.0 {
+        format!("{value:.0} {}", UNITS[unit])
+    } else {
+        format!("{value:.1} {}", UNITS[unit])
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Role {
@@ -227,13 +303,36 @@ pub fn human_title(session: &Session) -> String {
     }
 }
 
+/// `truncated` is the derived signal that anything was omitted; `truncation`
+/// says what and why. A transcript built through `new` keeps the two in
+/// agreement.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Transcript {
     pub session: Session,
     pub turns: Vec<Turn>,
     pub truncated: bool,
+    pub truncation: Truncation,
     pub trailing_record: Option<TrailingRecord>,
     pub notes: Vec<String>,
+}
+
+impl Transcript {
+    pub fn new(
+        session: Session,
+        turns: Vec<Turn>,
+        truncation: Truncation,
+        trailing_record: Option<TrailingRecord>,
+        notes: Vec<String>,
+    ) -> Self {
+        Self {
+            session,
+            turns,
+            truncated: !truncation.is_empty(),
+            truncation,
+            trailing_record,
+            notes,
+        }
+    }
 }
 
 impl Serialize for Transcript {
@@ -246,11 +345,16 @@ impl Serialize for Transcript {
             session: &self.session,
             turns: &self.turns,
             truncated: self.truncated,
+            truncation: &self.truncation,
             trailing_record: self.trailing_record.as_ref(),
             notes: &self.notes,
         }
         .serialize(serializer)
     }
+}
+
+fn truncation_is_empty(truncation: &&Truncation) -> bool {
+    truncation.is_empty()
 }
 
 impl<'de> Deserialize<'de> for Transcript {
@@ -270,6 +374,7 @@ impl<'de> Deserialize<'de> for Transcript {
             session: serialized.session,
             turns: serialized.turns,
             truncated: serialized.truncated,
+            truncation: serialized.truncation,
             trailing_record: serialized.trailing_record,
             notes: serialized.notes,
         })
@@ -282,6 +387,8 @@ struct TranscriptRef<'a> {
     session: &'a Session,
     turns: &'a [Turn],
     truncated: bool,
+    #[serde(skip_serializing_if = "truncation_is_empty")]
+    truncation: &'a Truncation,
     #[serde(skip_serializing_if = "Option::is_none")]
     trailing_record: Option<&'a TrailingRecord>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -294,6 +401,8 @@ struct SerializedTranscript {
     session: Session,
     turns: Vec<Turn>,
     truncated: bool,
+    #[serde(default)]
+    truncation: Truncation,
     #[serde(default)]
     trailing_record: Option<TrailingRecord>,
     #[serde(default)]
@@ -372,6 +481,7 @@ mod tests {
             session: session(),
             turns: vec![turn.clone()],
             truncated: true,
+            truncation: Truncation::default(),
             trailing_record: Some(TrailingRecord {
                 kind: "event_msg".into(),
                 timestamp: Some(timestamp(1_700_000_060)),
@@ -525,6 +635,7 @@ mod tests {
             session: session(),
             turns: Vec::new(),
             truncated: true,
+            truncation: Truncation::default(),
             trailing_record: None,
             notes: Vec::new(),
         };
@@ -540,11 +651,84 @@ mod tests {
     }
 
     #[test]
+    fn truncation_names_each_cause_and_derives_the_flag() {
+        let truncation = Truncation {
+            window: Truncation::window(100, 147, 100),
+            source: vec![
+                SourceBound::FileTail {
+                    bytes: 4 * 1024 * 1024,
+                },
+                SourceBound::RecordPage {
+                    records: 1000,
+                    of: "messages".into(),
+                },
+                SourceBound::TurnText {
+                    turns: 3,
+                    chars: 4000,
+                },
+            ],
+        };
+        let transcript =
+            Transcript::new(session(), Vec::new(), truncation.clone(), None, Vec::new());
+        assert!(transcript.truncated);
+
+        let value = serde_json::to_value(&transcript).unwrap();
+        assert_eq!(
+            value["truncation"],
+            json!({
+                "window": { "returned": 100, "omitted": 47, "omitted_from": "head", "bound": 100 },
+                "source": [
+                    { "kind": "file-tail", "bytes": 4_194_304 },
+                    { "kind": "record-page", "records": 1000, "of": "messages" },
+                    { "kind": "turn-text", "turns": 3, "chars": 4000 }
+                ]
+            })
+        );
+        let decoded: Transcript = serde_json::from_value(value).unwrap();
+        assert_eq!(decoded.truncation, truncation);
+        assert_round_trip(&truncation);
+
+        assert!(Truncation::window(147, 147, 200).is_none());
+        let whole = Transcript::new(
+            session(),
+            Vec::new(),
+            Truncation::default(),
+            None,
+            Vec::new(),
+        );
+        assert!(!whole.truncated);
+        let value = serde_json::to_value(&whole).unwrap();
+        assert!(value.get("truncation").is_none(), "{value}");
+        assert_eq!(value["truncated"], false);
+    }
+
+    #[test]
+    fn a_transcript_without_a_truncation_record_still_decodes() {
+        let value = json!({
+            "schema": SESSION_SCHEMA,
+            "session": serde_json::to_value(session()).unwrap(),
+            "turns": [],
+            "truncated": true
+        });
+        let decoded: Transcript = serde_json::from_value(value).unwrap();
+        assert!(decoded.truncated);
+        assert!(decoded.truncation.is_empty());
+    }
+
+    #[test]
+    fn human_bytes_names_the_unit_without_false_precision() {
+        assert_eq!(human_bytes(512), "512 bytes");
+        assert_eq!(human_bytes(4 * 1024 * 1024), "4 MiB");
+        assert_eq!(human_bytes(1536), "1.5 KiB");
+    }
+
+    #[test]
     fn transcript_omits_an_absent_trailing_record_and_timestamp() {
         let mut transcript = Transcript {
             session: session(),
             turns: Vec::new(),
             truncated: false,
+            truncation: Truncation::default(),
             trailing_record: Some(TrailingRecord {
                 kind: "last-prompt".into(),
                 timestamp: None,

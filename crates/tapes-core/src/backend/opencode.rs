@@ -12,7 +12,7 @@ use chrono::{TimeZone, Utc};
 use serde_json::{json, Value};
 
 use super::{filter_listing_search, filter_listing_search_parallel, Backend, Listing, Query};
-use crate::model::{Cost, Model, Role, Session, Tokens, Transcript, Turn};
+use crate::model::{Cost, Model, Role, Session, SourceBound, Tokens, Transcript, Truncation, Turn};
 
 const MAX_COMMAND_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_API_SESSIONS: usize = 1_000;
@@ -151,7 +151,7 @@ impl OpenCodeApiClient {
 
     fn search(&self, session: &Session, needle: &str, tail: usize) -> Result<bool> {
         let response = self.request(&format!("/api/session/{}/message", session.id))?;
-        let transcript = parse_transcript(session.clone(), &response, tail)?;
+        let transcript = parse_transcript(session.clone(), &response, tail, Vec::new())?;
         let needle = needle.to_lowercase();
         Ok(transcript
             .turns
@@ -587,9 +587,15 @@ impl OpenCodeBackend {
 
     fn database_transcript(&self, session: Session, tail: usize) -> Result<Transcript> {
         let id = sql_literal(&session.id);
+        let mut source = Vec::new();
         let mut message_rows = self.database(&database_message_query(&id))?;
-        let mut truncated = message_rows.len() > MAX_DB_MESSAGES;
-        message_rows.truncate(MAX_DB_MESSAGES);
+        if message_rows.len() > MAX_DB_MESSAGES {
+            message_rows.truncate(MAX_DB_MESSAGES);
+            source.push(SourceBound::RecordPage {
+                records: MAX_DB_MESSAGES,
+                of: "messages".to_owned(),
+            });
+        }
 
         let mut part_rows = self.database(&format!(
             "SELECT json_object( \
@@ -623,16 +629,42 @@ impl OpenCodeBackend {
              FROM part WHERE session_id = {id} ORDER BY time_created DESC LIMIT {}",
             MAX_DB_PARTS + 1
         ))?;
-        truncated |= part_rows.len() > MAX_DB_PARTS;
-        part_rows.truncate(MAX_DB_PARTS);
+        if part_rows.len() > MAX_DB_PARTS {
+            part_rows.truncate(MAX_DB_PARTS);
+            source.push(SourceBound::RecordPage {
+                records: MAX_DB_PARTS,
+                of: "parts".to_owned(),
+            });
+        }
 
+        // The projection cuts text and tool parts at different lengths, so
+        // each bound is reported with the count of parts it cut.
+        let mut cut_text_parts = 0;
+        let mut cut_tool_parts = 0;
         let mut parts = HashMap::<String, Vec<Value>>::new();
         for row in part_rows {
             let message_id = required_string(&row, "message_id")?;
             let data = database_data(&row)?;
-            truncated |= data["truncated"].as_bool().unwrap_or(false)
+            let cut = data["truncated"].as_bool().unwrap_or(false)
                 || data["truncated"].as_i64() == Some(1);
+            if cut && data["type"] == "tool" {
+                cut_tool_parts += 1;
+            } else if cut {
+                cut_text_parts += 1;
+            }
             parts.entry(message_id).or_default().push(data);
+        }
+        if cut_text_parts > 0 {
+            source.push(SourceBound::TurnText {
+                turns: cut_text_parts,
+                chars: MAX_DB_TEXT_CHARS,
+            });
+        }
+        if cut_tool_parts > 0 {
+            source.push(SourceBound::TurnText {
+                turns: cut_tool_parts,
+                chars: MAX_DB_TOOL_CHARS,
+            });
         }
         for values in parts.values_mut() {
             values.reverse();
@@ -644,11 +676,7 @@ impl OpenCodeBackend {
                 database_message(row, parts.remove(row["id"].as_str()?).unwrap_or_default())
             })
             .collect::<Result<Vec<_>>>()?;
-        let response = json!({
-            "data": messages,
-            "cursor": if truncated { json!({ "next": "database" }) } else { Value::Null }
-        });
-        parse_transcript(session, &response, tail)
+        parse_transcript(session, &json!({ "data": messages }), tail, source)
     }
 }
 
@@ -855,7 +883,7 @@ impl Backend for OpenCodeBackend {
             return self.database_transcript(session.clone(), tail);
         }
         let response = self.request(&format!("/api/session/{}/message", session.id))?;
-        parse_transcript(session.clone(), &response, tail)
+        parse_transcript(session.clone(), &response, tail, Vec::new())
     }
 }
 
@@ -1104,7 +1132,16 @@ fn parse_session(value: &Value) -> Result<Session> {
     })
 }
 
-fn parse_transcript(session: Session, response: &Value, tail: usize) -> Result<Transcript> {
+/// Normalize one message page. `source` carries the bounds the caller's read
+/// already reached; a page cursor pointing past this page adds one more. The
+/// session endpoint is the normalized source of metadata, so a message read
+/// does not invent a title that a title-less listing could not provide.
+fn parse_transcript(
+    session: Session,
+    response: &Value,
+    tail: usize,
+    mut source: Vec<SourceBound>,
+) -> Result<Transcript> {
     let messages = response["data"]
         .as_array()
         .ok_or_else(|| anyhow!("opencode message response has no data array"))?;
@@ -1113,26 +1150,28 @@ fn parse_transcript(session: Session, response: &Value, tail: usize) -> Result<T
         .rev()
         .flat_map(parse_message)
         .collect::<Vec<_>>();
-    let page_truncated = response["cursor"]["next"].as_str().is_some();
-    let tail_truncated = turns.len() > tail;
-    if tail_truncated {
-        turns.drain(..turns.len() - tail);
+    if response["cursor"]["next"].as_str().is_some() {
+        source.push(SourceBound::RecordPage {
+            records: messages.len(),
+            of: "messages".to_owned(),
+        });
     }
-    let notes = page_truncated
-        .then(|| "Some OpenCode content is outside the bounded read.".to_owned())
-        .into_iter()
-        .collect();
+    let total = turns.len();
+    if total > tail {
+        turns.drain(..total - tail);
+    }
+    let truncation = Truncation {
+        window: Truncation::window(turns.len(), total, tail),
+        source,
+    };
 
-    Ok(Transcript {
-        // The session endpoint is the normalized source of metadata. Message
-        // reads stay a transcript operation and do not invent a title that a
-        // title-less API listing could not provide without extra per-row work.
+    Ok(Transcript::new(
         session,
         turns,
-        truncated: page_truncated || tail_truncated,
-        trailing_record: None,
-        notes,
-    })
+        truncation,
+        None,
+        Vec::new(),
+    ))
 }
 
 fn parse_message(message: &Value) -> Vec<Turn> {

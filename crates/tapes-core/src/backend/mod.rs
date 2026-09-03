@@ -7,7 +7,7 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde_json::Value;
 
-use crate::model::{Session, TrailingRecord, Transcript, Turn};
+use crate::model::{Session, SourceBound, TrailingRecord, Transcript, Truncation, Turn};
 use crate::scope::Scope;
 
 pub mod claude;
@@ -628,22 +628,26 @@ pub(crate) fn transcript(
     trailing_record: Option<TrailingRecord>,
     mut notes: Vec<String>,
 ) -> Transcript {
-    let tail_truncated = turns.len() > tail;
-    if tail_truncated {
-        turns.drain(..turns.len() - tail);
+    let total = turns.len();
+    if total > tail {
+        turns.drain(..total - tail);
     }
     if read.skipped > 0 {
         let noun = if read.skipped == 1 { "line" } else { "lines" };
         notes.push(format!("Skipped {} unparseable {noun}.", read.skipped));
     }
+    let truncation = Truncation {
+        window: Truncation::window(turns.len(), total, tail),
+        source: read
+            .truncated
+            .then_some(SourceBound::FileTail {
+                bytes: MAX_TRANSCRIPT_BYTES,
+            })
+            .into_iter()
+            .collect(),
+    };
 
-    Transcript {
-        session,
-        turns,
-        truncated: read.truncated || tail_truncated,
-        trailing_record,
-        notes,
-    }
+    Transcript::new(session, turns, truncation, trailing_record, notes)
 }
 
 pub(crate) fn home_path(parts: &[&str]) -> Option<PathBuf> {

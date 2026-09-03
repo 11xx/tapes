@@ -1379,6 +1379,145 @@ fn show_reports_the_recorded_start_of_an_oversized_session() {
     assert_eq!(value["session"]["directory"], "/fixtures/project");
     assert_eq!(value["truncated"], true);
     assert_eq!(value["turns"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        value["truncation"]["source"],
+        serde_json::json!([{ "kind": "file-tail", "bytes": 4_194_304 }])
+    );
+    assert_eq!(value["truncation"]["window"]["returned"], 1);
+    assert_eq!(value["truncation"]["window"]["bound"], 1);
 
     fs::remove_dir_all(root).unwrap();
+}
+
+/// The recorded case: a 147-turn session shown through the default window
+/// returns 100 turns and says 47 earlier ones were windowed out, with no
+/// source bound; a wide enough window clears it; export reads every turn.
+#[test]
+fn show_distinguishes_the_turn_window_from_source_truncation() {
+    let root = std::env::temp_dir().join(format!(
+        "tapes-cli-window-provenance-{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&root);
+    let sessions = root.join("sessions/2026/01/01");
+    fs::create_dir_all(&sessions).unwrap();
+    let id = "00000000-0000-0000-0000-00000000cccc";
+    let path = sessions.join(format!("rollout-2026-01-01T10-00-00-{id}.jsonl"));
+    let mut file = std::io::BufWriter::new(fs::File::create(&path).unwrap());
+    use std::io::Write;
+    writeln!(
+        file,
+        r#"{{"timestamp":"2026-01-01T10:00:00Z","type":"session_meta","payload":{{"id":"{id}","cwd":"/fixtures/project"}}}}"#
+    )
+    .unwrap();
+    for index in 0..147 {
+        writeln!(
+            file,
+            r#"{{"timestamp":"2026-01-01T10:00:{:02}Z","type":"response_item","payload":{{"type":"message","role":"user","content":[{{"type":"input_text","text":"turn {index}"}}]}}}}"#,
+            index % 60
+        )
+        .unwrap();
+    }
+    drop(file);
+
+    let run = |args: &[&str]| {
+        let mut command = tapes();
+        command.args(args);
+        command
+            .env("HOME", root.join("home"))
+            .env("CODEX_HOME", &root)
+            .env("PATH", "/definitely/missing");
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        output.stdout
+    };
+
+    let value: Value = serde_json::from_slice(&run(&["show", id, "--json"])).unwrap();
+    assert_eq!(value["turns"].as_array().unwrap().len(), 100);
+    assert_eq!(value["truncated"], true);
+    assert_eq!(
+        value["truncation"],
+        serde_json::json!({
+            "window": { "returned": 100, "omitted": 47, "omitted_from": "head", "bound": 100 }
+        })
+    );
+
+    let human = String::from_utf8(run(&["show", id])).unwrap();
+    assert!(
+        human.contains(
+            "Showing the last 100 of 147 turns; 47 earlier turns fall outside the 100-turn window"
+        ),
+        "{human}"
+    );
+    assert!(human.contains("--tail 147"), "{human}");
+
+    let value: Value =
+        serde_json::from_slice(&run(&["show", id, "--tail", "200", "--json"])).unwrap();
+    assert_eq!(value["turns"].as_array().unwrap().len(), 147);
+    assert_eq!(value["truncated"], false);
+    assert!(value.get("truncation").is_none(), "{value}");
+
+    let bundle = root.join("bundle");
+    let listing =
+        String::from_utf8(run(&["export", id, "--bundle", bundle.to_str().unwrap()])).unwrap();
+    let json_path = listing
+        .lines()
+        .find(|line| line.contains(".json"))
+        .and_then(|line| line.split('\t').next())
+        .unwrap();
+    let exported: Value = serde_json::from_str(&fs::read_to_string(json_path).unwrap()).unwrap();
+    assert_eq!(exported["turns"].as_array().unwrap().len(), 147);
+    assert_eq!(exported["truncated"], false);
+    assert!(exported.get("truncation").is_none(), "{exported}");
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+/// The database projection cuts long part text; the transcript names that
+/// bound and the count of parts it cut rather than a bare flag.
+#[test]
+fn opencode_database_reads_name_cut_turn_text_as_a_source_bound() {
+    let root = TemporaryDirectory::new(std::env::temp_dir().join(format!(
+        "tapes-cli-opencode-cut-text-{}",
+        std::process::id()
+    )));
+    let _stable = opencode_program(root.path(), "opencode");
+    let _beta = opencode_program(root.path(), "opencode2");
+
+    let output = tapes()
+        .args(["show", "ses_database_only_fixture", "--json"])
+        .env("HOME", root.path().join("home"))
+        .env("PATH", root.path())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["truncated"], true);
+    assert_eq!(
+        value["truncation"],
+        serde_json::json!({
+            "source": [{ "kind": "turn-text", "turns": 1, "chars": 4000 }]
+        })
+    );
+
+    let human = tapes()
+        .args(["show", "ses_database_only_fixture"])
+        .env("HOME", root.path().join("home"))
+        .env("PATH", root.path())
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&human.stdout);
+    assert!(
+        text.contains("1 turn carries text cut at 4000 characters"),
+        "{text}"
+    );
+    assert!(!text.contains("Use --tail"), "{text}");
 }

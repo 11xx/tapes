@@ -6,7 +6,10 @@ use std::path::PathBuf;
 use anyhow::Result;
 use clap::{Args, Parser, Subcommand};
 use tapes_core::bundle::Bundle;
-use tapes_core::model::{human_timestamp, human_title, LiveState, Role, Session, Transcript};
+use tapes_core::model::{
+    human_bytes, human_timestamp, human_title, LiveState, Role, Session, SourceBound, Transcript,
+    Truncation,
+};
 use tapes_core::{Selection, Where};
 
 #[derive(Parser)]
@@ -292,16 +295,6 @@ fn print_manifest(bundle: &Bundle) {
     }
 }
 
-fn human_bytes(bytes: u64) -> String {
-    const KIB: u64 = 1024;
-    const MIB: u64 = KIB * 1024;
-    match bytes {
-        bytes if bytes >= MIB => format!("{:.1} MiB", bytes as f64 / MIB as f64),
-        bytes if bytes >= KIB => format!("{:.1} KiB", bytes as f64 / KIB as f64),
-        bytes => format!("{bytes} B"),
-    }
-}
-
 fn print_transcript(transcript: &Transcript, by_latest: bool) {
     print!("{}", render_transcript(transcript, by_latest));
 }
@@ -345,16 +338,49 @@ fn render_transcript(transcript: &Transcript, by_latest: bool) -> String {
             transcript.session.id
         ));
     }
-    if transcript.truncated {
-        out.push_str(
-            "Note: Truncated — earlier turns are not shown. Use --tail N for a larger window, \
-             or `tapes export` for the whole session.\n",
-        );
-    }
+    render_truncation_notes(&mut out, &transcript.truncation);
     for note in &transcript.notes {
         out.push_str(&format!("Note: {note}\n"));
     }
     out
+}
+
+/// Each cause of truncation gets its own note, and each note recommends only
+/// a recovery that reaches the omitted content: a window is reopened wider, a
+/// source bound is the reader's own limit and nothing through `tapes` passes
+/// it.
+fn render_truncation_notes(out: &mut String, truncation: &Truncation) {
+    if let Some(window) = &truncation.window {
+        let total = window.returned + window.omitted;
+        out.push_str(&format!(
+            "Note: Showing the last {} of {total} turns; {} earlier turns fall outside the {}-turn window. \
+             Use --tail {total} to see them, or `tapes export` for every turn the reader can reach.\n",
+            window.returned, window.omitted, window.bound
+        ));
+    }
+    for bound in &truncation.source {
+        match bound {
+            SourceBound::FileTail { bytes } => out.push_str(&format!(
+                "Note: Only the final {} of the recording was read; earlier records are beyond \
+                 what --tail or `tapes export` can reach.\n",
+                human_bytes(*bytes)
+            )),
+            SourceBound::RecordPage { records, of } => out.push_str(&format!(
+                "Note: Only the newest {records} {of} were fetched from the store; older ones \
+                 were not read, and no window reaches them.\n"
+            )),
+            SourceBound::TurnText { turns, chars } => {
+                let (noun, verb) = if *turns == 1 {
+                    ("turn", "carries")
+                } else {
+                    ("turns", "carry")
+                };
+                out.push_str(&format!(
+                    "Note: {turns} {noun} {verb} text cut at {chars} characters by the store read.\n"
+                ));
+            }
+        }
+    }
 }
 
 fn render_activity_note(out: &mut String, transcript: &Transcript) {
@@ -422,7 +448,7 @@ fn reset_sigpipe() {
 mod tests {
     use super::*;
     use chrono::{DateTime, Utc};
-    use tapes_core::model::{TrailingRecord, Turn};
+    use tapes_core::model::{End, TrailingRecord, Turn, TurnWindow};
 
     fn transcript(truncated: bool) -> Transcript {
         Transcript {
@@ -446,6 +472,15 @@ mod tests {
                 ts: None,
             }],
             truncated,
+            truncation: Truncation {
+                window: truncated.then_some(TurnWindow {
+                    returned: 1,
+                    omitted: 2,
+                    omitted_from: End::Head,
+                    bound: 1,
+                }),
+                source: Vec::new(),
+            },
             trailing_record: None,
             notes: vec!["Skipped 1 unparseable line.".to_owned()],
         }
@@ -454,15 +489,55 @@ mod tests {
     #[test]
     fn the_human_render_says_when_it_is_a_window() {
         let windowed = render_transcript(&transcript(true), false);
-        assert!(windowed.contains("Truncated"), "{windowed}");
-        assert!(windowed.contains("--tail N"), "{windowed}");
+        assert!(
+            windowed.contains(
+                "Showing the last 1 of 3 turns; 2 earlier turns fall outside the 1-turn window"
+            ),
+            "{windowed}"
+        );
+        assert!(windowed.contains("--tail 3"), "{windowed}");
         assert!(windowed.contains("tapes export"), "{windowed}");
         assert!(windowed.contains("Skipped 1 unparseable line."));
 
         let whole = render_transcript(&transcript(false), false);
-        assert!(!whole.contains("Truncated"), "{whole}");
+        assert!(!whole.contains("Showing the last"), "{whole}");
         assert!(whole.contains("Skipped 1 unparseable line."));
         assert!(whole.starts_with("[user]"), "{whole}");
+    }
+
+    /// A source bound is the reader's own limit, so its note names what was
+    /// read and does not offer a wider window as the remedy.
+    #[test]
+    fn a_source_bound_is_named_without_offering_a_window_as_the_remedy() {
+        let mut bounded = transcript(false);
+        bounded.truncated = true;
+        bounded.truncation.source = vec![
+            SourceBound::FileTail {
+                bytes: 4 * 1024 * 1024,
+            },
+            SourceBound::RecordPage {
+                records: 1000,
+                of: "messages".to_owned(),
+            },
+            SourceBound::TurnText {
+                turns: 1,
+                chars: 4000,
+            },
+        ];
+        let rendered = render_transcript(&bounded, false);
+        assert!(
+            rendered.contains("Only the final 4 MiB of the recording was read"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("Only the newest 1000 messages were fetched from the store"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("1 turn carries text cut at 4000 characters"),
+            "{rendered}"
+        );
+        assert!(!rendered.contains("Use --tail"), "{rendered}");
     }
 
     /// `list` reads activity from the newest record in the store, `show`
