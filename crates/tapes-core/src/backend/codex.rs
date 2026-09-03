@@ -8,7 +8,7 @@ use super::{
     read_recording, session_file, timestamp, trailing_record, transcript, Backend, Jsonl, Listing,
     ParsedFile, Query,
 };
-use crate::model::{Model, Role, Session, TrailingRecord, Transcript, Turn};
+use crate::model::{Model, Role, Session, Tokens, TrailingRecord, Transcript, Turn};
 
 #[derive(Clone, Debug)]
 pub struct CodexBackend {
@@ -67,6 +67,7 @@ impl CodexBackend {
                 })
             });
         let turns = read.values.iter().flat_map(parse_turns).collect::<Vec<_>>();
+        let tokens = read.values.iter().rev().find_map(codex_tokens);
 
         let session = Session {
             id,
@@ -80,7 +81,7 @@ impl CodexBackend {
             last_activity_at,
             live: None,
             cost: None,
-            tokens: None,
+            tokens,
             store: Some(path.display().to_string()),
         };
         // The opening is the start of the file, so its first user turn is the
@@ -204,6 +205,28 @@ fn codex_cwd(value: &Value) -> Option<&str> {
         Some("session_meta") | Some("turn_context") => value["payload"]["cwd"].as_str(),
         _ => None,
     }
+}
+
+/// The cumulative session totals a `token_count` event carries. Codex writes
+/// one after every model response with `info.total_token_usage` as the running
+/// total and `info.last_token_usage` as that response alone; the total is what
+/// the normalized counters mean, so the newest event in the read window is the
+/// session's accounting so far. An event without usage carries no answer and
+/// is passed over for an older one. Counters Codex did not write stay absent;
+/// a counter it wrote as zero is zero.
+fn codex_tokens(value: &Value) -> Option<Tokens> {
+    if value["type"] != "event_msg" || value["payload"]["type"] != "token_count" {
+        return None;
+    }
+    let usage = value["payload"]["info"]["total_token_usage"].as_object()?;
+    let counter = |name: &str| usage.get(name).and_then(Value::as_u64);
+    Some(Tokens {
+        input: counter("input_tokens"),
+        output: counter("output_tokens"),
+        reasoning: counter("reasoning_output_tokens"),
+        cache_read: counter("cached_input_tokens"),
+        cache_write: counter("cache_write_input_tokens"),
+    })
 }
 
 fn codex_trailing_kind(value: &Value) -> Option<&'static str> {

@@ -62,7 +62,13 @@ case-insensitive substring match against the recorded path and does not match
 sessions whose directory is absent. Both filters are applied before the
 per-harness listing bound. `Cost` contains a single USD value. `Tokens` can
 independently record input, output, reasoning, cache-read, and cache-write
-counts.
+counts. Each counter is what the harness recorded and is absent where it
+recorded nothing: OpenCode supplies all five from its session row, Codex
+supplies the cumulative totals of the newest `token_count` event in the
+bounded read (so a session's counters are its running total, not the
+window's), and Claude and pi record no session-level counters. Cost, provider
+quota, and recorded tokens are distinct facts; no counter is derived from
+another.
 
 `Turn` contains a role, text, an optional UTC timestamp, an `ordinal`, and an
 optional `native_id`. Roles are `user`, `assistant`, `tool`, and `reasoning`.

@@ -1980,3 +1980,31 @@ fn a_giant_message_stops_the_paged_read_before_it_with_a_note() {
         "the oversized page is retried smaller before the read gives up on it: {calls}"
     );
 }
+
+/// Codex writes cumulative totals after every response. The newest event in
+/// the read window is the session's accounting; a counter the newest event
+/// did not write is absent even when an older event carried it, a counter it
+/// wrote as zero is zero, and an event without usage is passed over.
+#[test]
+fn codex_reads_cumulative_token_totals_from_the_latest_event_with_usage() {
+    let backend = CodexBackend::new(fixtures("codex"));
+    let session = located(&backend, "00000000-0000-0000-0000-000000000001");
+    assert_eq!(
+        session.tokens,
+        Some(tapes_core::model::Tokens {
+            input: Some(1200),
+            output: Some(300),
+            reasoning: None,
+            cache_read: Some(1000),
+            cache_write: Some(0),
+        })
+    );
+    assert!(session.cost.is_none(), "Codex records no cost");
+
+    let transcript = backend.transcript(&session, 10).unwrap();
+    assert_eq!(transcript.session.tokens, session.tokens);
+    assert_eq!(transcript.turns.len(), 5, "token events are not turns");
+
+    let without = located(&backend, "20000000-0000-0000-0000-000000000004");
+    assert!(without.tokens.is_none(), "no token event, no counters");
+}

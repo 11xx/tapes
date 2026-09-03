@@ -1674,3 +1674,56 @@ fn show_renders_what_precedes_a_message_the_transport_cannot_carry() {
         "{text}"
     );
 }
+
+/// The normalized totals reach every surface unchanged: list, show, and the
+/// export bundle carry the same counters, with absent ones omitted.
+#[test]
+fn codex_token_totals_agree_across_list_show_and_export() {
+    let (codex_home, home) = fixture_store("codex-tokens");
+    let id = "00000000-0000-0000-0000-000000000001";
+    let run = |args: &[&str]| {
+        let mut command = tapes();
+        command.args(args);
+        with_fixture_env(
+            &mut command,
+            &codex_home,
+            &home,
+            Path::new("/definitely/missing"),
+        );
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        output.stdout
+    };
+    let expected = serde_json::json!({
+        "input": 1200,
+        "output": 300,
+        "cache_read": 1000,
+        "cache_write": 0
+    });
+
+    let shown: Value = serde_json::from_slice(&run(&["show", id, "--json"])).unwrap();
+    assert_eq!(shown["session"]["tokens"], expected);
+    assert!(shown["session"].get("cost").is_none());
+
+    let listed: Value =
+        serde_json::from_slice(&run(&["list", "--global", "--harness", "codex", "--json"]))
+            .unwrap();
+    assert_eq!(session(&listed, id)["tokens"], expected);
+
+    let bundle = codex_home.join("bundle");
+    let listing =
+        String::from_utf8(run(&["export", id, "--bundle", bundle.to_str().unwrap()])).unwrap();
+    let json_path = listing
+        .lines()
+        .find(|line| line.contains(".json"))
+        .and_then(|line| line.split('\t').next())
+        .unwrap();
+    let exported: Value = serde_json::from_str(&fs::read_to_string(json_path).unwrap()).unwrap();
+    assert_eq!(exported["session"]["tokens"], expected);
+
+    fs::remove_dir_all(codex_home).unwrap();
+}
