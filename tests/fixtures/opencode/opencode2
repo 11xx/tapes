@@ -24,6 +24,7 @@ fixture_dir=${resolved%/*}
 name=${invoked##*/}
 case $invoked in
   *opencode-titleless*) name=opencode2-titleless ;;
+  *opencode-oversized*) name=opencode2-oversized ;;
 esac
 path=${4:-}
 query=${4:-}
@@ -46,6 +47,10 @@ case $name in
     messages=messages.json
     session=session.json
     mode=counting
+    ;;
+  opencode2-oversized*)
+    list=list.json
+    mode=oversized
     ;;
   opencode)
     mode=database
@@ -71,8 +76,76 @@ if [ "${5:-}" = malformed-row ]; then
   mode=database-malformed
 fi
 
-if [ "$mode" = counting ]; then
+if [ "$mode" = counting ] || [ "$mode" = oversized ]; then
   printf '%s\n' "$path" >> "${invoked}.calls"
+fi
+
+# A session whose whole message projection is larger than any transport bound.
+# Pages are generated on demand: two full pages, then a short one. The unpaged
+# route answers with more bytes than a reader may accept, so a reader that asks
+# for it fails the way the real store makes it fail.
+oversized_page() {
+  giant=$1
+  query=${path#*\?}
+  limit=
+  cursor=
+  old_ifs=$IFS
+  IFS='&'
+  for pair in $query; do
+    case $pair in
+      limit=*) limit=${pair#limit=} ;;
+      cursor=*) cursor=${pair#cursor=} ;;
+    esac
+  done
+  IFS=$old_ifs
+  [ -n "$limit" ] || exit 7
+  page=${cursor:-1}
+  if [ "$page" -gt 2 ] && [ "$giant" = yes ]; then
+    /usr/bin/head -c 9000000 /dev/zero | /usr/bin/tr '\0' x
+    return
+  fi
+  if [ "$page" -gt 2 ]; then
+    printf '%s\n' '{"data":[],"cursor":{"next":"4","previous":"3"}}'
+    return
+  fi
+  printf '{"data":['
+  i=0
+  while [ "$i" -lt "$limit" ]; do
+    [ "$i" -gt 0 ] && printf ','
+    created=$((1784663300000 - page * 1000000 - i * 1000))
+    if [ $((i % 2)) -eq 0 ]; then
+      printf '{"id":"msg_oversized_%s_%s","type":"assistant","time":{"created":%s},"content":[{"type":"text","text":"Page %s message %s","time":{"created":%s}}]}' "$page" "$i" "$created" "$page" "$i" "$created"
+    else
+      printf '{"id":"msg_oversized_%s_%s","type":"user","time":{"created":%s},"text":"Ask page %s message %s"}' "$page" "$i" "$created" "$page" "$i"
+    fi
+    i=$((i + 1))
+  done
+  printf '],"cursor":{"next":"%s","previous":"%s"}}\n' $((page + 1)) $((page - 1))
+}
+
+if [ "$mode" = oversized ]; then
+  case $path in
+    /api/session/ses_oversized_fixture/message\?*)
+      oversized_page no
+      ;;
+    /api/session/ses_giant_message_fixture/message\?*)
+      oversized_page yes
+      ;;
+    /api/session/ses_oversized_fixture/message|/api/session/ses_giant_message_fixture/message)
+      /usr/bin/head -c 9000000 /dev/zero | /usr/bin/tr '\0' x
+      ;;
+    /api/session/ses_oversized_fixture|/api/session/ses_giant_message_fixture)
+      id=${path##*/}
+      printf '{"data":{"id":"%s","projectID":"fixture","agent":"build","model":{"id":"fixture-model","providerID":"fixture","variant":"balanced"},"cost":0,"tokens":{"input":0,"output":0,"reasoning":0,"cache":{"read":0,"write":0}},"time":{"created":1784663000000,"updated":1784663400000},"title":"Oversized fixture session","location":{"directory":"/fixtures/oversized"}}}\n' "$id"
+      ;;
+    /api/session\?*)
+      /bin/cat "$fixture_dir/$list"
+      ;;
+    *)
+      exit 1
+      ;;
+  esac
+  exit 0
 fi
 
 database_rows() {
@@ -159,7 +232,7 @@ case $path in
       *) /bin/cat "$fixture_dir/$list" ;;
     esac
     ;;
-  /api/session/*/message)
+  /api/session/*/message|/api/session/*/message\?*)
     case $mode in
       exit|malformed|absent) exit 7 ;;
       *) /bin/cat "$fixture_dir/$messages" ;;

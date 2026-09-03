@@ -117,6 +117,14 @@ impl OpenCodeAlias {
         }
     }
 
+    fn oversized() -> Self {
+        let mut alias = Self::new("oversized");
+        let calls = PathBuf::from(format!("{}.calls", alias.path.display()));
+        let _ = fs::remove_file(&calls);
+        alias.calls = Some(calls);
+        alias
+    }
+
     fn counting() -> Self {
         let mut alias = Self::new("counting");
         let calls = PathBuf::from(format!("{}.calls", alias.path.display()));
@@ -296,7 +304,7 @@ fn show_reuses_resolved_opencode_session() {
         routes,
         vec![
             format!("/api/session/{id}"),
-            format!("/api/session/{id}/message")
+            format!("/api/session/{id}/message?limit=10&order=desc")
         ]
     );
 }
@@ -1876,4 +1884,99 @@ fn every_backend_gives_turns_stable_ordinals_and_names_its_store() {
             );
         }
     }
+}
+
+/// A session whose whole message projection is larger than the transport
+/// bound is still read: newest first, a page at a time, stopping once the
+/// requested tail is in hand. The unpaged projection is never requested.
+#[test]
+fn an_oversized_opencode_session_is_read_in_pages() {
+    let program = OpenCodeAlias::oversized();
+    let backend = OpenCodeBackend::new(program.path());
+    let session = located(&backend, "ses_oversized_fixture");
+
+    let tail = backend.transcript(&session, 1).unwrap();
+    assert_eq!(tail.turns.len(), 1);
+    assert_eq!(tail.turns[0].text, "Page 1 message 0");
+    assert!(tail.truncated);
+    assert_eq!(
+        tail.truncation.source,
+        vec![SourceBound::RecordPage {
+            records: 8,
+            of: "messages".to_owned()
+        }],
+        "one page of the minimum size was enough, and older pages were not fetched"
+    );
+    let window = tail.truncation.window.as_ref().unwrap();
+    assert_eq!((window.returned, window.omitted), (1, 7));
+
+    let whole = backend.transcript(&session, usize::MAX).unwrap();
+    assert_eq!(whole.turns.len(), 100, "two full pages and one short page");
+    assert!(whole.truncation.source.is_empty());
+    assert!(!whole.truncated);
+    assert_eq!(whole.turns[0].text, "Ask page 2 message 49");
+    assert_eq!(whole.turns[99].text, "Page 1 message 0");
+
+    assert!(backend.search(&session, "PAGE 1 MESSAGE 3", 32).unwrap());
+    assert!(!backend.search(&session, "page 2 message 49", 32).unwrap());
+
+    let calls = fs::read_to_string(program.calls()).unwrap();
+    let message_requests = calls
+        .lines()
+        .filter(|line| line.contains("/message"))
+        .collect::<Vec<_>>();
+    assert!(!message_requests.is_empty(), "{calls}");
+    assert!(
+        message_requests.iter().all(|line| line.contains("limit=")),
+        "an unpaged message request was made: {calls}"
+    );
+    assert!(
+        message_requests
+            .iter()
+            .filter(|line| line.contains("cursor="))
+            .all(|line| !line.contains("order=")),
+        "a cursor page carried an order: {calls}"
+    );
+}
+
+/// One message the transport cannot carry does not make the session
+/// unreadable: the read hands over every newer message, names the bound it
+/// stopped at, and says why.
+#[test]
+fn a_giant_message_stops_the_paged_read_before_it_with_a_note() {
+    let program = OpenCodeAlias::oversized();
+    let backend = OpenCodeBackend::new(program.path());
+    let session = located(&backend, "ses_giant_message_fixture");
+
+    let whole = backend.transcript(&session, usize::MAX).unwrap();
+    assert_eq!(whole.turns.len(), 100, "both readable pages");
+    assert!(whole.truncated);
+    assert_eq!(
+        whole.truncation.source,
+        vec![SourceBound::RecordPage {
+            records: 100,
+            of: "messages".to_owned()
+        }]
+    );
+    assert_eq!(whole.notes.len(), 1, "{:?}", whole.notes);
+    assert!(
+        whole.notes[0].contains("older than the 100 fetched")
+            && whole.notes[0].contains("8 MiB transport bound"),
+        "{:?}",
+        whole.notes
+    );
+
+    let tail = backend.transcript(&session, 1).unwrap();
+    assert_eq!(tail.turns.len(), 1);
+    assert!(tail.notes.is_empty(), "the giant message was never reached");
+
+    let calls = fs::read_to_string(program.calls()).unwrap();
+    let attempts = calls
+        .lines()
+        .filter(|line| line.contains("cursor=3&") || line.ends_with("cursor=3"))
+        .count();
+    assert!(
+        attempts >= 2,
+        "the oversized page is retried smaller before the read gives up on it: {calls}"
+    );
 }

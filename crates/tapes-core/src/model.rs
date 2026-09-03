@@ -177,8 +177,8 @@ pub enum End {
 pub enum SourceBound {
     /// Only the final `bytes` of the recording file were read.
     FileTail { bytes: u64 },
-    /// Only the newest `records` of the named record kind were fetched from
-    /// the store; older ones exist and were not read.
+    /// The read stopped after the newest `records` of the named record kind;
+    /// anything older in the store was not fetched.
     RecordPage { records: usize, of: String },
     /// `turns` turns carry text the store read cut at `chars` characters.
     TurnText { turns: usize, chars: usize },

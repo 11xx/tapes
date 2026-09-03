@@ -224,9 +224,27 @@ reaches is reported under the transcript's `truncation.source`: the newest
 1,000 messages (`record-page` of `messages`), the newest 5,000 parts
 (`record-page` of `parts`), and text cut in the projection itself, at 4,000
 characters for text and reasoning parts and 2,000 for tool input, output, and
-error (`turn-text`, one entry per bound with the count of parts it cut). The
-API path reports a `record-page` of `messages` when the response carries a
-`cursor.next`, meaning older messages exist beyond the page it read.
+error (`turn-text`, one entry per bound with the count of parts it cut).
+
+The API transcript read pages `GET /api/session/{id}/message` newest first
+rather than fetching the whole projection: the first page asks for
+`limit=N&order=desc`, each later page passes `limit=N&cursor=<next>` and no
+`order`, which the endpoint refuses to combine with a cursor. `N` is the
+requested tail clamped between 8 and 50 messages. Pages are fetched until the
+requested number of turns is in hand, the store is exhausted, or 1,000
+messages have been read. The endpoint answers every page with a `cursor.next`,
+including the page after its last message, so cursor presence means nothing;
+a page shorter than its limit is the sign of exhaustion. A page the 8 MiB
+transport bound cannot carry is retried one message at a time, and the page
+size doubles back up while pages fit, since every failed attempt costs a full
+bound of transfer. A single message larger than
+the bound is the store's own limit: the read stops before it, hands over the
+newer messages it has, and says so in a transcript note; only when that
+message is the newest one, with nothing readable in front of it, does the read
+fail. A read that stopped before exhaustion reports a `record-page` of
+`messages` naming how many were fetched. `export` reads with an unbounded
+window and pages to the same ceiling, so a session whose whole projection is
+larger than the transport bound still exports.
 
 A turn's `native_id` is the part's `id` where the read carries one, and the
 message `id` (`msg_…`) otherwise; the database projection carries message ids
@@ -266,7 +284,9 @@ The `opencode2 serve` background service exposes:
 - `GET /api/session` — list sessions (`{"data":[…]}`)
 - `GET /api/session/{id}` — session info (`{"data":{…}}`)
 - `GET /api/session/{id}/message?limit&order&cursor` — paginated projection
-  (default 50, desc; cursor-based)
+  (default 50, desc; cursor-based; a request combining `cursor` with `order`
+  is answered with an `InvalidCursorError` body and exit 0, so a missing
+  `data` array is an error)
 - `GET /api/experimental/session/{id}/log` — the full event log as **SSE**
   (`data: <json>` lines, terminates with a `log.synced` control event)
 
