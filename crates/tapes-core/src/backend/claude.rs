@@ -7,7 +7,7 @@ use serde_json::Value;
 
 use super::{
     head_directory, home_path, list_files, list_files_with_search, matching_session_file,
-    read_jsonl, time_range, timestamp, trailing_record, transcript, Backend, Jsonl, Listing,
+    read_jsonl, read_recording, timestamp, trailing_record, transcript, Backend, Jsonl, Listing,
     ParsedFile, Query,
 };
 use crate::model::{Model, Role, Session, TrailingRecord, Transcript, Turn};
@@ -25,12 +25,19 @@ impl ClaudeBackend {
     }
 
     fn parse(&self, path: &Path) -> Result<(Session, Vec<Turn>, Jsonl)> {
-        let read = read_jsonl(path)?;
-        let (started_at, last_activity_at) = time_range(&read.values)
+        let recording = read_recording(path)?;
+        let (started_at, last_activity_at) = recording
+            .time_range()
             .ok_or_else(|| anyhow!("{} has no valid timestamps", path.display()))?;
-        let id = read
-            .values
+        // Claude repeats the session id and working directory on every message
+        // line. The opening is consulted first; it also covers a transcript
+        // past the bounded read whose remaining tail is all tool output and
+        // carries no `cwd`.
+        let opening = recording.opening();
+        let read = &recording.tail;
+        let id = opening
             .iter()
+            .chain(&read.values)
             .find_map(|value| value["sessionId"].as_str())
             .map(str::to_owned)
             .or_else(|| {
@@ -39,12 +46,11 @@ impl ClaudeBackend {
                     .map(str::to_owned)
             })
             .ok_or_else(|| anyhow!("{} has no session id", path.display()))?;
-        // The opening is read first, by the same rule a scoped listing's cheap
-        // probe uses, so the probe's answer and this one cannot disagree. It
-        // also covers a transcript past the bounded read whose remaining tail
-        // is all tool output and carries no `cwd`.
-        let directory = head_directory(path, claude_cwd)
-            .or_else(|| read.values.iter().find_map(claude_cwd).map(PathBuf::from));
+        let directory = opening
+            .iter()
+            .chain(&read.values)
+            .find_map(claude_cwd)
+            .map(PathBuf::from);
         let title = read
             .values
             .iter()
@@ -77,13 +83,16 @@ impl ClaudeBackend {
             cost: None,
             tokens: None,
         };
+        // The opening is the start of the file, so its first user turn is the
+        // session's first user turn even when the tail cannot see it.
         let session = if read.truncated {
-            session
+            let opening_turns = opening.iter().flat_map(parse_turns).collect::<Vec<_>>();
+            session.with_derived_title(&opening_turns)
         } else {
             session.with_derived_title(&turns)
         };
 
-        Ok((session, turns, read))
+        Ok((session, turns, recording.tail))
     }
 }
 

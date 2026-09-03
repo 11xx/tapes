@@ -41,10 +41,14 @@ normalized trailing-record kind stays the top-level `event_msg`. When one of
 these kinds is the final record after the newest rendered turn, the backend
 reports its kind and top-level timestamp as `trailing_record`.
 
-The normalized reader retains only a bounded 4 MiB tail for transcript reads.
-On a rollout whose model-bearing `turn_context` falls before that tail, the
-normalized `model` is absent even though the full file records the model; JSON
-preserves that absence rather than inventing a value.
+The normalized reader retains only a bounded 4 MiB tail for transcript reads,
+plus the first 64 KiB of the file. `session_meta` is the first line, so the
+session id, the recorded start timestamp, the working directory, and the first
+user turn come from that opening whatever the file's size; the tail supplies
+the turns, the last activity, and the final `turn_context`. On a rollout whose
+model-bearing `turn_context` falls before that tail, the normalized `model` is
+absent even though the full file records the model; JSON preserves that absence
+rather than inventing a value.
 
 ## `response_item` payloads
 

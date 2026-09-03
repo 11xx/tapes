@@ -1328,3 +1328,57 @@ fn opencode_database_transcripts_preserve_normalized_turn_roles_and_text() {
     assert_eq!(turns[3]["role"], "assistant");
     assert_eq!(turns[3]["text"], "Database-backed answer.");
 }
+
+/// The bounded reader keeps a file's tail, so an oversized session would
+/// otherwise report the first retained record as its start. `show --json`
+/// reports the header's recorded start and still marks the window truncated.
+#[test]
+fn show_reports_the_recorded_start_of_an_oversized_session() {
+    let root =
+        std::env::temp_dir().join(format!("tapes-cli-oversized-start-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&root);
+    let sessions = root.join("sessions/2026/01/01");
+    fs::create_dir_all(&sessions).unwrap();
+    let id = "00000000-0000-0000-0000-00000000bbbb";
+    let path = sessions.join(format!("rollout-2026-01-01T10-00-00-{id}.jsonl"));
+    let mut file = std::io::BufWriter::new(fs::File::create(&path).unwrap());
+    use std::io::Write;
+    writeln!(
+        file,
+        r#"{{"timestamp":"2026-01-01T10:00:00Z","type":"session_meta","payload":{{"id":"{id}","cwd":"/fixtures/project"}}}}"#
+    )
+    .unwrap();
+    let filler = "x".repeat(4096);
+    for _ in 0..1200 {
+        writeln!(
+            file,
+            r#"{{"timestamp":"2026-01-01T12:00:00Z","type":"response_item","payload":{{"type":"message","role":"assistant","content":[{{"type":"output_text","text":"{filler}"}}]}}}}"#
+        )
+        .unwrap();
+    }
+    drop(file);
+    assert!(fs::metadata(&path).unwrap().len() > 4 * 1024 * 1024);
+
+    let mut command = tapes();
+    command.args(["show", id, "--tail", "1", "--json"]);
+    command
+        .env("HOME", root.join("home"))
+        .env("CODEX_HOME", &root)
+        .env("PATH", "/definitely/missing");
+    let output = command.output().unwrap();
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["session"]["id"], id);
+    assert_eq!(value["session"]["started_at"], "2026-01-01T10:00:00Z");
+    assert_eq!(value["session"]["last_activity_at"], "2026-01-01T12:00:00Z");
+    assert_eq!(value["session"]["directory"], "/fixtures/project");
+    assert_eq!(value["truncated"], true);
+    assert_eq!(value["turns"].as_array().unwrap().len(), 1);
+
+    fs::remove_dir_all(root).unwrap();
+}

@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use chrono::{TimeZone, Utc};
+use chrono::{DateTime, TimeZone, Utc};
 use tapes_core::backend::claude::ClaudeBackend;
 use tapes_core::backend::codex::CodexBackend;
 use tapes_core::backend::opencode::OpenCodeBackend;
@@ -1128,11 +1128,16 @@ fn a_transcript_past_the_read_window_still_reports_its_directory() {
         r#"{{"type":"session","version":3,"id":"session-huge","timestamp":"2026-01-01T10:00:00Z","cwd":"/fixtures/project"}}"#
     )
     .unwrap();
+    writeln!(
+        file,
+        r#"{{"type":"message","id":"user-first","parentId":null,"timestamp":"2026-01-01T10:00:01Z","message":{{"role":"user","content":[{{"type":"text","text":"Open the oversized fixture."}}]}}}}"#
+    )
+    .unwrap();
     let filler = "x".repeat(4096);
     for index in 0..1200 {
         writeln!(
             file,
-            r#"{{"type":"message","id":"user-{index}","parentId":null,"timestamp":"2026-01-01T10:00:01Z","message":{{"role":"user","content":[{{"type":"text","text":"{filler}"}}]}}}}"#
+            r#"{{"type":"message","id":"user-{index}","parentId":null,"timestamp":"2026-01-01T12:00:01Z","message":{{"role":"user","content":[{{"type":"text","text":"{filler}"}}]}}}}"#
         )
         .unwrap();
     }
@@ -1149,9 +1154,15 @@ fn a_transcript_past_the_read_window_still_reports_its_directory() {
         session.directory.as_deref(),
         Some(Path::new("/fixtures/project"))
     );
-    assert!(
-        session.derived_title.is_none(),
-        "a bounded tail cannot prove which user turn was first"
+    assert_eq!(
+        session.started_at,
+        "2026-01-01T10:00:00Z".parse::<DateTime<Utc>>().unwrap(),
+        "the header's timestamp is the start, not the first retained tail entry"
+    );
+    assert_eq!(
+        session.derived_title.as_deref(),
+        Some("Open the oversized fixture."),
+        "the opening's first user message is the session's first"
     );
     assert_eq!(
         backend
@@ -1647,4 +1658,108 @@ fn a_hit_elsewhere_still_wins_over_a_broken_backend() {
 
     let resolved = resolve_session(&backends, "ses_alpha").unwrap();
     assert_eq!(resolved.session.id, "ses_alpha");
+}
+
+/// A file past the bounded tail loses its own opening, where every harness
+/// writes the session header. The head probe keeps the header's facts — the
+/// recorded start, the id, the directory, the first user turn — while the
+/// tail still decides truncation and supplies the turns.
+#[test]
+fn oversized_codex_and_claude_files_keep_their_header_facts() {
+    let root = std::env::temp_dir().join(format!("tapes-oversized-heads-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&root);
+    let codex_day = root.join("codex/2026/01/01");
+    let claude_project = root.join("claude/-fixtures-project");
+    fs::create_dir_all(&codex_day).unwrap();
+    fs::create_dir_all(&claude_project).unwrap();
+    let filler = "x".repeat(4096);
+
+    let codex_id = "00000000-0000-0000-0000-00000000aaaa";
+    let codex_path = codex_day.join(format!("rollout-2026-01-01T10-00-00-{codex_id}.jsonl"));
+    let mut file = BufWriter::new(File::create(&codex_path).unwrap());
+    writeln!(
+        file,
+        r#"{{"timestamp":"2026-01-01T10:00:00Z","type":"session_meta","payload":{{"id":"{codex_id}","cwd":"/fixtures/project"}}}}"#
+    )
+    .unwrap();
+    writeln!(
+        file,
+        r#"{{"timestamp":"2026-01-01T10:00:01Z","type":"response_item","payload":{{"type":"message","role":"user","content":[{{"type":"input_text","text":"Open the oversized rollout."}}]}}}}"#
+    )
+    .unwrap();
+    for _ in 0..1200 {
+        writeln!(
+            file,
+            r#"{{"timestamp":"2026-01-01T12:00:00Z","type":"response_item","payload":{{"type":"message","role":"assistant","content":[{{"type":"output_text","text":"{filler}"}}]}}}}"#
+        )
+        .unwrap();
+    }
+    drop(file);
+
+    let claude_id = "0000aaaa-0000-0000-0000-000000000000";
+    let claude_path = claude_project.join(format!("{claude_id}.jsonl"));
+    let mut file = BufWriter::new(File::create(&claude_path).unwrap());
+    writeln!(
+        file,
+        r#"{{"type":"user","sessionId":"{claude_id}","uuid":"u0","parentUuid":null,"timestamp":"2026-01-01T10:00:00Z","cwd":"/fixtures/project","message":{{"role":"user","content":"Open the oversized transcript."}}}}"#
+    )
+    .unwrap();
+    for index in 0..1200 {
+        writeln!(
+            file,
+            r#"{{"type":"assistant","sessionId":"{claude_id}","uuid":"a{index}","parentUuid":"u0","timestamp":"2026-01-01T12:00:00Z","cwd":"/fixtures/project","message":{{"role":"assistant","model":"claude-fixture","content":[{{"type":"text","text":"{filler}"}}]}}}}"#
+        )
+        .unwrap();
+    }
+    drop(file);
+
+    let cases: Vec<(Box<dyn Backend>, &str, &str, &str)> = vec![
+        (
+            Box::new(CodexBackend::new(root.join("codex"))),
+            codex_id,
+            "Open the oversized rollout.",
+            "rollout",
+        ),
+        (
+            Box::new(ClaudeBackend::new(root.join("claude"))),
+            claude_id,
+            "Open the oversized transcript.",
+            "transcript",
+        ),
+    ];
+    let start = "2026-01-01T10:00:00Z".parse::<DateTime<Utc>>().unwrap();
+    let end = "2026-01-01T12:00:00Z".parse::<DateTime<Utc>>().unwrap();
+    for (backend, id, first_turn, what) in cases {
+        let session = located(backend.as_ref(), id);
+        assert_eq!(session.id, id, "{what}: the header names the session");
+        assert_eq!(
+            session.started_at, start,
+            "{what}: the header's timestamp is the start"
+        );
+        assert_eq!(
+            session.last_activity_at, end,
+            "{what}: the tail's newest timestamp is the end"
+        );
+        assert_eq!(
+            session.directory.as_deref(),
+            Some(Path::new("/fixtures/project")),
+            "{what}: the header's directory survives"
+        );
+        assert_eq!(
+            session.derived_title.as_deref(),
+            Some(first_turn),
+            "{what}: the opening's first user turn is the session's first"
+        );
+
+        let transcript = backend.transcript(&session, 5).unwrap();
+        assert!(transcript.truncated, "{what}: the tail is still a window");
+        assert_eq!(transcript.turns.len(), 5, "{what}: turns stay bounded");
+        assert_eq!(transcript.session.started_at, start);
+
+        let listed = backend.list(&Query::unscoped(10)).unwrap().sessions;
+        assert_eq!(listed.len(), 1, "{what}: listing finds the session");
+        assert_eq!(listed[0].started_at, start, "{what}: listing agrees");
+    }
+
+    fs::remove_dir_all(root).unwrap();
 }

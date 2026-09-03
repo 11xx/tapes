@@ -29,7 +29,9 @@ recorded metadata from a display aid. Known instruction envelopes are removed
 and whitespace is collapsed before the hint is capped at 96 Unicode
 characters, using an ellipsis when it is shortened. Human renderers prefix
 this hint with `~`; JSON retains the recorded title, derived hint, and
-truncation marker separately. A bounded reader
+truncation marker separately. File-backed readers take the first user turn
+from the file's opening, which is read even when the transcript is larger than
+the bounded tail, so the hint names the session's actual first turn; a reader
 that cannot see the first user turn leaves the hint absent rather than labeling
 a later turn as the first. API-backed metadata readers also leave it absent
 when deriving it would require an extra message request; this keeps listing
@@ -39,6 +41,17 @@ the hint was shortened, or `false` when the present hint is complete. For
 Codex, an absent `model` can mean that the model-bearing `turn_context` was
 before the bounded 4 MiB file-tail read; the reader preserves that absence
 rather than inventing a model.
+
+`started_at` and `last_activity_at` come from two bounded windows on a
+file-backed session. File-backed readers open the first 64 KiB, where every
+harness writes its session header, and the last 4 MiB, where the newest
+records are; neither window grows with the file. `started_at` is the earliest
+timestamp across both, so a session larger than the tail still reports the
+start its header recorded rather than the first record the tail happened to
+retain. `last_activity_at` is the newest timestamp in the tail, which is the
+end of the file. The session id and directory are likewise read from the
+opening first. A header without a timestamp falls back to the tail's earliest,
+and a file with no timestamp anywhere in either window is not a session.
 
 `Model` contains the model identifier and an optional variant. The variant
 also carries an effort level when the harness records one. Its identity is the

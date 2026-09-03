@@ -43,6 +43,12 @@ inside the transcript is the only authoritative answer.
 | `uuid` | UUID | Unique per message |
 | `message` | object | The actual content (shape depends on `type`) |
 
+The reader keeps two bounded windows on a transcript: the first 64 KiB and the
+last 4 MiB. `sessionId`, `cwd`, the recorded start timestamp, and the first
+user turn come from the opening, so a transcript larger than the tail still
+reports the start and first prompt its opening recorded. The tail supplies the
+turns, the last activity, the `aiTitle`, and the final model.
+
 ## `type: "user"` — the user role
 
 `message.content` is *either* a string (real prompt) *or* an array (tool result envelope).
