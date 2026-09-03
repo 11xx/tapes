@@ -64,8 +64,26 @@ per-harness listing bound. `Cost` contains a single USD value. `Tokens` can
 independently record input, output, reasoning, cache-read, and cache-write
 counts.
 
-`Turn` contains a role, text, and optional UTC timestamp. Roles are `user`,
-`assistant`, `tool`, and `reasoning`.
+`Turn` contains a role, text, an optional UTC timestamp, an `ordinal`, and an
+optional `native_id`. Roles are `user`, `assistant`, `tool`, and `reasoning`.
+The ordinal is the turn's zero-based position in the session's normalized turn
+sequence, counted from the first turn the reader reaches, and it does not
+change when a window is applied: `show --tail 1` returns the turn whose ordinal
+is the sequence's last, and the window under `truncation` names the ordinals
+it holds. A consumer holding a session id and an ordinal re-finds the turn with
+`show` alone. On a recording past the reader's file bound the sequence starts
+at that bound, which is what the `file-tail` source entry says. `native_id` is
+the harness's own id for the record the turn came from, when the harness
+records one: Claude's message `uuid`, pi's entry `id`, OpenCode's message
+`id`, and Codex's `payload.id` where a response item carries one. Several
+turns share it when one record yields a message, its reasoning, and its tool
+calls.
+
+`Session.store` is where `tapes` read the session from, as an opaque string: a
+recording file's path for the file-backed harnesses, the database file for
+OpenCode's stable store, and the program and endpoint for the OpenCode API.
+Together with the harness and the native session id it is the coordinate a
+consumer writes down; none of the three carries transcript text.
 
 `TrailingRecord` identifies a verified final record after the newest rendered
 turn when that record does not become a turn. It carries the source `kind` and
@@ -128,6 +146,13 @@ A transcript that omitted anything carries `truncated: true` and a
     ]
   }
 }
+```
+
+The window names the ordinals it holds (`"ordinals": { "first": 47, "last":
+146 }` for the case above), and every turn carries its own:
+
+```json
+{ "role": "user", "text": "…", "ts": "2023-11-14T22:13:20Z", "ordinal": 47, "native_id": "msg_1" }
 ```
 
 An optional field means that the source harness does not record that fact.

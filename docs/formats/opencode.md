@@ -228,6 +228,11 @@ error (`turn-text`, one entry per bound with the count of parts it cut). The
 API path reports a `record-page` of `messages` when the response carries a
 `cursor.next`, meaning older messages exist beyond the page it read.
 
+A turn's `native_id` is the part's `id` where the read carries one, and the
+message `id` (`msg_…`) otherwise; the database projection carries message ids
+only. `session.store` is the `opencode.db` path for the stable store and the
+program and `/api/session/<id>` endpoint for the API.
+
 For content search, the database path first runs a read-only SQL prefilter over
 the listed session ids. It searches JSON-decoded part values (and preserves
 invalid JSON rows as candidates) and returns ids only. The bounded normalized

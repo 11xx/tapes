@@ -82,6 +82,7 @@ impl ClaudeBackend {
             live: None,
             cost: None,
             tokens: None,
+            store: Some(path.display().to_string()),
         };
         // The opening is the start of the file, so its first user turn is the
         // session's first user turn even when the tail cannot see it.
@@ -301,9 +302,12 @@ fn parse_turns(value: &Value) -> Vec<Turn> {
         _ => return Vec::new(),
     };
     let ts = timestamp(&value["timestamp"]);
+    let native_id = value["uuid"].as_str().map(str::to_owned);
     let content = &message["content"];
     if let Some(text) = content.as_str() {
-        return turn(role, text.to_owned(), ts).into_iter().collect();
+        return turn(role, text.to_owned(), ts, native_id)
+            .into_iter()
+            .collect();
     }
 
     content
@@ -317,11 +321,22 @@ fn parse_turns(value: &Value) -> Vec<Turn> {
                 "tool_use" | "tool_result" => (Role::Tool, block.to_string()),
                 _ => return None,
             };
-            turn(role, text, ts)
+            turn(role, text, ts, native_id.clone())
         })
         .collect()
 }
 
-fn turn(role: Role, text: String, ts: Option<chrono::DateTime<chrono::Utc>>) -> Option<Turn> {
-    (!text.is_empty()).then_some(Turn { role, text, ts })
+fn turn(
+    role: Role,
+    text: String,
+    ts: Option<chrono::DateTime<chrono::Utc>>,
+    native_id: Option<String>,
+) -> Option<Turn> {
+    (!text.is_empty()).then_some(Turn {
+        role,
+        text,
+        ts,
+        ordinal: 0,
+        native_id,
+    })
 }

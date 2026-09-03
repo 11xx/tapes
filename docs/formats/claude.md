@@ -47,7 +47,9 @@ The reader keeps two bounded windows on a transcript: the first 64 KiB and the
 last 4 MiB. `sessionId`, `cwd`, the recorded start timestamp, and the first
 user turn come from the opening, so a transcript larger than the tail still
 reports the start and first prompt its opening recorded. The tail supplies the
-turns, the last activity, the `aiTitle`, and the final model.
+turns, the last activity, the `aiTitle`, and the final model. A turn's
+`native_id` is the `uuid` of the line it came from; the text, thinking, and
+tool blocks of one assistant message share it.
 
 ## `type: "user"` — the user role
 

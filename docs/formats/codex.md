@@ -39,7 +39,9 @@ top-level kinds are `session_meta`, `turn_context`, `event_msg`, and
 `world_state`; `event_msg` carries a more specific `payload.type`, but the
 normalized trailing-record kind stays the top-level `event_msg`. When one of
 these kinds is the final record after the newest rendered turn, the backend
-reports its kind and top-level timestamp as `trailing_record`.
+reports its kind and top-level timestamp as `trailing_record`. A
+`response_item` whose payload carries an `id` (reasoning items do, as `rs_…`)
+gives its turn that id as `native_id`; one without leaves the field absent.
 
 The normalized reader retains only a bounded 4 MiB tail for transcript reads,
 plus the first 64 KiB of the file. `session_meta` is the first line, so the

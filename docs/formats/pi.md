@@ -48,7 +48,8 @@ recorded start timestamp, the working directory, and the first user message all
 come from that opening whatever the file's size. The tail supplies the active
 path, the turns, the last activity, and the final model and thinking level.
 Branch structure beyond the opening is unknown to the opening itself, so its
-messages are read in file order when the tail cannot see them.
+messages are read in file order when the tail cannot see them. A turn's
+`native_id` is its entry's `id`.
 
 `model_change` and `thinking_level_change` are timestamped state entries rather
 than turns. When either is the final entry on the active path after the newest

@@ -81,6 +81,7 @@ impl CodexBackend {
             live: None,
             cost: None,
             tokens: None,
+            store: Some(path.display().to_string()),
         };
         // The opening is the start of the file, so its first user turn is the
         // session's first user turn even when the tail cannot see it.
@@ -221,6 +222,7 @@ fn parse_turns(value: &Value) -> Vec<Turn> {
     }
     let payload = &value["payload"];
     let ts = timestamp(&value["timestamp"]);
+    let native_id = payload["id"].as_str().map(str::to_owned);
     let (role, text) = match payload["type"].as_str() {
         Some("message") => {
             let role = match payload["role"].as_str() {
@@ -250,7 +252,13 @@ fn parse_turns(value: &Value) -> Vec<Turn> {
         _ => return Vec::new(),
     };
     (!text.is_empty())
-        .then_some(Turn { role, text, ts })
+        .then_some(Turn {
+            role,
+            text,
+            ts,
+            ordinal: 0,
+            native_id,
+        })
         .into_iter()
         .collect()
 }

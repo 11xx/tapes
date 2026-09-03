@@ -96,6 +96,7 @@ impl PiBackend {
             live: None,
             cost: None,
             tokens: None,
+            store: Some(path.display().to_string()),
         };
         // The opening is the start of the file, so its first user message is
         // the session's first. Branch structure beyond the opening is unknown
@@ -292,6 +293,8 @@ fn parse_turns(value: &Value) -> Vec<Turn> {
     let Some(message_role) = message["role"].as_str() else {
         return Vec::new();
     };
+    let ts = timestamp(&value["timestamp"]);
+    let native_id = value["id"].as_str().map(str::to_owned);
     let role = match message_role {
         "user" => Role::User,
         "assistant" => Role::Assistant,
@@ -299,12 +302,13 @@ fn parse_turns(value: &Value) -> Vec<Turn> {
             return vec![Turn {
                 role: Role::Tool,
                 text: message.to_string(),
-                ts: timestamp(&value["timestamp"]),
+                ts,
+                ordinal: 0,
+                native_id,
             }];
         }
         _ => return Vec::new(),
     };
-    let ts = timestamp(&value["timestamp"]);
     let content = &message["content"];
     if let Some(text) = content.as_str() {
         return (!text.is_empty())
@@ -312,6 +316,8 @@ fn parse_turns(value: &Value) -> Vec<Turn> {
                 role,
                 text: text.to_owned(),
                 ts,
+                ordinal: 0,
+                native_id,
             })
             .into_iter()
             .collect();
@@ -328,7 +334,13 @@ fn parse_turns(value: &Value) -> Vec<Turn> {
                 "toolCall" => (Role::Tool, block.to_string()),
                 _ => return None,
             };
-            (!text.is_empty()).then_some(Turn { role, text, ts })
+            (!text.is_empty()).then_some(Turn {
+                role,
+                text,
+                ts,
+                ordinal: 0,
+                native_id: native_id.clone(),
+            })
         })
         .collect()
 }

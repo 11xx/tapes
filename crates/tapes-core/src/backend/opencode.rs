@@ -553,7 +553,10 @@ impl OpenCodeBackend {
         };
         for row in rows.values {
             match parse_database_session(&row) {
-                Ok(session) => listing.sessions.push(session),
+                Ok(mut session) => {
+                    session.store = Some(self.store_coordinate(&session.id));
+                    listing.sessions.push(session);
+                }
                 Err(error) => listing
                     .unavailable
                     .push(session_diagnostic(row["id"].as_str(), error.to_string())),
@@ -582,7 +585,25 @@ impl OpenCodeBackend {
              FROM session WHERE id = {} LIMIT 1",
             sql_literal(id)
         ))?;
-        rows.first().map(parse_database_session).transpose()
+        let mut session = rows.first().map(parse_database_session).transpose()?;
+        if let Some(session) = session.as_mut() {
+            session.store = Some(self.store_coordinate(&session.id));
+        }
+        Ok(session)
+    }
+
+    /// The coordinate a consumer writes down beside the session id: the
+    /// database file for the stable store, the program and endpoint for the
+    /// API. Opaque by contract; only its stability matters.
+    fn store_coordinate(&self, id: &str) -> String {
+        if self.uses_database() {
+            database_path("opencode.db").map_or_else(
+                || format!("{} db", self.program.to_string_lossy()),
+                |path| path.display().to_string(),
+            )
+        } else {
+            format!("{}:/api/session/{id}", self.program.to_string_lossy())
+        }
     }
 
     fn database_transcript(&self, session: Session, tail: usize) -> Result<Transcript> {
@@ -722,6 +743,10 @@ impl OpenCodeBackend {
         let scanned = sessions.len();
         let sessions = sessions
             .into_iter()
+            .map(|mut session| {
+                session.store = Some(self.store_coordinate(&session.id));
+                session
+            })
             .filter(|session| {
                 query.scope.is_none_or(|scope| {
                     session
@@ -875,7 +900,9 @@ impl Backend for OpenCodeBackend {
         if !data.is_object() {
             return Ok(None);
         }
-        parse_session(data).map(Some)
+        let mut session = parse_session(data)?;
+        session.store = Some(self.store_coordinate(&session.id));
+        Ok(Some(session))
     }
 
     fn transcript(&self, session: &Session, tail: usize) -> Result<Transcript> {
@@ -1014,12 +1041,14 @@ fn database_message(row: &Value, parts: Vec<Value>) -> Option<Result<Value>> {
     Some(Ok(if role == "user" {
         json!({
             "type": "user",
+            "id": row["id"],
             "time": { "created": message_time },
             "text": user_text
         })
     } else {
         json!({
             "type": "assistant",
+            "id": row["id"],
             "time": { "created": message_time },
             "content": parts
         })
@@ -1051,6 +1080,7 @@ fn parse_database_session(value: &Value) -> Result<Session> {
         live: None,
         cost: value["cost"].as_f64().map(|usd| Cost { usd }),
         tokens,
+        store: None,
     })
 }
 
@@ -1129,6 +1159,7 @@ fn parse_session(value: &Value) -> Result<Session> {
         live: None,
         cost: value["cost"].as_f64().map(|usd| Cost { usd }),
         tokens,
+        store: None,
     })
 }
 
@@ -1157,6 +1188,9 @@ fn parse_transcript(
         });
     }
     let total = turns.len();
+    for (ordinal, turn) in turns.iter_mut().enumerate() {
+        turn.ordinal = ordinal;
+    }
     if total > tail {
         turns.drain(..total - tail);
     }
@@ -1184,6 +1218,7 @@ fn parse_message(message: &Value) -> Vec<Turn> {
         _ => return Vec::new(),
     };
     let message_ts = epoch_millis(&message["time"]["created"]);
+    let message_id = message["id"].as_str().map(str::to_owned);
     if role == Role::User {
         return message["text"]
             .as_str()
@@ -1192,6 +1227,8 @@ fn parse_message(message: &Value) -> Vec<Turn> {
                 role,
                 text: text.to_owned(),
                 ts: message_ts,
+                ordinal: 0,
+                native_id: message_id,
             })
             .into_iter()
             .collect();
@@ -1209,7 +1246,19 @@ fn parse_message(message: &Value) -> Vec<Turn> {
                 "tool" => (Role::Tool, part.to_string()),
                 _ => return None,
             };
-            (!text.is_empty()).then_some(Turn { role, text, ts })
+            // A part names itself where the store keeps part ids; the
+            // message id stands in where the projection carries none.
+            let native_id = part["id"]
+                .as_str()
+                .map(str::to_owned)
+                .or_else(|| message_id.clone());
+            (!text.is_empty()).then_some(Turn {
+                role,
+                text,
+                ts,
+                ordinal: 0,
+                native_id,
+            })
         })
         .collect()
 }

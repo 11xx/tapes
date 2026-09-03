@@ -629,6 +629,9 @@ pub(crate) fn transcript(
     mut notes: Vec<String>,
 ) -> Transcript {
     let total = turns.len();
+    for (ordinal, turn) in turns.iter_mut().enumerate() {
+        turn.ordinal = ordinal;
+    }
     if total > tail {
         turns.drain(..total - tail);
     }

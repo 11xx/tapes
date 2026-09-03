@@ -111,6 +111,14 @@ PROBE BEFORE EXPORTING
   Human output says the same in its closing notes, recommending only the
   recovery that works.
 
+  Every turn carries an `ordinal`, its zero-based place in the session's
+  normalized sequence, kept under any window: `--tail 1` returns the turn with
+  the last ordinal, and the window names the range it holds. With the harness,
+  the session id, and `session.store` (where tapes read it from, opaque) that
+  is the coordinate to write down when filing something a session produced;
+  `native_id` adds the harness's own record id where one is recorded. Human
+  output prints the ordinal in each turn heading.
+
   When a backend can verify a non-turn record after the newest rendered turn,
   show names that trailing record's kind and timestamp. JSON carries the
   optional `trailing_record` object; source timestamps that are absent stay

@@ -1249,6 +1249,8 @@ impl Backend for SearchFixture {
                 role: Role::User,
                 text: "needle".into(),
                 ts: None,
+                ordinal: 0,
+                native_id: None,
             }],
             truncated: false,
             truncation: Truncation::default(),
@@ -1435,6 +1437,7 @@ fn resolver_session(id: &str) -> Session {
         live: None,
         cost: None,
         tokens: None,
+        store: None,
     }
 }
 
@@ -1818,5 +1821,59 @@ fn a_window_is_the_only_cause_when_the_file_fits_the_reader() {
             "{}",
             backend.harness()
         );
+    }
+}
+
+/// Every backend numbers its turns densely over the normalized sequence, the
+/// same way on every read, and names the store it read from. A native id is
+/// present where the harness records one and absent, not empty, where it
+/// does not.
+#[test]
+fn every_backend_gives_turns_stable_ordinals_and_names_its_store() {
+    for (backend, id) in fixture_backends() {
+        let harness = backend.harness();
+        let session = located(backend.as_ref(), id);
+        assert!(session.store.is_some(), "{harness}: store coordinate");
+
+        let first = backend.transcript(&session, usize::MAX).unwrap();
+        let second = backend.transcript(&session, usize::MAX).unwrap();
+        assert_eq!(first.turns, second.turns, "{harness}: stable across reads");
+        for (index, turn) in first.turns.iter().enumerate() {
+            assert_eq!(turn.ordinal, index, "{harness}: dense ordinals");
+        }
+
+        let last = first.turns.len() - 1;
+        let windowed = backend.transcript(&session, 1).unwrap();
+        assert_eq!(
+            windowed.turns[0].ordinal, last,
+            "{harness}: window keeps ordinals"
+        );
+        assert_eq!(
+            windowed.truncation.window.as_ref().unwrap().ordinals,
+            Some(tapes_core::model::OrdinalRange { first: last, last }),
+            "{harness}: the window names its ordinals"
+        );
+
+        let native_ids = first
+            .turns
+            .iter()
+            .map(|turn| turn.native_id.as_deref())
+            .collect::<Vec<_>>();
+        if harness == "codex" {
+            // Codex ids some response items (reasoning) and not others, so a
+            // turn is named where its record was and left absent where not.
+            assert!(
+                native_ids.contains(&Some("reasoning-1")),
+                "{harness}: {native_ids:?}"
+            );
+            assert!(native_ids.contains(&None), "{harness}: {native_ids:?}");
+        } else {
+            assert!(
+                native_ids
+                    .iter()
+                    .all(|id| id.is_some_and(|id| !id.is_empty())),
+                "{harness}: {native_ids:?}"
+            );
+        }
     }
 }

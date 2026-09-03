@@ -323,12 +323,13 @@ fn render_transcript(transcript: &Transcript, by_latest: bool) -> String {
         };
         if let Some(ts) = turn.ts {
             out.push_str(&format!(
-                "[{role} {}]\n{}\n",
+                "[{role} #{} {}]\n{}\n",
+                turn.ordinal,
                 human_timestamp(ts),
                 turn.text
             ));
         } else {
-            out.push_str(&format!("[{role}]\n{}\n", turn.text));
+            out.push_str(&format!("[{role} #{}]\n{}\n", turn.ordinal, turn.text));
         }
     }
     render_activity_note(&mut out, transcript);
@@ -448,7 +449,7 @@ fn reset_sigpipe() {
 mod tests {
     use super::*;
     use chrono::{DateTime, Utc};
-    use tapes_core::model::{End, TrailingRecord, Turn, TurnWindow};
+    use tapes_core::model::{End, OrdinalRange, TrailingRecord, Turn, TurnWindow};
 
     fn transcript(truncated: bool) -> Transcript {
         Transcript {
@@ -465,11 +466,14 @@ mod tests {
                 live: None,
                 cost: None,
                 tokens: None,
+                store: None,
             },
             turns: vec![Turn {
                 role: Role::User,
                 text: "fix the parser".to_owned(),
                 ts: None,
+                ordinal: 0,
+                native_id: None,
             }],
             truncated,
             truncation: Truncation {
@@ -478,6 +482,7 @@ mod tests {
                     omitted: 2,
                     omitted_from: End::Head,
                     bound: 1,
+                    ordinals: Some(OrdinalRange { first: 2, last: 2 }),
                 }),
                 source: Vec::new(),
             },
@@ -502,7 +507,7 @@ mod tests {
         let whole = render_transcript(&transcript(false), false);
         assert!(!whole.contains("Showing the last"), "{whole}");
         assert!(whole.contains("Skipped 1 unparseable line."));
-        assert!(whole.starts_with("[user]"), "{whole}");
+        assert!(whole.starts_with("[user #0]"), "{whole}");
     }
 
     /// A source bound is the reader's own limit, so its note names what was
