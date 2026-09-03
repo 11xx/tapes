@@ -13,7 +13,7 @@ use tapes_core::backend::codex::CodexBackend;
 use tapes_core::backend::opencode::OpenCodeBackend;
 use tapes_core::backend::pi::PiBackend;
 use tapes_core::backend::{Backend, Listing, Query};
-use tapes_core::model::{Role, Session, Transcript, Turn};
+use tapes_core::model::{Role, Session, SourceBound, Transcript, Truncation, Turn};
 use tapes_core::{
     latest_with_backends, list_with_backends, list_with_backends_filtered,
     list_with_backends_filtered_and_search, resolve_session, scope::Scope, show_with_backends,
@@ -1251,6 +1251,7 @@ impl Backend for SearchFixture {
                 ts: None,
             }],
             truncated: false,
+            truncation: Truncation::default(),
             trailing_record: None,
             notes: Vec::new(),
         })
@@ -1755,6 +1756,33 @@ fn oversized_codex_and_claude_files_keep_their_header_facts() {
         assert!(transcript.truncated, "{what}: the tail is still a window");
         assert_eq!(transcript.turns.len(), 5, "{what}: turns stay bounded");
         assert_eq!(transcript.session.started_at, start);
+        let window = transcript
+            .truncation
+            .window
+            .as_ref()
+            .unwrap_or_else(|| panic!("{what}: a 5-turn window over more turns is a window"));
+        assert_eq!(window.returned, 5, "{what}");
+        assert_eq!(window.bound, 5, "{what}");
+        assert!(window.omitted > 0, "{what}");
+        assert_eq!(
+            transcript.truncation.source,
+            vec![SourceBound::FileTail {
+                bytes: 4 * 1024 * 1024
+            }],
+            "{what}: the file bound is its own cause"
+        );
+
+        let wide = backend.transcript(&session, usize::MAX).unwrap();
+        assert!(wide.truncation.window.is_none(), "{what}: nothing windowed");
+        assert_eq!(
+            wide.truncation.source.len(),
+            1,
+            "{what}: the file bound remains"
+        );
+        assert!(
+            wide.truncated,
+            "{what}: the derived flag follows the source bound"
+        );
 
         let listed = backend.list(&Query::unscoped(10)).unwrap().sessions;
         assert_eq!(listed.len(), 1, "{what}: listing finds the session");
@@ -1762,4 +1790,33 @@ fn oversized_codex_and_claude_files_keep_their_header_facts() {
     }
 
     fs::remove_dir_all(root).unwrap();
+}
+
+/// A whole fixture read through a smaller window is windowed and nothing else,
+/// and the same read through a wide enough window is not truncated at all.
+#[test]
+fn a_window_is_the_only_cause_when_the_file_fits_the_reader() {
+    for (backend, id) in fixture_backends() {
+        let session = located(backend.as_ref(), id);
+        let whole = backend.transcript(&session, usize::MAX).unwrap();
+        assert!(!whole.truncated, "{}: whole fixture", backend.harness());
+        assert!(whole.truncation.is_empty(), "{}", backend.harness());
+
+        let windowed = backend.transcript(&session, 1).unwrap();
+        assert!(windowed.truncated, "{}", backend.harness());
+        let window = windowed.truncation.window.as_ref().unwrap();
+        assert_eq!(window.returned, 1, "{}", backend.harness());
+        assert_eq!(
+            window.omitted,
+            whole.turns.len() - 1,
+            "{}",
+            backend.harness()
+        );
+        assert_eq!(window.bound, 1, "{}", backend.harness());
+        assert!(
+            windowed.truncation.source.is_empty(),
+            "{}",
+            backend.harness()
+        );
+    }
 }

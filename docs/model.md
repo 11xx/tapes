@@ -73,9 +73,20 @@ an optional UTC `timestamp`; the timestamp stays absent when the source record
 does not provide one. `Transcript` omits `trailing_record` when no verified
 trailing record is available.
 
-`Transcript` contains a session, its turns, a `truncated` flag, an optional
-`trailing_record`, and optional reader-facing notes. The flag is true when a
-read bound was reached and the turns are only a window into the transcript.
+`Transcript` contains a session, its turns, a `truncated` flag, a `truncation`
+record, an optional `trailing_record`, and optional reader-facing notes. The
+flag is true when anything was omitted and the turns are only a window into the
+transcript; `truncation` says what and why, and is omitted from JSON when
+nothing was. Its `window`, present when the requested turn window dropped
+turns, carries `returned`, `omitted`, `omitted_from` (always `head`, since a
+window keeps the newest turns), and the `bound` in force; a larger `--tail` or
+`export` recovers what it omitted. Its `source` lists bounds the reader itself
+reached, each tagged by `kind`: `file-tail` with the `bytes` read from the end
+of a recording file, `record-page` with the newest `records` fetched and what
+they are (`of`), and `turn-text` with how many `turns` carry text cut at
+`chars` characters. How much lies beyond a source bound is unknown, and no
+request through `tapes` passes it: `export` reads with an unbounded window and
+still reports the same `source` entries.
 Notes preserve harness-specific facts that do not fit the normalized fields,
 such as abandoned pi branches or the number of malformed lines skipped while
 reading. They are prose rather than a structured API and are omitted from JSON
@@ -99,6 +110,23 @@ A serialized transcript is a `tapes-session/1` object:
   },
   "turns": [],
   "truncated": false
+}
+```
+
+A transcript that omitted anything carries `truncated: true` and a
+`truncation` object:
+
+```json
+{
+  "truncated": true,
+  "truncation": {
+    "window": { "returned": 100, "omitted": 47, "omitted_from": "head", "bound": 100 },
+    "source": [
+      { "kind": "file-tail", "bytes": 4194304 },
+      { "kind": "record-page", "records": 1000, "of": "messages" },
+      { "kind": "turn-text", "turns": 3, "chars": 4000 }
+    ]
+  }
 }
 ```
 

@@ -103,7 +103,13 @@ PROBE BEFORE EXPORTING
 
   show returns the last 100 turns unless --tail says otherwise, and marks the
   result truncated whenever it dropped any. It is the probe, not the archive;
-  export is what takes every turn the reader could reach.
+  export is what takes every turn the reader could reach. JSON says why under
+  `truncation`: a `window` names how many turns were returned and how many
+  earlier ones the --tail bound omitted, which a larger --tail or export
+  recovers; `source` lists bounds the reader itself reached (a file tail, a
+  store page, cut turn text), which no request through tapes reaches past.
+  Human output says the same in its closing notes, recommending only the
+  recovery that works.
 
   When a backend can verify a non-turn record after the newest rendered turn,
   show names that trailing record's kind and timestamp. JSON carries the
@@ -169,7 +175,9 @@ READ THE ENDING
   sentence, and not telling it costs a duplicated migration.
 
 SIGNALS THAT THE PICTURE IS PARTIAL
-  A truncated transcript is a window, not the session. Transcript notes carry
+  A truncated transcript is a window, not the session, and `truncation` says
+  which kind: a turn window you can widen, or a source bound you cannot.
+  Transcript notes carry
   what the normalized model has no field for: pi's abandoned branches, where a
   large remainder means the user changed direction; a claude session's
   subagent transcripts, which live in separate files and whose endings are not

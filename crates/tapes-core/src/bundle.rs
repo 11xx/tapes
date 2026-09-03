@@ -9,7 +9,8 @@ use serde::Serialize;
 use serde_json::Value;
 
 use crate::model::{
-    human_timestamp, human_title, Role, Session, TrailingRecord, Transcript, SESSION_SCHEMA,
+    human_bytes, human_timestamp, human_title, Role, Session, SourceBound, TrailingRecord,
+    Transcript, Truncation, SESSION_SCHEMA,
 };
 
 /// One exported file: where it landed and how big it is.
@@ -46,12 +47,18 @@ struct BundleJson<'a> {
     session: &'a Session,
     turns: &'a [crate::model::Turn],
     truncated: bool,
+    #[serde(skip_serializing_if = "truncation_is_empty")]
+    truncation: &'a Truncation,
     #[serde(skip_serializing_if = "Option::is_none")]
     trailing_record: Option<&'a TrailingRecord>,
     #[serde(skip_serializing_if = "<[String]>::is_empty")]
     notes: &'a [String],
     #[serde(skip_serializing_if = "Option::is_none")]
     git: Option<&'a GitContext>,
+}
+
+fn truncation_is_empty(truncation: &&Truncation) -> bool {
+    truncation.is_empty()
 }
 
 pub fn export(transcript: &Transcript, directory: &Path) -> Result<Bundle> {
@@ -65,6 +72,7 @@ pub fn export(transcript: &Transcript, directory: &Path) -> Result<Bundle> {
         session: &session,
         turns: &transcript.turns,
         truncated: transcript.truncated,
+        truncation: &transcript.truncation,
         trailing_record: transcript.trailing_record.as_ref(),
         notes: &transcript.notes,
         git: git.as_ref(),
@@ -187,8 +195,32 @@ fn write_header(out: &mut String, transcript: &Transcript, kind: &str) {
         "- last activity: {}",
         human_timestamp(session.last_activity_at)
     );
-    if transcript.truncated {
-        let _ = writeln!(out, "- truncated: this is a window, not the whole session");
+    if let Some(window) = &transcript.truncation.window {
+        let _ = writeln!(
+            out,
+            "- truncated: the last {} of {} turns; {} earlier turns fall outside the {}-turn window",
+            window.returned,
+            window.returned + window.omitted,
+            window.omitted,
+            window.bound
+        );
+    }
+    for bound in &transcript.truncation.source {
+        let _ = match bound {
+            SourceBound::FileTail { bytes } => writeln!(
+                out,
+                "- truncated: only the final {} of the recording was read",
+                human_bytes(*bytes)
+            ),
+            SourceBound::RecordPage { records, of } => writeln!(
+                out,
+                "- truncated: only the newest {records} {of} were fetched from the store"
+            ),
+            SourceBound::TurnText { turns, chars } => writeln!(
+                out,
+                "- truncated: {turns} turn(s) carry text cut at {chars} characters by the store read"
+            ),
+        };
     }
     for note in &transcript.notes {
         let _ = writeln!(out, "- note: {note}");
@@ -258,7 +290,7 @@ mod tests {
     use chrono::TimeZone;
 
     use super::*;
-    use crate::model::{LiveState, Model, TrailingRecord, Turn};
+    use crate::model::{LiveState, Model, TrailingRecord, Truncation, Turn};
 
     fn transcript() -> Transcript {
         let ts = Utc.timestamp_opt(1_700_000_000, 0).unwrap();
@@ -303,6 +335,7 @@ mod tests {
                 },
             ],
             truncated: false,
+            truncation: Truncation::default(),
             trailing_record: None,
             notes: vec!["1 entry belongs to an abandoned branch.".into()],
         }

@@ -1,4 +1,4 @@
 {"message_id":"msg_database_assistant","time_created":1784663110001,"data":{"type":"text","text":"Database-backed answer.","truncated":0,"time":{"start":1784663110001,"end":1784663110999}}}
 {"message_id":"msg_database_assistant","time_created":1784663108000,"data":{"type":"tool","tool":"read","callID":"call_database_fixture","state":{"status":"completed","input":"{\"path\":\"fixture\"}","output":"Database fixture read.","error":null},"truncated":0,"time":{"start":1784663108000,"end":1784663108999}}}
-{"message_id":"msg_database_assistant","time_created":1784663105000,"data":{"type":"reasoning","text":"Reason through the database projection.","truncated":0,"time":{"start":1784663105000,"end":1784663105999}}}
+{"message_id":"msg_database_assistant","time_created":1784663105000,"data":{"type":"reasoning","text":"Reason through the database projection.","truncated":1,"time":{"start":1784663105000,"end":1784663105999}}}
 {"message_id":"msg_database_user","time_created":1784663100001,"data":{"type":"text","text":"Inspect the database fixture.","truncated":0,"time":{"start":1784663100001,"end":1784663100999}}}

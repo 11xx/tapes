@@ -113,7 +113,12 @@ available backend, rejects ambiguous prefixes with the matching candidates,
 and prints normalized turns in chronological order. Human timestamps are RFC
 3339 whole seconds with `Z`; JSON preserves the recorded timestamp precision.
 `--tail` bounds the turns returned and defaults to the last 100; a transcript
-that dropped any is marked `truncated`. When a backend verifies a final
+that dropped any is marked `truncated`, and JSON says why under `truncation`:
+a `window` names the turns returned and the earlier turns the bound omitted,
+which a larger `--tail` or `export` recovers, while `source` lists bounds the
+reader itself reached (a file tail, a store page, cut turn text), which no
+request through `tapes` passes. Human output closes with one note per cause
+and recommends only the recovery that works. When a backend verifies a final
 non-turn record, human output names its kind and timestamp and JSON carries an
 optional `trailing_record` object; unavailable source timestamps remain absent.
 JSON output uses the `tapes-session/1` transcript schema, with the optional
