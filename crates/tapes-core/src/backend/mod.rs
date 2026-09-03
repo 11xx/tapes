@@ -261,6 +261,53 @@ pub(crate) struct ParsedFile {
     pub turns: Vec<Turn>,
 }
 
+/// A JSONL recording seen through two bounded windows. The tail holds the
+/// newest content and decides truncation. The head holds what every harness
+/// writes first, its session header, which a bounded tail loses on a large
+/// file. Neither window grows with the file.
+pub(crate) struct Recording {
+    pub head: Vec<Value>,
+    pub tail: Jsonl,
+}
+
+impl Recording {
+    /// The file's first records: the head probe when the tail is truncated,
+    /// the tail itself when it is the whole file. Header facts read from here
+    /// follow the same rule a scoped listing's cheap probe uses, so a session
+    /// the probe places outside a scope is one the full parse places there
+    /// too, and skipping it can never lose it.
+    pub fn opening(&self) -> &[Value] {
+        if self.tail.truncated {
+            &self.head
+        } else {
+            &self.tail.values
+        }
+    }
+
+    /// The earliest and latest recorded timestamps across both windows. The
+    /// start comes from the head whenever its records carry one, so a
+    /// truncated tail never advances a session's start to its first retained
+    /// record. The end comes from the tail, which is the end of the file.
+    pub fn time_range(&self) -> Option<(DateTime<Utc>, DateTime<Utc>)> {
+        match (time_range(&self.head), time_range(&self.tail.values)) {
+            (Some((head_start, head_end)), Some((tail_start, tail_end))) => {
+                Some((head_start.min(tail_start), head_end.max(tail_end)))
+            }
+            (head, tail) => head.or(tail),
+        }
+    }
+}
+
+pub(crate) fn read_recording(path: &Path) -> Result<Recording> {
+    let tail = read_jsonl(path)?;
+    let head = if tail.truncated {
+        head_jsonl(path)
+    } else {
+        Vec::new()
+    };
+    Ok(Recording { head, tail })
+}
+
 pub(crate) fn read_jsonl(path: &Path) -> Result<Jsonl> {
     let mut file =
         File::open(path).with_context(|| format!("failed to open {}", path.display()))?;

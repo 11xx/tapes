@@ -5,7 +5,7 @@ use serde_json::Value;
 
 use super::{
     head_directory, home_path, jsonl_files, list_files, list_files_with_search, read_jsonl,
-    session_file, time_range, timestamp, trailing_record, transcript, Backend, Jsonl, Listing,
+    read_recording, session_file, timestamp, trailing_record, transcript, Backend, Jsonl, Listing,
     ParsedFile, Query,
 };
 use crate::model::{Model, Role, Session, TrailingRecord, Transcript, Turn};
@@ -23,16 +23,18 @@ impl CodexBackend {
     }
 
     fn parse(&self, path: &Path) -> Result<(Session, Vec<Turn>, Jsonl)> {
-        let read = read_jsonl(path)?;
-        let (started_at, last_activity_at) = time_range(&read.values)
+        let recording = read_recording(path)?;
+        let (started_at, last_activity_at) = recording
+            .time_range()
             .ok_or_else(|| anyhow!("{} has no valid timestamps", path.display()))?;
-        let metadata = read
-            .values
+        // `session_meta` is the file's first line, so the opening is where the
+        // id and the recorded working directory live whatever the file's size.
+        let opening = recording.opening();
+        let read = &recording.tail;
+        let id = opening
             .iter()
             .find(|value| value["type"] == "session_meta")
-            .and_then(|value| value.get("payload"));
-        let id = metadata
-            .and_then(|value| value["id"].as_str())
+            .and_then(|value| value["payload"]["id"].as_str())
             .map(str::to_owned)
             .or_else(|| {
                 path.file_stem()
@@ -41,25 +43,15 @@ impl CodexBackend {
                     .map(str::to_owned)
             })
             .ok_or_else(|| anyhow!("{} has no session id", path.display()))?;
-        // The file's opening is consulted first, and by the same rule the
-        // scoped listing's cheap probe uses. Reading it here rather than only
-        // as a fallback is what makes the probe's answer and this one the
-        // same answer: a session the probe places outside a scope is one this
-        // parse would place there too, so skipping it can never lose it. On a
-        // transcript within the read window the opening is `session_meta`,
-        // which is what the tail lookup would have found anyway.
-        let directory = head_directory(path, codex_cwd)
-            .or_else(|| {
-                metadata
-                    .and_then(|value| value["cwd"].as_str())
-                    .map(PathBuf::from)
-            })
+        let directory = opening
+            .iter()
+            .find_map(codex_cwd)
+            .map(PathBuf::from)
             .or_else(|| {
                 read.values
                     .iter()
                     .rev()
-                    .find(|value| value["type"] == "turn_context")
-                    .and_then(|value| value["payload"]["cwd"].as_str())
+                    .find_map(codex_cwd)
                     .map(PathBuf::from)
             });
         let model = read
@@ -90,13 +82,16 @@ impl CodexBackend {
             cost: None,
             tokens: None,
         };
+        // The opening is the start of the file, so its first user turn is the
+        // session's first user turn even when the tail cannot see it.
         let session = if read.truncated {
-            session
+            let opening_turns = opening.iter().flat_map(parse_turns).collect::<Vec<_>>();
+            session.with_derived_title(&opening_turns)
         } else {
             session.with_derived_title(&turns)
         };
 
-        Ok((session, turns, read))
+        Ok((session, turns, recording.tail))
     }
 }
 

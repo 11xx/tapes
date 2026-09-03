@@ -6,7 +6,7 @@ use serde_json::Value;
 
 use super::{
     head_directory, home_path, jsonl_files, list_files, list_files_with_search, read_jsonl,
-    session_file, time_range, timestamp, trailing_record, transcript, Backend, Jsonl, Listing,
+    read_recording, session_file, timestamp, trailing_record, transcript, Backend, Jsonl, Listing,
     ParsedFile, Query,
 };
 use crate::model::{Model, Role, Session, TrailingRecord, Transcript, Turn};
@@ -24,10 +24,16 @@ impl PiBackend {
     }
 
     fn parse(&self, path: &Path) -> Result<(Session, Vec<Turn>, Jsonl, usize)> {
-        let read = read_jsonl(path)?;
-        let (started_at, last_activity_at) = time_range(&read.values)
+        let recording = read_recording(path)?;
+        let (started_at, last_activity_at) = recording
+            .time_range()
             .ok_or_else(|| anyhow!("{} has no valid timestamps", path.display()))?;
-        let header = read.values.iter().find(|value| value["type"] == "session");
+        // pi writes the session header once, as the first line, and nothing
+        // past it repeats the id or the working directory. The opening is the
+        // only place either can be read on a file past the bounded tail.
+        let opening = recording.opening();
+        let read = &recording.tail;
+        let header = opening.iter().find(|value| value["type"] == "session");
         let entries = read
             .values
             .iter()
@@ -56,15 +62,7 @@ impl PiBackend {
                     .map(str::to_owned)
             })
             .ok_or_else(|| anyhow!("{} has no session id", path.display()))?;
-        // pi writes the working directory once, in the header line, so past
-        // the bounded read nothing repeats it and the session would otherwise
-        // normalize with no directory at all. Reading the opening first also
-        // makes this the same answer a scoped listing's cheap probe gives.
-        let directory = head_directory(path, pi_cwd).or_else(|| {
-            header
-                .and_then(|value| value["cwd"].as_str())
-                .map(PathBuf::from)
-        });
+        let directory = opening.iter().find_map(pi_cwd).map(PathBuf::from);
         let variant = active.iter().rev().find_map(|value| {
             (value["type"] == "thinking_level_change")
                 .then(|| value["thinkingLevel"].as_str())
@@ -99,13 +97,17 @@ impl PiBackend {
             cost: None,
             tokens: None,
         };
+        // The opening is the start of the file, so its first user message is
+        // the session's first. Branch structure beyond the opening is unknown
+        // there, so the opening's messages are read in file order.
         let session = if read.truncated {
-            session
+            let opening_turns = opening.iter().flat_map(parse_turns).collect::<Vec<_>>();
+            session.with_derived_title(&opening_turns)
         } else {
             session.with_derived_title(&turns)
         };
 
-        Ok((session, turns, read, abandoned))
+        Ok((session, turns, recording.tail, abandoned))
     }
 }
 
