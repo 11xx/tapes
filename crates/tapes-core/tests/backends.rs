@@ -816,6 +816,100 @@ fn verified_file_backends_report_their_final_non_turn_record() {
 /// The parent names its subagent: the meta record beside the transcript says
 /// which agent it was, and the `Agent` call in the parent says when it was
 /// spawned and how it ended.
+/// A Codex child is an ordinary rollout, joined to its parent by the agent
+/// path in the parent's outputs and the parent id in the child's header.
+#[test]
+fn codex_joins_a_child_rollout_to_the_spawn_that_named_it() {
+    let root = std::env::temp_dir().join(format!(
+        "tapes-codex-lineage-{}-{}",
+        std::process::id(),
+        OPENCODE_ALIAS_COUNTER.fetch_add(1, Ordering::Relaxed)
+    ));
+    let sessions = root.join("2026/01/01");
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&sessions).unwrap();
+    let parent_id = "00000000-0000-0000-0000-0000000000a1";
+    let child_id = "00000000-0000-0000-0000-0000000000b2";
+    fs::write(
+        sessions.join(format!("rollout-2026-01-01T10-00-00-{parent_id}.jsonl")),
+        [
+            format!(r#"{{"timestamp":"2026-01-01T10:00:00Z","type":"session_meta","payload":{{"id":"{parent_id}","cwd":"/fixtures/project","forked_from_id":"00000000-0000-0000-0000-0000000000c3"}}}}"#),
+            r#"{"timestamp":"2026-01-01T10:00:01Z","type":"response_item","payload":{"type":"function_call","name":"spawn_agent","call_id":"call-spawn-1","arguments":"{\"task_name\":\"backend_workhorse\",\"model\":\"gpt-fixture\",\"message\":\"Do the work.\"}"}}"#.to_owned(),
+            r#"{"timestamp":"2026-01-01T10:00:02Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call-spawn-1","output":"{\"task_name\":\"/root/backend_workhorse\"}"}}"#.to_owned(),
+            r#"{"timestamp":"2026-01-01T10:00:03Z","type":"response_item","payload":{"type":"function_call","name":"spawn_agent","call_id":"call-spawn-2","arguments":"{\"task_name\":\"absent_worker\"}"}}"#.to_owned(),
+            r#"{"timestamp":"2026-01-01T10:00:04Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call-spawn-2","output":"{\"task_name\":\"/root/absent_worker\"}"}}"#.to_owned(),
+            r#"{"timestamp":"2026-01-01T10:00:05Z","type":"response_item","payload":{"type":"function_call","name":"wait_agent","call_id":"call-wait-1","arguments":"{}"}}"#.to_owned(),
+            r#"{"timestamp":"2026-01-01T10:00:06Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call-wait-1","output":"{\"agents\":[{\"agent_name\":\"/root/backend_workhorse\",\"agent_status\":\"completed\"},{\"agent_name\":\"/root/absent_worker\",\"agent_status\":\"running\"}]}"}}"#.to_owned(),
+        ]
+        .join("\n")
+            + "\n",
+    )
+    .unwrap();
+    fs::write(
+        sessions.join(format!("rollout-2026-01-01T10-00-01-{child_id}.jsonl")),
+        format!(
+            r#"{{"timestamp":"2026-01-01T10:00:01Z","type":"session_meta","payload":{{"id":"{child_id}","cwd":"/fixtures/project","thread_source":"subagent","parent_thread_id":"{parent_id}","agent_nickname":"backend_workhorse","agent_path":"/root/backend_workhorse","multi_agent_version":"v2"}}}}
+{{"timestamp":"2026-01-01T10:00:02Z","type":"response_item","payload":{{"type":"message","role":"assistant","content":[{{"type":"output_text","text":"child-only-text"}}]}}}}
+"#
+        ),
+    )
+    .unwrap();
+
+    let backend = CodexBackend::new(&root);
+    let parent = located(&backend, parent_id);
+    let lineage = backend.lineage(&parent).unwrap();
+
+    assert!(lineage.parent.is_none());
+    assert_eq!(
+        lineage.forked_from.as_deref(),
+        Some("00000000-0000-0000-0000-0000000000c3")
+    );
+    let children = &lineage.children;
+    assert_eq!(children.len(), 2, "{children:#?}");
+    let joined = &children[0];
+    assert_eq!(joined.reference, "/root/backend_workhorse");
+    assert_eq!(joined.session_id.as_deref(), Some(child_id));
+    assert!(joined.resolved);
+    assert_eq!(joined.role.as_deref(), Some("backend_workhorse"));
+    assert_eq!(joined.model.as_deref(), Some("gpt-fixture"));
+    assert_eq!(joined.group.as_deref(), Some("/root"));
+    assert_eq!(joined.disposition.as_deref(), Some("completed"));
+    assert_eq!(
+        joined.completed_at,
+        Some("2026-01-01T10:00:06Z".parse::<DateTime<Utc>>().unwrap())
+    );
+    // A task name no recording answers to stays a child, unresolved.
+    let dangling = &children[1];
+    assert_eq!(dangling.reference, "/root/absent_worker");
+    assert!(!dangling.resolved);
+    assert!(dangling.session_id.is_none());
+    assert_eq!(dangling.disposition.as_deref(), Some("running"));
+    assert!(dangling.completed_at.is_none());
+
+    // The parent refers to the child and never absorbs it: nothing the child
+    // recorded as a turn reaches the parent's lineage.
+    assert!(
+        !serde_json::to_string(&lineage)
+            .unwrap()
+            .contains("child-only-text"),
+        "{lineage:#?}"
+    );
+
+    // The child names the parent, and listing the store still returns exactly
+    // its two recordings.
+    let child = located(&backend, child_id);
+    let child_lineage = backend.lineage(&child).unwrap();
+    let parent_ref = child_lineage.parent.as_ref().unwrap();
+    assert_eq!(parent_ref.native_id, parent_id);
+    assert!(parent_ref.resolved);
+    assert_eq!(parent_ref.source, "session_meta.parent_thread_id");
+    assert!(child_lineage.children.is_empty());
+
+    let listed = backend.list(&Query::unscoped(10)).unwrap().sessions;
+    assert_eq!(listed.len(), 2, "{listed:#?}");
+    fs::remove_dir_all(root).unwrap();
+}
+
 #[test]
 fn claude_joins_a_subagent_transcript_to_the_call_that_spawned_it() {
     let backend = ClaudeBackend::new(fixtures("claude"));

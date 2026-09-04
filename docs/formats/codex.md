@@ -151,6 +151,38 @@ event with `info: null`, so the newest event carrying each fact answers for
 it independently. The usage view reports them as `context_window` and
 `rate_limits`, never folded into the session's counters.
 
+## Spawned agents
+
+A rollout can drive other agents, and each of them is an ordinary rollout in
+the same store. The child's `session_meta` payload is what says so:
+
+| field | Carries |
+|---|---|
+| `thread_source` | `subagent` on a spawned rollout |
+| `parent_thread_id` | the parent rollout's session id |
+| `agent_path` | the path the agent runs under, such as `/root/backend_workhorse` |
+| `agent_nickname` | the name the parent asked for |
+| `source.subagent.thread_spawn` | the same facts plus `depth` and `agent_role` |
+| `multi_agent_version` | `v1` or `v2` |
+| `forked_from_id` | on a forked thread, the thread it was forked from |
+
+The parent records the other half. `spawn_agent` is a `function_call` whose
+arguments carry `task_name`, `model`, `reasoning_effort`, and the message; its
+`function_call_output` answers with `{"task_name": "/root/<name>"}`, the agent
+path. `wait_agent` and its siblings answer with
+`{"agents": [{"agent_name": "/root/<name>", "agent_status": …}]}`. A child's
+thread id appears nowhere in the parent's payloads, so the join is the agent
+path on both sides, and the parent id in the child's header.
+
+The lineage view reads that pair: the spawn supplies the model and the moment
+the agent started, an agent report supplies the status and, on `completed`,
+the moment it ended, and the child's header supplies its session id and
+nickname. A `task_name` no recording in the store answers to stays a child
+with `resolved: false`, and a child whose spawn is behind the bounded read is
+still named by the report that mentions it. Finding children costs one head
+probe per recording, bounded at the newest 5,000; a store larger than that
+says so in a note.
+
 ## Lineage note
 
 The Python extractor this backend replaced opened with a docstring claiming it
