@@ -174,6 +174,7 @@ PROBE BEFORE EXPORTING
 
 EXPORT, THEN INGEST PROGRESSIVELY
   tapes export <id|--latest> [--bundle <dir>]
+  tapes export --global --since 2026-01-01 --until 2026-01-08
 
   Three files share one timestamped prefix, and stdout is exactly their paths
   and sizes, in the order they are meant to be read:
@@ -191,6 +192,16 @@ EXPORT, THEN INGEST PROGRESSIVELY
 
   A bundle holds what the transcript held, and reads are capped, so a large
   session exports as a window and says so.
+
+  Given the listing flags instead of an id — the scope flags, --harness,
+  --model, --directory, --since, --until, --sort, --limit, --search — export
+  takes the set list would return, in the same order, and writes one bundle
+  per session. Bundles are never joined: each session keeps its own bounded
+  three files, and manifest.json beside them is the only file spanning the
+  set. It records the selection, every bundle's paths, the sessions whose
+  store could not be read, and the listing's own diagnostics, so the set can
+  be audited against the store. A session that fails costs its own bundle and
+  nothing else.
 
   Never ingest a whole bundle merely because it exists. A large trace read in
   full buys little over the context file and costs the budget the actual work

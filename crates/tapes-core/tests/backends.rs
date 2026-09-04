@@ -20,9 +20,10 @@ use tapes_core::model::{
 };
 use tapes_core::usage::{usage, Durations, ModelUsage, RateWindow, TurnCoverage};
 use tapes_core::{
-    latest_with_backends, list_with_backends, list_with_backends_filtered,
-    list_with_backends_filtered_and_search, list_with_backends_options, resolve_session,
-    scope::Scope, show_with_backends, ListFilters, ListSort, ResolveError, Selection,
+    export_selection_with_backends, latest_with_backends, list_with_backends,
+    list_with_backends_filtered, list_with_backends_filtered_and_search,
+    list_with_backends_options, resolve_session, scope::Scope, show_with_backends, ExportSelection,
+    ListFilters, ListSort, ResolveError, Selection, Where, EXPORT_MANIFEST_SCHEMA,
     LIST_SEARCH_TAIL,
 };
 
@@ -3141,4 +3142,165 @@ fn a_bounded_read_reports_its_turn_counts_as_a_read_window() {
     assert_eq!(view.turns.coverage, TurnCoverage::ReadWindow);
     assert!(view.truncated);
     fs::remove_dir_all(root).unwrap();
+}
+
+/// A store that lists two sessions and can no longer read one of them.
+struct BulkExportFixture {
+    sessions: Vec<Session>,
+    unreadable: &'static str,
+}
+
+impl Backend for BulkExportFixture {
+    fn harness(&self) -> &'static str {
+        "fixture"
+    }
+
+    fn available(&self) -> bool {
+        true
+    }
+
+    fn list(&self, query: &Query) -> anyhow::Result<Listing> {
+        Ok(Listing::from_sessions(
+            self.sessions.iter().take(query.limit).cloned().collect(),
+        ))
+    }
+
+    fn locate(&self, _id: &str) -> anyhow::Result<Option<Session>> {
+        unreachable!("a selection exports through the backend that listed it")
+    }
+
+    fn transcript(&self, session: &Session, _tail: usize) -> anyhow::Result<Transcript> {
+        if session.id == self.unreadable {
+            anyhow::bail!("the recording is gone");
+        }
+        Ok(Transcript {
+            session: session.clone(),
+            turns: vec![Turn {
+                role: Role::User,
+                kind: TurnKind::Operator,
+                text: "rescue me".into(),
+                ts: None,
+                ordinal: 0,
+                native_id: None,
+                tool: None,
+            }],
+            truncated: false,
+            truncation: Truncation::default(),
+            trailing_record: None,
+            notes: Vec::new(),
+        })
+    }
+}
+
+fn export_directory(name: &str) -> PathBuf {
+    let directory =
+        std::env::temp_dir().join(format!("tapes-selection-{name}-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&directory);
+    directory
+}
+
+fn selection() -> ExportSelection<'static> {
+    ExportSelection {
+        within: Where::Global,
+        harness: Some("fixture"),
+        limit: None,
+        filters: ListFilters::default(),
+        sort: ListSort::Newest,
+    }
+}
+
+/// A store that vanishes between the listing and the read costs its own
+/// session and nothing else: the rest of the selection is exported and the
+/// manifest names the one that failed.
+#[test]
+fn a_selection_exports_every_readable_session_and_records_the_rest() {
+    let backends: Vec<Box<dyn Backend>> = vec![Box::new(BulkExportFixture {
+        sessions: vec![
+            resolver_session("ses_broken"),
+            resolver_session("ses_readable"),
+        ],
+        unreadable: "ses_broken",
+    })];
+    let directory = export_directory("partial");
+
+    let export = export_selection_with_backends(&backends, &selection(), Some(&directory)).unwrap();
+
+    assert_eq!(export.manifest.schema, EXPORT_MANIFEST_SCHEMA);
+    assert_eq!(
+        export
+            .manifest
+            .sessions
+            .iter()
+            .map(|session| session.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["ses_readable"]
+    );
+    assert_eq!(export.bundles.len(), 1);
+    assert_eq!(export.manifest.failed.len(), 1);
+    assert_eq!(export.manifest.failed[0].id, "ses_broken");
+    assert_eq!(export.manifest.failed[0].harness, "fixture");
+    assert!(
+        export.manifest.failed[0]
+            .error
+            .contains("the recording is gone"),
+        "{}",
+        export.manifest.failed[0].error
+    );
+    assert!(!export.every_session_failed());
+
+    let manifest: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(directory.join("manifest.json")).unwrap())
+            .unwrap();
+    assert_eq!(manifest["schema"], EXPORT_MANIFEST_SCHEMA);
+    assert_eq!(manifest["sessions"][0]["id"], "ses_readable");
+    assert_eq!(manifest["failed"][0]["id"], "ses_broken");
+    for path in ["context", "json", "trace"] {
+        let file = Path::new(manifest["sessions"][0]["files"][path].as_str().unwrap());
+        assert!(file.is_file(), "{} is missing", file.display());
+    }
+
+    fs::remove_dir_all(directory).unwrap();
+}
+
+/// Nothing selected could be read. The manifest still records the selection,
+/// and the caller is told it holds no session.
+#[test]
+fn a_selection_whose_every_session_failed_says_so() {
+    let backends: Vec<Box<dyn Backend>> = vec![Box::new(BulkExportFixture {
+        sessions: vec![resolver_session("ses_broken")],
+        unreadable: "ses_broken",
+    })];
+    let directory = export_directory("total-failure");
+
+    let export = export_selection_with_backends(&backends, &selection(), Some(&directory)).unwrap();
+
+    assert!(export.bundles.is_empty());
+    assert!(export.every_session_failed());
+    assert_eq!(
+        fs::read_dir(&directory).unwrap().count(),
+        1,
+        "only the manifest is written"
+    );
+
+    fs::remove_dir_all(directory).unwrap();
+}
+
+/// An empty selection is a fact, not a failure: the manifest records what was
+/// asked for and holds no session.
+#[test]
+fn an_empty_selection_writes_a_manifest_and_no_bundle() {
+    let backends: Vec<Box<dyn Backend>> = vec![Box::new(BulkExportFixture {
+        sessions: Vec::new(),
+        unreadable: "",
+    })];
+    let directory = export_directory("empty");
+
+    let export = export_selection_with_backends(&backends, &selection(), Some(&directory)).unwrap();
+
+    assert!(export.manifest.sessions.is_empty());
+    assert!(export.manifest.failed.is_empty());
+    assert!(!export.every_session_failed());
+    assert_eq!(export.manifest.selection.limit, 20);
+
+    fs::remove_dir_all(directory).unwrap();
 }

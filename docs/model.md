@@ -410,3 +410,46 @@ session id ascending, then harness ascending.
   "sessions": []
 }
 ```
+
+An `export` over a selection writes a `tapes-export-manifest/1` object beside
+the bundles it produced. `selection` restates the query that chose the set:
+`scope` is `here`, `project`, or `global`, `project` names the path whose
+project was selected for the first two, `sort` and `limit` are always present,
+and `harness`, `model`, `directory`, `activity`, and `search` appear only when
+they were requested. `sessions` is in selection order and names each bundle's
+three files. A selected session whose store could not be read appears in
+`failed` with its diagnostic instead. The listing's own `unavailable`,
+`unreadable`, `unsearched`, `scanned`, and `scan_truncated` are carried
+verbatim, so the exported set can be audited against the store it came from.
+
+```json
+{
+  "schema": "tapes-export-manifest/1",
+  "selection": {
+    "scope": "global",
+    "activity": { "since": "2026-01-01T00:00:00Z" },
+    "sort": "newest",
+    "limit": 20
+  },
+  "sessions": [
+    {
+      "id": "session-1",
+      "harness": "codex",
+      "last_activity_at": "2026-01-01T10:00:00Z",
+      "files": {
+        "context": "/tmp/20260101T120000Z-codex-session-1.context.md",
+        "json": "/tmp/20260101T120000Z-codex-session-1.json",
+        "trace": "/tmp/20260101T120000Z-codex-session-1.trace.md"
+      }
+    }
+  ],
+  "failed": [
+    { "id": "session-2", "harness": "codex", "error": "the recording is gone" }
+  ],
+  "unavailable": [],
+  "unreadable": [],
+  "unsearched": [],
+  "scanned": 2,
+  "scan_truncated": false
+}
+```
