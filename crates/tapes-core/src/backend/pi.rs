@@ -6,10 +6,11 @@ use serde_json::Value;
 
 use super::{
     accounting_for, head_directory, home_path, jsonl_files, list_files, list_files_with_search,
-    read_jsonl, read_recording, session_file, timestamp, trailing_record, transcript, Backend,
-    Jsonl, Listing, ParsedFile, Query, TokenTotals,
+    read_bounds, read_jsonl, read_recording, session_file, timestamp, trailing_record, transcript,
+    Backend, Jsonl, Listing, ParsedFile, Query, TokenTotals,
 };
 use crate::event::{Bounded, EventKind, ToolEvent};
+use crate::lineage::{Lineage, ParentRef};
 use crate::model::{
     AccountingBasis, AccountingCoverage, Cost, Model, Role, Session, Tokens, TrailingRecord,
     Transcript, Turn, TurnKind,
@@ -237,6 +238,34 @@ impl Backend for PiBackend {
             trailing_record,
             notes,
         ))
+    }
+
+    /// pi records a relationship on the session that has one: its header
+    /// names the session it came from. A recording names no children of its
+    /// own, so a parent's list of them stays empty.
+    fn lineage(&self, session: &Session) -> Result<Lineage> {
+        let root = self
+            .root
+            .as_deref()
+            .ok_or_else(|| anyhow!("pi store is unavailable"))?;
+        let path = session_file(root, &session.id)
+            .ok_or_else(|| anyhow!("pi session {} is unavailable", session.id))?;
+        let recording = read_recording(&path)?;
+        let parent = recording
+            .opening()
+            .iter()
+            .find(|value| value["type"] == "session")
+            .and_then(|value| value["parentSession"].as_str())
+            .map(|native_id| ParentRef {
+                resolved: session_file(root, native_id).is_some(),
+                native_id: native_id.to_owned(),
+                source: "session.parentSession".to_owned(),
+            });
+        Ok(Lineage {
+            parent,
+            truncation: read_bounds(&recording.tail),
+            ..Lineage::default()
+        })
     }
 }
 

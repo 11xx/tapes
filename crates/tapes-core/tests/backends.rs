@@ -816,6 +816,67 @@ fn verified_file_backends_report_their_final_non_turn_record() {
 /// The parent names its subagent: the meta record beside the transcript says
 /// which agent it was, and the `Agent` call in the parent says when it was
 /// spawned and how it ended.
+/// pi records the reference on the child, and a reference to a session the
+/// store does not hold is kept rather than dropped.
+#[test]
+fn pi_keeps_an_unresolved_parent_reference() {
+    let backend = PiBackend::new(fixtures("pi"));
+    let session = located(&backend, "session-pi");
+    let lineage = backend.lineage(&session).unwrap();
+
+    let parent = lineage.parent.as_ref().unwrap();
+    assert_eq!(parent.native_id, "session-pi-parent");
+    assert!(!parent.resolved, "the fixture store holds no such session");
+    assert_eq!(parent.source, "session.parentSession");
+    assert!(lineage.children.is_empty());
+    assert!(lineage.forked_from.is_none());
+}
+
+/// Each OpenCode projection records the relationship on the child's own row,
+/// so a parent's children are the rows naming it.
+#[test]
+fn opencode_reads_parent_and_child_rows_from_both_projections() {
+    let database = OpenCodeAlias::database();
+    let backend = OpenCodeBackend::new(database.path());
+    let child = located(&backend, "ses_database_only_fixture");
+    let lineage = backend.lineage(&child).unwrap();
+    let parent = lineage.parent.as_ref().unwrap();
+    assert_eq!(parent.native_id, "ses_000000fixtureSharedSession");
+    assert!(parent.resolved);
+    assert_eq!(parent.source, "session.parent_id");
+    assert_eq!(lineage.forked_from.as_deref(), Some("ses_fork_fixture"));
+    assert!(lineage.children.is_empty());
+
+    let parent_session = located(&backend, "ses_000000fixtureSharedSession");
+    let lineage = backend.lineage(&parent_session).unwrap();
+    assert!(lineage.parent.is_none());
+    assert!(lineage.forked_from.is_none());
+    assert_eq!(lineage.children.len(), 1, "{:#?}", lineage.children);
+    let child = &lineage.children[0];
+    assert_eq!(child.reference, "ses_database_only_fixture");
+    assert_eq!(child.session_id.as_deref(), Some("ses_database_only_fixture"));
+    assert_eq!(child.role.as_deref(), Some("build"));
+    assert_eq!(child.model.as_deref(), Some("fixture-db-model (balanced)"));
+    assert!(child.resolved);
+
+    let api = OpenCodeBackend::new(opencode_fixture_program());
+    let child = located(&api, "ses_api_only_fixture");
+    let lineage = api.lineage(&child).unwrap();
+    let parent = lineage.parent.as_ref().unwrap();
+    assert_eq!(parent.native_id, "ses_000000fixtureSharedSession");
+    assert!(parent.resolved);
+    assert_eq!(parent.source, "session.parentID");
+
+    let parent_session = located(&api, "ses_000000fixtureSharedSession");
+    let lineage = api.lineage(&parent_session).unwrap();
+    assert_eq!(lineage.children.len(), 1, "{:#?}", lineage.children);
+    let child = &lineage.children[0];
+    assert_eq!(child.reference, "ses_api_only_fixture");
+    assert_eq!(child.role.as_deref(), Some("build"));
+    assert_eq!(child.model.as_deref(), Some("fixture-api-model"));
+    assert!(child.resolved);
+}
+
 /// A Codex child is an ordinary rollout, joined to its parent by the agent
 /// path in the parent's outputs and the parent id in the child's header.
 #[test]
