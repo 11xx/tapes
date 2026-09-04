@@ -112,12 +112,15 @@ PROBE BEFORE EXPORTING
   recovery that works.
 
   Every turn carries an `ordinal`, its zero-based place in the session's
-  normalized sequence, kept under any window: `--tail 1` returns the turn with
-  the last ordinal, and the window names the range it holds. With the harness,
-  the session id, and `session.store` (where tapes read it from, opaque) that
-  is the coordinate to write down when filing something a session produced;
-  `native_id` adds the harness's own record id where one is recorded. Human
-  output prints the ordinal in each turn heading.
+  normalized sequence. On a file-backed session (claude, codex, pi) it is kept
+  under any window: `--tail 1` returns the turn with the last ordinal, and the
+  window names the range it holds. On an OpenCode API session the read is
+  paged, so a window that stopped fetching (`omitted_exact: false`) numbers
+  from the oldest turn it fetched and a wider request renumbers; there the
+  durable coordinate is `native_id`, which OpenCode always records. With the
+  harness, the session id, and `session.store` (where tapes read it from,
+  opaque) that is what to write down when filing something a session
+  produced. Human output prints the ordinal in each turn heading.
 
   When a backend can verify a non-turn record after the newest rendered turn,
   show names that trailing record's kind and timestamp. JSON carries the
