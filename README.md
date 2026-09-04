@@ -15,6 +15,7 @@ tapes show ses_07e16cc8 --tail 20
 tapes show ses_07e16cc8 --json
 tapes events ses_07e16cc8 --name wait_agent --json
 tapes usage ses_07e16cc8 --json
+tapes endings --here --since 2026-01-01 --json
 tapes export ses_07e16cc8 --bundle /tmp/
 ```
 
@@ -198,6 +199,24 @@ nothing to sum. Cost is summed only where a harness recorded one, never
 inferred from tokens. Human output is one row per group, a totals row, and
 the listing's own diagnostics.
 
+`endings` answers what each session of a selection ends on as
+`tapes-endings/1`, so deciding which endings deserve reading costs one bounded
+read each rather than a transcript apiece. It takes the same selection flags
+`list` and `export` do, applied before any transcript is opened, plus `--tail`
+for how many of each session's newest turns are read (12 by default) and
+`--text` for the operator and assistant text of those turns, cut at 400
+characters. `facts` names what the read establishes from the normalized turn
+kinds and typed tool events alone — an unanswered request, a harness command
+or notice recorded last, a call the read never saw a result for, results no
+turn narrates, a closing assistant turn — and `incomplete` names what it left
+unestablished, which qualifies each of them. `lineage` counts the relatives a
+store records without reading any of them, and `source` is the text-free
+coordinate to write down when filing a follow-up. Nothing is classified: the
+report infers no reason for an ending and labels no session complete. A
+session whose read fails is named in `unread` with its diagnostic and does not
+stop the run. Human output is one line per session, the text tail indented
+beneath it when asked for, and the listing's own diagnostics.
+
 `export` writes a three-file bundle sharing one timestamped prefix, into
 `--bundle <dir>` or `/tmp`:
 
@@ -276,11 +295,13 @@ questions without summing a transcript by hand. `tapes lineage --latest
 --json` answers which sessions a recording names as relatives — the one that
 spawned it, and the children its store records with their roles and outcomes
 — from the records themselves rather than from directory or timestamp
-proximity. `tapes usage --here --since <date> --json` answers the same questions across a project's sessions at once.
+proximity. `tapes usage --here --since <date> --json` answers the same questions across a project's sessions at once, and `tapes endings --here --since
+<date> --json` says what each of those sessions ends on, so a scan reads the
+few endings that matter instead of every tail.
 
 **Contracts you can build on.** `tapes-list/1`, `tapes-session/1`,
-`tapes-events/1`, `tapes-usage/1`, `tapes-usage-summary/1`, `tapes-lineage/1`, and
-`tapes-export-manifest/1` are versioned
+`tapes-events/1`, `tapes-usage/1`, `tapes-usage-summary/1`, `tapes-lineage/1`,
+`tapes-endings/1`, and `tapes-export-manifest/1` are versioned
 JSON; a breaking shape change bumps the version. A single-session `export`
 prints
 exactly three paths and their sizes on stdout, in reading order, and writes each

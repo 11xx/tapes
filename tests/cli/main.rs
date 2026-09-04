@@ -2773,3 +2773,156 @@ fn export_honours_the_limit_and_writes_a_manifest_for_an_empty_selection() {
 
     fs::remove_dir_all(codex_home).unwrap();
 }
+
+#[test]
+fn endings_help_names_the_schema_and_what_it_does_not_do() {
+    let output = tapes().args(["endings", "--help"]).output().unwrap();
+    assert!(output.status.success());
+    let help = String::from_utf8_lossy(&output.stdout);
+
+    assert!(help.contains("tapes-endings/1"), "{help}");
+    assert!(help.contains("never on their text"), "{help}");
+    assert!(help.contains("labels no session complete"), "{help}");
+    assert!(help.contains("--tail <N>"), "{help}");
+    assert!(help.contains("[default: 12]"), "{help}");
+    assert!(help.contains("--text"), "{help}");
+}
+
+/// The activity window chooses the set before a transcript is opened, so the
+/// report holds exactly the sessions `list` would return for the same flags.
+#[test]
+fn endings_applies_the_activity_window_before_reading_any_transcript() {
+    let (codex_home, home) = filter_fixture_store("endings-window");
+    let mut command = tapes();
+    command.args([
+        "endings",
+        "--global",
+        "--harness",
+        "codex",
+        "--since",
+        "2026-01-01T12:00:00Z",
+        "--json",
+    ]);
+    with_fixture_env(
+        &mut command,
+        &codex_home,
+        &home,
+        Path::new("/definitely/missing"),
+    );
+    let output = command.output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+
+    assert_eq!(value["schema"], "tapes-endings/1");
+    assert_eq!(
+        value["selection"]["activity"],
+        serde_json::json!({ "since": "2026-01-01T12:00:00Z" })
+    );
+    let endings = value["endings"].as_array().unwrap();
+    assert_eq!(
+        endings
+            .iter()
+            .map(|ending| ending["session"]["id"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        vec![
+            "30000000-0000-0000-0000-000000000005",
+            "20000000-0000-0000-0000-000000000004"
+        ]
+    );
+    for ending in endings {
+        assert_eq!(ending["source"]["schema"], "tapes-endings/1");
+        assert_eq!(ending["source"]["harness"], "codex");
+        assert_eq!(ending["facts"], serde_json::json!(["assistant-close"]));
+        // The structural report carries no transcript text of its own.
+        assert!(ending.get("tail").is_none(), "{ending}");
+    }
+    assert!(value["unread"].as_array().unwrap().is_empty());
+    assert_eq!(value["scan_truncated"], false);
+
+    fs::remove_dir_all(codex_home).unwrap();
+}
+
+/// The text tail is a glimpse of the exchange: an entry longer than the bound
+/// is cut and says so, and the human render prints it beneath its session.
+#[test]
+fn endings_text_tail_is_bounded_and_marks_what_it_cut() {
+    let root = TemporaryDirectory::new(
+        std::env::temp_dir().join(format!("tapes-cli-endings-text-{}", std::process::id())),
+    );
+    let home = root.path().join("home");
+    fs::create_dir_all(&home).unwrap();
+    let codex_home = root.path().join("codex");
+    let sessions = codex_home.join("sessions/2026/01/01");
+    fs::create_dir_all(&sessions).unwrap();
+    let id = "40000000-0000-0000-0000-000000000006";
+    let long = "word ".repeat(200);
+    let long = long.trim_end();
+    fs::write(
+        sessions.join(format!("rollout-2026-01-01T10-00-00-{id}.jsonl")),
+        format!(
+            r#"{{"timestamp":"2026-01-01T10:00:00Z","type":"session_meta","payload":{{"id":"{id}","cwd":"/fixtures/project"}}}}
+{{"timestamp":"2026-01-01T10:00:01Z","type":"turn_context","payload":{{"cwd":"/fixtures/project","model":"gpt-fixture"}}}}
+{{"timestamp":"2026-01-01T10:00:02Z","type":"response_item","payload":{{"type":"message","role":"user","content":[{{"type":"input_text","text":"Inspect the fixture."}}]}}}}
+{{"timestamp":"2026-01-01T10:00:02.500Z","type":"event_msg","payload":{{"type":"user_message","message":"Inspect the fixture."}}}}
+{{"timestamp":"2026-01-01T10:00:03Z","type":"response_item","payload":{{"type":"message","role":"assistant","content":[{{"type":"output_text","text":"{long}"}}]}}}}
+"#
+        ),
+    )
+    .unwrap();
+
+    let run = |arguments: &[&str]| {
+        let mut command = tapes();
+        command.args(arguments);
+        with_fixture_env(
+            &mut command,
+            &codex_home,
+            &home,
+            Path::new("/definitely/missing"),
+        );
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        output.stdout
+    };
+
+    let value: Value =
+        serde_json::from_slice(&run(&["endings", "--global", "--text", "--json"])).unwrap();
+    let tail = value["endings"][0]["tail"].as_array().unwrap();
+    assert_eq!(tail.len(), 2, "{tail:#?}");
+    assert_eq!(tail[0]["kind"], "operator");
+    assert_eq!(tail[0]["text"], "Inspect the fixture.");
+    assert_eq!(tail[0]["truncated"], false);
+    assert_eq!(tail[1]["kind"], "assistant");
+    assert_eq!(tail[1]["text"].as_str().unwrap().chars().count(), 400);
+    assert_eq!(tail[1]["truncated"], true);
+
+    let human = String::from_utf8(run(&["endings", "--global", "--text"])).unwrap();
+    let lines = human.lines().collect::<Vec<_>>();
+    assert!(
+        lines[0].starts_with(&format!(
+            "{id} codex 2026-01-01T10:00:03Z assistant assistant-close"
+        )),
+        "{human}"
+    );
+    assert_eq!(lines[1], "  [user #0 2026-01-01T10:00:02Z]");
+    assert_eq!(lines[2], "    Inspect the fixture.");
+    assert_eq!(
+        lines[3],
+        "  [assistant #1 2026-01-01T10:00:03Z cut at 400 characters]"
+    );
+
+    let without_text = String::from_utf8(run(&["endings", "--global"])).unwrap();
+    assert!(
+        !without_text
+            .lines()
+            .any(|line| line.starts_with("  [") || line.starts_with("    ")),
+        "{without_text}"
+    );
+}
