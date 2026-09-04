@@ -1,7 +1,9 @@
+use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use anyhow::{anyhow, Result};
+use chrono::{DateTime, NaiveDate, TimeZone, Utc};
 use serde::Serialize;
 
 use backend::{Backend, Listing, Query};
@@ -31,9 +33,55 @@ const LATEST_WINDOW: usize = 5;
 /// not the window `show` defaults to.
 const EXPORT_TAIL: usize = usize::MAX;
 
+pub type ActivityTimestamp = DateTime<Utc>;
+
+pub fn parse_activity_timestamp(value: &str) -> std::result::Result<ActivityTimestamp, String> {
+    if let Ok(timestamp) = DateTime::parse_from_rfc3339(value) {
+        return Ok(timestamp.with_timezone(&Utc));
+    }
+
+    NaiveDate::parse_from_str(value, "%Y-%m-%d")
+        .ok()
+        .and_then(|date| date.and_hms_opt(0, 0, 0))
+        .map(|midnight| Utc.from_utc_datetime(&midnight))
+        .ok_or_else(|| {
+            format!("{value:?} is not an RFC 3339 timestamp with an offset or a YYYY-MM-DD date")
+        })
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ListSort {
+    #[default]
+    Newest,
+    Oldest,
+}
+
+/// Metadata and content predicates applied while each backend gathers its
+/// candidates. Bounds use the session's newest recorded activity.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ListFilters<'a> {
+    pub model: Option<&'a str>,
+    pub directory: Option<&'a str>,
+    pub since: Option<DateTime<Utc>>,
+    pub until: Option<DateTime<Utc>>,
+    pub search: Option<&'a str>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ActivityWindow {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub since: Option<DateTime<Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub until: Option<DateTime<Utc>>,
+}
+
 #[derive(Debug, Serialize)]
 pub struct SessionList {
     pub schema: &'static str,
+    pub sort: ListSort,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub activity: Option<ActivityWindow>,
     pub sessions: Vec<Session>,
     /// Harnesses that could not be read at all.
     pub unavailable: Vec<String>,
@@ -164,15 +212,35 @@ pub fn list_with_filters_and_search(
     directory: Option<&str>,
     search: Option<&str>,
 ) -> Result<SessionList> {
+    list_with_options(
+        harness,
+        within,
+        limit,
+        ListFilters {
+            model,
+            directory,
+            search,
+            ..ListFilters::default()
+        },
+        ListSort::Newest,
+    )
+}
+
+pub fn list_with_options(
+    harness: Option<&str>,
+    within: Where,
+    limit: Option<usize>,
+    filters: ListFilters<'_>,
+    sort: ListSort,
+) -> Result<SessionList> {
     let scope = within.resolve()?;
-    list_with_backends_filtered_and_search(
+    list_with_backends_options(
         &backend::backends(),
         harness,
         scope.as_ref(),
         limit.unwrap_or(DEFAULT_LIST_LIMIT),
-        model,
-        directory,
-        search,
+        &filters,
+        sort,
     )
 }
 
@@ -182,7 +250,14 @@ pub fn list_with_backends(
     scope: Option<&Scope>,
     limit: usize,
 ) -> Result<SessionList> {
-    list_with_backends_filtered_and_search(backends, harness, scope, limit, None, None, None)
+    list_with_backends_options(
+        backends,
+        harness,
+        scope,
+        limit,
+        &ListFilters::default(),
+        ListSort::Newest,
+    )
 }
 
 pub fn list_with_backends_filtered(
@@ -193,7 +268,18 @@ pub fn list_with_backends_filtered(
     model: Option<&str>,
     directory: Option<&str>,
 ) -> Result<SessionList> {
-    list_with_backends_filtered_and_search(backends, harness, scope, limit, model, directory, None)
+    list_with_backends_options(
+        backends,
+        harness,
+        scope,
+        limit,
+        &ListFilters {
+            model,
+            directory,
+            ..ListFilters::default()
+        },
+        ListSort::Newest,
+    )
 }
 
 pub fn list_with_backends_filtered_and_search(
@@ -205,9 +291,37 @@ pub fn list_with_backends_filtered_and_search(
     directory: Option<&str>,
     search: Option<&str>,
 ) -> Result<SessionList> {
-    let listed = list_scoped(backends, harness, scope, limit, model, directory, search)?;
+    list_with_backends_options(
+        backends,
+        harness,
+        scope,
+        limit,
+        &ListFilters {
+            model,
+            directory,
+            search,
+            ..ListFilters::default()
+        },
+        ListSort::Newest,
+    )
+}
+
+pub fn list_with_backends_options(
+    backends: &[Box<dyn Backend>],
+    harness: Option<&str>,
+    scope: Option<&Scope>,
+    limit: usize,
+    filters: &ListFilters<'_>,
+    sort: ListSort,
+) -> Result<SessionList> {
+    let listed = list_scoped(backends, harness, scope, limit, filters, sort)?;
     Ok(SessionList {
         schema: LIST_SCHEMA,
+        sort,
+        activity: (filters.since.is_some() || filters.until.is_some()).then_some(ActivityWindow {
+            since: filters.since,
+            until: filters.until,
+        }),
         sessions: listed.sessions,
         unavailable: listed.unavailable,
         unreadable: listed.unreadable,
@@ -235,9 +349,8 @@ fn list_scoped(
     harness: Option<&str>,
     scope: Option<&Scope>,
     limit: usize,
-    model: Option<&str>,
-    directory: Option<&str>,
-    search: Option<&str>,
+    filters: &ListFilters<'_>,
+    sort: ListSort,
 ) -> Result<Listed> {
     if let Some(harness) = harness {
         if !backends.iter().any(|backend| backend.harness() == harness) {
@@ -245,10 +358,18 @@ fn list_scoped(
         }
     }
 
+    if filters
+        .since
+        .zip(filters.until)
+        .is_some_and(|(since, until)| since >= until)
+    {
+        return Err(anyhow!("activity window requires since before until"));
+    }
+
     // Content search is a filter, so the backend must inspect candidates until
     // it has found the requested result set rather than spending the limit on
     // sessions whose recent turns do not match.
-    let candidate_limit = if search.is_some() && limit > 0 {
+    let candidate_limit = if filters.search.is_some() && limit > 0 {
         usize::MAX
     } else {
         limit
@@ -261,8 +382,10 @@ fn list_scoped(
         } else {
             usize::MAX
         },
-        model,
-        directory,
+        filters.model,
+        filters.directory,
+        filters.since,
+        filters.until,
     );
     let mut found: Vec<(Session, usize)> = Vec::new();
     let mut available_harnesses = HashSet::new();
@@ -272,7 +395,7 @@ fn list_scoped(
     let mut scanned = 0;
     let mut scan_truncated = false;
     let mut selected_harness_counts = HashMap::<String, usize>::new();
-    if search.is_some() {
+    if filters.search.is_some() {
         for backend in backends.iter().filter(|backend| {
             harness.is_none_or(|name| backend.harness() == name) && backend.available()
         }) {
@@ -295,7 +418,7 @@ fn list_scoped(
         // projection. Search obeys the same first-source rule as resolution:
         // a later projection cannot turn an earlier projection's non-match
         // into a match for the same global id.
-        let candidate_ids = if search.is_some()
+        let candidate_ids = if filters.search.is_some()
             && selected_harness_counts
                 .get(backend.harness())
                 .is_some_and(|count| *count > 1)
@@ -319,7 +442,7 @@ fn list_scoped(
         } else {
             None
         };
-        let listing = if let Some(needle) = search {
+        let listing = if let Some(needle) = filters.search {
             backend.list_with_search(&query, needle, LIST_SEARCH_TAIL)
         } else {
             backend.list(&query)
@@ -347,7 +470,7 @@ fn list_scoped(
                 found.extend(sessions.into_iter().map(|session| (session, index)));
             }
             Err(error) => {
-                if search.is_some() {
+                if filters.search.is_some() {
                     unsearched_sessions
                         .push(format!("{} search failed: {error:#}", backend.harness()));
                 }
@@ -368,8 +491,7 @@ fn list_scoped(
     found.retain(|(session, origin)| {
         backends[*origin].harness() != "opencode" || opencode_ids.insert(session.id.clone())
     });
-    found.sort_by_key(|(session, _)| session.last_activity_at);
-    found.reverse();
+    found.sort_by(|(left, _), (right, _)| compare_sessions(left, right, sort));
 
     // A harness may have more than one installed store, such as stable
     // OpenCode and opencode2. Keep the public limit per harness, not per store.
@@ -403,6 +525,16 @@ fn list_scoped(
     })
 }
 
+fn compare_sessions(left: &Session, right: &Session, sort: ListSort) -> Ordering {
+    let activity = match sort {
+        ListSort::Newest => right.last_activity_at.cmp(&left.last_activity_at),
+        ListSort::Oldest => left.last_activity_at.cmp(&right.last_activity_at),
+    };
+    activity
+        .then_with(|| left.id.cmp(&right.id))
+        .then_with(|| left.harness.cmp(&right.harness))
+}
+
 /// The most recent session in scope, with the sessions named in `exclude`
 /// passed over.
 ///
@@ -434,14 +566,14 @@ pub fn latest_with_backends(
     // and not the same as it: a transcript restored or touched after a newer
     // one sorts ahead of it. Taking a small window and choosing by recorded
     // activity costs a few extra parses and removes that skew.
+    let filters = ListFilters::default();
     let listed = list_scoped(
         backends,
         harness,
         scope,
         exclude.len() + LATEST_WINDOW,
-        None,
-        None,
-        None,
+        &filters,
+        ListSort::Newest,
     )?;
     let scoped = if scope.is_some() {
         "in this project"

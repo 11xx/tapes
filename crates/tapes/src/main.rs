@@ -3,14 +3,29 @@ mod liveness;
 
 use std::path::PathBuf;
 
-use anyhow::Result;
-use clap::{Args, Parser, Subcommand};
+use anyhow::{anyhow, Result};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use tapes_core::bundle::Bundle;
 use tapes_core::model::{
     human_bytes, human_timestamp, human_title, LiveState, Role, Session, SourceBound, Transcript,
     Truncation,
 };
 use tapes_core::{Selection, Where};
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum SortArg {
+    Newest,
+    Oldest,
+}
+
+impl From<SortArg> for tapes_core::ListSort {
+    fn from(sort: SortArg) -> Self {
+        match sort {
+            SortArg::Newest => Self::Newest,
+            SortArg::Oldest => Self::Oldest,
+        }
+    }
+}
 
 #[derive(Parser)]
 #[command(
@@ -131,6 +146,20 @@ enum Command {
         /// Sessions without a directory never match.
         #[arg(long, value_name = "SUBSTRING")]
         directory: Option<String>,
+        /// Keep sessions whose newest recorded activity, `last_activity_at`,
+        /// is at or after this timestamp. RFC 3339 timestamps with an offset
+        /// and bare YYYY-MM-DD dates are accepted.
+        #[arg(long, value_name = "TIMESTAMP", value_parser = tapes_core::parse_activity_timestamp)]
+        since: Option<tapes_core::ActivityTimestamp>,
+        /// Keep sessions whose newest recorded activity, `last_activity_at`,
+        /// is before this timestamp. RFC 3339 timestamps with an offset and
+        /// bare YYYY-MM-DD dates are accepted.
+        #[arg(long, value_name = "TIMESTAMP", value_parser = tapes_core::parse_activity_timestamp)]
+        until: Option<tapes_core::ActivityTimestamp>,
+        /// Order by `last_activity_at`: newest first by default, or oldest
+        /// first. Equal timestamps are ordered by session id, then harness.
+        #[arg(long, value_enum, default_value_t = SortArg::Newest)]
+        sort: SortArg,
         /// Match case-insensitively against the last 32 normalized turns in
         /// each candidate session. The fixed tail keeps listing bounded; a
         /// match outside it is not considered. Search is applied before
@@ -187,21 +216,35 @@ fn dispatch(cli: Cli) -> Result<()> {
             limit,
             model,
             directory,
+            since,
+            until,
+            sort,
             search,
             json,
         } => {
+            if since
+                .zip(until)
+                .is_some_and(|(since, until)| since >= until)
+            {
+                return Err(anyhow!("--since must be earlier than --until"));
+            }
             if search.is_some() {
                 eprintln!(
                     "Searching the last 32 normalized turns of each candidate session before applying --limit."
                 );
             }
-            let mut result = tapes_core::list_with_filters_and_search(
+            let mut result = tapes_core::list_with_options(
                 harness.as_deref(),
                 scope.within(),
                 limit,
-                model.as_deref(),
-                directory.as_deref(),
-                search.as_deref(),
+                tapes_core::ListFilters {
+                    model: model.as_deref(),
+                    directory: directory.as_deref(),
+                    since,
+                    until,
+                    search: search.as_deref(),
+                },
+                sort.into(),
             )?;
             liveness::annotate(&mut result.sessions);
             if json {

@@ -44,6 +44,10 @@ pub struct Query<'a> {
     pub model: Option<String>,
     /// Lowercase substring of a session's directory path, when filtering.
     pub directory: Option<String>,
+    /// Lower bound for the session's newest recorded activity, inclusive.
+    pub since: Option<DateTime<Utc>>,
+    /// Upper bound for the session's newest recorded activity, exclusive.
+    pub until: Option<DateTime<Utc>>,
 }
 
 impl<'a> Query<'a> {
@@ -54,6 +58,8 @@ impl<'a> Query<'a> {
             ceiling: usize::MAX,
             model: None,
             directory: None,
+            since: None,
+            until: None,
         }
     }
 
@@ -61,10 +67,14 @@ impl<'a> Query<'a> {
         limit: usize,
         model: Option<&str>,
         directory: Option<&str>,
+        since: Option<DateTime<Utc>>,
+        until: Option<DateTime<Utc>>,
     ) -> Self {
         Self {
             model: model.map(str::to_lowercase),
             directory: directory.map(str::to_lowercase),
+            since,
+            until,
             ..Self::unscoped(limit)
         }
     }
@@ -75,6 +85,8 @@ impl<'a> Query<'a> {
         ceiling: usize,
         model: Option<&str>,
         directory: Option<&str>,
+        since: Option<DateTime<Utc>>,
+        until: Option<DateTime<Utc>>,
     ) -> Self {
         Self {
             scope,
@@ -82,11 +94,16 @@ impl<'a> Query<'a> {
             ceiling,
             model: model.map(str::to_lowercase),
             directory: directory.map(str::to_lowercase),
+            since,
+            until,
         }
     }
 
     pub(crate) fn has_filters(&self) -> bool {
-        self.model.is_some() || self.directory.is_some()
+        self.model.is_some()
+            || self.directory.is_some()
+            || self.since.is_some()
+            || self.until.is_some()
     }
 
     pub(crate) fn matches(&self, session: &Session) -> bool {
@@ -101,7 +118,13 @@ impl<'a> Query<'a> {
                 directory.to_string_lossy().to_lowercase().contains(needle)
             })
         });
-        model_matches && directory_matches
+        let since_matches = self
+            .since
+            .is_none_or(|since| session.last_activity_at >= since);
+        let until_matches = self
+            .until
+            .is_none_or(|until| session.last_activity_at < until);
+        model_matches && directory_matches && since_matches && until_matches
     }
 }
 

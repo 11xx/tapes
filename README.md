@@ -56,6 +56,12 @@ exists); a session without a model never matches. `--directory <substring>`
 matches case-insensitively against the recorded directory path; a session
 without a directory never matches. Both filters are applied by the library
 before the per-harness bound, and compose with the harness and scope filters.
+`--since <TIMESTAMP>` and `--until <TIMESTAMP>` filter the newest recorded
+activity, `last_activity_at`, with the half-open rule
+`since <= last_activity_at < until`; each accepts an RFC 3339 timestamp with an offset or a bare
+`YYYY-MM-DD` date interpreted as midnight UTC. The activity window is applied
+before the per-harness bound. `--sort newest|oldest` orders by
+`last_activity_at`; equal timestamps are ordered by session id, then harness.
 `--search <substring>` matches case-insensitively against the last 32 normalized
 turns in each candidate session. The fixed tail keeps the read bounded, so a
 non-match says only that those recent turns did not contain the text. Search is
@@ -112,6 +118,8 @@ supplies a usable snapshot, matching sessions also carry `live: "working"` or
 the field out. Unknown states are ignored per thread so recognized entries
 remain usable. Human list output keeps the exact session id in its first
 column and uses a separate `LIVE` column for that state.
+JSON always includes `sort`; it includes `activity` only when `--since` or
+`--until` is present.
 
 `show` accepts a full session ID or an unambiguous prefix. It searches every
 available backend, rejects ambiguous prefixes with the matching candidates,
