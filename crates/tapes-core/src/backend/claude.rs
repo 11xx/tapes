@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -6,12 +7,15 @@ use anyhow::{anyhow, Result};
 use serde_json::Value;
 
 use super::{
-    head_directory, home_path, list_files, list_files_with_search, matching_session_file,
-    read_jsonl, read_recording, timestamp, trailing_record, transcript, Backend, Jsonl, Listing,
-    ParsedFile, Query,
+    accounting_for, head_directory, home_path, list_files, list_files_with_search,
+    matching_session_file, read_jsonl, read_recording, timestamp, trailing_record, transcript,
+    Backend, Jsonl, Listing, ParsedFile, Query, TokenTotals,
 };
 use crate::event::{Bounded, EventKind, ToolEvent};
-use crate::model::{Model, Role, Session, TrailingRecord, Transcript, Turn};
+use crate::model::{
+    AccountingBasis, AccountingCoverage, Cost, Model, Role, Session, Tokens, TrailingRecord,
+    Transcript, Turn,
+};
 
 #[derive(Clone, Debug)]
 pub struct ClaudeBackend {
@@ -69,6 +73,13 @@ impl ClaudeBackend {
                 })
         });
         let turns = read.values.iter().flat_map(parse_turns).collect::<Vec<_>>();
+        let (tokens, cost, basis) = claude_accounting(&read.values);
+        let coverage = if read.truncated {
+            AccountingCoverage::ReadWindow
+        } else {
+            AccountingCoverage::Session
+        };
+        let accounting = accounting_for(tokens.as_ref(), cost.as_ref(), basis, coverage);
 
         let session = Session {
             id,
@@ -81,8 +92,9 @@ impl ClaudeBackend {
             started_at,
             last_activity_at,
             live: None,
-            cost: None,
-            tokens: None,
+            cost,
+            tokens,
+            accounting,
             store: Some(path.display().to_string()),
             start_uncertain: recording.start_uncertain(),
         };
@@ -220,6 +232,79 @@ fn read_transcript(path: &Path) -> Result<(Vec<Turn>, Jsonl, Option<TrailingReco
 /// Claude repeats the working directory on every message line.
 fn claude_cwd(value: &Value) -> Option<&str> {
     value["cwd"].as_str()
+}
+
+fn claude_accounting(values: &[Value]) -> (Option<Tokens>, Option<Cost>, AccountingBasis) {
+    if let Some(cost_state) = values
+        .iter()
+        .rev()
+        .find(|value| value["type"] == "cost-state")
+    {
+        let tokens = cost_state_tokens(cost_state);
+        let cost = cost_state["totalCostUSD"].as_f64().map(|usd| Cost { usd });
+        return (tokens, cost, AccountingBasis::RecordedTotal);
+    }
+
+    (
+        claude_request_tokens(values),
+        None,
+        AccountingBasis::SummedRequests,
+    )
+}
+
+fn cost_state_tokens(value: &Value) -> Option<Tokens> {
+    let mut totals = TokenTotals::default();
+    if let Some(model_usage) = value["modelUsage"].as_object() {
+        for usage in model_usage.values() {
+            totals.add(
+                usage.get("inputTokens").and_then(Value::as_u64),
+                usage.get("outputTokens").and_then(Value::as_u64),
+                usage.get("thinkingTokens").and_then(Value::as_u64),
+                usage.get("cacheReadInputTokens").and_then(Value::as_u64),
+                usage
+                    .get("cacheCreationInputTokens")
+                    .and_then(Value::as_u64),
+            );
+        }
+    }
+    totals.finish()
+}
+
+fn claude_request_tokens(values: &[Value]) -> Option<Tokens> {
+    let mut request_ids = HashSet::new();
+    let mut totals = TokenTotals::default();
+    for value in values {
+        if value["type"] != "assistant" {
+            continue;
+        }
+        let Some(message) = value.get("message") else {
+            continue;
+        };
+        if message.get("role").and_then(Value::as_str) != Some("assistant") {
+            continue;
+        }
+        let Some(usage) = message.get("usage").and_then(Value::as_object) else {
+            continue;
+        };
+        if let Some(request_id) = value["requestId"].as_str() {
+            if !request_ids.insert(request_id) {
+                continue;
+            }
+        }
+        totals.add(
+            usage.get("input_tokens").and_then(Value::as_u64),
+            usage.get("output_tokens").and_then(Value::as_u64),
+            usage
+                .get("output_tokens_details")
+                .and_then(|details| details.get("thinking_tokens"))
+                .and_then(Value::as_u64),
+            usage.get("cache_read_input_tokens").and_then(Value::as_u64),
+            usage
+                .get("cache_creation_input_tokens")
+                .and_then(Value::as_u64),
+        );
+    }
+    totals.finish()
 }
 
 fn claude_trailing_kind(value: &Value) -> Option<&'static str> {

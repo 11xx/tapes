@@ -170,8 +170,9 @@ enum Command {
         /// falls back to CLI API GETs and records that stage's diagnostic.
         #[arg(long, value_name = "SUBSTRING")]
         search: Option<String>,
-        /// Render results as JSON. Matching sessions may include an optional
-        /// `live` field supplied by harness-status.
+        /// Render results as JSON. Matching sessions may include optional
+        /// `live` and `accounting` fields; accounting states the basis and
+        /// coverage of any recorded cost or token counters.
         #[arg(long)]
         json: bool,
     },
@@ -186,7 +187,8 @@ enum Command {
         #[arg(long)]
         tail: Option<usize>,
         /// Render the session as JSON. The session may include optional
-        /// `live` and `trailing_record` fields supplied by its authorities.
+        /// `live`, `accounting`, and `trailing_record` fields supplied by its
+        /// authorities.
         #[arg(long)]
         json: bool,
     },
@@ -630,6 +632,7 @@ mod tests {
                 live: None,
                 cost: None,
                 tokens: None,
+                accounting: None,
                 store: None,
                 start_uncertain: false,
             },

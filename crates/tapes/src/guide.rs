@@ -81,6 +81,9 @@ FIND IT
   title metadata stays absent in list, show, and export. Human timestamps use whole
   RFC 3339 seconds with Z; JSON keeps recorded precision. show compares store
   activity with the newest rendered turn at that same whole-second precision.
+  Whenever cost or tokens are present, JSON also carries accounting stating
+  whether the figures are a recorded total or a sum of requests and whether
+  they cover the session or only the bounded read window.
 
   A session is named by its full id or an unambiguous prefix; an ambiguous
   prefix lists its candidates and fails rather than guessing. A harness whose

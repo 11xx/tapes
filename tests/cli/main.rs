@@ -2059,15 +2059,21 @@ fn codex_token_totals_agree_across_list_show_and_export() {
         "cache_read": 1000,
         "cache_write": 0
     });
+    let expected_accounting = serde_json::json!({
+        "basis": "recorded-total",
+        "coverage": "session"
+    });
 
     let shown: Value = serde_json::from_slice(&run(&["show", id, "--json"])).unwrap();
     assert_eq!(shown["session"]["tokens"], expected);
+    assert_eq!(shown["session"]["accounting"], expected_accounting);
     assert!(shown["session"].get("cost").is_none());
 
     let listed: Value =
         serde_json::from_slice(&run(&["list", "--global", "--harness", "codex", "--json"]))
             .unwrap();
     assert_eq!(session(&listed, id)["tokens"], expected);
+    assert_eq!(session(&listed, id)["accounting"], expected_accounting);
 
     let bundle = codex_home.join("bundle");
     let listing =
@@ -2079,6 +2085,7 @@ fn codex_token_totals_agree_across_list_show_and_export() {
         .unwrap();
     let exported: Value = serde_json::from_str(&fs::read_to_string(json_path).unwrap()).unwrap();
     assert_eq!(exported["session"]["tokens"], expected);
+    assert_eq!(exported["session"]["accounting"], expected_accounting);
 
     fs::remove_dir_all(codex_home).unwrap();
 }

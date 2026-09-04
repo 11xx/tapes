@@ -290,6 +290,7 @@ mod tests {
             live: None,
             cost: None,
             tokens: None,
+            accounting: None,
             store: None,
             start_uncertain: false,
         }

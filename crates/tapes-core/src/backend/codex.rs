@@ -4,12 +4,15 @@ use anyhow::{anyhow, Result};
 use serde_json::Value;
 
 use super::{
-    head_directory, home_path, jsonl_files, list_files, list_files_with_search, read_jsonl,
-    read_recording, session_file, timestamp, trailing_record, transcript, Backend, Jsonl, Listing,
-    ParsedFile, Query,
+    accounting_for, head_directory, home_path, jsonl_files, list_files, list_files_with_search,
+    read_jsonl, read_recording, session_file, timestamp, trailing_record, transcript, Backend,
+    Jsonl, Listing, ParsedFile, Query, TokenTotals,
 };
 use crate::event::{Bounded, EventKind, ToolEvent};
-use crate::model::{Model, Role, Session, Tokens, TrailingRecord, Transcript, Turn};
+use crate::model::{
+    AccountingBasis, AccountingCoverage, Model, Role, Session, Tokens, TrailingRecord, Transcript,
+    Turn,
+};
 
 #[derive(Clone, Debug)]
 pub struct CodexBackend {
@@ -69,6 +72,12 @@ impl CodexBackend {
             });
         let turns = read.values.iter().flat_map(parse_turns).collect::<Vec<_>>();
         let tokens = read.values.iter().rev().find_map(codex_tokens);
+        let accounting = accounting_for(
+            tokens.as_ref(),
+            None,
+            AccountingBasis::RecordedTotal,
+            AccountingCoverage::Session,
+        );
 
         let session = Session {
             id,
@@ -83,6 +92,7 @@ impl CodexBackend {
             live: None,
             cost: None,
             tokens,
+            accounting,
             store: Some(path.display().to_string()),
             start_uncertain: recording.start_uncertain(),
         };
@@ -230,13 +240,15 @@ fn codex_tokens(value: &Value) -> Option<Tokens> {
     }
     let usage = value["payload"]["info"]["total_token_usage"].as_object()?;
     let counter = |name: &str| usage.get(name).and_then(Value::as_u64);
-    Some(Tokens {
-        input: counter("input_tokens"),
-        output: counter("output_tokens"),
-        reasoning: counter("reasoning_output_tokens"),
-        cache_read: counter("cached_input_tokens"),
-        cache_write: counter("cache_write_input_tokens"),
-    })
+    let mut totals = TokenTotals::default();
+    totals.add(
+        counter("input_tokens"),
+        counter("output_tokens"),
+        counter("reasoning_output_tokens"),
+        counter("cached_input_tokens"),
+        counter("cache_write_input_tokens"),
+    );
+    totals.finish()
 }
 
 fn codex_trailing_kind(value: &Value) -> Option<&'static str> {

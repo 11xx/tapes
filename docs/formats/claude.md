@@ -33,7 +33,7 @@ inside the transcript is the only authoritative answer.
 
 | Field | Type | Notes |
 |---|---|---|
-| `type` | string | `user`, `assistant`, `system`, `file-history-snapshot`, `attachment`, `last-prompt`, `ai-title`, `mode`, `permission-mode`, `atis-latch`, `queue-operation` |
+| `type` | string | `user`, `assistant`, `system`, `file-history-snapshot`, `attachment`, `last-prompt`, `ai-title`, `mode`, `permission-mode`, `atis-latch`, `queue-operation`, `cost-state` |
 | `timestamp` | ISO 8601 | UTC; missing on metadata messages |
 | `sessionId` | UUID | Same on every message in a thread |
 | `cwd` | string | Captured working directory; same on every message |
@@ -132,6 +132,30 @@ and output metadata. Separate records carry the two halves, so
 - `stop_sequence` — stopped by a stop sequence (often the session-limit message)
 - `max_tokens` — truncated by the model's output limit
 
+Each assistant record also carries per-request usage when the API reports it:
+
+```json
+{
+  "requestId": "request-1",
+  "message": {
+    "role": "assistant",
+    "usage": {
+      "input_tokens": 34546,
+      "output_tokens": 285431,
+      "cache_read_input_tokens": 64355969,
+      "cache_creation_input_tokens": 604968,
+      "output_tokens_details": {"thinking_tokens": 102346}
+    }
+  }
+}
+```
+
+One API request can produce several assistant records, one for each content
+block, and those records repeat the same `requestId` and usage. A reader sums
+one usage object per `requestId`; an assistant record without `requestId` is
+counted once by itself. Synthetic records can carry zero usage, which remains
+recorded as zero.
+
 `tool_use.input` is whatever the assistant passed to the tool — for `Bash`, it's `{ "command": "..." }`; for `Read`, `{ "file_path": "..." }`; etc. The `id` matches `tool_result.tool_use_id` in the next user message.
 
 ## `type: "system"`
@@ -168,12 +192,25 @@ The `compact_boundary` event is critical for state detection: if it appears and 
 
 Note: `trackedFileBackups` is a **dict keyed by file path**, not a list. The values are metadata. Most snapshots are empty dicts. The *union of keys across all snapshots* is the full set of files the transcript recorded as touched.
 
+## `type: "cost-state"`
+
+`cost-state` is session metadata with no top-level `timestamp`, and it produces
+no conversation turn. Its `modelUsage` object is keyed by model and carries
+cumulative `inputTokens`, `outputTokens`, `thinkingTokens`,
+`cacheReadInputTokens`, `cacheCreationInputTokens`, and per-model `costUSD`.
+`totalCostUSD` is the cumulative cost for the session at the time of the
+record. When a bounded read contains more than one such record, the newest
+record is the session's accounting source; otherwise assistant `message.usage`
+records provide a per-request sum. Claude records no per-request cost in
+`message.usage`.
+
 ## Metadata types
 
-`mode`, `last-prompt`, `ai-title`, `queue-operation`, `attachment` are UI and
-metadata state carrying no conversation content, so they produce no turns.
-`ai-title` is the exception the backend does read: it is the only harness-
-supplied session title of the four.
+`mode`, `last-prompt`, `ai-title`, `queue-operation`, `attachment`, and
+`cost-state` are UI or accounting metadata carrying no conversation content,
+so they produce no turns. `cost-state` contributes session accounting but is
+not a `trailing_record` kind. `ai-title` is the exception the backend does
+read: it is the only harness-supplied session title of the four.
 
 When the final records after the newest rendered turn are the verified
 metadata kinds `last-prompt`, `ai-title`, `mode`, `permission-mode`, or
