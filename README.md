@@ -62,7 +62,10 @@ activity, `last_activity_at`, with the half-open rule
 `since <= last_activity_at < until`; each accepts an RFC 3339 timestamp with an offset or a bare
 `YYYY-MM-DD` date interpreted as midnight UTC. The activity window is applied
 before the per-harness bound. `--sort newest|oldest` orders by
-`last_activity_at`; equal timestamps are ordered by session id, then harness.
+`last_activity_at` and decides which sessions the bound keeps: `newest` keeps
+the newest matching sessions of each harness, `oldest` the oldest, which
+inspects every candidate the scan reaches, as `--search` does. Equal timestamps
+are ordered by session id, then harness.
 `--search <substring>` matches case-insensitively against the last 32 normalized
 turns in each candidate session. The fixed tail keeps the read bounded, so a
 non-match says only that those recent turns did not contain the text. Search is

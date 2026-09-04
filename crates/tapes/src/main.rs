@@ -158,7 +158,10 @@ enum Command {
         #[arg(long, value_name = "TIMESTAMP", value_parser = tapes_core::parse_activity_timestamp)]
         until: Option<tapes_core::ActivityTimestamp>,
         /// Order by `last_activity_at`: newest first by default, or oldest
-        /// first. Equal timestamps are ordered by session id, then harness.
+        /// first. The order decides which sessions --limit keeps: each
+        /// harness's newest matches, or its oldest, which inspects every
+        /// candidate the scan reaches. Equal timestamps are ordered by
+        /// session id, then harness.
         #[arg(long, value_enum, default_value_t = SortArg::Newest)]
         sort: SortArg,
         /// Match case-insensitively against the last 32 normalized turns in

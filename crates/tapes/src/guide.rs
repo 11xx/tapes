@@ -59,7 +59,9 @@ FIND IT
 
   --since and --until filter `last_activity_at`, the newest recorded activity,
   with the half-open rule `since <= last_activity_at < until`, before the
-  per-harness limit. --sort newest|oldest orders by that clock; ties use
+  per-harness limit. --sort newest|oldest orders by that clock and decides
+  which sessions the limit keeps: the newest of each harness, or the oldest,
+  which inspects every candidate the scan reaches as --search does. Ties use
   session id ascending, then harness ascending.
 
   --search <text> matches case-insensitively against the last 32 normalized
