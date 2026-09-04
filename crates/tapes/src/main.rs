@@ -468,7 +468,7 @@ fn dispatch(cli: Cli) -> Result<()> {
                     );
                 }
                 let export = tapes_core::export_selection(
-                    &tapes_core::ExportSelection {
+                    &tapes_core::SessionSelection {
                         within: scope.within(),
                         harness: harness.as_deref(),
                         limit,
