@@ -275,6 +275,10 @@ reader first uses an explicit read-only `sqlite3` prefilter over
 `session_message.data` when the v2 session table covers every
 listed session. Otherwise it starts one local server for enumeration and uses
 bounded HTTP GET reads for each candidate against that server.
+This path starts `opencode2 serve` on a temporary port bound to `127.0.0.1`
+with `OPENCODE_SERVER_PASSWORD` removed from the server process environment,
+so the server accepts unauthenticated requests for the duration of the scan.
+The server process is killed when the search finishes.
 The v2 prefilter returns only session ids, retains invalid or larger messages
 as uncertain candidates, and checks the `session` table coverage before using
 an empty result as a definitive non-match. Its 64 KiB per-message and 8 MiB
