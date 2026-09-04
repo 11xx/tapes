@@ -90,8 +90,9 @@ active conversation path, excluding abandoned branches, with the same
 coverage rule. Cost, provider quota, and recorded tokens are distinct facts;
 no counter or cost is derived from another counter.
 
-`Turn` contains a role, text, an optional UTC timestamp, an `ordinal`, and an
-optional `native_id`. Roles are `user`, `assistant`, `tool`, and `reasoning`.
+`Turn` contains a role, a `kind`, text, an optional UTC timestamp, an
+`ordinal`, and an optional `native_id`. Roles are `user`, `assistant`, `tool`,
+and `reasoning`.
 A tool turn also carries one typed `ToolEvent` inside the process for the
 `events` projection. The field is skipped by serialization, so
 `tapes-session/1` and export bundles retain the tool's harness envelope only in
@@ -114,6 +115,32 @@ records one: Claude's message `uuid`, pi's entry `id`, OpenCode's message
 `id`, and Codex's `payload.id` where a response item carries one. Several
 turns share it when one record yields a message, its reasoning, and its tool
 calls.
+
+`kind` is always present and says what the record behind a turn is, which the
+role alone cannot: a harness records its own commands, the context it attaches,
+and the messages it injects in the same user envelope an operator's prompt
+arrives in. Its values are `operator`, `assistant`, `reasoning`, `tool`,
+`control`, `ambient`, `notice`, and `unknown`. An `assistant`, `reasoning`, or
+`tool` turn always carries the kind of its own role, so only a user turn takes
+any other value:
+
+| kind | what the turn holds |
+|---|---|
+| `operator` | Content a person, or the caller driving the harness, addressed to the agent. A record carrying ambient context beside a request is one. |
+| `control` | A harness command or control message recorded in a user envelope, such as Claude's `/exit` and its local-command output. |
+| `ambient` | Context the harness attached on its own, with no request in it. |
+| `notice` | A message the harness injected on the system's behalf, such as a task notification. |
+| `unknown` | A user-envelope turn the harness recorded no evidence for. |
+
+Every value rests on a field the harness itself wrote; nothing is inferred
+from the text, so `unknown` is the answer for a record whose harness version
+wrote no such field:
+
+| harness | evidence |
+|---|---|
+| Claude | `origin.kind` and `promptSource` name the sender; `isMeta` marks text the harness attached; on a record carrying none of the three, content that is exactly a `<command-name>` envelope or a `<local-command-stdout>` element is the harness's own command. |
+| Codex | A `user_message` event carries the text of each message the operator sent, so a user message the event vouches for is theirs; a message holding only the blocks the harness wraps around a message is attached context. On an `exec` session, whose header names that source and which records no such event, the wrapper blocks are the only separation. |
+| pi, OpenCode | Neither records anything but the operator's messages in its user role. |
 
 ## Tool event layer
 
@@ -270,7 +297,7 @@ The window names the ordinals it holds (`"ordinals": { "first": 47, "last":
 146 }` for the case above), and every turn carries its own:
 
 ```json
-{ "role": "user", "text": "…", "ts": "2023-11-14T22:13:20Z", "ordinal": 47, "native_id": "msg_1" }
+{ "role": "user", "kind": "operator", "text": "…", "ts": "2023-11-14T22:13:20Z", "ordinal": 47, "native_id": "msg_1" }
 ```
 
 An optional field means that the source harness does not record that fact.

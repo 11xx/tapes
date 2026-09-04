@@ -167,7 +167,8 @@ EXPORT, THEN INGEST PROGRESSIVELY
   and sizes, in the order they are meant to be read:
 
   1. .context.md, whole. Operator turns and assistant-visible text — the
-     session's argument, and the small part of it.
+     session's argument, and the small part of it. The harness's own commands,
+     notices, and attached context stay out of it and remain in the trace.
   2. .json, narrowly, with jq. The canonical object plus turns, cost, tokens,
      and the session directory's git head and branch when they resolve. Query
      it for facts; do not print it.
@@ -187,7 +188,10 @@ READ THE ENDING
   tapes reports what a transcript contains and never classifies why it ended.
   That inference is yours, and it decides the shape of the handoff.
 
-  Last turn is a user turn      The ask was never processed; answer it first.
+  Last turn is an operator turn  The ask was never processed; answer it first.
+  Last turn is control or notice  The harness recorded its own message after
+                                 the last exchange. The ending is decided by
+                                 the turn before it.
   A tool call, no result         The call may have left side effects. Name the
                                  command and whether its result was ever seen.
   Results, then no text          Results landed but were never narrated. The
@@ -199,6 +203,14 @@ READ THE ENDING
                                  and often mid-tool, so say what was in flight
                                  and whether it landed.
   A closing summary, nothing open  Finished. A post-mortem, not a rescue.
+
+  Every turn carries a `kind`, filled only from fields the harness itself
+  wrote: `operator` for a message addressed to the agent, `control` for a
+  harness command such as `/exit`, `notice` for a message the harness injected,
+  `ambient` for context it attached, and the role's own name for assistant,
+  reasoning, and tool turns. A user turn the harness left no evidence for is
+  `unknown`, which is an answer rather than a gap — read its text before
+  deciding what it was.
 
   A session the user deliberately aborted is a frozen handoff whatever its
   last turn looks like: report what was abandoned, and do not resume it on

@@ -179,10 +179,13 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Show one session. The human header marks a matching live session when
-    /// harness-status is reachable, and a verified trailing record is named
-    /// when the store ends after its last rendered turn. Activity comparisons
-    /// use the whole-second timestamps shown to the reader.
+    /// Show one session. Every turn carries a `kind` naming what the harness
+    /// recorded it as, and a user turn holding a harness command, notice, or
+    /// attached context is headed `user/<kind>` rather than `user`. The human
+    /// header marks a matching live session when harness-status is reachable,
+    /// and a verified trailing record is named when the store ends after its
+    /// last rendered turn. Activity comparisons use the whole-second
+    /// timestamps shown to the reader.
     Show {
         #[command(flatten)]
         selection: SelectionArgs,
@@ -215,7 +218,9 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Export one session.
+    /// Export one session. The context file keeps the operator turns and the
+    /// assistant's text; the trace file keeps every turn, each headed as
+    /// `show` heads it.
     Export {
         #[command(flatten)]
         selection: SelectionArgs,

@@ -42,6 +42,7 @@ inside the transcript is the only authoritative answer.
 | `isSidechain` | bool | true for subagent / fork messages |
 | `uuid` | UUID | Unique per message |
 | `message` | object | The actual content (shape depends on `type`) |
+| `origin`, `promptSource`, `isMeta` | object, string, bool | On a `user` record, what the record is; see below |
 
 The reader keeps two bounded windows on a transcript: the first 64 KiB and the
 last 4 MiB. `sessionId`, `cwd`, the recorded start timestamp, and the first
@@ -60,6 +61,8 @@ tool blocks of one assistant message share it.
 ```json
 {
   "type": "user",
+  "origin": { "kind": "human" },
+  "promptSource": "typed",
   "message": {
     "role": "user",
     "content": "what's the weather?"
@@ -67,7 +70,31 @@ tool blocks of one assistant message share it.
 }
 ```
 
-Marked "real" only if the content is non-empty and contains no `<local-command-caveat>` or `<command-name>` markers. `/command` invocations (`/clear`, `/compact`, `/help`, …) come through as user messages with content like `<command-name>/clear</command-name>...` and should be filtered out of "real" prompts.
+The user role is the envelope for everything the harness has to put in front
+of the model, so three top-level fields say what a record actually is:
+
+| Field | Values seen | Means |
+|---|---|---|
+| `origin.kind` | `human`, `task-notification`, `auto-continuation` | Who sent the message. Every prompt a person typed carries `human`. |
+| `promptSource` | `typed`, `system` | How the prompt reached the harness. A typed prompt carries `typed` alongside `origin.kind: human`; a message the harness raised itself carries `system`. |
+| `isMeta` | `true` | The harness attached this text itself, such as a hook notice or the caveat that precedes a local command's output. |
+
+A record carrying none of the three is the harness's own local-command
+envelope when its string content is exactly one of these and nothing else:
+
+```json
+{ "message": { "role": "user", "content": "<command-name>/exit</command-name>\n<command-message>exit</command-message>\n<command-args></command-args>" } }
+{ "message": { "role": "user", "content": "<local-command-stdout>(no content)</local-command-stdout>" } }
+```
+
+`<command-name>` is accompanied by `<command-message>`, `<command-args>`, and
+sometimes `<command-contents>`, separated by whitespace. A `<local-command-caveat>`
+envelope rides on an `isMeta` record rather than on one of its own. The
+envelopes are read only where the sender fields are absent, since a person can
+type text that looks like one and the fields the harness wrote outrank the
+text every time. A record with neither a sender field nor an envelope — a
+transcript from a harness version that wrote none — says nothing about what it
+is, and the normalized turn keeps that absence as `kind: unknown`.
 
 ### Tool result (array content)
 

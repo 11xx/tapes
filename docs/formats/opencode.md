@@ -43,6 +43,10 @@ Produced by the TUI export action without debug. Shape:
 }
 ```
 
+A message of `type: "user"` carries the operator's own text and nothing else;
+everything the harness contributes is a part of an assistant message. A session
+ending on a user message therefore ends on an unanswered request.
+
 Assistant `content[]` block types:
 
 | `type` | payload | notes |
