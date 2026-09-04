@@ -16,6 +16,7 @@ use crate::model::{
     AccountingBasis, AccountingCoverage, Cost, Model, Role, Session, Tokens, TrailingRecord,
     Transcript, Turn, TurnKind,
 };
+use crate::usage::{Durations, ModelUsage, UsageDetail};
 
 #[derive(Clone, Debug)]
 pub struct ClaudeBackend {
@@ -83,6 +84,9 @@ impl ClaudeBackend {
             AccountingCoverage::ReadWindow
         };
         let accounting = accounting_for(tokens.as_ref(), cost.as_ref(), basis, coverage);
+        let usage_detail = newest_cost_state(&read.values)
+            .map(cost_state_detail)
+            .and_then(UsageDetail::into_option);
 
         let session = Session {
             id,
@@ -100,6 +104,7 @@ impl ClaudeBackend {
             accounting,
             store: Some(path.display().to_string()),
             start_uncertain: recording.start_uncertain(),
+            usage_detail,
         };
         // The opening is the start of the file, so its first user turn is the
         // session's first user turn even when the tail cannot see it.
@@ -237,12 +242,15 @@ fn claude_cwd(value: &Value) -> Option<&str> {
     value["cwd"].as_str()
 }
 
-fn claude_accounting(values: &[Value]) -> (Option<Tokens>, Option<Cost>, AccountingBasis) {
-    if let Some(cost_state) = values
+fn newest_cost_state(values: &[Value]) -> Option<&Value> {
+    values
         .iter()
         .rev()
         .find(|value| value["type"] == "cost-state")
-    {
+}
+
+fn claude_accounting(values: &[Value]) -> (Option<Tokens>, Option<Cost>, AccountingBasis) {
+    if let Some(cost_state) = newest_cost_state(values) {
         let tokens = cost_state_tokens(cost_state);
         let cost = cost_state["totalCostUSD"].as_f64().map(|usd| Cost { usd });
         return (tokens, cost, AccountingBasis::RecordedTotal);
@@ -253,6 +261,50 @@ fn claude_accounting(values: &[Value]) -> (Option<Tokens>, Option<Cost>, Account
         None,
         AccountingBasis::SummedRequests,
     )
+}
+
+/// The durations and the per-model split a `cost-state` records beside its
+/// totals. The durations are milliseconds of wall clock; the split names each
+/// model the session spent on, ordered by model id so one recording reads the
+/// same way twice.
+fn cost_state_detail(value: &Value) -> UsageDetail {
+    let milliseconds = |name: &str| value[name].as_u64();
+    let durations = Durations {
+        api: milliseconds("totalAPIDuration"),
+        api_without_retries: milliseconds("totalAPIDurationWithoutRetries"),
+        tool: milliseconds("totalToolDuration"),
+        total: milliseconds("totalDuration"),
+    };
+    let by_model = value["modelUsage"].as_object().map(|models| {
+        let mut usage = models
+            .iter()
+            .map(|(model, usage)| ModelUsage {
+                model: model.clone(),
+                tokens: model_usage_tokens(usage),
+                cost: usage["costUSD"].as_f64().map(|usd| Cost { usd }),
+            })
+            .collect::<Vec<_>>();
+        usage.sort_by(|left, right| left.model.cmp(&right.model));
+        usage
+    });
+    UsageDetail {
+        context_window: None,
+        rate_limits: None,
+        durations_ms: (!durations.is_empty()).then_some(durations),
+        by_model: by_model.filter(|usage| !usage.is_empty()),
+    }
+}
+
+fn model_usage_tokens(usage: &Value) -> Option<Tokens> {
+    let mut totals = TokenTotals::default();
+    totals.add(
+        usage["inputTokens"].as_u64(),
+        usage["outputTokens"].as_u64(),
+        usage["thinkingTokens"].as_u64(),
+        usage["cacheReadInputTokens"].as_u64(),
+        usage["cacheCreationInputTokens"].as_u64(),
+    );
+    totals.finish()
 }
 
 fn cost_state_tokens(value: &Value) -> Option<Tokens> {

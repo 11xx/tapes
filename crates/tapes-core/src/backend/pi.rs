@@ -115,6 +115,7 @@ impl PiBackend {
             accounting,
             store: Some(path.display().to_string()),
             start_uncertain: recording.start_uncertain(),
+            usage_detail: None,
         };
         // pi rewinds by appending a new branch, so the first user message in
         // the file may sit on a root the active path never reaches. The

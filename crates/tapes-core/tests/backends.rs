@@ -18,6 +18,7 @@ use tapes_core::model::{
     Accounting, AccountingBasis, AccountingCoverage, Cost, Role, Session, SourceBound, Tokens,
     Transcript, Truncation, Turn, TurnKind,
 };
+use tapes_core::usage::{usage, Durations, ModelUsage, RateWindow, TurnCoverage};
 use tapes_core::{
     latest_with_backends, list_with_backends, list_with_backends_filtered,
     list_with_backends_filtered_and_search, list_with_backends_options, resolve_session,
@@ -1814,6 +1815,7 @@ fn resolver_session(id: &str) -> Session {
         accounting: None,
         store: None,
         start_uncertain: false,
+        usage_detail: None,
     }
 }
 
@@ -2971,4 +2973,172 @@ fn pi_and_opencode_user_turns_are_the_operator_speaking() {
             backend.harness()
         );
     }
+}
+
+/// Codex records the context window and the account's quota windows on its
+/// `token_count` events. The newest event carrying each fact answers for it,
+/// so a quota refresh without usage still reports the quota.
+#[test]
+fn codex_usage_reports_the_context_window_and_the_newest_quota_windows() {
+    let backend = CodexBackend::new(fixtures("codex"));
+    let session = located(&backend, "00000000-0000-0000-0000-000000000001");
+    let view = usage(&backend.transcript(&session, usize::MAX).unwrap());
+
+    assert_eq!(view.context_window, Some(272_000));
+    let limits = view.rate_limits.expect("the fixture records rate limits");
+    assert_eq!(
+        limits.primary,
+        Some(RateWindow {
+            used_percent: 12.0,
+            window_minutes: Some(300),
+            resets_at: Some("2026-01-01T14:00:00Z".parse().unwrap()),
+        })
+    );
+    assert_eq!(
+        limits.secondary,
+        Some(RateWindow {
+            used_percent: 92.0,
+            window_minutes: Some(10_080),
+            resets_at: Some("2026-01-05T10:00:00Z".parse().unwrap()),
+        })
+    );
+    assert_eq!(limits.plan.as_deref(), Some("fixture"));
+    assert_eq!(view.tokens, session.tokens);
+    assert_eq!(view.turns.total, 6);
+    assert_eq!(view.turns.coverage, TurnCoverage::Session);
+    assert!(view.durations_ms.is_none(), "Codex records no durations");
+    assert!(view.by_model.is_none(), "Codex records no per-model split");
+
+    let without = located(&backend, "20000000-0000-0000-0000-000000000004");
+    let without = usage(&backend.transcript(&without, usize::MAX).unwrap());
+    assert!(without.context_window.is_none());
+    assert!(without.rate_limits.is_none());
+}
+
+/// A Claude `cost-state` carries wall-clock durations and the per-model split
+/// beside its totals. A recording without one carries neither.
+#[test]
+fn claude_usage_reports_cost_state_durations_and_the_per_model_split() {
+    let root = std::env::temp_dir().join(format!("tapes-claude-usage-{}", std::process::id()));
+    let project = root.join("project");
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&project).unwrap();
+    fs::write(
+        project.join("session-usage.jsonl"),
+        concat!(
+            r#"{"type":"user","sessionId":"session-usage","uuid":"user-1","timestamp":"2026-01-01T10:00:00Z","cwd":"/fixtures/project","message":{"role":"user","content":"Inspect the fixture."}}"#,
+            "\n",
+            r#"{"type":"cost-state","sessionId":"session-usage","totalCostUSD":12.5,"totalAPIDuration":5000,"totalAPIDurationWithoutRetries":4000,"totalToolDuration":3000,"totalDuration":9000,"modelUsage":{"claude-second":{"inputTokens":1,"outputTokens":2,"thinkingTokens":3,"cacheReadInputTokens":4,"cacheCreationInputTokens":5,"costUSD":0.5},"claude-first":{"inputTokens":100,"outputTokens":200,"thinkingTokens":300,"cacheReadInputTokens":400,"cacheCreationInputTokens":500,"costUSD":12.0}}}"#,
+            "\n"
+        ),
+    )
+    .unwrap();
+
+    let backend = ClaudeBackend::new(&root);
+    let session = located(&backend, "session-usage");
+    let view = usage(&backend.transcript(&session, usize::MAX).unwrap());
+
+    assert_eq!(
+        view.durations_ms,
+        Some(Durations {
+            api: Some(5_000),
+            api_without_retries: Some(4_000),
+            tool: Some(3_000),
+            total: Some(9_000),
+        })
+    );
+    assert_eq!(
+        view.by_model,
+        Some(vec![
+            ModelUsage {
+                model: "claude-first".to_owned(),
+                tokens: Some(Tokens {
+                    input: Some(100),
+                    output: Some(200),
+                    reasoning: Some(300),
+                    cache_read: Some(400),
+                    cache_write: Some(500),
+                }),
+                cost: Some(Cost { usd: 12.0 }),
+            },
+            ModelUsage {
+                model: "claude-second".to_owned(),
+                tokens: Some(Tokens {
+                    input: Some(1),
+                    output: Some(2),
+                    reasoning: Some(3),
+                    cache_read: Some(4),
+                    cache_write: Some(5),
+                }),
+                cost: Some(Cost { usd: 0.5 }),
+            },
+        ])
+    );
+    assert!(view.context_window.is_none(), "Claude records no window");
+    assert!(view.rate_limits.is_none(), "Claude records no quota");
+    fs::remove_dir_all(root).unwrap();
+
+    let fixture = ClaudeBackend::new(fixtures("claude"));
+    let session = located(&fixture, "session-claude");
+    let view = usage(&fixture.transcript(&session, usize::MAX).unwrap());
+    assert!(view.durations_ms.is_none(), "no cost-state, no durations");
+    assert!(view.by_model.is_none(), "no cost-state, no per-model split");
+}
+
+/// A harness that records none of the optional usage facts omits each object
+/// rather than emitting an empty or null one.
+#[test]
+fn a_harness_without_usage_detail_omits_every_optional_object() {
+    let opencode = OpenCodeBackend::new(opencode_fixture_program());
+    let opencode_session = located(&opencode, "ses_000000fixtureSharedSession");
+    let pi = PiBackend::new(fixtures("pi"));
+    let pi_session = located(&pi, "session-pi");
+
+    for (backend, session) in [
+        (&opencode as &dyn Backend, opencode_session),
+        (&pi as &dyn Backend, pi_session),
+    ] {
+        let view = usage(&backend.transcript(&session, usize::MAX).unwrap());
+        assert!(view.context_window.is_none(), "{}", session.harness);
+        assert!(view.rate_limits.is_none(), "{}", session.harness);
+        assert!(view.durations_ms.is_none(), "{}", session.harness);
+        assert!(view.by_model.is_none(), "{}", session.harness);
+
+        let value = serde_json::to_value(&view).unwrap();
+        for absent in ["context_window", "rate_limits", "durations_ms", "by_model"] {
+            assert!(value.get(absent).is_none(), "{absent} in {value}");
+        }
+        assert_eq!(
+            view.turns.total,
+            view.turns.user + view.turns.assistant + view.turns.tool + view.turns.reasoning
+        );
+    }
+}
+
+/// A read that stopped at the file tail counted only the turns it reached.
+#[test]
+fn a_bounded_read_reports_its_turn_counts_as_a_read_window() {
+    let root = std::env::temp_dir().join(format!("tapes-usage-bounds-{}", std::process::id()));
+    let project = root.join("project");
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&project).unwrap();
+    let mut file = BufWriter::new(File::create(project.join("bounded-usage.jsonl")).unwrap());
+    file.write_all(b"{\"padding\":\"").unwrap();
+    file.write_all(&vec![b'x'; 4 * 1024 * 1024]).unwrap();
+    file.write_all(b"\"}\n").unwrap();
+    writeln!(
+        file,
+        r#"{{"type":"user","sessionId":"bounded-usage","timestamp":"2026-01-01T12:00:00Z","cwd":"/fixtures/project","message":{{"role":"user","content":"Tail input."}}}}"#
+    )
+    .unwrap();
+    file.flush().unwrap();
+
+    let backend = ClaudeBackend::new(&root);
+    let session = located(&backend, "bounded-usage");
+    let view = usage(&backend.transcript(&session, usize::MAX).unwrap());
+
+    assert_eq!(view.turns.total, 1);
+    assert_eq!(view.turns.coverage, TurnCoverage::ReadWindow);
+    assert!(view.truncated);
+    fs::remove_dir_all(root).unwrap();
 }

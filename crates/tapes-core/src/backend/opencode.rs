@@ -1211,6 +1211,7 @@ fn parse_database_session(value: &Value) -> Result<Session> {
         accounting,
         store: None,
         start_uncertain: false,
+        usage_detail: None,
     })
 }
 
@@ -1285,6 +1286,7 @@ fn parse_session(value: &Value) -> Result<Session> {
         accounting,
         store: None,
         start_uncertain: false,
+        usage_detail: None,
     })
 }
 

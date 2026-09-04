@@ -4,6 +4,7 @@ use chrono::{DateTime, SecondsFormat, Utc};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::event::ToolEvent;
+use crate::usage::UsageDetail;
 
 pub const SESSION_SCHEMA: &str = "tapes-session/1";
 /// Maximum length of a title derived from the first user turn.
@@ -51,6 +52,12 @@ pub struct Session {
     /// start is at or before it. Omitted when false.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub start_uncertain: bool,
+    /// Usage facts a harness records beside the normalized counters, filled
+    /// by the backend that holds them. They are harness-shaped rather than
+    /// part of the session contract, so `tapes-session/1` does not carry
+    /// them; the usage projection is where they reach a consumer.
+    #[serde(skip)]
+    pub usage_detail: Option<UsageDetail>,
 }
 
 /// The present-tense state supplied by the optional harness-status authority.
@@ -670,6 +677,7 @@ mod tests {
             }),
             store: None,
             start_uncertain: false,
+            usage_detail: None,
         }
     }
 
