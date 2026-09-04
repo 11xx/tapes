@@ -76,7 +76,7 @@ failed states also project a result event without creating a second turn:
 | `kind` | `tool-call`; `completed` and `error` also project `tool-result` | same |
 | `subtype` | `tool` | `tool` |
 | `name` | part `name` | part `tool` |
-| `call_id` | part `id` | part `callID`, falling back to an available part id |
+| `call_id` | part `callID` when present, else the part `id` | part `callID` when present, else the part `id` |
 | `status` | `state.status` | `state.status` |
 | `arguments` | `state.input` | bounded `state.input` projection |
 | `output` | `state.content`, then `state.output` or `state.error`; error states prefer `state.error` | `state.output`, or `state.error` for an error state |
