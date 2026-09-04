@@ -90,6 +90,23 @@ Marked "real" only if the content is non-empty and contains no `<local-command-c
 
 The `tool_use_id` references the assistant's `tool_use` block id. `is_error: true` is a hard error signal.
 
+Tool blocks supply typed event fields as follows:
+
+| event field | Claude source |
+|---|---|
+| `kind` | `tool-call` for `tool_use`; `tool-result` for `tool_result` |
+| `subtype` | content block `type` |
+| `name` | `tool_use.name`; result blocks leave it absent |
+| `call_id` | `tool_use.id` or `tool_result.tool_use_id` |
+| `status` | `error` only when `tool_result.is_error` is true |
+| `arguments` | `tool_use.input` |
+| `output` | `tool_result.content` |
+| event timestamp | the containing record's top-level `timestamp` |
+
+Object and array payloads are serialized as compact JSON for bounded argument
+and output metadata. Separate records carry the two halves, so
+`completed_ts` is absent.
+
 ## `type: "assistant"`
 
 `message.content` is an array of typed blocks:

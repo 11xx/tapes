@@ -13,6 +13,7 @@ tapes list                      # every harness, newest first
 tapes list --harness opencode --here
 tapes show ses_07e16cc8 --tail 20
 tapes show ses_07e16cc8 --json
+tapes events ses_07e16cc8 --name wait_agent --json
 tapes export ses_07e16cc8 --bundle /tmp/
 ```
 
@@ -151,6 +152,17 @@ sessions the caller already holds — including its own, which is otherwise the
 newest one there. `--project <path>` scopes elsewhere and `--global` drops the
 scope.
 
+`events` projects tool calls and results into the harness-neutral
+`tapes-events/1` schema. Each record keeps the turn ordinal and native id,
+bounded argument or output metadata, and an exact call/result pair when both
+halves occur in the bounded read. Unpaired calls report `no-result-in-read`;
+an unpaired result reports `call-before-read-bound` when a file-tail or
+record-page bound can hide its call, and `call-not-recorded` when the read
+reached the recording's start. `--tail` uses the same turn-ordinal window as
+`show`, while `--name` and `--call-id` apply after pairing. With no `--tail`,
+the command returns every event the bounded reader reaches so counts describe
+the read rather than an implicit display window.
+
 `export` writes a three-file bundle sharing one timestamped prefix, into
 `--bundle <dir>` or `/tmp`:
 
@@ -205,9 +217,12 @@ guesses which one the caller meant.
 **The cheap probe first.** `tapes show --latest --tail 40` answers "is there
 anything here worth having?" without exporting. Reach for `export` only after
 that says yes; a bundle costs context, and the tail usually settles it.
+`tapes events --latest --json` answers tool-count, pairing, duration, and
+incompleteness questions without parsing raw tool envelopes from turn text.
 
-**Contracts you can build on.** `tapes-list/1` and `tapes-session/1` are
-versioned JSON; a breaking shape change bumps the version. `export` prints
+**Contracts you can build on.** `tapes-list/1`, `tapes-session/1`, and
+`tapes-events/1` are versioned JSON; a breaking shape change bumps the
+version. `export` prints
 exactly three paths and their sizes on stdout, in reading order, and writes each
 file under a temporary name before renaming — so a bundle is never observed
 half-written. A harness whose binary or store is absent reports itself

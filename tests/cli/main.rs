@@ -189,6 +189,19 @@ fn session<'a>(value: &'a Value, id: &str) -> &'a Value {
         .unwrap()
 }
 
+fn fixture_command(name: &str, args: &[&str]) -> std::process::Output {
+    let (codex_home, home) = fixture_store(name);
+    let mut command = tapes();
+    command.args(args);
+    with_fixture_env(
+        &mut command,
+        &codex_home,
+        &home,
+        Path::new("/definitely/missing"),
+    );
+    command.output().unwrap()
+}
+
 struct TemporaryDirectory {
     path: PathBuf,
 }
@@ -254,7 +267,7 @@ fn bare_invocation_guides_while_misuse_still_fails() {
     let guide = tapes().output().unwrap();
     assert!(guide.status.success());
     let text = String::from_utf8_lossy(&guide.stdout);
-    for command in ["tapes list", "tapes show", "tapes export"] {
+    for command in ["tapes list", "tapes show", "tapes events", "tapes export"] {
         assert!(text.contains(command), "guide omits `{command}`");
     }
 
@@ -291,6 +304,24 @@ fn show_help_exits_successfully() {
 }
 
 #[test]
+fn events_help_explains_pairing_filters_and_the_default_bound() {
+    let output = tapes().args(["events", "--help"]).output().unwrap();
+    assert!(output.status.success());
+    let help = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        help.contains("Pairing is exact within the bounded read"),
+        "{help}"
+    );
+    assert!(
+        help.contains("every turn the bounded reader reaches"),
+        "{help}"
+    );
+    assert!(help.contains("--name <NAME>"), "{help}");
+    assert!(help.contains("--call-id <ID>"), "{help}");
+    assert!(help.contains("tapes-events/1"), "{help}");
+}
+
+#[test]
 fn export_help_exits_successfully() {
     assert!(tapes()
         .args(["export", "--help"])
@@ -309,6 +340,7 @@ fn selection_and_scope_flags_are_mutually_exclusive() {
         vec!["show", "some-id", "--exclude", "other-id"],
         vec!["show", "some-id", "--harness", "codex"],
         vec!["export", "some-id", "--global"],
+        vec!["events", "some-id", "--latest"],
         vec!["show", "--exclude", "some-id"],
         vec!["show", "--latest", "--here", "--global"],
         vec!["export", "--latest", "--project", "/tmp", "--global"],
@@ -317,6 +349,102 @@ fn selection_and_scope_flags_are_mutually_exclusive() {
         let misuse = tapes().args(&arguments).output().unwrap();
         assert_eq!(misuse.status.code(), Some(2), "{arguments:?} was accepted");
     }
+}
+
+#[test]
+fn events_json_answers_call_counts_and_incomplete_calls_without_raw_text() {
+    let id = "00000000-0000-0000-0000-000000000001";
+    let output = fixture_command("events-json", &["events", id, "--json"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+
+    assert_eq!(value["schema"], "tapes-events/1");
+    assert_eq!(value["session"]["id"], id);
+    assert!(value.get("truncation").is_none(), "{value}");
+    assert_eq!(
+        value["pairs"],
+        serde_json::json!({"complete": 1, "incomplete": 1})
+    );
+    let events = value["events"].as_array().unwrap();
+    assert_eq!(events.len(), 3);
+    assert!(events.iter().all(|event| event.get("text").is_none()));
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| { event["kind"] == "tool-call" && event["name"] == "fixture_tool" })
+            .count(),
+        1
+    );
+    let incomplete = events
+        .iter()
+        .find(|event| event["incomplete"] == "no-result-in-read")
+        .unwrap();
+    assert_eq!(incomplete["call_id"], "call-pending");
+    assert!(incomplete.get("pair").is_none(), "{incomplete}");
+    assert!(incomplete.get("duration_ms").is_none(), "{incomplete}");
+    assert_eq!(events[0]["duration_ms"], 1_000);
+    assert!(events[1].get("duration_ms").is_none(), "{}", events[1]);
+}
+
+#[test]
+fn events_filters_after_pairing_and_tail_uses_show_ordinals() {
+    let id = "00000000-0000-0000-0000-000000000001";
+    let named = fixture_command(
+        "events-name",
+        &["events", id, "--name", "fixture_tool", "--json"],
+    );
+    let named: Value = serde_json::from_slice(&named.stdout).unwrap();
+    assert_eq!(named["events"].as_array().unwrap().len(), 1);
+    assert_eq!(named["events"][0]["kind"], "tool-call");
+    assert_eq!(
+        named["pairs"],
+        serde_json::json!({"complete": 1, "incomplete": 0})
+    );
+
+    let wrong_case = fixture_command(
+        "events-name-case",
+        &["events", id, "--name", "Fixture_Tool", "--json"],
+    );
+    let wrong_case: Value = serde_json::from_slice(&wrong_case.stdout).unwrap();
+    assert!(wrong_case["events"].as_array().unwrap().is_empty());
+
+    let pending = fixture_command(
+        "events-call-id",
+        &["events", id, "--call-id", "call-pending", "--json"],
+    );
+    let pending: Value = serde_json::from_slice(&pending.stdout).unwrap();
+    assert_eq!(pending["events"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        pending["pairs"],
+        serde_json::json!({"complete": 0, "incomplete": 1})
+    );
+
+    let shown = fixture_command("events-show-tail", &["show", id, "--tail", "1", "--json"]);
+    let shown: Value = serde_json::from_slice(&shown.stdout).unwrap();
+    let events = fixture_command("events-tail", &["events", id, "--tail", "1", "--json"]);
+    let events: Value = serde_json::from_slice(&events.stdout).unwrap();
+    assert_eq!(
+        events["truncation"]["window"],
+        shown["truncation"]["window"]
+    );
+    assert_eq!(events["events"].as_array().unwrap().len(), 1);
+    assert_eq!(events["events"][0]["ordinal"], shown["turns"][0]["ordinal"]);
+
+    let human = fixture_command("events-human", &["events", id, "--tail", "1"]);
+    let human = String::from_utf8(human.stdout).unwrap();
+    assert!(
+        human.contains("[tool-call #5 2026-01-01T10:00:06Z]"),
+        "{human}"
+    );
+    assert!(
+        human.contains("fixture_pending call-pending completed no-result-in-read"),
+        "{human}"
+    );
+    assert!(human.contains("Showing the last 1 of 6 turns"), "{human}");
 }
 
 #[test]
@@ -1531,6 +1659,24 @@ fn opencode_database_transcripts_preserve_normalized_turn_roles_and_text() {
     assert!(tool_text.contains("Database fixture read."), "{tool_text}");
     assert_eq!(turns[3]["role"], "assistant");
     assert_eq!(turns[3]["text"], "Database-backed answer.");
+
+    let output = tapes()
+        .args(["events", id, "--json"])
+        .env("HOME", root.path().join("home"))
+        .env("PATH", root.path())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let events: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(events["events"].as_array().unwrap().len(), 2);
+    assert_eq!(events["events"][0]["call_id"], "call_database_fixture");
+    assert_eq!(events["events"][0]["duration_ms"], 999);
+    assert_eq!(events["events"][1]["kind"], "tool-result");
+    assert_eq!(events["events"][1]["ts"], "2026-07-21T19:45:08.999Z");
 }
 
 /// The bounded reader keeps a file's tail, so an oversized session would

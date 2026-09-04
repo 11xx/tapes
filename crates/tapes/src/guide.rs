@@ -109,6 +109,7 @@ FIND IT
 PROBE BEFORE EXPORTING
   tapes show <id> --tail 40      A window, costing no bundle.
   tapes show <id> --json         The same turns as tapes-session/1.
+  tapes events <id> --json       Typed tool calls, results, and pairs.
 
   show returns the last 100 turns unless --tail says otherwise, and marks the
   result truncated whenever it dropped any. It is the probe, not the archive;
@@ -119,6 +120,12 @@ PROBE BEFORE EXPORTING
   store page, cut turn text), which no request through tapes reaches past.
   Human output says the same in its closing notes, recommending only the
   recovery that works.
+
+  events projects harness-neutral tool records as tapes-events/1. Pairing is
+  exact within the bounded read; an incomplete call or result says whether its
+  counterpart was not reached or not recorded. Event ordinals are the same
+  turn coordinates show prints. With no --tail, every event the bounded reader
+  reaches is returned; --name and --call-id filter only after pairing.
 
   Every turn carries an `ordinal`, its zero-based place in the session's
   normalized sequence. On a file-backed session (claude, codex, pi) it is kept

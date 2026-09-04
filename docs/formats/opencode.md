@@ -68,6 +68,26 @@ Quirks a reader must handle:
 - Interrupt/retry events are **not** in this form — terminal-state detection
   here is heuristic (empty tail → `mid_generation_interrupted`).
 
+A `tool` part supplies one tool turn and one typed call event. Completed and
+failed states also project a result event without creating a second turn:
+
+| event field | API part source | stable-database projection source |
+|---|---|---|
+| `kind` | `tool-call`; `completed` and `error` also project `tool-result` | same |
+| `subtype` | `tool` | `tool` |
+| `name` | part `name` | part `tool` |
+| `call_id` | part `id` | part `callID`, falling back to an available part id |
+| `status` | `state.status` | `state.status` |
+| `arguments` | `state.input` | bounded `state.input` projection |
+| `output` | `state.content`, then `state.output` or `state.error`; error states prefer `state.error` | `state.output`, or `state.error` for an error state |
+| call timestamp | `time.created` | `time.start` |
+| `completed_ts` | `time.completed` | `time.end` |
+
+The result projection uses `completed_ts` as its event timestamp and shares the
+call's turn ordinal and pairing key. A `pending` or `running` state has no
+result projection. Structured payloads are serialized as compact JSON before
+their bounded metadata is built.
+
 ## 2. Debug JSON export (`info` + `events`)
 
 Same export with the debug toggle: the raw durable event log.

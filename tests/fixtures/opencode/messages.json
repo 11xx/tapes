@@ -1,6 +1,36 @@
 {
   "data": [
     {
+      "id": "msg_fixture_assistant_pending",
+      "time": {
+        "created": 1784663071000
+      },
+      "type": "assistant",
+      "agent": "build",
+      "model": {
+        "id": "kimi-k3",
+        "providerID": "opencode-go",
+        "variant": "max"
+      },
+      "content": [
+        {
+          "type": "tool",
+          "id": "fixture_tool_pending",
+          "name": "fixture_pending",
+          "executed": false,
+          "state": {
+            "status": "pending",
+            "input": {
+              "path": "fixture-pending"
+            }
+          },
+          "time": {
+            "created": 1784663071001
+          }
+        }
+      ]
+    },
+    {
       "id": "msg_fixture_assistant_final",
       "time": {
         "created": 1784663069000,
@@ -50,23 +80,12 @@
           "type": "tool",
           "id": "fixture_tool_call",
           "name": "read",
+          "executed": true,
           "state": {
             "status": "completed",
             "input": {
               "path": "fixture"
-            }
-          },
-          "time": {
-            "created": 1784663063000,
-            "completed": 1784663063999
-          }
-        },
-        {
-          "type": "tool",
-          "id": "fixture_tool_result",
-          "name": "read",
-          "state": {
-            "status": "completed",
+            },
             "content": [
               {
                 "type": "text",
@@ -75,7 +94,8 @@
             ]
           },
           "time": {
-            "created": 1784663064000,
+            "created": 1784663063000,
+            "ran": 1784663064000,
             "completed": 1784663067999
           }
         }

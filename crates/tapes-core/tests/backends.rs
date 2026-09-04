@@ -13,6 +13,7 @@ use tapes_core::backend::codex::CodexBackend;
 use tapes_core::backend::opencode::OpenCodeBackend;
 use tapes_core::backend::pi::PiBackend;
 use tapes_core::backend::{Backend, Listing, Query};
+use tapes_core::event::{project, EventKind, Incomplete};
 use tapes_core::model::{Role, Session, SourceBound, Transcript, Truncation, Turn};
 use tapes_core::{
     latest_with_backends, list_with_backends, list_with_backends_filtered,
@@ -223,7 +224,11 @@ fn every_backend_satisfies_shared_normalization_assertions() {
         assert_eq!(transcript.session, *listed);
         assert!(transcript.turns.len() >= 2);
         assert_eq!(transcript.turns.first().unwrap().role, Role::User);
-        assert_eq!(transcript.turns.last().unwrap().role, Role::Assistant);
+        assert_eq!(transcript.turns.last().unwrap().role, Role::Tool);
+        assert!(transcript
+            .turns
+            .iter()
+            .any(|turn| turn.role == Role::Assistant));
         assert!(transcript.turns.iter().all(|turn| !turn.text.is_empty()));
 
         let tailed = backend.transcript(listed, 1).unwrap();
@@ -633,21 +638,89 @@ fn every_file_backend_preserves_reasoning_and_tool_chronology() {
             .map(|turn| turn.role.clone())
             .collect::<Vec<_>>();
 
-        assert_eq!(
-            roles,
+        let expected = if backend.harness() == "opencode" {
+            vec![
+                Role::User,
+                Role::Reasoning,
+                Role::Tool,
+                Role::Assistant,
+                Role::Tool,
+            ]
+        } else {
             vec![
                 Role::User,
                 Role::Reasoning,
                 Role::Tool,
                 Role::Tool,
-                Role::Assistant
-            ],
-            "{} chronology differs",
-            backend.harness()
-        );
+                Role::Assistant,
+                Role::Tool,
+            ]
+        };
+        assert_eq!(roles, expected, "{} chronology differs", backend.harness());
         assert_eq!(transcript.turns[1].text, "Consider the fixture.");
         assert!(transcript.turns[2].text.contains("fixture_tool"));
-        assert!(transcript.turns[3].text.contains("Tool complete."));
+        assert!(transcript
+            .turns
+            .iter()
+            .any(|turn| turn.text.contains("Tool complete.")));
+        assert!(transcript
+            .turns
+            .last()
+            .unwrap()
+            .text
+            .contains("fixture_pending"));
+    }
+}
+
+#[test]
+fn every_backend_exposes_one_complete_pair_and_one_incomplete_call() {
+    let cases = [
+        ("claude", "tool-1", "tool-pending"),
+        ("codex", "call-1", "call-pending"),
+        ("opencode", "fixture_tool_call", "fixture_tool_pending"),
+        ("pi", "tool-1", "tool-pending"),
+    ];
+    for ((backend, id), (harness, paired, pending)) in fixture_backends().into_iter().zip(cases) {
+        assert_eq!(backend.harness(), harness);
+        let session = located(backend.as_ref(), id);
+        let transcript = backend.transcript(&session, usize::MAX).unwrap();
+        let session_json = serde_json::to_value(&transcript).unwrap();
+        assert!(session_json["turns"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|turn| turn.get("tool").is_none()));
+
+        let events = backend.events(&session, usize::MAX).unwrap();
+        assert_eq!(events.events.len(), 3, "{harness}: {:#?}", events.events);
+        assert_eq!(events.pairs.complete, 1, "{harness}");
+        assert_eq!(events.pairs.incomplete, 1, "{harness}");
+        let call = events
+            .events
+            .iter()
+            .find(|event| {
+                event.event.call_id.as_deref() == Some(paired)
+                    && event.event.kind == EventKind::ToolCall
+            })
+            .unwrap();
+        assert!(call.pair.is_some(), "{harness}");
+        assert!(call.duration_ms.is_some(), "{harness}");
+        assert!(call.event.arguments.is_some(), "{harness}");
+        let result = events
+            .events
+            .iter()
+            .find(|event| {
+                event.event.call_id.as_deref() == Some(paired)
+                    && event.event.kind == EventKind::ToolResult
+            })
+            .unwrap();
+        assert!(result.event.output.is_some(), "{harness}");
+        let pending = events
+            .events
+            .iter()
+            .find(|event| event.event.call_id.as_deref() == Some(pending))
+            .unwrap();
+        assert_eq!(pending.incomplete, Some(Incomplete::NoResultInRead));
     }
 }
 
@@ -1397,6 +1470,7 @@ impl Backend for SearchFixture {
                 ts: None,
                 ordinal: 0,
                 native_id: None,
+                tool: None,
             }],
             truncated: self.bounded,
             truncation: Truncation {
@@ -1652,6 +1726,55 @@ fn transcript_reads_are_capped_at_four_megabytes() {
     assert!(transcript.truncated);
     assert_eq!(transcript.turns.len(), 2);
     fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn unmatched_results_distinguish_missing_calls_from_calls_before_the_file_tail() {
+    for (tag, padded, expected) in [
+        ("whole", false, Incomplete::CallNotRecorded),
+        ("bounded", true, Incomplete::CallBeforeReadBound),
+    ] {
+        let root = std::env::temp_dir().join(format!(
+            "tapes-unmatched-result-{tag}-{}",
+            std::process::id()
+        ));
+        let day = root.join("2026/01/01");
+        fs::create_dir_all(&day).unwrap();
+        let id = if padded {
+            "00000000-0000-0000-0000-00000000b001"
+        } else {
+            "00000000-0000-0000-0000-00000000a001"
+        };
+        let path = day.join(format!("rollout-2026-01-01T10-00-00-{id}.jsonl"));
+        let mut file = BufWriter::new(File::create(&path).unwrap());
+        writeln!(
+            file,
+            r#"{{"timestamp":"2026-01-01T10:00:00Z","type":"session_meta","payload":{{"id":"{id}","cwd":"/fixtures/project"}}}}"#
+        )
+        .unwrap();
+        if padded {
+            file.write_all(b"{\"padding\":\"").unwrap();
+            file.write_all(&vec![b'x'; 4 * 1024 * 1024]).unwrap();
+            file.write_all(b"\"}\n").unwrap();
+        }
+        writeln!(
+            file,
+            r#"{{"timestamp":"2026-01-01T10:00:01Z","type":"response_item","payload":{{"type":"function_call_output","call_id":"missing-call","output":"orphan"}}}}"#
+        )
+        .unwrap();
+        drop(file);
+
+        let backend = CodexBackend::new(&root);
+        let session = located(&backend, id);
+        let events = project(
+            backend.transcript(&session, usize::MAX).unwrap(),
+            usize::MAX,
+        );
+        assert_eq!(events.events.len(), 1);
+        assert_eq!(events.events[0].incomplete, Some(expected));
+        assert_eq!(events.pairs.incomplete, 1);
+        fs::remove_dir_all(root).unwrap();
+    }
 }
 
 #[test]
@@ -2057,6 +2180,13 @@ fn an_oversized_opencode_session_is_read_in_pages() {
     assert_eq!((window.returned, window.omitted), (1, 7));
     assert!(!window.omitted_exact, "only the fetched page is counted");
 
+    let events = backend.events(&session, 1).unwrap();
+    assert!(
+        events.events.is_empty(),
+        "the generated page has no tool parts"
+    );
+    assert_eq!(events.truncation, tail.truncation);
+
     let whole = backend.transcript(&session, usize::MAX).unwrap();
     assert_eq!(whole.turns.len(), 100, "two full pages and one short page");
     assert!(whole.truncation.source.is_empty());
@@ -2150,7 +2280,7 @@ fn codex_reads_cumulative_token_totals_from_the_latest_event_with_usage() {
 
     let transcript = backend.transcript(&session, 10).unwrap();
     assert_eq!(transcript.session.tokens, session.tokens);
-    assert_eq!(transcript.turns.len(), 5, "token events are not turns");
+    assert_eq!(transcript.turns.len(), 6, "token events are not turns");
 
     let without = located(&backend, "20000000-0000-0000-0000-000000000004");
     assert!(without.tokens.is_none(), "no token event, no counters");

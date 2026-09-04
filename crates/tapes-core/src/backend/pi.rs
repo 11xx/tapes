@@ -9,6 +9,7 @@ use super::{
     read_recording, session_file, timestamp, trailing_record, transcript, Backend, Jsonl, Listing,
     ParsedFile, Query,
 };
+use crate::event::{Bounded, EventKind, ToolEvent};
 use crate::model::{Model, Role, Session, TrailingRecord, Transcript, Turn};
 
 #[derive(Clone, Debug)]
@@ -242,12 +243,16 @@ fn read_transcript(path: &Path) -> Result<(Vec<Turn>, Jsonl, usize, Option<Trail
                 .is_some_and(|id| !active_ids.contains(id))
         })
         .count();
-    let turns = active.iter().flat_map(|value| parse_turns(value)).collect();
-    let trailing_record = trailing_record(
-        active.iter().copied(),
-        |value| !parse_turns(value).is_empty(),
-        pi_trailing_kind,
-    );
+    let mut turns = Vec::new();
+    let mut last_turn = None;
+    for (index, value) in active.iter().enumerate() {
+        let parsed = parse_turns(value);
+        if !parsed.is_empty() {
+            last_turn = Some(index);
+        }
+        turns.extend(parsed);
+    }
+    let trailing_record = trailing_record(active.iter().copied(), last_turn, pi_trailing_kind);
 
     Ok((turns, read, abandoned, trailing_record))
 }
@@ -311,6 +316,7 @@ fn parse_turns(value: &Value) -> Vec<Turn> {
                 ts,
                 ordinal: 0,
                 native_id,
+                tool: Some(pi_result_event(message)),
             }];
         }
         _ => return Vec::new(),
@@ -324,6 +330,7 @@ fn parse_turns(value: &Value) -> Vec<Turn> {
                 ts,
                 ordinal: 0,
                 native_id,
+                tool: None,
             })
             .into_iter()
             .collect();
@@ -334,10 +341,14 @@ fn parse_turns(value: &Value) -> Vec<Turn> {
         .into_iter()
         .flatten()
         .filter_map(|block| {
-            let (role, text) = match block["type"].as_str()? {
-                "text" => (role.clone(), block["text"].as_str()?.to_owned()),
-                "thinking" => (Role::Reasoning, block["thinking"].as_str()?.to_owned()),
-                "toolCall" => (Role::Tool, block.to_string()),
+            let (role, text, tool) = match block["type"].as_str()? {
+                "text" => (role.clone(), block["text"].as_str()?.to_owned(), None),
+                "thinking" => (
+                    Role::Reasoning,
+                    block["thinking"].as_str()?.to_owned(),
+                    None,
+                ),
+                "toolCall" => (Role::Tool, block.to_string(), Some(pi_call_event(block))),
                 _ => return None,
             };
             (!text.is_empty()).then_some(Turn {
@@ -346,7 +357,34 @@ fn parse_turns(value: &Value) -> Vec<Turn> {
                 ts,
                 ordinal: 0,
                 native_id: native_id.clone(),
+                tool,
             })
         })
         .collect()
+}
+
+fn pi_call_event(block: &Value) -> ToolEvent {
+    ToolEvent {
+        kind: EventKind::ToolCall,
+        subtype: "toolCall".to_owned(),
+        name: block["name"].as_str().map(str::to_owned),
+        call_id: block["id"].as_str().map(str::to_owned),
+        status: None,
+        arguments: Bounded::from_value(&block["arguments"]),
+        output: None,
+        completed_ts: None,
+    }
+}
+
+fn pi_result_event(message: &Value) -> ToolEvent {
+    ToolEvent {
+        kind: EventKind::ToolResult,
+        subtype: "toolResult".to_owned(),
+        name: message["toolName"].as_str().map(str::to_owned),
+        call_id: message["toolCallId"].as_str().map(str::to_owned),
+        status: (message["isError"].as_bool() == Some(true)).then(|| "error".to_owned()),
+        arguments: None,
+        output: Bounded::from_value(&message["content"]),
+        completed_ts: None,
+    }
 }

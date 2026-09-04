@@ -7,6 +7,7 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde_json::Value;
 
+use crate::event::{self, EventTranscript};
 use crate::model::{Session, SourceBound, TrailingRecord, Transcript, Truncation, Turn};
 use crate::scope::Scope;
 
@@ -182,6 +183,12 @@ pub trait Backend {
     /// locating it again; the transcript read may still need to open the
     /// underlying record to collect turns.
     fn transcript(&self, session: &Session, tail: usize) -> Result<Transcript>;
+    /// Project tool events after parsing the whole source read but before its
+    /// turn window is applied. Paged backends override this so the supplied
+    /// tail also bounds how many source pages are fetched.
+    fn events(&self, session: &Session, tail: usize) -> Result<EventTranscript> {
+        Ok(event::project(self.transcript(session, usize::MAX)?, tail))
+    }
     /// Search only the bounded tail requested by a listing. The default keeps
     /// this path aligned with each backend's existing transcript reader, so a
     /// backend cannot accidentally grow a second unbounded parser for search.
@@ -720,18 +727,17 @@ pub(crate) fn time_range(values: &[Value]) -> Option<(DateTime<Utc>, DateTime<Ut
 /// Report the final verified record after the last record that rendered a
 /// turn. A newer unrecognized record suppresses an older candidate: naming the
 /// older one would misidentify the store's actual ending.
-pub(crate) fn trailing_record<'a, I, R, K>(
+pub(crate) fn trailing_record<'a, I, K>(
     values: I,
-    renders_turn: R,
+    last_turn: Option<usize>,
     known_kind: K,
 ) -> Option<TrailingRecord>
 where
     I: IntoIterator<Item = &'a Value>,
-    R: Fn(&Value) -> bool,
     K: Fn(&Value) -> Option<&'static str>,
 {
     let values = values.into_iter().collect::<Vec<_>>();
-    let last_turn = values.iter().rposition(|value| renders_turn(value))?;
+    let last_turn = last_turn?;
     let value = values.get(last_turn + 1..)?.last().copied()?;
     Some(TrailingRecord {
         kind: known_kind(value)?.to_owned(),
