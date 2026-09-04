@@ -2242,5 +2242,24 @@ fn file_search_short_of_the_tail_behind_the_file_bound_is_unsearched() {
     .unwrap();
     assert_eq!(hit.sessions.len(), 1);
     assert!(hit.unsearched.is_empty());
+
+    // A candidate the metadata filters exclude was never asked about, so it
+    // is neither returned nor reported as unsearched.
+    let filtered_out = list_with_backends_filtered_and_search(
+        &backends,
+        Some("codex"),
+        None,
+        10,
+        Some("some-other-model"),
+        None,
+        Some("older needle"),
+    )
+    .unwrap();
+    assert!(filtered_out.sessions.is_empty());
+    assert!(
+        filtered_out.unsearched.is_empty(),
+        "{:?}",
+        filtered_out.unsearched
+    );
     fs::remove_dir_all(root).unwrap();
 }
