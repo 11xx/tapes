@@ -14,6 +14,7 @@ tapes list --harness opencode --here
 tapes show ses_07e16cc8 --tail 20
 tapes show ses_07e16cc8 --json
 tapes events ses_07e16cc8 --name wait_agent --json
+tapes usage ses_07e16cc8 --json
 tapes export ses_07e16cc8 --bundle /tmp/
 ```
 
@@ -172,6 +173,19 @@ reached the recording's start. `--tail` uses the same turn-ordinal window as
 the command returns every event the bounded reader reaches so counts describe
 the read rather than an implicit display window.
 
+`usage` answers where one session's quota went as `tapes-usage/1`: the
+session's recorded `tokens`, `cost`, and `accounting`, and `turns` counted by
+role. The accounting `basis` and `coverage` decide whether figures may be
+summed — a recorded total and a sum of per-request records are both safe to
+add, while coverage says how much of each session a figure covers, and `turns`
+carries the same coverage for the read behind it. Cost is only what the harness
+recorded; a provider quota is a separate fact about the account. Facts beyond
+the normalized counters appear only where a harness records them: Codex adds
+`context_window` and `rate_limits`, Claude adds `durations_ms` and `by_model`
+when the recording holds a `cost-state`, and pi and OpenCode add neither.
+Human output prints one line per recorded fact and closes with the same
+truncation notes `show` prints.
+
 `export` writes a three-file bundle sharing one timestamped prefix, into
 `--bundle <dir>` or `/tmp`:
 
@@ -230,10 +244,12 @@ guesses which one the caller meant.
 anything here worth having?" without exporting. Reach for `export` only after
 that says yes; a bundle costs context, and the tail usually settles it.
 `tapes events --latest --json` answers tool-count, pairing, duration, and
-incompleteness questions without parsing raw tool envelopes from turn text.
+incompleteness questions without parsing raw tool envelopes from turn text,
+and `tapes usage --latest --json` answers token, cost, and turn-count
+questions without summing a transcript by hand.
 
-**Contracts you can build on.** `tapes-list/1`, `tapes-session/1`, and
-`tapes-events/1` are versioned JSON; a breaking shape change bumps the
+**Contracts you can build on.** `tapes-list/1`, `tapes-session/1`,
+`tapes-events/1`, and `tapes-usage/1` are versioned JSON; a breaking shape change bumps the
 version. `export` prints
 exactly three paths and their sizes on stdout, in reading order, and writes each
 file under a temporary name before renaming — so a bundle is never observed

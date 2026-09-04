@@ -13,6 +13,7 @@ use crate::model::{
     is_known_envelope, without_known_envelopes, AccountingBasis, AccountingCoverage, Model, Role,
     Session, Tokens, TrailingRecord, Transcript, Turn, TurnKind,
 };
+use crate::usage::{RateLimits, RateWindow, UsageDetail};
 
 #[derive(Clone, Debug)]
 pub struct CodexBackend {
@@ -83,6 +84,12 @@ impl CodexBackend {
             AccountingBasis::RecordedTotal,
             AccountingCoverage::Session,
         );
+        let usage_detail = UsageDetail {
+            context_window: read.values.iter().rev().find_map(codex_context_window),
+            rate_limits: read.values.iter().rev().find_map(codex_rate_limits),
+            ..UsageDetail::default()
+        }
+        .into_option();
 
         let session = Session {
             id,
@@ -100,6 +107,7 @@ impl CodexBackend {
             accounting,
             store: Some(path.display().to_string()),
             start_uncertain: recording.start_uncertain(),
+            usage_detail,
         };
         // The opening is the start of the file, so its first user turn is the
         // session's first user turn even when the tail cannot see it.
@@ -245,7 +253,7 @@ fn codex_cwd(value: &Value) -> Option<&str> {
 /// is passed over for an older one. Counters Codex did not write stay absent;
 /// a counter it wrote as zero is zero.
 fn codex_tokens(value: &Value) -> Option<Tokens> {
-    if value["type"] != "event_msg" || value["payload"]["type"] != "token_count" {
+    if !is_token_count(value) {
         return None;
     }
     let usage = value["payload"]["info"]["total_token_usage"].as_object()?;
@@ -259,6 +267,49 @@ fn codex_tokens(value: &Value) -> Option<Tokens> {
         counter("cache_write_input_tokens"),
     );
     totals.finish()
+}
+
+/// The context window the newest `token_count` event naming one reports.
+/// Events carrying no `info` say nothing about it and are passed over.
+fn codex_context_window(value: &Value) -> Option<u64> {
+    is_token_count(value)
+        .then(|| value["payload"]["info"]["model_context_window"].as_u64())
+        .flatten()
+}
+
+/// The provider quota the newest `token_count` event carrying one observed.
+/// It rides alongside `info` and describes the account rather than this
+/// session, so it is reported as its own fact and never mixed into the
+/// session's counters.
+fn codex_rate_limits(value: &Value) -> Option<RateLimits> {
+    if !is_token_count(value) {
+        return None;
+    }
+    let limits = &value["payload"]["rate_limits"];
+    let window = |name: &str| {
+        let window = &limits[name];
+        window["used_percent"]
+            .as_f64()
+            .map(|used_percent| RateWindow {
+                used_percent,
+                window_minutes: window["window_minutes"].as_u64(),
+                resets_at: window["resets_at"].as_i64().and_then(epoch_seconds),
+            })
+    };
+    let limits = RateLimits {
+        primary: window("primary"),
+        secondary: window("secondary"),
+        plan: limits["plan_type"].as_str().map(str::to_owned),
+    };
+    (!limits.is_empty()).then_some(limits)
+}
+
+fn epoch_seconds(seconds: i64) -> Option<chrono::DateTime<chrono::Utc>> {
+    chrono::DateTime::from_timestamp(seconds, 0)
+}
+
+fn is_token_count(value: &Value) -> bool {
+    value["type"] == "event_msg" && value["payload"]["type"] == "token_count"
 }
 
 fn codex_trailing_kind(value: &Value) -> Option<&'static str> {

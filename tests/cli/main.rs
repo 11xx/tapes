@@ -2209,3 +2209,112 @@ fn show_types_every_turn_and_names_a_control_turn_in_human_output() {
     assert!(human.contains("[user/notice #12 "), "{human}");
     assert!(human.contains("[user #5 "), "{human}");
 }
+
+#[test]
+fn usage_help_names_the_schema_and_what_the_figures_mean() {
+    let output = tapes().args(["usage", "--help"]).output().unwrap();
+    assert!(output.status.success());
+    let help = String::from_utf8_lossy(&output.stdout);
+    assert!(help.contains("tapes-usage/1"), "{help}");
+    assert!(
+        help.contains("basis and coverage decide whether figures may be summed"),
+        "{help}"
+    );
+    assert!(help.contains("quota is a separate fact"), "{help}");
+}
+
+/// The usage view counts the same normalized turns `show` renders, by role.
+#[test]
+fn usage_json_reports_recorded_facts_and_turn_counts_show_agrees_with() {
+    let id = "00000000-0000-0000-0000-000000000001";
+    let output = fixture_command("usage-json", &["usage", id, "--json"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+
+    assert_eq!(value["schema"], "tapes-usage/1");
+    assert_eq!(value["session"]["id"], id);
+    assert_eq!(value["session"]["harness"], "codex");
+    assert_eq!(
+        value["tokens"],
+        serde_json::json!({
+            "input": 1200,
+            "output": 300,
+            "cache_read": 1000,
+            "cache_write": 0
+        })
+    );
+    assert_eq!(
+        value["accounting"],
+        serde_json::json!({ "basis": "recorded-total", "coverage": "session" })
+    );
+    assert_eq!(value["context_window"], 272_000);
+    assert_eq!(value["rate_limits"]["primary"]["used_percent"], 12.0);
+    assert_eq!(value["rate_limits"]["secondary"]["window_minutes"], 10_080);
+    assert_eq!(
+        value["rate_limits"]["primary"]["resets_at"],
+        "2026-01-01T14:00:00Z"
+    );
+    assert_eq!(value["rate_limits"]["plan"], "fixture");
+    for absent in ["cost", "durations_ms", "by_model", "truncation"] {
+        assert!(value.get(absent).is_none(), "{absent} in {value}");
+    }
+
+    let shown = fixture_command("usage-show", &["show", id, "--json"]);
+    let shown: Value = serde_json::from_slice(&shown.stdout).unwrap();
+    let turns = shown["turns"].as_array().unwrap();
+    let counted = |role: &str| turns.iter().filter(|turn| turn["role"] == role).count();
+    assert_eq!(value["turns"]["user"], counted("user"));
+    assert_eq!(value["turns"]["assistant"], counted("assistant"));
+    assert_eq!(value["turns"]["tool"], counted("tool"));
+    assert_eq!(value["turns"]["reasoning"], counted("reasoning"));
+    assert_eq!(value["turns"]["total"], turns.len());
+    assert_eq!(value["turns"]["coverage"], "session");
+}
+
+/// Human output states each recorded fact once and invents no line for a
+/// fact the harness did not record.
+#[test]
+fn usage_human_output_names_the_recorded_facts_only() {
+    let id = "00000000-0000-0000-0000-000000000001";
+    let output = fixture_command("usage-human", &["usage", id]);
+    let rendered = String::from_utf8(output.stdout).unwrap();
+
+    assert!(
+        rendered.starts_with(
+            "session: codex 00000000-0000-0000-0000-000000000001 gpt-fixture (high)\n"
+        ),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains("tokens: input 1200, output 300, cache read 1000, cache write 0\n"),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains("accounting: a recorded total, covering the whole session\n"),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains(
+            "turns: 6 total, 1 user, 1 assistant, 3 tool, 1 reasoning, covering the whole session\n"
+        ),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains("context window: 272000 tokens\n"),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains(
+            "rate limit primary: 12% used of a 300-minute window, resets 2026-01-01T14:00:00Z\n"
+        ),
+        "{rendered}"
+    );
+    assert!(rendered.contains("plan: fixture\n"), "{rendered}");
+    for absent in ["cost:", "durations:", "model ", "Note:"] {
+        assert!(!rendered.contains(absent), "{absent} in {rendered}");
+    }
+}

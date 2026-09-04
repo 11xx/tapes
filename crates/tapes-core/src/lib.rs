@@ -20,6 +20,7 @@ pub mod bundle;
 pub mod event;
 pub mod model;
 pub mod scope;
+pub mod usage;
 
 pub const LIST_SCHEMA: &str = "tapes-list/1";
 /// Number of normalized turns a `list --search` query inspects per session.
@@ -770,6 +771,23 @@ impl Selection<'_> {
 
 pub fn show(selection: Selection, tail: Option<usize>) -> Result<Transcript> {
     show_with_backends(&backend::backends(), selection, tail.unwrap_or(100))
+}
+
+/// One session's usage. The read uses the export-shaped window, so the turn
+/// counts are the whole bounded read's rather than a display window's.
+pub fn usage(selection: Selection) -> Result<usage::UsageView> {
+    usage_with_backends(&backend::backends(), selection)
+}
+
+pub fn usage_with_backends(
+    backends: &[Box<dyn Backend>],
+    selection: Selection,
+) -> Result<usage::UsageView> {
+    Ok(usage::usage(&show_with_backends(
+        backends,
+        selection,
+        EXPORT_TAIL,
+    )?))
 }
 
 pub fn events(selection: Selection, tail: Option<usize>) -> Result<event::EventTranscript> {

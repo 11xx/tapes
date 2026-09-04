@@ -8,9 +8,10 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 use tapes_core::bundle::Bundle;
 use tapes_core::event::{EventKind, EventRecord, EventTranscript, Incomplete};
 use tapes_core::model::{
-    human_bytes, human_speaker, human_timestamp, human_title, LiveState, Session, SourceBound,
-    Transcript, Truncation,
+    human_bytes, human_speaker, human_timestamp, human_title, Accounting, AccountingBasis,
+    AccountingCoverage, Cost, LiveState, Session, SourceBound, Tokens, Transcript, Truncation,
 };
+use tapes_core::usage::{Durations, ModelUsage, RateLimits, RateWindow, TurnCoverage, UsageView};
 use tapes_core::{Selection, Where};
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -218,6 +219,19 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Where one session's quota went: its recorded tokens, cost, and turn
+    /// counts, plus whatever else its harness recorded — a context window, a
+    /// provider quota window, wall-clock durations, a per-model split. The
+    /// accounting basis and coverage decide whether figures may be summed;
+    /// cost is only what the harness recorded, and quota is a separate fact
+    /// about the account rather than this session.
+    Usage {
+        #[command(flatten)]
+        selection: SelectionArgs,
+        /// Render the versioned tapes-usage/1 object as JSON.
+        #[arg(long)]
+        json: bool,
+    },
     /// Export one session. The context file keeps the operator turns and the
     /// assistant's text; the trace file keeps every turn, each headed as
     /// `show` heads it.
@@ -316,12 +330,152 @@ fn dispatch(cli: Cli) -> Result<()> {
                 print_events(&events, by_latest);
             }
         }
+        Command::Usage { selection, json } => {
+            let usage = tapes_core::usage(selection.selection())?;
+            if json {
+                println!("{}", serde_json::to_string(&usage)?);
+            } else {
+                print!("{}", render_usage(&usage));
+            }
+        }
         Command::Export { selection, bundle } => {
             let bundle = tapes_core::export(selection.selection(), bundle.as_deref())?;
             print_manifest(&bundle);
         }
     }
     Ok(())
+}
+
+/// One line per fact, and a fact the harness did not record has no line.
+/// The closing notes are `show`'s, because the read behind them is the same.
+fn render_usage(usage: &UsageView) -> String {
+    let mut out = format!("session: {} {}", usage.session.harness, usage.session.id);
+    if let Some(model) = &usage.session.model {
+        out.push_str(&format!(" {}", model.identity()));
+    }
+    out.push('\n');
+    if let Some(tokens) = &usage.tokens {
+        out.push_str(&format!("tokens: {}\n", render_tokens(tokens)));
+    }
+    if let Some(cost) = &usage.cost {
+        out.push_str(&format!("cost: {}\n", render_cost(cost)));
+    }
+    if let Some(accounting) = &usage.accounting {
+        out.push_str(&format!("accounting: {}\n", render_accounting(accounting)));
+    }
+    let turns = &usage.turns;
+    out.push_str(&format!(
+        "turns: {} total, {} user, {} assistant, {} tool, {} reasoning, covering {}\n",
+        turns.total,
+        turns.user,
+        turns.assistant,
+        turns.tool,
+        turns.reasoning,
+        match turns.coverage {
+            TurnCoverage::Session => "the whole session",
+            TurnCoverage::ReadWindow => "the bounded read window",
+        }
+    ));
+    if let Some(context_window) = usage.context_window {
+        out.push_str(&format!("context window: {context_window} tokens\n"));
+    }
+    if let Some(rate_limits) = &usage.rate_limits {
+        render_rate_limits(&mut out, rate_limits);
+    }
+    if let Some(durations) = &usage.durations_ms {
+        out.push_str(&format!("durations: {}\n", render_durations(durations)));
+    }
+    for model in usage.by_model.iter().flatten() {
+        out.push_str(&render_model_usage(model));
+    }
+    render_truncation_notes(&mut out, &usage.truncation);
+    render_notes(&mut out, &usage.notes);
+    out
+}
+
+fn render_tokens(tokens: &Tokens) -> String {
+    [
+        ("input", tokens.input),
+        ("output", tokens.output),
+        ("reasoning", tokens.reasoning),
+        ("cache read", tokens.cache_read),
+        ("cache write", tokens.cache_write),
+    ]
+    .into_iter()
+    .filter_map(|(name, count)| count.map(|count| format!("{name} {count}")))
+    .collect::<Vec<_>>()
+    .join(", ")
+}
+
+/// Four decimal places, so a fraction of a cent is neither rounded away nor
+/// dressed up as more precision than the harness recorded.
+fn render_cost(cost: &Cost) -> String {
+    format!("{:.4} USD", cost.usd)
+}
+
+fn render_accounting(accounting: &Accounting) -> String {
+    let basis = match accounting.basis {
+        AccountingBasis::RecordedTotal => "a recorded total",
+        AccountingBasis::SummedRequests => "a sum of per-request records",
+    };
+    let coverage = match accounting.coverage {
+        AccountingCoverage::Session => "the whole session",
+        AccountingCoverage::ReadWindow => "the bounded read window",
+    };
+    format!("{basis}, covering {coverage}")
+}
+
+fn render_rate_limits(out: &mut String, limits: &RateLimits) {
+    for (name, window) in [
+        ("primary", &limits.primary),
+        ("secondary", &limits.secondary),
+    ] {
+        if let Some(window) = window {
+            out.push_str(&format!(
+                "rate limit {name}: {}\n",
+                render_rate_window(window)
+            ));
+        }
+    }
+    if let Some(plan) = &limits.plan {
+        out.push_str(&format!("plan: {plan}\n"));
+    }
+}
+
+fn render_rate_window(window: &RateWindow) -> String {
+    let mut rendered = format!("{}% used", window.used_percent);
+    if let Some(minutes) = window.window_minutes {
+        rendered.push_str(&format!(" of a {minutes}-minute window"));
+    }
+    if let Some(resets_at) = window.resets_at {
+        rendered.push_str(&format!(", resets {}", human_timestamp(resets_at)));
+    }
+    rendered
+}
+
+fn render_durations(durations: &Durations) -> String {
+    [
+        ("api", durations.api),
+        ("api without retries", durations.api_without_retries),
+        ("tool", durations.tool),
+        ("total", durations.total),
+    ]
+    .into_iter()
+    .filter_map(|(name, value)| value.map(|value| format!("{name} {value}ms")))
+    .collect::<Vec<_>>()
+    .join(", ")
+}
+
+fn render_model_usage(model: &ModelUsage) -> String {
+    let mut rendered = format!("model {}:", model.model);
+    if let Some(tokens) = &model.tokens {
+        rendered.push_str(&format!(" {}", render_tokens(tokens)));
+    }
+    if let Some(cost) = &model.cost {
+        rendered.push_str(&format!("; {}", render_cost(cost)));
+    }
+    rendered.push('\n');
+    rendered
 }
 
 fn print_events(events: &EventTranscript, by_latest: bool) {
@@ -638,6 +792,7 @@ mod tests {
                 accounting: None,
                 store: None,
                 start_uncertain: false,
+                usage_detail: None,
             },
             turns: vec![Turn {
                 role: Role::User,

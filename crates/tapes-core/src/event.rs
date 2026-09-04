@@ -293,6 +293,7 @@ mod tests {
             accounting: None,
             store: None,
             start_uncertain: false,
+            usage_detail: None,
         }
     }
 
