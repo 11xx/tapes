@@ -8,6 +8,7 @@ use chrono::{DateTime, Utc};
 use serde_json::Value;
 
 use crate::event::{self, EventTranscript};
+use crate::lineage::Lineage;
 use crate::model::{
     Accounting, AccountingBasis, AccountingCoverage, Cost, Session, SourceBound, Tokens,
     TrailingRecord, Transcript, Truncation, Turn,
@@ -249,6 +250,13 @@ pub trait Backend {
     /// tail also bounds how many source pages are fetched.
     fn events(&self, session: &Session, tail: usize) -> Result<EventTranscript> {
         Ok(event::project(self.transcript(session, usize::MAX)?, tail))
+    }
+    /// The relationships this session's store records for it. The default is
+    /// the answer for a harness that records none: a backend reports only
+    /// what a record names, and never reads a child's turns.
+    fn lineage(&self, session: &Session) -> Result<Lineage> {
+        let _ = session;
+        Ok(Lineage::default())
     }
     /// Search only the bounded tail requested by a listing. The default keeps
     /// this path aligned with each backend's existing transcript reader, so a
@@ -804,6 +812,20 @@ where
         kind: known_kind(value)?.to_owned(),
         timestamp: timestamp(&value["timestamp"]),
     })
+}
+
+/// What a bounded file read leaves unread, in the transcript's own terms.
+pub(crate) fn read_bounds(read: &Jsonl) -> Truncation {
+    Truncation {
+        window: None,
+        source: read
+            .truncated
+            .then_some(SourceBound::FileTail {
+                bytes: MAX_TRANSCRIPT_BYTES,
+            })
+            .into_iter()
+            .collect(),
+    }
 }
 
 pub(crate) fn transcript(

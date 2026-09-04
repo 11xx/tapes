@@ -676,7 +676,8 @@ fn every_file_backend_preserves_reasoning_and_tool_chronology() {
                 Role::Tool,
             ],
             // The claude fixture closes its exchange with the commands and
-            // notices its harness records in the user envelope.
+            // notices its harness records in the user envelope, then spawns a
+            // subagent and leaves one call open.
             "claude" => {
                 let mut roles = vec![
                     Role::User,
@@ -686,7 +687,7 @@ fn every_file_backend_preserves_reasoning_and_tool_chronology() {
                     Role::Assistant,
                 ];
                 roles.extend((0..8).map(|_| Role::User));
-                roles.push(Role::Tool);
+                roles.extend([Role::Tool, Role::Tool, Role::Tool]);
                 roles
             }
             _ => vec![
@@ -716,13 +717,17 @@ fn every_file_backend_preserves_reasoning_and_tool_chronology() {
 
 #[test]
 fn every_backend_exposes_one_complete_pair_and_one_incomplete_call() {
+    // The claude fixture also spawns a subagent, whose call and result are a
+    // second complete pair.
     let cases = [
-        ("claude", "tool-1", "tool-pending"),
-        ("codex", "call-1", "call-pending"),
-        ("opencode", "fixture_tool_call", "fixture_tool_pending"),
-        ("pi", "tool-1", "tool-pending"),
+        ("claude", "tool-1", "tool-pending", 5, 2),
+        ("codex", "call-1", "call-pending", 3, 1),
+        ("opencode", "fixture_tool_call", "fixture_tool_pending", 3, 1),
+        ("pi", "tool-1", "tool-pending", 3, 1),
     ];
-    for ((backend, id), (harness, paired, pending)) in fixture_backends().into_iter().zip(cases) {
+    for ((backend, id), (harness, paired, pending, event_count, complete_pairs)) in
+        fixture_backends().into_iter().zip(cases)
+    {
         assert_eq!(backend.harness(), harness);
         let session = located(backend.as_ref(), id);
         let transcript = backend.transcript(&session, usize::MAX).unwrap();
@@ -734,8 +739,13 @@ fn every_backend_exposes_one_complete_pair_and_one_incomplete_call() {
             .all(|turn| turn.get("tool").is_none()));
 
         let events = backend.events(&session, usize::MAX).unwrap();
-        assert_eq!(events.events.len(), 3, "{harness}: {:#?}", events.events);
-        assert_eq!(events.pairs.complete, 1, "{harness}");
+        assert_eq!(
+            events.events.len(),
+            event_count,
+            "{harness}: {:#?}",
+            events.events
+        );
+        assert_eq!(events.pairs.complete, complete_pairs, "{harness}");
         assert_eq!(events.pairs.incomplete, 1, "{harness}");
         let call = events
             .events
@@ -801,6 +811,99 @@ fn verified_file_backends_report_their_final_non_turn_record() {
             assert!(trailing.timestamp.is_some());
         }
     }
+}
+
+/// The parent names its subagent: the meta record beside the transcript says
+/// which agent it was, and the `Agent` call in the parent says when it was
+/// spawned and how it ended.
+#[test]
+fn claude_joins_a_subagent_transcript_to_the_call_that_spawned_it() {
+    let backend = ClaudeBackend::new(fixtures("claude"));
+    let session = located(&backend, "session-claude");
+    let lineage = backend.lineage(&session).unwrap();
+
+    assert!(lineage.parent.is_none());
+    assert!(lineage.forked_from.is_none());
+    assert_eq!(lineage.children.len(), 1, "{:#?}", lineage.children);
+    let child = &lineage.children[0];
+    assert_eq!(child.reference, "fixture");
+    assert_eq!(child.harness, "claude");
+    assert_eq!(child.role.as_deref(), Some("Explore"));
+    assert_eq!(child.model.as_deref(), Some("sonnet"));
+    assert_eq!(child.disposition.as_deref(), Some("completed"));
+    assert!(child.resolved);
+    assert_eq!(
+        child.spawned_at,
+        Some("2026-01-01T10:00:03.900Z".parse::<DateTime<Utc>>().unwrap())
+    );
+    assert_eq!(
+        child.completed_at,
+        Some("2026-01-01T10:00:03.950Z".parse::<DateTime<Utc>>().unwrap())
+    );
+    assert!(child.session_id.is_none(), "a subagent file is not a session");
+    let sources = serde_json::to_value(&child.source).unwrap();
+    assert!(
+        sources
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|source| source["path"]
+                .as_str()
+                .is_some_and(|path| path.ends_with("subagents/agent-fixture.meta.json"))),
+        "{sources}"
+    );
+    assert!(
+        sources
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|source| source["native_id"] == "assistant-agent"),
+        "{sources}"
+    );
+}
+
+/// A spawn whose transcript is not in the store is still a child. Dropping it
+/// would hide exactly the case a reader is looking for.
+#[test]
+fn claude_keeps_a_spawn_whose_transcript_is_absent() {
+    let root = std::env::temp_dir().join(format!(
+        "tapes-claude-unresolved-agent-{}-{}",
+        std::process::id(),
+        OPENCODE_ALIAS_COUNTER.fetch_add(1, Ordering::Relaxed)
+    ));
+    let project = root.join("-fixtures-project");
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&project).unwrap();
+    fs::write(
+        project.join("session-absent-agent.jsonl"),
+        concat!(
+            r#"{"type":"user","sessionId":"session-absent-agent","uuid":"user-1","timestamp":"2026-01-01T10:00:00Z","cwd":"/fixtures/project","message":{"role":"user","content":"Spawn a subagent."}}"#,
+            "
+",
+            r#"{"type":"assistant","sessionId":"session-absent-agent","uuid":"assistant-1","timestamp":"2026-01-01T10:00:01Z","cwd":"/fixtures/project","message":{"role":"assistant","model":"claude-fixture","content":[{"type":"tool_use","id":"tool-agent-9","name":"Agent","input":{"subagent_type":"Explore","description":"Look around."}}]}}"#,
+            "
+",
+            r#"{"type":"user","sessionId":"session-absent-agent","uuid":"tool-result-1","timestamp":"2026-01-01T10:00:02Z","cwd":"/fixtures/project","toolUseResult":"{\"isAsync\":true,\"status\":\"async_launched\",\"agentId\":\"absent-agent\",\"resolvedModel\":\"claude-fixture-sonnet\"}","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tool-agent-9","content":"Launched."}]}}"#,
+            "
+"
+        ),
+    )
+    .unwrap();
+
+    let backend = ClaudeBackend::new(&root);
+    let session = located(&backend, "session-absent-agent");
+    let lineage = backend.lineage(&session).unwrap();
+
+    assert_eq!(lineage.children.len(), 1, "{:#?}", lineage.children);
+    let child = &lineage.children[0];
+    assert_eq!(child.reference, "absent-agent");
+    assert!(!child.resolved);
+    assert_eq!(child.disposition.as_deref(), Some("async_launched"));
+    assert_eq!(child.role.as_deref(), Some("Explore"));
+    assert_eq!(child.model.as_deref(), Some("claude-fixture-sonnet"));
+    // A launch is not an ending, so nothing says the child finished.
+    assert!(child.completed_at.is_none());
+    fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
