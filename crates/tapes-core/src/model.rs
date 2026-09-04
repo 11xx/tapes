@@ -760,6 +760,28 @@ mod tests {
     }
 
     #[test]
+    fn an_envelope_is_recognized_by_its_tag_whatever_attributes_it_carries() {
+        assert!(is_known_envelope(
+            "<in-app-browser-context url=\"https://example.invalid/page\">\n  page\n</in-app-browser-context>\n"
+        ));
+        assert!(is_known_envelope(
+            "# Files mentioned by the user:\n<environment_context>/work</environment_context>"
+        ));
+        // A block that carries a request beside the envelope is not envelope.
+        assert!(!is_known_envelope(
+            "<environment_context>\n  <cwd>/work</cwd>\n</environment_context>\nfix the parser"
+        ));
+    }
+
+    #[test]
+    fn an_element_whose_name_merely_begins_with_a_known_tag_is_left_alone() {
+        assert_eq!(
+            derive_title("<INSTRUCTIONS_FOR_HUMANS>read me</INSTRUCTIONS_FOR_HUMANS>").as_deref(),
+            Some("<INSTRUCTIONS_FOR_HUMANS>read me</INSTRUCTIONS_FOR_HUMANS>")
+        );
+    }
+
+    #[test]
     fn derived_title_handles_plugins_before_heading_and_leading_whitespace() {
         let title = derive_title(
             "\n  <recommended_plugins>\n- one-plugin\n</recommended_plugins>\n\n  # AGENTS.md instructions\n\n<INSTRUCTIONS>\nfollow the repository rules\n</INSTRUCTIONS>\n\n  inspect the fixture  ",
