@@ -311,7 +311,11 @@ that says yes; a bundle costs context, and the tail usually settles it.
 `tapes events --latest --json` answers tool-count, pairing, duration, and
 incompleteness questions without parsing raw tool envelopes from turn text,
 and `tapes usage --latest --json` answers token, cost, and turn-count
-questions without summing a transcript by hand. `tapes lineage --latest
+questions without summing a transcript by hand. `tapes stats --latest --json`
+answers the retrospective counting questions — calls by tool and outcome, time
+spent in tools, incomplete calls, turns by kind, cache shares, recorded
+children — in one bounded pass, so none of them needs custom `jq` over an
+export. `tapes lineage --latest
 --json` answers which sessions a recording names as relatives — the one that
 spawned it, and the children its store records with their roles and outcomes
 — from the records themselves rather than from directory or timestamp
@@ -321,7 +325,7 @@ few endings that matter instead of every tail.
 
 **Contracts you can build on.** `tapes-list/1`, `tapes-session/1`,
 `tapes-events/1`, `tapes-usage/1`, `tapes-usage-summary/1`, `tapes-lineage/1`,
-`tapes-endings/1`, and `tapes-export-manifest/1` are versioned
+`tapes-endings/1`, `tapes-stats/1`, and `tapes-export-manifest/1` are versioned
 JSON; a breaking shape change bumps the version. A single-session `export`
 prints
 exactly three paths and their sizes on stdout, in reading order, and writes each
