@@ -353,11 +353,20 @@ fn render_transcript(transcript: &Transcript, by_latest: bool) -> String {
 fn render_truncation_notes(out: &mut String, truncation: &Truncation) {
     if let Some(window) = &truncation.window {
         let total = window.returned + window.omitted;
-        out.push_str(&format!(
-            "Note: Showing the last {} of {total} turns; {} earlier turns fall outside the {}-turn window. \
-             Use --tail {total} to see them, or `tapes export` for every turn the reader can reach.\n",
-            window.returned, window.omitted, window.bound
-        ));
+        if window.omitted_exact {
+            out.push_str(&format!(
+                "Note: Showing the last {} of {total} turns; {} earlier turns fall outside the {}-turn window. \
+                 Use --tail {total} to see them, or `tapes export` for every turn the reader can reach.\n",
+                window.returned, window.omitted, window.bound
+            ));
+        } else {
+            out.push_str(&format!(
+                "Note: Showing the last {} of at least {total} turns; the read stopped once the {}-turn window \
+                 was full, so older turns were not fetched and ordinals count from the oldest fetched. \
+                 A larger --tail or `tapes export` fetches further back.\n",
+                window.returned, window.bound
+            ));
+        }
     }
     for bound in &truncation.source {
         match bound {
@@ -483,6 +492,7 @@ mod tests {
                     omitted_from: End::Head,
                     bound: 1,
                     ordinals: Some(OrdinalRange { first: 2, last: 2 }),
+                    omitted_exact: true,
                 }),
                 source: Vec::new(),
             },

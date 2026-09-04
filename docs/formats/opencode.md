@@ -241,10 +241,19 @@ bound of transfer. A single message larger than
 the bound is the store's own limit: the read stops before it, hands over the
 newer messages it has, and says so in a transcript note; only when that
 message is the newest one, with nothing readable in front of it, does the read
-fail. A read that stopped before exhaustion reports a `record-page` of
-`messages` naming how many were fetched. `export` reads with an unbounded
+fail. Why the read stopped decides what the transcript reports. Stopping
+because the requested window was full is a window with `omitted_exact:
+false`: only the fetched messages are counted, a wider `--tail` or `export`
+fetches older ones, and ordinals count from the oldest fetched turn, so a
+reference into an OpenCode API session should carry the `native_id`. Stopping
+at the 1,000-message ceiling, which is exact whatever page size the read had
+grown back to, or before a message the transport cannot carry, is a
+`record-page` of `messages` naming how many were fetched. A page shorter than
+its limit is exhaustion and reports nothing. `export` reads with an unbounded
 window and pages to the same ceiling, so a session whose whole projection is
-larger than the transport bound still exports.
+larger than the transport bound still exports. A content search that reached
+fewer than the 32 turns it searches before a ceiling reports the session as
+unsearched rather than as a non-match.
 
 A turn's `native_id` is the part's `id` where the read carries one, and the
 message `id` (`msg_…`) otherwise; the database projection carries message ids

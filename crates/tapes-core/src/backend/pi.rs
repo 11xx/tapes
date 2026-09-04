@@ -98,12 +98,13 @@ impl PiBackend {
             tokens: None,
             store: Some(path.display().to_string()),
         };
-        // The opening is the start of the file, so its first user message is
-        // the session's first. Branch structure beyond the opening is unknown
-        // there, so the opening's messages are read in file order.
+        // pi rewinds by appending a new branch, so the first user message in
+        // the file may sit on a root the active path never reaches. The
+        // active path is known only when the whole file is in the tail; past
+        // the bound the hint stays absent rather than naming an abandoned
+        // prompt as the session's first.
         let session = if read.truncated {
-            let opening_turns = opening.iter().flat_map(parse_turns).collect::<Vec<_>>();
-            session.with_derived_title(&opening_turns)
+            session
         } else {
             session.with_derived_title(&turns)
         };

@@ -48,7 +48,9 @@ harness writes its session header, and the last 4 MiB, where the newest
 records are; neither window grows with the file. `started_at` is the earliest
 timestamp across both, so a session larger than the tail still reports the
 start its header recorded rather than the first record the tail happened to
-retain. `last_activity_at` is the newest timestamp in the tail, which is the
+retain. The head probe grows to 1 MiB when the first line alone is longer than
+64 KiB; a first line longer than that leaves the opening empty and the start
+falls back to the tail's earliest record. `last_activity_at` is the newest timestamp in the tail, which is the
 end of the file. The session id and directory are likewise read from the
 opening first. A header without a timestamp falls back to the tail's earliest,
 and a file with no timestamp anywhere in either window is not a session.
@@ -103,14 +105,23 @@ flag is true when anything was omitted and the turns are only a window into the
 transcript; `truncation` says what and why, and is omitted from JSON when
 nothing was. Its `window`, present when the requested turn window dropped
 turns, carries `returned`, `omitted`, `omitted_from` (always `head`, since a
-window keeps the newest turns), and the `bound` in force; a larger `--tail` or
-`export` recovers what it omitted. Its `source` lists bounds the reader itself
-reached, each tagged by `kind`: `file-tail` with the `bytes` read from the end
-of a recording file, `record-page` with the newest `records` fetched before
-the read stopped and what they are (`of`), and `turn-text` with how many `turns` carry text cut at
-`chars` characters. How much lies beyond a source bound is unknown, and no
-request through `tapes` passes it: `export` reads with an unbounded window and
-still reports the same `source` entries.
+window keeps the newest turns), the `bound` in force, and `omitted_exact`,
+which is omitted when true; a larger `--tail` or `export` recovers what a
+window omitted. `omitted_exact: false` marks a read that stopped fetching once
+the window was full, as the paged OpenCode API read does: `omitted` then
+counts only what was fetched, a wider request fetches older turns, and
+ordinals count from the oldest turn that read reached rather than from the
+session's start, so `native_id` is the stable reference for such a store. Its
+`source` lists bounds the reader itself reached, each tagged by `kind`:
+`file-tail` with the `bytes` read from the end of a recording file,
+`record-page` with the newest `records` a paged store read fetched before its
+ceiling (a message cap, or a message the transport cannot carry) and what they
+are (`of`), and `turn-text` with how many `turns` carry text cut at `chars`
+characters. How much lies beyond a source bound is unknown, and no request
+through `tapes` passes it: `export` reads with an unbounded window and still
+reports the same `source` entries. A content search whose bounded read reached
+fewer turns than it was asked to search behind a source bound reports the
+session as unsearched rather than as a non-match.
 Notes preserve harness-specific facts that do not fit the normalized fields,
 such as abandoned pi branches or the number of malformed lines skipped while
 reading. They are prose rather than a structured API and are omitted from JSON

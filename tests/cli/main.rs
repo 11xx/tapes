@@ -1621,16 +1621,21 @@ fn show_tail_on_an_oversized_opencode_session_stays_bounded() {
         serde_json::from_slice(&run(&["show", id, "--tail", "1", "--json"])).unwrap();
     assert_eq!(value["turns"].as_array().unwrap().len(), 1);
     assert_eq!(value["truncated"], true);
+    assert!(value["truncation"].get("source").is_none(), "{value}");
     assert_eq!(
-        value["truncation"]["source"],
-        serde_json::json!([{ "kind": "record-page", "records": 8, "of": "messages" }])
+        value["truncation"]["window"],
+        serde_json::json!({
+            "returned": 1, "omitted": 7, "omitted_from": "head", "bound": 1,
+            "ordinals": { "first": 7, "last": 7 }, "omitted_exact": false
+        })
     );
 
     let human = String::from_utf8(run(&["show", id, "--tail", "1"])).unwrap();
     assert!(
-        human.contains("Only the newest 8 messages were fetched from the store"),
+        human.contains("Showing the last 1 of at least 8 turns; the read stopped once the 1-turn window was full"),
         "{human}"
     );
+    assert!(!human.contains("were fetched from the store"), "{human}");
 
     let calls = fs::read_to_string(format!("{}.calls", program.path().display())).unwrap();
     assert!(

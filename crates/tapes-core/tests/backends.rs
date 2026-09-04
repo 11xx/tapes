@@ -1167,10 +1167,9 @@ fn a_transcript_past_the_read_window_still_reports_its_directory() {
         "2026-01-01T10:00:00Z".parse::<DateTime<Utc>>().unwrap(),
         "the header's timestamp is the start, not the first retained tail entry"
     );
-    assert_eq!(
-        session.derived_title.as_deref(),
-        Some("Open the oversized fixture."),
-        "the opening's first user message is the session's first"
+    assert!(
+        session.derived_title.is_none(),
+        "past the bound pi cannot prove which root the active path descends from"
     );
     assert_eq!(
         backend
@@ -1222,6 +1221,8 @@ struct SearchFixture {
     session: Session,
     requested_tail: Rc<Cell<usize>>,
     fail: bool,
+    /// The read stops at a source bound before the searched tail is covered.
+    bounded: bool,
 }
 
 impl Backend for SearchFixture {
@@ -1260,8 +1261,17 @@ impl Backend for SearchFixture {
                 ordinal: 0,
                 native_id: None,
             }],
-            truncated: false,
-            truncation: Truncation::default(),
+            truncated: self.bounded,
+            truncation: Truncation {
+                window: None,
+                source: if self.bounded {
+                    vec![SourceBound::FileTail {
+                        bytes: 4 * 1024 * 1024,
+                    }]
+                } else {
+                    Vec::new()
+                },
+            },
             trailing_record: None,
             notes: Vec::new(),
         })
@@ -1275,6 +1285,7 @@ fn list_search_uses_a_fixed_tail_before_applying_the_limit() {
         session: resolver_session("search-session"),
         requested_tail: Rc::clone(&requested_tail),
         fail: false,
+        bounded: false,
     })];
 
     let result = list_with_backends_filtered_and_search(
@@ -1357,6 +1368,7 @@ fn a_failed_bounded_search_is_reported_as_unsearched() {
         session: resolver_session("unsearched-session"),
         requested_tail,
         fail: true,
+        bounded: false,
     })];
 
     let result = list_with_backends_filtered_and_search(
@@ -1899,16 +1911,13 @@ fn an_oversized_opencode_session_is_read_in_pages() {
     assert_eq!(tail.turns.len(), 1);
     assert_eq!(tail.turns[0].text, "Page 1 message 0");
     assert!(tail.truncated);
-    assert_eq!(
-        tail.truncation.source,
-        vec![SourceBound::RecordPage {
-            records: 8,
-            of: "messages".to_owned()
-        }],
-        "one page of the minimum size was enough, and older pages were not fetched"
+    assert!(
+        tail.truncation.source.is_empty(),
+        "stopping with the window full is not a source bound: a wider request fetches more"
     );
     let window = tail.truncation.window.as_ref().unwrap();
     assert_eq!((window.returned, window.omitted), (1, 7));
+    assert!(!window.omitted_exact, "only the fetched page is counted");
 
     let whole = backend.transcript(&session, usize::MAX).unwrap();
     assert_eq!(whole.turns.len(), 100, "two full pages and one short page");
@@ -2007,4 +2016,109 @@ fn codex_reads_cumulative_token_totals_from_the_latest_event_with_usage() {
 
     let without = located(&backend, "20000000-0000-0000-0000-000000000004");
     assert!(without.tokens.is_none(), "no token event, no counters");
+}
+
+/// A read that reached fewer turns than the searched tail because of a source
+/// bound cannot say the needle is absent; the session is unsearched, not a
+/// non-match. A hit inside the reached turns is still a match.
+#[test]
+fn a_source_bounded_read_short_of_the_tail_is_unsearched_not_a_non_match() {
+    let requested_tail = Rc::new(Cell::new(0));
+    let backends: Vec<Box<dyn Backend>> = vec![Box::new(SearchFixture {
+        session: resolver_session("bounded-session"),
+        requested_tail,
+        fail: false,
+        bounded: true,
+    })];
+
+    let miss = list_with_backends_filtered_and_search(
+        &backends,
+        Some("fixture"),
+        None,
+        1,
+        None,
+        None,
+        Some("absent"),
+    )
+    .unwrap();
+    assert!(miss.sessions.is_empty());
+    assert_eq!(miss.unsearched.len(), 1, "{:?}", miss.unsearched);
+    assert!(
+        miss.unsearched[0].contains("reached 1 of the last 32 turns"),
+        "{:?}",
+        miss.unsearched
+    );
+
+    let hit = list_with_backends_filtered_and_search(
+        &backends,
+        Some("fixture"),
+        None,
+        1,
+        None,
+        None,
+        Some("needle"),
+    )
+    .unwrap();
+    assert_eq!(hit.sessions.len(), 1);
+    assert!(hit.unsearched.is_empty());
+}
+
+/// The message ceiling is exact: a store with more messages than the ceiling
+/// yields exactly that many, whatever page size the read had grown back to.
+#[test]
+fn the_paged_read_stops_exactly_at_the_message_ceiling() {
+    let program = OpenCodeAlias::oversized();
+    let backend = OpenCodeBackend::new(program.path());
+    let session = located(&backend, "ses_endless_fixture");
+
+    let whole = backend.transcript(&session, usize::MAX).unwrap();
+    assert_eq!(whole.turns.len(), 1000);
+    assert_eq!(
+        whole.truncation.source,
+        vec![SourceBound::RecordPage {
+            records: 1000,
+            of: "messages".to_owned()
+        }]
+    );
+    assert!(whole.truncation.window.is_none());
+}
+
+/// A first line longer than the head probe grows the probe rather than
+/// emptying the opening, so the header behind it still supplies the start.
+#[test]
+fn a_first_line_longer_than_the_head_probe_still_yields_the_header() {
+    let root = std::env::temp_dir().join(format!("tapes-long-first-line-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&root);
+    let day = root.join("2026/01/01");
+    fs::create_dir_all(&day).unwrap();
+    let id = "00000000-0000-0000-0000-00000000dddd";
+    let path = day.join(format!("rollout-2026-01-01T10-00-00-{id}.jsonl"));
+    let mut file = BufWriter::new(File::create(&path).unwrap());
+    writeln!(
+        file,
+        r#"{{"timestamp":"2026-01-01T10:00:00Z","type":"session_meta","payload":{{"id":"{id}","cwd":"/fixtures/project","note":"{}"}}}}"#,
+        "h".repeat(70 * 1024)
+    )
+    .unwrap();
+    let filler = "x".repeat(4096);
+    for _ in 0..1200 {
+        writeln!(
+            file,
+            r#"{{"timestamp":"2026-01-01T12:00:00Z","type":"response_item","payload":{{"type":"message","role":"assistant","content":[{{"type":"output_text","text":"{filler}"}}]}}}}"#
+        )
+        .unwrap();
+    }
+    drop(file);
+
+    let backend = CodexBackend::new(&root);
+    let session = located(&backend, id);
+    assert_eq!(
+        session.started_at,
+        "2026-01-01T10:00:00Z".parse::<DateTime<Utc>>().unwrap()
+    );
+    assert_eq!(
+        session.directory.as_deref(),
+        Some(Path::new("/fixtures/project"))
+    );
+    fs::remove_dir_all(root).unwrap();
 }

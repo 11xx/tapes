@@ -196,14 +196,24 @@ fn write_header(out: &mut String, transcript: &Transcript, kind: &str) {
         human_timestamp(session.last_activity_at)
     );
     if let Some(window) = &transcript.truncation.window {
-        let _ = writeln!(
-            out,
-            "- truncated: the last {} of {} turns; {} earlier turns fall outside the {}-turn window",
-            window.returned,
-            window.returned + window.omitted,
-            window.omitted,
-            window.bound
-        );
+        let _ = if window.omitted_exact {
+            writeln!(
+                out,
+                "- truncated: the last {} of {} turns; {} earlier turns fall outside the {}-turn window",
+                window.returned,
+                window.returned + window.omitted,
+                window.omitted,
+                window.bound
+            )
+        } else {
+            writeln!(
+                out,
+                "- truncated: the last {} of at least {} turns; the read stopped once the {}-turn window was full",
+                window.returned,
+                window.returned + window.omitted,
+                window.bound
+            )
+        };
     }
     for bound in &transcript.truncation.source {
         let _ = match bound {
