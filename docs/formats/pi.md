@@ -61,7 +61,10 @@ rendered turn, the backend reports its kind and timestamp as
 ## Message content
 
 `message.role` is `user`, `assistant`, or `toolResult` — the tool result is a
-role, not a content block, which is where pi differs most from the others.
+role, not a content block, which is where pi differs most from the others. The
+`user` role holds the operator's own messages and nothing else: pi keeps its
+commands and its state changes in entries of their own, so a session ending on
+a user message ends on an unanswered request.
 
 Assistant content blocks:
 

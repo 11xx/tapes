@@ -24,7 +24,7 @@ Every line is `{"type": …, "timestamp": …, "payload": {…}}` with an RFC 33
 
 | `type` | Carries |
 |---|---|
-| `session_meta` | `payload.id` (session UUID), `payload.cwd` |
+| `session_meta` | `payload.id` (session UUID), `payload.cwd`, `payload.source` |
 | `turn_context` | `payload.model`, `payload.effort`, `payload.cwd` |
 | `response_item` | the conversation itself, discriminated by `payload.type` |
 | `event_msg` | harness lifecycle and accounting state, discriminated by `payload.type` |
@@ -86,6 +86,7 @@ and result records are separate, so `completed_ts` is absent.
 Some Codex invocations inject a leading user record containing a heading such
 as `# AGENTS.md instructions` (optionally followed by a directory), an
 `<INSTRUCTIONS>` block, and a `<recommended_plugins>` block before the human
+request. Others put the same wrapper in the same `input_text` block as the
 request. The normalized
 derived title ignores that wrapper and chooses the first later user turn with
 meaningful content; an instruction-only record does not become the title.
@@ -93,6 +94,29 @@ meaningful content; an instruction-only record does not become the title.
 Reasoning payloads are frequently encrypted, carrying a signature rather than
 readable text. That is absence, not failure — a session can legitimately yield
 reasoning turns with placeholder content.
+
+## The operator's own messages
+
+A user `response_item` is what the model reads, wrapper included, so it does
+not by itself say which part somebody typed. The harness records that
+separately: for each message the operator sends, an `event_msg` with
+`payload.type == "user_message"` carries `payload.message`, the text as it was
+sent, and follows the matching `response_item`.
+
+```json
+{"type": "event_msg", "payload": {"type": "user_message", "message": "Implement the readable title."}}
+```
+
+`payload.source` in the header names the entry point the session was started
+from. An `exec` session — `codex exec`, whose caller supplies one prompt and
+reads the result — records no `user_message` event at all. There, its user
+messages are the wrapper followed by the caller's prompt, and the wrapper
+blocks are what separates them.
+
+The wrapper blocks, whether they arrive as a record of their own or beside the
+request, begin with `<environment_context>`, `<recommended_plugins>`,
+`<in-app-browser-context>`, `<INSTRUCTIONS>`, `# AGENTS.md instructions`, or
+`# Files mentioned by the user:`.
 
 ## Token accounting
 

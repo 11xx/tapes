@@ -16,7 +16,7 @@ use tapes_core::backend::{Backend, Listing, Query};
 use tapes_core::event::{project, EventKind, Incomplete};
 use tapes_core::model::{
     Accounting, AccountingBasis, AccountingCoverage, Cost, Role, Session, SourceBound, Tokens,
-    Transcript, Truncation, Turn,
+    Transcript, Truncation, Turn, TurnKind,
 };
 use tapes_core::{
     latest_with_backends, list_with_backends, list_with_backends_filtered,
@@ -223,7 +223,7 @@ fn every_backend_satisfies_shared_normalization_assertions() {
             assert!(listed.derived_title.is_none());
         }
 
-        let transcript = backend.transcript(listed, 10).unwrap();
+        let transcript = backend.transcript(listed, usize::MAX).unwrap();
         assert_eq!(transcript.session, *listed);
         assert!(transcript.turns.len() >= 2);
         assert_eq!(transcript.turns.first().unwrap().role, Role::User);
@@ -658,30 +658,43 @@ fn every_file_backend_resolves_full_ids_and_unambiguous_prefixes() {
 fn every_file_backend_preserves_reasoning_and_tool_chronology() {
     for (backend, id) in fixture_backends() {
         let session = located(backend.as_ref(), id);
-        let transcript = backend.transcript(&session, 10).unwrap();
+        let transcript = backend.transcript(&session, usize::MAX).unwrap();
         let roles = transcript
             .turns
             .iter()
             .map(|turn| turn.role.clone())
             .collect::<Vec<_>>();
 
-        let expected = if backend.harness() == "opencode" {
-            vec![
+        let expected = match backend.harness() {
+            "opencode" => vec![
                 Role::User,
                 Role::Reasoning,
                 Role::Tool,
                 Role::Assistant,
                 Role::Tool,
-            ]
-        } else {
-            vec![
+            ],
+            // The claude fixture closes its exchange with the commands and
+            // notices its harness records in the user envelope.
+            "claude" => {
+                let mut roles = vec![
+                    Role::User,
+                    Role::Reasoning,
+                    Role::Tool,
+                    Role::Tool,
+                    Role::Assistant,
+                ];
+                roles.extend((0..8).map(|_| Role::User));
+                roles.push(Role::Tool);
+                roles
+            }
+            _ => vec![
                 Role::User,
                 Role::Reasoning,
                 Role::Tool,
                 Role::Tool,
                 Role::Assistant,
                 Role::Tool,
-            ]
+            ],
         };
         assert_eq!(roles, expected, "{} chronology differs", backend.harness());
         assert_eq!(transcript.turns[1].text, "Consider the fixture.");
@@ -1595,6 +1608,7 @@ impl Backend for SearchFixture {
             session: session.clone(),
             turns: vec![Turn {
                 role: Role::User,
+                kind: TurnKind::Operator,
                 text: "needle".into(),
                 ts: None,
                 ordinal: 0,
@@ -2803,4 +2817,158 @@ fn a_truncated_claude_read_keeps_whole_session_coverage_for_a_cost_state_record(
     assert!(backend.transcript(&session, 1).unwrap().truncated);
 
     fs::remove_dir_all(root).unwrap();
+}
+
+/// Every kind rests on a field the harness wrote beside the text, so a record
+/// whose text resembles a command is still an operator's when the sender
+/// fields vouch for it, and a record with no such field stays unknown.
+#[test]
+fn claude_types_each_user_record_from_the_fields_it_recorded() {
+    let backend = ClaudeBackend::new(fixtures("claude"));
+    let session = located(&backend, "session-claude");
+    let transcript = backend.transcript(&session, usize::MAX).unwrap();
+
+    let kind = |native_id: &str| {
+        transcript
+            .turns
+            .iter()
+            .find(|turn| turn.native_id.as_deref() == Some(native_id))
+            .unwrap_or_else(|| panic!("fixture has no record {native_id}"))
+            .kind
+    };
+
+    assert_eq!(kind("user-1"), TurnKind::Unknown);
+    assert_eq!(kind("user-2"), TurnKind::Operator);
+    assert_eq!(kind("user-3"), TurnKind::Operator);
+    assert_eq!(kind("meta-hook"), TurnKind::Ambient);
+    assert_eq!(kind("meta-caveat"), TurnKind::Control);
+    assert_eq!(kind("command-low-priority"), TurnKind::Control);
+    assert_eq!(kind("command-exit"), TurnKind::Control);
+    assert_eq!(kind("command-exit-stdout"), TurnKind::Control);
+    assert_eq!(kind("notice-task"), TurnKind::Notice);
+    assert_eq!(kind("tool-result-1"), TurnKind::Tool);
+    assert_eq!(kind("assistant-1"), TurnKind::Reasoning);
+    assert_eq!(kind("assistant-2"), TurnKind::Assistant);
+}
+
+/// The ending a reader judges: the operator's last turn is the one before the
+/// commands the harness recorded on its way out, so a session that ends on a
+/// control turn is not an unanswered prompt.
+#[test]
+fn the_last_operator_turn_precedes_the_commands_that_close_a_claude_session() {
+    let backend = ClaudeBackend::new(fixtures("claude"));
+    let session = located(&backend, "session-claude");
+    let transcript = backend.transcript(&session, usize::MAX).unwrap();
+
+    let last_operator = transcript
+        .turns
+        .iter()
+        .rposition(|turn| turn.kind == TurnKind::Operator)
+        .unwrap();
+    assert!(transcript.turns[last_operator + 1..]
+        .iter()
+        .filter(|turn| turn.role == Role::User)
+        .all(|turn| {
+            matches!(
+                turn.kind,
+                TurnKind::Control | TurnKind::Notice | TurnKind::Ambient
+            )
+        }));
+    assert_eq!(
+        transcript.turns[last_operator + 1].kind,
+        TurnKind::Ambient,
+        "the operator's last turn precedes what the harness recorded after it"
+    );
+}
+
+/// The bundle's context file is the session's argument, so the harness's own
+/// commands, notices, and attached context stay in the trace beside them.
+#[test]
+fn a_bundle_context_keeps_operator_turns_and_drops_harness_records() {
+    let backend = ClaudeBackend::new(fixtures("claude"));
+    let session = located(&backend, "session-claude");
+    let transcript = backend.transcript(&session, usize::MAX).unwrap();
+    let directory = std::env::temp_dir().join(format!(
+        "tapes-context-kinds-{}-{}",
+        std::process::id(),
+        OPENCODE_ALIAS_COUNTER.fetch_add(1, Ordering::Relaxed)
+    ));
+    let bundle = tapes_core::bundle::export(&transcript, &directory).unwrap();
+
+    let context = fs::read_to_string(&bundle.context.path).unwrap();
+    assert!(context.contains("Check the ending."), "{context}");
+    assert!(!context.contains("/low-priority"), "{context}");
+    assert!(!context.contains("local-command-stdout"), "{context}");
+    assert!(
+        !context.contains("A background task finished."),
+        "{context}"
+    );
+    assert!(!context.contains("Fixture hook ran"), "{context}");
+
+    let trace = fs::read_to_string(&bundle.trace.path).unwrap();
+    assert!(trace.contains("## user/control #10"), "{trace}");
+    assert!(trace.contains("## user/notice #12"), "{trace}");
+    assert!(trace.contains("## user/ambient #7"), "{trace}");
+    fs::remove_dir_all(directory).unwrap();
+}
+
+/// Codex records the operator's own messages as `user_message` events, and an
+/// `exec` session records none because its caller supplies the one prompt.
+#[test]
+fn codex_types_user_messages_from_its_own_records() {
+    let backend = CodexBackend::new(fixtures("codex"));
+    let kinds = |id: &str| {
+        let session = located(&backend, id);
+        backend
+            .transcript(&session, usize::MAX)
+            .unwrap()
+            .turns
+            .into_iter()
+            .filter(|turn| turn.role == Role::User)
+            .map(|turn| turn.kind)
+            .collect::<Vec<_>>()
+    };
+
+    assert_eq!(
+        kinds("10000000-0000-0000-0000-000000000003"),
+        vec![TurnKind::Ambient, TurnKind::Operator]
+    );
+    assert_eq!(
+        kinds("30000000-0000-0000-0000-000000000005"),
+        vec![TurnKind::Operator],
+        "an exec session's prompt needs no event"
+    );
+    assert_eq!(
+        kinds("20000000-0000-0000-0000-000000000004"),
+        vec![TurnKind::Unknown],
+        "a message with neither evidence is not guessed at"
+    );
+}
+
+/// pi and OpenCode keep their harness messages out of the user role, so an
+/// unanswered user turn there is a genuine unanswered prompt.
+#[test]
+fn pi_and_opencode_user_turns_are_the_operator_speaking() {
+    let backends: Vec<(Box<dyn Backend>, &str)> = vec![
+        (Box::new(PiBackend::new(fixtures("pi"))), "session-pi"),
+        (
+            Box::new(OpenCodeBackend::new(opencode_fixture_program())),
+            "ses_000000fixtureSharedSession",
+        ),
+    ];
+    for (backend, id) in backends {
+        let session = located(backend.as_ref(), id);
+        let transcript = backend.transcript(&session, usize::MAX).unwrap();
+        let user = transcript
+            .turns
+            .iter()
+            .filter(|turn| turn.role == Role::User)
+            .collect::<Vec<_>>();
+        assert!(!user.is_empty(), "{} has no user turn", backend.harness());
+        assert!(
+            user.iter().all(|turn| turn.kind == TurnKind::Operator),
+            "{} typed a user turn as something else",
+            backend.harness()
+        );
+    }
 }

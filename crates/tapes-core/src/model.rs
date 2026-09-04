@@ -123,6 +123,9 @@ pub enum AccountingCoverage {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Turn {
     pub role: Role,
+    /// What the record the turn came from is, beyond the role that carries
+    /// it. Filled from the harness's own fields, never from the text.
+    pub kind: TurnKind,
     pub text: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ts: Option<DateTime<Utc>>,
@@ -281,6 +284,48 @@ pub enum Role {
     Reasoning,
 }
 
+impl Role {
+    /// The kind a role settles by itself. A harness records its own commands,
+    /// its attached context, and the messages it injects in the same user
+    /// envelope an operator's prompt arrives in, so a user turn's kind comes
+    /// from the fields the harness wrote beside the text.
+    pub fn kind(&self) -> Option<TurnKind> {
+        match self {
+            Role::User => None,
+            Role::Assistant => Some(TurnKind::Assistant),
+            Role::Tool => Some(TurnKind::Tool),
+            Role::Reasoning => Some(TurnKind::Reasoning),
+        }
+    }
+}
+
+/// Who a turn's content came from, which the role alone cannot say: a user
+/// turn holds an operator's request, a harness command, context the harness
+/// attached, or a message the harness injected. Every value rests on a field
+/// the harness itself wrote; `Unknown` is the answer where it wrote none.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TurnKind {
+    /// Content addressed to the agent by the person or caller driving the
+    /// harness. A record carrying ambient context beside a request is one.
+    Operator,
+    /// The agent's own visible text.
+    Assistant,
+    /// The agent's reasoning.
+    Reasoning,
+    /// A tool call or its result.
+    Tool,
+    /// A harness command or control message recorded in a user envelope.
+    Control,
+    /// Context the harness attached on its own, carrying no request.
+    Ambient,
+    /// A message the harness injected into the user envelope on the system's
+    /// behalf.
+    Notice,
+    /// A user-envelope turn the harness gives no evidence for.
+    Unknown,
+}
+
 impl Session {
     /// Preserve recorded title absence while adding a bounded display hint.
     pub fn with_derived_title(mut self, turns: &[Turn]) -> Self {
@@ -306,8 +351,7 @@ pub fn derive_title(text: &str) -> Option<String> {
 }
 
 fn derive_title_info(text: &str) -> Option<(String, bool)> {
-    let mut cleaned = text.to_owned();
-    strip_known_envelopes(&mut cleaned);
+    let cleaned = without_known_envelopes(text);
 
     let collapsed = cleaned.split_whitespace().collect::<Vec<_>>().join(" ");
     if collapsed.is_empty() {
@@ -330,19 +374,42 @@ fn derive_title_info(text: &str) -> Option<(String, bool)> {
     }
 }
 
+/// Blocks a harness wraps in a tag of its own around the operator's message.
+const ENVELOPE_TAGS: [&str; 9] = [
+    "environment_context",
+    "collaboration_mode",
+    "permissions_instructions",
+    "apps_instructions",
+    "plugins_instructions",
+    "skills_instructions",
+    "INSTRUCTIONS",
+    "recommended_plugins",
+    "in-app-browser-context",
+];
+
+/// Blocks a harness opens with a heading rather than a tag.
+const ENVELOPE_HEADINGS: [&str; 2] = ["# AGENTS.md instructions", "# Files mentioned by the user:"];
+
+/// The text with every block the harness attached around it removed. What
+/// remains is what somebody wrote, or nothing when the text was all envelope.
+pub fn without_known_envelopes(text: &str) -> String {
+    let mut cleaned = text.to_owned();
+    strip_known_envelopes(&mut cleaned);
+    cleaned
+}
+
+/// Whether the text holds attached blocks and nothing else.
+pub fn is_known_envelope(text: &str) -> bool {
+    without_known_envelopes(text).trim().is_empty()
+}
+
 fn strip_known_envelopes(text: &mut String) {
     loop {
-        let mut changed = strip_leading_agents_heading(text);
-        for tag in [
-            "environment_context",
-            "collaboration_mode",
-            "permissions_instructions",
-            "apps_instructions",
-            "plugins_instructions",
-            "skills_instructions",
-            "INSTRUCTIONS",
-            "recommended_plugins",
-        ] {
+        let mut changed = false;
+        for heading in ENVELOPE_HEADINGS {
+            changed |= strip_leading_heading(text, heading);
+        }
+        for tag in ENVELOPE_TAGS {
             changed |= strip_envelope(text, tag);
         }
         if !changed {
@@ -351,10 +418,10 @@ fn strip_known_envelopes(text: &mut String) {
     }
 }
 
-fn strip_leading_agents_heading(text: &mut String) -> bool {
+fn strip_leading_heading(text: &mut String, heading: &str) -> bool {
     let leading = text.len() - text.trim_start().len();
     let remainder = &text[leading..];
-    let Some(after_prefix) = remainder.strip_prefix("# AGENTS.md instructions") else {
+    let Some(after_prefix) = remainder.strip_prefix(heading) else {
         return false;
     };
     let prefix_len = remainder.len() - after_prefix.len();
@@ -368,13 +435,24 @@ fn strip_leading_agents_heading(text: &mut String) -> bool {
 }
 
 fn strip_envelope(text: &mut String, tag: &str) -> bool {
-    let opening = format!("<{tag}>");
+    let opening = format!("<{tag}");
     let closing = format!("</{tag}>");
     let mut search_from = 0;
     let mut changed = false;
     while let Some(relative_start) = text[search_from..].find(&opening) {
         let start = search_from + relative_start;
-        let content_start = start + opening.len();
+        let after_tag = &text[start + opening.len()..];
+        // An opening tag ends at its own `>`, whatever attributes ride on it;
+        // a longer tag that merely begins the same way is another element.
+        let Some(attributes) = after_tag
+            .find('>')
+            .filter(|end| after_tag[..*end].chars().all(|c| c != '<'))
+            .filter(|end| *end == 0 || after_tag.starts_with(char::is_whitespace))
+        else {
+            search_from = start + 1;
+            continue;
+        };
+        let content_start = start + opening.len() + attributes + 1;
         let Some(relative_end) = text[content_start..].find(&closing) else {
             text.replace_range(start.., "");
             return true;
@@ -391,6 +469,38 @@ fn strip_envelope(text: &mut String, tag: &str) -> bool {
 /// or an offset spelling that varies by renderer.
 pub fn human_timestamp(timestamp: DateTime<Utc>) -> String {
     timestamp.to_rfc3339_opts(SecondsFormat::Secs, true)
+}
+
+impl TurnKind {
+    /// The name a human render uses for the kind.
+    pub fn label(self) -> &'static str {
+        match self {
+            TurnKind::Operator => "operator",
+            TurnKind::Assistant => "assistant",
+            TurnKind::Reasoning => "reasoning",
+            TurnKind::Tool => "tool",
+            TurnKind::Control => "control",
+            TurnKind::Ambient => "ambient",
+            TurnKind::Notice => "notice",
+            TurnKind::Unknown => "unknown",
+        }
+    }
+}
+
+/// How a turn is named in human output. A user turn holding something other
+/// than an operator's message names what the harness recorded it as, so a
+/// reader judging an ending is not told a command was an unanswered prompt.
+pub fn human_speaker(turn: &Turn) -> String {
+    let role = match turn.role {
+        Role::User => "user",
+        Role::Assistant => "assistant",
+        Role::Tool => "tool",
+        Role::Reasoning => "reasoning",
+    };
+    if turn.role == Role::User && turn.kind != TurnKind::Operator {
+        return format!("{role}/{}", turn.kind.label());
+    }
+    role.to_owned()
 }
 
 /// Render a title without making a derived hint look like harness metadata.
@@ -583,6 +693,7 @@ mod tests {
         };
         let turn = Turn {
             role: Role::Assistant,
+            kind: TurnKind::Assistant,
             text: "Done".into(),
             ts: Some(timestamp(1_700_000_050)),
             ordinal: 0,
@@ -649,6 +760,28 @@ mod tests {
     }
 
     #[test]
+    fn an_envelope_is_recognized_by_its_tag_whatever_attributes_it_carries() {
+        assert!(is_known_envelope(
+            "<in-app-browser-context url=\"https://example.invalid/page\">\n  page\n</in-app-browser-context>\n"
+        ));
+        assert!(is_known_envelope(
+            "# Files mentioned by the user:\n<environment_context>/work</environment_context>"
+        ));
+        // A block that carries a request beside the envelope is not envelope.
+        assert!(!is_known_envelope(
+            "<environment_context>\n  <cwd>/work</cwd>\n</environment_context>\nfix the parser"
+        ));
+    }
+
+    #[test]
+    fn an_element_whose_name_merely_begins_with_a_known_tag_is_left_alone() {
+        assert_eq!(
+            derive_title("<INSTRUCTIONS_FOR_HUMANS>read me</INSTRUCTIONS_FOR_HUMANS>").as_deref(),
+            Some("<INSTRUCTIONS_FOR_HUMANS>read me</INSTRUCTIONS_FOR_HUMANS>")
+        );
+    }
+
+    #[test]
     fn derived_title_handles_plugins_before_heading_and_leading_whitespace() {
         let title = derive_title(
             "\n  <recommended_plugins>\n- one-plugin\n</recommended_plugins>\n\n  # AGENTS.md instructions\n\n<INSTRUCTIONS>\nfollow the repository rules\n</INSTRUCTIONS>\n\n  inspect the fixture  ",
@@ -664,6 +797,7 @@ mod tests {
         let session = session.with_derived_title(&[
             Turn {
                 role: Role::User,
+                kind: TurnKind::Operator,
                 text: "# AGENTS.md instructions for /work\n<INSTRUCTIONS>rules</INSTRUCTIONS>\n<recommended_plugins>plugins</recommended_plugins>".into(),
                 ts: None,
                 ordinal: 0,
@@ -672,6 +806,7 @@ mod tests {
             },
             Turn {
                 role: Role::User,
+                kind: TurnKind::Operator,
                 text: "Implement the readable title.".into(),
                 ts: None,
                 ordinal: 0,
@@ -701,6 +836,7 @@ mod tests {
         complete.title = None;
         let complete = complete.with_derived_title(&[Turn {
             role: Role::User,
+            kind: TurnKind::Operator,
             text: "A short request".into(),
             ts: None,
             ordinal: 0,
@@ -715,6 +851,7 @@ mod tests {
         shortened.title = None;
         let shortened = shortened.with_derived_title(&[Turn {
             role: Role::User,
+            kind: TurnKind::Operator,
             text: "word ".repeat(DERIVED_TITLE_MAX_CHARS),
             ts: None,
             ordinal: 0,
@@ -735,6 +872,7 @@ mod tests {
         session.title = None;
         let session = session.with_derived_title(&[Turn {
             role: Role::User,
+            kind: TurnKind::Operator,
             text: "A complete request…".into(),
             ts: None,
             ordinal: 0,
@@ -753,6 +891,7 @@ mod tests {
     fn derived_title_does_not_replace_recorded_title() {
         let session = session().with_derived_title(&[Turn {
             role: Role::User,
+            kind: TurnKind::Operator,
             text: "A different request".into(),
             ts: None,
             ordinal: 0,
@@ -848,6 +987,7 @@ mod tests {
     fn a_turn_carries_its_ordinal_and_omits_an_absent_native_id() {
         let turn = Turn {
             role: Role::User,
+            kind: TurnKind::Operator,
             text: "hello".into(),
             ts: None,
             ordinal: 12,

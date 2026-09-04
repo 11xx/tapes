@@ -18,7 +18,7 @@ use super::{
 use crate::event::{self, Bounded, EventKind, EventTranscript, ToolEvent};
 use crate::model::{
     human_bytes, AccountingBasis, AccountingCoverage, Cost, Model, Role, Session, SourceBound,
-    Tokens, Transcript, Truncation, Turn, TurnWindow,
+    Tokens, Transcript, Truncation, Turn, TurnKind, TurnWindow,
 };
 
 const MAX_COMMAND_BYTES: u64 = 8 * 1024 * 1024;
@@ -1492,6 +1492,12 @@ fn normalized_turns(messages: &[Value]) -> Vec<Turn> {
     turns
 }
 
+/// OpenCode gives the harness's own messages parts of their own inside an
+/// assistant message, so every message of type `user` is one the operator sent.
+fn user_kind(role: &Role) -> TurnKind {
+    role.kind().unwrap_or(TurnKind::Operator)
+}
+
 fn parse_message(message: &Value) -> Vec<Turn> {
     let Some(message_role) = message["type"].as_str() else {
         return Vec::new();
@@ -1508,6 +1514,7 @@ fn parse_message(message: &Value) -> Vec<Turn> {
             .as_str()
             .filter(|text| !text.is_empty())
             .map(|text| Turn {
+                kind: user_kind(&role),
                 role,
                 text: text.to_owned(),
                 ts: message_ts,
@@ -1542,6 +1549,7 @@ fn parse_message(message: &Value) -> Vec<Turn> {
                 .map(str::to_owned)
                 .or_else(|| message_id.clone());
             (!text.is_empty()).then_some(Turn {
+                kind: user_kind(&role),
                 role,
                 text,
                 ts,

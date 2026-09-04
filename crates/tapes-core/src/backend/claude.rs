@@ -14,7 +14,7 @@ use super::{
 use crate::event::{Bounded, EventKind, ToolEvent};
 use crate::model::{
     AccountingBasis, AccountingCoverage, Cost, Model, Role, Session, Tokens, TrailingRecord,
-    Transcript, Turn,
+    Transcript, Turn, TurnKind,
 };
 
 #[derive(Clone, Debug)]
@@ -402,8 +402,9 @@ fn parse_turns(value: &Value) -> Vec<Turn> {
     let ts = timestamp(&value["timestamp"]);
     let native_id = value["uuid"].as_str().map(str::to_owned);
     let content = &message["content"];
+    let user_kind = claude_user_kind(value, content.as_str());
     if let Some(text) = content.as_str() {
-        return turn(role, text.to_owned(), ts, native_id, None)
+        return turn(role, user_kind, text.to_owned(), ts, native_id, None)
             .into_iter()
             .collect();
     }
@@ -427,19 +428,21 @@ fn parse_turns(value: &Value) -> Vec<Turn> {
                 ),
                 _ => return None,
             };
-            turn(role, text, ts, native_id.clone(), tool)
+            turn(role, user_kind, text, ts, native_id.clone(), tool)
         })
         .collect()
 }
 
 fn turn(
     role: Role,
+    user_kind: TurnKind,
     text: String,
     ts: Option<chrono::DateTime<chrono::Utc>>,
     native_id: Option<String>,
     tool: Option<ToolEvent>,
 ) -> Option<Turn> {
     (!text.is_empty()).then_some(Turn {
+        kind: role.kind().unwrap_or(user_kind),
         role,
         text,
         ts,
@@ -447,6 +450,80 @@ fn turn(
         native_id,
         tool,
     })
+}
+
+/// Claude writes what a user record is beside its content. `origin.kind` and
+/// `promptSource` name the sender; `isMeta` marks text the harness attached
+/// itself; and a record carrying none of the three holds a local command when
+/// its content is one of the harness's own envelopes and nothing else. A
+/// record the sender fields do vouch for keeps its sender whatever its text
+/// resembles, so a person who types a command envelope is still an operator.
+fn claude_user_kind(value: &Value, content: Option<&str>) -> TurnKind {
+    let origin = value["origin"]["kind"].as_str();
+    let prompt_source = value["promptSource"].as_str();
+    let is_meta = value["isMeta"].as_bool() == Some(true);
+    match (origin, prompt_source) {
+        (Some("human"), _) | (_, Some("typed")) => return TurnKind::Operator,
+        (Some("task-notification" | "auto-continuation"), _) | (_, Some("system")) => {
+            return TurnKind::Notice
+        }
+        _ => {}
+    }
+    if is_meta {
+        let carries_caveat = content.is_some_and(|text| text.contains("<local-command-caveat>"));
+        return if carries_caveat {
+            TurnKind::Control
+        } else {
+            TurnKind::Ambient
+        };
+    }
+    if origin.is_some() || prompt_source.is_some() {
+        return TurnKind::Unknown;
+    }
+    match content {
+        Some(text) if is_command_envelope(text) || is_element(text, "local-command-stdout") => {
+            TurnKind::Control
+        }
+        _ => TurnKind::Unknown,
+    }
+}
+
+/// The envelope Claude records a slash command as: a `<command-name>` element
+/// and the elements that accompany it, separated by whitespace and holding
+/// nothing else.
+fn is_command_envelope(text: &str) -> bool {
+    let mut rest = text.trim();
+    if !rest.starts_with("<command-name>") {
+        return false;
+    }
+    while !rest.is_empty() {
+        let Some(tag) = COMMAND_ELEMENTS
+            .iter()
+            .find(|tag| rest.starts_with(&format!("<{tag}>")))
+        else {
+            return false;
+        };
+        let Some(end) = rest.find(&format!("</{tag}>")) else {
+            return false;
+        };
+        rest = rest[end + tag.len() + 3..].trim_start();
+    }
+    true
+}
+
+const COMMAND_ELEMENTS: [&str; 4] = [
+    "command-name",
+    "command-message",
+    "command-args",
+    "command-contents",
+];
+
+/// Whether the text is one element of the named tag and nothing besides.
+fn is_element(text: &str, tag: &str) -> bool {
+    let text = text.trim();
+    text.starts_with(&format!("<{tag}>"))
+        && text.ends_with(&format!("</{tag}>"))
+        && !text[tag.len() + 2..].contains(&format!("<{tag}>"))
 }
 
 fn claude_tool_event(block: &Value, subtype: &str) -> ToolEvent {

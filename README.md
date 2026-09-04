@@ -127,7 +127,13 @@ JSON always includes `sort`; it includes `activity` only when `--since` or
 
 `show` accepts a full session ID or an unambiguous prefix. It searches every
 available backend, rejects ambiguous prefixes with the matching candidates,
-and prints normalized turns in chronological order. Every turn carries its
+and prints normalized turns in chronological order. Every turn carries a
+`kind` saying what the harness recorded it as — `operator`, `assistant`,
+`reasoning`, `tool`, `control`, `ambient`, `notice`, or `unknown` — filled
+only from fields the harness itself wrote, so a `/exit` command or an injected
+notice is not read as an unanswered prompt and a record with no such field
+stays `unknown` (see `docs/model.md`). Human output heads a user turn holding
+anything but an operator's message `user/<kind>`. Every turn also carries its
 zero-based `ordinal` in the session's normalized sequence, which a file-backed
 session keeps under any window while a paged OpenCode API read renumbers when
 a wider window fetches further back (see `docs/model.md`), and a `native_id`
@@ -169,13 +175,15 @@ the read rather than an implicit display window.
 `export` writes a three-file bundle sharing one timestamped prefix, into
 `--bundle <dir>` or `/tmp`:
 
-- `.context.md` — exact operator turns and assistant-visible text. Read first.
+- `.context.md` — exact operator turns and assistant-visible text, without the
+  harness's own commands, notices, and attached context. Read first.
 - `.json` — the canonical `tapes-session/1` object plus turns, cost, tokens,
   their `accounting` basis and coverage when present, any verified
   `trailing_record`, and the session directory's git head and branch when
   they resolve. Query selectively with `jq`.
-- `.trace.md` — every reasoning and tool turn the transcript carries, in
-  order, for grepping. A tool turn is headed by the tool's name where its
+- `.trace.md` — every turn the transcript carries, reasoning and tool included,
+  in order and headed as `show` heads it, for grepping. A tool turn is headed
+  by the tool's name where its
   envelope carries one, by `result` for a bare result, and by `unnamed`
   otherwise, with the harness's raw envelope kept beneath it.
 

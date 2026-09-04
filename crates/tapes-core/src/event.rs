@@ -273,7 +273,7 @@ mod tests {
     use chrono::TimeZone;
 
     use super::*;
-    use crate::model::{Role, Turn};
+    use crate::model::{Role, Turn, TurnKind};
 
     fn session() -> Session {
         let ts = Utc.timestamp_opt(1_700_000_000, 0).unwrap();
@@ -312,6 +312,7 @@ mod tests {
     fn turn(ordinal: usize, seconds: i64, event: ToolEvent) -> Turn {
         Turn {
             role: Role::Tool,
+            kind: TurnKind::Tool,
             text: "fixture envelope".to_owned(),
             ts: Some(Utc.timestamp_opt(seconds, 0).unwrap()),
             ordinal,
