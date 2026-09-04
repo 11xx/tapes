@@ -17,6 +17,7 @@ pub use event::{
 
 pub mod backend;
 pub mod bundle;
+pub mod endings;
 pub mod event;
 pub mod lineage;
 pub mod model;
@@ -29,7 +30,7 @@ pub const USAGE_SUMMARY_SCHEMA: &str = "tapes-usage-summary/1";
 /// Number of normalized turns a `list --search` query inspects per session.
 /// Keeping this fixed makes the listing's cost predictable for callers.
 pub const LIST_SEARCH_TAIL: usize = 32;
-const DEFAULT_LIST_LIMIT: usize = 20;
+pub(crate) const DEFAULT_LIST_LIMIT: usize = 20;
 const RESOLVE_LIMIT: usize = 1_000;
 /// Candidates a scoped listing may inspect per harness before it reports that
 /// it stopped looking. Well above any store seen in practice, so it bounds a
@@ -341,20 +342,20 @@ pub fn list_with_backends_options(
     })
 }
 
-struct Listed {
-    sessions: Vec<Session>,
+pub(crate) struct Listed {
+    pub(crate) sessions: Vec<Session>,
     /// Which backend each session came from, positionally — kept so a
     /// selection can go straight to its transcript without resolving the id
     /// against every store again.
-    origins: Vec<usize>,
-    unavailable: Vec<String>,
-    unreadable: Vec<String>,
-    unsearched: Vec<String>,
-    scanned: usize,
-    scan_truncated: bool,
+    pub(crate) origins: Vec<usize>,
+    pub(crate) unavailable: Vec<String>,
+    pub(crate) unreadable: Vec<String>,
+    pub(crate) unsearched: Vec<String>,
+    pub(crate) scanned: usize,
+    pub(crate) scan_truncated: bool,
 }
 
-fn list_scoped(
+pub(crate) fn list_scoped(
     backends: &[Box<dyn Backend>],
     harness: Option<&str>,
     scope: Option<&Scope>,
@@ -1086,7 +1087,7 @@ pub fn usage_summary_with_backends(
     })
 }
 
-fn selection_record(selection: &SessionSelection<'_>, limit: usize) -> SelectionRecord {
+pub(crate) fn selection_record(selection: &SessionSelection<'_>, limit: usize) -> SelectionRecord {
     let (scope, project) = match selection.within {
         Where::Here => (SelectedScope::Here, std::env::current_dir().ok()),
         Where::Project(path) => (SelectedScope::Project, Some(path.to_path_buf())),

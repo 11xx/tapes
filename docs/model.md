@@ -500,6 +500,117 @@ account-wide fact, not a sum over sessions.
 }
 ```
 
+## Endings report
+
+`tapes endings` answers what each session of a selection ends on and
+serializes as a `tapes-endings/1` object. The selection is stated in the terms
+`list` uses, so the reported set is exactly the set `list` returns for the same
+flags, and the scope and metadata filters apply before any transcript is
+opened. Each selected session then costs one bounded transcript read of
+`--tail` turns and one lineage read; a session whose read fails is named in
+`unread` with its diagnostic and does not stop the run.
+
+`selection` restates the query that chose the set, with the members and
+meanings the export manifest's `selection` carries, and the listing's
+`unavailable`, `unreadable`, `unsearched`, `scanned`, and `scan_truncated` are
+carried verbatim.
+
+Each ending carries the session identity, the coordinate to write down for it,
+the turns the report names, the facts the read establishes, and what it left
+unestablished. `source` is that coordinate: the harness, the session id, the
+last read turn's `ts` — or the session's `last_activity_at` where that turn
+carries none — its `turn` ordinal and `native_id`, this schema, and
+`coverage`, which is `read-window` when a source bound withheld turns,
+`window` when only the turn window omitted any, and `session` otherwise. It
+holds no transcript text.
+
+`facts` names what the read establishes, each from the normalized kinds and
+typed tool events of the turns that were read and never from their text:
+
+| fact | established by |
+|---|---|
+| `operator-turn-after-assistant` | the newest `operator` turn is later than the newest `assistant` turn, or the read holds an operator turn and no assistant turn at all |
+| `control-turn-last` | the last turn is `control`, a harness command such as `/exit`; what the recording ends on is decided by the turns before it |
+| `notice-turn-last` | the last turn is `notice`, a message the harness injected; the turns before it decide the ending in the same way |
+| `call-without-result` | a `tool-call` in the read carries `no-result-in-read` and no `tool-result` in the read follows it |
+| `results-without-narration` | the newest turn is a paired `tool-result`, so results landed and no assistant turn narrates them |
+| `assistant-close` | the newest turn that is neither `control` nor `notice` is an `assistant` turn |
+
+More than one can hold at once, and they are listed in the order of the table.
+The report classifies nothing beyond them: it infers no reason for an ending
+and labels no session complete.
+
+`incomplete` qualifies every fact beside it:
+
+| value | meaning |
+|---|---|
+| `read-window` | a `file-tail` or `record-page` source bound withheld turns, so the recording continues past what any request through `tapes` reaches |
+| `tail-window` | the `--tail` window omitted turns the read produced; a wider window recovers them |
+| `kind-unknown` | a user turn in the read is `unknown`, so what it holds is not established |
+| `no-timestamps` | a turn an ordering depended on carries no timestamp, so the order rests on the normalized sequence alone |
+
+`last_turn` names the newest turn's `role`, `kind`, `ordinal`, and `ts`, and is
+absent when the read reached no turn. `last_operator` and `last_assistant`
+name where those turns sit. `lineage` is present when the session's store
+records a relative: the `parent` reference the lineage view carries, the
+`children` count, how many of them are unresolved, and
+`children_by_disposition`, one count per outcome the harness recorded. No
+child is read; its own ending is read under its own id.
+
+`tail` is present only when the bounded text tail was asked for. It holds at
+most `--tail` entries, one per `operator` or `assistant` turn in the read, each
+with the turn's `ordinal`, `kind`, `role`, `ts`, its `text` cut at 400
+characters, and whether that cut happened. The harness's own commands,
+notices, and attached context stay out of it. Each ending also carries the
+read's `truncated` flag, its `truncation` record, its `notes`, and any
+verified `trailing_record`, with the meanings they have on a transcript.
+
+```json
+{
+  "schema": "tapes-endings/1",
+  "selection": { "scope": "global", "sort": "newest", "limit": 20 },
+  "endings": [
+    {
+      "session": {
+        "id": "session-1",
+        "harness": "codex",
+        "model": { "id": "gpt-5.6-sol", "variant": "high" },
+        "last_activity_at": "2026-01-01T10:00:07Z"
+      },
+      "source": {
+        "harness": "codex",
+        "session": "session-1",
+        "ts": "2026-01-01T10:00:06Z",
+        "turn": 41,
+        "native_id": "msg_1",
+        "schema": "tapes-endings/1",
+        "coverage": "window"
+      },
+      "last_turn": {
+        "role": "tool",
+        "kind": "tool",
+        "ordinal": 41,
+        "ts": "2026-01-01T10:00:06Z"
+      },
+      "last_operator": { "ordinal": 30, "ts": "2026-01-01T10:00:02Z" },
+      "last_assistant": { "ordinal": 36, "ts": "2026-01-01T10:00:04Z" },
+      "facts": ["results-without-narration"],
+      "incomplete": ["tail-window"],
+      "lineage": { "children": 2, "children_unresolved": 0, "children_by_disposition": { "completed": 2 } },
+      "truncated": true
+    }
+  ],
+  "unread": [
+    { "id": "session-2", "harness": "codex", "error": "the recording is gone" }
+  ],
+  "unavailable": [],
+  "unreadable": [],
+  "unsearched": [],
+  "scanned": 2,
+  "scan_truncated": false
+}
+```
+
 ## JSON contract
 
 A serialized transcript is a `tapes-session/1` object:
