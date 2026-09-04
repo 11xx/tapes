@@ -113,9 +113,11 @@ column and uses a separate `LIVE` column for that state.
 `show` accepts a full session ID or an unambiguous prefix. It searches every
 available backend, rejects ambiguous prefixes with the matching candidates,
 and prints normalized turns in chronological order. Every turn carries its
-zero-based `ordinal` in the session's normalized sequence, kept under any
-window, and a `native_id` where the harness records one; the session carries
-`store`, the opaque coordinate it was read from. Human timestamps are RFC
+zero-based `ordinal` in the session's normalized sequence, which a file-backed
+session keeps under any window while a paged OpenCode API read renumbers when
+a wider window fetches further back (see `docs/model.md`), and a `native_id`
+where the harness records one; the session carries `store`, the opaque
+coordinate it was read from. Human timestamps are RFC
 3339 whole seconds with `Z`; JSON preserves the recorded timestamp precision.
 `--tail` bounds the turns returned and defaults to the last 100; a transcript
 that dropped any is marked `truncated`, and JSON says why under `truncation`:

@@ -298,8 +298,10 @@ enum SearchOutcome {
     Matched(Box<Session>),
     Miss,
     /// The read reached fewer turns than it was asked to search and the file
-    /// holds older ones, so a miss is unknown rather than a non-match.
-    Unsearched(String),
+    /// holds older ones, so a miss is unknown rather than a non-match. The
+    /// session travels with the diagnostic so the listing's filters decide
+    /// whether the candidate was asked about at all.
+    Unsearched(Box<Session>, String),
 }
 
 /// A JSONL recording seen through two bounded windows. The tail holds the
@@ -582,13 +584,14 @@ pub(crate) fn list_files_with_search(
                             if matched {
                                 SearchOutcome::Matched(Box::new(parsed.session))
                             } else if parsed.truncated && parsed.turns.len() < tail {
-                                SearchOutcome::Unsearched(format!(
+                                let diagnostic = format!(
                                     "{} session {}: the bounded read reached {} of the last {tail} \
                                      turns, so a miss is not a non-match",
                                     parsed.session.harness,
                                     parsed.session.id,
                                     parsed.turns.len()
-                                ))
+                                );
+                                SearchOutcome::Unsearched(Box::new(parsed.session), diagnostic)
                             } else {
                                 SearchOutcome::Miss
                             }
@@ -607,14 +610,14 @@ pub(crate) fn list_files_with_search(
         scan_truncated,
         ..Listing::default()
     };
+    // Scope and metadata filters decide which candidates the listing was
+    // asked about; a match outside them is not returned, and an unsearched
+    // candidate outside them is not reported either.
     for outcome in parsed {
-        let session = match outcome {
-            SearchOutcome::Matched(session) => *session,
+        let (session, diagnostic) = match outcome {
+            SearchOutcome::Matched(session) => (*session, None),
             SearchOutcome::Miss => continue,
-            SearchOutcome::Unsearched(diagnostic) => {
-                listing.unsearched.push(diagnostic);
-                continue;
-            }
+            SearchOutcome::Unsearched(session, diagnostic) => (*session, Some(diagnostic)),
         };
         let placed = query.scope.is_none_or(|scope| {
             session
@@ -622,8 +625,13 @@ pub(crate) fn list_files_with_search(
                 .as_deref()
                 .is_some_and(|directory| scope.contains(directory))
         });
-        if placed && query.matches(&session) && listing.sessions.len() < query.limit {
-            listing.sessions.push(session);
+        if !placed || !query.matches(&session) {
+            continue;
+        }
+        match diagnostic {
+            Some(diagnostic) => listing.unsearched.push(diagnostic),
+            None if listing.sessions.len() < query.limit => listing.sessions.push(session),
+            None => {}
         }
     }
     listing

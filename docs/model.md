@@ -29,11 +29,13 @@ recorded metadata from a display aid. Known instruction envelopes are removed
 and whitespace is collapsed before the hint is capped at 96 Unicode
 characters, using an ellipsis when it is shortened. Human renderers prefix
 this hint with `~`; JSON retains the recorded title, derived hint, and
-truncation marker separately. File-backed readers take the first user turn
-from the file's opening, which is read even when the transcript is larger than
-the bounded tail, so the hint names the session's actual first turn; a reader
-that cannot see the first user turn leaves the hint absent rather than labeling
-a later turn as the first. API-backed metadata readers also leave it absent
+truncation marker separately. The Claude and Codex readers take the first user
+turn from the file's opening, which is read even when the transcript is larger
+than the bounded tail, so the hint names the session's actual first turn; the
+pi reader withholds the hint past that bound, since the opening cannot prove
+which root its active path descends from; and any reader that cannot see the
+first user turn leaves the hint absent rather than labeling a later turn as the
+first. API-backed metadata readers also leave it absent
 when deriving it would require an extra message request; this keeps listing
 bounded and keeps show/export metadata consistent with listing metadata.
 `derived_title_truncated` is present with the derived hint and is `true` when
