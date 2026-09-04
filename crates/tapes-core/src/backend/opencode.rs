@@ -11,9 +11,12 @@ use anyhow::{anyhow, Context, Result};
 use chrono::{TimeZone, Utc};
 use serde_json::{json, Value};
 
-use super::{filter_listing_search, filter_listing_search_parallel, Backend, Listing, Query};
+use super::{
+    filter_listing_search, filter_listing_search_parallel, search_turns, Backend, Listing, Query,
+};
 use crate::model::{
     human_bytes, Cost, Model, Role, Session, SourceBound, Tokens, Transcript, Truncation, Turn,
+    TurnWindow,
 };
 
 const MAX_COMMAND_BYTES: u64 = 8 * 1024 * 1024;
@@ -182,18 +185,8 @@ impl OpenCodeApiClient {
 
     fn search(&self, session: &Session, needle: &str, tail: usize) -> Result<bool> {
         let pages = paged_messages(&|path| self.request(path), &session.id, tail)?;
-        let transcript = parse_transcript(
-            session.clone(),
-            &pages.messages,
-            tail,
-            pages.source,
-            pages.notes,
-        );
-        let needle = needle.to_lowercase();
-        Ok(transcript
-            .turns
-            .iter()
-            .any(|turn| turn.text.to_lowercase().contains(&needle)))
+        let transcript = paged_transcript(session.clone(), &pages, tail);
+        search_turns(&transcript, needle, tail)
     }
 
     fn sessions(&self, limit: usize) -> Result<Vec<Session>> {
@@ -696,37 +689,47 @@ impl OpenCodeBackend {
             });
         }
 
-        // The projection cuts text and tool parts at different lengths, so
-        // each bound is reported with the count of parts it cut.
-        let mut cut_text_parts = 0;
-        let mut cut_tool_parts = 0;
         let mut parts = HashMap::<String, Vec<Value>>::new();
         for row in part_rows {
             let message_id = required_string(&row, "message_id")?;
-            let data = database_data(&row)?;
-            let cut = data["truncated"].as_bool().unwrap_or(false)
-                || data["truncated"].as_i64() == Some(1);
-            if cut && data["type"] == "tool" {
-                cut_tool_parts += 1;
-            } else if cut {
-                cut_text_parts += 1;
-            }
-            parts.entry(message_id).or_default().push(data);
-        }
-        if cut_text_parts > 0 {
-            source.push(SourceBound::TurnText {
-                turns: cut_text_parts,
-                chars: MAX_DB_TEXT_CHARS,
-            });
-        }
-        if cut_tool_parts > 0 {
-            source.push(SourceBound::TurnText {
-                turns: cut_tool_parts,
-                chars: MAX_DB_TOOL_CHARS,
-            });
+            parts
+                .entry(message_id)
+                .or_default()
+                .push(database_data(&row)?);
         }
         for values in parts.values_mut() {
             values.reverse();
+        }
+
+        // The projection cuts text and tool parts at different lengths, and
+        // each bound is reported with the count of normalized turns it
+        // touched: a user message's text parts join into one turn, an
+        // assistant message yields one turn per part.
+        let mut cut_text_turns = 0;
+        let mut cut_tool_turns = 0;
+        for row in &message_rows {
+            let Ok(data) = database_data(row) else {
+                continue;
+            };
+            let message_parts = row["id"]
+                .as_str()
+                .and_then(|id| parts.get(id))
+                .map_or(&[][..], Vec::as_slice);
+            let (text, tool) = cut_turn_counts(data["role"].as_str(), message_parts);
+            cut_text_turns += text;
+            cut_tool_turns += tool;
+        }
+        if cut_text_turns > 0 {
+            source.push(SourceBound::TurnText {
+                turns: cut_text_turns,
+                chars: MAX_DB_TEXT_CHARS,
+            });
+        }
+        if cut_tool_turns > 0 {
+            source.push(SourceBound::TurnText {
+                turns: cut_tool_turns,
+                chars: MAX_DB_TOOL_CHARS,
+            });
         }
 
         let messages = message_rows
@@ -739,8 +742,11 @@ impl OpenCodeBackend {
             session,
             &messages,
             tail,
-            source,
             Vec::new(),
+            |returned, total| Truncation {
+                window: Truncation::window(returned, total, tail),
+                source,
+            },
         ))
     }
 }
@@ -954,13 +960,7 @@ impl Backend for OpenCodeBackend {
             return self.database_transcript(session.clone(), tail);
         }
         let pages = paged_messages(&|path| self.request(path), &session.id, tail)?;
-        Ok(parse_transcript(
-            session.clone(),
-            &pages.messages,
-            tail,
-            pages.source,
-            pages.notes,
-        ))
+        Ok(paged_transcript(session.clone(), &pages, tail))
     }
 }
 
@@ -1060,6 +1060,35 @@ fn database_data(row: &Value) -> Result<Value> {
     }
     let data = required_string(row, "data")?;
     serde_json::from_str(&data).context("opencode database record contains invalid JSON")
+}
+
+/// How many normalized turns the projection's text cut touched in one message,
+/// as (text or reasoning turns, tool turns). A user message joins its text
+/// parts into one turn, so any cut part there is one cut turn; an assistant
+/// message yields one turn per part.
+fn cut_turn_counts(role: Option<&str>, parts: &[Value]) -> (usize, usize) {
+    let cut = |part: &Value| {
+        part["truncated"].as_bool().unwrap_or(false) || part["truncated"].as_i64() == Some(1)
+    };
+    match role {
+        Some("user") => {
+            let any = parts.iter().any(|part| part["type"] == "text" && cut(part));
+            (usize::from(any), 0)
+        }
+        Some("assistant") => {
+            parts
+                .iter()
+                .filter(|part| cut(part))
+                .fold((0, 0), |(text, tool), part| {
+                    if part["type"] == "tool" {
+                        (text, tool + 1)
+                    } else {
+                        (text + 1, tool)
+                    }
+                })
+        }
+        _ => (0, 0),
+    }
 }
 
 fn database_message(row: &Value, parts: Vec<Value>) -> Option<Result<Value>> {
@@ -1213,12 +1242,25 @@ fn parse_session(value: &Value) -> Result<Session> {
     })
 }
 
-/// What a paged read handed over: newest-first messages, the bound it stopped
-/// at if it did, and anything a reader should know that has no field.
+/// What a paged read handed over: newest-first messages, why it stopped, and
+/// anything a reader should know that has no field.
 struct MessagePages {
     messages: Vec<Value>,
-    source: Vec<SourceBound>,
+    stop: PageStop,
     notes: Vec<String>,
+}
+
+/// Why a paged read stopped. Only a ceiling is a source bound: a read that
+/// stopped because the requested window was full is a window, and a wider
+/// request fetches what it left.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PageStop {
+    /// A page shorter than asked for: the store has nothing older.
+    Exhausted,
+    /// Enough turns for the requested window were in hand.
+    WindowFull,
+    /// The message ceiling, or a message the transport cannot carry.
+    Ceiling,
 }
 
 /// Newest-first message pages, fetched until the requested number of turns is
@@ -1239,14 +1281,21 @@ fn paged_messages(
     id: &str,
     tail: usize,
 ) -> Result<MessagePages> {
-    let mut messages = Vec::new();
+    let mut messages: Vec<Value> = Vec::new();
     let mut notes = Vec::new();
     let mut turns = 0;
     let mut cursor: Option<String> = None;
     let page_size = tail.clamp(MIN_MESSAGE_PAGE, MESSAGE_PAGE);
     let mut limit = page_size;
-    let mut exhausted = false;
-    while !exhausted && turns < tail && messages.len() < MAX_API_MESSAGES {
+    let stop = loop {
+        if turns >= tail {
+            break PageStop::WindowFull;
+        }
+        let remaining = MAX_API_MESSAGES - messages.len();
+        if remaining == 0 {
+            break PageStop::Ceiling;
+        }
+        limit = limit.min(remaining);
         let path = match &cursor {
             None => format!("/api/session/{id}/message?limit={limit}&order=desc"),
             Some(cursor) => format!("/api/session/{id}/message?limit={limit}&cursor={cursor}"),
@@ -1267,7 +1316,7 @@ fn paged_messages(
                     messages.len(),
                     human_bytes(MAX_COMMAND_BYTES)
                 ));
-                break;
+                break PageStop::Ceiling;
             }
             Err(error) => return Err(error),
         };
@@ -1277,41 +1326,76 @@ fn paged_messages(
                 Some(message) => anyhow!("opencode message request failed: {message}"),
                 None => anyhow!("opencode message response has no data array"),
             })?;
-        exhausted = data.len() < limit;
+        let short = data.len() < limit;
         turns += data
             .iter()
             .map(|message| parse_message(message).len())
             .sum::<usize>();
         messages.extend(data.iter().cloned());
         cursor = page["cursor"]["next"].as_str().map(str::to_owned);
-        exhausted |= cursor.is_none();
+        if short || cursor.is_none() {
+            break PageStop::Exhausted;
+        }
         limit = (limit * 2).min(page_size);
-    }
-    let source = (!exhausted)
-        .then(|| SourceBound::RecordPage {
-            records: messages.len(),
-            of: "messages".to_owned(),
-        })
-        .into_iter()
-        .collect();
+    };
     Ok(MessagePages {
         messages,
-        source,
+        stop,
         notes,
     })
 }
 
-/// Normalize newest-first messages into a chronological transcript. `source`
-/// carries the bounds the read reached and `notes` what the read learned that
-/// has no field. The session endpoint is the normalized source of metadata,
-/// so a message read does not invent a title that a title-less listing could
-/// not provide.
+/// The truncation a paged read produced. A read that stopped with the window
+/// full has an inexact window: the omitted count covers only what was fetched,
+/// and a wider request fetches older messages. A read that hit a ceiling
+/// reports the source bound.
+fn paged_truncation(
+    pages: &MessagePages,
+    returned: usize,
+    total: usize,
+    tail: usize,
+) -> Truncation {
+    let mut window = Truncation::window(returned, total, tail);
+    let mut source = Vec::new();
+    match pages.stop {
+        PageStop::Exhausted => {}
+        PageStop::WindowFull => {
+            let mut inexact = window.unwrap_or_else(|| TurnWindow::whole(returned, tail));
+            inexact.omitted_exact = false;
+            window = Some(inexact);
+        }
+        PageStop::Ceiling => source.push(SourceBound::RecordPage {
+            records: pages.messages.len(),
+            of: "messages".to_owned(),
+        }),
+    }
+    Truncation { window, source }
+}
+
+/// A transcript from a paged API read, whose truncation depends on why the
+/// paging stopped.
+fn paged_transcript(session: Session, pages: &MessagePages, tail: usize) -> Transcript {
+    parse_transcript(
+        session,
+        &pages.messages,
+        tail,
+        pages.notes.clone(),
+        |returned, total| paged_truncation(pages, returned, total, tail),
+    )
+}
+
+/// Normalize newest-first messages into a chronological transcript. The
+/// caller supplies the truncation from the returned and total turn counts,
+/// since only it knows how the messages were read; `notes` is what the read
+/// learned that has no field. The session endpoint is the normalized source
+/// of metadata, so a message read does not invent a title that a title-less
+/// listing could not provide.
 fn parse_transcript(
     session: Session,
     messages: &[Value],
     tail: usize,
-    source: Vec<SourceBound>,
     notes: Vec<String>,
+    truncation: impl FnOnce(usize, usize) -> Truncation,
 ) -> Transcript {
     let mut turns = messages
         .iter()
@@ -1325,10 +1409,7 @@ fn parse_transcript(
     if total > tail {
         turns.drain(..total - tail);
     }
-    let truncation = Truncation {
-        window: Truncation::window(turns.len(), total, tail),
-        source,
-    };
+    let truncation = truncation(turns.len(), total);
 
     Transcript::new(session, turns, truncation, None, notes)
 }
@@ -1450,6 +1531,36 @@ mod tests {
         assert!(query.contains("length(CAST(data AS BLOB)) > 65536"));
         assert!(!query.contains("FROM event"));
         assert!(!query.contains("LIMIT"));
+    }
+
+    #[test]
+    fn cut_parts_are_counted_as_the_turns_they_become() {
+        let cut_text = json!({"type": "text", "truncated": 1});
+        let whole_text = json!({"type": "text", "truncated": 0});
+        let cut_tool = json!({"type": "tool", "truncated": true});
+        let cut_reasoning = json!({"type": "reasoning", "truncated": 1});
+
+        // Two cut text parts of one user message join into one turn.
+        assert_eq!(
+            cut_turn_counts(Some("user"), &[cut_text.clone(), cut_text.clone()]),
+            (1, 0)
+        );
+        assert_eq!(
+            cut_turn_counts(Some("user"), std::slice::from_ref(&whole_text)),
+            (0, 0)
+        );
+        // Each assistant part is its own turn, split by the bound that cut it.
+        assert_eq!(
+            cut_turn_counts(
+                Some("assistant"),
+                &[cut_text, whole_text, cut_tool, cut_reasoning]
+            ),
+            (2, 1)
+        );
+        assert_eq!(
+            cut_turn_counts(Some("system"), &[json!({"type": "text", "truncated": 1})]),
+            (0, 0)
+        );
     }
 
     #[test]

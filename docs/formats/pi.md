@@ -47,9 +47,11 @@ first 64 KiB rather than from the bounded 4 MiB tail: the session id, the
 recorded start timestamp, the working directory, and the first user message all
 come from that opening whatever the file's size. The tail supplies the active
 path, the turns, the last activity, and the final model and thinking level.
-Branch structure beyond the opening is unknown to the opening itself, so its
-messages are read in file order when the tail cannot see them. A turn's
-`native_id` is its entry's `id`.
+The first-turn hint is not read from the opening: pi rewinds by appending a new
+branch, so the first user message in the file may sit on a root the active path
+never reaches, and past the bound the reader cannot tell. A transcript larger
+than the tail therefore leaves `derived_title` absent. A turn's `native_id` is
+its entry's `id`.
 
 `model_change` and `thinking_level_change` are timestamped state entries rather
 than turns. When either is the final entry on the active path after the newest

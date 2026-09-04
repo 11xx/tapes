@@ -100,11 +100,13 @@ oversized_page() {
   IFS=$old_ifs
   [ -n "$limit" ] || exit 7
   page=${cursor:-1}
-  if [ "$page" -gt 2 ] && [ "$giant" = yes ]; then
+  if [ "$giant" = endless ]; then
+    : # every page is full and every cursor leads to another
+  elif [ "$page" -gt 2 ] && [ "$giant" = yes ]; then
     /usr/bin/head -c 9000000 /dev/zero | /usr/bin/tr '\0' x
     return
   fi
-  if [ "$page" -gt 2 ]; then
+  if [ "$page" -gt 2 ] && [ "$giant" != endless ]; then
     printf '%s\n' '{"data":[],"cursor":{"next":"4","previous":"3"}}'
     return
   fi
@@ -131,10 +133,13 @@ if [ "$mode" = oversized ]; then
     /api/session/ses_giant_message_fixture/message\?*)
       oversized_page yes
       ;;
+    /api/session/ses_endless_fixture/message\?*)
+      oversized_page endless
+      ;;
     /api/session/ses_oversized_fixture/message|/api/session/ses_giant_message_fixture/message)
       /usr/bin/head -c 9000000 /dev/zero | /usr/bin/tr '\0' x
       ;;
-    /api/session/ses_oversized_fixture|/api/session/ses_giant_message_fixture)
+    /api/session/ses_oversized_fixture|/api/session/ses_giant_message_fixture|/api/session/ses_endless_fixture)
       id=${path##*/}
       printf '{"data":{"id":"%s","projectID":"fixture","agent":"build","model":{"id":"fixture-model","providerID":"fixture","variant":"balanced"},"cost":0,"tokens":{"input":0,"output":0,"reasoning":0,"cache":{"read":0,"write":0}},"time":{"created":1784663000000,"updated":1784663400000},"title":"Oversized fixture session","location":{"directory":"/fixtures/oversized"}}}\n' "$id"
       ;;

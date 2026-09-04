@@ -22,6 +22,10 @@ const MAX_SEARCH_WORKERS: usize = 8;
 /// Enough of a file's opening to carry any harness's session header, and
 /// small enough that probing a whole store stays cheap.
 const HEAD_PROBE_BYTES: u64 = 64 * 1024;
+/// How far the head probe will grow when the first line alone is longer than
+/// the probe, as a Claude record carrying a large pasted prompt can be. A
+/// first line longer than this leaves the opening empty.
+const HEAD_PROBE_MAX_BYTES: u64 = 1024 * 1024;
 
 /// What a listing asks for.
 ///
@@ -159,13 +163,38 @@ pub trait Backend {
     /// this path aligned with each backend's existing transcript reader, so a
     /// backend cannot accidentally grow a second unbounded parser for search.
     fn search(&self, session: &Session, needle: &str, tail: usize) -> Result<bool> {
-        let needle = needle.to_lowercase();
-        let transcript = self.transcript(session, tail)?;
-        Ok(transcript
-            .turns
-            .iter()
-            .any(|turn| turn.text.to_lowercase().contains(&needle)))
+        search_turns(&self.transcript(session, tail)?, needle, tail)
     }
+}
+
+/// Whether the searched tail contains the needle. A hit anywhere in the read
+/// is a match. A miss is a non-match only when the read covered the tail it
+/// was asked to search: fewer turns than that behind a bound that withheld
+/// turns means the answer is unknown, and an unknown reported as a miss would
+/// hide exactly the sessions a search exists to find. A bound that only cut
+/// text within turns the read did reach leaves the turn count whole.
+pub(crate) fn search_turns(transcript: &Transcript, needle: &str, tail: usize) -> Result<bool> {
+    let needle = needle.to_lowercase();
+    if transcript
+        .turns
+        .iter()
+        .any(|turn| turn.text.to_lowercase().contains(&needle))
+    {
+        return Ok(true);
+    }
+    let turns_withheld = transcript.truncation.source.iter().any(|bound| {
+        matches!(
+            bound,
+            SourceBound::FileTail { .. } | SourceBound::RecordPage { .. }
+        )
+    });
+    if transcript.turns.len() < tail && turns_withheld {
+        anyhow::bail!(
+            "the bounded read reached {} of the last {tail} turns, so a miss is not a non-match",
+            transcript.turns.len()
+        );
+    }
+    Ok(false)
 }
 
 pub(crate) fn filter_listing_search<B: Backend + ?Sized>(
@@ -394,18 +423,30 @@ fn raw_tail_may_contain(path: &Path, needle: &str) -> bool {
 /// about a session at the top, and `read_jsonl` reads the *end* of a file, so
 /// a large transcript loses its own header without this.
 pub(crate) fn head_jsonl(path: &Path) -> Vec<Value> {
-    let Ok(file) = File::open(path) else {
+    let Ok(mut file) = File::open(path) else {
         return Vec::new();
     };
+    // The probe grows only while it holds no complete line, so a store of
+    // ordinary files costs one small read each and a file whose first record
+    // outgrows the probe costs one larger read rather than a wrong answer.
     let mut bytes = Vec::new();
-    if file.take(HEAD_PROBE_BYTES).read_to_end(&mut bytes).is_err() {
-        return Vec::new();
+    let mut window = HEAD_PROBE_BYTES;
+    loop {
+        let wanted = window - bytes.len() as u64;
+        if (&mut file).take(wanted).read_to_end(&mut bytes).is_err() {
+            return Vec::new();
+        }
+        let filled = bytes.len() as u64 == window;
+        if !filled || bytes.contains(&b'\n') || window >= HEAD_PROBE_MAX_BYTES {
+            break;
+        }
+        window = HEAD_PROBE_MAX_BYTES;
     }
     // A read that filled the window stopped somewhere inside a line, so the
     // remainder after the last newline is a fragment. A shorter read reached
     // the end of the file, where a final line without a trailing newline is
     // whole.
-    let complete = if bytes.len() as u64 == HEAD_PROBE_BYTES {
+    let complete = if bytes.len() as u64 == window {
         bytes
             .iter()
             .rposition(|byte| *byte == b'\n')

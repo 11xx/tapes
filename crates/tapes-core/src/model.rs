@@ -142,6 +142,7 @@ impl Truncation {
                 first: total - returned,
                 last: total - 1,
             }),
+            omitted_exact: true,
         })
     }
 }
@@ -158,6 +159,38 @@ pub struct TurnWindow {
     /// be outside rather than absent. An empty window holds none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ordinals: Option<OrdinalRange>,
+    /// Whether `omitted` is the whole count. A reader that stops fetching once
+    /// the window is full knows only what it fetched: the count is a floor, a
+    /// wider request fetches older turns, and ordinals count from the oldest
+    /// turn this read reached rather than from the session's start.
+    #[serde(default = "yes", skip_serializing_if = "is_true")]
+    pub omitted_exact: bool,
+}
+
+impl TurnWindow {
+    /// A window that dropped nothing the reader saw, for a read that stopped
+    /// at the window's edge without looking further.
+    pub fn whole(returned: usize, bound: usize) -> Self {
+        Self {
+            returned,
+            omitted: 0,
+            omitted_from: End::Head,
+            bound,
+            ordinals: (returned > 0).then(|| OrdinalRange {
+                first: 0,
+                last: returned - 1,
+            }),
+            omitted_exact: true,
+        }
+    }
+}
+
+fn yes() -> bool {
+    true
+}
+
+fn is_true(value: &bool) -> bool {
+    *value
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
