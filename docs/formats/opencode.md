@@ -80,7 +80,7 @@ failed states also project a result event without creating a second turn:
 | `kind` | `tool-call`; `completed` and `error` also project `tool-result` | same |
 | `subtype` | `tool` | `tool` |
 | `name` | part `name` | part `tool` |
-| `call_id` | part `callID` when present, else the part `id` | part `callID` when present, else the part `id` |
+| `call_id` | part `callID` when present, else the part `id` | part `callID`; the projection carries no part id, so a part without one has no pairing key |
 | `status` | `state.status` | `state.status` |
 | `arguments` | `state.input` | bounded `state.input` projection |
 | `output` | `state.content`, then `state.output` or `state.error`; error states prefer `state.error` | `state.output`, or `state.error` for an error state |
