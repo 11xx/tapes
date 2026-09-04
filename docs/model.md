@@ -107,7 +107,9 @@ consumer writes down; none of the three carries transcript text.
 turn when that record does not become a turn. It carries the source `kind` and
 an optional UTC `timestamp`; the timestamp stays absent when the source record
 does not provide one. `Transcript` omits `trailing_record` when no verified
-trailing record is available.
+trailing record is available. A message-only projection that does not expose a
+record kind after its newest message, such as OpenCode's paged read, leaves the
+field absent.
 
 `Transcript` contains a session, its turns, a `truncated` flag, a `truncation`
 record, an optional `trailing_record`, and optional reader-facing notes. The

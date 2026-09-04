@@ -255,6 +255,10 @@ larger than the transport bound still exports. A content search that reached
 fewer than the 32 turns it searches before a ceiling reports the session as
 unsearched rather than as a non-match.
 
+OpenCode transcript reads render messages as turns and do not read a record kind
+that could follow the newest message. `Transcript.trailing_record` is therefore
+always absent for this backend.
+
 A turn's `native_id` is the part's `id` where the read carries one, and the
 message `id` (`msg_…`) otherwise; the database projection carries message ids
 only. `session.store` is the `opencode.db` path for the stable store and the
