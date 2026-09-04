@@ -57,6 +57,11 @@ FIND IT
   directory never matches. Both filters are applied before the per-harness
   limit and compose with --harness and the scope flags.
 
+  --since and --until filter `last_activity_at`, the newest recorded activity,
+  with the half-open rule `since <= last_activity_at < until`, before the
+  per-harness limit. --sort newest|oldest orders by that clock; ties use
+  session id ascending, then harness ascending.
+
   --search <text> matches case-insensitively against the last 32 normalized
   turns in each candidate session. The fixed tail keeps a listing bounded, so
   a non-match means only that those recent turns did not contain the text. It

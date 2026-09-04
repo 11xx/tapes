@@ -272,6 +272,15 @@ fn list_help_exits_successfully() {
     assert!(help.contains("full model identity"), "{help}");
     assert!(help.contains("id (variant)"), "{help}");
     assert!(help.contains("directory path"), "{help}");
+    assert!(help.contains("last_activity_at"), "{help}");
+    assert!(
+        help.contains("newest first by default, or oldest"),
+        "{help}"
+    );
+    assert!(
+        help.contains("RFC 3339 timestamps with an offset"),
+        "{help}"
+    );
     assert!(help.contains("last 32 normalized turns"), "{help}");
     assert!(help.contains("unsearched"), "{help}");
 }
@@ -487,6 +496,201 @@ fn list_filters_metadata_case_insensitively_and_before_limit() {
     assert_eq!(limited_value["scanned"], 3);
 
     fs::remove_dir_all(codex_home).unwrap();
+}
+
+#[test]
+fn list_filters_activity_before_limit_and_serializes_the_window() {
+    let (codex_home, home) = filter_fixture_store("activity");
+    let mut command = tapes();
+    command.args([
+        "list",
+        "--global",
+        "--harness",
+        "codex",
+        "--since",
+        "2026-01-01T10:00:00+00:00",
+        "--until",
+        "2026-01-01T10:30:00Z",
+        "--limit",
+        "1",
+        "--json",
+    ]);
+    with_fixture_env(
+        &mut command,
+        &codex_home,
+        &home,
+        Path::new("/definitely/missing"),
+    );
+    let output = command.output().unwrap();
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["sort"], "newest");
+    assert_eq!(
+        value["activity"],
+        serde_json::json!({
+            "since": "2026-01-01T10:00:00Z",
+            "until": "2026-01-01T10:30:00Z"
+        })
+    );
+    assert_eq!(
+        value["sessions"][0]["id"],
+        "00000000-0000-0000-0000-000000000001"
+    );
+    assert_eq!(value["sessions"].as_array().unwrap().len(), 1);
+    assert_eq!(value["scanned"], 4);
+    assert_eq!(value["scan_truncated"], false);
+
+    fs::remove_dir_all(codex_home).unwrap();
+}
+
+#[test]
+fn list_sort_oldest_orders_recorded_activity_and_keeps_activity_absent() {
+    let (codex_home, home) = filter_fixture_store("sort");
+    let command = |arguments: &[&str]| {
+        let mut command = tapes();
+        command.args(arguments);
+        with_fixture_env(
+            &mut command,
+            &codex_home,
+            &home,
+            Path::new("/definitely/missing"),
+        );
+        command.output().unwrap()
+    };
+
+    let newest = command(&["list", "--global", "--harness", "codex", "--json"]);
+    assert!(newest.status.success());
+    let newest_value: Value = serde_json::from_slice(&newest.stdout).unwrap();
+    let newest_ids = newest_value["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|session| session["id"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        newest_ids,
+        vec![
+            "30000000-0000-0000-0000-000000000005",
+            "20000000-0000-0000-0000-000000000004",
+            "10000000-0000-0000-0000-000000000002",
+            "00000000-0000-0000-0000-000000000001"
+        ]
+    );
+    assert_eq!(newest_value["sort"], "newest");
+    assert!(newest_value.get("activity").is_none());
+
+    let oldest = command(&[
+        "list",
+        "--global",
+        "--harness",
+        "codex",
+        "--sort",
+        "oldest",
+        "--json",
+    ]);
+    assert!(oldest.status.success());
+    let oldest_value: Value = serde_json::from_slice(&oldest.stdout).unwrap();
+    let oldest_ids = oldest_value["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|session| session["id"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        oldest_ids,
+        vec![
+            "00000000-0000-0000-0000-000000000001",
+            "10000000-0000-0000-0000-000000000002",
+            "20000000-0000-0000-0000-000000000004",
+            "30000000-0000-0000-0000-000000000005"
+        ]
+    );
+    assert_eq!(oldest_value["sort"], "oldest");
+    assert!(oldest_value.get("activity").is_none());
+
+    fs::remove_dir_all(codex_home).unwrap();
+}
+
+#[test]
+fn list_accepts_date_only_activity_bounds_and_omits_absent_bound() {
+    let (codex_home, home) = filter_fixture_store("date-only");
+    let mut command = tapes();
+    command.args([
+        "list",
+        "--global",
+        "--harness",
+        "codex",
+        "--since",
+        "2026-01-01",
+        "--limit",
+        "1",
+        "--json",
+    ]);
+    with_fixture_env(
+        &mut command,
+        &codex_home,
+        &home,
+        Path::new("/definitely/missing"),
+    );
+    let output = command.output().unwrap();
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["activity"]["since"], "2026-01-01T00:00:00Z");
+    assert!(value["activity"].get("until").is_none());
+    assert_eq!(
+        value["sessions"][0]["id"],
+        "30000000-0000-0000-0000-000000000005"
+    );
+
+    fs::remove_dir_all(codex_home).unwrap();
+}
+
+#[test]
+fn list_rejects_a_non_half_open_activity_window() {
+    let cases = [
+        ("2026-01-01T10:00:00Z", "2026-01-01T10:00:00Z"),
+        ("2026-01-01T11:00:00Z", "2026-01-01T10:00:00Z"),
+    ];
+    for (since, until) in cases {
+        let (codex_home, home) = filter_fixture_store("invalid-window");
+        let mut command = tapes();
+        command.args([
+            "list",
+            "--global",
+            "--harness",
+            "codex",
+            "--since",
+            since,
+            "--until",
+            until,
+        ]);
+        with_fixture_env(
+            &mut command,
+            &codex_home,
+            &home,
+            Path::new("/definitely/missing"),
+        );
+        let output = command.output().unwrap();
+
+        assert!(!output.status.success());
+        assert!(
+            String::from_utf8_lossy(&output.stderr)
+                .contains("--since must be earlier than --until"),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        fs::remove_dir_all(codex_home).unwrap();
+    }
 }
 
 #[test]

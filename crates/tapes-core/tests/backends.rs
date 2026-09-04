@@ -16,8 +16,9 @@ use tapes_core::backend::{Backend, Listing, Query};
 use tapes_core::model::{Role, Session, SourceBound, Transcript, Truncation, Turn};
 use tapes_core::{
     latest_with_backends, list_with_backends, list_with_backends_filtered,
-    list_with_backends_filtered_and_search, resolve_session, scope::Scope, show_with_backends,
-    ResolveError, Selection, LIST_SEARCH_TAIL,
+    list_with_backends_filtered_and_search, list_with_backends_options, resolve_session,
+    scope::Scope, show_with_backends, ListFilters, ListSort, ResolveError, Selection,
+    LIST_SEARCH_TAIL,
 };
 
 fn fixtures(harness: &str) -> PathBuf {
@@ -982,6 +983,100 @@ fn metadata_filters_fill_the_limit_after_rejecting_candidates() {
     );
     assert_eq!(result.scanned, 3);
     assert!(!result.scan_truncated);
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn activity_filters_fill_the_limit_after_rejecting_candidates() {
+    let root = filtered_store("activity-window");
+    let backends: Vec<Box<dyn Backend>> = vec![Box::new(CodexBackend::new(&root))];
+    let since = "2026-08-09T00:00:00Z".parse::<DateTime<Utc>>().unwrap();
+    let until = "2026-08-09T00:00:02Z".parse::<DateTime<Utc>>().unwrap();
+
+    let result = list_with_backends_options(
+        &backends,
+        Some("codex"),
+        None,
+        2,
+        &ListFilters {
+            since: Some(since),
+            until: Some(until),
+            ..ListFilters::default()
+        },
+        ListSort::Newest,
+    )
+    .unwrap();
+
+    assert_eq!(
+        result
+            .sessions
+            .iter()
+            .map(|session| session.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["wanted-b", "wanted-a"]
+    );
+    assert_eq!(result.scanned, 3);
+    assert!(!result.scan_truncated);
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn listing_ties_on_activity_by_session_id() {
+    let root = std::env::temp_dir().join(format!("tapes-activity-ties-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&root);
+    let day = root.join("2026/08/09");
+    fs::create_dir_all(&day).unwrap();
+    for (index, id) in [(0, "tie-z"), (1, "tie-a")] {
+        let path = day.join(format!("rollout-2026-08-09T00-00-0{index}-{id}.jsonl"));
+        fs::write(
+            &path,
+            format!(
+                concat!(
+                    r#"{{"timestamp":"2026-08-09T00:00:00Z","type":"session_meta","payload":{{"id":"{id}","cwd":"/fixtures/project"}}}}"#,
+                    "\n",
+                    r#"{{"timestamp":"2026-08-09T00:00:00Z","type":"response_item","payload":{{"type":"message","role":"user","content":[{{"type":"input_text","text":"hello"}}]}}}}"#,
+                    "\n"
+                ),
+                id = id
+            ),
+        )
+        .unwrap();
+        File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(
+                std::time::SystemTime::UNIX_EPOCH
+                    + std::time::Duration::from_secs(1_800_000_000 + index),
+            )
+            .unwrap();
+    }
+
+    let backends: Vec<Box<dyn Backend>> = vec![Box::new(CodexBackend::new(&root))];
+    let result = list_with_backends_options(
+        &backends,
+        Some("codex"),
+        None,
+        10,
+        &ListFilters::default(),
+        ListSort::Newest,
+    )
+    .unwrap();
+
+    assert_eq!(
+        result
+            .sessions
+            .iter()
+            .map(|session| session.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["tie-a", "tie-z"]
+    );
+    assert_eq!(
+        result.sessions[0].last_activity_at,
+        result.sessions[1].last_activity_at
+    );
 
     fs::remove_dir_all(root).unwrap();
 }

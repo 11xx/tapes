@@ -199,4 +199,21 @@ fails or a search stage falls back; its entries name the session or search
 stage and diagnostic. It is distinct from
 `unreadable`, which describes a session that could not be normalized at all.
 `list --search` inspects the last 32 normalized turns per candidate before the
-per-harness result limit.
+per-harness result limit. The object always includes `sort`, either `newest` or
+`oldest`, and includes `activity` only when an activity bound was requested:
+its optional `since` and `until` members are UTC timestamps. The activity
+window matches `last_activity_at` with `since <= last_activity_at < until` and
+is applied before the per-harness result limit. Sort ties use session id
+ascending, then harness ascending.
+
+```json
+{
+  "schema": "tapes-list/1",
+  "sort": "newest",
+  "activity": {
+    "since": "2026-01-01T00:00:00Z",
+    "until": "2026-01-02T00:00:00Z"
+  },
+  "sessions": []
+}
+```
