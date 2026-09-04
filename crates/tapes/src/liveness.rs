@@ -6,6 +6,7 @@ use std::process::{Child, ChildStdout, Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 
 use serde::Deserialize;
+use tapes_core::endings::Ending;
 use tapes_core::model::{LiveState, Session};
 
 const MAX_STATUS_BYTES: usize = 64 * 1024;
@@ -205,5 +206,14 @@ pub fn annotate(sessions: &mut [Session]) {
     let live = snapshot();
     for session in sessions {
         session.live = live.get(&session.id).cloned();
+    }
+}
+
+/// The same join onto the sessions an endings report names, from one snapshot
+/// however many endings it holds.
+pub fn annotate_endings(endings: &mut [Ending]) {
+    let live = snapshot();
+    for ending in endings {
+        ending.session.live = live.get(&ending.session.id).cloned();
     }
 }

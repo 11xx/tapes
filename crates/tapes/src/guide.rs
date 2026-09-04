@@ -118,6 +118,7 @@ PROBE BEFORE EXPORTING
   tapes usage <id> --json        Tokens, cost, and turn counts.
   tapes lineage <id> --json      The sessions this one names as relatives.
   tapes usage --here --json      The same counters summed over a project.
+  tapes endings --here --json    What each session of a project ends on.
 
   show returns the last 100 turns unless --tail says otherwise, and marks the
   result truncated whenever it dropped any. It is the probe, not the archive;
@@ -236,6 +237,40 @@ EXPORT, THEN INGEST PROGRESSIVELY
   Never ingest a whole bundle merely because it exists. A large trace read in
   full buys little over the context file and costs the budget the actual work
   needs.
+
+READ MANY ENDINGS
+  tapes endings --here --since 2026-01-01 --json
+  tapes endings --global --harness codex --limit 50 --text
+
+  endings answers what each session of a selection ends on, as
+  tapes-endings/1, so choosing which few endings deserve reading costs one
+  bounded read each instead of a transcript apiece. The selection is the one
+  list and export take, and the scope and filters apply before any transcript
+  is opened. --tail sets how many of each session's newest turns are read (12
+  by default) and --text adds the operator and assistant text of those turns,
+  cut at 400 characters.
+
+  It states facts and classifies nothing. Each rests on the normalized turn
+  kinds and typed tool events of the turns that were read, never on their
+  text: operator-turn-after-assistant for a request nothing answers,
+  control-turn-last or notice-turn-last for a harness command or injected
+  message recorded after the last exchange, call-without-result for a call the
+  read never saw a result for, results-without-narration for results no turn
+  narrates, assistant-close for a closing assistant turn. More than one can
+  hold at once. What the ending means — and whether it is worth rescuing — is
+  the reading below, and it is yours.
+
+  incomplete says what the read did not establish, and it qualifies every fact
+  beside it: read-window and tail-window for turns the read or the window did
+  not reach, kind-unknown for a user turn the harness left no evidence for,
+  no-timestamps for an order resting on the normalized sequence alone. lineage
+  counts the relatives a store records without reading any of them.
+
+  source is what to write down when filing a follow-up: the harness, the
+  session id, the last read turn's ordinal and native id, and coverage saying
+  how much of the session the read covered. It carries no transcript text, so
+  it can be quoted anywhere the conclusion can. A session whose read fails is
+  named in unread with its diagnostic and does not stop the report.
 
 READ THE ENDING
   tapes reports what a transcript contains and never classifies why it ended.

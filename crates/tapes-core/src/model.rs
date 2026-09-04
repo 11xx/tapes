@@ -498,16 +498,22 @@ impl TurnKind {
 /// than an operator's message names what the harness recorded it as, so a
 /// reader judging an ending is not told a command was an unanswered prompt.
 pub fn human_speaker(turn: &Turn) -> String {
-    let role = match turn.role {
+    speaker(&turn.role, turn.kind)
+}
+
+/// The same naming for a turn a projection carries by its role and kind
+/// rather than whole.
+pub fn speaker(role: &Role, kind: TurnKind) -> String {
+    let name = match role {
         Role::User => "user",
         Role::Assistant => "assistant",
         Role::Tool => "tool",
         Role::Reasoning => "reasoning",
     };
-    if turn.role == Role::User && turn.kind != TurnKind::Operator {
-        return format!("{role}/{}", turn.kind.label());
+    if *role == Role::User && kind != TurnKind::Operator {
+        return format!("{name}/{}", kind.label());
     }
-    role.to_owned()
+    name.to_owned()
 }
 
 /// Render a title without making a derived hint look like harness metadata.

@@ -6,10 +6,11 @@ use std::path::PathBuf;
 use anyhow::{anyhow, Result};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use tapes_core::bundle::{Bundle, BundleFile};
+use tapes_core::endings::{Ending, EndingsReport, DEFAULT_ENDINGS_TAIL};
 use tapes_core::event::{EventKind, EventRecord, EventTranscript, Incomplete};
 use tapes_core::lineage::{ChildRef, LineageView};
 use tapes_core::model::{
-    human_bytes, human_speaker, human_timestamp, human_title, Accounting, AccountingBasis,
+    human_bytes, human_speaker, human_timestamp, human_title, speaker, Accounting, AccountingBasis,
     AccountingCoverage, Cost, LiveState, Session, SourceBound, Tokens, Transcript, Truncation,
 };
 use tapes_core::usage::{
@@ -359,6 +360,67 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// What each session of a selection ends on, one bounded record each, as
+    /// tapes-endings/1. The selection uses the flags `list` and `export` take,
+    /// applied before any transcript is opened; each selected session then
+    /// costs one bounded read of its newest turns and one lineage read. Every
+    /// fact rests on the normalized turn kinds and typed tool events of the
+    /// turns that were read, never on their text: an unanswered request, a
+    /// harness command or notice recorded last, a call the read never saw a
+    /// result for, results no turn narrates, a closing assistant turn. What
+    /// the read left unestablished is named beside them, and `source` is the
+    /// coordinate to write down when filing a follow-up. The report infers no
+    /// reason for an ending and labels no session complete.
+    Endings {
+        /// Restrict results to one harness.
+        #[arg(long)]
+        harness: Option<String>,
+        #[command(flatten)]
+        scope: ScopeArgs,
+        /// Take at most this many sessions from each harness [default: 20].
+        #[arg(long)]
+        limit: Option<usize>,
+        /// Match case-insensitively against the full model identity, `id` or
+        /// `id (variant)`. Sessions without a model never match.
+        #[arg(long, value_name = "SUBSTRING")]
+        model: Option<String>,
+        /// Match case-insensitively against the recorded directory path.
+        /// Sessions without a directory never match.
+        #[arg(long, value_name = "SUBSTRING")]
+        directory: Option<String>,
+        /// Keep sessions whose newest recorded activity, `last_activity_at`,
+        /// is at or after this timestamp. RFC 3339 timestamps with an offset
+        /// and bare YYYY-MM-DD dates are accepted.
+        #[arg(long, value_name = "TIMESTAMP", value_parser = tapes_core::parse_activity_timestamp)]
+        since: Option<tapes_core::ActivityTimestamp>,
+        /// Keep sessions whose newest recorded activity, `last_activity_at`,
+        /// is before this timestamp. RFC 3339 timestamps with an offset and
+        /// bare YYYY-MM-DD dates are accepted.
+        #[arg(long, value_name = "TIMESTAMP", value_parser = tapes_core::parse_activity_timestamp)]
+        until: Option<tapes_core::ActivityTimestamp>,
+        /// Order the selection by `last_activity_at` before --limit takes from
+        /// it: newest first by default, or oldest first.
+        #[arg(long, value_enum, value_name = "ORDER", default_value_t = SortArg::Newest)]
+        sort: SortArg,
+        /// Match case-insensitively against the last 32 normalized turns in
+        /// each candidate session. The fixed tail keeps the selection bounded;
+        /// a match outside it is not considered.
+        #[arg(long, value_name = "SUBSTRING")]
+        search: Option<String>,
+        /// Read this many of each session's newest turns. The window bounds
+        /// the structural read and the optional text tail alike; a window that
+        /// omitted turns is reported as `tail-window`.
+        #[arg(long, value_name = "N", default_value_t = DEFAULT_ENDINGS_TAIL)]
+        tail: usize,
+        /// Include the bounded text of each read operator and assistant turn,
+        /// cut at 400 characters. The harness's own commands, notices, and
+        /// attached context stay out of it.
+        #[arg(long)]
+        text: bool,
+        /// Render the versioned tapes-endings/1 object as JSON.
+        #[arg(long)]
+        json: bool,
+    },
     /// Export sessions as bundles. One session by id or `--latest`, or every
     /// session a selection holds: the listing flags choose the same set
     /// `list` would return, in the same order, and a `manifest.json` beside
@@ -626,6 +688,68 @@ fn dispatch(cli: Cli) -> Result<()> {
                 }
             }
         }
+        Command::Endings {
+            harness,
+            scope,
+            limit,
+            model,
+            directory,
+            since,
+            until,
+            sort,
+            search,
+            tail,
+            text,
+            json,
+        } => {
+            if since
+                .zip(until)
+                .is_some_and(|(since, until)| since >= until)
+            {
+                return Err(anyhow!("--since must be earlier than --until"));
+            }
+            if search.is_some() {
+                eprintln!(
+                    "Searching the last 32 normalized turns of each candidate session before applying --limit."
+                );
+            }
+            let mut report = tapes_core::endings::endings(
+                &tapes_core::SessionSelection {
+                    within: scope.within(),
+                    harness: harness.as_deref(),
+                    limit,
+                    filters: tapes_core::ListFilters {
+                        model: model.as_deref(),
+                        directory: directory.as_deref(),
+                        since,
+                        until,
+                        search: search.as_deref(),
+                    },
+                    sort: sort.into(),
+                },
+                tail,
+                text,
+            )?;
+            liveness::annotate_endings(&mut report.endings);
+            if json {
+                println!("{}", serde_json::to_string(&report)?);
+            } else {
+                print!("{}", render_endings(&report));
+                for session in &report.unread {
+                    println!(
+                        "Unread: {} session {}: {}",
+                        session.harness, session.id, session.error
+                    );
+                }
+                print_diagnostics(
+                    report.scan_truncated,
+                    report.scanned,
+                    &report.unreadable,
+                    &report.unsearched,
+                    &report.unavailable,
+                );
+            }
+        }
         Command::Export {
             session,
             latest,
@@ -694,6 +818,74 @@ fn dispatch(cli: Cli) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// One line per session: what it is, what it ends on, and what the read could
+/// not establish. A fact the read did not establish has no name on the line,
+/// and an empty fact list is the answer that the read established none.
+fn render_endings(report: &EndingsReport) -> String {
+    report.endings.iter().map(render_ending).collect()
+}
+
+fn render_ending(ending: &Ending) -> String {
+    let mut out = format!(
+        "{} {} {} {}",
+        ending.session.id,
+        ending.session.harness,
+        human_timestamp(ending.session.last_activity_at),
+        ending
+            .last_turn
+            .as_ref()
+            .map_or_else(|| "-".to_owned(), |turn| speaker(&turn.role, turn.kind))
+    );
+    if !ending.facts.is_empty() {
+        out.push(' ');
+        out.push_str(
+            &ending
+                .facts
+                .iter()
+                .map(|fact| fact.label())
+                .collect::<Vec<_>>()
+                .join(","),
+        );
+    }
+    if !ending.incomplete.is_empty() {
+        out.push_str(&format!(
+            " [incomplete: {}]",
+            ending
+                .incomplete
+                .iter()
+                .map(|limit| limit.label())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    if let Some(children) = ending
+        .lineage
+        .as_ref()
+        .map(|lineage| lineage.children)
+        .filter(|children| *children > 0)
+    {
+        out.push_str(&format!(" [children: {children}]"));
+    }
+    out.push('\n');
+    for entry in ending.tail.iter().flatten() {
+        let heading = [
+            Some(speaker(&entry.role, entry.kind)),
+            Some(format!("#{}", entry.ordinal)),
+            entry.ts.map(human_timestamp),
+            entry.truncated.then(|| "cut at 400 characters".to_owned()),
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join(" ");
+        out.push_str(&format!("  [{heading}]\n"));
+        for line in entry.text.lines() {
+            out.push_str(&format!("    {line}\n"));
+        }
+    }
+    out
 }
 
 /// One line for the session, one for a recorded parent or fork, and one per
