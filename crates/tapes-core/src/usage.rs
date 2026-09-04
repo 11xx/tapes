@@ -6,10 +6,15 @@
 //! split — has no normalized field, so it rides on the session as
 //! `usage_detail` and reaches a consumer through this projection.
 
+use std::collections::BTreeMap;
+
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 
-use crate::model::{Accounting, Cost, Model, Role, SourceBound, Tokens, Transcript, Truncation};
+use crate::model::{
+    Accounting, AccountingBasis, AccountingCoverage, Cost, Model, Role, Session, SourceBound,
+    Tokens, Transcript, Truncation,
+};
 
 pub const USAGE_SCHEMA: &str = "tapes-usage/1";
 
@@ -234,6 +239,245 @@ fn turn_coverage(truncation: &Truncation) -> TurnCoverage {
     }
 }
 
+/// A dimension a usage summary groups sessions by.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GroupBy {
+    Harness,
+    /// The model's id, without the variant that may qualify it.
+    Model,
+    /// The model's variant, which qualifies its id where a harness records
+    /// one — a reasoning effort, a service tier.
+    Variant,
+    Directory,
+}
+
+impl GroupBy {
+    /// The session's value for this dimension, absent when the session
+    /// carries no such fact.
+    fn of(self, session: &Session) -> Option<String> {
+        match self {
+            Self::Harness => Some(session.harness.clone()),
+            Self::Model => session.model.as_ref().map(|model| model.id.clone()),
+            Self::Variant => session
+                .model
+                .as_ref()
+                .and_then(|model| model.variant.clone()),
+            Self::Directory => session
+                .directory
+                .as_deref()
+                .map(|path| path.display().to_string()),
+        }
+    }
+}
+
+/// What a group's sessions share. A dimension the grouping did not ask for,
+/// and one the sessions did not record, are both absent.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct GroupKey {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub harness: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub variant: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub directory: Option<String>,
+}
+
+/// How many sessions carried each counter. A sum says how much; this says
+/// over how many sessions, so a total is read for what it covers.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct CountedSessions {
+    pub input: usize,
+    pub output: usize,
+    pub reasoning: usize,
+    pub cache_read: usize,
+    pub cache_write: usize,
+    pub cost: usize,
+}
+
+/// The sessions behind a sum, counted by the accounting of their counters.
+/// A recorded total and a sum of per-request records are both addable; the
+/// coverage of a summed figure says how much of its session it covers, and a
+/// session with no counters at all contributes nothing but itself.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct CoverageCounts {
+    pub recorded_total: usize,
+    pub summed_session: usize,
+    pub summed_read_window: usize,
+    pub no_accounting: usize,
+}
+
+/// Counters summed over a set of sessions. Every sum is over the sessions
+/// that recorded it, and `counted` says how many those were; a counter no
+/// session recorded is absent rather than zero.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct UsageTally {
+    pub sessions: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tokens: Option<Tokens>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cost: Option<Cost>,
+    pub coverage: CoverageCounts,
+    pub counted: CountedSessions,
+}
+
+/// One group of sessions and what they spent.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct UsageGroup {
+    pub key: GroupKey,
+    #[serde(flatten)]
+    pub tally: UsageTally,
+}
+
+/// Sessions grouped by the requested dimensions, plus the tally over all of
+/// them. Groups are ordered by their key values, ascending, in the order the
+/// dimensions were requested; a group whose key value is absent sorts first.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct UsageAggregate {
+    pub groups: Vec<UsageGroup>,
+    pub totals: UsageTally,
+}
+
+/// Group sessions by the requested dimensions and sum their recorded
+/// counters. Nothing is inferred: a cost is only a recorded cost, a token
+/// count is only a recorded token count, and neither is derived from the
+/// other. With no dimensions the whole set is one group under an empty key.
+pub fn aggregate(sessions: &[Session], by: &[GroupBy]) -> UsageAggregate {
+    let mut groups: BTreeMap<Vec<Option<String>>, Tally> = BTreeMap::new();
+    let mut totals = Tally::default();
+    for session in sessions {
+        let key = by.iter().map(|dimension| dimension.of(session)).collect();
+        groups.entry(key).or_default().add(session);
+        totals.add(session);
+    }
+    UsageAggregate {
+        groups: groups
+            .into_iter()
+            .map(|(values, tally)| UsageGroup {
+                key: group_key(by, &values),
+                tally: tally.finish(),
+            })
+            .collect(),
+        totals: totals.finish(),
+    }
+}
+
+fn group_key(by: &[GroupBy], values: &[Option<String>]) -> GroupKey {
+    let mut key = GroupKey::default();
+    for (dimension, value) in by.iter().zip(values) {
+        let slot = match dimension {
+            GroupBy::Harness => &mut key.harness,
+            GroupBy::Model => &mut key.model,
+            GroupBy::Variant => &mut key.variant,
+            GroupBy::Directory => &mut key.directory,
+        };
+        slot.clone_from(value);
+    }
+    key
+}
+
+/// One counter being summed: the running total and how many sessions have
+/// contributed to it.
+#[derive(Clone, Copy, Default)]
+struct Counter {
+    total: u64,
+    counted: usize,
+}
+
+impl Counter {
+    fn add(&mut self, value: Option<u64>) {
+        if let Some(value) = value {
+            self.total = self.total.saturating_add(value);
+            self.counted += 1;
+        }
+    }
+
+    fn sum(self) -> Option<u64> {
+        (self.counted > 0).then_some(self.total)
+    }
+}
+
+#[derive(Clone, Copy, Default)]
+struct Tally {
+    sessions: usize,
+    input: Counter,
+    output: Counter,
+    reasoning: Counter,
+    cache_read: Counter,
+    cache_write: Counter,
+    cost_usd: f64,
+    cost_counted: usize,
+    coverage: CoverageCounts,
+}
+
+impl Tally {
+    fn add(&mut self, session: &Session) {
+        self.sessions += 1;
+        if let Some(tokens) = &session.tokens {
+            self.input.add(tokens.input);
+            self.output.add(tokens.output);
+            self.reasoning.add(tokens.reasoning);
+            self.cache_read.add(tokens.cache_read);
+            self.cache_write.add(tokens.cache_write);
+        }
+        if let Some(cost) = &session.cost {
+            self.cost_usd += cost.usd;
+            self.cost_counted += 1;
+        }
+        // Accounting is present exactly when a counter is, so its absence is
+        // the session that recorded nothing to sum.
+        match session
+            .accounting
+            .as_ref()
+            .map(|accounting| accounting.basis)
+        {
+            None => self.coverage.no_accounting += 1,
+            Some(AccountingBasis::RecordedTotal) => self.coverage.recorded_total += 1,
+            Some(AccountingBasis::SummedRequests) => {
+                match session
+                    .accounting
+                    .as_ref()
+                    .map(|accounting| accounting.coverage)
+                {
+                    Some(AccountingCoverage::ReadWindow) => self.coverage.summed_read_window += 1,
+                    _ => self.coverage.summed_session += 1,
+                }
+            }
+        }
+    }
+
+    fn finish(self) -> UsageTally {
+        let counted = CountedSessions {
+            input: self.input.counted,
+            output: self.output.counted,
+            reasoning: self.reasoning.counted,
+            cache_read: self.cache_read.counted,
+            cache_write: self.cache_write.counted,
+            cost: self.cost_counted,
+        };
+        let any_token_counted = counted.input
+            + counted.output
+            + counted.reasoning
+            + counted.cache_read
+            + counted.cache_write
+            > 0;
+        UsageTally {
+            sessions: self.sessions,
+            tokens: any_token_counted.then(|| Tokens {
+                input: self.input.sum(),
+                output: self.output.sum(),
+                reasoning: self.reasoning.sum(),
+                cache_read: self.cache_read.sum(),
+                cache_write: self.cache_write.sum(),
+            }),
+            cost: (self.cost_counted > 0).then_some(Cost { usd: self.cost_usd }),
+            coverage: self.coverage,
+            counted,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use chrono::TimeZone;
@@ -434,5 +678,180 @@ mod tests {
             let value = serde_json::to_value(usage(&transcript)).unwrap();
             assert_eq!(value["turns"]["coverage"], expected, "{value}");
         }
+    }
+
+    fn spender(
+        harness: &str,
+        model: Option<(&str, Option<&str>)>,
+        tokens: Option<Tokens>,
+        cost: Option<f64>,
+        accounting: Option<(AccountingBasis, AccountingCoverage)>,
+    ) -> Session {
+        Session {
+            harness: harness.to_owned(),
+            model: model.map(|(id, variant)| Model {
+                id: id.to_owned(),
+                variant: variant.map(str::to_owned),
+            }),
+            tokens,
+            cost: cost.map(|usd| Cost { usd }),
+            accounting: accounting.map(|(basis, coverage)| Accounting { basis, coverage }),
+            ..session()
+        }
+    }
+
+    fn tokens(input: Option<u64>, output: Option<u64>, reasoning: Option<u64>) -> Option<Tokens> {
+        Some(Tokens {
+            input,
+            output,
+            reasoning,
+            cache_read: None,
+            cache_write: None,
+        })
+    }
+
+    fn spenders() -> Vec<Session> {
+        vec![
+            spender(
+                "codex",
+                Some(("gpt-fixture", Some("high"))),
+                tokens(Some(100), Some(10), Some(5)),
+                Some(1.0),
+                Some((AccountingBasis::RecordedTotal, AccountingCoverage::Session)),
+            ),
+            spender(
+                "codex",
+                Some(("gpt-fixture", Some("high"))),
+                tokens(Some(200), Some(20), None),
+                None,
+                Some((
+                    AccountingBasis::SummedRequests,
+                    AccountingCoverage::ReadWindow,
+                )),
+            ),
+            spender("codex", Some(("gpt-fixture", None)), None, None, None),
+            spender(
+                "claude",
+                Some(("claude-fixture", None)),
+                Some(Tokens {
+                    input: None,
+                    output: None,
+                    reasoning: None,
+                    cache_read: Some(7),
+                    cache_write: None,
+                }),
+                Some(2.5),
+                Some((AccountingBasis::SummedRequests, AccountingCoverage::Session)),
+            ),
+        ]
+    }
+
+    /// A sum is over the sessions that recorded the counter, and `counted`
+    /// says how many those were, so a group of three sessions whose figure
+    /// came from two is not read as three.
+    #[test]
+    fn a_group_sums_only_the_counters_its_sessions_recorded() {
+        let aggregate = aggregate(&spenders(), &[GroupBy::Harness, GroupBy::Model]);
+        let value = serde_json::to_value(&aggregate).unwrap();
+
+        assert_eq!(
+            value["groups"],
+            json!([
+                {
+                    "key": { "harness": "claude", "model": "claude-fixture" },
+                    "sessions": 1,
+                    "tokens": { "cache_read": 7 },
+                    "cost": { "usd": 2.5 },
+                    "coverage": {
+                        "recorded_total": 0,
+                        "summed_session": 1,
+                        "summed_read_window": 0,
+                        "no_accounting": 0
+                    },
+                    "counted": {
+                        "input": 0,
+                        "output": 0,
+                        "reasoning": 0,
+                        "cache_read": 1,
+                        "cache_write": 0,
+                        "cost": 1
+                    }
+                },
+                {
+                    "key": { "harness": "codex", "model": "gpt-fixture" },
+                    "sessions": 3,
+                    "tokens": { "input": 300, "output": 30, "reasoning": 5 },
+                    "cost": { "usd": 1.0 },
+                    "coverage": {
+                        "recorded_total": 1,
+                        "summed_session": 0,
+                        "summed_read_window": 1,
+                        "no_accounting": 1
+                    },
+                    "counted": {
+                        "input": 2,
+                        "output": 2,
+                        "reasoning": 1,
+                        "cache_read": 0,
+                        "cache_write": 0,
+                        "cost": 1
+                    }
+                }
+            ])
+        );
+        assert_eq!(
+            value["totals"],
+            json!({
+                "sessions": 4,
+                "tokens": { "input": 300, "output": 30, "reasoning": 5, "cache_read": 7 },
+                "cost": { "usd": 3.5 },
+                "coverage": {
+                    "recorded_total": 1,
+                    "summed_session": 1,
+                    "summed_read_window": 1,
+                    "no_accounting": 1
+                },
+                "counted": {
+                    "input": 2,
+                    "output": 2,
+                    "reasoning": 1,
+                    "cache_read": 1,
+                    "cache_write": 0,
+                    "cost": 2
+                }
+            })
+        );
+    }
+
+    /// A model without a variant is its own group, keyed by the absence
+    /// rather than by an empty string, and a group whose sessions recorded
+    /// nothing carries no counters at all.
+    #[test]
+    fn an_unrecorded_variant_keys_a_group_by_its_absence() {
+        let aggregate = aggregate(&spenders()[..3], &[GroupBy::Variant]);
+        let value = serde_json::to_value(&aggregate).unwrap();
+
+        assert_eq!(value["groups"][0]["key"], json!({}));
+        assert_eq!(value["groups"][0]["sessions"], 1);
+        for absent in ["tokens", "cost"] {
+            assert!(
+                value["groups"][0].get(absent).is_none(),
+                "{absent} in {value}"
+            );
+        }
+        assert_eq!(value["groups"][0]["coverage"]["no_accounting"], 1);
+        assert_eq!(value["groups"][1]["key"], json!({ "variant": "high" }));
+        assert_eq!(value["groups"][1]["sessions"], 2);
+        assert_eq!(value["groups"].as_array().unwrap().len(), 2);
+    }
+
+    /// Without a dimension the selection is one group, so a summary can be
+    /// asked for a single total.
+    #[test]
+    fn no_dimension_leaves_one_group_over_the_whole_selection() {
+        let aggregate = aggregate(&spenders(), &[]);
+        assert_eq!(aggregate.groups.len(), 1);
+        assert_eq!(aggregate.groups[0].key, GroupKey::default());
+        assert_eq!(aggregate.groups[0].tally, aggregate.totals);
     }
 }

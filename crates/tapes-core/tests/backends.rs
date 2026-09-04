@@ -22,8 +22,8 @@ use tapes_core::usage::{usage, Durations, ModelUsage, RateWindow, TurnCoverage};
 use tapes_core::{
     export_selection_with_backends, latest_with_backends, list_with_backends,
     list_with_backends_filtered, list_with_backends_filtered_and_search,
-    list_with_backends_options, resolve_session, scope::Scope, show_with_backends, ExportSelection,
-    ListFilters, ListSort, ResolveError, Selection, Where, EXPORT_MANIFEST_SCHEMA,
+    list_with_backends_options, resolve_session, scope::Scope, show_with_backends, ListFilters,
+    ListSort, ResolveError, Selection, SessionSelection, Where, EXPORT_MANIFEST_SCHEMA,
     LIST_SEARCH_TAIL,
 };
 
@@ -3508,8 +3508,8 @@ fn export_directory(name: &str) -> PathBuf {
     directory
 }
 
-fn selection() -> ExportSelection<'static> {
-    ExportSelection {
+fn selection() -> SessionSelection<'static> {
+    SessionSelection {
         within: Where::Global,
         harness: Some("fixture"),
         limit: None,

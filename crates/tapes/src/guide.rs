@@ -117,6 +117,7 @@ PROBE BEFORE EXPORTING
   tapes events <id> --json       Typed tool calls, results, and pairs.
   tapes usage <id> --json        Tokens, cost, and turn counts.
   tapes lineage <id> --json      The sessions this one names as relatives.
+  tapes usage --here --json      The same counters summed over a project.
 
   show returns the last 100 turns unless --tail says otherwise, and marks the
   result truncated whenever it dropped any. It is the probe, not the archive;
@@ -162,6 +163,16 @@ PROBE BEFORE EXPORTING
   rollout headers naming this session as their parent, opencode reads the
   parent column on either projection, and pi carries a parent reference on the
   child alone.
+
+  Given a scope or a listing filter instead of a session, usage answers that
+  whole selection as tapes-usage-summary/1, using the flags list and export
+  take and grouping by --by (harness and model unless told otherwise). It sums
+  the counters the listing already carries, so nothing is re-read. Read
+  counted before a sum: it says how many of a group's sessions recorded that
+  counter, and a counter none recorded is absent rather than zero. coverage
+  counts the sessions behind a sum by their accounting, including those whose
+  harness recorded nothing to sum, and cost is summed only where a harness
+  recorded one.
 
   Every turn carries an `ordinal`, its zero-based place in the session's
   normalized sequence. On a file-backed session (claude, codex, pi) it is kept

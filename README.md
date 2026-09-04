@@ -186,6 +186,18 @@ when the recording holds a `cost-state`, and pi and OpenCode add neither.
 Human output prints one line per recorded fact and closes with the same
 truncation notes `show` prints.
 
+Given a scope or a listing filter instead of a session, `usage` answers the
+whole selection as `tapes-usage-summary/1`: the same flags `list` and `export`
+take, grouped by `--by harness,model,variant,directory` and defaulting to
+harness and model. It sums the counters the listing already carries, so no
+transcript is read. Each sum covers the sessions that recorded that counter
+and `counted` says how many those were — a counter nine of twelve sessions
+recorded is not a figure about twelve — while `coverage` counts the sessions
+behind a sum by their accounting, including those whose harness recorded
+nothing to sum. Cost is summed only where a harness recorded one, never
+inferred from tokens. Human output is one row per group, a totals row, and
+the listing's own diagnostics.
+
 `export` writes a three-file bundle sharing one timestamped prefix, into
 `--bundle <dir>` or `/tmp`:
 
@@ -264,10 +276,10 @@ questions without summing a transcript by hand. `tapes lineage --latest
 --json` answers which sessions a recording names as relatives — the one that
 spawned it, and the children its store records with their roles and outcomes
 — from the records themselves rather than from directory or timestamp
-proximity.
+proximity. `tapes usage --here --since <date> --json` answers the same questions across a project's sessions at once.
 
 **Contracts you can build on.** `tapes-list/1`, `tapes-session/1`,
-`tapes-events/1`, `tapes-usage/1`, `tapes-lineage/1`, and
+`tapes-events/1`, `tapes-usage/1`, `tapes-usage-summary/1`, `tapes-lineage/1`, and
 `tapes-export-manifest/1` are versioned
 JSON; a breaking shape change bumps the version. A single-session `export`
 prints

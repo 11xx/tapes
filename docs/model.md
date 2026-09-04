@@ -409,6 +409,96 @@ render with a note saying so, beside whatever notes the read produced. When a
 trailing record is available, `show` names its kind and timestamp when one was
 recorded.
 
+## Usage summary
+
+`tapes usage` over a selection sums what that set of sessions spent and
+serializes as a `tapes-usage-summary/1` object. The counters come from the
+listing, so the summed set is exactly the set `list` returns for the same
+flags and no transcript is read.
+
+`selection` restates the query that chose the set, with the members and
+meanings the export manifest's `selection` carries. The listing's
+`unavailable`, `unreadable`, `unsearched`, `scanned`, and `scan_truncated`
+are carried verbatim, so a total can be audited against the store it came
+from.
+
+`groups` holds one entry per distinct combination of the requested
+dimensions: `harness`, `model` (the model id), `variant` (what qualifies that
+id, such as a reasoning effort), and `directory`. A group's `key` carries
+only the requested dimensions, and a dimension the sessions did not record is
+absent from the key rather than empty. Groups are ordered by their key values
+ascending, in the order the dimensions were requested; an absent value sorts
+first. `totals` has a group's shape without its key and covers every selected
+session.
+
+Within a group or the totals, `tokens.<counter>` is the sum over the sessions
+that recorded that counter and `counted.<counter>` is how many those were, so
+a total over twelve sessions of which nine recorded reasoning tokens is not
+read as twelve. A counter no session recorded is absent rather than zero, and
+`tokens` itself is absent when no counter was recorded at all. `cost.usd`
+sums only recorded costs, with `counted.cost` behind it; nothing is inferred
+from tokens, and a group with no recorded cost omits `cost`.
+
+`coverage` counts the sessions behind a sum by their accounting:
+`recorded_total` for a cumulative figure, `summed_session` and
+`summed_read_window` for a sum of per-request records by how much of its
+session it covers, and `no_accounting` for a session whose harness recorded
+no counters at all. A provider quota is not part of this view: it is an
+account-wide fact, not a sum over sessions.
+
+```json
+{
+  "schema": "tapes-usage-summary/1",
+  "selection": { "scope": "global", "sort": "newest", "limit": 20 },
+  "groups": [
+    {
+      "key": { "harness": "codex", "model": "gpt-5.6-sol", "variant": "high" },
+      "sessions": 12,
+      "tokens": { "input": 120000, "output": 8000, "reasoning": 4000 },
+      "cost": { "usd": 1.23 },
+      "coverage": {
+        "recorded_total": 10,
+        "summed_session": 1,
+        "summed_read_window": 1,
+        "no_accounting": 0
+      },
+      "counted": {
+        "input": 12,
+        "output": 12,
+        "reasoning": 9,
+        "cache_read": 12,
+        "cache_write": 12,
+        "cost": 12
+      }
+    }
+  ],
+  "totals": {
+    "sessions": 12,
+    "tokens": { "input": 120000, "output": 8000, "reasoning": 4000 },
+    "cost": { "usd": 1.23 },
+    "coverage": {
+      "recorded_total": 10,
+      "summed_session": 1,
+      "summed_read_window": 1,
+      "no_accounting": 0
+    },
+    "counted": {
+      "input": 12,
+      "output": 12,
+      "reasoning": 9,
+      "cache_read": 12,
+      "cache_write": 12,
+      "cost": 12
+    }
+  },
+  "unavailable": [],
+  "unreadable": [],
+  "unsearched": [],
+  "scanned": 12,
+  "scan_truncated": false
+}
+```
+
 ## JSON contract
 
 A serialized transcript is a `tapes-session/1` object:

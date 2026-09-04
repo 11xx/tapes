@@ -25,6 +25,7 @@ pub mod usage;
 
 pub const LIST_SCHEMA: &str = "tapes-list/1";
 pub const EXPORT_MANIFEST_SCHEMA: &str = "tapes-export-manifest/1";
+pub const USAGE_SUMMARY_SCHEMA: &str = "tapes-usage-summary/1";
 /// Number of normalized turns a `list --search` query inspects per session.
 /// Keeping this fixed makes the listing's cost predictable for callers.
 pub const LIST_SEARCH_TAIL: usize = 32;
@@ -843,10 +844,10 @@ pub fn export_with_backends(
     bundle::export(&transcript, directory.unwrap_or_else(|| Path::new("/tmp")))
 }
 
-/// Which sessions a bulk export acts on, stated in the same terms a listing
-/// is, so the exported set is exactly the listed one.
+/// Which sessions a command acts on in bulk, stated in the same terms a
+/// listing is, so the set acted on is exactly the listed one.
 #[derive(Clone, Copy, Debug, Default)]
-pub struct ExportSelection<'a> {
+pub struct SessionSelection<'a> {
     pub within: Where<'a>,
     pub harness: Option<&'a str>,
     pub limit: Option<usize>,
@@ -946,7 +947,7 @@ impl BulkExport {
 }
 
 pub fn export_selection(
-    selection: &ExportSelection<'_>,
+    selection: &SessionSelection<'_>,
     directory: Option<&Path>,
 ) -> Result<BulkExport> {
     export_selection_with_backends(&backend::backends(), selection, directory)
@@ -961,7 +962,7 @@ pub fn export_selection(
 /// was never exported.
 pub fn export_selection_with_backends(
     backends: &[Box<dyn Backend>],
-    selection: &ExportSelection<'_>,
+    selection: &SessionSelection<'_>,
     directory: Option<&Path>,
 ) -> Result<BulkExport> {
     let scope = selection.within.resolve()?;
@@ -1027,7 +1028,65 @@ pub fn export_selection_with_backends(
     })
 }
 
-fn selection_record(selection: &ExportSelection<'_>, limit: usize) -> SelectionRecord {
+/// What a selection of sessions spent, grouped. `selection` restates the
+/// query that chose the set, and the listing's own diagnostics are carried
+/// verbatim, so a total can be audited against the store it came from.
+#[derive(Debug, Serialize)]
+pub struct UsageSummary {
+    pub schema: &'static str,
+    pub selection: SelectionRecord,
+    pub groups: Vec<usage::UsageGroup>,
+    /// Every selected session, whatever it was grouped under.
+    pub totals: usage::UsageTally,
+    pub unavailable: Vec<String>,
+    pub unreadable: Vec<String>,
+    pub unsearched: Vec<String>,
+    pub scanned: usize,
+    pub scan_truncated: bool,
+}
+
+pub fn usage_summary(
+    selection: &SessionSelection<'_>,
+    by: &[usage::GroupBy],
+) -> Result<UsageSummary> {
+    usage_summary_with_backends(&backend::backends(), selection, by)
+}
+
+/// Sum the recorded counters of every session a listing with the same filters
+/// would return, grouped by the requested dimensions.
+///
+/// The listing carries each session's counters and its accounting, so the
+/// summary is a projection over it and no transcript is read.
+pub fn usage_summary_with_backends(
+    backends: &[Box<dyn Backend>],
+    selection: &SessionSelection<'_>,
+    by: &[usage::GroupBy],
+) -> Result<UsageSummary> {
+    let scope = selection.within.resolve()?;
+    let limit = selection.limit.unwrap_or(DEFAULT_LIST_LIMIT);
+    let listed = list_scoped(
+        backends,
+        selection.harness,
+        scope.as_ref(),
+        limit,
+        &selection.filters,
+        selection.sort,
+    )?;
+    let aggregate = usage::aggregate(&listed.sessions, by);
+    Ok(UsageSummary {
+        schema: USAGE_SUMMARY_SCHEMA,
+        selection: selection_record(selection, limit),
+        groups: aggregate.groups,
+        totals: aggregate.totals,
+        unavailable: listed.unavailable,
+        unreadable: listed.unreadable,
+        unsearched: listed.unsearched,
+        scanned: listed.scanned,
+        scan_truncated: listed.scan_truncated,
+    })
+}
+
+fn selection_record(selection: &SessionSelection<'_>, limit: usize) -> SelectionRecord {
     let (scope, project) = match selection.within {
         Where::Here => (SelectedScope::Here, std::env::current_dir().ok()),
         Where::Project(path) => (SelectedScope::Project, Some(path.to_path_buf())),
