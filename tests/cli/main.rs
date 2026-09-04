@@ -2089,3 +2089,37 @@ fn codex_token_totals_agree_across_list_show_and_export() {
 
     fs::remove_dir_all(codex_home).unwrap();
 }
+
+#[test]
+fn list_sort_oldest_keeps_the_oldest_sessions_under_the_limit() {
+    let (codex_home, home) = filter_fixture_store("sort-oldest-limit");
+    let mut command = tapes();
+    command.args([
+        "list",
+        "--global",
+        "--harness",
+        "codex",
+        "--sort",
+        "oldest",
+        "--limit",
+        "1",
+        "--json",
+    ]);
+    with_fixture_env(
+        &mut command,
+        &codex_home,
+        &home,
+        Path::new("/definitely/missing"),
+    );
+    let output = command.output().unwrap();
+
+    assert!(output.status.success());
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["sessions"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        value["sessions"][0]["id"],
+        "00000000-0000-0000-0000-000000000001"
+    );
+
+    fs::remove_dir_all(codex_home).unwrap();
+}

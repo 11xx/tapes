@@ -374,8 +374,11 @@ fn list_scoped(
 
     // Content search is a filter, so the backend must inspect candidates until
     // it has found the requested result set rather than spending the limit on
-    // sessions whose recent turns do not match.
-    let candidate_limit = if filters.search.is_some() && limit > 0 {
+    // sessions whose recent turns do not match. A backend walks its store
+    // newest first, so the oldest sessions are known only once every candidate
+    // has been seen: an oldest-first listing likewise inspects them all and
+    // applies the limit after the sort.
+    let candidate_limit = if (filters.search.is_some() || sort == ListSort::Oldest) && limit > 0 {
         usize::MAX
     } else {
         limit

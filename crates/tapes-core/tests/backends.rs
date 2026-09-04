@@ -2685,3 +2685,122 @@ fn file_search_short_of_the_tail_behind_the_file_bound_is_unsearched() {
     );
     fs::remove_dir_all(root).unwrap();
 }
+
+/// A backend walks its store newest first and stops at the limit, so an
+/// oldest-first listing must inspect every candidate before it can know which
+/// are the oldest; otherwise the limit would keep the newest and merely print
+/// them oldest first.
+#[test]
+fn sort_oldest_selects_the_oldest_sessions_before_the_limit() {
+    let root = std::env::temp_dir().join(format!("tapes-sort-oldest-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&root);
+    let day = root.join("2026/08/09");
+    fs::create_dir_all(&day).unwrap();
+    for (index, id) in [(0, "old"), (1, "mid"), (2, "new")] {
+        let path = day.join(format!("rollout-2026-08-09T00-00-0{index}-{id}.jsonl"));
+        fs::write(
+            &path,
+            format!(
+                concat!(
+                    r#"{{"timestamp":"2026-08-09T00:00:0{index}Z","type":"session_meta","payload":{{"id":"{id}","cwd":"/fixtures/project"}}}}"#,
+                    "\n",
+                    r#"{{"timestamp":"2026-08-09T00:00:0{index}Z","type":"response_item","payload":{{"type":"message","role":"user","content":[{{"type":"input_text","text":"hello"}}]}}}}"#,
+                    "\n"
+                ),
+                index = index,
+                id = id
+            ),
+        )
+        .unwrap();
+        File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(
+                std::time::SystemTime::UNIX_EPOCH
+                    + std::time::Duration::from_secs(1_800_000_000 + index),
+            )
+            .unwrap();
+    }
+    let backends: Vec<Box<dyn Backend>> = vec![Box::new(CodexBackend::new(&root))];
+    let ids = |sort: ListSort| {
+        list_with_backends_options(
+            &backends,
+            Some("codex"),
+            None,
+            2,
+            &ListFilters::default(),
+            sort,
+        )
+        .unwrap()
+        .sessions
+        .into_iter()
+        .map(|session| session.id)
+        .collect::<Vec<_>>()
+    };
+
+    assert_eq!(ids(ListSort::Oldest), vec!["old", "mid"]);
+    assert_eq!(ids(ListSort::Newest), vec!["new", "mid"]);
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+/// A `cost-state` record is the session's running total wherever the read
+/// reached it, so a recording past the file bound still reports whole-session
+/// coverage from it; only a per-request sum is bounded by the read.
+#[test]
+fn a_truncated_claude_read_keeps_whole_session_coverage_for_a_cost_state_record() {
+    let root = std::env::temp_dir().join(format!(
+        "tapes-claude-truncated-cost-state-{}",
+        std::process::id()
+    ));
+    let project = root.join("project");
+    let path = project.join("session-truncated-cost.jsonl");
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&project).unwrap();
+    let mut file = BufWriter::new(File::create(&path).unwrap());
+    writeln!(
+        file,
+        r#"{{"type":"user","sessionId":"session-truncated-cost","uuid":"user-1","timestamp":"2026-01-01T10:00:00Z","cwd":"/fixtures/project","message":{{"role":"user","content":"Inspect the fixture."}}}}"#
+    )
+    .unwrap();
+    let filler = "x".repeat(4096);
+    for index in 0..1100 {
+        writeln!(
+            file,
+            r#"{{"type":"assistant","sessionId":"session-truncated-cost","uuid":"assistant-{index}","requestId":"request-{index}","timestamp":"2026-01-01T10:00:01Z","cwd":"/fixtures/project","message":{{"role":"assistant","model":"claude-fixture","usage":{{"input_tokens":1,"output_tokens":1}},"content":[{{"type":"text","text":"{filler}"}}]}}}}"#
+        )
+        .unwrap();
+    }
+    writeln!(
+        file,
+        r#"{{"type":"cost-state","sessionId":"session-truncated-cost","totalCostUSD":3.5,"modelUsage":{{"claude-fixture":{{"inputTokens":10,"outputTokens":20,"thinkingTokens":30,"cacheReadInputTokens":40,"cacheCreationInputTokens":50}}}},"hasUnknownModelCost":false}}"#
+    )
+    .unwrap();
+    drop(file);
+    assert!(fs::metadata(&path).unwrap().len() > 4 * 1024 * 1024);
+
+    let backend = ClaudeBackend::new(&root);
+    let session = located(&backend, "session-truncated-cost");
+    assert_eq!(
+        session.tokens,
+        Some(Tokens {
+            input: Some(10),
+            output: Some(20),
+            reasoning: Some(30),
+            cache_read: Some(40),
+            cache_write: Some(50),
+        })
+    );
+    assert_eq!(session.cost, Some(Cost { usd: 3.5 }));
+    assert_eq!(
+        session.accounting,
+        Some(Accounting {
+            basis: AccountingBasis::RecordedTotal,
+            coverage: AccountingCoverage::Session,
+        })
+    );
+    assert!(backend.transcript(&session, 1).unwrap().truncated);
+
+    fs::remove_dir_all(root).unwrap();
+}

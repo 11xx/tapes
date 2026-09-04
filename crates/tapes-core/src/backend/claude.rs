@@ -74,10 +74,13 @@ impl ClaudeBackend {
         });
         let turns = read.values.iter().flat_map(parse_turns).collect::<Vec<_>>();
         let (tokens, cost, basis) = claude_accounting(&read.values);
-        let coverage = if read.truncated {
-            AccountingCoverage::ReadWindow
-        } else {
+        // A cost-state record is cumulative for the whole session wherever the
+        // read reached it; only a sum over the read's requests is bounded by
+        // the read.
+        let coverage = if basis == AccountingBasis::RecordedTotal || !read.truncated {
             AccountingCoverage::Session
+        } else {
+            AccountingCoverage::ReadWindow
         };
         let accounting = accounting_for(tokens.as_ref(), cost.as_ref(), basis, coverage);
 

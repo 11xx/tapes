@@ -155,7 +155,10 @@ the window metadata therefore uses the same turn coordinates as `show` rather
 than counting event records. Name and call-id filters apply after pairing.
 `pairs.complete` counts distinct complete pairs represented by at least one
 returned event, while `pairs.incomplete` counts returned events carrying an
-`incomplete` reason.
+`incomplete` reason. Both describe the read: a file-backed or database read
+pairs the whole bounded read before the window applies, while the OpenCode API
+read fetches only the pages the window needs, so its counts belong to that
+window's read and a wider `--tail` can pair more.
 
 ```json
 {
@@ -294,8 +297,10 @@ per-harness result limit. The object always includes `sort`, either `newest` or
 `oldest`, and includes `activity` only when an activity bound was requested:
 its optional `since` and `until` members are UTC timestamps. The activity
 window matches `last_activity_at` with `since <= last_activity_at < until` and
-is applied before the per-harness result limit. Sort ties use session id
-ascending, then harness ascending.
+is applied before the per-harness result limit. The sort is applied before
+that limit too: `newest` keeps each harness's newest matching sessions and
+`oldest` its oldest, inspecting every candidate the scan reaches. Sort ties use
+session id ascending, then harness ascending.
 
 ```json
 {
