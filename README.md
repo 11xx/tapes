@@ -128,6 +128,8 @@ request through `tapes` passes. Human output closes with one note per cause
 and recommends only the recovery that works. When a backend verifies a final
 non-turn record, human output names its kind and timestamp and JSON carries an
 optional `trailing_record` object; unavailable source timestamps remain absent.
+The activity note compares the store's last activity and the newest rendered
+turn at whole-second precision, matching the timestamps shown to the reader.
 JSON output uses the `tapes-session/1` transcript schema, with the optional
 `live` annotation when the authority answers. The human header marks the same
 state.

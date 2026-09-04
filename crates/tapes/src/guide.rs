@@ -71,7 +71,8 @@ FIND IT
   says whether the hint was shortened. OpenCode's API-backed
   listing does not fetch messages merely to invent titles, so title-less OpenCode
   title metadata stays absent in list, show, and export. Human timestamps use whole
-  RFC 3339 seconds with Z; JSON keeps recorded precision.
+  RFC 3339 seconds with Z; JSON keeps recorded precision. show compares store
+  activity with the newest rendered turn at that same whole-second precision.
 
   A session is named by its full id or an unambiguous prefix; an ambiguous
   prefix lists its candidates and fails rather than guessing. A harness whose
