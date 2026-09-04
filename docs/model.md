@@ -735,6 +735,121 @@ verified `trailing_record`, with the meanings they have on a transcript.
 }
 ```
 
+## Continuation brief
+
+`tapes brief` answers what a continuation of one session needs from its
+recording and serializes as a `tapes-brief/1` object. The session is named by
+id or reached with `--latest`, and costs one export-shaped transcript read and
+one lineage read: pairing therefore sees every call and result the reader
+reached, while `--tail` bounds the rendered exchange alone.
+
+The brief reads the recording and nothing else. It opens no journal, asks no
+project tool, judges no ending, and resumes nothing; joining it with whatever a
+project records about the same work is the caller's.
+
+`session` carries the identity the usage view carries — `id`, `harness`,
+`model`, `started_at`, `last_activity_at`, `directory`, `store` — plus the
+recorded `title` or the derived `derived_title` hint, and `live` when a status
+authority answered. `source` is the coordinate to write down for this reading,
+emitted as the endings report emits it, `schema` included.
+
+`working_set` is where the session worked: the recorded `directory`, the
+`git` head and branch read from that directory when it is a repository, and
+`directory_exists`, which says whether that directory is a directory on this
+machine and is `false` when the recording names none. Nothing here reports
+uncommitted state; what is dirty now is present-tense and the caller reads it
+itself.
+
+`ending` is the endings report's record for the same read: `last_turn`,
+`last_operator`, `last_assistant`, `facts`, `incomplete`, and any verified
+`trailing_record`, each with the meaning it has there.
+
+`in_flight` holds the handles a continuation reattaches to, each bounded to 20
+entries with a note when the bound cut the list:
+
+| member | holds |
+|---|---|
+| `calls_without_result` | every tool call the read paired no result to, newest first, with its `ordinal`, `name`, `call_id`, `ts`, and bounded `arguments` |
+| `children` | every child the store records no outcome for — neither a `completed_at` nor a `disposition` — and every child whose own recording the store cannot resolve, in the order the store records them as spawned |
+
+A call listed there may have left side effects, and a child listed there may
+still be running: the recording says only that nothing answered it.
+
+`tail` holds the newest `--tail` `operator` and `assistant` turns of the read,
+oldest first, each with the turn's `ordinal`, `kind`, `role`, `ts`, its `text`
+cut at 600 characters, and whether that cut happened. The harness's own
+commands, notices, and attached context stay out of it, as do reasoning and
+tool turns.
+
+`usage` is present when the session recorded a token count or a cost, and
+carries those counters with the `accounting` that says what they cover. The
+brief also carries the read's `truncated` flag, its `truncation` record, and
+its `notes`, with the meanings they have on a transcript.
+
+```json
+{
+  "schema": "tapes-brief/1",
+  "session": {
+    "id": "session-1",
+    "harness": "codex",
+    "model": { "id": "gpt-5.6-sol", "variant": "high" },
+    "started_at": "2026-01-01T10:00:00Z",
+    "last_activity_at": "2026-01-01T10:00:06Z",
+    "directory": "/projects/tapes",
+    "store": "/store/rollout-2026-01-01T10-00-00-session-1.jsonl"
+  },
+  "source": {
+    "harness": "codex",
+    "session": "session-1",
+    "ts": "2026-01-01T10:00:06Z",
+    "turn": 41,
+    "schema": "tapes-endings/1",
+    "coverage": "session"
+  },
+  "working_set": {
+    "directory": "/projects/tapes",
+    "git": { "head": "0f2c1d9", "branch": "topic" },
+    "directory_exists": true
+  },
+  "ending": {
+    "last_turn": { "role": "tool", "kind": "tool", "ordinal": 41, "ts": "2026-01-01T10:00:06Z" },
+    "last_operator": { "ordinal": 30, "ts": "2026-01-01T10:00:02Z" },
+    "last_assistant": { "ordinal": 36, "ts": "2026-01-01T10:00:04Z" },
+    "facts": ["call-without-result"],
+    "incomplete": []
+  },
+  "in_flight": {
+    "calls_without_result": [
+      {
+        "ordinal": 41,
+        "name": "apply_patch",
+        "call_id": "call-1",
+        "ts": "2026-01-01T10:00:06Z",
+        "arguments": { "chars": 812, "preview": "*** Begin Patch" }
+      }
+    ],
+    "children": [
+      { "reference": "/root/worker", "role": "worker", "resolved": true, "spawned_at": "2026-01-01T10:00:05Z" }
+    ]
+  },
+  "tail": [
+    {
+      "ordinal": 36,
+      "kind": "assistant",
+      "role": "assistant",
+      "ts": "2026-01-01T10:00:04Z",
+      "text": "Applying the patch.",
+      "truncated": false
+    }
+  ],
+  "usage": {
+    "tokens": { "input": 1200, "output": 300 },
+    "accounting": { "basis": "recorded-total", "coverage": "session" }
+  },
+  "truncated": false
+}
+```
+
 ## JSON contract
 
 A serialized transcript is a `tapes-session/1` object:

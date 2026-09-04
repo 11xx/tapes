@@ -16,6 +16,7 @@ pub use event::{
 };
 
 pub mod backend;
+pub mod brief;
 pub mod bundle;
 pub mod endings;
 pub mod event;
@@ -827,6 +828,28 @@ pub fn stats_with_backends(
     let transcript = backend.transcript(&resolved.session, EXPORT_TAIL)?;
     let lineage = backend.lineage(&resolved.session)?;
     Ok(stats::stats(transcript, &lineage))
+}
+
+/// What a continuation of one session needs from its recording. The read is
+/// export-shaped, so tool pairing sees every call and its result; `tail`
+/// bounds the rendered exchange alone.
+pub fn brief(selection: Selection, tail: Option<usize>) -> Result<brief::Brief> {
+    brief_with_backends(
+        &backend::backends(),
+        selection,
+        tail.unwrap_or(brief::DEFAULT_BRIEF_TAIL),
+    )
+}
+
+pub fn brief_with_backends(
+    backends: &[Box<dyn Backend>],
+    selection: Selection,
+    tail: usize,
+) -> Result<brief::Brief> {
+    let resolved = selection.resolve(backends)?;
+    let transcript = backends[resolved.backend_index].transcript(&resolved.session, EXPORT_TAIL)?;
+    let lineage = backends[resolved.backend_index].lineage(&resolved.session);
+    Ok(brief::brief(transcript, lineage, tail))
 }
 
 pub fn events(selection: Selection, tail: Option<usize>) -> Result<event::EventTranscript> {
