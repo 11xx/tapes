@@ -64,6 +64,9 @@ FIND IT
   is omitted from sessions and named in unsearched instead of being treated as
   a non-match; a preflight notice is written to stderr before scanning, and a
   stopped candidate scan is still reported as scan_truncated.
+  If the local OpenCode2 API server cannot start or list candidates, search
+  falls back to CLI API GETs and records the failed stage and diagnostic in
+  unsearched.
 
   File-backed harnesses may show a bounded first-meaningful-user-turn hint
   prefixed with ~ when a harness recorded no title. JSON keeps that hint as
@@ -71,7 +74,8 @@ FIND IT
   says whether the hint was shortened. OpenCode's API-backed
   listing does not fetch messages merely to invent titles, so title-less OpenCode
   title metadata stays absent in list, show, and export. Human timestamps use whole
-  RFC 3339 seconds with Z; JSON keeps recorded precision.
+  RFC 3339 seconds with Z; JSON keeps recorded precision. show compares store
+  activity with the newest rendered turn at that same whole-second precision.
 
   A session is named by its full id or an unambiguous prefix; an ambiguous
   prefix lists its candidates and fails rather than guessing. A harness whose

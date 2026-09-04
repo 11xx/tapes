@@ -135,7 +135,9 @@ enum Command {
         /// each candidate session. The fixed tail keeps listing bounded; a
         /// match outside it is not considered. Search is applied before
         /// --limit, and a failed bounded read is reported as unsearched. A
-        /// short preflight notice is written to stderr before scanning.
+        /// short preflight notice is written to stderr before scanning. If the
+        /// local OpenCode2 API server cannot start or list candidates, search
+        /// falls back to CLI API GETs and records that stage's diagnostic.
         #[arg(long, value_name = "SUBSTRING")]
         search: Option<String>,
         /// Render results as JSON. Matching sessions may include an optional
@@ -145,7 +147,8 @@ enum Command {
     },
     /// Show one session. The human header marks a matching live session when
     /// harness-status is reachable, and a verified trailing record is named
-    /// when the store ends after its last rendered turn.
+    /// when the store ends after its last rendered turn. Activity comparisons
+    /// use the whole-second timestamps shown to the reader.
     Show {
         #[command(flatten)]
         selection: SelectionArgs,
@@ -402,9 +405,12 @@ fn render_truncation_notes(out: &mut String, truncation: &Truncation) {
 
 fn render_activity_note(out: &mut String, transcript: &Transcript) {
     let newest_turn = transcript.turns.iter().rev().find_map(|turn| turn.ts);
+    let activity_after_newest_turn = newest_turn.as_ref().is_some_and(|newest_turn| {
+        transcript.session.last_activity_at.timestamp() > newest_turn.timestamp()
+    });
     let Some(trailing_record) = transcript.trailing_record.as_ref() else {
-        if let Some(newest_turn) = newest_turn {
-            if transcript.session.last_activity_at > newest_turn {
+        if activity_after_newest_turn {
+            if let Some(newest_turn) = newest_turn {
                 out.push_str(&format!(
                     "Note: The store records activity at {}, after the newest turn rendered here ({}). \
                      What came later is a record `show` does not render as a turn.\n",
@@ -425,7 +431,7 @@ fn render_activity_note(out: &mut String, transcript: &Transcript) {
         None => format!("`{}` (timestamp unavailable)", trailing_record.kind),
     };
     if let Some(newest_turn) = newest_turn {
-        if transcript.session.last_activity_at > newest_turn {
+        if activity_after_newest_turn {
             out.push_str(&format!(
                 "Note: The store records activity at {}, after the newest turn rendered here ({}). \
                  The newest trailing record is {label}; `show` does not render it as a turn.\n",
@@ -595,6 +601,29 @@ mod tests {
         assert!(
             !agreeing.contains("does not render as a turn"),
             "{agreeing}"
+        );
+    }
+
+    #[test]
+    fn subsecond_activity_in_the_same_rendered_second_is_not_named() {
+        let newest_turn = "2026-08-23T23:24:52Z".parse::<DateTime<Utc>>().unwrap();
+        let mut transcript = transcript(false);
+        transcript.turns[0].ts = Some(newest_turn);
+        transcript.session.last_activity_at =
+            "2026-08-23T23:24:52.400Z".parse::<DateTime<Utc>>().unwrap();
+
+        let same_second = render_transcript(&transcript, false);
+        assert!(
+            !same_second.contains("The store records activity"),
+            "{same_second}"
+        );
+
+        transcript.session.last_activity_at =
+            "2026-08-23T23:24:53Z".parse::<DateTime<Utc>>().unwrap();
+        let next_second = render_transcript(&transcript, false);
+        assert!(
+            next_second.contains("The store records activity"),
+            "{next_second}"
         );
     }
 

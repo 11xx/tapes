@@ -107,7 +107,9 @@ consumer writes down; none of the three carries transcript text.
 turn when that record does not become a turn. It carries the source `kind` and
 an optional UTC `timestamp`; the timestamp stays absent when the source record
 does not provide one. `Transcript` omits `trailing_record` when no verified
-trailing record is available.
+trailing record is available. A message-only projection that does not expose a
+record kind after its newest message, such as OpenCode's paged read, leaves the
+field absent.
 
 `Transcript` contains a session, its turns, a `truncated` flag, a `truncation`
 record, an optional `trailing_record`, and optional reader-facing notes. The
@@ -190,13 +192,16 @@ transcript notes. `derived_title` is present only when the bounded first user
 turn produced a useful hint. `trailing_record` and its `timestamp` are omitted
 when their source facts are unavailable. JSON timestamps retain their recorded
 precision; human list, show, and Markdown renderings use RFC 3339 whole seconds
-with a `Z` suffix.
+with a `Z` suffix. The human `show` activity note compares the store's last
+activity with the newest rendered turn after both timestamps are truncated to
+whole seconds.
 
 A serialized list is a `tapes-list/1` object with `sessions`, `unavailable`,
 `unreadable`, `unsearched`, `scanned`, and `scan_truncated`. `unsearched` is
 populated only for a requested content search when a candidate's bounded read
 fails or a search stage falls back; its entries name the session or search
-stage and diagnostic. It is distinct from
+stage and diagnostic, including a failed OpenCode2 local API server start or
+candidate listing when CLI API reads continue. It is distinct from
 `unreadable`, which describes a session that could not be normalized at all.
 `list --search` inspects the last 32 normalized turns per candidate before the
 per-harness result limit.

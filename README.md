@@ -77,6 +77,9 @@ no v2 database prefilter is available; server reuse removes per-session
 process startup, not that necessary scan. When stable and v2 both expose an
 id, search uses the stable projection just as resolution does; a later
 projection cannot resurrect its non-match.
+If the local v2 API server cannot start or list candidates, the search falls
+back to `opencode2 api --standalone get` listing and per-session reads, and
+records the failed stage and diagnostic in `unsearched`.
 The command writes a short preflight notice to stderr before scanning; JSON
 results remain on stdout.
 The scope applies before the bound, so a scoped listing cannot be emptied by a
@@ -128,6 +131,8 @@ request through `tapes` passes. Human output closes with one note per cause
 and recommends only the recovery that works. When a backend verifies a final
 non-turn record, human output names its kind and timestamp and JSON carries an
 optional `trailing_record` object; unavailable source timestamps remain absent.
+The activity note compares the store's last activity and the newest rendered
+turn at whole-second precision, matching the timestamps shown to the reader.
 JSON output uses the `tapes-session/1` transcript schema, with the optional
 `live` annotation when the authority answers. The human header marks the same
 state.

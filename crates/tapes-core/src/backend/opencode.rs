@@ -889,23 +889,46 @@ impl Backend for OpenCodeBackend {
 
     fn list_with_search(&self, query: &Query, needle: &str, tail: usize) -> Result<Listing> {
         if !self.uses_database() {
-            if let Ok(server) = OpenCodeApiServer::start(&self.program) {
-                if let Ok(listing) = self.api_listing(query, &server.client) {
-                    return Ok(self.filter_v2_search(listing, needle, tail, Some(&server.client)));
-                }
-            }
+            let api_fallback = match OpenCodeApiServer::start(&self.program) {
+                Ok(server) => match self.api_listing(query, &server.client) {
+                    Ok(listing) => {
+                        return Ok(self.filter_v2_search(
+                            listing,
+                            needle,
+                            tail,
+                            Some(&server.client),
+                        ));
+                    }
+                    Err(error) => Some(format!(
+                        "opencode v2 search could not use the local API server while listing candidates: \
+                         {error:#}; searched through the CLI instead"
+                    )),
+                },
+                Err(error) => Some(format!(
+                    "opencode v2 search could not use the local API server at startup: \
+                     {error:#}; searched through the CLI instead"
+                )),
+            };
             let listing = match self.list(query) {
                 Ok(listing) => listing,
                 Err(error) => {
+                    let mut unsearched = vec![format!(
+                        "opencode v2 search could not list candidates: {error:#}"
+                    )];
+                    if let Some(api_fallback) = api_fallback {
+                        unsearched.push(api_fallback);
+                    }
                     return Ok(Listing {
-                        unsearched: vec![format!(
-                            "opencode v2 search could not list candidates: {error:#}"
-                        )],
+                        unsearched,
                         ..Listing::default()
                     });
                 }
             };
-            return Ok(self.filter_v2_search(listing, needle, tail, None));
+            let mut searched = self.filter_v2_search(listing, needle, tail, None);
+            if let Some(api_fallback) = api_fallback {
+                searched.unsearched.push(api_fallback);
+            }
+            return Ok(searched);
         }
         let listing = self.list(query)?;
         let ids = match self.database_search_ids(needle, &listing.sessions) {

@@ -255,6 +255,10 @@ larger than the transport bound still exports. A content search that reached
 fewer than the 32 turns it searches before a ceiling reports the session as
 unsearched rather than as a non-match.
 
+OpenCode transcript reads render messages as turns and do not read a record kind
+that could follow the newest message. `Transcript.trailing_record` is therefore
+always absent for this backend.
+
 A turn's `native_id` is the part's `id` where the read carries one, and the
 message `id` (`msg_…`) otherwise; the database projection carries message ids
 only. `session.store` is the `opencode.db` path for the stable store and the
@@ -275,6 +279,10 @@ reader first uses an explicit read-only `sqlite3` prefilter over
 `session_message.data` when the v2 session table covers every
 listed session. Otherwise it starts one local server for enumeration and uses
 bounded HTTP GET reads for each candidate against that server.
+This path starts `opencode2 serve` on a temporary port bound to `127.0.0.1`
+with `OPENCODE_SERVER_PASSWORD` removed from the server process environment,
+so the server accepts unauthenticated requests for the duration of the scan.
+The server process is killed when the search finishes.
 The v2 prefilter returns only session ids, retains invalid or larger messages
 as uncertain candidates, and checks the `session` table coverage before using
 an empty result as a definitive non-match. Its 64 KiB per-message and 8 MiB
@@ -284,7 +292,10 @@ confirmation read per candidate after metadata filters; the shared server
 removes repeated process startup but cannot change that v2 API contract. If a
 SQL prefilter fails, `tapes` keeps the safe per-session fallback and adds the
 prefilter diagnostic to `unsearched`; an unsupported prefilter is distinct and
-falls back without that error note.
+falls back without that error note. If the local API server cannot start or
+list candidates, `tapes` falls back to `opencode2 api --standalone get` listing
+and per-session reads and records the failed stage and diagnostic in
+`unsearched`.
 
 ## 6. Live HTTP API (legacy reference)
 
