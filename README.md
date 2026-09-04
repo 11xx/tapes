@@ -91,9 +91,11 @@ was shortened (`false` means the present hint is complete). OpenCode's
 API-backed listing does not fetch messages merely to invent titles, so a
 title-less OpenCode row keeps title metadata absent in
 list, show, and export. File-backed readers open a session's first 64 KiB as
-well as its last 4 MiB, so `started_at`, the id, the directory, and the
-first-turn hint come from the header even when the transcript is larger than
-the tail. A Codex row without `model` may have its
+well as its last 4 MiB, so `started_at`, the id, and the directory come from
+the header even when the transcript is larger than the tail (Claude and Codex
+also take the first-turn hint from there; pi withholds it, since its active
+path is unknowable past the bound). A session whose header could not be read
+carries `start_uncertain: true`, and `started_at` is then a floor. A Codex row without `model` may have its
 model-bearing `turn_context` before the bounded 4 MiB file-tail read; the
 absence is preserved rather than filled with a guess. JSON output is a
 `tapes-list/1` object containing `sessions`, `unavailable`, `unreadable`,

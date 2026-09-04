@@ -329,6 +329,7 @@ mod tests {
                 cost: None,
                 tokens: None,
                 store: None,
+                start_uncertain: false,
             },
             turns: vec![
                 Turn {

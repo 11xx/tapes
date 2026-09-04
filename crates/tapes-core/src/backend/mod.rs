@@ -288,6 +288,18 @@ pub(crate) struct Jsonl {
 pub(crate) struct ParsedFile {
     pub session: Session,
     pub turns: Vec<Turn>,
+    /// Whether the read kept only the file's tail, so turns older than the
+    /// ones here exist and were not read.
+    pub truncated: bool,
+}
+
+/// What a bounded content search concluded about one file.
+enum SearchOutcome {
+    Matched(Box<Session>),
+    Miss,
+    /// The read reached fewer turns than it was asked to search and the file
+    /// holds older ones, so a miss is unknown rather than a non-match.
+    Unsearched(String),
 }
 
 /// A JSONL recording seen through two bounded windows. The tail holds the
@@ -324,6 +336,13 @@ impl Recording {
             }
             (head, tail) => head.or(tail),
         }
+    }
+
+    /// Whether the start is only the earliest record reached: the file is
+    /// past the tail bound and its opening carried no timestamp, so the
+    /// recorded start is behind the bound and unknown.
+    pub fn start_uncertain(&self) -> bool {
+        self.tail.truncated && time_range(&self.head).is_none()
     }
 }
 
@@ -489,6 +508,7 @@ pub(crate) fn list_files(
         parse(path).map(|session| ParsedFile {
             session,
             turns: Vec::new(),
+            truncated: false,
         })
     })
 }
@@ -496,8 +516,12 @@ pub(crate) fn list_files(
 /// Search file-backed candidates with a conservative raw prefilter, then retain
 /// only candidates whose final normalized turns contain the needle. The file
 /// parser already caps the bytes it reads, and `tail` caps the turns considered
-/// by the content search. Worker reads preserve candidate order before the
-/// caller applies scope and result limits.
+/// by the content search. A file past the parser's bound is always parsed,
+/// because only the parse can tell whether the retained tail holds enough
+/// turns for a miss to mean anything; when it does not, the candidate is
+/// reported as unsearched by the same rule `search_turns` applies. Worker
+/// reads preserve candidate order before the caller applies scope and result
+/// limits.
 pub(crate) fn list_files_with_search(
     files: Vec<PathBuf>,
     query: &Query,
@@ -541,18 +565,33 @@ pub(crate) fn list_files_with_search(
                     chunk
                         .iter()
                         .map(|path| {
-                            if !raw_tail_may_contain(path, &needle) {
-                                return None;
+                            let oversized = fs::metadata(path)
+                                .map_or(true, |metadata| metadata.len() > MAX_TRANSCRIPT_BYTES);
+                            if !oversized && !raw_tail_may_contain(path, &needle) {
+                                return SearchOutcome::Miss;
                             }
-                            parse(path).and_then(|parsed| {
-                                let matched = parsed
-                                    .turns
-                                    .iter()
-                                    .rev()
-                                    .take(tail)
-                                    .any(|turn| turn.text.to_lowercase().contains(&needle));
-                                matched.then_some(parsed.session)
-                            })
+                            let Some(parsed) = parse(path) else {
+                                return SearchOutcome::Miss;
+                            };
+                            let matched = parsed
+                                .turns
+                                .iter()
+                                .rev()
+                                .take(tail)
+                                .any(|turn| turn.text.to_lowercase().contains(&needle));
+                            if matched {
+                                SearchOutcome::Matched(Box::new(parsed.session))
+                            } else if parsed.truncated && parsed.turns.len() < tail {
+                                SearchOutcome::Unsearched(format!(
+                                    "{} session {}: the bounded read reached {} of the last {tail} \
+                                     turns, so a miss is not a non-match",
+                                    parsed.session.harness,
+                                    parsed.session.id,
+                                    parsed.turns.len()
+                                ))
+                            } else {
+                                SearchOutcome::Miss
+                            }
                         })
                         .collect::<Vec<_>>()
                 })
@@ -568,7 +607,15 @@ pub(crate) fn list_files_with_search(
         scan_truncated,
         ..Listing::default()
     };
-    for session in parsed.into_iter().flatten() {
+    for outcome in parsed {
+        let session = match outcome {
+            SearchOutcome::Matched(session) => *session,
+            SearchOutcome::Miss => continue,
+            SearchOutcome::Unsearched(diagnostic) => {
+                listing.unsearched.push(diagnostic);
+                continue;
+            }
+        };
         let placed = query.scope.is_none_or(|scope| {
             session
                 .directory

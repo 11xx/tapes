@@ -332,6 +332,13 @@ fn render_transcript(transcript: &Transcript, by_latest: bool) -> String {
             out.push_str(&format!("[{role} #{}]\n{}\n", turn.ordinal, turn.text));
         }
     }
+    if transcript.session.start_uncertain {
+        out.push_str(&format!(
+            "Note: The recorded start could not be read; {} is the earliest record reached, and the \
+             session began at or before it.\n",
+            human_timestamp(transcript.session.started_at)
+        ));
+    }
     render_activity_note(&mut out, transcript);
     if by_latest {
         out.push_str(&format!(
@@ -476,6 +483,7 @@ mod tests {
                 cost: None,
                 tokens: None,
                 store: None,
+                start_uncertain: false,
             },
             turns: vec![Turn {
                 role: Role::User,
@@ -518,6 +526,18 @@ mod tests {
         assert!(!whole.contains("Showing the last"), "{whole}");
         assert!(whole.contains("Skipped 1 unparseable line."));
         assert!(whole.starts_with("[user #0]"), "{whole}");
+    }
+
+    #[test]
+    fn an_uncertain_start_is_named_as_a_floor() {
+        let mut floor = transcript(false);
+        floor.session.start_uncertain = true;
+        let rendered = render_transcript(&floor, false);
+        assert!(
+            rendered.contains("The recorded start could not be read"),
+            "{rendered}"
+        );
+        assert!(!render_transcript(&transcript(false), false).contains("could not be read"));
     }
 
     /// A source bound is the reader's own limit, so its note names what was

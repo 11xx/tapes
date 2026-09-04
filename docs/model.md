@@ -49,8 +49,10 @@ records are; neither window grows with the file. `started_at` is the earliest
 timestamp across both, so a session larger than the tail still reports the
 start its header recorded rather than the first record the tail happened to
 retain. The head probe grows to 1 MiB when the first line alone is longer than
-64 KiB; a first line longer than that leaves the opening empty and the start
-falls back to the tail's earliest record. `last_activity_at` is the newest timestamp in the tail, which is the
+64 KiB. A first line longer than that leaves the opening empty; the start then
+falls back to the tail's earliest record and the session carries
+`start_uncertain: true`, meaning the session began at or before `started_at`.
+The flag is omitted when the start is the recorded one. `last_activity_at` is the newest timestamp in the tail, which is the
 end of the file. The session id and directory are likewise read from the
 opening first. A header without a timestamp falls back to the tail's earliest,
 and a file with no timestamp anywhere in either window is not a session.
@@ -75,12 +77,18 @@ another.
 `Turn` contains a role, text, an optional UTC timestamp, an `ordinal`, and an
 optional `native_id`. Roles are `user`, `assistant`, `tool`, and `reasoning`.
 The ordinal is the turn's zero-based position in the session's normalized turn
-sequence, counted from the first turn the reader reaches, and it does not
-change when a window is applied: `show --tail 1` returns the turn whose ordinal
-is the sequence's last, and the window under `truncation` names the ordinals
-it holds. A consumer holding a session id and an ordinal re-finds the turn with
-`show` alone. On a recording past the reader's file bound the sequence starts
-at that bound, which is what the `file-tail` source entry says. `native_id` is
+sequence, counted from the first turn the reader reaches. For a file-backed
+session the reader's reach is the file's last 4 MiB whatever the window, so
+the ordinal does not change with `--tail`: `show --tail 1` returns the turn
+whose ordinal is the sequence's last, the window under `truncation` names the
+ordinals it holds, and a consumer holding a session id and an ordinal re-finds
+the turn with `show` alone. On a recording past that bound the sequence starts
+at the bound, which is what the `file-tail` source entry says, and it moves as
+the file grows. For a paged store read, the OpenCode API, the reach depends on
+the window: a read that stopped with the window full reports
+`omitted_exact: false`, its ordinals count from the oldest turn it fetched,
+and a wider request renumbers. Such a reference should carry the `native_id`,
+which OpenCode always records. `native_id` is
 the harness's own id for the record the turn came from, when the harness
 records one: Claude's message `uuid`, pi's entry `id`, OpenCode's message
 `id`, and Codex's `payload.id` where a response item carries one. Several
