@@ -115,6 +115,7 @@ PROBE BEFORE EXPORTING
   tapes show <id> --tail 40      A window, costing no bundle.
   tapes show <id> --json         The same turns as tapes-session/1.
   tapes events <id> --json       Typed tool calls, results, and pairs.
+  tapes usage <id> --json        Tokens, cost, and turn counts.
 
   show returns the last 100 turns unless --tail says otherwise, and marks the
   result truncated whenever it dropped any. It is the probe, not the archive;
@@ -131,6 +132,17 @@ PROBE BEFORE EXPORTING
   counterpart was not reached or not recorded. Event ordinals are the same
   turn coordinates show prints. With no --tail, every event the bounded reader
   reaches is returned; --name and --call-id filter only after pairing.
+
+  usage answers where a session's quota went as tapes-usage/1: its recorded
+  tokens, cost, and accounting, and its turns counted by role. Read accounting
+  before adding anything up — basis says whether a figure is a recorded total
+  or a sum of per-request records, and coverage says how much of the session it
+  covers, which is the same coverage the turn counts carry. Cost is only what
+  the harness recorded, and quota is a separate fact about the account rather
+  than about this session. Facts beyond the counters appear only where a
+  harness records them: codex reports its context window and quota windows,
+  claude reports wall-clock durations and a per-model split, pi and opencode
+  report neither.
 
   Every turn carries an `ordinal`, its zero-based place in the session's
   normalized sequence. On a file-backed session (claude, codex, pi) it is kept

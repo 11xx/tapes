@@ -226,7 +226,11 @@ no conversation turn. Its `modelUsage` object is keyed by model and carries
 cumulative `inputTokens`, `outputTokens`, `thinkingTokens`,
 `cacheReadInputTokens`, `cacheCreationInputTokens`, and per-model `costUSD`.
 `totalCostUSD` is the cumulative cost for the session at the time of the
-record. When a bounded read contains more than one such record, the newest
+record. Four wall-clock durations ride alongside it in milliseconds:
+`totalAPIDuration`, `totalAPIDurationWithoutRetries`, `totalToolDuration`, and
+`totalDuration`. The durations and the per-model split are what the usage view
+reports as `durations_ms` and `by_model`; a transcript whose bounded read holds
+no `cost-state` reports neither. When a bounded read contains more than one such record, the newest
 record is the session's accounting source; otherwise assistant `message.usage`
 records provide a per-request sum. Claude records no per-request cost in
 `message.usage`.

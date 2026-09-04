@@ -141,6 +141,16 @@ across model and effort changes and across compaction, so the newest event
 is the whole session's accounting so far, not the accounting of the window.
 `last_token_usage` is per response and is not normalized.
 
+The same event carries two facts that are not accounting.
+`info.model_context_window` is how many tokens the session's model holds at
+once. `rate_limits` sits beside `info` and describes the account's provider
+quota rather than this session: `limit_id`, `plan_type`, and `primary` and
+`secondary` windows, each with `used_percent`, `window_minutes`, and a
+`resets_at` in epoch seconds. A quota refresh is written as a `token_count`
+event with `info: null`, so the newest event carrying each fact answers for
+it independently. The usage view reports them as `context_window` and
+`rate_limits`, never folded into the session's counters.
+
 ## Lineage note
 
 The Python extractor this backend replaced opened with a docstring claiming it

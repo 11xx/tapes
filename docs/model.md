@@ -90,6 +90,12 @@ active conversation path, excluding abandoned branches, with the same
 coverage rule. Cost, provider quota, and recorded tokens are distinct facts;
 no counter or cost is derived from another counter.
 
+A session also carries `usage_detail`: usage facts a harness records that the
+normalized model has no field for, filled by the backend holding them. Like a
+turn's tool event it is skipped by serialization, so `tapes-session/1` and
+export bundles are unaffected and the usage view is where it reaches a
+consumer.
+
 `Turn` contains a role, a `kind`, text, an optional UTC timestamp, an
 `ordinal`, and an optional `native_id`. Roles are `user`, `assistant`, `tool`,
 and `reasoning`.
@@ -212,6 +218,70 @@ window's read and a wider `--tail` can pair more.
   "truncated": false
 }
 ```
+
+## Usage view
+
+`tapes usage` answers where one session's quota went and serializes as a
+`tapes-usage/1` object. `tokens`, `cost`, and `accounting` are the session's
+own fields, repeated unchanged: a `recorded-total` is cumulative and a
+`summed-requests` figure is a sum of per-request records, so either may be
+added across sessions, and `coverage` is the difference a consumer must
+respect. Cost is only what a harness recorded, and a provider quota is a
+separate fact about the account rather than about this session.
+
+`turns` counts the normalized turns the read reached, by role — `user`,
+`assistant`, `tool`, `reasoning` — plus their `total`. Its `coverage` is
+`read-window` when a source bound withheld whole turns, and `session`
+otherwise; the read uses the same unbounded turn window `export` does, so the
+counts are the bounded read's rather than a display window's.
+
+The remaining objects are present exactly when the harness recorded them:
+
+| member | source |
+|---|---|
+| `context_window` | Codex `info.model_context_window` |
+| `rate_limits` | Codex `rate_limits`: optional `primary` and `secondary` windows with `used_percent`, `window_minutes`, and an RFC 3339 `resets_at`, and the account `plan` |
+| `durations_ms` | Claude `cost-state` wall clock: `api`, `api_without_retries`, `tool`, `total` |
+| `by_model` | Claude `cost-state` `modelUsage`, one entry per model with its `tokens` and `cost`, ordered by model id |
+
+pi and OpenCode record none of them, and each stays absent rather than empty
+or null.
+
+```json
+{
+  "schema": "tapes-usage/1",
+  "session": {
+    "id": "session-1",
+    "harness": "codex",
+    "model": { "id": "gpt-5.6-sol", "variant": "high" },
+    "started_at": "2023-11-14T22:13:20Z",
+    "last_activity_at": "2023-11-14T22:15:00Z"
+  },
+  "accounting": { "basis": "recorded-total", "coverage": "session" },
+  "tokens": { "input": 1200, "output": 300, "cache_read": 1000 },
+  "turns": {
+    "user": 1,
+    "assistant": 1,
+    "tool": 3,
+    "reasoning": 1,
+    "total": 6,
+    "coverage": "session"
+  },
+  "context_window": 828400,
+  "rate_limits": {
+    "primary": {
+      "used_percent": 1.0,
+      "window_minutes": 300,
+      "resets_at": "2026-01-01T14:00:00Z"
+    },
+    "plan": "plus"
+  },
+  "truncated": false
+}
+```
+
+The view also carries the read's `truncated` flag, its `truncation` record,
+and its `notes`, with the same meaning they have on a transcript.
 
 `Session.store` is where `tapes` read the session from, as an opaque string: a
 recording file's path for the file-backed harnesses, the database file for
