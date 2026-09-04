@@ -36,6 +36,10 @@ pub struct Session {
     pub cost: Option<Cost>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tokens: Option<Tokens>,
+    /// The basis and coverage of the session-level cost and token counters.
+    /// Present exactly when at least one of those counters is present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accounting: Option<Accounting>,
     /// Where `tapes` read this session from, as an opaque coordinate: a
     /// recording file's path, or a store and the endpoint within it. A
     /// consumer writes it down beside the id and does not parse it.
@@ -93,6 +97,27 @@ pub struct Tokens {
     pub cache_read: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cache_write: Option<u64>,
+}
+
+/// What the session-level counters are, and how much of the session they cover.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Accounting {
+    pub basis: AccountingBasis,
+    pub coverage: AccountingCoverage,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum AccountingBasis {
+    RecordedTotal,
+    SummedRequests,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum AccountingCoverage {
+    Session,
+    ReadWindow,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -529,6 +554,10 @@ mod tests {
                 cache_read: Some(10),
                 cache_write: Some(5),
             }),
+            accounting: Some(Accounting {
+                basis: AccountingBasis::RecordedTotal,
+                coverage: AccountingCoverage::Session,
+            }),
             store: None,
             start_uncertain: false,
         }
@@ -547,6 +576,10 @@ mod tests {
             reasoning: Some(25),
             cache_read: Some(10),
             cache_write: Some(5),
+        };
+        let accounting = Accounting {
+            basis: AccountingBasis::RecordedTotal,
+            coverage: AccountingCoverage::Session,
         };
         let turn = Turn {
             role: Role::Assistant,
@@ -571,6 +604,14 @@ mod tests {
         assert_round_trip(&model);
         assert_round_trip(&cost);
         assert_round_trip(&tokens);
+        assert_round_trip(&accounting);
+        assert_eq!(
+            serde_json::to_value(&accounting).unwrap(),
+            json!({
+                "basis": "recorded-total",
+                "coverage": "session"
+            })
+        );
         assert_round_trip(&session());
         assert_round_trip(&Role::Assistant);
         assert_round_trip(&turn);
@@ -583,6 +624,8 @@ mod tests {
         session.title = None;
         session.model = None;
         session.cost = None;
+        session.tokens = None;
+        session.accounting = None;
 
         let value = serde_json::to_value(session).unwrap();
         let object = value.as_object().unwrap();
@@ -592,6 +635,8 @@ mod tests {
         assert!(!object.contains_key("derived_title_truncated"));
         assert!(!object.contains_key("model"));
         assert!(!object.contains_key("cost"));
+        assert!(!object.contains_key("tokens"));
+        assert!(!object.contains_key("accounting"));
     }
 
     #[test]

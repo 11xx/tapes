@@ -14,7 +14,10 @@ use tapes_core::backend::opencode::OpenCodeBackend;
 use tapes_core::backend::pi::PiBackend;
 use tapes_core::backend::{Backend, Listing, Query};
 use tapes_core::event::{project, EventKind, Incomplete};
-use tapes_core::model::{Role, Session, SourceBound, Transcript, Truncation, Turn};
+use tapes_core::model::{
+    Accounting, AccountingBasis, AccountingCoverage, Cost, Role, Session, SourceBound, Tokens,
+    Transcript, Truncation, Turn,
+};
 use tapes_core::{
     latest_with_backends, list_with_backends, list_with_backends_filtered,
     list_with_backends_filtered_and_search, list_with_backends_options, resolve_session,
@@ -317,6 +320,30 @@ fn show_reuses_resolved_opencode_session() {
             format!("/api/session/{id}"),
             format!("/api/session/{id}/message?limit=10&order=desc")
         ]
+    );
+}
+
+#[test]
+fn opencode_projections_mark_recorded_totals_as_whole_session_accounting() {
+    let api = OpenCodeBackend::new(opencode_fixture_program());
+    let api_session = located(&api, "ses_api_only_fixture");
+    assert_eq!(
+        api_session.accounting,
+        Some(Accounting {
+            basis: AccountingBasis::RecordedTotal,
+            coverage: AccountingCoverage::Session,
+        })
+    );
+
+    let database = OpenCodeAlias::database();
+    let database_backend = OpenCodeBackend::new(database.path());
+    let database_session = located(&database_backend, "ses_database_only_fixture");
+    assert_eq!(
+        database_session.accounting,
+        Some(Accounting {
+            basis: AccountingBasis::RecordedTotal,
+            coverage: AccountingCoverage::Session,
+        })
     );
 }
 
@@ -784,6 +811,89 @@ fn claude_lists_only_parent_sessions_and_reports_subagent_transcripts() {
 }
 
 #[test]
+fn claude_sums_each_request_once_and_marks_the_read_as_summed_requests() {
+    let backend = ClaudeBackend::new(fixtures("claude"));
+    let session = located(&backend, "session-claude");
+
+    assert_eq!(
+        session.tokens,
+        Some(Tokens {
+            input: Some(11),
+            output: Some(22),
+            reasoning: Some(55),
+            cache_read: Some(33),
+            cache_write: Some(44),
+        })
+    );
+    assert!(
+        session.cost.is_none(),
+        "Claude request records have no cost"
+    );
+    assert_eq!(
+        session.accounting,
+        Some(Accounting {
+            basis: AccountingBasis::SummedRequests,
+            coverage: AccountingCoverage::Session,
+        })
+    );
+
+    let transcript = backend.transcript(&session, 10).unwrap();
+    assert_eq!(transcript.session.accounting, session.accounting);
+}
+
+#[test]
+fn claude_cost_state_supplies_recorded_totals_over_request_usage() {
+    let root = std::env::temp_dir().join(format!("tapes-claude-cost-state-{}", std::process::id()));
+    let project = root.join("project");
+    let path = project.join("session-cost-state.jsonl");
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&project).unwrap();
+    fs::write(
+        &path,
+        concat!(
+            r#"{"type":"user","sessionId":"session-cost-state","uuid":"user-1","timestamp":"2026-01-01T10:00:00Z","cwd":"/fixtures/project","message":{"role":"user","content":"Inspect the fixture."}}"#,
+            "\n",
+            r#"{"type":"assistant","sessionId":"session-cost-state","uuid":"assistant-1","requestId":"request-1","timestamp":"2026-01-01T10:00:01Z","cwd":"/fixtures/project","message":{"role":"assistant","model":"claude-fixture","usage":{"input_tokens":1,"output_tokens":2,"cache_read_input_tokens":3,"cache_creation_input_tokens":4,"output_tokens_details":{"thinking_tokens":5}},"content":[{"type":"text","text":"Fixture inspected."}]}}"#,
+            "\n",
+            r#"{"type":"cost-state","sessionId":"session-cost-state","totalCostUSD":12.5,"modelUsage":{"claude-fixture":{"inputTokens":100,"outputTokens":200,"thinkingTokens":300,"cacheReadInputTokens":400,"cacheCreationInputTokens":500},"claude-other":{"inputTokens":1,"outputTokens":2,"thinkingTokens":3,"cacheReadInputTokens":4,"cacheCreationInputTokens":5}},"hasUnknownModelCost":false}"#,
+            "\n"
+        ),
+    )
+    .unwrap();
+
+    let backend = ClaudeBackend::new(&root);
+    let session = located(&backend, "session-cost-state");
+    assert_eq!(
+        session.tokens,
+        Some(Tokens {
+            input: Some(101),
+            output: Some(202),
+            reasoning: Some(303),
+            cache_read: Some(404),
+            cache_write: Some(505),
+        })
+    );
+    assert_eq!(session.cost, Some(Cost { usd: 12.5 }));
+    assert_eq!(
+        session.accounting,
+        Some(Accounting {
+            basis: AccountingBasis::RecordedTotal,
+            coverage: AccountingCoverage::Session,
+        })
+    );
+
+    let transcript = backend.transcript(&session, 10).unwrap();
+    assert_eq!(
+        transcript.turns.len(),
+        2,
+        "cost-state is metadata, not a turn"
+    );
+    assert!(transcript.trailing_record.is_none());
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn malformed_lines_leave_parseable_turns_and_a_note() {
     let cases: Vec<(Box<dyn Backend>, &str)> = vec![
         (
@@ -872,6 +982,25 @@ fn pi_reports_entries_outside_the_active_leaf_path() {
         .turns
         .iter()
         .all(|turn| turn.text != "Abandoned branch."));
+    assert_eq!(
+        session.tokens,
+        Some(Tokens {
+            input: Some(40),
+            output: Some(60),
+            reasoning: Some(10),
+            cache_read: Some(12),
+            cache_write: Some(14),
+        })
+    );
+    assert_eq!(session.cost, Some(Cost { usd: 0.375 }));
+    assert_eq!(
+        session.accounting,
+        Some(Accounting {
+            basis: AccountingBasis::SummedRequests,
+            coverage: AccountingCoverage::Session,
+        })
+    );
+    assert_eq!(transcript.session.tokens, session.tokens);
 }
 
 #[test]
@@ -1668,6 +1797,7 @@ fn resolver_session(id: &str) -> Session {
         live: None,
         cost: None,
         tokens: None,
+        accounting: None,
         store: None,
         start_uncertain: false,
     }
@@ -1714,7 +1844,7 @@ fn transcript_reads_are_capped_at_four_megabytes() {
     .unwrap();
     writeln!(
         file,
-        r#"{{"type":"assistant","sessionId":"bounded","timestamp":"2026-01-01T12:00:01Z","cwd":"/fixtures/project","message":{{"role":"assistant","model":"claude-fixture","content":[{{"type":"text","text":"Tail output."}}]}}}}"#
+        r#"{{"type":"assistant","sessionId":"bounded","requestId":"bounded-request","timestamp":"2026-01-01T12:00:01Z","cwd":"/fixtures/project","message":{{"role":"assistant","model":"claude-fixture","usage":{{"input_tokens":7,"output_tokens":8,"cache_read_input_tokens":9,"cache_creation_input_tokens":10}},"content":[{{"type":"text","text":"Tail output."}}]}}}}"#
     )
     .unwrap();
     file.flush().unwrap();
@@ -1725,6 +1855,23 @@ fn transcript_reads_are_capped_at_four_megabytes() {
 
     assert!(transcript.truncated);
     assert_eq!(transcript.turns.len(), 2);
+    assert_eq!(
+        transcript.session.tokens,
+        Some(Tokens {
+            input: Some(7),
+            output: Some(8),
+            reasoning: None,
+            cache_read: Some(9),
+            cache_write: Some(10),
+        })
+    );
+    assert_eq!(
+        transcript.session.accounting,
+        Some(Accounting {
+            basis: AccountingBasis::SummedRequests,
+            coverage: AccountingCoverage::ReadWindow,
+        })
+    );
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -2277,6 +2424,13 @@ fn codex_reads_cumulative_token_totals_from_the_latest_event_with_usage() {
         })
     );
     assert!(session.cost.is_none(), "Codex records no cost");
+    assert_eq!(
+        session.accounting,
+        Some(Accounting {
+            basis: AccountingBasis::RecordedTotal,
+            coverage: AccountingCoverage::Session,
+        })
+    );
 
     let transcript = backend.transcript(&session, 10).unwrap();
     assert_eq!(transcript.session.tokens, session.tokens);
@@ -2284,6 +2438,7 @@ fn codex_reads_cumulative_token_totals_from_the_latest_event_with_usage() {
 
     let without = located(&backend, "20000000-0000-0000-0000-000000000004");
     assert!(without.tokens.is_none(), "no token event, no counters");
+    assert!(without.accounting.is_none());
 }
 
 /// A read that reached fewer turns than the searched tail because of a source

@@ -5,12 +5,15 @@ use anyhow::{anyhow, Result};
 use serde_json::Value;
 
 use super::{
-    head_directory, home_path, jsonl_files, list_files, list_files_with_search, read_jsonl,
-    read_recording, session_file, timestamp, trailing_record, transcript, Backend, Jsonl, Listing,
-    ParsedFile, Query,
+    accounting_for, head_directory, home_path, jsonl_files, list_files, list_files_with_search,
+    read_jsonl, read_recording, session_file, timestamp, trailing_record, transcript, Backend,
+    Jsonl, Listing, ParsedFile, Query, TokenTotals,
 };
 use crate::event::{Bounded, EventKind, ToolEvent};
-use crate::model::{Model, Role, Session, TrailingRecord, Transcript, Turn};
+use crate::model::{
+    AccountingBasis, AccountingCoverage, Cost, Model, Role, Session, Tokens, TrailingRecord,
+    Transcript, Turn,
+};
 
 #[derive(Clone, Debug)]
 pub struct PiBackend {
@@ -83,6 +86,18 @@ impl PiBackend {
             .iter()
             .flat_map(|value| parse_turns(value))
             .collect::<Vec<_>>();
+        let (tokens, cost) = pi_usage(&active);
+        let coverage = if read.truncated {
+            AccountingCoverage::ReadWindow
+        } else {
+            AccountingCoverage::Session
+        };
+        let accounting = accounting_for(
+            tokens.as_ref(),
+            cost.as_ref(),
+            AccountingBasis::SummedRequests,
+            coverage,
+        );
 
         let session = Session {
             id,
@@ -95,8 +110,9 @@ impl PiBackend {
             started_at,
             last_activity_at,
             live: None,
-            cost: None,
-            tokens: None,
+            cost,
+            tokens,
+            accounting,
             store: Some(path.display().to_string()),
             start_uncertain: recording.start_uncertain(),
         };
@@ -262,6 +278,52 @@ fn pi_cwd(value: &Value) -> Option<&str> {
     (value["type"] == "session")
         .then(|| value["cwd"].as_str())
         .flatten()
+}
+
+fn pi_usage(entries: &[&Value]) -> (Option<Tokens>, Option<Cost>) {
+    let mut totals = TokenTotals::default();
+    let mut usage_count = 0;
+    let mut cost_total = Some(0.0);
+
+    for entry in entries {
+        if entry["type"] != "message" {
+            continue;
+        }
+        let Some(message) = entry.get("message") else {
+            continue;
+        };
+        if message.get("role").and_then(Value::as_str) != Some("assistant") {
+            continue;
+        }
+        let Some(usage) = message.get("usage").and_then(Value::as_object) else {
+            continue;
+        };
+        usage_count += 1;
+        totals.add(
+            usage.get("input").and_then(Value::as_u64),
+            usage.get("output").and_then(Value::as_u64),
+            usage.get("reasoning").and_then(Value::as_u64),
+            usage.get("cacheRead").and_then(Value::as_u64),
+            usage.get("cacheWrite").and_then(Value::as_u64),
+        );
+        let Some(cost) = usage.get("cost").and_then(Value::as_object) else {
+            cost_total = None;
+            continue;
+        };
+        let Some(total) = cost.get("total").and_then(Value::as_f64) else {
+            cost_total = None;
+            continue;
+        };
+        if let Some(sum) = cost_total.as_mut() {
+            *sum += total;
+        }
+    }
+
+    let cost = (usage_count > 0)
+        .then_some(cost_total)
+        .flatten()
+        .map(|usd| Cost { usd });
+    (totals.finish(), cost)
 }
 
 fn pi_trailing_kind(value: &Value) -> Option<&'static str> {

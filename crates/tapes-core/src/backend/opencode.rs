@@ -12,12 +12,13 @@ use chrono::{TimeZone, Utc};
 use serde_json::{json, Value};
 
 use super::{
-    filter_listing_search, filter_listing_search_parallel, search_turns, Backend, Listing, Query,
+    accounting_for, filter_listing_search, filter_listing_search_parallel, search_turns, Backend,
+    Listing, Query, TokenTotals,
 };
 use crate::event::{self, Bounded, EventKind, EventTranscript, ToolEvent};
 use crate::model::{
-    human_bytes, Cost, Model, Role, Session, SourceBound, Tokens, Transcript, Truncation, Turn,
-    TurnWindow,
+    human_bytes, AccountingBasis, AccountingCoverage, Cost, Model, Role, Session, SourceBound,
+    Tokens, Transcript, Truncation, Turn, TurnWindow,
 };
 
 const MAX_COMMAND_BYTES: u64 = 8 * 1024 * 1024;
@@ -1183,6 +1184,13 @@ fn parse_database_session(value: &Value) -> Result<Session> {
         .ok_or_else(|| anyhow!("opencode session {id} has no update time"))?;
     let model = database_model(&value["model"]);
     let tokens = database_tokens(value);
+    let cost = value["cost"].as_f64().map(|usd| Cost { usd });
+    let accounting = accounting_for(
+        tokens.as_ref(),
+        cost.as_ref(),
+        AccountingBasis::RecordedTotal,
+        AccountingCoverage::Session,
+    );
 
     Ok(Session {
         id,
@@ -1198,8 +1206,9 @@ fn parse_database_session(value: &Value) -> Result<Session> {
         started_at,
         last_activity_at,
         live: None,
-        cost: value["cost"].as_f64().map(|usd| Cost { usd }),
+        cost,
         tokens,
+        accounting,
         store: None,
         start_uncertain: false,
     })
@@ -1221,23 +1230,15 @@ fn database_model(value: &Value) -> Option<Model> {
 }
 
 fn database_tokens(value: &Value) -> Option<Tokens> {
-    let fields = [
-        "tokens_input",
-        "tokens_output",
-        "tokens_reasoning",
-        "tokens_cache_read",
-        "tokens_cache_write",
-    ];
-    fields
-        .iter()
-        .any(|field| !value[*field].is_null())
-        .then(|| Tokens {
-            input: value["tokens_input"].as_u64(),
-            output: value["tokens_output"].as_u64(),
-            reasoning: value["tokens_reasoning"].as_u64(),
-            cache_read: value["tokens_cache_read"].as_u64(),
-            cache_write: value["tokens_cache_write"].as_u64(),
-        })
+    let mut totals = TokenTotals::default();
+    totals.add(
+        value["tokens_input"].as_u64(),
+        value["tokens_output"].as_u64(),
+        value["tokens_reasoning"].as_u64(),
+        value["tokens_cache_read"].as_u64(),
+        value["tokens_cache_write"].as_u64(),
+    );
+    totals.finish()
 }
 
 fn parse_sessions(response: &Value) -> Result<Vec<Session>> {
@@ -1259,13 +1260,14 @@ fn parse_session(value: &Value) -> Result<Session> {
         id: id.to_owned(),
         variant: value["model"]["variant"].as_str().map(str::to_owned),
     });
-    let tokens = value["tokens"].as_object().map(|tokens| Tokens {
-        input: tokens["input"].as_u64(),
-        output: tokens["output"].as_u64(),
-        reasoning: tokens["reasoning"].as_u64(),
-        cache_read: tokens["cache"]["read"].as_u64(),
-        cache_write: tokens["cache"]["write"].as_u64(),
-    });
+    let tokens = api_tokens(value);
+    let cost = value["cost"].as_f64().map(|usd| Cost { usd });
+    let accounting = accounting_for(
+        tokens.as_ref(),
+        cost.as_ref(),
+        AccountingBasis::RecordedTotal,
+        AccountingCoverage::Session,
+    );
 
     Ok(Session {
         id,
@@ -1278,11 +1280,30 @@ fn parse_session(value: &Value) -> Result<Session> {
         started_at,
         last_activity_at,
         live: None,
-        cost: value["cost"].as_f64().map(|usd| Cost { usd }),
+        cost,
         tokens,
+        accounting,
         store: None,
         start_uncertain: false,
     })
+}
+
+fn api_tokens(value: &Value) -> Option<Tokens> {
+    let tokens = value["tokens"].as_object()?;
+    let cache = tokens.get("cache").and_then(Value::as_object);
+    let mut totals = TokenTotals::default();
+    totals.add(
+        tokens.get("input").and_then(Value::as_u64),
+        tokens.get("output").and_then(Value::as_u64),
+        tokens.get("reasoning").and_then(Value::as_u64),
+        cache
+            .and_then(|cache| cache.get("read"))
+            .and_then(Value::as_u64),
+        cache
+            .and_then(|cache| cache.get("write"))
+            .and_then(Value::as_u64),
+    );
+    totals.finish()
 }
 
 /// What a paged read handed over: newest-first messages, why it stopped, and

@@ -93,8 +93,31 @@ serialized as compact JSON for bounded metadata. Calls and results occupy
 separate entries, so `completed_ts` is absent. Only events on the active path
 enter the normalized transcript.
 
+## Assistant usage
+
+Assistant `message` entries carry per-request `usage` when the provider reports
+it:
+
+```json
+{
+  "input": 9177,
+  "output": 11399,
+  "cacheRead": 704,
+  "cacheWrite": 0,
+  "reasoning": 7922,
+  "totalTokens": 21280,
+  "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "total": 0}
+}
+```
+
+The normalized counters sum `input`, `output`, `reasoning`, `cacheRead`, and
+`cacheWrite` from assistant messages on the active leaf-to-root path. Entries
+on abandoned branches are not counted. `cost.total` is summed only when every
+counted usage entry carries a numeric `cost.total`; otherwise normalized cost
+is absent. A zero is retained when pi recorded zero, while an omitted field
+remains absent. `totalTokens` has no normalized field.
+
 ## What pi does not record
 
-No session title and no cost. Both are omitted from the normalized session
-rather than defaulted — a consumer must be able to tell "no title" from
-"empty title".
+No session title is recorded. Cost is absent when no counted usage entry
+provides a complete `cost.total` value; it is not estimated from token counts.

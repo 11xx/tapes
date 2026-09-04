@@ -168,8 +168,9 @@ the read rather than an implicit display window.
 
 - `.context.md` — exact operator turns and assistant-visible text. Read first.
 - `.json` — the canonical `tapes-session/1` object plus turns, cost, tokens,
-  any verified `trailing_record`, and the session directory's git head and
-  branch when they resolve. Query selectively with `jq`.
+  their `accounting` basis and coverage when present, any verified
+  `trailing_record`, and the session directory's git head and branch when
+  they resolve. Query selectively with `jq`.
 - `.trace.md` — every reasoning and tool turn the transcript carries, in
   order, for grepping. A tool turn is headed by the tool's name where its
   envelope carries one, by `result` for a bare result, and by `unnamed`

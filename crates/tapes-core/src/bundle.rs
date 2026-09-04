@@ -9,8 +9,8 @@ use serde::Serialize;
 use serde_json::Value;
 
 use crate::model::{
-    human_bytes, human_timestamp, human_title, Role, Session, SourceBound, TrailingRecord,
-    Transcript, Truncation, Turn, SESSION_SCHEMA,
+    human_bytes, human_timestamp, human_title, AccountingBasis, AccountingCoverage, Role, Session,
+    SourceBound, TrailingRecord, Transcript, Truncation, Turn, SESSION_SCHEMA,
 };
 
 /// One exported file: where it landed and how big it is.
@@ -195,6 +195,43 @@ fn write_header(out: &mut String, transcript: &Transcript, kind: &str) {
         "- last activity: {}",
         human_timestamp(session.last_activity_at)
     );
+    if let Some(tokens) = &session.tokens {
+        let mut counters = Vec::new();
+        if let Some(input) = tokens.input {
+            counters.push(format!("input {input}"));
+        }
+        if let Some(output) = tokens.output {
+            counters.push(format!("output {output}"));
+        }
+        if let Some(reasoning) = tokens.reasoning {
+            counters.push(format!("reasoning {reasoning}"));
+        }
+        if let Some(cache_read) = tokens.cache_read {
+            counters.push(format!("cache read {cache_read}"));
+        }
+        if let Some(cache_write) = tokens.cache_write {
+            counters.push(format!("cache write {cache_write}"));
+        }
+        if !counters.is_empty() {
+            let accounting = session.accounting.as_ref().map(|accounting| {
+                let basis = match accounting.basis {
+                    AccountingBasis::RecordedTotal => "recorded total",
+                    AccountingBasis::SummedRequests => "summed requests",
+                };
+                let coverage = match accounting.coverage {
+                    AccountingCoverage::Session => "whole session",
+                    AccountingCoverage::ReadWindow => "read window",
+                };
+                format!(" ({basis}, {coverage})")
+            });
+            let _ = writeln!(
+                out,
+                "- tokens: {}{}",
+                counters.join(", "),
+                accounting.unwrap_or_default()
+            );
+        }
+    }
     if let Some(window) = &transcript.truncation.window {
         let _ = if window.omitted_exact {
             writeln!(
@@ -310,7 +347,10 @@ mod tests {
     use chrono::TimeZone;
 
     use super::*;
-    use crate::model::{LiveState, Model, TrailingRecord, Truncation, Turn};
+    use crate::model::{
+        Accounting, AccountingBasis, AccountingCoverage, LiveState, Model, Tokens, TrailingRecord,
+        Truncation, Turn,
+    };
 
     fn transcript() -> Transcript {
         let ts = Utc.timestamp_opt(1_700_000_000, 0).unwrap();
@@ -331,6 +371,7 @@ mod tests {
                 live: None,
                 cost: None,
                 tokens: None,
+                accounting: None,
                 store: None,
                 start_uncertain: false,
             },
@@ -510,6 +551,34 @@ mod tests {
         assert!(trace.contains("## user #0 — 2023-11-14T22:13:20Z"));
         assert!(!context.contains(".123456789Z"));
         assert!(!trace.contains(".123456789Z"));
+
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn markdown_headers_report_tokens_and_accounting() {
+        let mut transcript = transcript();
+        transcript.session.tokens = Some(Tokens {
+            input: Some(100),
+            output: Some(50),
+            reasoning: Some(25),
+            cache_read: Some(10),
+            cache_write: Some(5),
+        });
+        transcript.session.accounting = Some(Accounting {
+            basis: AccountingBasis::RecordedTotal,
+            coverage: AccountingCoverage::Session,
+        });
+
+        let directory =
+            std::env::temp_dir().join(format!("tapes-bundle-{}-token-header", std::process::id()));
+        let _ = fs::remove_dir_all(&directory);
+        let bundle = export(&transcript, &directory).unwrap();
+        let context = fs::read_to_string(&bundle.context.path).unwrap();
+        let trace = fs::read_to_string(&bundle.trace.path).unwrap();
+        let line = "- tokens: input 100, output 50, reasoning 25, cache read 10, cache write 5 (recorded total, whole session)";
+        assert!(context.contains(line), "{context}");
+        assert!(trace.contains(line), "{trace}");
 
         fs::remove_dir_all(directory).unwrap();
     }

@@ -8,7 +8,10 @@ use chrono::{DateTime, Utc};
 use serde_json::Value;
 
 use crate::event::{self, EventTranscript};
-use crate::model::{Session, SourceBound, TrailingRecord, Transcript, Truncation, Turn};
+use crate::model::{
+    Accounting, AccountingBasis, AccountingCoverage, Cost, Session, SourceBound, Tokens,
+    TrailingRecord, Transcript, Truncation, Turn,
+};
 use crate::scope::Scope;
 
 pub mod claude;
@@ -27,6 +30,64 @@ const HEAD_PROBE_BYTES: u64 = 64 * 1024;
 /// the probe, as a Claude record carrying a large pasted prompt can be. A
 /// first line longer than this leaves the opening empty.
 const HEAD_PROBE_MAX_BYTES: u64 = 1024 * 1024;
+
+/// Accumulates only counters the source actually wrote. A zero is retained as
+/// a present value, while a missing field remains absent in the result.
+#[derive(Default)]
+pub(crate) struct TokenTotals {
+    input: Option<u64>,
+    output: Option<u64>,
+    reasoning: Option<u64>,
+    cache_read: Option<u64>,
+    cache_write: Option<u64>,
+}
+
+impl TokenTotals {
+    pub(crate) fn add(
+        &mut self,
+        input: Option<u64>,
+        output: Option<u64>,
+        reasoning: Option<u64>,
+        cache_read: Option<u64>,
+        cache_write: Option<u64>,
+    ) {
+        add_counter(&mut self.input, input);
+        add_counter(&mut self.output, output);
+        add_counter(&mut self.reasoning, reasoning);
+        add_counter(&mut self.cache_read, cache_read);
+        add_counter(&mut self.cache_write, cache_write);
+    }
+
+    pub(crate) fn finish(self) -> Option<Tokens> {
+        let has_counter = self.input.is_some()
+            || self.output.is_some()
+            || self.reasoning.is_some()
+            || self.cache_read.is_some()
+            || self.cache_write.is_some();
+        has_counter.then_some(Tokens {
+            input: self.input,
+            output: self.output,
+            reasoning: self.reasoning,
+            cache_read: self.cache_read,
+            cache_write: self.cache_write,
+        })
+    }
+}
+
+fn add_counter(total: &mut Option<u64>, value: Option<u64>) {
+    if let Some(value) = value {
+        *total = Some((*total).unwrap_or_default().saturating_add(value));
+    }
+}
+
+pub(crate) fn accounting_for(
+    tokens: Option<&Tokens>,
+    cost: Option<&Cost>,
+    basis: AccountingBasis,
+    coverage: AccountingCoverage,
+) -> Option<Accounting> {
+    (tokens.is_some() || cost.is_some()).then_some(Accounting { basis, coverage })
+}
 
 /// What a listing asks for.
 ///

@@ -8,9 +8,9 @@ knowing which harness stored them.
 
 `Session` identifies the harness and session, records its first and latest
 activity timestamps, and may carry a model, recorded title, derived title,
-working directory, present live state, cost, and token counts. Both timestamps
-are required UTC values. A record that cannot supply timestamps is not a
-session and is omitted from listings.
+working directory, present live state, cost, token counts, and their accounting
+metadata. Both timestamps are required UTC values. A record that cannot supply
+timestamps is not a session and is omitted from listings.
 
 `LiveState` is either `working` or `idle`. It is an optional present-tense
 annotation joined by session id from the `harness-status` command; recording
@@ -69,12 +69,26 @@ sessions whose directory is absent. Both filters are applied before the
 per-harness listing bound. `Cost` contains a single USD value. `Tokens` can
 independently record input, output, reasoning, cache-read, and cache-write
 counts. Each counter is what the harness recorded and is absent where it
-recorded nothing: OpenCode supplies all five from its session row, Codex
-supplies the cumulative totals of the newest `token_count` event in the
-bounded read (so a session's counters are its running total, not the
-window's), and Claude and pi record no session-level counters. Cost, provider
-quota, and recorded tokens are distinct facts; no counter is derived from
-another.
+recorded nothing. `Accounting` is present exactly when `cost` or `tokens` is
+present and serializes as an object with two independent axes:
+
+- `basis` is `recorded-total` when the harness supplied a cumulative
+  session-level record, or `summed-requests` when `tapes` added per-request
+  usage records.
+- `coverage` is `session` when the figures cover the whole recording, or
+  `read-window` when a bounded source read may have left older requests
+  unread.
+
+OpenCode supplies recorded totals from its session row or API response, and
+Codex supplies the cumulative totals of the newest `token_count` event in the
+bounded read. Both are `recorded-total`/`session` because the harness records
+running session totals. Claude uses the newest `cost-state` record in the
+bounded read as a `recorded-total`/`session`; without one, it sums each
+per-request `message.usage` once by `requestId`, using `summed-requests` with
+coverage determined by the file-tail bound. pi sums `message.usage` from the
+active conversation path, excluding abandoned branches, with the same
+coverage rule. Cost, provider quota, and recorded tokens are distinct facts;
+no counter or cost is derived from another counter.
 
 `Turn` contains a role, text, an optional UTC timestamp, an `ordinal`, and an
 optional `native_id`. Roles are `user`, `assistant`, `tool`, and `reasoning`.
