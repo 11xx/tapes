@@ -1,8 +1,8 @@
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 use chrono::{DateTime, NaiveDate, TimeZone, Utc};
 use serde::Serialize;
 
@@ -23,6 +23,7 @@ pub mod scope;
 pub mod usage;
 
 pub const LIST_SCHEMA: &str = "tapes-list/1";
+pub const EXPORT_MANIFEST_SCHEMA: &str = "tapes-export-manifest/1";
 /// Number of normalized turns a `list --search` query inspects per session.
 /// Keeping this fixed makes the listing's cost predictable for callers.
 pub const LIST_SEARCH_TAIL: usize = 32;
@@ -823,4 +824,211 @@ pub fn export_with_backends(
 ) -> Result<bundle::Bundle> {
     let transcript = show_with_backends(backends, selection, EXPORT_TAIL)?;
     bundle::export(&transcript, directory.unwrap_or_else(|| Path::new("/tmp")))
+}
+
+/// Which sessions a bulk export acts on, stated in the same terms a listing
+/// is, so the exported set is exactly the listed one.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ExportSelection<'a> {
+    pub within: Where<'a>,
+    pub harness: Option<&'a str>,
+    pub limit: Option<usize>,
+    pub filters: ListFilters<'a>,
+    pub sort: ListSort,
+}
+
+/// Which project's sessions a selection could see.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SelectedScope {
+    Here,
+    Project,
+    Global,
+}
+
+/// The query that produced a bulk export, recorded so the exported set can be
+/// audited against the store it came from.
+#[derive(Debug, Serialize)]
+pub struct SelectionRecord {
+    pub scope: SelectedScope,
+    /// The path whose project was selected, for the `here` and `project`
+    /// scopes. Absent for a global selection, and when the current directory
+    /// cannot be read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project: Option<PathBuf>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub harness: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub directory: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub activity: Option<ActivityWindow>,
+    pub sort: ListSort,
+    pub limit: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub search: Option<String>,
+}
+
+/// Where one session's three bundle files landed.
+#[derive(Debug, Serialize)]
+pub struct ExportedFiles {
+    pub context: PathBuf,
+    pub json: PathBuf,
+    pub trace: PathBuf,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ExportedSession {
+    pub id: String,
+    pub harness: String,
+    pub last_activity_at: DateTime<Utc>,
+    pub files: ExportedFiles,
+}
+
+/// A selected session whose store could not be read into a bundle. The
+/// selection stands; only this session is missing from it.
+#[derive(Debug, Serialize)]
+pub struct FailedExport {
+    pub id: String,
+    pub harness: String,
+    pub error: String,
+}
+
+/// The one file a bulk export writes that spans its sessions: what was asked
+/// for, what was written, and every diagnostic the listing produced.
+#[derive(Debug, Serialize)]
+pub struct ExportManifest {
+    pub schema: &'static str,
+    pub selection: SelectionRecord,
+    /// Exported sessions, in selection order.
+    pub sessions: Vec<ExportedSession>,
+    pub failed: Vec<FailedExport>,
+    pub unavailable: Vec<String>,
+    pub unreadable: Vec<String>,
+    pub unsearched: Vec<String>,
+    pub scanned: usize,
+    pub scan_truncated: bool,
+}
+
+/// One bundle per selected session, plus the manifest that spans them.
+pub struct BulkExport {
+    /// Bundles in selection order, positionally matching `manifest.sessions`.
+    pub bundles: Vec<bundle::Bundle>,
+    pub manifest: ExportManifest,
+    pub manifest_file: bundle::BundleFile,
+}
+
+impl BulkExport {
+    /// Nothing selected could be read. The manifest still records the
+    /// selection and every diagnostic, so the run is auditable, but the caller
+    /// asked for sessions and holds none.
+    pub fn every_session_failed(&self) -> bool {
+        self.bundles.is_empty() && !self.manifest.failed.is_empty()
+    }
+}
+
+pub fn export_selection(
+    selection: &ExportSelection<'_>,
+    directory: Option<&Path>,
+) -> Result<BulkExport> {
+    export_selection_with_backends(&backend::backends(), selection, directory)
+}
+
+/// Export every session a listing with the same filters would return, in the
+/// listing's order, one bounded bundle each.
+///
+/// The listing is computed once and its sessions are read through the backend
+/// that produced them: an id re-resolved against every store could reach a
+/// different session, or none, and the manifest would then describe a set that
+/// was never exported.
+pub fn export_selection_with_backends(
+    backends: &[Box<dyn Backend>],
+    selection: &ExportSelection<'_>,
+    directory: Option<&Path>,
+) -> Result<BulkExport> {
+    let scope = selection.within.resolve()?;
+    let limit = selection.limit.unwrap_or(DEFAULT_LIST_LIMIT);
+    let listed = list_scoped(
+        backends,
+        selection.harness,
+        scope.as_ref(),
+        limit,
+        &selection.filters,
+        selection.sort,
+    )?;
+    let directory = directory.unwrap_or_else(|| Path::new("/tmp"));
+
+    let mut bundles = Vec::new();
+    let mut sessions = Vec::new();
+    let mut failed = Vec::new();
+    for (session, origin) in listed.sessions.into_iter().zip(listed.origins) {
+        match backends[origin]
+            .transcript(&session, EXPORT_TAIL)
+            .and_then(|transcript| bundle::export(&transcript, directory))
+        {
+            Ok(bundle) => {
+                sessions.push(ExportedSession {
+                    id: session.id,
+                    harness: session.harness,
+                    last_activity_at: session.last_activity_at,
+                    files: ExportedFiles {
+                        context: bundle.context.path.clone(),
+                        json: bundle.json.path.clone(),
+                        trace: bundle.trace.path.clone(),
+                    },
+                });
+                bundles.push(bundle);
+            }
+            Err(error) => failed.push(FailedExport {
+                id: session.id,
+                harness: session.harness,
+                error: format!("{error:#}"),
+            }),
+        }
+    }
+
+    let manifest = ExportManifest {
+        schema: EXPORT_MANIFEST_SCHEMA,
+        selection: selection_record(selection, limit),
+        sessions,
+        failed,
+        unavailable: listed.unavailable,
+        unreadable: listed.unreadable,
+        unsearched: listed.unsearched,
+        scanned: listed.scanned,
+        scan_truncated: listed.scan_truncated,
+    };
+    let body = serde_json::to_string_pretty(&manifest)
+        .context("failed to serialize the export manifest")?;
+    let manifest_file = bundle::write_manifest(directory, &body)?;
+
+    Ok(BulkExport {
+        bundles,
+        manifest,
+        manifest_file,
+    })
+}
+
+fn selection_record(selection: &ExportSelection<'_>, limit: usize) -> SelectionRecord {
+    let (scope, project) = match selection.within {
+        Where::Here => (SelectedScope::Here, std::env::current_dir().ok()),
+        Where::Project(path) => (SelectedScope::Project, Some(path.to_path_buf())),
+        Where::Global => (SelectedScope::Global, None),
+    };
+    let filters = &selection.filters;
+    SelectionRecord {
+        scope,
+        project,
+        harness: selection.harness.map(str::to_owned),
+        model: filters.model.map(str::to_owned),
+        directory: filters.directory.map(str::to_owned),
+        activity: (filters.since.is_some() || filters.until.is_some()).then_some(ActivityWindow {
+            since: filters.since,
+            until: filters.until,
+        }),
+        sort: selection.sort,
+        limit,
+        search: filters.search.map(str::to_owned),
+    }
 }

@@ -5,14 +5,14 @@ use std::path::PathBuf;
 
 use anyhow::{anyhow, Result};
 use clap::{Args, Parser, Subcommand, ValueEnum};
-use tapes_core::bundle::Bundle;
+use tapes_core::bundle::{Bundle, BundleFile};
 use tapes_core::event::{EventKind, EventRecord, EventTranscript, Incomplete};
 use tapes_core::model::{
     human_bytes, human_speaker, human_timestamp, human_title, Accounting, AccountingBasis,
     AccountingCoverage, Cost, LiveState, Session, SourceBound, Tokens, Transcript, Truncation,
 };
 use tapes_core::usage::{Durations, ModelUsage, RateLimits, RateWindow, TurnCoverage, UsageView};
-use tapes_core::{Selection, Where};
+use tapes_core::{BulkExport, Selection, Where};
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
 enum SortArg {
@@ -232,13 +232,78 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Export one session. The context file keeps the operator turns and the
-    /// assistant's text; the trace file keeps every turn, each headed as
-    /// `show` heads it.
+    /// Export sessions as bundles. One session by id or `--latest`, or every
+    /// session a selection holds: the listing flags choose the same set
+    /// `list` would return, in the same order, and a `manifest.json` beside
+    /// the bundles records that selection and every bundle it produced. Each
+    /// session keeps its own bounded bundle; a session whose store cannot be
+    /// read is recorded in the manifest's `failed` and does not stop the run,
+    /// which fails only when every selected session did.
     Export {
+        /// Session identifier, full or an unambiguous prefix.
+        #[arg(
+            required_unless_present_any = ["latest", "here", "project", "global", "harness", "model", "directory", "since", "until", "search"],
+            conflicts_with_all = ["latest", "exclude", "harness", "here", "project", "global"]
+        )]
+        session: Option<String>,
+        /// Take the most recent session in scope instead of naming one. A
+        /// caller asking from inside a live session is usually itself the most
+        /// recent one in its own project, so reaching an older session takes
+        /// `--exclude <own-id>`.
+        #[arg(long)]
+        latest: bool,
+        /// Pass over this session when taking the latest. Repeatable. An agent
+        /// asking from inside its own session passes its own id here.
+        #[arg(long, requires = "latest")]
+        exclude: Vec<String>,
+        /// Restrict to one harness: the most recent session of it with
+        /// --latest, every selected session of it otherwise.
+        #[arg(long, conflicts_with = "session")]
+        harness: Option<String>,
         #[command(flatten)]
-        selection: SelectionArgs,
-        /// Directory for the exported bundle.
+        scope: ScopeArgs,
+        /// Take at most this many sessions from each harness [default: 20].
+        #[arg(long, conflicts_with_all = ["session", "latest"])]
+        limit: Option<usize>,
+        /// Match case-insensitively against the full model identity, `id` or
+        /// `id (variant)`. Sessions without a model never match.
+        #[arg(long, value_name = "SUBSTRING", conflicts_with_all = ["session", "latest"])]
+        model: Option<String>,
+        /// Match case-insensitively against the recorded directory path.
+        /// Sessions without a directory never match.
+        #[arg(long, value_name = "SUBSTRING", conflicts_with_all = ["session", "latest"])]
+        directory: Option<String>,
+        /// Keep sessions whose newest recorded activity, `last_activity_at`,
+        /// is at or after this timestamp. RFC 3339 timestamps with an offset
+        /// and bare YYYY-MM-DD dates are accepted.
+        #[arg(
+            long,
+            value_name = "TIMESTAMP",
+            value_parser = tapes_core::parse_activity_timestamp,
+            conflicts_with_all = ["session", "latest"]
+        )]
+        since: Option<tapes_core::ActivityTimestamp>,
+        /// Keep sessions whose newest recorded activity, `last_activity_at`,
+        /// is before this timestamp. RFC 3339 timestamps with an offset and
+        /// bare YYYY-MM-DD dates are accepted.
+        #[arg(
+            long,
+            value_name = "TIMESTAMP",
+            value_parser = tapes_core::parse_activity_timestamp,
+            conflicts_with_all = ["session", "latest"]
+        )]
+        until: Option<tapes_core::ActivityTimestamp>,
+        /// Order the selection by `last_activity_at`: newest first by
+        /// default, or oldest first. Bundles are written, and the manifest
+        /// lists them, in this order.
+        #[arg(long, value_enum, value_name = "ORDER", conflicts_with_all = ["session", "latest"])]
+        sort: Option<SortArg>,
+        /// Match case-insensitively against the last 32 normalized turns in
+        /// each candidate session. The fixed tail keeps the selection bounded;
+        /// a match outside it is not considered.
+        #[arg(long, value_name = "SUBSTRING", conflicts_with_all = ["session", "latest"])]
+        search: Option<String>,
+        /// Directory for the exported bundles and their manifest.
         #[arg(long)]
         bundle: Option<PathBuf>,
     },
@@ -338,9 +403,71 @@ fn dispatch(cli: Cli) -> Result<()> {
                 print!("{}", render_usage(&usage));
             }
         }
-        Command::Export { selection, bundle } => {
-            let bundle = tapes_core::export(selection.selection(), bundle.as_deref())?;
-            print_manifest(&bundle);
+        Command::Export {
+            session,
+            latest,
+            exclude,
+            harness,
+            scope,
+            limit,
+            model,
+            directory,
+            since,
+            until,
+            sort,
+            search,
+            bundle,
+        } => {
+            if let Some(session) = &session {
+                print_manifest(&tapes_core::export(
+                    Selection::Id(session),
+                    bundle.as_deref(),
+                )?);
+            } else if latest {
+                print_manifest(&tapes_core::export(
+                    Selection::Latest {
+                        within: scope.within_or_here(),
+                        harness: harness.as_deref(),
+                        exclude: &exclude,
+                    },
+                    bundle.as_deref(),
+                )?);
+            } else {
+                if since
+                    .zip(until)
+                    .is_some_and(|(since, until)| since >= until)
+                {
+                    return Err(anyhow!("--since must be earlier than --until"));
+                }
+                if search.is_some() {
+                    eprintln!(
+                        "Searching the last 32 normalized turns of each candidate session before applying --limit."
+                    );
+                }
+                let export = tapes_core::export_selection(
+                    &tapes_core::ExportSelection {
+                        within: scope.within(),
+                        harness: harness.as_deref(),
+                        limit,
+                        filters: tapes_core::ListFilters {
+                            model: model.as_deref(),
+                            directory: directory.as_deref(),
+                            since,
+                            until,
+                            search: search.as_deref(),
+                        },
+                        sort: sort.unwrap_or(SortArg::Newest).into(),
+                    },
+                    bundle.as_deref(),
+                )?;
+                print_selection_manifest(&export);
+                if export.every_session_failed() {
+                    return Err(anyhow!(
+                        "no selected session could be exported; {} names each failure",
+                        export.manifest_file.path.display()
+                    ));
+                }
+            }
         }
     }
     Ok(())
@@ -592,8 +719,21 @@ fn print_availability_note(result: &tapes_core::SessionList) {
 /// sizes, in the order a rescuer should read them.
 fn print_manifest(bundle: &Bundle) {
     for file in bundle.files() {
-        println!("{}\t{}", file.path.display(), human_bytes(file.bytes));
+        print_bundle_file(file);
     }
+}
+
+/// A selection prints each bundle's manifest in selection order, then the one
+/// file that spans them.
+fn print_selection_manifest(export: &BulkExport) {
+    for bundle in &export.bundles {
+        print_manifest(bundle);
+    }
+    print_bundle_file(&export.manifest_file);
+}
+
+fn print_bundle_file(file: &BundleFile) {
+    println!("{}\t{}", file.path.display(), human_bytes(file.bytes));
 }
 
 fn print_transcript(transcript: &Transcript, by_latest: bool) {

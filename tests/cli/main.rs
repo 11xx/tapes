@@ -322,12 +322,16 @@ fn events_help_explains_pairing_filters_and_the_default_bound() {
 }
 
 #[test]
-fn export_help_exits_successfully() {
-    assert!(tapes()
-        .args(["export", "--help"])
-        .status()
-        .unwrap()
-        .success());
+fn export_help_explains_the_selection_form_and_its_manifest() {
+    let output = tapes().args(["export", "--help"]).output().unwrap();
+    assert!(output.status.success());
+    let help = String::from_utf8_lossy(&output.stdout);
+    assert!(help.contains("manifest.json"), "{help}");
+    assert!(help.contains("`failed`"), "{help}");
+    assert!(help.contains("the same order"), "{help}");
+    assert!(help.contains("--since <TIMESTAMP>"), "{help}");
+    assert!(help.contains("--sort <ORDER>"), "{help}");
+    assert!(help.contains("--search <SUBSTRING>"), "{help}");
 }
 
 /// Selecting a session stays explicit: an id or `--latest`, never a silent
@@ -344,6 +348,11 @@ fn selection_and_scope_flags_are_mutually_exclusive() {
         vec!["show", "--exclude", "some-id"],
         vec!["show", "--latest", "--here", "--global"],
         vec!["export", "--latest", "--project", "/tmp", "--global"],
+        vec!["export", "some-id", "--since", "2026-01-01"],
+        vec!["export", "some-id", "--sort", "oldest"],
+        vec!["export", "--latest", "--search", "parser"],
+        vec!["export"],
+        vec!["export", "--bundle", "/tmp"],
         vec!["list", "--here", "--global"],
     ] {
         let misuse = tapes().args(&arguments).output().unwrap();
@@ -2317,4 +2326,160 @@ fn usage_human_output_names_the_recorded_facts_only() {
     for absent in ["cost:", "durations:", "model ", "Note:"] {
         assert!(!rendered.contains(absent), "{absent} in {rendered}");
     }
+}
+
+/// The selection is exactly what `list` returns for the same flags, in the
+/// same order, and each session keeps its own bounded bundle.
+#[test]
+fn export_over_an_activity_window_writes_one_bundle_per_session_and_a_manifest() {
+    let (codex_home, home) = filter_fixture_store("export-window");
+    let bundle = codex_home.join("bundle");
+    let mut command = tapes();
+    command.args([
+        "export",
+        "--global",
+        "--harness",
+        "codex",
+        "--since",
+        "2026-01-01T11:00:00Z",
+        "--until",
+        "2026-01-01T14:00:00Z",
+        "--sort",
+        "oldest",
+        "--bundle",
+    ]);
+    command.arg(&bundle);
+    with_fixture_env(
+        &mut command,
+        &codex_home,
+        &home,
+        Path::new("/definitely/missing"),
+    );
+    let output = command.output().unwrap();
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let manifest: Value =
+        serde_json::from_slice(&fs::read(bundle.join("manifest.json")).unwrap()).unwrap();
+    assert_eq!(manifest["schema"], "tapes-export-manifest/1");
+    assert_eq!(
+        manifest["selection"],
+        serde_json::json!({
+            "scope": "global",
+            "harness": "codex",
+            "activity": {
+                "since": "2026-01-01T11:00:00Z",
+                "until": "2026-01-01T14:00:00Z"
+            },
+            "sort": "oldest",
+            "limit": 20
+        })
+    );
+    let exported = manifest["sessions"].as_array().unwrap();
+    assert_eq!(
+        exported
+            .iter()
+            .map(|session| session["id"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        vec![
+            "10000000-0000-0000-0000-000000000002",
+            "20000000-0000-0000-0000-000000000004"
+        ]
+    );
+    assert!(manifest["failed"].as_array().unwrap().is_empty());
+    assert_eq!(manifest["scan_truncated"], false);
+
+    // Two sessions exported in one run keep separate bundles: the stem carries
+    // the session id, so sharing an export second cannot collide.
+    let mut stdout_paths = Vec::new();
+    for session in exported {
+        for kind in ["context", "json", "trace"] {
+            let path = PathBuf::from(session["files"][kind].as_str().unwrap());
+            assert!(path.is_file(), "{} is missing", path.display());
+            stdout_paths.push(path);
+        }
+    }
+    assert_eq!(fs::read_dir(&bundle).unwrap().count(), 7);
+
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let printed = stdout
+        .lines()
+        .map(|line| PathBuf::from(line.split('\t').next().unwrap()))
+        .collect::<Vec<_>>();
+    stdout_paths.push(bundle.join("manifest.json"));
+    assert_eq!(printed, stdout_paths);
+
+    fs::remove_dir_all(codex_home).unwrap();
+}
+
+/// A limit bounds the selection the way it bounds a listing, and a selection
+/// that holds nothing is a fact rather than a failure.
+#[test]
+fn export_honours_the_limit_and_writes_a_manifest_for_an_empty_selection() {
+    let (codex_home, home) = filter_fixture_store("export-limit");
+    let run = |arguments: &[&str], bundle: &Path| {
+        let mut command = tapes();
+        command.args(arguments).arg("--bundle").arg(bundle);
+        with_fixture_env(
+            &mut command,
+            &codex_home,
+            &home,
+            Path::new("/definitely/missing"),
+        );
+        command.output().unwrap()
+    };
+
+    let limited_bundle = codex_home.join("limited");
+    let limited = run(
+        &["export", "--global", "--harness", "codex", "--limit", "1"],
+        &limited_bundle,
+    );
+    assert!(
+        limited.status.success(),
+        "{}",
+        String::from_utf8_lossy(&limited.stderr)
+    );
+    let manifest: Value =
+        serde_json::from_slice(&fs::read(limited_bundle.join("manifest.json")).unwrap()).unwrap();
+    assert_eq!(manifest["selection"]["limit"], 1);
+    assert_eq!(
+        manifest["sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|session| session["id"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        vec!["30000000-0000-0000-0000-000000000005"]
+    );
+    assert_eq!(fs::read_dir(&limited_bundle).unwrap().count(), 4);
+
+    let empty_bundle = codex_home.join("empty");
+    let empty = run(
+        &[
+            "export",
+            "--global",
+            "--harness",
+            "codex",
+            "--since",
+            "2030-01-01",
+        ],
+        &empty_bundle,
+    );
+    assert!(
+        empty.status.success(),
+        "{}",
+        String::from_utf8_lossy(&empty.stderr)
+    );
+    let manifest: Value =
+        serde_json::from_slice(&fs::read(empty_bundle.join("manifest.json")).unwrap()).unwrap();
+    assert!(manifest["sessions"].as_array().unwrap().is_empty());
+    assert!(manifest["failed"].as_array().unwrap().is_empty());
+    assert_eq!(fs::read_dir(&empty_bundle).unwrap().count(), 1);
+    let stdout = String::from_utf8(empty.stdout).unwrap();
+    assert_eq!(stdout.lines().count(), 1, "{stdout}");
+
+    fs::remove_dir_all(codex_home).unwrap();
 }

@@ -87,6 +87,16 @@ pub fn export(transcript: &Transcript, directory: &Path) -> Result<Bundle> {
     })
 }
 
+/// The file a bulk export writes beside its bundles, naming the selection
+/// that produced them.
+pub const MANIFEST_FILE_NAME: &str = "manifest.json";
+
+/// Write an export manifest into the directory holding its bundles, under the
+/// same atomic rename the bundle files use.
+pub fn write_manifest(directory: &Path, body: &str) -> Result<BundleFile> {
+    write_atomically(&directory.join("manifest"), "json", body)
+}
+
 /// A prefix that sorts by export time and still names its session.
 fn bundle_stem(session: &Session) -> String {
     let id = session

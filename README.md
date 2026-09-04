@@ -216,6 +216,20 @@ Stdout is a manifest of exactly those three paths and their sizes; nothing
 else goes there. Each file is written under a temporary name and renamed, so
 a bundle never looks complete while it is half written.
 
+Given the listing flags in place of an id — `--here`, `--project <path>`,
+`--global`, `--harness`, `--model`, `--directory`, `--since`, `--until`,
+`--sort`, `--limit`, `--search` — `export` takes the set `list` would return,
+in the same order, and writes one bundle per session. Bundles are never
+joined: each session keeps its own bounded three files, and a
+`tapes-export-manifest/1` `manifest.json` beside them is the only file that
+spans the set. It records the selection, each session's bundle paths, the
+sessions whose store could not be read under `failed`, and the listing's own
+`unavailable`, `unreadable`, `unsearched`, `scanned`, and `scan_truncated`
+diagnostics. Stdout adds each bundle's three lines in selection order, then
+the manifest's own path and size. A session whose store vanishes between the
+listing and the read costs its own bundle and nothing else; the command fails
+only when every selected session failed, or when the listing itself did.
+
 ## Integrating
 
 `tapes` is meant to be the one reader of transcript stores on a machine. If you
@@ -249,8 +263,9 @@ and `tapes usage --latest --json` answers token, cost, and turn-count
 questions without summing a transcript by hand.
 
 **Contracts you can build on.** `tapes-list/1`, `tapes-session/1`,
-`tapes-events/1`, and `tapes-usage/1` are versioned JSON; a breaking shape change bumps the
-version. `export` prints
+`tapes-events/1`, `tapes-usage/1`, and `tapes-export-manifest/1` are versioned
+JSON; a breaking shape change bumps the version. A single-session `export`
+prints
 exactly three paths and their sizes on stdout, in reading order, and writes each
 file under a temporary name before renaming — so a bundle is never observed
 half-written. A harness whose binary or store is absent reports itself
