@@ -267,7 +267,13 @@ fn bare_invocation_guides_while_misuse_still_fails() {
     let guide = tapes().output().unwrap();
     assert!(guide.status.success());
     let text = String::from_utf8_lossy(&guide.stdout);
-    for command in ["tapes list", "tapes show", "tapes events", "tapes export"] {
+    for command in [
+        "tapes list",
+        "tapes show",
+        "tapes events",
+        "tapes stats",
+        "tapes export",
+    ] {
         assert!(text.contains(command), "guide omits `{command}`");
     }
 
@@ -2925,4 +2931,398 @@ fn endings_text_tail_is_bounded_and_marks_what_it_cut() {
             .any(|line| line.starts_with("  [") || line.starts_with("    ")),
         "{without_text}"
     );
+}
+
+const CODEX_SESSION_TITLE: &str = include_str!(
+    "../fixtures/codex/rollout-2026-01-01T12-00-00-10000000-0000-0000-0000-000000000003.jsonl"
+);
+
+/// A recording whose every counted figure is chosen: a call repeated under
+/// one id, a result whose call is outside the pair, a tool the harness
+/// recorded an error on, two complete pairs with known durations, recorded
+/// token counters, and one child.
+const STATS_PARENT: &str = concat!(
+    r#"{"timestamp":"2026-02-02T09:00:00Z","type":"session_meta","payload":{"id":"44444444-0000-0000-0000-000000000001","cwd":"/fixtures/project"}}"#,
+    "\n",
+    r#"{"timestamp":"2026-02-02T09:00:01Z","type":"turn_context","payload":{"cwd":"/fixtures/project","model":"gpt-fixture","effort":"high"}}"#,
+    "\n",
+    r#"{"timestamp":"2026-02-02T09:00:02Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Measure the fixture."}]}}"#,
+    "\n",
+    r#"{"timestamp":"2026-02-02T09:00:02.500Z","type":"event_msg","payload":{"type":"user_message","message":"Measure the fixture."}}"#,
+    "\n",
+    r#"{"timestamp":"2026-02-02T09:00:03Z","type":"response_item","payload":{"type":"reasoning","summary":[{"type":"summary_text","text":"Consider the fixture."}]}}"#,
+    "\n",
+    r#"{"timestamp":"2026-02-02T09:00:04Z","type":"response_item","payload":{"type":"function_call","name":"read","arguments":"{}","call_id":"call-a"}}"#,
+    "\n",
+    r#"{"timestamp":"2026-02-02T09:00:05Z","type":"response_item","payload":{"type":"function_call","name":"read","arguments":"{}","call_id":"call-a"}}"#,
+    "\n",
+    r#"{"timestamp":"2026-02-02T09:00:07Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call-a","output":"Read complete."}}"#,
+    "\n",
+    r#"{"timestamp":"2026-02-02T09:00:09Z","type":"response_item","payload":{"type":"custom_tool_call","name":"probe","input":"probe fixture","call_id":"call-b","status":"error"}}"#,
+    "\n",
+    r#"{"timestamp":"2026-02-02T09:00:11Z","type":"response_item","payload":{"type":"custom_tool_call","name":"probe","input":"probe fixture","call_id":"call-c","status":"completed"}}"#,
+    "\n",
+    r#"{"timestamp":"2026-02-02T09:00:12Z","type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"call-c","output":"Probe complete."}}"#,
+    "\n",
+    r#"{"timestamp":"2026-02-02T09:00:13Z","type":"response_item","payload":{"type":"function_call","name":"spawn_agent","arguments":"{\"task_name\":\"explore\",\"model\":\"gpt-fixture\"}","call_id":"call-d"}}"#,
+    "\n",
+    r#"{"timestamp":"2026-02-02T09:00:14Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call-d","output":"{\"task_name\":\"/root/explore\",\"agents\":[{\"agent_name\":\"/root/explore\",\"agent_status\":\"completed\"}]}"}}"#,
+    "\n",
+    r#"{"timestamp":"2026-02-02T09:00:15Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call-z","output":"Orphan result."}}"#,
+    "\n",
+    r#"{"timestamp":"2026-02-02T09:00:16Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Fixture measured."}]}}"#,
+    "\n",
+    r#"{"timestamp":"2026-02-02T09:00:16.500Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":2500,"cached_input_tokens":1000,"cache_write_input_tokens":500,"output_tokens":400,"total_tokens":4400},"model_context_window":272000},"rate_limits":null}}"#,
+    "\n",
+);
+
+const STATS_CHILD: &str = concat!(
+    r#"{"timestamp":"2026-02-02T09:00:13Z","type":"session_meta","payload":{"id":"44444444-0000-0000-0000-000000000002","cwd":"/fixtures/project","parent_thread_id":"44444444-0000-0000-0000-000000000001","agent_path":"/root/explore","agent_nickname":"explorer"}}"#,
+    "\n",
+    r#"{"timestamp":"2026-02-02T09:00:14Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Explored."}]}}"#,
+    "\n",
+);
+
+fn stats_store(name: &str) -> TemporaryDirectory {
+    let root = TemporaryDirectory::new(
+        std::env::temp_dir().join(format!("tapes-cli-stats-{name}-{}", std::process::id())),
+    );
+    let sessions = root.path().join("codex/sessions/2026/02/02");
+    fs::create_dir_all(&sessions).unwrap();
+    fs::create_dir_all(root.path().join("home")).unwrap();
+    fs::write(
+        sessions.join("rollout-2026-02-02T09-00-00-44444444-0000-0000-0000-000000000001.jsonl"),
+        STATS_PARENT,
+    )
+    .unwrap();
+    fs::write(
+        sessions.join("rollout-2026-02-02T09-00-13-44444444-0000-0000-0000-000000000002.jsonl"),
+        STATS_CHILD,
+    )
+    .unwrap();
+    root
+}
+
+fn stats_command(root: &Path, arguments: &[&str]) -> std::process::Output {
+    let mut command = tapes();
+    command.args(arguments);
+    with_fixture_env(
+        &mut command,
+        &root.join("codex"),
+        &root.join("home"),
+        Path::new("/definitely/missing"),
+    );
+    let output = command.output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    output
+}
+
+#[test]
+fn stats_help_names_the_schema_and_what_the_figures_cover() {
+    let output = tapes().args(["stats", "--help"]).output().unwrap();
+    assert!(output.status.success());
+    let help = String::from_utf8_lossy(&output.stdout);
+    assert!(help.contains("tapes-stats/1"), "{help}");
+    assert!(help.contains("complete pairs only"), "{help}");
+    assert!(
+        help.contains("share of recorded token counts rather than of cost"),
+        "{help}"
+    );
+    assert!(help.contains("Nothing is judged"), "{help}");
+}
+
+/// Every figure in the answer is a figure the recording chose, so the whole
+/// object is asserted rather than a sample of it.
+#[test]
+fn stats_json_counts_a_chosen_recording_exactly() {
+    let root = stats_store("exact");
+    let id = "44444444-0000-0000-0000-000000000001";
+    let output = stats_command(root.path(), &["stats", id, "--json"]);
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+
+    assert_eq!(
+        value,
+        serde_json::json!({
+            "schema": "tapes-stats/1",
+            "session": {
+                "id": id,
+                "harness": "codex",
+                "model": { "id": "gpt-fixture", "variant": "high" },
+                "started_at": "2026-02-02T09:00:00Z",
+                "last_activity_at": "2026-02-02T09:00:16.500Z",
+                "directory": "/fixtures/project",
+                "store": root
+                    .path()
+                    .join("codex/sessions/2026/02/02/rollout-2026-02-02T09-00-00-44444444-0000-0000-0000-000000000001.jsonl")
+                    .display()
+                    .to_string()
+            },
+            "coverage": { "turns": "session", "pairs": "complete-only" },
+            "turns": {
+                "operator": 1,
+                "assistant": 1,
+                "tool": 9,
+                "reasoning": 1,
+                "control": 0,
+                "ambient": 0,
+                "notice": 0,
+                "unknown": 0,
+                "total": 12
+            },
+            "tools": {
+                "calls": 5,
+                "results": 4,
+                "paired": 3,
+                "incomplete": {
+                    "no-result-in-read": 2,
+                    "call-before-read-bound": 0,
+                    "call-not-recorded": 1
+                },
+                "by_name": [
+                    {
+                        "name": "probe",
+                        "calls": 2,
+                        "paired": 1,
+                        "errors": 1,
+                        "duration_ms": { "total": 1_000, "max": 1_000, "count": 1 }
+                    },
+                    {
+                        "name": "read",
+                        "calls": 2,
+                        "paired": 1,
+                        "errors": 0,
+                        "duration_ms": { "total": 2_000, "max": 2_000, "count": 1 }
+                    },
+                    {
+                        "name": "spawn_agent",
+                        "calls": 1,
+                        "paired": 1,
+                        "errors": 0,
+                        "duration_ms": { "total": 1_000, "max": 1_000, "count": 1 }
+                    }
+                ],
+                "errors": 1
+            },
+            "durations_ms": {
+                "recorded_span": 14_000,
+                "in_tool": 4_000,
+                "between_turns_max": 2_000,
+                "count_with_timestamps": 12
+            },
+            "usage": {
+                "tokens": {
+                    "input": 2500,
+                    "output": 400,
+                    "cache_read": 1000,
+                    "cache_write": 500
+                },
+                "accounting": { "basis": "recorded-total", "coverage": "session" },
+                "cache_read_ratio": 0.25,
+                "cache_write_ratio": 0.125
+            },
+            "lineage": {
+                "children": 1,
+                "resolved": 1,
+                "by_disposition": { "completed": 1 }
+            },
+            "warnings": ["incomplete-pairs"]
+        }),
+        "{value:#}"
+    );
+}
+
+/// The counts are the `events` projection's own, so the two commands answer
+/// the same question about the same read.
+#[test]
+fn stats_tool_counts_are_the_events_projections_counts() {
+    let root = stats_store("events");
+    let id = "44444444-0000-0000-0000-000000000001";
+    let stats: Value =
+        serde_json::from_slice(&stats_command(root.path(), &["stats", id, "--json"]).stdout)
+            .unwrap();
+    let events: Value =
+        serde_json::from_slice(&stats_command(root.path(), &["events", id, "--json"]).stdout)
+            .unwrap();
+
+    let records = events["events"].as_array().unwrap();
+    let counted = |kind: &str| {
+        records
+            .iter()
+            .filter(|record| record["kind"] == kind)
+            .count()
+    };
+    assert_eq!(stats["tools"]["calls"], counted("tool-call"));
+    assert_eq!(stats["tools"]["results"], counted("tool-result"));
+    assert_eq!(stats["tools"]["paired"], events["pairs"]["complete"]);
+    let incomplete = |reason: &str| {
+        records
+            .iter()
+            .filter(|record| record["incomplete"] == reason)
+            .count()
+    };
+    for reason in [
+        "no-result-in-read",
+        "call-before-read-bound",
+        "call-not-recorded",
+    ] {
+        assert_eq!(
+            stats["tools"]["incomplete"][reason],
+            incomplete(reason),
+            "{reason}"
+        );
+    }
+    // The tool distribution comes from the typed events rather than from the
+    // harness envelope each tool turn keeps as its text.
+    let named = |name: &str| {
+        records
+            .iter()
+            .filter(|record| record["kind"] == "tool-call" && record["name"] == name)
+            .count()
+    };
+    for tool in stats["tools"]["by_name"].as_array().unwrap() {
+        assert_eq!(
+            tool["calls"],
+            named(tool["name"].as_str().unwrap()),
+            "{tool}"
+        );
+    }
+}
+
+/// A read that stopped at a source bound counted only what it reached, and
+/// says so in the coverage and in a warning.
+#[test]
+fn stats_of_an_oversized_recording_reports_the_read_window() {
+    let root = TemporaryDirectory::new(
+        std::env::temp_dir().join(format!("tapes-cli-stats-oversized-{}", std::process::id())),
+    );
+    let sessions = root.path().join("codex/sessions/2026/02/02");
+    fs::create_dir_all(&sessions).unwrap();
+    let id = "44444444-0000-0000-0000-0000000000ff";
+    let mut file = std::io::BufWriter::new(
+        fs::File::create(sessions.join(format!("rollout-2026-02-02T09-00-00-{id}.jsonl"))).unwrap(),
+    );
+    use std::io::Write;
+    writeln!(
+        file,
+        r#"{{"timestamp":"2026-02-02T09:00:00Z","type":"session_meta","payload":{{"id":"{id}","cwd":"/fixtures/project"}}}}"#
+    )
+    .unwrap();
+    let filler = "x".repeat(4096);
+    for _ in 0..1200 {
+        writeln!(
+            file,
+            r#"{{"timestamp":"2026-02-02T10:00:00Z","type":"response_item","payload":{{"type":"message","role":"assistant","content":[{{"type":"output_text","text":"{filler}"}}]}}}}"#
+        )
+        .unwrap();
+    }
+    drop(file);
+
+    let value: Value =
+        serde_json::from_slice(&stats_command(root.path(), &["stats", id, "--json"]).stdout)
+            .unwrap();
+    assert_eq!(value["coverage"]["turns"], "read-window");
+    assert_eq!(
+        value["coverage"]["truncation"]["source"],
+        serde_json::json!([{ "kind": "file-tail", "bytes": 4_194_304 }])
+    );
+    assert_eq!(value["warnings"], serde_json::json!(["read-window"]));
+
+    let human = String::from_utf8(stats_command(root.path(), &["stats", id]).stdout).unwrap();
+    assert!(
+        human.contains("coverage: turns cover the bounded read window"),
+        "{human}"
+    );
+    assert!(human.contains("warnings: read-window"), "{human}");
+    assert!(
+        human.contains("Only the final 4 MiB of the recording was read"),
+        "{human}"
+    );
+}
+
+/// Human output states each group once and invents no line for a group the
+/// recording holds nothing for.
+#[test]
+fn stats_human_output_prints_no_absent_group() {
+    let root = TemporaryDirectory::new(
+        std::env::temp_dir().join(format!("tapes-cli-stats-human-{}", std::process::id())),
+    );
+    let sessions = root.path().join("codex/sessions/2026/01/01");
+    fs::create_dir_all(&sessions).unwrap();
+    fs::write(
+        sessions.join("rollout-2026-01-01T12-00-00-10000000-0000-0000-0000-000000000003.jsonl"),
+        CODEX_SESSION_TITLE,
+    )
+    .unwrap();
+
+    let rendered = String::from_utf8(
+        stats_command(
+            root.path(),
+            &["stats", "10000000-0000-0000-0000-000000000003"],
+        )
+        .stdout,
+    )
+    .unwrap();
+
+    assert!(
+        rendered.starts_with(
+            "session: codex 10000000-0000-0000-0000-000000000003 gpt-fixture (high)\n"
+        ),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains(
+            "coverage: turns cover the whole session, durations cover complete pairs only\n"
+        ),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains("turns: 3 total, 1 operator, 1 assistant, 1 ambient\n"),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains("tools: 0 calls, 0 results, 0 paired, 0 errors\n"),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains("durations: recorded span 2000ms, longest gap between turns 1000ms, 3 turns with timestamps\n"),
+        "{rendered}"
+    );
+    for absent in [
+        "incomplete:",
+        "NAME\tCALLS",
+        "tokens:",
+        "cost:",
+        "accounting:",
+        "cache of input",
+        "children:",
+        "warnings:",
+        "Note:",
+    ] {
+        assert!(!rendered.contains(absent), "{absent} in {rendered}");
+    }
+}
+
+/// The stats read is the export-shaped one, so its turn counts are the whole
+/// bounded read's and agree with what `usage` counts by role.
+#[test]
+fn stats_and_usage_count_the_same_bounded_read() {
+    let root = stats_store("usage");
+    let id = "44444444-0000-0000-0000-000000000001";
+    let stats: Value =
+        serde_json::from_slice(&stats_command(root.path(), &["stats", id, "--json"]).stdout)
+            .unwrap();
+    let usage: Value =
+        serde_json::from_slice(&stats_command(root.path(), &["usage", id, "--json"]).stdout)
+            .unwrap();
+
+    assert_eq!(stats["turns"]["total"], usage["turns"]["total"]);
+    assert_eq!(stats["turns"]["tool"], usage["turns"]["tool"]);
+    assert_eq!(stats["turns"]["assistant"], usage["turns"]["assistant"]);
+    assert_eq!(stats["coverage"]["turns"], usage["turns"]["coverage"]);
+    assert_eq!(stats["usage"]["tokens"], usage["tokens"]);
+    assert_eq!(stats["usage"]["accounting"], usage["accounting"]);
 }

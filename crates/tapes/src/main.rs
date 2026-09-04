@@ -13,6 +13,10 @@ use tapes_core::model::{
     human_bytes, human_speaker, human_timestamp, human_title, speaker, Accounting, AccountingBasis,
     AccountingCoverage, Cost, LiveState, Session, SourceBound, Tokens, Transcript, Truncation,
 };
+use tapes_core::stats::{
+    Coverage, LineageStats, StatsView, TimeStats, ToolNameStats, ToolStats, TurnKindCounts,
+    UsageStats, Warning,
+};
 use tapes_core::usage::{
     Durations, GroupBy, GroupKey, ModelUsage, RateLimits, RateWindow, TurnCoverage, UsageTally,
     UsageView,
@@ -269,6 +273,22 @@ enum Command {
         #[command(flatten)]
         selection: SelectionArgs,
         /// Render the versioned tapes-lineage/1 object as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Count what one session's recording holds: turns by kind, tool calls
+    /// by name with their paired durations and error counts, the recorded
+    /// clock, the session's own token counters with the share of
+    /// `input + cache_read + cache_write` its cache accounts for, and the
+    /// children its store names. Every figure is a count of records the
+    /// harness wrote, and every total says what it covers: turn coverage is
+    /// `read-window` when a source bound withheld turns, durations come from
+    /// complete pairs only, and a cache ratio is a share of recorded token
+    /// counts rather than of cost. Nothing is judged, ranked, or explained.
+    Stats {
+        #[command(flatten)]
+        selection: SelectionArgs,
+        /// Render the versioned tapes-stats/1 object as JSON.
         #[arg(long)]
         json: bool,
     },
@@ -590,6 +610,14 @@ fn dispatch(cli: Cli) -> Result<()> {
                 println!("{}", serde_json::to_string(&lineage)?);
             } else {
                 print!("{}", render_lineage(&lineage));
+            }
+        }
+        Command::Stats { selection, json } => {
+            let stats = tapes_core::stats(selection.selection())?;
+            if json {
+                println!("{}", serde_json::to_string(&stats)?);
+            } else {
+                print!("{}", render_stats(&stats));
             }
         }
         Command::Usage {
@@ -948,6 +976,189 @@ fn render_child(child: &ChildRef) -> String {
     }
     rendered.push('\n');
     rendered
+}
+
+/// One line per group, in the order the JSON carries them, and a group the
+/// read holds nothing for has no line at all. The tool table is the only
+/// multi-line group.
+fn render_stats(stats: &StatsView) -> String {
+    let mut out = format!("session: {} {}", stats.session.harness, stats.session.id);
+    if let Some(model) = &stats.session.model {
+        out.push_str(&format!(" {}", model.identity()));
+    }
+    out.push('\n');
+    out.push_str(&format!("coverage: {}\n", render_coverage(&stats.coverage)));
+    out.push_str(&format!("turns: {}\n", render_turn_kinds(&stats.turns)));
+    out.push_str(&format!("tools: {}\n", render_tools(&stats.tools)));
+    if stats.tools.incomplete.total() > 0 {
+        out.push_str(&format!(
+            "incomplete: {}\n",
+            render_incomplete(&stats.tools)
+        ));
+    }
+    if !stats.tools.by_name.is_empty() {
+        out.push_str("NAME\tCALLS\tPAIRED\tERRORS\tTOTAL MS\tMAX MS\tTIMED\n");
+        for tool in &stats.tools.by_name {
+            out.push_str(&render_tool_name(tool));
+        }
+    }
+    if let Some(durations) = &stats.durations_ms {
+        out.push_str(&format!("durations: {}\n", render_time(durations)));
+    }
+    if let Some(usage) = &stats.usage {
+        render_usage_stats(&mut out, usage);
+    }
+    if let Some(lineage) = &stats.lineage {
+        out.push_str(&format!("children: {}\n", render_children(lineage)));
+    }
+    if !stats.warnings.is_empty() {
+        out.push_str(&format!(
+            "warnings: {}\n",
+            stats
+                .warnings
+                .iter()
+                .map(|warning| warning_label(*warning))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    render_truncation_notes(&mut out, &stats.coverage.truncation);
+    out
+}
+
+fn render_coverage(coverage: &Coverage) -> String {
+    let turns = match coverage.turns {
+        TurnCoverage::Session => "turns cover the whole session",
+        TurnCoverage::ReadWindow => "turns cover the bounded read window",
+    };
+    format!("{turns}, durations cover complete pairs only")
+}
+
+/// The total, then the kinds the read reached. A kind with no turn is a kind
+/// the session did not record.
+fn render_turn_kinds(turns: &TurnKindCounts) -> String {
+    let counted = [
+        ("operator", turns.operator),
+        ("assistant", turns.assistant),
+        ("tool", turns.tool),
+        ("reasoning", turns.reasoning),
+        ("control", turns.control),
+        ("ambient", turns.ambient),
+        ("notice", turns.notice),
+        ("unknown", turns.unknown),
+    ]
+    .into_iter()
+    .filter(|(_, count)| *count > 0)
+    .map(|(name, count)| format!("{count} {name}"))
+    .collect::<Vec<_>>();
+    std::iter::once(format!("{} total", turns.total))
+        .chain(counted)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn render_tools(tools: &ToolStats) -> String {
+    format!(
+        "{} calls, {} results, {} paired, {} errors",
+        tools.calls, tools.results, tools.paired, tools.errors
+    )
+}
+
+fn render_incomplete(tools: &ToolStats) -> String {
+    [
+        ("no-result-in-read", tools.incomplete.no_result_in_read),
+        (
+            "call-before-read-bound",
+            tools.incomplete.call_before_read_bound,
+        ),
+        ("call-not-recorded", tools.incomplete.call_not_recorded),
+    ]
+    .into_iter()
+    .filter(|(_, count)| *count > 0)
+    .map(|(name, count)| format!("{count} {name}"))
+    .collect::<Vec<_>>()
+    .join(", ")
+}
+
+fn render_tool_name(tool: &ToolNameStats) -> String {
+    let (total, max, count) = tool.duration_ms.map_or_else(
+        || (String::new(), String::new(), String::new()),
+        |durations| {
+            (
+                durations.total.to_string(),
+                durations.max.to_string(),
+                durations.count.to_string(),
+            )
+        },
+    );
+    format!(
+        "{}\t{}\t{}\t{}\t{total}\t{max}\t{count}\n",
+        tool.name, tool.calls, tool.paired, tool.errors
+    )
+}
+
+fn render_time(durations: &TimeStats) -> String {
+    [
+        ("recorded span", durations.recorded_span),
+        ("in tool", durations.in_tool),
+        ("longest gap between turns", durations.between_turns_max),
+    ]
+    .into_iter()
+    .filter_map(|(name, value)| value.map(|value| format!("{name} {value}ms")))
+    .chain(std::iter::once(format!(
+        "{} turns with timestamps",
+        durations.count_with_timestamps
+    )))
+    .collect::<Vec<_>>()
+    .join(", ")
+}
+
+fn render_usage_stats(out: &mut String, usage: &UsageStats) {
+    if let Some(tokens) = &usage.tokens {
+        out.push_str(&format!("tokens: {}\n", render_tokens(tokens)));
+    }
+    if let Some(cost) = &usage.cost {
+        out.push_str(&format!("cost: {}\n", render_cost(cost)));
+    }
+    if let Some(accounting) = &usage.accounting {
+        out.push_str(&format!("accounting: {}\n", render_accounting(accounting)));
+    }
+    let cache = [
+        ("read", usage.cache_read_ratio),
+        ("write", usage.cache_write_ratio),
+    ]
+    .into_iter()
+    .filter_map(|(name, ratio)| ratio.map(|ratio| format!("{name} {ratio:.4}")))
+    .collect::<Vec<_>>();
+    if !cache.is_empty() {
+        out.push_str(&format!(
+            "cache of input plus cache read plus cache write: {}\n",
+            cache.join(", ")
+        ));
+    }
+}
+
+fn render_children(lineage: &LineageStats) -> String {
+    let dispositions = lineage
+        .by_disposition
+        .iter()
+        .map(|(disposition, count)| format!("{count} {disposition}"))
+        .collect::<Vec<_>>();
+    std::iter::once(format!("{} recorded", lineage.children))
+        .chain(std::iter::once(format!("{} resolved", lineage.resolved)))
+        .chain(dispositions)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn warning_label(warning: Warning) -> &'static str {
+    match warning {
+        Warning::ReadWindow => "read-window",
+        Warning::TailWindow => "tail-window",
+        Warning::KindUnknown => "kind-unknown",
+        Warning::IncompletePairs => "incomplete-pairs",
+        Warning::NoTimestamps => "no-timestamps",
+    }
 }
 
 /// One line per fact, and a fact the harness did not record has no line.

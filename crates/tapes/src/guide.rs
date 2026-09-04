@@ -116,6 +116,7 @@ PROBE BEFORE EXPORTING
   tapes show <id> --json         The same turns as tapes-session/1.
   tapes events <id> --json       Typed tool calls, results, and pairs.
   tapes usage <id> --json        Tokens, cost, and turn counts.
+  tapes stats <id> --json        The same recording, counted.
   tapes lineage <id> --json      The sessions this one names as relatives.
   tapes usage --here --json      The same counters summed over a project.
   tapes endings --here --json    What each session of a project ends on.
@@ -146,6 +147,20 @@ PROBE BEFORE EXPORTING
   harness records them: codex reports its context window and quota windows,
   claude reports wall-clock durations and a per-model split, pi and opencode
   report neither.
+
+  stats counts what one recording holds as tapes-stats/1: turns by kind, tool
+  calls by name with their paired durations and error counts, unpaired calls
+  by the boundary that left them unpaired, the recorded clock, the session's
+  token counters with the share of input plus cache read plus cache write its
+  cache accounts for, and the children its store names. Every figure is a
+  count of records the harness wrote, and every total says what it covers:
+  turn coverage is read-window when a source bound withheld turns, a duration
+  comes from a pair the read holds both halves of, and a cache ratio divides
+  recorded token counts rather than cost, within one harness's own convention
+  for what its input counter already includes. warnings names the limits of
+  the read behind the figures. What a count means for the work is the reader's
+  inference: nothing here calls a call wasteful, explains a latency, or says
+  why a session ended.
 
   lineage answers which sessions a recording names as relatives, as
   tapes-lineage/1: the session it was spawned or forked from, and the children
