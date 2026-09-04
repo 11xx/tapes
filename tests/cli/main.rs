@@ -272,6 +272,7 @@ fn bare_invocation_guides_while_misuse_still_fails() {
         "tapes show",
         "tapes events",
         "tapes stats",
+        "tapes brief",
         "tapes export",
     ] {
         assert!(text.contains(command), "guide omits `{command}`");
@@ -3325,4 +3326,87 @@ fn stats_and_usage_count_the_same_bounded_read() {
     assert_eq!(stats["coverage"]["turns"], usage["turns"]["coverage"]);
     assert_eq!(stats["usage"]["tokens"], usage["tokens"]);
     assert_eq!(stats["usage"]["accounting"], usage["accounting"]);
+}
+
+#[test]
+fn brief_help_names_the_schema_and_the_half_it_reads() {
+    let output = tapes().args(["brief", "--help"]).output().unwrap();
+    assert!(output.status.success());
+    let help = String::from_utf8_lossy(&output.stdout);
+
+    assert!(help.contains("tapes-brief/1"), "{help}");
+    assert!(help.contains("reads the recording alone"), "{help}");
+    assert!(help.contains("--tail <N>"), "{help}");
+    assert!(help.contains("[default: 12]"), "{help}");
+}
+
+/// The human brief is one screen in a fixed reading order: which session this
+/// is, where it worked, where it stopped, what it left open, what it last
+/// said.
+#[test]
+fn brief_renders_the_continuation_in_reading_order() {
+    let (codex_home, home) = fixture_store("brief-order");
+    let id = "00000000-0000-0000-0000-000000000001";
+    let run = |arguments: &[&str]| {
+        let mut command = tapes();
+        command.args(arguments);
+        with_fixture_env(
+            &mut command,
+            &codex_home,
+            &home,
+            Path::new("/definitely/missing"),
+        );
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        output.stdout
+    };
+
+    let human = String::from_utf8(run(&["brief", id])).unwrap();
+    let lines = human.lines().collect::<Vec<_>>();
+    assert_eq!(
+        lines[0],
+        format!("session: codex {id} ~Inspect the fixture."),
+        "{human}"
+    );
+    // The recorded directory is not on this machine, which is stated rather
+    // than left blank, and nothing about a commit is claimed for it.
+    assert_eq!(lines[1], "working set: /fixtures/project (gone)", "{human}");
+    assert_eq!(lines[2], "ending: tool call-without-result", "{human}");
+    assert_eq!(
+        lines[3], "in flight: call fixture_pending call-pending #5 2026-01-01T10:00:06Z",
+        "{human}"
+    );
+    assert_eq!(lines[4], "tail:", "{human}");
+    assert_eq!(lines[5], "[user #0 2026-01-01T10:00:02Z]", "{human}");
+    assert_eq!(lines[6], "Inspect the fixture.", "{human}");
+    assert_eq!(lines[7], "[assistant #4 2026-01-01T10:00:06Z]", "{human}");
+    assert_eq!(lines[8], "Fixture inspected.", "{human}");
+    assert_eq!(lines.len(), 9, "{human}");
+
+    // The window bounds the rendered exchange alone.
+    let narrow = String::from_utf8(run(&["brief", id, "--tail", "1"])).unwrap();
+    assert!(!narrow.contains("[user #0"), "{narrow}");
+    assert!(narrow.contains("[assistant #4"), "{narrow}");
+
+    let value: Value = serde_json::from_slice(&run(&["brief", id, "--json"])).unwrap();
+    assert_eq!(value["schema"], "tapes-brief/1");
+    assert_eq!(value["session"]["id"], id);
+    assert_eq!(value["working_set"]["directory_exists"], false);
+    assert!(value["working_set"].get("git").is_none(), "{value}");
+    assert_eq!(
+        value["ending"]["facts"],
+        serde_json::json!(["call-without-result"])
+    );
+    assert_eq!(
+        value["in_flight"]["calls_without_result"][0]["call_id"],
+        "call-pending"
+    );
+    assert_eq!(value["usage"]["tokens"]["input"], 1200);
+    assert_eq!(value["tail"].as_array().unwrap().len(), 2);
+
+    fs::remove_dir_all(codex_home).unwrap();
 }

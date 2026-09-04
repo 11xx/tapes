@@ -34,7 +34,7 @@ impl Bundle {
 }
 
 /// The commit a session's working directory sat on, when that is knowable.
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 pub struct GitContext {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub head: Option<String>,
@@ -328,7 +328,10 @@ fn tool_label(turn: &Turn) -> String {
     "unnamed".to_owned()
 }
 
-fn git_context(directory: Option<&Path>) -> Option<GitContext> {
+/// The commit and branch a recorded working directory sits on, read from the
+/// directory itself. Absent when the recording names no directory, when the
+/// directory is gone, and when it is not a repository.
+pub fn git_context(directory: Option<&Path>) -> Option<GitContext> {
     let directory = directory?;
     if !directory.is_dir() {
         return None;
