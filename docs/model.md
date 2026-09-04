@@ -410,6 +410,130 @@ render with a note saying so, beside whatever notes the read produced. When a
 trailing record is available, `show` names its kind and timestamp when one was
 recorded.
 
+## Stats view
+
+`tapes stats` counts what one session's recording holds and serializes as a
+`tapes-stats/1` object. Every figure is a count of records the harness wrote:
+nothing here labels a call useful, attributes a reason to a latency, classifies
+why a session ended, or recommends anything.
+
+`session` is the identity the usage view carries. `coverage` says what the
+figures are figures about: `turns` is `read-window` when a source bound
+withheld whole turns and `session` otherwise, `pairs` is `complete-only`
+because every duration comes from a call and result the read holds both halves
+of, and `truncation` is the read's own record, absent when the read reached
+everything.
+
+`turns` counts the normalized turns the read reached by the `kind` the harness
+recorded them as — `operator`, `assistant`, `tool`, `reasoning`, `control`,
+`ambient`, `notice`, `unknown` — plus their `total`.
+
+`tools` counts the same typed events `tapes events` returns. `calls` and
+`results` count event records, `paired` counts the distinct complete pairs
+among them, and `incomplete` splits the unpaired events by the boundary that
+left them unpaired, in the keys the event layer names. `errors` counts calls
+whose recorded outcome is an error, once per call however many halves of a
+pair the harness wrote that status on. `by_name` holds one row per tool, calls
+descending and then by name; a row's `duration_ms` covers the complete pairs
+that carried both timestamps and `count` says how many those were, so a tool
+whose pairs carried no timestamps has no `duration_ms` at all. A record whose
+tool name neither it nor its counterpart carries is in the totals and in no
+row, because the read holds no name to key one by.
+
+`durations_ms` is present when at least one turn the read reached carried a
+timestamp, and `count_with_timestamps` says how many did. `recorded_span` runs
+from the first timestamped turn to the last and needs two of them;
+`between_turns_max` is the longest interval between consecutive timestamped
+turns; `in_tool` sums the complete pairs' durations. Each is absent when the
+read holds nothing to measure it from.
+
+`usage` repeats the session's own `tokens`, `cost`, and `accounting`, read
+exactly as the usage view states them, and adds `cache_read_ratio` and
+`cache_write_ratio`: the share of `input + cache_read + cache_write` that each
+cache counter accounts for. A ratio is a ratio of recorded token counts and
+never a share of cost, and it is present only when every counter in its
+denominator is. Whether a harness's `input` already includes what it read from
+the cache is that harness's own convention, so a ratio compares recordings of
+one harness rather than of two. The whole object is absent for a session whose harness
+recorded no counters.
+
+`lineage` counts the children the store records for this session, from the
+same reference read `tapes lineage` answers with and without opening a child:
+`children`, how many `resolved` to a recording in the store, and
+`by_disposition`, keyed by the outcomes the harness wrote. A child whose
+outcome it did not write is in `children` and in no disposition. The object is
+absent when the store records no child.
+
+`warnings` names the limits of the read the figures came from, in a fixed
+order:
+
+| value | meaning |
+|---|---|
+| `read-window` | a source bound withheld whole turns, so the counts are the read's rather than the session's |
+| `tail-window` | a turn window dropped turns the read had produced |
+| `kind-unknown` | a user-envelope turn carries no evidence of what it is |
+| `incomplete-pairs` | a call or result the read holds has no counterpart in it |
+| `no-timestamps` | a turn the read reached carries no timestamp, so the clock covers fewer turns than the counts do |
+
+```json
+{
+  "schema": "tapes-stats/1",
+  "session": {
+    "id": "session-1",
+    "harness": "codex",
+    "model": { "id": "gpt-5.6-sol", "variant": "high" },
+    "started_at": "2023-11-14T22:13:20Z",
+    "last_activity_at": "2023-11-14T22:15:00Z"
+  },
+  "coverage": { "turns": "session", "pairs": "complete-only" },
+  "turns": {
+    "operator": 1,
+    "assistant": 1,
+    "tool": 4,
+    "reasoning": 1,
+    "control": 0,
+    "ambient": 0,
+    "notice": 0,
+    "unknown": 0,
+    "total": 7
+  },
+  "tools": {
+    "calls": 2,
+    "results": 2,
+    "paired": 2,
+    "incomplete": {
+      "no-result-in-read": 0,
+      "call-before-read-bound": 0,
+      "call-not-recorded": 0
+    },
+    "by_name": [
+      {
+        "name": "exec",
+        "calls": 2,
+        "paired": 2,
+        "errors": 1,
+        "duration_ms": { "total": 5312, "max": 4312, "count": 2 }
+      }
+    ],
+    "errors": 1
+  },
+  "durations_ms": {
+    "recorded_span": 100000,
+    "in_tool": 5312,
+    "between_turns_max": 40000,
+    "count_with_timestamps": 7
+  },
+  "usage": {
+    "tokens": { "input": 2500, "output": 400, "cache_read": 1000, "cache_write": 500 },
+    "accounting": { "basis": "recorded-total", "coverage": "session" },
+    "cache_read_ratio": 0.25,
+    "cache_write_ratio": 0.125
+  },
+  "lineage": { "children": 1, "resolved": 1, "by_disposition": { "completed": 1 } },
+  "warnings": []
+}
+```
+
 ## Usage summary
 
 `tapes usage` over a selection sums what that set of sessions spent and

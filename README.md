@@ -15,6 +15,7 @@ tapes show ses_07e16cc8 --tail 20
 tapes show ses_07e16cc8 --json
 tapes events ses_07e16cc8 --name wait_agent --json
 tapes usage ses_07e16cc8 --json
+tapes stats ses_07e16cc8 --json
 tapes endings --here --since 2026-01-01 --json
 tapes export ses_07e16cc8 --bundle /tmp/
 ```
@@ -216,6 +217,25 @@ report infers no reason for an ending and labels no session complete. A
 session whose read fails is named in `unread` with its diagnostic and does not
 stop the run. Human output is one line per session, the text tail indented
 beneath it when asked for, and the listing's own diagnostics.
+
+`stats` counts what one recording holds as `tapes-stats/1`: `turns` by the
+`kind` the harness recorded them as, `tools` — calls, results, complete pairs,
+unpaired events by the boundary that left them unpaired, errors, and a
+`by_name` row per tool with its paired durations — the recorded clock in
+`durations_ms`, the session's own counters with the share of
+`input + cache_read + cache_write` each cache counter accounts for, and the
+children its store names. It reads the same typed events
+`events` returns and the same reference read `lineage` answers with, so no
+transcript is parsed twice and no child is opened. Every total says what it
+covers: `coverage.turns` is `read-window` when a source bound withheld turns,
+a duration comes only from a pair the read holds both halves of, a cache ratio
+divides recorded token counts rather than cost and is present only when every
+counter in its denominator is (whether a harness's `input` already includes
+its cache reads is that harness's convention, so the ratio compares recordings
+of one harness), and `warnings` names the limits of the read behind the
+figures. Every figure is a count of records the harness wrote; nothing is
+judged, ranked, or explained. Human output prints one line per group and no
+line for a group the recording holds nothing for.
 
 `export` writes a three-file bundle sharing one timestamped prefix, into
 `--bundle <dir>` or `/tmp`:

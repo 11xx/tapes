@@ -22,6 +22,7 @@ pub mod event;
 pub mod lineage;
 pub mod model;
 pub mod scope;
+pub mod stats;
 pub mod usage;
 
 pub const LIST_SCHEMA: &str = "tapes-list/1";
@@ -808,6 +809,24 @@ pub fn lineage_with_backends(
     let resolved = selection.resolve(backends)?;
     let read = backends[resolved.backend_index].lineage(&resolved.session)?;
     Ok(lineage::view(&resolved.session, read))
+}
+
+/// One session's counted facts. The transcript read uses the export-shaped
+/// window, and the relatives are counted from the same reference read
+/// `lineage` answers with, which never opens a child.
+pub fn stats(selection: Selection) -> Result<stats::StatsView> {
+    stats_with_backends(&backend::backends(), selection)
+}
+
+pub fn stats_with_backends(
+    backends: &[Box<dyn Backend>],
+    selection: Selection,
+) -> Result<stats::StatsView> {
+    let resolved = selection.resolve(backends)?;
+    let backend = &backends[resolved.backend_index];
+    let transcript = backend.transcript(&resolved.session, EXPORT_TAIL)?;
+    let lineage = backend.lineage(&resolved.session)?;
+    Ok(stats::stats(transcript, &lineage))
 }
 
 pub fn events(selection: Selection, tail: Option<usize>) -> Result<event::EventTranscript> {
