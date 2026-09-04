@@ -9,8 +9,9 @@ use serde::Serialize;
 use serde_json::Value;
 
 use crate::model::{
-    human_bytes, human_timestamp, human_title, AccountingBasis, AccountingCoverage, Role, Session,
-    SourceBound, TrailingRecord, Transcript, Truncation, Turn, SESSION_SCHEMA,
+    human_bytes, human_speaker, human_timestamp, human_title, AccountingBasis, AccountingCoverage,
+    Role, Session, SourceBound, TrailingRecord, Transcript, Truncation, Turn, TurnKind,
+    SESSION_SCHEMA,
 };
 
 /// One exported file: where it landed and how big it is.
@@ -137,12 +138,15 @@ fn render_context(transcript: &Transcript) -> String {
     let mut out = String::new();
     write_header(&mut out, transcript, "context");
     for turn in &transcript.turns {
-        let speaker = match turn.role {
-            Role::User => "user",
-            Role::Assistant => "assistant",
-            Role::Tool | Role::Reasoning => continue,
-        };
-        write_turn_heading(&mut out, speaker, turn);
+        match turn.role {
+            // The session's argument: what was asked, and what the agent said
+            // back. A harness's own commands, the context it attached, and the
+            // messages it injected are recorded elsewhere in the bundle.
+            Role::User if matches!(turn.kind, TurnKind::Operator | TurnKind::Unknown) => {}
+            Role::Assistant => {}
+            _ => continue,
+        }
+        write_turn_heading(&mut out, &human_speaker(turn), turn);
         out.push_str(turn.text.trim_end());
         out.push_str("\n\n");
     }
@@ -155,13 +159,11 @@ fn render_trace(transcript: &Transcript) -> String {
     write_header(&mut out, transcript, "trace");
     for turn in &transcript.turns {
         match turn.role {
-            Role::User => write_turn_heading(&mut out, "user", turn),
-            Role::Assistant => write_turn_heading(&mut out, "assistant", turn),
-            Role::Reasoning => write_turn_heading(&mut out, "reasoning", turn),
             Role::Tool => {
                 let label = tool_label(turn);
                 write_turn_heading(&mut out, &format!("tool: {label}"), turn);
             }
+            _ => write_turn_heading(&mut out, &human_speaker(turn), turn),
         }
         out.push_str(turn.text.trim_end());
         out.push_str("\n\n");
@@ -378,6 +380,7 @@ mod tests {
             turns: vec![
                 Turn {
                     role: Role::User,
+                    kind: TurnKind::Operator,
                     text: "fix the parser".into(),
                     ts: Some(ts),
                     ordinal: 0,
@@ -386,6 +389,7 @@ mod tests {
                 },
                 Turn {
                     role: Role::Reasoning,
+                    kind: TurnKind::Reasoning,
                     text: "the parser drops empty lines".into(),
                     ts: Some(ts),
                     ordinal: 0,
@@ -394,6 +398,7 @@ mod tests {
                 },
                 Turn {
                     role: Role::Tool,
+                    kind: TurnKind::Tool,
                     text: r#"{"name":"shell","input":{"command":"cargo test"}}"#.into(),
                     ts: Some(ts),
                     ordinal: 0,
@@ -402,6 +407,7 @@ mod tests {
                 },
                 Turn {
                     role: Role::Assistant,
+                    kind: TurnKind::Assistant,
                     text: "fixed it".into(),
                     ts: Some(ts),
                     ordinal: 0,
@@ -603,6 +609,7 @@ mod tests {
     fn tool_labels_come_from_whichever_key_the_harness_uses() {
         let turn = |text: &str| Turn {
             role: Role::Tool,
+            kind: TurnKind::Tool,
             text: text.to_owned(),
             ts: None,
             ordinal: 0,

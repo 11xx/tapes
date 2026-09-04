@@ -8,8 +8,8 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 use tapes_core::bundle::Bundle;
 use tapes_core::event::{EventKind, EventRecord, EventTranscript, Incomplete};
 use tapes_core::model::{
-    human_bytes, human_timestamp, human_title, LiveState, Role, Session, SourceBound, Transcript,
-    Truncation,
+    human_bytes, human_speaker, human_timestamp, human_title, LiveState, Session, SourceBound,
+    Transcript, Truncation,
 };
 use tapes_core::{Selection, Where};
 
@@ -457,12 +457,7 @@ fn render_transcript(transcript: &Transcript, by_latest: bool) -> String {
         ));
     }
     for turn in &transcript.turns {
-        let role = match turn.role {
-            Role::User => "user",
-            Role::Assistant => "assistant",
-            Role::Tool => "tool",
-            Role::Reasoning => "reasoning",
-        };
+        let role = human_speaker(turn);
         if let Some(ts) = turn.ts {
             out.push_str(&format!(
                 "[{role} #{} {}]\n{}\n",
@@ -618,7 +613,7 @@ fn reset_sigpipe() {
 mod tests {
     use super::*;
     use chrono::{DateTime, Utc};
-    use tapes_core::model::{End, OrdinalRange, TrailingRecord, Turn, TurnWindow};
+    use tapes_core::model::{End, OrdinalRange, Role, TrailingRecord, Turn, TurnKind, TurnWindow};
 
     fn transcript(truncated: bool) -> Transcript {
         Transcript {
@@ -641,6 +636,7 @@ mod tests {
             },
             turns: vec![Turn {
                 role: Role::User,
+                kind: TurnKind::Operator,
                 text: "fix the parser".to_owned(),
                 ts: None,
                 ordinal: 0,

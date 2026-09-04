@@ -12,7 +12,7 @@ use super::{
 use crate::event::{Bounded, EventKind, ToolEvent};
 use crate::model::{
     AccountingBasis, AccountingCoverage, Cost, Model, Role, Session, Tokens, TrailingRecord,
-    Transcript, Turn,
+    Transcript, Turn, TurnKind,
 };
 
 #[derive(Clone, Debug)]
@@ -358,6 +358,12 @@ fn active_path<'a>(entries: &[&'a Value]) -> Vec<&'a Value> {
     path
 }
 
+/// pi records its harness commands outside the conversation, so every message
+/// in its user role is one the operator sent.
+fn user_kind(role: &Role) -> TurnKind {
+    role.kind().unwrap_or(TurnKind::Operator)
+}
+
 fn parse_turns(value: &Value) -> Vec<Turn> {
     if value["type"] != "message" {
         return Vec::new();
@@ -374,6 +380,7 @@ fn parse_turns(value: &Value) -> Vec<Turn> {
         "toolResult" => {
             return vec![Turn {
                 role: Role::Tool,
+                kind: TurnKind::Tool,
                 text: message.to_string(),
                 ts,
                 ordinal: 0,
@@ -387,6 +394,7 @@ fn parse_turns(value: &Value) -> Vec<Turn> {
     if let Some(text) = content.as_str() {
         return (!text.is_empty())
             .then(|| Turn {
+                kind: user_kind(&role),
                 role,
                 text: text.to_owned(),
                 ts,
@@ -414,6 +422,7 @@ fn parse_turns(value: &Value) -> Vec<Turn> {
                 _ => return None,
             };
             (!text.is_empty()).then_some(Turn {
+                kind: user_kind(&role),
                 role,
                 text,
                 ts,

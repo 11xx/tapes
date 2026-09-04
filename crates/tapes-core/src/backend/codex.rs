@@ -10,8 +10,8 @@ use super::{
 };
 use crate::event::{Bounded, EventKind, ToolEvent};
 use crate::model::{
-    AccountingBasis, AccountingCoverage, Model, Role, Session, Tokens, TrailingRecord, Transcript,
-    Turn,
+    is_known_envelope, without_known_envelopes, AccountingBasis, AccountingCoverage, Model, Role,
+    Session, Tokens, TrailingRecord, Transcript, Turn, TurnKind,
 };
 
 #[derive(Clone, Debug)]
@@ -70,7 +70,12 @@ impl CodexBackend {
                     variant: payload["effort"].as_str().map(str::to_owned),
                 })
             });
-        let turns = read.values.iter().flat_map(parse_turns).collect::<Vec<_>>();
+        let evidence = user_message_evidence(&read.values, opening);
+        let turns = read
+            .values
+            .iter()
+            .flat_map(|value| parse_turns(value, &evidence))
+            .collect::<Vec<_>>();
         let tokens = read.values.iter().rev().find_map(codex_tokens);
         let accounting = accounting_for(
             tokens.as_ref(),
@@ -99,7 +104,11 @@ impl CodexBackend {
         // The opening is the start of the file, so its first user turn is the
         // session's first user turn even when the tail cannot see it.
         let session = if read.truncated {
-            let opening_turns = opening.iter().flat_map(parse_turns).collect::<Vec<_>>();
+            let opening_evidence = user_message_evidence(opening, opening);
+            let opening_turns = opening
+                .iter()
+                .flat_map(|value| parse_turns(value, &opening_evidence))
+                .collect::<Vec<_>>();
             session.with_derived_title(&opening_turns)
         } else {
             session.with_derived_title(&turns)
@@ -205,10 +214,11 @@ impl Backend for CodexBackend {
 
 fn read_transcript(path: &Path) -> Result<(Vec<Turn>, Jsonl, Option<TrailingRecord>)> {
     let read = read_jsonl(path)?;
+    let evidence = user_message_evidence(&read.values, &[]);
     let mut turns = Vec::new();
     let mut last_turn = None;
     for (index, value) in read.values.iter().enumerate() {
-        let parsed = parse_turns(value);
+        let parsed = parse_turns(value, &evidence);
         if !parsed.is_empty() {
             last_turn = Some(index);
         }
@@ -261,14 +271,87 @@ fn codex_trailing_kind(value: &Value) -> Option<&'static str> {
     }
 }
 
-fn parse_turns(value: &Value) -> Vec<Turn> {
+/// What a rollout's own records say about the messages in its user role: the
+/// entry point its header names, and the text of every message the operator
+/// sent, which the harness records as a `user_message` event of its own.
+struct UserMessages<'a> {
+    /// Whether the session was started by `codex exec`, whose caller supplies
+    /// one prompt and whose records carry no `user_message` event.
+    exec: bool,
+    text: Vec<&'a str>,
+}
+
+fn user_message_evidence<'a>(values: &'a [Value], opening: &'a [Value]) -> UserMessages<'a> {
+    UserMessages {
+        exec: opening
+            .iter()
+            .chain(values)
+            .find_map(codex_source)
+            .is_some_and(|source| source == "exec"),
+        text: values.iter().filter_map(codex_user_message).collect(),
+    }
+}
+
+fn codex_source(value: &Value) -> Option<&str> {
+    (value["type"] == "session_meta")
+        .then(|| value["payload"]["source"].as_str())
+        .flatten()
+}
+
+fn codex_user_message(value: &Value) -> Option<&str> {
+    (value["type"] == "event_msg" && value["payload"]["type"] == "user_message")
+        .then(|| value["payload"]["message"].as_str())
+        .flatten()
+        .filter(|message| !message.is_empty())
+}
+
+/// Codex records the operator's own messages twice: once as the conversation
+/// item the model reads, and once as a `user_message` event carrying the text
+/// as it was sent. A conversation item the event vouches for is the operator's;
+/// one holding only blocks the harness wraps around a message is context it
+/// attached. An `exec` session records no such event, and there the wrapper
+/// blocks are all that separates the harness's own text from the caller's.
+fn codex_user_kind(payload: &Value, text: &str, messages: &UserMessages) -> TurnKind {
+    let mut blocks = payload["content"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|block| block["type"] == "input_text")
+        .filter_map(|block| block["text"].as_str())
+        .peekable();
+    let attached = blocks.peek().is_some() && blocks.all(is_known_envelope);
+    if messages.exec {
+        return if attached {
+            TurnKind::Ambient
+        } else {
+            TurnKind::Operator
+        };
+    }
+    // The harness wraps a message either in records of its own or in the same
+    // block, so the sent text is matched against the message and against the
+    // message with the wrapper removed.
+    let requested = without_known_envelopes(text);
+    let sent = messages
+        .text
+        .iter()
+        .any(|sent| text.starts_with(sent) || requested.trim_start().starts_with(sent));
+    if sent {
+        TurnKind::Operator
+    } else if attached {
+        TurnKind::Ambient
+    } else {
+        TurnKind::Unknown
+    }
+}
+
+fn parse_turns(value: &Value, messages: &UserMessages) -> Vec<Turn> {
     if value["type"] != "response_item" {
         return Vec::new();
     }
     let payload = &value["payload"];
     let ts = timestamp(&value["timestamp"]);
     let native_id = payload["id"].as_str().map(str::to_owned);
-    let (role, text, tool) = match payload["type"].as_str() {
+    let (role, kind, text, tool) = match payload["type"].as_str() {
         Some("message") => {
             let role = match payload["role"].as_str() {
                 Some("user") => Role::User,
@@ -285,9 +368,17 @@ fn parse_turns(value: &Value) -> Vec<Turn> {
                 .filter_map(|block| block["text"].as_str())
                 .collect::<Vec<_>>()
                 .join("\n");
-            (role, text, None)
+            let kind = role
+                .kind()
+                .unwrap_or_else(|| codex_user_kind(payload, &text, messages));
+            (role, kind, text, None)
         }
-        Some("reasoning") => (Role::Reasoning, reasoning_text(payload), None),
+        Some("reasoning") => (
+            Role::Reasoning,
+            TurnKind::Reasoning,
+            reasoning_text(payload),
+            None,
+        ),
         Some(
             subtype @ ("function_call"
             | "function_call_output"
@@ -295,6 +386,7 @@ fn parse_turns(value: &Value) -> Vec<Turn> {
             | "custom_tool_call_output"),
         ) => (
             Role::Tool,
+            TurnKind::Tool,
             payload.to_string(),
             Some(codex_tool_event(payload, subtype)),
         ),
@@ -303,6 +395,7 @@ fn parse_turns(value: &Value) -> Vec<Turn> {
     (!text.is_empty())
         .then_some(Turn {
             role,
+            kind,
             text,
             ts,
             ordinal: 0,

@@ -1200,6 +1200,8 @@ fn human_renderers_show_derived_titles_and_whole_second_timestamps() {
             "\n",
             r##"{"timestamp":"2026-01-01T10:00:02.987654321Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"\n  <recommended_plugins>\n- Fixture helper\n</recommended_plugins>\n\n  # AGENTS.md instructions\n\n<INSTRUCTIONS>\nFollow the repository instructions before acting.\n</INSTRUCTIONS>\n\n<environment_context>\n  <cwd>/fixtures/project</cwd>\n</environment_context>\n\nInspect the fixture."}]}}"##,
             "\n",
+            r#"{"timestamp":"2026-01-01T10:00:02.999999999Z","type":"event_msg","payload":{"type":"user_message","message":"Inspect the fixture."}}"#,
+            "\n",
             r#"{"timestamp":"2026-01-01T10:00:03.123456789Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Fixture inspected."}]}}"#,
             "\n",
             r#"{"timestamp":"2026-01-01T10:00:06.123456789Z","type":"event","payload":{}}"#,
@@ -2122,4 +2124,88 @@ fn list_sort_oldest_keeps_the_oldest_sessions_under_the_limit() {
     );
 
     fs::remove_dir_all(codex_home).unwrap();
+}
+
+const CLAUDE_SESSION: &str = include_str!("../fixtures/claude/project/session-claude.jsonl");
+const PI_SESSION: &str = include_str!("../fixtures/pi/2026-01-01T10-00-00-000Z_session-pi.jsonl");
+
+/// Every turn says what it is, and a user turn the harness recorded its own
+/// command in says so in the heading a reader judges an ending by.
+#[test]
+fn show_types_every_turn_and_names_a_control_turn_in_human_output() {
+    let root = TemporaryDirectory::new(
+        std::env::temp_dir().join(format!("tapes-cli-turn-kinds-{}", std::process::id())),
+    );
+    let home = root.path().join("home");
+    let project = home.join(".claude/projects/-fixtures-project");
+    fs::create_dir_all(&project).unwrap();
+    fs::write(project.join("session-claude.jsonl"), CLAUDE_SESSION).unwrap();
+    let pi_sessions = home.join(".pi/agent/sessions");
+    fs::create_dir_all(&pi_sessions).unwrap();
+    fs::write(
+        pi_sessions.join("2026-01-01T10-00-00-000Z_session-pi.jsonl"),
+        PI_SESSION,
+    )
+    .unwrap();
+    let codex_home = root.path().join("codex");
+    let codex_sessions = codex_home.join("sessions/2026/01/01");
+    fs::create_dir_all(&codex_sessions).unwrap();
+    fs::write(
+        codex_sessions
+            .join("rollout-2026-01-01T10-00-00-00000000-0000-0000-0000-000000000001.jsonl"),
+        CODEX_SESSION_ONE,
+    )
+    .unwrap();
+
+    let _opencode = opencode_program(root.path(), "opencode2");
+
+    let run = |arguments: &[&str]| {
+        let mut command = tapes();
+        command.args(arguments);
+        with_fixture_env(&mut command, &codex_home, &home, root.path());
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        output.stdout
+    };
+
+    for id in [
+        "session-claude",
+        "session-pi",
+        "00000000-0000-0000-0000-000000000001",
+        "ses_000000fixtureSharedSession",
+    ] {
+        let value: Value = serde_json::from_slice(&run(&["show", id, "--json"])).unwrap();
+        let turns = value["turns"].as_array().unwrap();
+        assert!(!turns.is_empty(), "{id} has no turns");
+        for turn in turns {
+            let kind = turn["kind"].as_str().unwrap_or_else(|| panic!("{turn}"));
+            assert!(
+                [
+                    "operator",
+                    "assistant",
+                    "reasoning",
+                    "tool",
+                    "control",
+                    "ambient",
+                    "notice",
+                    "unknown"
+                ]
+                .contains(&kind),
+                "{id} carries an unnamed kind: {turn}"
+            );
+            let role = turn["role"].as_str().unwrap();
+            if role != "user" {
+                assert_eq!(kind, role, "{id}: {turn}");
+            }
+        }
+    }
+
+    let human = String::from_utf8(run(&["show", "session-claude"])).unwrap();
+    assert!(human.contains("[user/control #10 "), "{human}");
+    assert!(human.contains("[user/notice #12 "), "{human}");
+    assert!(human.contains("[user #5 "), "{human}");
 }
