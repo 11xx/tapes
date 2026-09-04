@@ -78,6 +78,10 @@ another.
 
 `Turn` contains a role, text, an optional UTC timestamp, an `ordinal`, and an
 optional `native_id`. Roles are `user`, `assistant`, `tool`, and `reasoning`.
+A tool turn also carries one typed `ToolEvent` inside the process for the
+`events` projection. The field is skipped by serialization, so
+`tapes-session/1` and export bundles retain the tool's harness envelope only in
+`text`.
 The ordinal is the turn's zero-based position in the session's normalized turn
 sequence, counted from the first turn the reader reaches. For a file-backed
 session the reader's reach is the file's last 4 MiB whatever the window, so
@@ -96,6 +100,74 @@ records one: Claude's message `uuid`, pi's entry `id`, OpenCode's message
 `id`, and Codex's `payload.id` where a response item carries one. Several
 turns share it when one record yields a message, its reasoning, and its tool
 calls.
+
+## Tool event layer
+
+`ToolEvent` is the harness-neutral representation attached while a backend is
+already parsing a tool turn. `kind` is `tool-call` or `tool-result`; `subtype`
+keeps the harness's record kind; and optional `name`, `call_id`, and `status`
+keep only facts the record supplies. Call arguments and result output use a
+`Bounded` value with the payload's Unicode character count and its first 200
+characters. A string is measured as written, while an object or array is first
+serialized as compact JSON. The preview always ends on a character boundary.
+
+OpenCode records a call and its outcome in one `tool` part. Its turn carries a
+call event with the state output, native status, and completion timestamp. The
+event projection emits a result record from that same event when the state is
+`completed` or `error`; both records use the part's turn ordinal and pairing
+key. A `pending` or `running` part emits only the call.
+
+Pairing scans a session's bounded read in turn order. A result pairs with the
+most recent unpaired call carrying the same `call_id`. Both records name the
+counterpart's ordinal and optional native id. A paired call carries
+`duration_ms` only when both timestamps are present and the result is not
+earlier than the call; results never carry a duration. Pairing happens before
+an event window or filter, so the reference remains when a counterpart falls
+outside the returned set.
+
+An unpaired event carries one `incomplete` reason:
+
+| value | meaning |
+|---|---|
+| `no-result-in-read` | The bounded read ended without reaching a result for this call. |
+| `call-before-read-bound` | A `file-tail` or `record-page` source bound can hide the call for this result. |
+| `call-not-recorded` | The read reached the recording's start and contains no call for this result. |
+
+`tapes events` serializes the projection as `tapes-events/1`. The object holds
+the same `Session` representation as `show`, the event records, complete and
+incomplete pair counts, and the transcript's truncation and notes. A
+`--tail N` window keeps events whose turn ordinals are in the final `N` turns;
+the window metadata therefore uses the same turn coordinates as `show` rather
+than counting event records. Name and call-id filters apply after pairing.
+`pairs.complete` counts distinct complete pairs represented by at least one
+returned event, while `pairs.incomplete` counts returned events carrying an
+`incomplete` reason.
+
+```json
+{
+  "schema": "tapes-events/1",
+  "session": {
+    "id": "session-1",
+    "harness": "codex",
+    "started_at": "2023-11-14T22:13:20Z",
+    "last_activity_at": "2023-11-14T22:15:00Z"
+  },
+  "events": [
+    {
+      "ordinal": 12,
+      "kind": "tool-call",
+      "subtype": "function_call",
+      "name": "exec",
+      "call_id": "call_1",
+      "arguments": { "chars": 14, "preview": "{\"cmd\":\"true\"}" },
+      "pair": { "ordinal": 13 },
+      "duration_ms": 4312
+    }
+  ],
+  "pairs": { "complete": 1, "incomplete": 0 },
+  "truncated": false
+}
+```
 
 `Session.store` is where `tapes` read the session from, as an opaque string: a
 recording file's path for the file-backed harnesses, the database file for

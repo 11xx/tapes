@@ -159,7 +159,7 @@ fn render_trace(transcript: &Transcript) -> String {
             Role::Assistant => write_turn_heading(&mut out, "assistant", turn),
             Role::Reasoning => write_turn_heading(&mut out, "reasoning", turn),
             Role::Tool => {
-                let label = tool_label(&turn.text);
+                let label = tool_label(turn);
                 write_turn_heading(&mut out, &format!("tool: {label}"), turn);
             }
         }
@@ -259,8 +259,11 @@ fn write_turn_heading(out: &mut String, speaker: &str, turn: &Turn) {
 
 /// Tool turns carry the harness's own JSON envelope. Lead with whatever names
 /// the tool so the trace is scannable; the envelope stays beneath it.
-fn tool_label(text: &str) -> String {
-    let Ok(value) = serde_json::from_str::<Value>(text) else {
+fn tool_label(turn: &Turn) -> String {
+    if let Some(name) = turn.tool.as_ref().and_then(|event| event.name.as_ref()) {
+        return name.clone();
+    }
+    let Ok(value) = serde_json::from_str::<Value>(&turn.text) else {
         return "unnamed".to_owned();
     };
     for key in ["name", "toolName", "tool_name"] {
@@ -338,6 +341,7 @@ mod tests {
                     ts: Some(ts),
                     ordinal: 0,
                     native_id: None,
+                    tool: None,
                 },
                 Turn {
                     role: Role::Reasoning,
@@ -345,6 +349,7 @@ mod tests {
                     ts: Some(ts),
                     ordinal: 0,
                     native_id: None,
+                    tool: None,
                 },
                 Turn {
                     role: Role::Tool,
@@ -352,6 +357,7 @@ mod tests {
                     ts: Some(ts),
                     ordinal: 0,
                     native_id: None,
+                    tool: None,
                 },
                 Turn {
                     role: Role::Assistant,
@@ -359,6 +365,7 @@ mod tests {
                     ts: Some(ts),
                     ordinal: 0,
                     native_id: None,
+                    tool: None,
                 },
             ],
             truncated: false,
@@ -525,9 +532,17 @@ mod tests {
 
     #[test]
     fn tool_labels_come_from_whichever_key_the_harness_uses() {
-        assert_eq!(tool_label(r#"{"name":"shell"}"#), "shell");
-        assert_eq!(tool_label(r#"{"tool_use_id":"toolu_1"}"#), "result");
-        assert_eq!(tool_label(r#"{"call_id":"call_1"}"#), "result");
-        assert_eq!(tool_label("not json"), "unnamed");
+        let turn = |text: &str| Turn {
+            role: Role::Tool,
+            text: text.to_owned(),
+            ts: None,
+            ordinal: 0,
+            native_id: None,
+            tool: None,
+        };
+        assert_eq!(tool_label(&turn(r#"{"name":"shell"}"#)), "shell");
+        assert_eq!(tool_label(&turn(r#"{"tool_use_id":"toolu_1"}"#)), "result");
+        assert_eq!(tool_label(&turn(r#"{"call_id":"call_1"}"#)), "result");
+        assert_eq!(tool_label(&turn("not json")), "unnamed");
     }
 }

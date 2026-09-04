@@ -75,6 +75,24 @@ Assistant content blocks:
 plain-text field, so `tapes` keeps the JSON as the turn's text and lets the
 trace file head it with the tool name.
 
+The tool JSON also supplies a typed event:
+
+| event field | pi source |
+|---|---|
+| `kind` | `tool-call` for a `toolCall` block; `tool-result` for a `toolResult` role |
+| `subtype` | `toolCall` or `toolResult` |
+| `name` | call `name` or result `toolName` |
+| `call_id` | call `id` or result `toolCallId` |
+| `status` | `error` only when result `isError` is true |
+| `arguments` | call `arguments` |
+| `output` | result `content` |
+| event timestamp | the containing entry's top-level `timestamp` |
+
+String values remain strings while objects and content-block arrays are
+serialized as compact JSON for bounded metadata. Calls and results occupy
+separate entries, so `completed_ts` is absent. Only events on the active path
+enter the normalized transcript.
+
 ## What pi does not record
 
 No session title and no cost. Both are omitted from the normalized session

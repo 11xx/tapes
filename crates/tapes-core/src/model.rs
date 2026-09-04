@@ -3,6 +3,8 @@ use std::path::PathBuf;
 use chrono::{DateTime, SecondsFormat, Utc};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
+use crate::event::ToolEvent;
+
 pub const SESSION_SCHEMA: &str = "tapes-session/1";
 /// Maximum length of a title derived from the first user turn.
 pub const DERIVED_TITLE_MAX_CHARS: usize = 96;
@@ -109,6 +111,10 @@ pub struct Turn {
     /// message, its reasoning, and its tool calls.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub native_id: Option<String>,
+    /// Harness-neutral tool data used by in-process projections. Session JSON
+    /// keeps the harness envelope in `text` as its stable wire contract.
+    #[serde(skip)]
+    pub tool: Option<ToolEvent>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -548,6 +554,7 @@ mod tests {
             ts: Some(timestamp(1_700_000_050)),
             ordinal: 0,
             native_id: None,
+            tool: None,
         };
         let transcript = Transcript {
             session: session(),
@@ -616,6 +623,7 @@ mod tests {
                 ts: None,
                 ordinal: 0,
                 native_id: None,
+                tool: None,
             },
             Turn {
                 role: Role::User,
@@ -623,6 +631,7 @@ mod tests {
                 ts: None,
                 ordinal: 0,
                 native_id: None,
+                tool: None,
             },
         ]);
 
@@ -651,6 +660,7 @@ mod tests {
             ts: None,
             ordinal: 0,
             native_id: None,
+            tool: None,
         }]);
         let complete_json = serde_json::to_value(complete).unwrap();
         assert_eq!(complete_json["derived_title"], "A short request");
@@ -664,6 +674,7 @@ mod tests {
             ts: None,
             ordinal: 0,
             native_id: None,
+            tool: None,
         }]);
         let shortened_json = serde_json::to_value(shortened).unwrap();
         assert_eq!(shortened_json["derived_title_truncated"], true);
@@ -683,6 +694,7 @@ mod tests {
             ts: None,
             ordinal: 0,
             native_id: None,
+            tool: None,
         }]);
 
         assert_eq!(
@@ -700,6 +712,7 @@ mod tests {
             ts: None,
             ordinal: 0,
             native_id: None,
+            tool: None,
         }]);
 
         assert_eq!(session.title.as_deref(), Some("Build the model"));
@@ -794,6 +807,7 @@ mod tests {
             ts: None,
             ordinal: 12,
             native_id: None,
+            tool: None,
         };
         let value = serde_json::to_value(&turn).unwrap();
         assert_eq!(value["ordinal"], 12);

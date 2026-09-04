@@ -8,6 +8,7 @@ use super::{
     read_recording, session_file, timestamp, trailing_record, transcript, Backend, Jsonl, Listing,
     ParsedFile, Query,
 };
+use crate::event::{Bounded, EventKind, ToolEvent};
 use crate::model::{Model, Role, Session, Tokens, TrailingRecord, Transcript, Turn};
 
 #[derive(Clone, Debug)]
@@ -194,12 +195,16 @@ impl Backend for CodexBackend {
 
 fn read_transcript(path: &Path) -> Result<(Vec<Turn>, Jsonl, Option<TrailingRecord>)> {
     let read = read_jsonl(path)?;
-    let turns = read.values.iter().flat_map(parse_turns).collect();
-    let trailing_record = trailing_record(
-        read.values.iter(),
-        |value| !parse_turns(value).is_empty(),
-        codex_trailing_kind,
-    );
+    let mut turns = Vec::new();
+    let mut last_turn = None;
+    for (index, value) in read.values.iter().enumerate() {
+        let parsed = parse_turns(value);
+        if !parsed.is_empty() {
+            last_turn = Some(index);
+        }
+        turns.extend(parsed);
+    }
+    let trailing_record = trailing_record(read.values.iter(), last_turn, codex_trailing_kind);
     Ok((turns, read, trailing_record))
 }
 
@@ -251,7 +256,7 @@ fn parse_turns(value: &Value) -> Vec<Turn> {
     let payload = &value["payload"];
     let ts = timestamp(&value["timestamp"]);
     let native_id = payload["id"].as_str().map(str::to_owned);
-    let (role, text) = match payload["type"].as_str() {
+    let (role, text, tool) = match payload["type"].as_str() {
         Some("message") => {
             let role = match payload["role"].as_str() {
                 Some("user") => Role::User,
@@ -268,15 +273,19 @@ fn parse_turns(value: &Value) -> Vec<Turn> {
                 .filter_map(|block| block["text"].as_str())
                 .collect::<Vec<_>>()
                 .join("\n");
-            (role, text)
+            (role, text, None)
         }
-        Some("reasoning") => (Role::Reasoning, reasoning_text(payload)),
+        Some("reasoning") => (Role::Reasoning, reasoning_text(payload), None),
         Some(
-            "function_call"
+            subtype @ ("function_call"
             | "function_call_output"
             | "custom_tool_call"
-            | "custom_tool_call_output",
-        ) => (Role::Tool, payload.to_string()),
+            | "custom_tool_call_output"),
+        ) => (
+            Role::Tool,
+            payload.to_string(),
+            Some(codex_tool_event(payload, subtype)),
+        ),
         _ => return Vec::new(),
     };
     (!text.is_empty())
@@ -286,9 +295,41 @@ fn parse_turns(value: &Value) -> Vec<Turn> {
             ts,
             ordinal: 0,
             native_id,
+            tool,
         })
         .into_iter()
         .collect()
+}
+
+fn codex_tool_event(payload: &Value, subtype: &str) -> ToolEvent {
+    let call = matches!(subtype, "function_call" | "custom_tool_call");
+    let arguments = match subtype {
+        "function_call" => Bounded::from_value(&payload["arguments"]),
+        "custom_tool_call" => Bounded::from_value(&payload["input"]),
+        _ => None,
+    };
+    ToolEvent {
+        kind: if call {
+            EventKind::ToolCall
+        } else {
+            EventKind::ToolResult
+        },
+        subtype: subtype.to_owned(),
+        name: call
+            .then(|| payload["name"].as_str())
+            .flatten()
+            .map(str::to_owned),
+        call_id: payload["call_id"].as_str().map(str::to_owned),
+        status: (subtype == "custom_tool_call")
+            .then(|| payload["status"].as_str())
+            .flatten()
+            .map(str::to_owned),
+        arguments,
+        output: (!call)
+            .then(|| Bounded::from_value(&payload["output"]))
+            .flatten(),
+        completed_ts: None,
+    }
 }
 
 fn reasoning_text(payload: &Value) -> String {

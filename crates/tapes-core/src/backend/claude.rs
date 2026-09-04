@@ -10,6 +10,7 @@ use super::{
     read_jsonl, read_recording, timestamp, trailing_record, transcript, Backend, Jsonl, Listing,
     ParsedFile, Query,
 };
+use crate::event::{Bounded, EventKind, ToolEvent};
 use crate::model::{Model, Role, Session, TrailingRecord, Transcript, Turn};
 
 #[derive(Clone, Debug)]
@@ -203,12 +204,16 @@ impl Backend for ClaudeBackend {
 
 fn read_transcript(path: &Path) -> Result<(Vec<Turn>, Jsonl, Option<TrailingRecord>)> {
     let read = read_jsonl(path)?;
-    let turns = read.values.iter().flat_map(parse_turns).collect();
-    let trailing_record = trailing_record(
-        read.values.iter(),
-        |value| !parse_turns(value).is_empty(),
-        claude_trailing_kind,
-    );
+    let mut turns = Vec::new();
+    let mut last_turn = None;
+    for (index, value) in read.values.iter().enumerate() {
+        let parsed = parse_turns(value);
+        if !parsed.is_empty() {
+            last_turn = Some(index);
+        }
+        turns.extend(parsed);
+    }
+    let trailing_record = trailing_record(read.values.iter(), last_turn, claude_trailing_kind);
     Ok((turns, read, trailing_record))
 }
 
@@ -310,7 +315,7 @@ fn parse_turns(value: &Value) -> Vec<Turn> {
     let native_id = value["uuid"].as_str().map(str::to_owned);
     let content = &message["content"];
     if let Some(text) = content.as_str() {
-        return turn(role, text.to_owned(), ts, native_id)
+        return turn(role, text.to_owned(), ts, native_id, None)
             .into_iter()
             .collect();
     }
@@ -320,13 +325,21 @@ fn parse_turns(value: &Value) -> Vec<Turn> {
         .into_iter()
         .flatten()
         .filter_map(|block| {
-            let (role, text) = match block["type"].as_str()? {
-                "text" => (role.clone(), block["text"].as_str()?.to_owned()),
-                "thinking" => (Role::Reasoning, block["thinking"].as_str()?.to_owned()),
-                "tool_use" | "tool_result" => (Role::Tool, block.to_string()),
+            let (role, text, tool) = match block["type"].as_str()? {
+                "text" => (role.clone(), block["text"].as_str()?.to_owned(), None),
+                "thinking" => (
+                    Role::Reasoning,
+                    block["thinking"].as_str()?.to_owned(),
+                    None,
+                ),
+                subtype @ ("tool_use" | "tool_result") => (
+                    Role::Tool,
+                    block.to_string(),
+                    Some(claude_tool_event(block, subtype)),
+                ),
                 _ => return None,
             };
-            turn(role, text, ts, native_id.clone())
+            turn(role, text, ts, native_id.clone(), tool)
         })
         .collect()
 }
@@ -336,6 +349,7 @@ fn turn(
     text: String,
     ts: Option<chrono::DateTime<chrono::Utc>>,
     native_id: Option<String>,
+    tool: Option<ToolEvent>,
 ) -> Option<Turn> {
     (!text.is_empty()).then_some(Turn {
         role,
@@ -343,5 +357,34 @@ fn turn(
         ts,
         ordinal: 0,
         native_id,
+        tool,
     })
+}
+
+fn claude_tool_event(block: &Value, subtype: &str) -> ToolEvent {
+    let call = subtype == "tool_use";
+    ToolEvent {
+        kind: if call {
+            EventKind::ToolCall
+        } else {
+            EventKind::ToolResult
+        },
+        subtype: subtype.to_owned(),
+        name: call
+            .then(|| block["name"].as_str())
+            .flatten()
+            .map(str::to_owned),
+        call_id: if call {
+            block["id"].as_str()
+        } else {
+            block["tool_use_id"].as_str()
+        }
+        .map(str::to_owned),
+        status: (!call && block["is_error"].as_bool() == Some(true)).then(|| "error".to_owned()),
+        arguments: call.then(|| Bounded::from_value(&block["input"])).flatten(),
+        output: (!call)
+            .then(|| Bounded::from_value(&block["content"]))
+            .flatten(),
+        completed_ts: None,
+    }
 }

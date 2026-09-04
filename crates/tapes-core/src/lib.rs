@@ -10,8 +10,14 @@ use backend::{Backend, Listing, Query};
 use model::{Session, Transcript};
 use scope::Scope;
 
+pub use event::{
+    Bounded, EventKind, EventRecord, EventTranscript, Incomplete, PairCounts, PairRef, ToolEvent,
+    EVENTS_SCHEMA,
+};
+
 pub mod backend;
 pub mod bundle;
+pub mod event;
 pub mod model;
 pub mod scope;
 
@@ -761,6 +767,19 @@ impl Selection<'_> {
 
 pub fn show(selection: Selection, tail: Option<usize>) -> Result<Transcript> {
     show_with_backends(&backend::backends(), selection, tail.unwrap_or(100))
+}
+
+pub fn events(selection: Selection, tail: Option<usize>) -> Result<event::EventTranscript> {
+    events_with_backends(&backend::backends(), selection, tail.unwrap_or(EXPORT_TAIL))
+}
+
+pub fn events_with_backends(
+    backends: &[Box<dyn Backend>],
+    selection: Selection,
+    tail: usize,
+) -> Result<event::EventTranscript> {
+    let resolved = selection.resolve(backends)?;
+    backends[resolved.backend_index].events(&resolved.session, tail)
 }
 
 pub fn show_with_backends(

@@ -66,6 +66,23 @@ or `output_text` (assistant). Tool payloads have no text field; `tapes` keeps
 the whole payload as the turn's text so nothing is lost, and the trace file
 heads each one with its `name` or marks it a result via `call_id`.
 
+The same payload supplies the typed tool event:
+
+| event field | Codex source |
+|---|---|
+| `kind` | `tool-call` for `function_call` and `custom_tool_call`; `tool-result` for their output types |
+| `subtype` | `payload.type` |
+| `name` | call `payload.name`; result records leave it absent |
+| `call_id` | `payload.call_id` |
+| `status` | `payload.status` on `custom_tool_call`; every other subtype leaves it absent |
+| `arguments` | `function_call.arguments` or `custom_tool_call.input` |
+| `output` | result `payload.output` |
+| event timestamp | the record's top-level `timestamp` |
+
+String arguments and output are measured as written; structured output is
+serialized as compact JSON before its bounded metadata is built. Codex call
+and result records are separate, so `completed_ts` is absent.
+
 Some Codex invocations inject a leading user record containing a heading such
 as `# AGENTS.md instructions` (optionally followed by a directory), an
 `<INSTRUCTIONS>` block, and a `<recommended_plugins>` block before the human

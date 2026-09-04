@@ -6,6 +6,7 @@ use std::path::PathBuf;
 use anyhow::{anyhow, Result};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use tapes_core::bundle::Bundle;
+use tapes_core::event::{EventKind, EventRecord, EventTranscript, Incomplete};
 use tapes_core::model::{
     human_bytes, human_timestamp, human_title, LiveState, Role, Session, SourceBound, Transcript,
     Truncation,
@@ -189,6 +190,26 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Project typed tool calls and results from one session. Pairing is exact
+    /// within the bounded read; an unpaired event names which read boundary
+    /// prevented a complete pair.
+    Events {
+        #[command(flatten)]
+        selection: SelectionArgs,
+        /// Return events on turns within the final N-turn ordinal window. The
+        /// default is every turn the bounded reader reaches.
+        #[arg(long)]
+        tail: Option<usize>,
+        /// Match the recorded tool name exactly. Repeatable.
+        #[arg(long, value_name = "NAME")]
+        name: Vec<String>,
+        /// Match the recorded tool call identifier exactly. Repeatable.
+        #[arg(long, value_name = "ID")]
+        call_id: Vec<String>,
+        /// Render the versioned tapes-events/1 object as JSON.
+        #[arg(long)]
+        json: bool,
+    },
     /// Export one session.
     Export {
         #[command(flatten)]
@@ -268,12 +289,82 @@ fn dispatch(cli: Cli) -> Result<()> {
                 print_transcript(&transcript, by_latest);
             }
         }
+        Command::Events {
+            selection,
+            tail,
+            name,
+            call_id,
+            json,
+        } => {
+            let by_latest = selection.latest;
+            let mut events = tapes_core::events(selection.selection(), tail)?;
+            liveness::annotate(std::slice::from_mut(&mut events.session));
+            events.retain(&name, &call_id);
+            if json {
+                println!("{}", serde_json::to_string(&events)?);
+            } else {
+                print_events(&events, by_latest);
+            }
+        }
         Command::Export { selection, bundle } => {
             let bundle = tapes_core::export(selection.selection(), bundle.as_deref())?;
             print_manifest(&bundle);
         }
     }
     Ok(())
+}
+
+fn print_events(events: &EventTranscript, by_latest: bool) {
+    let mut out = String::new();
+    if events.session.live.is_some() || by_latest {
+        out.push_str(&format!(
+            "# {} {}{}\n",
+            events.session.harness,
+            events.session.id,
+            live_marker(&events.session)
+        ));
+    }
+    for event in &events.events {
+        out.push_str(&render_event(event));
+        out.push('\n');
+    }
+    if by_latest {
+        render_latest_note(&mut out, &events.session);
+    }
+    render_truncation_notes(&mut out, &events.truncation);
+    render_notes(&mut out, &events.notes);
+    print!("{out}");
+}
+
+fn render_event(record: &EventRecord) -> String {
+    let kind = match record.event.kind {
+        EventKind::ToolCall => "tool-call",
+        EventKind::ToolResult => "tool-result",
+    };
+    let heading = record.ts.map_or_else(
+        || format!("[{kind} #{}]", record.ordinal),
+        |ts| format!("[{kind} #{} {}]", record.ordinal, human_timestamp(ts)),
+    );
+    let outcome = match (&record.duration_ms, &record.incomplete, &record.pair) {
+        (Some(duration), _, _) => format!("{duration}ms"),
+        (_, Some(incomplete), _) => incomplete_label(incomplete).to_owned(),
+        (_, _, Some(_)) => "paired".to_owned(),
+        _ => "-".to_owned(),
+    };
+    format!(
+        "{heading} {} {} {} {outcome}",
+        record.event.name.as_deref().unwrap_or("-"),
+        record.event.call_id.as_deref().unwrap_or("-"),
+        record.event.status.as_deref().unwrap_or("-")
+    )
+}
+
+fn incomplete_label(incomplete: &Incomplete) -> &'static str {
+    match incomplete {
+        Incomplete::NoResultInRead => "no-result-in-read",
+        Incomplete::CallBeforeReadBound => "call-before-read-bound",
+        Incomplete::CallNotRecorded => "call-not-recorded",
+    }
 }
 
 fn print_session_list(sessions: &[Session]) {
@@ -387,16 +478,24 @@ fn render_transcript(transcript: &Transcript, by_latest: bool) -> String {
     }
     render_activity_note(&mut out, transcript);
     if by_latest {
-        out.push_str(&format!(
-            "Note: --latest picked the newest session in scope. Pass --exclude {} to reach the one before it.\n",
-            transcript.session.id
-        ));
+        render_latest_note(&mut out, &transcript.session);
     }
     render_truncation_notes(&mut out, &transcript.truncation);
-    for note in &transcript.notes {
+    render_notes(&mut out, &transcript.notes);
+    out
+}
+
+fn render_latest_note(out: &mut String, session: &Session) {
+    out.push_str(&format!(
+        "Note: --latest picked the newest session in scope. Pass --exclude {} to reach the one before it.\n",
+        session.id
+    ));
+}
+
+fn render_notes(out: &mut String, notes: &[String]) {
+    for note in notes {
         out.push_str(&format!("Note: {note}\n"));
     }
-    out
 }
 
 /// Each cause of truncation gets its own note, and each note recommends only
@@ -540,6 +639,7 @@ mod tests {
                 ts: None,
                 ordinal: 0,
                 native_id: None,
+                tool: None,
             }],
             truncated,
             truncation: Truncation {

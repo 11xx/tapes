@@ -14,6 +14,7 @@ use serde_json::{json, Value};
 use super::{
     filter_listing_search, filter_listing_search_parallel, search_turns, Backend, Listing, Query,
 };
+use crate::event::{self, Bounded, EventKind, EventTranscript, ToolEvent};
 use crate::model::{
     human_bytes, Cost, Model, Role, Session, SourceBound, Tokens, Transcript, Truncation, Turn,
     TurnWindow,
@@ -985,6 +986,20 @@ impl Backend for OpenCodeBackend {
         let pages = paged_messages(&|path| self.request(path), &session.id, tail)?;
         Ok(paged_transcript(session.clone(), &pages, tail))
     }
+
+    fn events(&self, session: &Session, tail: usize) -> Result<EventTranscript> {
+        if self.uses_database() {
+            return Ok(event::project(
+                self.database_transcript(session.clone(), usize::MAX)?,
+                tail,
+            ));
+        }
+        let pages = paged_messages(&|path| self.request(path), &session.id, tail)?;
+        Ok(event::project(
+            paged_event_source(session.clone(), &pages, tail),
+            tail,
+        ))
+    }
 }
 
 fn sql_literal(value: &str) -> String {
@@ -1137,6 +1152,9 @@ fn database_message(row: &Value, parts: Vec<Value>) -> Option<Result<Value>> {
         if let Some(time) = part["time"].as_object_mut() {
             if let Some(start) = time.get("start").cloned() {
                 time.entry("created").or_insert(start);
+            }
+            if let Some(end) = time.get("end").cloned() {
+                time.entry("completed").or_insert(end);
             }
         }
     }
@@ -1409,6 +1427,15 @@ fn paged_transcript(session: Session, pages: &MessagePages, tail: usize) -> Tran
     )
 }
 
+/// Keep every turn from the pages fetched for an event read. The event layer
+/// pairs this sequence before applying the same window metadata as `show`.
+fn paged_event_source(session: Session, pages: &MessagePages, tail: usize) -> Transcript {
+    let turns = normalized_turns(&pages.messages);
+    let returned = turns.len().min(tail);
+    let truncation = paged_truncation(pages, returned, turns.len(), tail);
+    Transcript::new(session, turns, truncation, None, pages.notes.clone())
+}
+
 /// Normalize newest-first messages into a chronological transcript. The
 /// caller supplies the truncation from the returned and total turn counts,
 /// since only it knows how the messages were read; `notes` is what the read
@@ -1422,21 +1449,26 @@ fn parse_transcript(
     notes: Vec<String>,
     truncation: impl FnOnce(usize, usize) -> Truncation,
 ) -> Transcript {
-    let mut turns = messages
-        .iter()
-        .rev()
-        .flat_map(parse_message)
-        .collect::<Vec<_>>();
+    let mut turns = normalized_turns(messages);
     let total = turns.len();
-    for (ordinal, turn) in turns.iter_mut().enumerate() {
-        turn.ordinal = ordinal;
-    }
     if total > tail {
         turns.drain(..total - tail);
     }
     let truncation = truncation(turns.len(), total);
 
     Transcript::new(session, turns, truncation, None, notes)
+}
+
+fn normalized_turns(messages: &[Value]) -> Vec<Turn> {
+    let mut turns = messages
+        .iter()
+        .rev()
+        .flat_map(parse_message)
+        .collect::<Vec<_>>();
+    for (ordinal, turn) in turns.iter_mut().enumerate() {
+        turn.ordinal = ordinal;
+    }
+    turns
 }
 
 fn parse_message(message: &Value) -> Vec<Turn> {
@@ -1460,6 +1492,7 @@ fn parse_message(message: &Value) -> Vec<Turn> {
                 ts: message_ts,
                 ordinal: 0,
                 native_id: message_id,
+                tool: None,
             })
             .into_iter()
             .collect();
@@ -1471,10 +1504,14 @@ fn parse_message(message: &Value) -> Vec<Turn> {
         .flatten()
         .filter_map(|part| {
             let ts = epoch_millis(&part["time"]["created"]).or(message_ts);
-            let (role, text) = match part["type"].as_str()? {
-                "text" => (role.clone(), part["text"].as_str()?.to_owned()),
-                "reasoning" => (Role::Reasoning, part["text"].as_str()?.to_owned()),
-                "tool" => (Role::Tool, part.to_string()),
+            let (role, text, tool) = match part["type"].as_str()? {
+                "text" => (role.clone(), part["text"].as_str()?.to_owned(), None),
+                "reasoning" => (Role::Reasoning, part["text"].as_str()?.to_owned(), None),
+                "tool" => (
+                    Role::Tool,
+                    part.to_string(),
+                    Some(opencode_tool_event(part)),
+                ),
                 _ => return None,
             };
             // A part names itself where the store keeps part ids; the
@@ -1489,9 +1526,40 @@ fn parse_message(message: &Value) -> Vec<Turn> {
                 ts,
                 ordinal: 0,
                 native_id,
+                tool,
             })
         })
         .collect()
+}
+
+fn opencode_tool_event(part: &Value) -> ToolEvent {
+    let state = &part["state"];
+    let status = state["status"].as_str().map(str::to_owned);
+    let output = if status.as_deref() == Some("error") {
+        ["error", "output", "content"]
+            .into_iter()
+            .find_map(|field| Bounded::from_value(&state[field]))
+    } else {
+        ["content", "output", "error"]
+            .into_iter()
+            .find_map(|field| Bounded::from_value(&state[field]))
+    };
+    ToolEvent {
+        kind: EventKind::ToolCall,
+        subtype: "tool".to_owned(),
+        name: part["name"]
+            .as_str()
+            .or_else(|| part["tool"].as_str())
+            .map(str::to_owned),
+        call_id: part["callID"]
+            .as_str()
+            .or_else(|| part["id"].as_str())
+            .map(str::to_owned),
+        status,
+        arguments: Bounded::from_value(&state["input"]),
+        output,
+        completed_ts: epoch_millis(&part["time"]["completed"]),
+    }
 }
 
 fn required_string(value: &Value, field: &str) -> Result<String> {
