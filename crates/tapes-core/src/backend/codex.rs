@@ -83,6 +83,7 @@ impl CodexBackend {
             cost: None,
             tokens,
             store: Some(path.display().to_string()),
+            start_uncertain: recording.start_uncertain(),
         };
         // The opening is the start of the file, so its first user turn is the
         // session's first user turn even when the tail cannot see it.
@@ -146,7 +147,11 @@ impl Backend for CodexBackend {
             |path| {
                 self.parse(path)
                     .ok()
-                    .map(|(session, turns, _)| ParsedFile { session, turns })
+                    .map(|(session, turns, read)| ParsedFile {
+                        session,
+                        turns,
+                        truncated: read.truncated,
+                    })
             },
         );
         listing

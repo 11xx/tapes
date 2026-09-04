@@ -44,10 +44,10 @@ needs and the normalized model has no field for it.
 
 Because the header is never repeated, the reader takes it from the file's
 first 64 KiB rather than from the bounded 4 MiB tail: the session id, the
-recorded start timestamp, the working directory, and the first user message all
-come from that opening whatever the file's size. The tail supplies the active
-path, the turns, the last activity, and the final model and thinking level.
-The first-turn hint is not read from the opening: pi rewinds by appending a new
+recorded start timestamp, and the working directory come from that opening
+whatever the file's size. The tail supplies the active path, the turns, the
+last activity, and the final model and thinking level. The first-turn hint is
+not read from the opening: pi rewinds by appending a new
 branch, so the first user message in the file may sit on a root the active path
 never reaches, and past the bound the reader cannot tell. A transcript larger
 than the tail therefore leaves `derived_title` absent. A turn's `native_id` is

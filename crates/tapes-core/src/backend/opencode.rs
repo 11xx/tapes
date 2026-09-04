@@ -1160,6 +1160,7 @@ fn parse_database_session(value: &Value) -> Result<Session> {
         cost: value["cost"].as_f64().map(|usd| Cost { usd }),
         tokens,
         store: None,
+        start_uncertain: false,
     })
 }
 
@@ -1239,6 +1240,7 @@ fn parse_session(value: &Value) -> Result<Session> {
         cost: value["cost"].as_f64().map(|usd| Cost { usd }),
         tokens,
         store: None,
+        start_uncertain: false,
     })
 }
 

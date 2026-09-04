@@ -1458,6 +1458,7 @@ fn resolver_session(id: &str) -> Session {
         cost: None,
         tokens: None,
         store: None,
+        start_uncertain: false,
     }
 }
 
@@ -2120,5 +2121,126 @@ fn a_first_line_longer_than_the_head_probe_still_yields_the_header() {
         session.directory.as_deref(),
         Some(Path::new("/fixtures/project"))
     );
+    fs::remove_dir_all(root).unwrap();
+}
+
+/// A first line longer than the head probe's ceiling leaves the opening
+/// empty; the start is then the earliest record reached and the session says
+/// so, rather than presenting that record as the recorded start.
+#[test]
+fn a_first_line_past_the_probe_ceiling_marks_the_start_uncertain() {
+    let root = std::env::temp_dir().join(format!("tapes-huge-first-line-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&root);
+    let day = root.join("2026/01/01");
+    fs::create_dir_all(&day).unwrap();
+    let id = "00000000-0000-0000-0000-00000000eeee";
+    let path = day.join(format!("rollout-2026-01-01T10-00-00-{id}.jsonl"));
+    let mut file = BufWriter::new(File::create(&path).unwrap());
+    writeln!(
+        file,
+        r#"{{"timestamp":"2026-01-01T10:00:00Z","type":"session_meta","payload":{{"id":"{id}","cwd":"/fixtures/project","note":"{}"}}}}"#,
+        "h".repeat(1100 * 1024)
+    )
+    .unwrap();
+    let filler = "x".repeat(4096);
+    for _ in 0..1200 {
+        writeln!(
+            file,
+            r#"{{"timestamp":"2026-01-01T12:00:00Z","type":"response_item","payload":{{"type":"message","role":"assistant","content":[{{"type":"output_text","text":"{filler}"}}]}}}}"#
+        )
+        .unwrap();
+    }
+    drop(file);
+
+    let backend = CodexBackend::new(&root);
+    let session = located(&backend, id);
+    assert!(session.start_uncertain);
+    assert_eq!(
+        session.started_at,
+        "2026-01-01T12:00:00Z".parse::<DateTime<Utc>>().unwrap(),
+        "the earliest record reached"
+    );
+    let value = serde_json::to_value(&session).unwrap();
+    assert_eq!(value["start_uncertain"], true);
+
+    let certain = located(&backend, id);
+    let mut certain_value = serde_json::to_value(&certain).unwrap();
+    certain_value["start_uncertain"] = serde_json::Value::Bool(false);
+    let decoded: Session = serde_json::from_value(certain_value).unwrap();
+    assert!(!decoded.start_uncertain);
+    assert!(
+        serde_json::to_value(&decoded)
+            .unwrap()
+            .get("start_uncertain")
+            .is_none(),
+        "omitted when false"
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+/// The fast JSONL search path applies the same rule as the bounded read: a
+/// file past the reader's bound whose retained tail holds fewer turns than
+/// the search covers is unsearched on a miss, and still a match on a hit.
+#[test]
+fn file_search_short_of_the_tail_behind_the_file_bound_is_unsearched() {
+    let root = std::env::temp_dir().join(format!("tapes-search-file-bound-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&root);
+    let day = root.join("2026/01/01");
+    fs::create_dir_all(&day).unwrap();
+    let id = "00000000-0000-0000-0000-00000000ffff";
+    let path = day.join(format!("rollout-2026-01-01T10-00-00-{id}.jsonl"));
+    let mut file = BufWriter::new(File::create(&path).unwrap());
+    writeln!(
+        file,
+        r#"{{"timestamp":"2026-01-01T10:00:00Z","type":"session_meta","payload":{{"id":"{id}","cwd":"/fixtures/project"}}}}"#
+    )
+    .unwrap();
+    writeln!(
+        file,
+        r#"{{"timestamp":"2026-01-01T10:00:01Z","type":"response_item","payload":{{"type":"message","role":"user","content":[{{"type":"input_text","text":"the older needle"}}]}}}}"#
+    )
+    .unwrap();
+    let huge = "x".repeat(3 * 1024 * 1024);
+    for index in 0..2 {
+        writeln!(
+            file,
+            r#"{{"timestamp":"2026-01-01T10:00:0{}Z","type":"response_item","payload":{{"type":"message","role":"assistant","content":[{{"type":"output_text","text":"retained {index} {huge}"}}]}}}}"#,
+            index + 2
+        )
+        .unwrap();
+    }
+    drop(file);
+
+    let backends: Vec<Box<dyn Backend>> = vec![Box::new(CodexBackend::new(&root))];
+    let miss = list_with_backends_filtered_and_search(
+        &backends,
+        Some("codex"),
+        None,
+        10,
+        None,
+        None,
+        Some("older needle"),
+    )
+    .unwrap();
+    assert!(miss.sessions.is_empty());
+    assert_eq!(miss.unsearched.len(), 1, "{:?}", miss.unsearched);
+    assert!(
+        miss.unsearched[0].contains(id) && miss.unsearched[0].contains("of the last 32 turns"),
+        "{:?}",
+        miss.unsearched
+    );
+
+    let hit = list_with_backends_filtered_and_search(
+        &backends,
+        Some("codex"),
+        None,
+        10,
+        None,
+        None,
+        Some("retained 1"),
+    )
+    .unwrap();
+    assert_eq!(hit.sessions.len(), 1);
+    assert!(hit.unsearched.is_empty());
     fs::remove_dir_all(root).unwrap();
 }

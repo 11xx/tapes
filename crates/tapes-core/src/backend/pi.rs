@@ -97,6 +97,7 @@ impl PiBackend {
             cost: None,
             tokens: None,
             store: Some(path.display().to_string()),
+            start_uncertain: recording.start_uncertain(),
         };
         // pi rewinds by appending a new branch, so the first user message in
         // the file may sit on a root the active path never reaches. The
@@ -166,7 +167,11 @@ impl Backend for PiBackend {
             |path| {
                 self.parse(path)
                     .ok()
-                    .map(|(session, turns, _, _)| ParsedFile { session, turns })
+                    .map(|(session, turns, read, _)| ParsedFile {
+                        session,
+                        turns,
+                        truncated: read.truncated,
+                    })
             },
         );
         listing

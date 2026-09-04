@@ -39,6 +39,12 @@ pub struct Session {
     /// consumer writes it down beside the id and does not parse it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub store: Option<String>,
+    /// True when the recorded start could not be read: the recording is past
+    /// the reader's file bound and its opening carried no timestamp. Then
+    /// `started_at` is the earliest record the reader reached, and the true
+    /// start is at or before it. Omitted when false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub start_uncertain: bool,
 }
 
 /// The present-tense state supplied by the optional harness-status authority.
@@ -518,6 +524,7 @@ mod tests {
                 cache_write: Some(5),
             }),
             store: None,
+            start_uncertain: false,
         }
     }
 
