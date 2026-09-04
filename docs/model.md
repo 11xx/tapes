@@ -283,6 +283,87 @@ or null.
 The view also carries the read's `truncated` flag, its `truncation` record,
 and its `notes`, with the same meaning they have on a transcript.
 
+## Lineage view
+
+`tapes lineage` answers which sessions a recording names as its relatives and
+serializes as a `tapes-lineage/1` object. A relationship exists only where a
+record states it: a child's header naming a parent, a parent's spawn or
+completion event, a transcript file under the parent's own directory, or a
+session row's parent column. Directory proximity, a shared title, and a
+timestamp coincidence create nothing. A reference the store cannot resolve is
+kept with `resolved: false`, because a relative whose recording is gone is a
+fact rather than a gap.
+
+The view refers to a child and never absorbs one: resolving a reference reads
+the child's header or row and never its turns, and a child's transcript is
+read with `show` under its own id.
+
+`lineage` carries an optional `parent`, an always-present `children` array,
+and an optional `forked_from`. `ParentRef` is the parent's `native_id` in the
+harness's own terms, whether a session with that id is in the store
+(`resolved`), and the record that named it (`source`). Each `ChildRef`
+carries:
+
+| member | meaning |
+|---|---|
+| `reference` | how the parent's store names the child: its session id where the records carry one, otherwise the harness's own name for it, such as a Codex agent path |
+| `session_id` | the child's session id, where the store holds a session under it; absent for a Claude subagent transcript, which is not addressable as a session |
+| `harness` | the harness both sessions belong to |
+| `role` | the role the parent asked for, in the harness's vocabulary: a Claude `agentType`, a Codex nickname or task name, an OpenCode agent |
+| `model` | the model the records name for the child |
+| `group` | the namespace a harness organizes children under, such as a Codex agent path's parent |
+| `spawned_at`, `completed_at` | the spawn call's and the completion record's timestamps |
+| `disposition` | the outcome the harness recorded, in its own words: a Claude `toolUseResult.status`, a Codex `agent_status` |
+| `resolved` | whether the child's own recording is in the store |
+| `source` | where the reference was read from: a `record` with its `native_id`, a `file` with its `path`, or a `session` with its `id` |
+
+Every optional member is absent where the harness recorded nothing, and
+children are ordered by the moment they were spawned, with a child whose spawn
+was never recorded after them.
+
+What each harness records:
+
+| harness | recorded |
+|---|---|
+| Claude | subagent transcripts under `<session>/subagents/`, their meta records, and the `Agent` calls and `toolUseResult` records in the parent |
+| Codex | `spawn_agent` and agent-status outputs in the parent, joined by agent path to the rollout headers whose `parent_thread_id` is this session; the header's own `parent_thread_id` and `forked_from_id` |
+| OpenCode | the parent column on a session's row or object, in either direction |
+| pi | the header's `parentSession`, on the child alone |
+
+```json
+{
+  "schema": "tapes-lineage/1",
+  "session": {
+    "id": "session-1",
+    "harness": "codex",
+    "started_at": "2023-11-14T22:13:20Z",
+    "last_activity_at": "2023-11-14T22:15:00Z"
+  },
+  "lineage": {
+    "children": [
+      {
+        "reference": "/root/backend_workhorse",
+        "session_id": "session-2",
+        "harness": "codex",
+        "role": "backend_workhorse",
+        "group": "/root",
+        "spawned_at": "2023-11-14T22:13:30Z",
+        "completed_at": "2023-11-14T22:14:40Z",
+        "disposition": "completed",
+        "resolved": true,
+        "source": [{ "kind": "record", "native_id": "call_1" }]
+      }
+    ]
+  },
+  "truncated": false
+}
+```
+
+The view also carries the read's `truncated` flag, its `truncation` record,
+and its `notes`, with the same meaning they have on a transcript: a bounded
+read can leave a spawn record unread, and a store larger than the read's own
+probe says so in a note.
+
 `Session.store` is where `tapes` read the session from, as an opaque string: a
 recording file's path for the file-backed harnesses, the database file for
 OpenCode's stable store, and the program and endpoint for the OpenCode API.

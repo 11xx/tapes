@@ -230,7 +230,10 @@ mod tests {
         assert_eq!(value["lineage"]["children"], json!([]));
         assert_eq!(value["truncated"], false);
         for absent in ["parent", "forked_from"] {
-            assert!(value["lineage"].get(absent).is_none(), "{absent} in {value}");
+            assert!(
+                value["lineage"].get(absent).is_none(),
+                "{absent} in {value}"
+            );
         }
         for absent in ["truncation", "notes"] {
             assert!(value.get(absent).is_none(), "{absent} in {value}");

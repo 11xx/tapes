@@ -725,9 +725,7 @@ impl OpenCodeBackend {
             })
             .transpose()?;
 
-        let page = self.request(&format!(
-            "/api/session?order=desc&limit={MAX_API_SESSIONS}"
-        ))?;
+        let page = self.request(&format!("/api/session?order=desc&limit={MAX_API_SESSIONS}"))?;
         let rows = page["data"]
             .as_array()
             .ok_or_else(|| anyhow!("opencode session response has no data array"))?;

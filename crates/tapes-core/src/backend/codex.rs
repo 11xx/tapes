@@ -636,9 +636,7 @@ fn spawned_agents(values: &[Value]) -> HashMap<String, SpawnedAgent> {
                         task_name: arguments["task_name"].as_str().map(str::to_owned),
                         model: arguments["model"].as_str().map(str::to_owned),
                         spawned_at: ts,
-                        source: vec![SourceRef::Record {
-                            native_id: call_id,
-                        }],
+                        source: vec![SourceRef::Record { native_id: call_id }],
                         ..SpawnedAgent::default()
                     },
                 );

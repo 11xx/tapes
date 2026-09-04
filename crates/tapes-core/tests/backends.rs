@@ -722,7 +722,13 @@ fn every_backend_exposes_one_complete_pair_and_one_incomplete_call() {
     let cases = [
         ("claude", "tool-1", "tool-pending", 5, 2),
         ("codex", "call-1", "call-pending", 3, 1),
-        ("opencode", "fixture_tool_call", "fixture_tool_pending", 3, 1),
+        (
+            "opencode",
+            "fixture_tool_call",
+            "fixture_tool_pending",
+            3,
+            1,
+        ),
         ("pi", "tool-1", "tool-pending", 3, 1),
     ];
     for ((backend, id), (harness, paired, pending, event_count, complete_pairs)) in
@@ -854,7 +860,10 @@ fn opencode_reads_parent_and_child_rows_from_both_projections() {
     assert_eq!(lineage.children.len(), 1, "{:#?}", lineage.children);
     let child = &lineage.children[0];
     assert_eq!(child.reference, "ses_database_only_fixture");
-    assert_eq!(child.session_id.as_deref(), Some("ses_database_only_fixture"));
+    assert_eq!(
+        child.session_id.as_deref(),
+        Some("ses_database_only_fixture")
+    );
     assert_eq!(child.role.as_deref(), Some("build"));
     assert_eq!(child.model.as_deref(), Some("fixture-db-model (balanced)"));
     assert!(child.resolved);
@@ -995,7 +1004,10 @@ fn claude_joins_a_subagent_transcript_to_the_call_that_spawned_it() {
         child.completed_at,
         Some("2026-01-01T10:00:03.950Z".parse::<DateTime<Utc>>().unwrap())
     );
-    assert!(child.session_id.is_none(), "a subagent file is not a session");
+    assert!(
+        child.session_id.is_none(),
+        "a subagent file is not a session"
+    );
     let sources = serde_json::to_value(&child.source).unwrap();
     assert!(
         sources
