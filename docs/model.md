@@ -188,10 +188,11 @@ the window metadata therefore uses the same turn coordinates as `show` rather
 than counting event records. Name and call-id filters apply after pairing.
 `pairs.complete` counts distinct complete pairs represented by at least one
 returned event, while `pairs.incomplete` counts returned events carrying an
-`incomplete` reason. Both describe the read: a file-backed or database read
-pairs the whole bounded read before the window applies, while the OpenCode API
-read fetches only the pages the window needs, so its counts belong to that
-window's read and a wider `--tail` can pair more.
+`incomplete` reason. Both counts describe the returned window, since the
+window is applied before they are taken; the pairing itself is what the window
+never changes. On the OpenCode API path the window also bounds the read, so
+the events a wider `--tail` returns may pair with calls a narrower read never
+fetched.
 
 ```json
 {
