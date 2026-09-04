@@ -728,7 +728,12 @@ fn agent_calls(values: &[Value]) -> HashMap<String, AgentCall> {
                     let Some(outcome) = tool_use_result(value) else {
                         continue;
                     };
-                    if !calls.contains_key(call_id) {
+                    // Claude writes a `toolUseResult` beside every tool's
+                    // result, so a result belongs to an agent only when its
+                    // call was an `Agent` or the payload names an agent
+                    // itself — which is how a spawn behind the read bound is
+                    // still recognized.
+                    if !calls.contains_key(call_id) && outcome["agentId"].as_str().is_none() {
                         continue;
                     }
                     let call = calls.entry(call_id.to_owned()).or_default();

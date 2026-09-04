@@ -1073,6 +1073,45 @@ fn claude_keeps_a_spawn_whose_transcript_is_absent() {
     fs::remove_dir_all(root).unwrap();
 }
 
+/// Claude writes a `toolUseResult` beside every tool's result, so what makes
+/// one an agent is the `Agent` call it answers or the agent it names itself.
+#[test]
+fn claude_reads_an_agent_result_without_reading_every_tool_result() {
+    let root = std::env::temp_dir().join(format!(
+        "tapes-claude-agent-result-{}-{}",
+        std::process::id(),
+        OPENCODE_ALIAS_COUNTER.fetch_add(1, Ordering::Relaxed)
+    ));
+    let project = root.join("-fixtures-project");
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&project).unwrap();
+    fs::write(
+        project.join("session-agent-result.jsonl"),
+        concat!(
+            r#"{"type":"user","sessionId":"session-agent-result","uuid":"user-1","timestamp":"2026-01-01T10:00:00Z","cwd":"/fixtures/project","message":{"role":"user","content":"Read a file."}}"#,
+            "\n",
+            r#"{"type":"user","sessionId":"session-agent-result","uuid":"tool-result-1","timestamp":"2026-01-01T10:00:01Z","cwd":"/fixtures/project","toolUseResult":{"type":"text","file":{"filePath":"/fixtures/project/notes"}},"message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tool-read-1","content":"Notes."}]}}"#,
+            "\n",
+            r#"{"type":"user","sessionId":"session-agent-result","uuid":"tool-result-2","timestamp":"2026-01-01T10:00:02Z","cwd":"/fixtures/project","toolUseResult":{"status":"completed","agentId":"early-agent","agentType":"codex","resolvedModel":"claude-fixture-sonnet","totalDurationMs":900},"message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tool-agent-early","content":"Agent complete."}]}}"#,
+            "\n"
+        ),
+    )
+    .unwrap();
+
+    let backend = ClaudeBackend::new(&root);
+    let session = located(&backend, "session-agent-result");
+    let lineage = backend.lineage(&session).unwrap();
+
+    assert_eq!(lineage.children.len(), 1, "{:#?}", lineage.children);
+    let child = &lineage.children[0];
+    assert_eq!(child.reference, "early-agent");
+    assert_eq!(child.role.as_deref(), Some("codex"));
+    assert_eq!(child.disposition.as_deref(), Some("completed"));
+    assert!(child.spawned_at.is_none(), "no call is in this read");
+    assert!(!child.resolved);
+    fs::remove_dir_all(root).unwrap();
+}
+
 #[test]
 fn claude_lists_only_parent_sessions_and_reports_subagent_transcripts() {
     let backend = ClaudeBackend::new(fixtures("claude"));

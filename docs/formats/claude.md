@@ -284,6 +284,10 @@ or the JSON text of one, reporting the agent's outcome: `status`, `agentId`,
 `async_launched` reports a subagent that is still running and is not an
 ending; any other status is one.
 
+A `toolUseResult` accompanies every tool's result, so a result belongs to an
+agent when it answers an `Agent` call or names an `agentId` itself; the second
+is what recognizes an agent whose call is behind the bounded read.
+
 The lineage view reads those three records and nothing else: the file stem's
 agent id is the child's reference, the meta record and the call supply its
 role and model, the call and result supply the spawn and ending timestamps,
