@@ -77,6 +77,9 @@ no v2 database prefilter is available; server reuse removes per-session
 process startup, not that necessary scan. When stable and v2 both expose an
 id, search uses the stable projection just as resolution does; a later
 projection cannot resurrect its non-match.
+If the local v2 API server cannot start or list candidates, the search falls
+back to `opencode2 api --standalone get` listing and per-session reads, and
+records the failed stage and diagnostic in `unsearched`.
 The command writes a short preflight notice to stderr before scanning; JSON
 results remain on stdout.
 The scope applies before the bound, so a scoped listing cannot be emptied by a

@@ -48,6 +48,12 @@ case $name in
     session=session.json
     mode=counting
     ;;
+  opencode2-serve-failed*)
+    list=list.json
+    messages=messages.json
+    session=session.json
+    mode=serve-failed
+    ;;
   opencode2-oversized*)
     list=list.json
     mode=oversized
@@ -74,6 +80,10 @@ esac
 
 if [ "${5:-}" = malformed-row ]; then
   mode=database-malformed
+fi
+
+if [ "$mode" = serve-failed ] && [ "${1:-}" = serve ]; then
+  exit 7
 fi
 
 if [ "$mode" = counting ] || [ "$mode" = oversized ]; then

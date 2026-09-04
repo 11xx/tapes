@@ -64,6 +64,9 @@ FIND IT
   is omitted from sessions and named in unsearched instead of being treated as
   a non-match; a preflight notice is written to stderr before scanning, and a
   stopped candidate scan is still reported as scan_truncated.
+  If the local OpenCode2 API server cannot start or list candidates, search
+  falls back to CLI API GETs and records the failed stage and diagnostic in
+  unsearched.
 
   File-backed harnesses may show a bounded first-meaningful-user-turn hint
   prefixed with ~ when a harness recorded no title. JSON keeps that hint as

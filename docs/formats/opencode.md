@@ -284,7 +284,10 @@ confirmation read per candidate after metadata filters; the shared server
 removes repeated process startup but cannot change that v2 API contract. If a
 SQL prefilter fails, `tapes` keeps the safe per-session fallback and adds the
 prefilter diagnostic to `unsearched`; an unsupported prefilter is distinct and
-falls back without that error note.
+falls back without that error note. If the local API server cannot start or
+list candidates, `tapes` falls back to `opencode2 api --standalone get` listing
+and per-session reads and records the failed stage and diagnostic in
+`unsearched`.
 
 ## 6. Live HTTP API (legacy reference)
 

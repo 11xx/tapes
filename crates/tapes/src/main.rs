@@ -135,7 +135,9 @@ enum Command {
         /// each candidate session. The fixed tail keeps listing bounded; a
         /// match outside it is not considered. Search is applied before
         /// --limit, and a failed bounded read is reported as unsearched. A
-        /// short preflight notice is written to stderr before scanning.
+        /// short preflight notice is written to stderr before scanning. If the
+        /// local OpenCode2 API server cannot start or list candidates, search
+        /// falls back to CLI API GETs and records that stage's diagnostic.
         #[arg(long, value_name = "SUBSTRING")]
         search: Option<String>,
         /// Render results as JSON. Matching sessions may include an optional

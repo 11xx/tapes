@@ -133,6 +133,10 @@ impl OpenCodeAlias {
         alias
     }
 
+    fn serve_failed() -> Self {
+        Self::new("serve-failed")
+    }
+
     fn path(&self) -> &Path {
         &self.path
     }
@@ -283,7 +287,8 @@ fn list_search_uses_each_backend_search_path_before_the_limit() {
     .unwrap();
 
     assert_eq!(result.sessions.len(), 4);
-    assert!(result.unsearched.is_empty());
+    assert_eq!(result.unsearched.len(), 1, "{:?}", result.unsearched);
+    assert!(result.unsearched[0].contains("opencode v2 search could not use the local API server"));
 }
 
 #[test]
@@ -461,7 +466,43 @@ fn opencode_v2_only_search_keeps_all_genuine_fixture_matches() {
         ids,
         HashSet::from(["ses_000000fixtureSharedSession", "ses_api_only_fixture"])
     );
-    assert!(result.unsearched.is_empty());
+    assert_eq!(result.unsearched.len(), 1, "{:?}", result.unsearched);
+    assert!(result.unsearched[0].contains("opencode v2 search could not use the local API server"));
+}
+
+#[test]
+fn opencode_v2_search_reports_a_failed_local_server_fallback() {
+    let api = OpenCodeAlias::serve_failed();
+    let backends: Vec<Box<dyn Backend>> = vec![Box::new(OpenCodeBackend::new(api.path()))];
+
+    let result = list_with_backends_filtered_and_search(
+        &backends,
+        Some("opencode"),
+        None,
+        10,
+        None,
+        None,
+        Some("fixture"),
+    )
+    .unwrap();
+    let ids = result
+        .sessions
+        .iter()
+        .map(|session| session.id.as_str())
+        .collect::<HashSet<_>>();
+
+    assert_eq!(
+        ids,
+        HashSet::from(["ses_000000fixtureSharedSession", "ses_api_only_fixture"])
+    );
+    assert_eq!(result.unsearched.len(), 1, "{:?}", result.unsearched);
+    assert!(result.unsearched[0].contains("opencode v2 search could not use the local API server"));
+    assert!(result.unsearched[0].contains("startup"));
+    assert!(
+        result.unsearched[0].contains("searched through the CLI instead"),
+        "{:?}",
+        result.unsearched
+    );
 }
 
 #[test]
@@ -494,7 +535,8 @@ fn opencode_search_uses_the_first_projection_before_deduplicating() {
         HashSet::from(["ses_database_only_fixture", "ses_api_only_fixture"])
     );
     assert!(!ids.contains("ses_000000fixtureSharedSession"));
-    assert!(result.unsearched.is_empty());
+    assert_eq!(result.unsearched.len(), 1, "{:?}", result.unsearched);
+    assert!(result.unsearched[0].contains("opencode v2 search could not use the local API server"));
 }
 
 #[test]
