@@ -676,7 +676,8 @@ fn every_file_backend_preserves_reasoning_and_tool_chronology() {
                 Role::Tool,
             ],
             // The claude fixture closes its exchange with the commands and
-            // notices its harness records in the user envelope.
+            // notices its harness records in the user envelope, then spawns a
+            // subagent and leaves one call open.
             "claude" => {
                 let mut roles = vec![
                     Role::User,
@@ -686,7 +687,7 @@ fn every_file_backend_preserves_reasoning_and_tool_chronology() {
                     Role::Assistant,
                 ];
                 roles.extend((0..8).map(|_| Role::User));
-                roles.push(Role::Tool);
+                roles.extend([Role::Tool, Role::Tool, Role::Tool]);
                 roles
             }
             _ => vec![
@@ -716,13 +717,23 @@ fn every_file_backend_preserves_reasoning_and_tool_chronology() {
 
 #[test]
 fn every_backend_exposes_one_complete_pair_and_one_incomplete_call() {
+    // The claude fixture also spawns a subagent, whose call and result are a
+    // second complete pair.
     let cases = [
-        ("claude", "tool-1", "tool-pending"),
-        ("codex", "call-1", "call-pending"),
-        ("opencode", "fixture_tool_call", "fixture_tool_pending"),
-        ("pi", "tool-1", "tool-pending"),
+        ("claude", "tool-1", "tool-pending", 5, 2),
+        ("codex", "call-1", "call-pending", 3, 1),
+        (
+            "opencode",
+            "fixture_tool_call",
+            "fixture_tool_pending",
+            3,
+            1,
+        ),
+        ("pi", "tool-1", "tool-pending", 3, 1),
     ];
-    for ((backend, id), (harness, paired, pending)) in fixture_backends().into_iter().zip(cases) {
+    for ((backend, id), (harness, paired, pending, event_count, complete_pairs)) in
+        fixture_backends().into_iter().zip(cases)
+    {
         assert_eq!(backend.harness(), harness);
         let session = located(backend.as_ref(), id);
         let transcript = backend.transcript(&session, usize::MAX).unwrap();
@@ -734,8 +745,13 @@ fn every_backend_exposes_one_complete_pair_and_one_incomplete_call() {
             .all(|turn| turn.get("tool").is_none()));
 
         let events = backend.events(&session, usize::MAX).unwrap();
-        assert_eq!(events.events.len(), 3, "{harness}: {:#?}", events.events);
-        assert_eq!(events.pairs.complete, 1, "{harness}");
+        assert_eq!(
+            events.events.len(),
+            event_count,
+            "{harness}: {:#?}",
+            events.events
+        );
+        assert_eq!(events.pairs.complete, complete_pairs, "{harness}");
         assert_eq!(events.pairs.incomplete, 1, "{harness}");
         let call = events
             .events
@@ -801,6 +817,299 @@ fn verified_file_backends_report_their_final_non_turn_record() {
             assert!(trailing.timestamp.is_some());
         }
     }
+}
+
+/// The parent names its subagent: the meta record beside the transcript says
+/// which agent it was, and the `Agent` call in the parent says when it was
+/// spawned and how it ended.
+/// pi records the reference on the child, and a reference to a session the
+/// store does not hold is kept rather than dropped.
+#[test]
+fn pi_keeps_an_unresolved_parent_reference() {
+    let backend = PiBackend::new(fixtures("pi"));
+    let session = located(&backend, "session-pi");
+    let lineage = backend.lineage(&session).unwrap();
+
+    let parent = lineage.parent.as_ref().unwrap();
+    assert_eq!(parent.native_id, "session-pi-parent");
+    assert!(!parent.resolved, "the fixture store holds no such session");
+    assert_eq!(parent.source, "session.parentSession");
+    assert!(lineage.children.is_empty());
+    assert!(lineage.forked_from.is_none());
+}
+
+/// Each OpenCode projection records the relationship on the child's own row,
+/// so a parent's children are the rows naming it.
+#[test]
+fn opencode_reads_parent_and_child_rows_from_both_projections() {
+    let database = OpenCodeAlias::database();
+    let backend = OpenCodeBackend::new(database.path());
+    let child = located(&backend, "ses_database_only_fixture");
+    let lineage = backend.lineage(&child).unwrap();
+    let parent = lineage.parent.as_ref().unwrap();
+    assert_eq!(parent.native_id, "ses_000000fixtureSharedSession");
+    assert!(parent.resolved);
+    assert_eq!(parent.source, "session.parent_id");
+    assert_eq!(lineage.forked_from.as_deref(), Some("ses_fork_fixture"));
+    assert!(lineage.children.is_empty());
+
+    let parent_session = located(&backend, "ses_000000fixtureSharedSession");
+    let lineage = backend.lineage(&parent_session).unwrap();
+    assert!(lineage.parent.is_none());
+    assert!(lineage.forked_from.is_none());
+    assert_eq!(lineage.children.len(), 1, "{:#?}", lineage.children);
+    let child = &lineage.children[0];
+    assert_eq!(child.reference, "ses_database_only_fixture");
+    assert_eq!(
+        child.session_id.as_deref(),
+        Some("ses_database_only_fixture")
+    );
+    assert_eq!(child.role.as_deref(), Some("build"));
+    assert_eq!(child.model.as_deref(), Some("fixture-db-model (balanced)"));
+    assert!(child.resolved);
+
+    let api = OpenCodeBackend::new(opencode_fixture_program());
+    let child = located(&api, "ses_api_only_fixture");
+    let lineage = api.lineage(&child).unwrap();
+    let parent = lineage.parent.as_ref().unwrap();
+    assert_eq!(parent.native_id, "ses_000000fixtureSharedSession");
+    assert!(parent.resolved);
+    assert_eq!(parent.source, "session.parentID");
+
+    let parent_session = located(&api, "ses_000000fixtureSharedSession");
+    let lineage = api.lineage(&parent_session).unwrap();
+    assert_eq!(lineage.children.len(), 1, "{:#?}", lineage.children);
+    let child = &lineage.children[0];
+    assert_eq!(child.reference, "ses_api_only_fixture");
+    assert_eq!(child.role.as_deref(), Some("build"));
+    assert_eq!(child.model.as_deref(), Some("fixture-api-model"));
+    assert!(child.resolved);
+}
+
+/// A Codex child is an ordinary rollout, joined to its parent by the agent
+/// path in the parent's outputs and the parent id in the child's header.
+#[test]
+fn codex_joins_a_child_rollout_to_the_spawn_that_named_it() {
+    let root = std::env::temp_dir().join(format!(
+        "tapes-codex-lineage-{}-{}",
+        std::process::id(),
+        OPENCODE_ALIAS_COUNTER.fetch_add(1, Ordering::Relaxed)
+    ));
+    let sessions = root.join("2026/01/01");
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&sessions).unwrap();
+    let parent_id = "00000000-0000-0000-0000-0000000000a1";
+    let child_id = "00000000-0000-0000-0000-0000000000b2";
+    fs::write(
+        sessions.join(format!("rollout-2026-01-01T10-00-00-{parent_id}.jsonl")),
+        [
+            format!(r#"{{"timestamp":"2026-01-01T10:00:00Z","type":"session_meta","payload":{{"id":"{parent_id}","cwd":"/fixtures/project","forked_from_id":"00000000-0000-0000-0000-0000000000c3"}}}}"#),
+            r#"{"timestamp":"2026-01-01T10:00:01Z","type":"response_item","payload":{"type":"function_call","name":"spawn_agent","call_id":"call-spawn-1","arguments":"{\"task_name\":\"backend_workhorse\",\"model\":\"gpt-fixture\",\"message\":\"Do the work.\"}"}}"#.to_owned(),
+            r#"{"timestamp":"2026-01-01T10:00:02Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call-spawn-1","output":"{\"task_name\":\"/root/backend_workhorse\"}"}}"#.to_owned(),
+            r#"{"timestamp":"2026-01-01T10:00:03Z","type":"response_item","payload":{"type":"function_call","name":"spawn_agent","call_id":"call-spawn-2","arguments":"{\"task_name\":\"absent_worker\"}"}}"#.to_owned(),
+            r#"{"timestamp":"2026-01-01T10:00:04Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call-spawn-2","output":"{\"task_name\":\"/root/absent_worker\"}"}}"#.to_owned(),
+            r#"{"timestamp":"2026-01-01T10:00:05Z","type":"response_item","payload":{"type":"function_call","name":"wait_agent","call_id":"call-wait-1","arguments":"{}"}}"#.to_owned(),
+            r#"{"timestamp":"2026-01-01T10:00:06Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call-wait-1","output":"{\"agents\":[{\"agent_name\":\"/root/backend_workhorse\",\"agent_status\":\"completed\"},{\"agent_name\":\"/root/absent_worker\",\"agent_status\":\"running\"}]}"}}"#.to_owned(),
+        ]
+        .join("\n")
+            + "\n",
+    )
+    .unwrap();
+    fs::write(
+        sessions.join(format!("rollout-2026-01-01T10-00-01-{child_id}.jsonl")),
+        format!(
+            r#"{{"timestamp":"2026-01-01T10:00:01Z","type":"session_meta","payload":{{"id":"{child_id}","cwd":"/fixtures/project","thread_source":"subagent","parent_thread_id":"{parent_id}","agent_nickname":"backend_workhorse","agent_path":"/root/backend_workhorse","multi_agent_version":"v2"}}}}
+{{"timestamp":"2026-01-01T10:00:02Z","type":"response_item","payload":{{"type":"message","role":"assistant","content":[{{"type":"output_text","text":"child-only-text"}}]}}}}
+"#
+        ),
+    )
+    .unwrap();
+
+    let backend = CodexBackend::new(&root);
+    let parent = located(&backend, parent_id);
+    let lineage = backend.lineage(&parent).unwrap();
+
+    assert!(lineage.parent.is_none());
+    assert_eq!(
+        lineage.forked_from.as_deref(),
+        Some("00000000-0000-0000-0000-0000000000c3")
+    );
+    let children = &lineage.children;
+    assert_eq!(children.len(), 2, "{children:#?}");
+    let joined = &children[0];
+    assert_eq!(joined.reference, "/root/backend_workhorse");
+    assert_eq!(joined.session_id.as_deref(), Some(child_id));
+    assert!(joined.resolved);
+    assert_eq!(joined.role.as_deref(), Some("backend_workhorse"));
+    assert_eq!(joined.model.as_deref(), Some("gpt-fixture"));
+    assert_eq!(joined.group.as_deref(), Some("/root"));
+    assert_eq!(joined.disposition.as_deref(), Some("completed"));
+    assert_eq!(
+        joined.completed_at,
+        Some("2026-01-01T10:00:06Z".parse::<DateTime<Utc>>().unwrap())
+    );
+    // A task name no recording answers to stays a child, unresolved.
+    let dangling = &children[1];
+    assert_eq!(dangling.reference, "/root/absent_worker");
+    assert!(!dangling.resolved);
+    assert!(dangling.session_id.is_none());
+    assert_eq!(dangling.disposition.as_deref(), Some("running"));
+    assert!(dangling.completed_at.is_none());
+
+    // The parent refers to the child and never absorbs it: nothing the child
+    // recorded as a turn reaches the parent's lineage.
+    assert!(
+        !serde_json::to_string(&lineage)
+            .unwrap()
+            .contains("child-only-text"),
+        "{lineage:#?}"
+    );
+
+    // The child names the parent, and listing the store still returns exactly
+    // its two recordings.
+    let child = located(&backend, child_id);
+    let child_lineage = backend.lineage(&child).unwrap();
+    let parent_ref = child_lineage.parent.as_ref().unwrap();
+    assert_eq!(parent_ref.native_id, parent_id);
+    assert!(parent_ref.resolved);
+    assert_eq!(parent_ref.source, "session_meta.parent_thread_id");
+    assert!(child_lineage.children.is_empty());
+
+    let listed = backend.list(&Query::unscoped(10)).unwrap().sessions;
+    assert_eq!(listed.len(), 2, "{listed:#?}");
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn claude_joins_a_subagent_transcript_to_the_call_that_spawned_it() {
+    let backend = ClaudeBackend::new(fixtures("claude"));
+    let session = located(&backend, "session-claude");
+    let lineage = backend.lineage(&session).unwrap();
+
+    assert!(lineage.parent.is_none());
+    assert!(lineage.forked_from.is_none());
+    assert_eq!(lineage.children.len(), 1, "{:#?}", lineage.children);
+    let child = &lineage.children[0];
+    assert_eq!(child.reference, "fixture");
+    assert_eq!(child.harness, "claude");
+    assert_eq!(child.role.as_deref(), Some("Explore"));
+    assert_eq!(child.model.as_deref(), Some("sonnet"));
+    assert_eq!(child.disposition.as_deref(), Some("completed"));
+    assert!(child.resolved);
+    assert_eq!(
+        child.spawned_at,
+        Some("2026-01-01T10:00:03.900Z".parse::<DateTime<Utc>>().unwrap())
+    );
+    assert_eq!(
+        child.completed_at,
+        Some("2026-01-01T10:00:03.950Z".parse::<DateTime<Utc>>().unwrap())
+    );
+    assert!(
+        child.session_id.is_none(),
+        "a subagent file is not a session"
+    );
+    let sources = serde_json::to_value(&child.source).unwrap();
+    assert!(
+        sources
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|source| source["path"]
+                .as_str()
+                .is_some_and(|path| path.ends_with("subagents/agent-fixture.meta.json"))),
+        "{sources}"
+    );
+    assert!(
+        sources
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|source| source["native_id"] == "assistant-agent"),
+        "{sources}"
+    );
+}
+
+/// A spawn whose transcript is not in the store is still a child. Dropping it
+/// would hide exactly the case a reader is looking for.
+#[test]
+fn claude_keeps_a_spawn_whose_transcript_is_absent() {
+    let root = std::env::temp_dir().join(format!(
+        "tapes-claude-unresolved-agent-{}-{}",
+        std::process::id(),
+        OPENCODE_ALIAS_COUNTER.fetch_add(1, Ordering::Relaxed)
+    ));
+    let project = root.join("-fixtures-project");
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&project).unwrap();
+    fs::write(
+        project.join("session-absent-agent.jsonl"),
+        concat!(
+            r#"{"type":"user","sessionId":"session-absent-agent","uuid":"user-1","timestamp":"2026-01-01T10:00:00Z","cwd":"/fixtures/project","message":{"role":"user","content":"Spawn a subagent."}}"#,
+            "
+",
+            r#"{"type":"assistant","sessionId":"session-absent-agent","uuid":"assistant-1","timestamp":"2026-01-01T10:00:01Z","cwd":"/fixtures/project","message":{"role":"assistant","model":"claude-fixture","content":[{"type":"tool_use","id":"tool-agent-9","name":"Agent","input":{"subagent_type":"Explore","description":"Look around."}}]}}"#,
+            "
+",
+            r#"{"type":"user","sessionId":"session-absent-agent","uuid":"tool-result-1","timestamp":"2026-01-01T10:00:02Z","cwd":"/fixtures/project","toolUseResult":"{\"isAsync\":true,\"status\":\"async_launched\",\"agentId\":\"absent-agent\",\"resolvedModel\":\"claude-fixture-sonnet\"}","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tool-agent-9","content":"Launched."}]}}"#,
+            "
+"
+        ),
+    )
+    .unwrap();
+
+    let backend = ClaudeBackend::new(&root);
+    let session = located(&backend, "session-absent-agent");
+    let lineage = backend.lineage(&session).unwrap();
+
+    assert_eq!(lineage.children.len(), 1, "{:#?}", lineage.children);
+    let child = &lineage.children[0];
+    assert_eq!(child.reference, "absent-agent");
+    assert!(!child.resolved);
+    assert_eq!(child.disposition.as_deref(), Some("async_launched"));
+    assert_eq!(child.role.as_deref(), Some("Explore"));
+    assert_eq!(child.model.as_deref(), Some("claude-fixture-sonnet"));
+    // A launch is not an ending, so nothing says the child finished.
+    assert!(child.completed_at.is_none());
+    fs::remove_dir_all(root).unwrap();
+}
+
+/// Claude writes a `toolUseResult` beside every tool's result, so what makes
+/// one an agent is the `Agent` call it answers or the agent it names itself.
+#[test]
+fn claude_reads_an_agent_result_without_reading_every_tool_result() {
+    let root = std::env::temp_dir().join(format!(
+        "tapes-claude-agent-result-{}-{}",
+        std::process::id(),
+        OPENCODE_ALIAS_COUNTER.fetch_add(1, Ordering::Relaxed)
+    ));
+    let project = root.join("-fixtures-project");
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&project).unwrap();
+    fs::write(
+        project.join("session-agent-result.jsonl"),
+        concat!(
+            r#"{"type":"user","sessionId":"session-agent-result","uuid":"user-1","timestamp":"2026-01-01T10:00:00Z","cwd":"/fixtures/project","message":{"role":"user","content":"Read a file."}}"#,
+            "\n",
+            r#"{"type":"user","sessionId":"session-agent-result","uuid":"tool-result-1","timestamp":"2026-01-01T10:00:01Z","cwd":"/fixtures/project","toolUseResult":{"type":"text","file":{"filePath":"/fixtures/project/notes"}},"message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tool-read-1","content":"Notes."}]}}"#,
+            "\n",
+            r#"{"type":"user","sessionId":"session-agent-result","uuid":"tool-result-2","timestamp":"2026-01-01T10:00:02Z","cwd":"/fixtures/project","toolUseResult":{"status":"completed","agentId":"early-agent","agentType":"codex","resolvedModel":"claude-fixture-sonnet","totalDurationMs":900},"message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tool-agent-early","content":"Agent complete."}]}}"#,
+            "\n"
+        ),
+    )
+    .unwrap();
+
+    let backend = ClaudeBackend::new(&root);
+    let session = located(&backend, "session-agent-result");
+    let lineage = backend.lineage(&session).unwrap();
+
+    assert_eq!(lineage.children.len(), 1, "{:#?}", lineage.children);
+    let child = &lineage.children[0];
+    assert_eq!(child.reference, "early-agent");
+    assert_eq!(child.role.as_deref(), Some("codex"));
+    assert_eq!(child.disposition.as_deref(), Some("completed"));
+    assert!(child.spawned_at.is_none(), "no call is in this read");
+    assert!(!child.resolved);
+    fs::remove_dir_all(root).unwrap();
 }
 
 #[test]

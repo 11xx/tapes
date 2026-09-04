@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -8,10 +8,11 @@ use serde_json::Value;
 
 use super::{
     accounting_for, head_directory, home_path, list_files, list_files_with_search,
-    matching_session_file, read_jsonl, read_recording, timestamp, trailing_record, transcript,
-    Backend, Jsonl, Listing, ParsedFile, Query, TokenTotals,
+    matching_session_file, read_bounds, read_jsonl, read_recording, timestamp, trailing_record,
+    transcript, Backend, Jsonl, Listing, ParsedFile, Query, TokenTotals,
 };
 use crate::event::{Bounded, EventKind, ToolEvent};
+use crate::lineage::{ChildRef, Lineage, SourceRef};
 use crate::model::{
     AccountingBasis, AccountingCoverage, Cost, Model, Role, Session, Tokens, TrailingRecord,
     Transcript, Turn, TurnKind,
@@ -220,6 +221,75 @@ impl Backend for ClaudeBackend {
             notes,
         ))
     }
+
+    /// A Claude session's children are the subagent transcripts under its own
+    /// directory and the `Agent` calls its records hold. The parent names
+    /// them; a child's own turns are never read here.
+    fn lineage(&self, session: &Session) -> Result<Lineage> {
+        let root = self
+            .root
+            .as_deref()
+            .ok_or_else(|| anyhow!("claude store is unavailable"))?;
+        let path = matching_session_file(session_files(root), &session.id)
+            .ok_or_else(|| anyhow!("claude session {} is unavailable", session.id))?;
+        let read = read_jsonl(&path)?;
+        let mut calls = agent_calls(&read.values);
+
+        let mut children = Vec::new();
+        for file in subagent_files(&path) {
+            let call = file
+                .tool_use_id
+                .as_ref()
+                .and_then(|call_id| calls.remove(call_id))
+                .or_else(|| {
+                    let call_id = calls
+                        .iter()
+                        .find(|(_, call)| call.agent_id.as_deref() == Some(&file.agent_id))
+                        .map(|(call_id, _)| call_id.clone())?;
+                    calls.remove(&call_id)
+                })
+                .unwrap_or_default();
+            let mut source = vec![
+                SourceRef::File {
+                    path: file.transcript.display().to_string(),
+                },
+                SourceRef::File {
+                    path: file.meta.display().to_string(),
+                },
+            ];
+            source.extend(call.sources());
+            children.push(ChildRef {
+                role: file.agent_type.or(call.agent_type).or(call.role),
+                model: file.model.or(call.model),
+                spawned_at: call.spawned_at,
+                completed_at: call.completed_at,
+                disposition: call.disposition,
+                resolved: true,
+                source,
+                ..ChildRef::new(file.agent_id, self.harness())
+            });
+        }
+        // A call whose transcript is not in the store stays a child: the
+        // records name it, and the missing file is what a reader must see.
+        for (call_id, call) in calls {
+            let source = call.sources();
+            children.push(ChildRef {
+                role: call.agent_type.or(call.role),
+                model: call.model,
+                spawned_at: call.spawned_at,
+                completed_at: call.completed_at,
+                disposition: call.disposition,
+                source,
+                ..ChildRef::new(call.agent_id.unwrap_or(call_id), self.harness())
+            });
+        }
+
+        Ok(Lineage {
+            children,
+            truncation: read_bounds(&read),
+            ..Lineage::default()
+        })
+    }
 }
 
 fn read_transcript(path: &Path) -> Result<(Vec<Turn>, Jsonl, Option<TrailingRecord>)> {
@@ -417,26 +487,7 @@ fn session_files(root: &Path) -> Vec<PathBuf> {
 }
 
 fn subagent_transcript_count(path: &Path) -> usize {
-    let Some(session) = path.file_stem() else {
-        return 0;
-    };
-    let subagents = path.with_file_name(session).join("subagents");
-    fs::read_dir(subagents)
-        .into_iter()
-        .flatten()
-        .flatten()
-        .filter(|entry| {
-            let path = entry.path();
-            entry.file_type().is_ok_and(|kind| kind.is_file())
-                && path
-                    .file_stem()
-                    .and_then(|stem| stem.to_str())
-                    .is_some_and(|stem| stem.starts_with("agent-"))
-                && path
-                    .extension()
-                    .is_some_and(|extension| extension == "jsonl")
-        })
-        .count()
+    subagent_files(path).len()
 }
 
 fn parse_turns(value: &Value) -> Vec<Turn> {
@@ -604,4 +655,162 @@ fn claude_tool_event(block: &Value, subtype: &str) -> ToolEvent {
             .flatten(),
         completed_ts: None,
     }
+}
+
+/// The name Claude records a subagent spawn under.
+const AGENT_TOOL: &str = "Agent";
+/// The status a launch record carries for a subagent still running. Every
+/// other status is an ending.
+const AGENT_LAUNCHED: &str = "async_launched";
+
+/// What a spawn call in the parent said, and what its result reported. Claude
+/// writes the call as an `Agent` tool use and the outcome as a `toolUseResult`
+/// object beside the matching tool result, so the tool-use id is the join.
+#[derive(Default)]
+struct AgentCall {
+    role: Option<String>,
+    spawned_at: Option<chrono::DateTime<chrono::Utc>>,
+    call_record: Option<String>,
+    agent_id: Option<String>,
+    agent_type: Option<String>,
+    model: Option<String>,
+    disposition: Option<String>,
+    completed_at: Option<chrono::DateTime<chrono::Utc>>,
+    result_record: Option<String>,
+}
+
+impl AgentCall {
+    fn sources(&self) -> Vec<SourceRef> {
+        [&self.call_record, &self.result_record]
+            .into_iter()
+            .flatten()
+            .map(|native_id| SourceRef::Record {
+                native_id: native_id.clone(),
+            })
+            .collect()
+    }
+}
+
+/// A subagent transcript beside the parent's recording, and the meta record
+/// Claude writes next to it.
+struct SubagentFile {
+    agent_id: String,
+    transcript: PathBuf,
+    meta: PathBuf,
+    tool_use_id: Option<String>,
+    agent_type: Option<String>,
+    model: Option<String>,
+}
+
+fn agent_calls(values: &[Value]) -> HashMap<String, AgentCall> {
+    let mut calls = HashMap::<String, AgentCall>::new();
+    for value in values {
+        let ts = timestamp(&value["timestamp"]);
+        let record = value["uuid"].as_str().map(str::to_owned);
+        for block in value["message"]["content"].as_array().into_iter().flatten() {
+            match block["type"].as_str() {
+                Some("tool_use") if block["name"] == AGENT_TOOL => {
+                    let Some(call_id) = block["id"].as_str() else {
+                        continue;
+                    };
+                    let call = calls.entry(call_id.to_owned()).or_default();
+                    call.role = block["input"]["subagent_type"]
+                        .as_str()
+                        .map(str::to_owned)
+                        .or(call.role.take());
+                    call.spawned_at = ts;
+                    call.call_record = record.clone();
+                }
+                Some("tool_result") => {
+                    let Some(call_id) = block["tool_use_id"].as_str() else {
+                        continue;
+                    };
+                    let Some(outcome) = tool_use_result(value) else {
+                        continue;
+                    };
+                    // Claude writes a `toolUseResult` beside every tool's
+                    // result, so a result belongs to an agent only when its
+                    // call was an `Agent` or the payload names an agent
+                    // itself — which is how a spawn behind the read bound is
+                    // still recognized.
+                    if !calls.contains_key(call_id) && outcome["agentId"].as_str().is_none() {
+                        continue;
+                    }
+                    let call = calls.entry(call_id.to_owned()).or_default();
+                    let status = outcome["status"].as_str();
+                    call.agent_id = outcome["agentId"]
+                        .as_str()
+                        .map(str::to_owned)
+                        .or(call.agent_id.take());
+                    call.agent_type = outcome["agentType"]
+                        .as_str()
+                        .map(str::to_owned)
+                        .or(call.agent_type.take());
+                    call.model = outcome["resolvedModel"]
+                        .as_str()
+                        .map(str::to_owned)
+                        .or(call.model.take());
+                    call.disposition = status.map(str::to_owned).or(call.disposition.take());
+                    if status.is_some_and(|status| status != AGENT_LAUNCHED) {
+                        call.completed_at = ts;
+                    }
+                    call.result_record = record.clone();
+                }
+                _ => {}
+            }
+        }
+    }
+    calls
+}
+
+/// Claude writes the tool result's own payload beside the record, as an
+/// object or as the JSON text of one.
+fn tool_use_result(value: &Value) -> Option<Value> {
+    match value.get("toolUseResult")? {
+        Value::Object(object) => Some(Value::Object(object.clone())),
+        Value::String(text) => serde_json::from_str(text).ok(),
+        _ => None,
+    }
+}
+
+/// The subagent transcripts recorded under a session's own directory. Each
+/// carries a meta record naming the agent, and the file's stem carries the
+/// agent id the parent's completion record repeats.
+fn subagent_files(path: &Path) -> Vec<SubagentFile> {
+    let Some(session) = path.file_stem() else {
+        return Vec::new();
+    };
+    let directory = path.with_file_name(session).join("subagents");
+    let mut files = fs::read_dir(directory)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|entry| {
+            let path = entry.path();
+            let agent_id = path
+                .file_stem()
+                .and_then(|stem| stem.to_str())?
+                .strip_prefix("agent-")?
+                .to_owned();
+            path.extension()
+                .is_some_and(|extension| extension == "jsonl")
+                .then(|| {
+                    let meta = path.with_file_name(format!("agent-{agent_id}.meta.json"));
+                    let recorded = fs::read_to_string(&meta)
+                        .ok()
+                        .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+                        .unwrap_or(Value::Null);
+                    SubagentFile {
+                        agent_id,
+                        transcript: path,
+                        meta,
+                        tool_use_id: recorded["toolUseId"].as_str().map(str::to_owned),
+                        agent_type: recorded["agentType"].as_str().map(str::to_owned),
+                        model: recorded["model"].as_str().map(str::to_owned),
+                    }
+                })
+        })
+        .collect::<Vec<_>>();
+    files.sort_by(|left, right| left.agent_id.cmp(&right.agent_id));
+    files
 }

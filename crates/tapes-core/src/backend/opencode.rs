@@ -16,6 +16,7 @@ use super::{
     Listing, Query, TokenTotals,
 };
 use crate::event::{self, Bounded, EventKind, EventTranscript, ToolEvent};
+use crate::lineage::{ChildRef, Lineage, ParentRef, SourceRef};
 use crate::model::{
     human_bytes, AccountingBasis, AccountingCoverage, Cost, Model, Role, Session, SourceBound,
     Tokens, Transcript, Truncation, Turn, TurnKind, TurnWindow,
@@ -46,6 +47,8 @@ const API_SERVER_RETRY_DELAY: Duration = Duration::from_millis(10);
 const API_RESPONSE_TIMEOUT: Duration = Duration::from_secs(30);
 /// Every OpenCode session id carries this prefix.
 const SESSION_ID_PREFIX: &str = "ses_";
+/// Child rows a lineage read returns before it reports that it stopped.
+const MAX_LINEAGE_CHILDREN: usize = 1_000;
 
 /// A response the transport refused to carry whole. Typed so a paged read can
 /// tell it from every other failure and ask for a smaller page.
@@ -625,6 +628,137 @@ impl OpenCodeBackend {
         Ok(session)
     }
 
+    /// The relationships the session table records. `parent_id` is the
+    /// column a child carries; a row naming this session in it is a child.
+    /// A store that does not record a fork answers the shorter query.
+    fn database_lineage(&self, session: &Session) -> Result<Lineage> {
+        let id = sql_literal(&session.id);
+        let own = self.first_supported(&[
+            format!(
+                "SELECT json_object('parent_id', parent_id, 'fork_session_id', fork_session_id) \
+                 AS row FROM session WHERE id = {id} LIMIT 1"
+            ),
+            format!(
+                "SELECT json_object('parent_id', parent_id) AS row FROM session \
+                 WHERE id = {id} LIMIT 1"
+            ),
+        ])?;
+        let own = own.first().cloned().unwrap_or(Value::Null);
+        let parent = own["parent_id"]
+            .as_str()
+            .map(|native_id| -> Result<ParentRef> {
+                Ok(ParentRef {
+                    resolved: self.database_locate(native_id)?.is_some(),
+                    native_id: native_id.to_owned(),
+                    source: "session.parent_id".to_owned(),
+                })
+            })
+            .transpose()?;
+
+        let rows = self.first_supported(&[
+            format!(
+                "SELECT json_object('id', id, 'agent', agent, 'model', model) AS row \
+                 FROM session WHERE parent_id = {id} ORDER BY time_created LIMIT \
+                 {MAX_LINEAGE_CHILDREN}"
+            ),
+            format!(
+                "SELECT json_object('id', id, 'model', model) AS row FROM session \
+                 WHERE parent_id = {id} ORDER BY time_created LIMIT {MAX_LINEAGE_CHILDREN}"
+            ),
+        ])?;
+        let mut notes = Vec::new();
+        if rows.len() >= MAX_LINEAGE_CHILDREN {
+            notes.push(format!(
+                "The lineage read returned the first {MAX_LINEAGE_CHILDREN} child sessions; \
+                 the store may hold more."
+            ));
+        }
+        let children = rows
+            .iter()
+            .filter_map(|row| {
+                let id = row["id"].as_str()?.to_owned();
+                Some(ChildRef {
+                    session_id: Some(id.clone()),
+                    role: row["agent"].as_str().map(str::to_owned),
+                    model: database_model(&row["model"]).map(|model| model.identity()),
+                    resolved: true,
+                    source: vec![SourceRef::Session { id: id.clone() }],
+                    ..ChildRef::new(id, self.harness())
+                })
+            })
+            .collect();
+
+        Ok(Lineage {
+            parent,
+            children,
+            forked_from: own["fork_session_id"].as_str().map(str::to_owned),
+            notes,
+            ..Lineage::default()
+        })
+    }
+
+    /// The first of these queries the store answers. A column a store does
+    /// not have is a fact about that store, not a failure of the read.
+    fn first_supported(&self, queries: &[String]) -> Result<Vec<Value>> {
+        let mut last = None;
+        for query in queries {
+            match self.database(query) {
+                Ok(rows) => return Ok(rows),
+                Err(error) => last = Some(error),
+            }
+        }
+        Err(last.unwrap_or_else(|| anyhow!("opencode database was not asked anything")))
+    }
+
+    /// The relationships the API records: a session names its parent, and the
+    /// listing page names the sessions that carry this one as theirs.
+    fn api_lineage(&self, session: &Session) -> Result<Lineage> {
+        let response = self.request(&format!("/api/session/{}", session.id))?;
+        let parent = response["data"]["parentID"]
+            .as_str()
+            .map(|native_id| -> Result<ParentRef> {
+                Ok(ParentRef {
+                    resolved: self.locate(native_id)?.is_some(),
+                    native_id: native_id.to_owned(),
+                    source: "session.parentID".to_owned(),
+                })
+            })
+            .transpose()?;
+
+        let page = self.request(&format!("/api/session?order=desc&limit={MAX_API_SESSIONS}"))?;
+        let rows = page["data"]
+            .as_array()
+            .ok_or_else(|| anyhow!("opencode session response has no data array"))?;
+        let children = rows
+            .iter()
+            .filter(|row| row["parentID"].as_str() == Some(session.id.as_str()))
+            .filter_map(|row| {
+                let id = row["id"].as_str()?.to_owned();
+                Some(ChildRef {
+                    session_id: Some(id.clone()),
+                    role: row["agent"].as_str().map(str::to_owned),
+                    model: row["model"]["id"].as_str().map(str::to_owned),
+                    resolved: true,
+                    source: vec![SourceRef::Session { id: id.clone() }],
+                    ..ChildRef::new(id, self.harness())
+                })
+            })
+            .collect();
+        let mut notes = Vec::new();
+        if rows.len() >= MAX_API_SESSIONS {
+            notes.push(format!(
+                "The lineage read looked for children in the newest {MAX_API_SESSIONS} sessions \
+                 the API returned; an older child was not looked for."
+            ));
+        }
+        Ok(Lineage {
+            parent,
+            children,
+            notes,
+            ..Lineage::default()
+        })
+    }
+
     /// The coordinate a consumer writes down beside the session id: the
     /// database file for the stable store, the program and endpoint for the
     /// API. Opaque by contract; only its stability matters.
@@ -986,6 +1120,13 @@ impl Backend for OpenCodeBackend {
         }
         let pages = paged_messages(&|path| self.request(path), &session.id, tail)?;
         Ok(paged_transcript(session.clone(), &pages, tail))
+    }
+
+    fn lineage(&self, session: &Session) -> Result<Lineage> {
+        if self.uses_database() {
+            return self.database_lineage(session);
+        }
+        self.api_lineage(session)
     }
 
     fn events(&self, session: &Session, tail: usize) -> Result<EventTranscript> {

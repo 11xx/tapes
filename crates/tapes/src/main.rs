@@ -7,6 +7,7 @@ use anyhow::{anyhow, Result};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use tapes_core::bundle::{Bundle, BundleFile};
 use tapes_core::event::{EventKind, EventRecord, EventTranscript, Incomplete};
+use tapes_core::lineage::{ChildRef, LineageView};
 use tapes_core::model::{
     human_bytes, human_speaker, human_timestamp, human_title, Accounting, AccountingBasis,
     AccountingCoverage, Cost, LiveState, Session, SourceBound, Tokens, Transcript, Truncation,
@@ -219,6 +220,20 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Which sessions a recording names as its relatives: the session it was
+    /// spawned from or forked from, and the children its own store records,
+    /// each with the role, model, timestamps, and outcome the harness wrote.
+    /// A relationship exists only where a record states it; nothing is
+    /// inferred from directories, titles, or timestamps. A reference the
+    /// store cannot resolve is kept and marked. A child is referred to, never
+    /// absorbed: read its transcript with `show` under its own id.
+    Lineage {
+        #[command(flatten)]
+        selection: SelectionArgs,
+        /// Render the versioned tapes-lineage/1 object as JSON.
+        #[arg(long)]
+        json: bool,
+    },
     /// Where one session's quota went: its recorded tokens, cost, and turn
     /// counts, plus whatever else its harness recorded — a context window, a
     /// provider quota window, wall-clock durations, a per-model split. The
@@ -395,6 +410,14 @@ fn dispatch(cli: Cli) -> Result<()> {
                 print_events(&events, by_latest);
             }
         }
+        Command::Lineage { selection, json } => {
+            let lineage = tapes_core::lineage(selection.selection())?;
+            if json {
+                println!("{}", serde_json::to_string(&lineage)?);
+            } else {
+                print!("{}", render_lineage(&lineage));
+            }
+        }
         Command::Usage { selection, json } => {
             let usage = tapes_core::usage(selection.selection())?;
             if json {
@@ -471,6 +494,68 @@ fn dispatch(cli: Cli) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// One line for the session, one for a recorded parent or fork, and one per
+/// child. A relationship the store does not record has no line, and an empty
+/// child list is the answer that the store records none.
+fn render_lineage(lineage: &LineageView) -> String {
+    let mut out = format!(
+        "session: {} {}",
+        lineage.session.harness, lineage.session.id
+    );
+    if let Some(model) = &lineage.session.model {
+        out.push_str(&format!(" {}", model.identity()));
+    }
+    out.push('\n');
+    if let Some(parent) = &lineage.lineage.parent {
+        out.push_str(&format!(
+            "parent: {} ({}){}\n",
+            parent.native_id,
+            parent.source,
+            if parent.resolved { "" } else { " unresolved" }
+        ));
+    }
+    if let Some(forked_from) = &lineage.lineage.forked_from {
+        out.push_str(&format!("forked from: {forked_from}\n"));
+    }
+    for child in &lineage.lineage.children {
+        out.push_str(&render_child(child));
+    }
+    render_truncation_notes(&mut out, &lineage.truncation);
+    render_notes(&mut out, &lineage.notes);
+    out
+}
+
+fn render_child(child: &ChildRef) -> String {
+    let mut rendered = format!("child: {}", child.role.as_deref().unwrap_or("-"));
+    rendered.push_str(&format!(" {}", child.reference));
+    if let Some(session_id) = &child.session_id {
+        if session_id != &child.reference {
+            rendered.push_str(&format!(" ({session_id})"));
+        }
+    }
+    if let Some(model) = &child.model {
+        rendered.push_str(&format!(" {model}"));
+    }
+    for (label, stamp) in [
+        ("spawned", child.spawned_at),
+        ("completed", child.completed_at),
+    ] {
+        rendered.push_str(&format!(
+            " {label} {}",
+            stamp.map_or_else(|| "-".to_owned(), human_timestamp)
+        ));
+    }
+    rendered.push_str(&format!(
+        " status {}",
+        child.disposition.as_deref().unwrap_or("-")
+    ));
+    if !child.resolved {
+        rendered.push_str(" unresolved");
+    }
+    rendered.push('\n');
+    rendered
 }
 
 /// One line per fact, and a fact the harness did not record has no line.

@@ -2137,6 +2137,10 @@ fn list_sort_oldest_keeps_the_oldest_sessions_under_the_limit() {
 
 const CLAUDE_SESSION: &str = include_str!("../fixtures/claude/project/session-claude.jsonl");
 const PI_SESSION: &str = include_str!("../fixtures/pi/2026-01-01T10-00-00-000Z_session-pi.jsonl");
+const CLAUDE_SUBAGENT: &str =
+    include_str!("../fixtures/claude/project/session-claude/subagents/agent-fixture.jsonl");
+const CLAUDE_SUBAGENT_META: &str =
+    include_str!("../fixtures/claude/project/session-claude/subagents/agent-fixture.meta.json");
 
 /// Every turn says what it is, and a user turn the harness recorded its own
 /// command in says so in the heading a reader judges an ending by.
@@ -2217,6 +2221,98 @@ fn show_types_every_turn_and_names_a_control_turn_in_human_output() {
     assert!(human.contains("[user/control #10 "), "{human}");
     assert!(human.contains("[user/notice #12 "), "{human}");
     assert!(human.contains("[user #5 "), "{human}");
+}
+
+#[test]
+fn lineage_help_names_the_schema_and_the_rule_it_follows() {
+    let output = tapes().args(["lineage", "--help"]).output().unwrap();
+    assert!(output.status.success());
+    let help = String::from_utf8_lossy(&output.stdout);
+    assert!(help.contains("tapes-lineage/1"), "{help}");
+    assert!(
+        help.contains("A relationship exists only where a record states it"),
+        "{help}"
+    );
+    assert!(help.contains("referred to, never"), "{help}");
+}
+
+/// The command reports the relationships a store recorded, keeps a reference
+/// the store cannot resolve, and never reads a child's transcript.
+#[test]
+fn lineage_reports_a_subagent_reference_and_an_unresolved_parent() {
+    let root = TemporaryDirectory::new(
+        std::env::temp_dir().join(format!("tapes-cli-lineage-{}", std::process::id())),
+    );
+    let home = root.path().join("home");
+    let project = home.join(".claude/projects/-fixtures-project");
+    let subagents = project.join("session-claude/subagents");
+    fs::create_dir_all(&subagents).unwrap();
+    fs::write(project.join("session-claude.jsonl"), CLAUDE_SESSION).unwrap();
+    fs::write(subagents.join("agent-fixture.jsonl"), CLAUDE_SUBAGENT).unwrap();
+    fs::write(
+        subagents.join("agent-fixture.meta.json"),
+        CLAUDE_SUBAGENT_META,
+    )
+    .unwrap();
+    let pi_sessions = home.join(".pi/agent/sessions");
+    fs::create_dir_all(&pi_sessions).unwrap();
+    fs::write(
+        pi_sessions.join("2026-01-01T10-00-00-000Z_session-pi.jsonl"),
+        PI_SESSION,
+    )
+    .unwrap();
+    let codex_home = root.path().join("codex");
+    fs::create_dir_all(codex_home.join("sessions")).unwrap();
+
+    let run = |arguments: &[&str]| {
+        let mut command = tapes();
+        command.args(arguments);
+        with_fixture_env(
+            &mut command,
+            &codex_home,
+            &home,
+            Path::new("/definitely/missing"),
+        );
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        output.stdout
+    };
+
+    let value: Value =
+        serde_json::from_slice(&run(&["lineage", "session-claude", "--json"])).unwrap();
+    assert_eq!(value["schema"], "tapes-lineage/1");
+    assert_eq!(value["session"]["id"], "session-claude");
+    let children = value["lineage"]["children"].as_array().unwrap();
+    assert_eq!(children.len(), 1, "{value}");
+    assert_eq!(children[0]["reference"], "fixture");
+    assert_eq!(children[0]["role"], "Explore");
+    assert_eq!(children[0]["disposition"], "completed");
+    assert_eq!(children[0]["resolved"], true);
+    assert!(value["lineage"].get("parent").is_none(), "{value}");
+    // The parent refers to the child; nothing the child recorded is in here.
+    assert!(
+        !String::from_utf8(run(&["lineage", "session-claude", "--json"]))
+            .unwrap()
+            .contains("Subagent fixture."),
+        "{value}"
+    );
+
+    let human = String::from_utf8(run(&["lineage", "session-claude"])).unwrap();
+    assert!(human.contains("child: Explore fixture"), "{human}");
+    assert!(human.contains("status completed"), "{human}");
+
+    let value: Value = serde_json::from_slice(&run(&["lineage", "session-pi", "--json"])).unwrap();
+    assert_eq!(value["lineage"]["parent"]["native_id"], "session-pi-parent");
+    assert_eq!(value["lineage"]["parent"]["resolved"], false);
+    assert_eq!(value["lineage"]["children"].as_array().unwrap().len(), 0);
+
+    let human = String::from_utf8(run(&["lineage", "session-pi"])).unwrap();
+    assert!(human.contains("parent: session-pi-parent"), "{human}");
+    assert!(human.contains("unresolved"), "{human}");
 }
 
 #[test]

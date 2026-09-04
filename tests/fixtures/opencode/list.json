@@ -54,7 +54,8 @@
       "title": "API-only fixture session",
       "location": {
         "directory": "/fixtures/api-project"
-      }
+      },
+      "parentID": "ses_000000fixtureSharedSession"
     }
   ],
   "cursor": {

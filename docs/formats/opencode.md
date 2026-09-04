@@ -352,6 +352,19 @@ unbounded and unexpectedly expensive. An explicit content search may read the
 bounded message tail, but that read preserves the same metadata rather than
 inventing a title after listing.
 
+## Session relationships
+
+A relationship is recorded on the session that has one. The database `session`
+table carries `parent_id`, and `fork_session_id` where the store records
+forks; the API carries the same parent as `parentID` on the session object.
+Lineage therefore reads a session's parent from its own row or object, and its
+children as the rows or listed sessions naming it as their parent. A child
+carries its own id, its `agent` as the role, and the model it recorded. A
+store whose `session` table has no fork column answers the parent query
+without it, which is a fact about that store rather than a failed read. The
+database child query returns the first 1,000 rows and the API filters the
+newest 1,000 listed sessions; either bound reached is reported as a note.
+
 ## Resume / fork primitives
 
 - Resume in the TUI: `opencode2 --session ses_<id>` (global store; cwd not required)

@@ -1,14 +1,17 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Result};
 use serde_json::Value;
 
 use super::{
-    accounting_for, head_directory, home_path, jsonl_files, list_files, list_files_with_search,
-    read_jsonl, read_recording, session_file, timestamp, trailing_record, transcript, Backend,
-    Jsonl, Listing, ParsedFile, Query, TokenTotals,
+    accounting_for, head_directory, head_jsonl, home_path, jsonl_files, list_files,
+    list_files_with_search, matching_session_file, read_bounds, read_jsonl, read_recording,
+    session_file, timestamp, trailing_record, transcript, Backend, Jsonl, Listing, ParsedFile,
+    Query, TokenTotals,
 };
 use crate::event::{Bounded, EventKind, ToolEvent};
+use crate::lineage::{ChildRef, Lineage, ParentRef, SourceRef};
 use crate::model::{
     is_known_envelope, without_known_envelopes, AccountingBasis, AccountingCoverage, Model, Role,
     Session, Tokens, TrailingRecord, Transcript, Turn, TurnKind,
@@ -217,6 +220,80 @@ impl Backend for CodexBackend {
             trailing_record,
             Vec::new(),
         ))
+    }
+
+    /// A Codex child is an ordinary rollout whose header names its parent, so
+    /// lineage joins two independent records: the spawn and wait calls in the
+    /// parent, keyed by the agent path they name, and the headers of the
+    /// store's own recordings. Only headers are read; no child's turns are.
+    fn lineage(&self, session: &Session) -> Result<Lineage> {
+        let root = self
+            .root
+            .as_deref()
+            .ok_or_else(|| anyhow!("codex store is unavailable"))?;
+        let files = jsonl_files(root);
+        let path = matching_session_file(files.clone(), &session.id)
+            .ok_or_else(|| anyhow!("codex session {} is unavailable", session.id))?;
+        let recording = read_recording(&path)?;
+        let header = recording
+            .opening()
+            .iter()
+            .find(|value| value["type"] == "session_meta")
+            .map(|value| value["payload"].clone())
+            .unwrap_or(Value::Null);
+
+        let parent = header["parent_thread_id"]
+            .as_str()
+            .map(|native_id| ParentRef {
+                resolved: matching_session_file(files.clone(), native_id).is_some(),
+                native_id: native_id.to_owned(),
+                source: "session_meta.parent_thread_id".to_owned(),
+            });
+
+        let mut agents = spawned_agents(&recording.tail.values);
+        let (probed, probe_bound) = child_headers(&files, &path, &session.id);
+        for child in probed {
+            let entry = agents.entry(child.agent_path.clone()).or_default();
+            entry.session_id = Some(child.thread_id);
+            entry.nickname = child.nickname.or_else(|| entry.nickname.take());
+            entry.source.push(SourceRef::File {
+                path: child.path.display().to_string(),
+            });
+        }
+
+        let children = agents
+            .into_iter()
+            .map(|(reference, agent)| ChildRef {
+                role: agent.nickname.or(agent.task_name),
+                model: agent.model,
+                group: agent_group(&reference),
+                spawned_at: agent.spawned_at,
+                completed_at: agent.completed_at,
+                disposition: agent.disposition,
+                resolved: agent.session_id.is_some(),
+                session_id: agent.session_id,
+                source: agent.source,
+                ..ChildRef::new(reference, self.harness())
+            })
+            .collect();
+
+        let mut notes = Vec::new();
+        if let Some(inspected) = probe_bound {
+            notes.push(format!(
+                "The lineage read inspected the newest {inspected} recordings in the store; \
+                 an older child recording was not looked for."
+            ));
+        }
+        let mut lineage = Lineage {
+            parent,
+            children,
+            forked_from: header["forked_from_id"].as_str().map(str::to_owned),
+            truncation: read_bounds(&recording.tail),
+            notes,
+        };
+        // The agents are gathered by path rather than in record order.
+        lineage.sort_children();
+        Ok(lineage)
     }
 }
 
@@ -502,4 +579,149 @@ fn reasoning_text(payload: &Value) -> String {
     } else {
         String::new()
     }
+}
+
+/// Recordings whose headers the lineage read will open while looking for
+/// children. Well above any store seen in practice, so it bounds a
+/// pathological one without hiding a real child.
+const MAX_LINEAGE_PROBES: usize = 5_000;
+/// The function call Codex records when a session spawns another agent.
+const SPAWN_AGENT: &str = "spawn_agent";
+/// The status an agent report carries once that agent has finished.
+const AGENT_COMPLETED: &str = "completed";
+
+/// One agent a parent drove, as its own records name it. The key is the agent
+/// path, which is what a child's header and the parent's outputs share.
+#[derive(Default)]
+struct SpawnedAgent {
+    task_name: Option<String>,
+    nickname: Option<String>,
+    model: Option<String>,
+    spawned_at: Option<chrono::DateTime<chrono::Utc>>,
+    completed_at: Option<chrono::DateTime<chrono::Utc>>,
+    disposition: Option<String>,
+    session_id: Option<String>,
+    source: Vec<SourceRef>,
+}
+
+/// A child recording found by its header.
+struct ChildHeader {
+    thread_id: String,
+    agent_path: String,
+    nickname: Option<String>,
+    path: PathBuf,
+}
+
+/// The agents a rollout's own records say it drove. A `spawn_agent` call
+/// carries the request and its output names the path the agent runs under;
+/// every call that reports on agents answers with their statuses under those
+/// same paths, so an agent whose spawn is behind the read bound is still
+/// named by the report that mentions it.
+fn spawned_agents(values: &[Value]) -> HashMap<String, SpawnedAgent> {
+    let mut agents = HashMap::<String, SpawnedAgent>::new();
+    let mut spawns = HashMap::<String, SpawnedAgent>::new();
+    for value in values {
+        if value["type"] != "response_item" {
+            continue;
+        }
+        let payload = &value["payload"];
+        let ts = timestamp(&value["timestamp"]);
+        let call_id = payload["call_id"].as_str().unwrap_or_default().to_owned();
+        match payload["type"].as_str() {
+            Some("function_call") if payload["name"] == SPAWN_AGENT => {
+                let arguments = payload_json(&payload["arguments"]);
+                spawns.insert(
+                    call_id.clone(),
+                    SpawnedAgent {
+                        task_name: arguments["task_name"].as_str().map(str::to_owned),
+                        model: arguments["model"].as_str().map(str::to_owned),
+                        spawned_at: ts,
+                        source: vec![SourceRef::Record { native_id: call_id }],
+                        ..SpawnedAgent::default()
+                    },
+                );
+            }
+            Some("function_call_output") => {
+                let output = payload_json(&payload["output"]);
+                if let Some(spawn) = spawns.remove(&call_id) {
+                    let Some(path) = output["task_name"].as_str() else {
+                        continue;
+                    };
+                    let agent = agents.entry(path.to_owned()).or_default();
+                    agent.task_name = spawn.task_name;
+                    agent.model = spawn.model;
+                    agent.spawned_at = spawn.spawned_at;
+                    agent.source.extend(spawn.source);
+                    agent.source.push(SourceRef::Record {
+                        native_id: call_id.clone(),
+                    });
+                }
+                for reported in output["agents"].as_array().into_iter().flatten() {
+                    let Some(name) = reported["agent_name"].as_str() else {
+                        continue;
+                    };
+                    let Some(status) = reported["agent_status"].as_str() else {
+                        continue;
+                    };
+                    let agent = agents.entry(name.to_owned()).or_default();
+                    agent.disposition = Some(status.to_owned());
+                    if status == AGENT_COMPLETED && agent.completed_at.is_none() {
+                        agent.completed_at = ts;
+                    }
+                    agent.source.push(SourceRef::Record {
+                        native_id: call_id.clone(),
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
+    agents
+}
+
+/// A Codex payload field that carries JSON as text, or as the value itself.
+fn payload_json(value: &Value) -> Value {
+    match value {
+        Value::String(text) => serde_json::from_str(text).unwrap_or(Value::Null),
+        other => other.clone(),
+    }
+}
+
+/// The store's recordings whose headers name this session as their parent,
+/// and the probe bound when the store held more than the read inspected.
+fn child_headers(files: &[PathBuf], own: &Path, id: &str) -> (Vec<ChildHeader>, Option<usize>) {
+    let inspected = files.len().min(MAX_LINEAGE_PROBES);
+    let bound = (files.len() > inspected).then_some(inspected);
+    let children = files
+        .iter()
+        .take(inspected)
+        .filter(|path| path.as_path() != own)
+        .filter_map(|path| {
+            let payload = head_jsonl(path)
+                .into_iter()
+                .find(|value| value["type"] == "session_meta")
+                .map(|value| value["payload"].clone())?;
+            (payload["parent_thread_id"].as_str() == Some(id)).then_some(())?;
+            Some(ChildHeader {
+                thread_id: payload["id"].as_str()?.to_owned(),
+                agent_path: payload["agent_path"].as_str()?.to_owned(),
+                nickname: payload["agent_nickname"].as_str().map(str::to_owned),
+                path: path.clone(),
+            })
+        })
+        .collect();
+    (children, bound)
+}
+
+/// The namespace an agent path sits in, where the harness organizes children
+/// under one.
+fn agent_group(path: &str) -> Option<String> {
+    let (group, name) = path.rsplit_once('/')?;
+    (!name.is_empty()).then(|| {
+        if group.is_empty() {
+            "/".to_owned()
+        } else {
+            group.to_owned()
+        }
+    })
 }

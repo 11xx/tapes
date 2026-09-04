@@ -262,3 +262,35 @@ A session's subagent threads live one level deeper, and each carries the
 Enumerating `<encoded-cwd>/*.jsonl` therefore lists sessions; recursing further
 lists the same session many times over. `tapes` enumerates at session depth and
 reports the subagent count as a transcript note.
+
+Beside each transcript is `agent-<id>.meta.json`, describing the agent the
+parent asked for:
+
+```json
+{"agentType": "Explore", "description": "…", "toolUseId": "toolu_01…", "spawnDepth": 1, "model": "sonnet"}
+```
+
+`toolUseId` is the `id` of the `Agent` tool use in the parent, which is where
+the spawn itself is recorded:
+
+```json
+{"type": "tool_use", "id": "toolu_01…", "name": "Agent", "input": {"subagent_type": "Explore", "description": "…"}}
+```
+
+The matching tool-result record carries a top-level `toolUseResult`, an object
+or the JSON text of one, reporting the agent's outcome: `status`, `agentId`,
+`agentType`, `resolvedModel`, and, once it ends, `totalDurationMs`,
+`totalTokens`, and `totalToolUseCount`. A record whose `status` is
+`async_launched` reports a subagent that is still running and is not an
+ending; any other status is one.
+
+A `toolUseResult` accompanies every tool's result, so a result belongs to an
+agent when it answers an `Agent` call or names an `agentId` itself; the second
+is what recognizes an agent whose call is behind the bounded read.
+
+The lineage view reads those three records and nothing else: the file stem's
+agent id is the child's reference, the meta record and the call supply its
+role and model, the call and result supply the spawn and ending timestamps,
+and `status` is the disposition. A subagent transcript is not addressable as a
+session of its own, so a child carries no session id. A call whose transcript
+is absent from the store stays a child with `resolved: false`.

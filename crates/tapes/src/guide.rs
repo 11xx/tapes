@@ -116,6 +116,7 @@ PROBE BEFORE EXPORTING
   tapes show <id> --json         The same turns as tapes-session/1.
   tapes events <id> --json       Typed tool calls, results, and pairs.
   tapes usage <id> --json        Tokens, cost, and turn counts.
+  tapes lineage <id> --json      The sessions this one names as relatives.
 
   show returns the last 100 turns unless --tail says otherwise, and marks the
   result truncated whenever it dropped any. It is the probe, not the archive;
@@ -143,6 +144,24 @@ PROBE BEFORE EXPORTING
   harness records them: codex reports its context window and quota windows,
   claude reports wall-clock durations and a per-model split, pi and opencode
   report neither.
+
+  lineage answers which sessions a recording names as relatives, as
+  tapes-lineage/1: the session it was spawned or forked from, and the children
+  its own store records, each with the role, model, spawn and completion
+  stamps, and outcome its harness wrote. A relationship exists only where a
+  record states it — a child header naming a parent, a spawn or completion
+  event, a transcript file under the parent's directory, a session row's
+  parent column. Nothing is inferred from directories, titles, or times, and a
+  reference the store cannot resolve is kept with resolved: false, because a
+  child whose recording is gone is exactly what a reader is looking for.
+  A parent refers to a child and never absorbs it: read the child with
+  `show` under its own id, and expect a claude subagent, which is not
+  addressable as a session, to carry no session id.
+  What each harness records differs: claude names its subagent transcripts and
+  the Agent calls that spawned them, codex joins spawn and wait calls to the
+  rollout headers naming this session as their parent, opencode reads the
+  parent column on either projection, and pi carries a parent reference on the
+  child alone.
 
   Every turn carries an `ordinal`, its zero-based place in the session's
   normalized sequence. On a file-backed session (claude, codex, pi) it is kept

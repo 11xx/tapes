@@ -53,6 +53,13 @@ never reaches, and past the bound the reader cannot tell. A transcript larger
 than the tail therefore leaves `derived_title` absent. A turn's `native_id` is
 its entry's `id`.
 
+The header also carries `parentSession` on a session started from another
+one: the id of the session it came from, in pi's own terms. It is the only
+relationship pi records, and it sits on the session that has it, so the
+lineage view reports that reference — resolved when the store holds a session
+under that id — and no children. A reference the store cannot resolve is kept
+rather than dropped.
+
 `model_change` and `thinking_level_change` are timestamped state entries rather
 than turns. When either is the final entry on the active path after the newest
 rendered turn, the backend reports its kind and timestamp as

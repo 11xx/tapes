@@ -18,6 +18,7 @@ pub use event::{
 pub mod backend;
 pub mod bundle;
 pub mod event;
+pub mod lineage;
 pub mod model;
 pub mod scope;
 pub mod usage;
@@ -789,6 +790,22 @@ pub fn usage_with_backends(
         selection,
         EXPORT_TAIL,
     )?))
+}
+
+/// One session's recorded relatives. The read never opens a child's turns:
+/// a relationship is a reference, and `show` under the child's own id is how
+/// its transcript is read.
+pub fn lineage(selection: Selection) -> Result<lineage::LineageView> {
+    lineage_with_backends(&backend::backends(), selection)
+}
+
+pub fn lineage_with_backends(
+    backends: &[Box<dyn Backend>],
+    selection: Selection,
+) -> Result<lineage::LineageView> {
+    let resolved = selection.resolve(backends)?;
+    let read = backends[resolved.backend_index].lineage(&resolved.session)?;
+    Ok(lineage::view(&resolved.session, read))
 }
 
 pub fn events(selection: Selection, tail: Option<usize>) -> Result<event::EventTranscript> {

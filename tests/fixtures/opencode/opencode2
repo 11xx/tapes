@@ -187,6 +187,29 @@ if [ "$mode" = database ] || [ "$mode" = database-malformed ]; then
           ;;
       esac
       ;;
+    *"'parent_id', parent_id"*)
+      case "$query" in
+        *"ses_database_only_fixture"*)
+          database_rows database-lineage-database-only.json
+          ;;
+        *"ses_000000fixtureSharedSession"*)
+          database_rows database-lineage-shared.json
+          ;;
+        *)
+          exit 0
+          ;;
+      esac
+      ;;
+    *"FROM session WHERE parent_id = "*)
+      case "$query" in
+        *"ses_000000fixtureSharedSession"*)
+          database_rows database-children-shared.json
+          ;;
+        *)
+          exit 0
+          ;;
+      esac
+      ;;
     *"FROM session WHERE id = "*)
       case "$query" in
         *"ses_truncated_fixture"*)
