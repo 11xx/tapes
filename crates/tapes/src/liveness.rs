@@ -6,6 +6,7 @@ use std::process::{Child, ChildStdout, Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 
 use serde::Deserialize;
+use tapes_core::brief::Brief;
 use tapes_core::endings::Ending;
 use tapes_core::model::{LiveState, Session};
 
@@ -216,4 +217,9 @@ pub fn annotate_endings(endings: &mut [Ending]) {
     for ending in endings {
         ending.session.live = live.get(&ending.session.id).cloned();
     }
+}
+
+/// The same join onto the one session a brief is about.
+pub fn annotate_brief(brief: &mut Brief) {
+    brief.session.live = snapshot().get(&brief.session.id).cloned();
 }

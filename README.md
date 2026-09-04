@@ -16,6 +16,8 @@ tapes show ses_07e16cc8 --json
 tapes events ses_07e16cc8 --name wait_agent --json
 tapes usage ses_07e16cc8 --json
 tapes stats ses_07e16cc8 --json
+
+tapes brief ses_07e16cc8
 tapes endings --here --since 2026-01-01 --json
 tapes export ses_07e16cc8 --bundle /tmp/
 ```
@@ -237,6 +239,20 @@ figures. Every figure is a count of records the harness wrote; nothing is
 judged, ranked, or explained. Human output prints one line per group and no
 line for a group the recording holds nothing for.
 
+`brief` answers what a continuation of one session needs from its recording as
+`tapes-brief/1`, for the case where resuming the session itself has gone too
+expensive: where it stopped, the directory it worked in and the commit that
+directory sits on, the tool calls the read never saw a result for, the children
+whose outcome its store does not record, and the last `--tail` operator and
+assistant turns (12 by default) cut at 600 characters. It reads the recording
+alone — no journal, no project tool — so it is one half of a continuation and
+the project's own record of the work is the other; the caller joins them.
+`working_set.directory_exists` states whether the recorded directory is still
+there, and uncommitted state is left to the caller, being present-tense rather
+than recorded. A call or child it lists is a handle, not a verdict: the
+recording says only that nothing answered it. Human output is the same content
+in one screen, in that reading order.
+
 `export` writes a three-file bundle sharing one timestamped prefix, into
 `--bundle <dir>` or `/tmp`:
 
@@ -319,13 +335,17 @@ export. `tapes lineage --latest
 --json` answers which sessions a recording names as relatives — the one that
 spawned it, and the children its store records with their roles and outcomes
 — from the records themselves rather than from directory or timestamp
-proximity. `tapes usage --here --since <date> --json` answers the same questions across a project's sessions at once, and `tapes endings --here --since
+proximity. `tapes brief <id> --json` answers what picking one session's work
+back up needs from its recording, so a continuation costs one bounded read
+rather than a resent history. `tapes usage --here --since <date> --json` answers the same questions across a project's sessions at once, and `tapes endings --here --since
 <date> --json` says what each of those sessions ends on, so a scan reads the
 few endings that matter instead of every tail.
 
 **Contracts you can build on.** `tapes-list/1`, `tapes-session/1`,
 `tapes-events/1`, `tapes-usage/1`, `tapes-usage-summary/1`, `tapes-lineage/1`,
 `tapes-endings/1`, `tapes-stats/1`, and `tapes-export-manifest/1` are versioned
+
+`tapes-endings/1`, `tapes-brief/1`, and `tapes-export-manifest/1` are versioned
 JSON; a breaking shape change bumps the version. A single-session `export`
 prints
 exactly three paths and their sizes on stdout, in reading order, and writes each

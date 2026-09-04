@@ -5,7 +5,8 @@ use std::path::PathBuf;
 
 use anyhow::{anyhow, Result};
 use clap::{Args, Parser, Subcommand, ValueEnum};
-use tapes_core::bundle::{Bundle, BundleFile};
+use tapes_core::brief::{Brief, OpenCall, OpenChild, DEFAULT_BRIEF_TAIL, TAIL_TEXT_CHARS};
+use tapes_core::bundle::{Bundle, BundleFile, GitContext};
 use tapes_core::endings::{Ending, EndingsReport, DEFAULT_ENDINGS_TAIL};
 use tapes_core::event::{EventKind, EventRecord, EventTranscript, Incomplete};
 use tapes_core::lineage::{ChildRef, LineageView};
@@ -380,6 +381,25 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// What a continuation of one session needs from its recording, as
+    /// tapes-brief/1: where the work stopped, the working directory and the
+    /// commit it sits on, the calls the read never saw a result for, the
+    /// children whose outcome the store does not record, and a bounded tail
+    /// of the exchange. It reads the recording alone and judges nothing —
+    /// what a project's journal records about the same work is the other half
+    /// of a continuation, and the caller joins them.
+    Brief {
+        #[command(flatten)]
+        selection: SelectionArgs,
+        /// Render this many of the session's newest operator and assistant
+        /// turns, each cut at 600 characters. Every other kind of turn stays
+        /// out of the tail.
+        #[arg(long, value_name = "N", default_value_t = DEFAULT_BRIEF_TAIL)]
+        tail: usize,
+        /// Render the versioned tapes-brief/1 object as JSON.
+        #[arg(long)]
+        json: bool,
+    },
     /// What each session of a selection ends on, one bounded record each, as
     /// tapes-endings/1. The selection uses the flags `list` and `export` take,
     /// applied before any transcript is opened; each selected session then
@@ -716,6 +736,19 @@ fn dispatch(cli: Cli) -> Result<()> {
                 }
             }
         }
+        Command::Brief {
+            selection,
+            tail,
+            json,
+        } => {
+            let mut brief = tapes_core::brief(selection.selection(), Some(tail))?;
+            liveness::annotate_brief(&mut brief);
+            if json {
+                println!("{}", serde_json::to_string(&brief)?);
+            } else {
+                print!("{}", render_brief(&brief));
+            }
+        }
         Command::Endings {
             harness,
             scope,
@@ -846,6 +879,144 @@ fn dispatch(cli: Cli) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// The continuation's own reading order: which session this is, where it
+/// worked, where it stopped, what it left open, and what it last said. A fact
+/// the recording does not carry has no line, so what is printed is what the
+/// read established.
+fn render_brief(brief: &Brief) -> String {
+    let mut out = format!("session: {} {}", brief.session.harness, brief.session.id);
+    match (&brief.session.title, &brief.session.derived_title) {
+        (Some(title), _) => out.push_str(&format!(" {title}")),
+        (None, Some(hint)) => out.push_str(&format!(" ~{hint}")),
+        (None, None) => {}
+    }
+    out.push_str(&match brief.session.live {
+        Some(LiveState::Working) => " [working]".to_owned(),
+        Some(LiveState::Idle) => " [idle]".to_owned(),
+        None => String::new(),
+    });
+    out.push('\n');
+
+    out.push_str("working set: ");
+    match &brief.working_set.directory {
+        Some(directory) => {
+            out.push_str(&directory.display().to_string());
+            if !brief.working_set.directory_exists {
+                out.push_str(" (gone)");
+            }
+        }
+        None => out.push('-'),
+    }
+    if let Some(git) = &brief.working_set.git {
+        out.push_str(&render_git(git));
+    }
+    out.push('\n');
+
+    out.push_str(&format!(
+        "ending: {}",
+        brief
+            .ending
+            .last_turn
+            .as_ref()
+            .map_or_else(|| "-".to_owned(), |turn| speaker(&turn.role, turn.kind))
+    ));
+    for fact in &brief.ending.facts {
+        out.push_str(&format!(" {}", fact.label()));
+    }
+    if !brief.ending.incomplete.is_empty() {
+        out.push_str(&format!(
+            " [incomplete: {}]",
+            brief
+                .ending
+                .incomplete
+                .iter()
+                .map(|limit| limit.label())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    out.push('\n');
+
+    for call in &brief.in_flight.calls_without_result {
+        out.push_str(&render_open_call(call));
+    }
+    for child in &brief.in_flight.children {
+        out.push_str(&render_open_child(child));
+    }
+
+    out.push_str("tail:\n");
+    for entry in &brief.tail {
+        let heading = [
+            Some(speaker(&entry.role, entry.kind)),
+            Some(format!("#{}", entry.ordinal)),
+            entry.ts.map(human_timestamp),
+            entry
+                .truncated
+                .then(|| format!("cut at {TAIL_TEXT_CHARS} characters")),
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join(" ");
+        out.push_str(&format!("[{heading}]\n{}\n", entry.text));
+    }
+
+    render_truncation_notes(&mut out, &brief.truncation);
+    render_notes(&mut out, &brief.notes);
+    out
+}
+
+fn render_git(git: &GitContext) -> String {
+    let mut rendered = String::new();
+    if let Some(head) = &git.head {
+        rendered.push_str(&format!(" head {head}"));
+    }
+    if let Some(branch) = &git.branch {
+        rendered.push_str(&format!(" branch {branch}"));
+    }
+    rendered
+}
+
+fn render_open_call(call: &OpenCall) -> String {
+    let mut rendered = format!(
+        "in flight: call {} {} #{}",
+        call.name.as_deref().unwrap_or("-"),
+        call.call_id.as_deref().unwrap_or("-"),
+        call.ordinal
+    );
+    if let Some(ts) = call.ts {
+        rendered.push_str(&format!(" {}", human_timestamp(ts)));
+    }
+    rendered.push('\n');
+    rendered
+}
+
+fn render_open_child(child: &OpenChild) -> String {
+    let mut rendered = format!(
+        "in flight: child {} {}",
+        child.reference,
+        child.role.as_deref().unwrap_or("-")
+    );
+    for (label, stamp) in [
+        ("spawned", child.spawned_at),
+        ("completed", child.completed_at),
+    ] {
+        rendered.push_str(&format!(
+            " {label} {}",
+            stamp.map_or_else(|| "-".to_owned(), human_timestamp)
+        ));
+    }
+    rendered.push_str(&format!(
+        " status {}",
+        child.disposition.as_deref().unwrap_or("-")
+    ));
+    if !child.resolved {
+        rendered.push_str(" unresolved");
+    }
+    rendered.push('\n');
+    rendered
 }
 
 /// One line per session: what it is, what it ends on, and what the read could

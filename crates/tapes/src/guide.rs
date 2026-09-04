@@ -118,6 +118,7 @@ PROBE BEFORE EXPORTING
   tapes usage <id> --json        Tokens, cost, and turn counts.
   tapes stats <id> --json        The same recording, counted.
   tapes lineage <id> --json      The sessions this one names as relatives.
+  tapes brief <id> --json        What a continuation of it needs.
   tapes usage --here --json      The same counters summed over a project.
   tapes endings --here --json    What each session of a project ends on.
 
@@ -333,6 +334,36 @@ SIGNALS THAT THE PICTURE IS PARTIAL
   that placeholder marks reasoning you cannot read rather than reasoning that
   did not happen. Read both signals and state what is missing rather than
   writing over the gap.
+
+CONTINUE A COLD SESSION
+  tapes brief <id|--latest>
+  tapes brief <id> --tail 20 --json
+
+  A continuation has two halves. brief is the transcript's half, as
+  tapes-brief/1: where the session stopped, the directory it worked in and the
+  commit that directory sits on, the tool calls the read never saw a result
+  for, the children whose outcome its store does not record, and the last few
+  operator and assistant turns, each cut at 600 characters. --tail sets how
+  many of those turns are rendered (12 by default), and everything else about
+  the session — its harness, id, model, counters, and the coordinate to quote
+  — comes with it.
+
+  The other half is the project's own record of the work: `arc catchup` for
+  what the change has reached, `arc resume` for the thread to pick up. The
+  journal holds the decisions and the reasoning, which is why a continuation
+  reads it; the transcript holds what nobody filed, which is why a
+  continuation reads the brief. Read both and join them yourself: brief reads
+  the recording alone, so it knows nothing the journal wrote and judges
+  nothing it reads.
+
+  It reports what is open; it does not resume anything. A call with no result
+  may have left side effects, a child with no recorded outcome may still be
+  running, and a working directory that is gone is stated as gone rather than
+  left blank. What is uncommitted in that directory now is present-tense state
+  to check for yourself — the brief reports the recording, not the machine.
+
+  Resuming the session in place is cheaper than any of this while its cache is
+  warm; a brief is what a cold session is worth reading through instead.
 
 CARRY IT FORWARD
   Bundles are working material, not artifacts — leave them in /tmp. What
