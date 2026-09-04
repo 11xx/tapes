@@ -2326,6 +2326,19 @@ fn usage_help_names_the_schema_and_what_the_figures_mean() {
         "{help}"
     );
     assert!(help.contains("quota is a separate fact"), "{help}");
+    assert!(help.contains("tapes-usage-summary/1"), "{help}");
+    assert!(help.contains("--by"), "{help}");
+}
+
+/// Neither form was asked for, so the error names both rather than guessing
+/// which one was meant.
+#[test]
+fn usage_without_a_session_or_a_selection_names_both_forms() {
+    let output = tapes().arg("usage").output().unwrap();
+    assert!(!output.status.success());
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert!(error.contains("--latest"), "{error}");
+    assert!(error.contains("--global"), "{error}");
 }
 
 /// The usage view counts the same normalized turns `show` renders, by role.
@@ -2422,6 +2435,187 @@ fn usage_human_output_names_the_recorded_facts_only() {
     for absent in ["cost:", "durations:", "model ", "Note:"] {
         assert!(!rendered.contains(absent), "{absent} in {rendered}");
     }
+}
+
+/// The summary sums the same counters the listing reports per session, and
+/// `counted` says how many sessions were behind each sum.
+#[test]
+fn usage_summary_sums_the_listings_own_counters_and_counts_the_sessions_behind_them() {
+    let (codex_home, home) = filter_fixture_store("usage-summary");
+    let command = |arguments: &[&str]| {
+        let mut command = tapes();
+        command.args(arguments);
+        with_fixture_env(
+            &mut command,
+            &codex_home,
+            &home,
+            Path::new("/definitely/missing"),
+        );
+        command.output().unwrap()
+    };
+
+    let listed = command(&["list", "--global", "--harness", "codex", "--json"]);
+    assert!(
+        listed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&listed.stderr)
+    );
+    let listed: Value = serde_json::from_slice(&listed.stdout).unwrap();
+    let counted_session = session(&listed, "00000000-0000-0000-0000-000000000001");
+
+    let output = command(&[
+        "usage",
+        "--global",
+        "--harness",
+        "codex",
+        "--by",
+        "harness,model",
+        "--json",
+    ]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+
+    assert_eq!(value["schema"], "tapes-usage-summary/1");
+    assert_eq!(value["selection"]["scope"], "global");
+    assert_eq!(value["selection"]["harness"], "codex");
+    assert_eq!(value["scanned"], 4);
+    assert_eq!(value["scan_truncated"], false);
+
+    let groups = value["groups"].as_array().unwrap();
+    assert_eq!(groups.len(), 3);
+    // A session that recorded no model is keyed by that absence.
+    assert_eq!(groups[0]["key"], serde_json::json!({ "harness": "codex" }));
+    assert_eq!(groups[0]["sessions"], 1);
+    assert!(groups[0].get("tokens").is_none(), "{value}");
+
+    let gpt = &groups[1];
+    assert_eq!(
+        gpt["key"],
+        serde_json::json!({ "harness": "codex", "model": "gpt-fixture" })
+    );
+    assert_eq!(gpt["sessions"], 2);
+    assert_eq!(gpt["tokens"], counted_session["tokens"]);
+    assert_eq!(
+        gpt["counted"],
+        serde_json::json!({
+            "input": 1,
+            "output": 1,
+            "reasoning": 0,
+            "cache_read": 1,
+            "cache_write": 1,
+            "cost": 0
+        })
+    );
+    assert_eq!(
+        gpt["coverage"],
+        serde_json::json!({
+            "recorded_total": 1,
+            "summed_session": 0,
+            "summed_read_window": 0,
+            "no_accounting": 1
+        })
+    );
+    assert!(gpt.get("cost").is_none(), "{value}");
+
+    assert_eq!(value["totals"]["sessions"], 4);
+    assert_eq!(value["totals"]["tokens"], counted_session["tokens"]);
+    assert_eq!(value["totals"]["counted"]["input"], 1);
+    assert_eq!(value["totals"]["coverage"]["no_accounting"], 3);
+
+    fs::remove_dir_all(codex_home).unwrap();
+}
+
+/// The activity window narrows the summed set the same way it narrows a
+/// listing, and sessions whose harness recorded no counters are reported as
+/// such rather than as zeroes.
+#[test]
+fn usage_summary_narrows_by_activity_and_reports_sessions_with_no_accounting() {
+    let (codex_home, home) = filter_fixture_store("usage-window");
+    let mut command = tapes();
+    command.args([
+        "usage",
+        "--global",
+        "--harness",
+        "codex",
+        "--since",
+        "2026-01-01T12:00:00Z",
+        "--by",
+        "model",
+        "--json",
+    ]);
+    with_fixture_env(
+        &mut command,
+        &codex_home,
+        &home,
+        Path::new("/definitely/missing"),
+    );
+    let output = command.output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+
+    assert_eq!(
+        value["selection"]["activity"],
+        serde_json::json!({ "since": "2026-01-01T12:00:00Z" })
+    );
+    let groups = value["groups"].as_array().unwrap();
+    assert_eq!(groups.len(), 2);
+    assert_eq!(groups[0]["key"], serde_json::json!({}));
+    assert_eq!(
+        groups[1]["key"],
+        serde_json::json!({ "model": "other-fixture" })
+    );
+    for group in groups {
+        assert!(group.get("tokens").is_none(), "{group}");
+        assert!(group.get("cost").is_none(), "{group}");
+        assert_eq!(group["coverage"]["no_accounting"], 1);
+    }
+    assert_eq!(value["totals"]["sessions"], 2);
+    assert_eq!(value["totals"]["coverage"]["no_accounting"], 2);
+    assert!(value["totals"].get("tokens").is_none(), "{value}");
+
+    fs::remove_dir_all(codex_home).unwrap();
+}
+
+/// The table prints one row per group and a closing total, and a sum drawn
+/// from fewer sessions than the row holds says so.
+#[test]
+fn usage_summary_human_output_says_how_many_sessions_are_behind_each_sum() {
+    let (codex_home, home) = filter_fixture_store("usage-table");
+    let mut command = tapes();
+    command.args(["usage", "--global", "--harness", "codex"]);
+    with_fixture_env(
+        &mut command,
+        &codex_home,
+        &home,
+        Path::new("/definitely/missing"),
+    );
+    let output = command.output().unwrap();
+    let rendered = String::from_utf8(output.stdout).unwrap();
+    let lines = rendered.lines().collect::<Vec<_>>();
+
+    assert_eq!(
+        lines[0],
+        "HARNESS\tMODEL\tSESSIONS\tINPUT\tOUTPUT\tREASONING\tCACHE READ\tCACHE WRITE\tCOST\t\
+         COVERAGE (RECORDED/SUMMED/WINDOW/NONE)"
+    );
+    assert_eq!(
+        lines[2],
+        "codex\tgpt-fixture\t2\t1200 (1 of 2)\t300 (1 of 2)\t\t1000 (1 of 2)\t0 (1 of 2)\t\t1/0/0/1"
+    );
+    assert_eq!(
+        lines[4],
+        "TOTAL\t\t4\t1200 (1 of 4)\t300 (1 of 4)\t\t1000 (1 of 4)\t0 (1 of 4)\t\t1/0/0/3"
+    );
+
+    fs::remove_dir_all(codex_home).unwrap();
 }
 
 /// The selection is exactly what `list` returns for the same flags, in the

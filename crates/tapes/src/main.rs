@@ -12,8 +12,11 @@ use tapes_core::model::{
     human_bytes, human_speaker, human_timestamp, human_title, Accounting, AccountingBasis,
     AccountingCoverage, Cost, LiveState, Session, SourceBound, Tokens, Transcript, Truncation,
 };
-use tapes_core::usage::{Durations, ModelUsage, RateLimits, RateWindow, TurnCoverage, UsageView};
-use tapes_core::{BulkExport, Selection, Where};
+use tapes_core::usage::{
+    Durations, GroupBy, GroupKey, ModelUsage, RateLimits, RateWindow, TurnCoverage, UsageTally,
+    UsageView,
+};
+use tapes_core::{BulkExport, Selection, UsageSummary, Where};
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
 enum SortArg {
@@ -28,6 +31,40 @@ impl From<SortArg> for tapes_core::ListSort {
             SortArg::Oldest => Self::Oldest,
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+enum ByArg {
+    Harness,
+    Model,
+    Variant,
+    Directory,
+}
+
+impl From<ByArg> for GroupBy {
+    fn from(by: ByArg) -> Self {
+        match by {
+            ByArg::Harness => Self::Harness,
+            ByArg::Model => Self::Model,
+            ByArg::Variant => Self::Variant,
+            ByArg::Directory => Self::Directory,
+        }
+    }
+}
+
+/// The grouping a summary uses: what was asked for, or the harness and model
+/// split that answers "what spent this" without being asked.
+fn grouping(by: &[ByArg]) -> Vec<GroupBy> {
+    if by.is_empty() {
+        return vec![GroupBy::Harness, GroupBy::Model];
+    }
+    let mut dimensions = Vec::new();
+    for dimension in by.iter().copied().map(GroupBy::from) {
+        if !dimensions.contains(&dimension) {
+            dimensions.push(dimension);
+        }
+    }
+    dimensions
 }
 
 #[derive(Parser)]
@@ -234,16 +271,91 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Where one session's quota went: its recorded tokens, cost, and turn
-    /// counts, plus whatever else its harness recorded — a context window, a
-    /// provider quota window, wall-clock durations, a per-model split. The
-    /// accounting basis and coverage decide whether figures may be summed;
-    /// cost is only what the harness recorded, and quota is a separate fact
-    /// about the account rather than this session.
+    /// Where quota went. A session named by id or reached with --latest
+    /// answers that session as tapes-usage/1: its recorded tokens, cost, and
+    /// turn counts, plus whatever else its harness recorded — a context
+    /// window, a provider quota window, wall-clock durations, a per-model
+    /// split. A scope or listing filter instead answers the whole selection
+    /// as tapes-usage-summary/1, grouped by --by and summing each counter
+    /// over the sessions that recorded it. The accounting basis and coverage
+    /// decide whether figures may be summed; cost is only what the harness
+    /// recorded, and quota is a separate fact about the account rather than
+    /// these sessions.
     Usage {
+        /// Session identifier, full or an unambiguous prefix.
+        #[arg(conflicts_with_all = ["latest", "exclude", "harness", "here", "project", "global"])]
+        session: Option<String>,
+        /// Take the most recent session in scope instead of naming one. A
+        /// caller asking from inside a live session is usually itself the most
+        /// recent one in its own project, so reaching an older session takes
+        /// `--exclude <own-id>`.
+        #[arg(long)]
+        latest: bool,
+        /// Pass over this session when taking the latest. Repeatable. An agent
+        /// asking from inside its own session passes its own id here.
+        #[arg(long, requires = "latest")]
+        exclude: Vec<String>,
+        /// Restrict to one harness: the most recent session of it with
+        /// --latest, every selected session of it otherwise.
+        #[arg(long, conflicts_with = "session")]
+        harness: Option<String>,
         #[command(flatten)]
-        selection: SelectionArgs,
-        /// Render the versioned tapes-usage/1 object as JSON.
+        scope: ScopeArgs,
+        /// Take at most this many sessions from each harness [default: 20].
+        #[arg(long, conflicts_with_all = ["session", "latest"])]
+        limit: Option<usize>,
+        /// Match case-insensitively against the full model identity, `id` or
+        /// `id (variant)`. Sessions without a model never match.
+        #[arg(long, value_name = "SUBSTRING", conflicts_with_all = ["session", "latest"])]
+        model: Option<String>,
+        /// Match case-insensitively against the recorded directory path.
+        /// Sessions without a directory never match.
+        #[arg(long, value_name = "SUBSTRING", conflicts_with_all = ["session", "latest"])]
+        directory: Option<String>,
+        /// Keep sessions whose newest recorded activity, `last_activity_at`,
+        /// is at or after this timestamp. RFC 3339 timestamps with an offset
+        /// and bare YYYY-MM-DD dates are accepted.
+        #[arg(
+            long,
+            value_name = "TIMESTAMP",
+            value_parser = tapes_core::parse_activity_timestamp,
+            conflicts_with_all = ["session", "latest"]
+        )]
+        since: Option<tapes_core::ActivityTimestamp>,
+        /// Keep sessions whose newest recorded activity, `last_activity_at`,
+        /// is before this timestamp. RFC 3339 timestamps with an offset and
+        /// bare YYYY-MM-DD dates are accepted.
+        #[arg(
+            long,
+            value_name = "TIMESTAMP",
+            value_parser = tapes_core::parse_activity_timestamp,
+            conflicts_with_all = ["session", "latest"]
+        )]
+        until: Option<tapes_core::ActivityTimestamp>,
+        /// Order the selection by `last_activity_at` before --limit takes
+        /// from it: newest first by default, or oldest first.
+        #[arg(long, value_enum, value_name = "ORDER", conflicts_with_all = ["session", "latest"])]
+        sort: Option<SortArg>,
+        /// Match case-insensitively against the last 32 normalized turns in
+        /// each candidate session. The fixed tail keeps the selection bounded;
+        /// a match outside it is not considered.
+        #[arg(long, value_name = "SUBSTRING", conflicts_with_all = ["session", "latest"])]
+        search: Option<String>,
+        /// Group the summed sessions by this dimension. Repeatable and
+        /// comma-separated; groups are keyed in the order given
+        /// [default: harness,model]. `model` is the model id and `variant`
+        /// the reasoning effort or tier qualifying it, so a session that
+        /// recorded no variant is grouped under that absence.
+        #[arg(
+            long,
+            value_enum,
+            value_name = "DIMENSION",
+            value_delimiter = ',',
+            conflicts_with_all = ["session", "latest"]
+        )]
+        by: Vec<ByArg>,
+        /// Render the versioned tapes-usage/1 object, or tapes-usage-summary/1
+        /// for a selection, as JSON.
         #[arg(long)]
         json: bool,
     },
@@ -418,12 +530,100 @@ fn dispatch(cli: Cli) -> Result<()> {
                 print!("{}", render_lineage(&lineage));
             }
         }
-        Command::Usage { selection, json } => {
-            let usage = tapes_core::usage(selection.selection())?;
-            if json {
-                println!("{}", serde_json::to_string(&usage)?);
+        Command::Usage {
+            session,
+            latest,
+            exclude,
+            harness,
+            scope,
+            limit,
+            model,
+            directory,
+            since,
+            until,
+            sort,
+            search,
+            by,
+            json,
+        } => {
+            let one = if let Some(session) = &session {
+                Some(Selection::Id(session))
+            } else if latest {
+                Some(Selection::Latest {
+                    within: scope.within_or_here(),
+                    harness: harness.as_deref(),
+                    exclude: &exclude,
+                })
             } else {
-                print!("{}", render_usage(&usage));
+                None
+            };
+            if let Some(one) = one {
+                let usage = tapes_core::usage(one)?;
+                if json {
+                    println!("{}", serde_json::to_string(&usage)?);
+                } else {
+                    print!("{}", render_usage(&usage));
+                }
+            } else {
+                let selected = scope.here
+                    || scope.global
+                    || scope.project.is_some()
+                    || harness.is_some()
+                    || model.is_some()
+                    || directory.is_some()
+                    || since.is_some()
+                    || until.is_some()
+                    || search.is_some()
+                    || limit.is_some()
+                    || sort.is_some()
+                    || !by.is_empty();
+                if !selected {
+                    return Err(anyhow!(
+                        "usage answers one session or a selection of them: name a session id, \
+                         pass --latest, or select a set with --here, --project <path>, --global, \
+                         or a listing filter"
+                    ));
+                }
+                if since
+                    .zip(until)
+                    .is_some_and(|(since, until)| since >= until)
+                {
+                    return Err(anyhow!("--since must be earlier than --until"));
+                }
+                if search.is_some() {
+                    eprintln!(
+                        "Searching the last 32 normalized turns of each candidate session before applying --limit."
+                    );
+                }
+                let by = grouping(&by);
+                let summary = tapes_core::usage_summary(
+                    &tapes_core::SessionSelection {
+                        within: scope.within(),
+                        harness: harness.as_deref(),
+                        limit,
+                        filters: tapes_core::ListFilters {
+                            model: model.as_deref(),
+                            directory: directory.as_deref(),
+                            since,
+                            until,
+                            search: search.as_deref(),
+                        },
+                        sort: sort.unwrap_or(SortArg::Newest).into(),
+                    },
+                    &by,
+                )?;
+                if json {
+                    println!("{}", serde_json::to_string(&summary)?);
+                } else {
+                    print!("{}", render_usage_summary(&summary, &by));
+                    print_diagnostics(
+                        summary.scan_truncated,
+                        summary.scanned,
+                        &summary.unreadable,
+                        &summary.unsearched,
+                        &summary.unavailable,
+                    );
+                }
             }
         }
         Command::Export {
@@ -690,6 +890,114 @@ fn render_model_usage(model: &ModelUsage) -> String {
     rendered
 }
 
+/// One row per group and a closing total, each counter cell naming how many
+/// of the row's sessions recorded it whenever that is fewer than all of
+/// them. A counter no session recorded has no figure to print.
+fn render_usage_summary(summary: &UsageSummary, by: &[GroupBy]) -> String {
+    let key_columns: Vec<&str> = if by.is_empty() {
+        vec!["GROUP"]
+    } else {
+        by.iter().map(key_column).collect()
+    };
+    let mut out = key_columns.join("\t");
+    out.push_str(
+        "\tSESSIONS\tINPUT\tOUTPUT\tREASONING\tCACHE READ\tCACHE WRITE\tCOST\t\
+         COVERAGE (RECORDED/SUMMED/WINDOW/NONE)\n",
+    );
+    for group in &summary.groups {
+        let mut cells: Vec<String> = by
+            .iter()
+            .map(|dimension| key_cell(&group.key, *dimension).unwrap_or_default())
+            .collect();
+        cells.resize(key_columns.len(), String::new());
+        cells.extend(tally_cells(&group.tally));
+        out.push_str(&cells.join("\t"));
+        out.push('\n');
+    }
+    let mut total = vec!["TOTAL".to_owned()];
+    total.resize(key_columns.len(), String::new());
+    total.extend(tally_cells(&summary.totals));
+    out.push_str(&total.join("\t"));
+    out.push('\n');
+    out
+}
+
+fn key_column(dimension: &GroupBy) -> &'static str {
+    match dimension {
+        GroupBy::Harness => "HARNESS",
+        GroupBy::Model => "MODEL",
+        GroupBy::Variant => "VARIANT",
+        GroupBy::Directory => "DIRECTORY",
+    }
+}
+
+fn key_cell(key: &GroupKey, dimension: GroupBy) -> Option<String> {
+    match dimension {
+        GroupBy::Harness => key.harness.clone(),
+        GroupBy::Model => key.model.clone(),
+        GroupBy::Variant => key.variant.clone(),
+        GroupBy::Directory => key.directory.clone(),
+    }
+}
+
+fn tally_cells(tally: &UsageTally) -> Vec<String> {
+    let tokens = tally.tokens.as_ref();
+    let sessions = tally.sessions;
+    let counted = &tally.counted;
+    let coverage = &tally.coverage;
+    vec![
+        sessions.to_string(),
+        counter_cell(
+            tokens.and_then(|tokens| tokens.input),
+            counted.input,
+            sessions,
+        ),
+        counter_cell(
+            tokens.and_then(|tokens| tokens.output),
+            counted.output,
+            sessions,
+        ),
+        counter_cell(
+            tokens.and_then(|tokens| tokens.reasoning),
+            counted.reasoning,
+            sessions,
+        ),
+        counter_cell(
+            tokens.and_then(|tokens| tokens.cache_read),
+            counted.cache_read,
+            sessions,
+        ),
+        counter_cell(
+            tokens.and_then(|tokens| tokens.cache_write),
+            counted.cache_write,
+            sessions,
+        ),
+        sum_cell(tally.cost.as_ref().map(render_cost), counted.cost, sessions),
+        format!(
+            "{}/{}/{}/{}",
+            coverage.recorded_total,
+            coverage.summed_session,
+            coverage.summed_read_window,
+            coverage.no_accounting
+        ),
+    ]
+}
+
+fn counter_cell(sum: Option<u64>, counted: usize, sessions: usize) -> String {
+    sum_cell(sum.map(|sum| sum.to_string()), counted, sessions)
+}
+
+/// A sum covers the sessions that recorded the counter. When that is fewer
+/// than the row holds, the cell says how many, so the figure is not read as
+/// every session's.
+fn sum_cell(sum: Option<String>, counted: usize, sessions: usize) -> String {
+    match sum {
+        None => String::new(),
+        Some(sum) if counted < sessions => format!("{sum} ({counted} of {sessions})"),
+        Some(sum) => sum,
+    }
+}
+
 fn print_events(events: &EventTranscript, by_latest: bool) {
     let mut out = String::new();
     if events.session.live.is_some() || by_latest {
@@ -778,26 +1086,43 @@ fn live_label(session: &Session) -> &'static str {
 }
 
 fn print_availability_note(result: &tapes_core::SessionList) {
-    if result.scan_truncated {
+    print_diagnostics(
+        result.scan_truncated,
+        result.scanned,
+        &result.unreadable,
+        &result.unsearched,
+        &result.unavailable,
+    );
+}
+
+/// What a listing could not reach, stated the same way wherever a listing
+/// backs the answer: a set that stopped short is a view, not the store.
+fn print_diagnostics(
+    scan_truncated: bool,
+    scanned: usize,
+    unreadable: &[String],
+    unsearched: &[String],
+    unavailable: &[String],
+) {
+    if scan_truncated {
         println!(
-            "The search stopped early after {} candidates; older sessions were not inspected. \
-             Raise --limit to widen the scan, or `tapes export` a session once it is found.",
-            result.scanned
+            "The search stopped early after {scanned} candidates; older sessions were not inspected. \
+             Raise --limit to widen the scan, or `tapes export` a session once it is found."
         );
     }
-    for session in &result.unreadable {
+    for session in unreadable {
         println!("Unreadable: {session}");
     }
-    for session in &result.unsearched {
+    for session in unsearched {
         println!("Unsearched: {session}");
     }
-    if result.unavailable.is_empty() {
+    if unavailable.is_empty() {
         return;
     }
-    if result.unavailable.len() == 4 {
+    if unavailable.len() == 4 {
         println!("No harnesses available.");
     }
-    println!("Unavailable: {}", result.unavailable.join(", "));
+    println!("Unavailable: {}", unavailable.join(", "));
 }
 
 /// The manifest is the whole stdout contract for `export`: three paths, three
