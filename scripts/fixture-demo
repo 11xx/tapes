@@ -1,0 +1,36 @@
+#!/usr/bin/env python3
+"""Run the CLI against committed fixtures in an isolated environment."""
+import pathlib
+import shutil
+import subprocess
+import sys
+import tempfile
+
+repo = pathlib.Path(__file__).resolve().parents[1]
+binary = pathlib.Path(sys.argv[1]).resolve() if len(sys.argv) > 1 else repo / "target/debug/tapes"
+if not binary.is_file():
+    raise SystemExit("Build first with cargo build -p tapes, or pass the binary path.")
+with tempfile.TemporaryDirectory(prefix="tapes-fixture-demo-") as directory:
+    root = pathlib.Path(directory)
+    sessions = root / "codex/sessions"
+    sessions.mkdir(parents=True)
+    for name in [
+        "rollout-2026-01-01T10-00-00-00000000-0000-0000-0000-000000000001.jsonl",
+        "rollout-2026-01-01T11-00-00-10000000-0000-0000-0000-000000000002.jsonl",
+    ]:
+        shutil.copy2(repo / "tests/fixtures/codex" / name, sessions / name)
+    (root / "home").mkdir()
+    (root / "bin").mkdir()
+    env = {"HOME": str(root / "home"), "CODEX_HOME": str(root / "codex"),
+           "XDG_DATA_HOME": str(root / "data"), "PATH": str(root / "bin")}
+    commands = [
+        ["list", "--harness", "codex", "--limit", "2"],
+        ["show", "00000000-0000-0000-0000-000000000001", "--tail", "1"],
+    ]
+    for arguments in commands:
+        print("$ tapes " + " ".join(arguments), flush=True)
+        result = subprocess.run([str(binary), *arguments], env=env, cwd=root,
+                                capture_output=True, text=True, check=True)
+        print(result.stdout.replace(str(root), "<fixture-store>"), end="")
+        if result.stderr:
+            print(result.stderr.replace(str(root), "<fixture-store>"), end="", file=sys.stderr)
