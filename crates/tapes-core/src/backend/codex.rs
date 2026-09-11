@@ -155,8 +155,12 @@ impl Backend for CodexBackend {
             Path::new(path),
             cursor,
             bytes,
-            |values, opening| {
-                let evidence = user_message_evidence(values, opening);
+            true,
+            |values, opening, context| {
+                let mut evidence = user_message_evidence(values, opening);
+                evidence
+                    .text
+                    .extend(context.iter().filter_map(codex_user_message));
                 let turns = values
                     .iter()
                     .flat_map(|value| parse_turns(value, &evidence))

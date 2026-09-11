@@ -249,7 +249,8 @@ enum Command {
         selection: SelectionArgs,
         #[arg(long)]
         cursor: Option<String>,
-        /// Maximum source bytes per page, between 1024 and 4194304.
+        /// Maximum payload bytes per page, between 1024 and 4194304.
+        /// Bounded header, alignment and provenance context reads are separate.
         #[arg(long, default_value_t = tapes_core::history::DEFAULT_BYTES)]
         bytes: usize,
         #[arg(long)]

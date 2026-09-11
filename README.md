@@ -392,10 +392,14 @@ Claude or Codex recording. Pass its `next_cursor` to `--cursor` to continue.
 Turns are chronological within a page; ordinals are page-local. The source
 byte range plus session ID and store identify the page. Byte budgets range
 from 1 KiB to 4 MiB; the default is 64 KiB. Session metadata and the bounded
-opening-header probe are read separately. Ordinary show/export retain their
+opening-header probe are read separately. A page also probes at most one
+alignment byte, counted separately as `alignment_bytes`. Codex also reads up
+to 64 KiB of newer context to corroborate user-message provenance across page
+boundaries, counted as `context_bytes`; those records are not returned as turns.
+A kind remains unknown when its corroborating evidence is outside these bounds. Ordinary show/export retain their
 source bounds.
 
-A cursor binds the recording's identity, size and modification time. Changed
+A cursor binds the recording's identity, size, modification time and change time. Changed
 or replaced recordings refuse continuation; restart without a cursor. Malformed
 records and skipped fragments of records larger than a page are counted.
 Those gaps prevent a complete-history claim even when no cursor remains.

@@ -3537,6 +3537,10 @@ fn history_pages_cover_records_once_and_reject_changed_sources() {
     ]);
     let complete: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(complete["matches"].as_array().unwrap().len(), 1);
+    assert!(
+        complete["matches"][0]["page_end"].as_u64().unwrap()
+            > complete["matches"][0]["page_start"].as_u64().unwrap()
+    );
     assert!(complete["next_cursor"].is_null());
     fs::write(&path, format!("{body}\n")).unwrap();
     let changed = run(&["page", id, "--cursor", &first_cursor, "--json"]);
@@ -3592,4 +3596,90 @@ fn metadata_history_recovers_midfile_models_and_reports_record_gaps() {
     let tiny = run(&["metadata", id, "--bytes", "1024", "--pages", "2", "--json"]);
     assert!(tiny["skipped_fragment_bytes"].as_u64().unwrap() > 0);
     assert!(tiny["next_cursor"].is_string());
+}
+
+#[test]
+fn history_page_preserves_a_record_exactly_aligned_with_the_byte_budget() {
+    let root = TemporaryDirectory::new(
+        std::env::temp_dir().join(format!("tapes-page-alignment-{}", std::process::id())),
+    );
+    let codex = root.path().join("codex");
+    let sessions = codex.join("sessions");
+    fs::create_dir_all(&sessions).unwrap();
+    let id = "80000000-0000-0000-0000-000000000001";
+    let header = serde_json::json!({"type":"session_meta","timestamp":"2026-01-01T10:00:00Z","payload":{"id":id,"source":"exec","cwd":"/fixture"}});
+    let mut record = serde_json::json!({"type":"response_item","timestamp":"2026-01-01T10:01:00Z","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":""}]}});
+    let padding = 1023 - record.to_string().len();
+    record["payload"]["content"][0]["text"] = Value::String("x".repeat(padding));
+    let line = format!("{record}\n");
+    assert_eq!(line.len(), 1024);
+    fs::write(
+        sessions.join(format!("rollout-2026-01-01T10-00-00-{id}.jsonl")),
+        format!("{header}\n{line}{line}"),
+    )
+    .unwrap();
+    let mut command = tapes();
+    command.args(["page", id, "--bytes", "1024", "--json"]);
+    with_fixture_env(&mut command, &codex, &root.path().join("home"), root.path());
+    let output = command.output().unwrap();
+    assert!(output.status.success());
+    let page: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(page["turns"].as_array().unwrap().len(), 1);
+    assert_eq!(page["skipped_fragment_bytes"], 0);
+    assert_eq!(page["bytes_read"], 1024);
+    assert_eq!(page["alignment_bytes"], 1);
+}
+
+#[test]
+fn history_pages_keep_newer_provenance_context_and_detect_same_size_edits() {
+    let root = TemporaryDirectory::new(
+        std::env::temp_dir().join(format!("tapes-page-context-{}", std::process::id())),
+    );
+    let codex = root.path().join("codex");
+    let sessions = codex.join("sessions");
+    fs::create_dir_all(&sessions).unwrap();
+    let id = "90000000-0000-0000-0000-000000000001";
+    let path = sessions.join(format!("rollout-2026-01-01T10-00-00-{id}.jsonl"));
+    let header = serde_json::json!({"type":"session_meta","timestamp":"2026-01-01T10:00:00Z","payload":{"id":id,"source":"cli","cwd":"/fixture"}});
+    let user = serde_json::json!({"type":"response_item","timestamp":"2026-01-01T10:01:00Z","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"corroborated request"}]}});
+    let evidence = serde_json::json!({"type":"event_msg","timestamp":"2026-01-01T10:01:00Z","payload":{"type":"user_message","message":"corroborated request"}});
+    let mut body = format!(
+        "{header}\n{}\n{user}\n",
+        format!("{{\"padding\":\"{}\"}}\n", "x".repeat(4000)).repeat(20)
+    );
+    let mut newer = format!("{evidence}\n");
+    newer.push_str(&" ".repeat(1023 - newer.len()));
+    newer.push('\n');
+    assert_eq!(newer.len(), 1024);
+    body.push_str(&newer);
+    fs::write(&path, &body).unwrap();
+    let run = |args: &[&str]| {
+        let mut command = tapes();
+        command.args(args);
+        with_fixture_env(&mut command, &codex, &root.path().join("home"), root.path());
+        command.output().unwrap()
+    };
+    let first = run(&["page", id, "--bytes", "1024", "--json"]);
+    assert!(first.status.success());
+    let first: Value = serde_json::from_slice(&first.stdout).unwrap();
+    assert_eq!(first["skipped_records"], 0);
+    let cursor = first["next_cursor"].as_str().unwrap();
+    let older = run(&["page", id, "--bytes", "1024", "--cursor", cursor, "--json"]);
+    assert!(older.status.success());
+    let older: Value = serde_json::from_slice(&older.stdout).unwrap();
+    assert_eq!(older["turns"][0]["kind"], "operator");
+    assert_eq!(older["context_bytes"], 1024);
+    let original = fs::metadata(&path).unwrap().modified().unwrap();
+    let changed_body = body.replace("corroborated request", "substituted request");
+    assert_eq!(changed_body.len(), body.len());
+    fs::write(&path, changed_body).unwrap();
+    fs::File::options()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_modified(original)
+        .unwrap();
+    let changed = run(&["page", id, "--cursor", cursor, "--json"]);
+    assert!(!changed.status.success());
+    assert!(String::from_utf8_lossy(&changed.stderr).contains("source changed"));
 }

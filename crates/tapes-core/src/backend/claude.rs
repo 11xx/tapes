@@ -144,8 +144,9 @@ impl Backend for ClaudeBackend {
             Path::new(path),
             cursor,
             bytes,
-            |values, opening| {
-                let _ = opening;
+            false,
+            |values, opening, context| {
+                let _ = (opening, context);
                 let turns = values.iter().flat_map(parse_turns).collect();
                 let models = values
                     .iter()
