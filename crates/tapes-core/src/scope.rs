@@ -150,7 +150,9 @@ mod tests {
     }
 
     fn repository(name: &str) -> PathBuf {
-        let root = std::env::temp_dir().join(format!("tapes-scope-{name}"));
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/scope-fixtures")
+            .join(format!("tapes-scope-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).expect("temp directory is creatable");
         run(&root, &["init", "-q"]);
@@ -212,7 +214,7 @@ mod tests {
 
     #[test]
     fn without_a_repository_the_scope_is_the_subtree() {
-        let root = std::env::temp_dir().join("tapes-scope-plain");
+        let root = std::env::temp_dir().join(format!("tapes-scope-plain-{}", std::process::id()));
         let nested = root.join("nested");
         std::fs::create_dir_all(&nested).expect("temp directory is creatable");
         let scope = Scope::at(&root).expect("scope resolves");
