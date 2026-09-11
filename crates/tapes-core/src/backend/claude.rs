@@ -13,6 +13,7 @@ use super::{
     transcript, Backend, Jsonl, Listing, ParsedFile, Query, TokenTotals,
 };
 use crate::event::{Bounded, EventKind, ToolEvent};
+use crate::history::{PageProjection, ReadContext};
 use crate::lineage::{ChildRef, Lineage, SourceRef};
 use crate::model::{
     AccountingBasis, AccountingCoverage, Cost, Model, Role, Session, Tokens, TrailingRecord,
@@ -143,6 +144,50 @@ impl ClaudeBackend {
 
         Ok((session, turns, recording.tail))
     }
+    fn read_history(
+        &self,
+        session: &Session,
+        cursor: Option<&str>,
+        bytes: usize,
+        projection: PageProjection,
+    ) -> Result<crate::history::Page> {
+        let path = session
+            .store
+            .as_deref()
+            .ok_or_else(|| anyhow!("session has no source file"))?;
+        crate::history::read_file(
+            session,
+            Path::new(path),
+            cursor,
+            bytes,
+            ReadContext::None,
+            |values, opening, context| {
+                let _ = (opening, context);
+                let turns = if projection == PageProjection::Transcript {
+                    values.iter().flat_map(parse_turns).collect()
+                } else {
+                    Vec::new()
+                };
+                let models = values
+                    .iter()
+                    .filter_map(|value| {
+                        let message = &value["message"];
+                        if message["role"] != "assistant" {
+                            return None;
+                        }
+                        Some(crate::history::ModelObservation {
+                            model: Model {
+                                id: message["model"].as_str()?.to_owned(),
+                                variant: None,
+                            },
+                            timestamp: timestamp(&value["timestamp"]),
+                        })
+                    })
+                    .collect();
+                (turns, models)
+            },
+        )
+    }
 }
 
 impl Default for ClaudeBackend {
@@ -198,38 +243,16 @@ impl Backend for ClaudeBackend {
         cursor: Option<&str>,
         bytes: usize,
     ) -> Result<crate::history::Page> {
-        let path = session
-            .store
-            .as_deref()
-            .ok_or_else(|| anyhow!("session has no source file"))?;
-        crate::history::read_file(
-            session,
-            Path::new(path),
-            cursor,
-            bytes,
-            false,
-            |values, opening, context| {
-                let _ = (opening, context);
-                let turns = values.iter().flat_map(parse_turns).collect();
-                let models = values
-                    .iter()
-                    .filter_map(|value| {
-                        let message = &value["message"];
-                        if message["role"] != "assistant" {
-                            return None;
-                        }
-                        Some(crate::history::ModelObservation {
-                            model: Model {
-                                id: message["model"].as_str()?.to_owned(),
-                                variant: None,
-                            },
-                            timestamp: timestamp(&value["timestamp"]),
-                        })
-                    })
-                    .collect();
-                (turns, models)
-            },
-        )
+        self.read_history(session, cursor, bytes, PageProjection::Transcript)
+    }
+
+    fn metadata_page(
+        &self,
+        session: &Session,
+        cursor: Option<&str>,
+        bytes: usize,
+    ) -> Result<crate::history::Page> {
+        self.read_history(session, cursor, bytes, PageProjection::Models)
     }
 
     fn harness(&self) -> &'static str {

@@ -439,8 +439,8 @@ Turns are chronological within a page; ordinals are page-local. The source
 byte range plus session ID and store identify the page. Byte budgets range
 from 1 KiB to 4 MiB; the default is 64 KiB. Session metadata and the bounded
 opening-header probe are read separately. A page also probes at most one
-alignment byte, counted separately as `alignment_bytes`. Codex also reads up
-to 64 KiB of newer context to corroborate user-message provenance across page
+alignment byte, counted separately as `alignment_bytes`. Codex transcript pages
+also read up to 64 KiB of newer context to corroborate user-message provenance across page
 boundaries, counted as `context_bytes`; those records are not returned as turns.
 A kind remains unknown when its corroborating evidence is outside these bounds. Ordinary show/export retain their
 source bounds.
@@ -462,7 +462,10 @@ model observations outside the ordinary source tail. It reports observations
 in reverse record order, page coverage and gaps, and a continuation cursor.
 An older observation is not asserted to be the current model, and ordinary
 session metadata is not overwritten. At most 100 observations are returned.
-History search and metadata accept 1–32 pages per call.
+History search and metadata accept 1–32 pages per call. Metadata pages extract
+model observations directly without normalizing transcript turns or reading
+operator-provenance context. Session lookup retains its ordinary bounded
+metadata read; page counters describe the subsequent history traversal.
 ## Tool usage across sessions
 
 `tapes stats --here --since 2026-01-01 --json` returns

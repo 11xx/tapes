@@ -6,7 +6,7 @@ use serde::Serialize;
 
 use crate::backend::{self, Backend};
 use crate::event;
-use crate::stats::{Coverage, PairCoverage, ToolStats};
+use crate::stats::{Coverage, PairCoverage, ToolNameStats, ToolStats};
 use crate::usage::{self, UsageSession};
 use crate::{list_scoped, selection_record, SelectionRecord, SessionSelection, DEFAULT_LIST_LIMIT};
 
@@ -75,16 +75,14 @@ pub fn with_backends(
         scanned: listed.scanned,
         scan_truncated: listed.scan_truncated,
     };
+    let mut by_harness = BTreeMap::<String, ToolAccumulator>::new();
     for (session, origin) in listed.sessions.into_iter().zip(listed.origins) {
         match backends[origin].transcript(&session, usize::MAX) {
             Ok(transcript) => {
                 let usage = usage::usage(&transcript);
                 let events = event::project(transcript, usize::MAX);
                 let tools = crate::stats::count_tools(&events.events, events.pairs.complete);
-                merge(
-                    report.by_harness.entry(session.harness).or_default(),
-                    &tools,
-                );
+                by_harness.entry(session.harness).or_default().add(&tools);
                 report.sessions.push(SessionStats {
                     session: usage.session,
                     coverage: Coverage {
@@ -94,7 +92,6 @@ pub fn with_backends(
                     },
                     tools,
                 });
-                report.read += 1;
             }
             Err(error) => report.failed.push(ReadFailure {
                 id: session.id,
@@ -104,38 +101,53 @@ pub fn with_backends(
             }),
         }
     }
+    report.read = report.sessions.len();
+    report.by_harness = by_harness
+        .into_iter()
+        .map(|(harness, tools)| (harness, tools.finish()))
+        .collect();
     Ok(report)
 }
 
-fn merge(total: &mut ToolStats, value: &ToolStats) {
-    total.calls += value.calls;
-    total.results += value.results;
-    total.paired += value.paired;
-    total.errors += value.errors;
-    total.incomplete.no_result_in_read += value.incomplete.no_result_in_read;
-    total.incomplete.call_before_read_bound += value.incomplete.call_before_read_bound;
-    total.incomplete.call_not_recorded += value.incomplete.call_not_recorded;
-    let mut names = std::mem::take(&mut total.by_name)
-        .into_iter()
-        .map(|row| (row.name.clone(), row))
-        .collect::<BTreeMap<_, _>>();
-    for row in &value.by_name {
-        if let Some(sum) = names.get_mut(&row.name) {
-            sum.calls += row.calls;
-            sum.paired += row.paired;
-            sum.errors += row.errors;
-            if let Some(duration) = row.duration_ms {
-                let sum = sum.duration_ms.get_or_insert_with(Default::default);
-                sum.total = sum.total.saturating_add(duration.total);
-                sum.max = sum.max.max(duration.max);
-                sum.count += duration.count;
+/// Keep the name index across sessions and sort only the completed output.
+#[derive(Default)]
+struct ToolAccumulator {
+    totals: ToolStats,
+    names: BTreeMap<String, ToolNameStats>,
+}
+
+impl ToolAccumulator {
+    fn add(&mut self, value: &ToolStats) {
+        let total = &mut self.totals;
+        total.calls += value.calls;
+        total.results += value.results;
+        total.paired += value.paired;
+        total.errors += value.errors;
+        total.incomplete.no_result_in_read += value.incomplete.no_result_in_read;
+        total.incomplete.call_before_read_bound += value.incomplete.call_before_read_bound;
+        total.incomplete.call_not_recorded += value.incomplete.call_not_recorded;
+        for row in &value.by_name {
+            if let Some(sum) = self.names.get_mut(&row.name) {
+                sum.calls += row.calls;
+                sum.paired += row.paired;
+                sum.errors += row.errors;
+                if let Some(duration) = row.duration_ms {
+                    let sum = sum.duration_ms.get_or_insert_with(Default::default);
+                    sum.total = sum.total.saturating_add(duration.total);
+                    sum.max = sum.max.max(duration.max);
+                    sum.count += duration.count;
+                }
+            } else {
+                self.names.insert(row.name.clone(), row.clone());
             }
-        } else {
-            names.insert(row.name.clone(), row.clone());
         }
     }
-    total.by_name = names.into_values().collect();
-    total
-        .by_name
-        .sort_by(|a, b| b.calls.cmp(&a.calls).then_with(|| a.name.cmp(&b.name)));
+
+    fn finish(mut self) -> ToolStats {
+        self.totals.by_name = self.names.into_values().collect();
+        self.totals
+            .by_name
+            .sort_by(|a, b| b.calls.cmp(&a.calls).then_with(|| a.name.cmp(&b.name)));
+        self.totals
+    }
 }

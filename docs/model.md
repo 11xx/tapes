@@ -1028,7 +1028,8 @@ verbatim, so the exported set can be audited against the store it came from.
 
 `tapes-page/1` carries a normalized session, chronological `turns` with page-local
 ordinals, recorded `models`, source `start`/`end` byte offsets, `source_bytes`,
-`bytes_read`, separately counted `alignment_bytes` and `context_bytes`, malformed `skipped_records`, `skipped_fragment_bytes`, and an
+`bytes_read`, separately counted `alignment_bytes` and `context_bytes`, malformed
+`skipped_records`, `skipped_fragment_bytes`, and an
 optional `next_cursor`. A missing cursor means the source beginning was reached,
 not that malformed or oversized records were decoded. The cursor is opaque;
 it binds the session and file snapshot and must be passed back unchanged.
@@ -1038,6 +1039,10 @@ matching text excerpts identified by page start, end and ordinal, an output-trun
 flag, and a continuation cursor. `tapes-metadata-history/1` carries the same
 coverage facts with up to 100 reverse-record-ordered model observations and
 an observation-truncation flag. Neither schema infers facts outside its reads.
+Metadata traversal does not
+normalize transcript turns or read their provenance context; its `context_bytes`
+is zero for Claude and Codex. Initial session resolution is separate from the
+page-byte counters.
 ## Selection statistics: `tapes-stats-summary/1`
 
 `selection` records the listing query. `selected` counts its sessions, `read`

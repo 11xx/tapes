@@ -3799,6 +3799,7 @@ fn metadata_history_recovers_midfile_models_and_reports_record_gaps() {
     ]);
     assert!(metadata["next_cursor"].is_null());
     assert_eq!(metadata["skipped_records"], 1);
+    assert_eq!(metadata["context_bytes"], 0);
     assert_eq!(metadata["observations"][0]["model"]["id"], "recorded-model");
     let tiny = run(&["metadata", id, "--bytes", "1024", "--pages", "2", "--json"]);
     assert!(tiny["skipped_fragment_bytes"].as_u64().unwrap() > 0);

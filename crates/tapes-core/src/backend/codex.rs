@@ -11,6 +11,7 @@ use super::{
     TokenTotals,
 };
 use crate::event::{Bounded, EventKind, ToolEvent};
+use crate::history::{PageProjection, ReadContext};
 use crate::lineage::{ChildRef, Lineage, ParentRef, SourceRef};
 use crate::model::{
     is_known_envelope, without_known_envelopes, AccountingBasis, AccountingCoverage, Model, Role,
@@ -127,6 +128,58 @@ impl CodexBackend {
 
         Ok((session, turns, recording.tail))
     }
+    fn read_history(
+        &self,
+        session: &Session,
+        cursor: Option<&str>,
+        bytes: usize,
+        projection: PageProjection,
+    ) -> Result<crate::history::Page> {
+        let path = session
+            .store
+            .as_deref()
+            .ok_or_else(|| anyhow!("session has no source file"))?;
+        crate::history::read_file(
+            session,
+            Path::new(path),
+            cursor,
+            bytes,
+            if projection == PageProjection::Transcript {
+                ReadContext::OperatorProvenance
+            } else {
+                ReadContext::None
+            },
+            |values, opening, context| {
+                let turns = if projection == PageProjection::Transcript {
+                    let mut evidence = user_message_evidence(values, opening);
+                    evidence
+                        .text
+                        .extend(context.iter().filter_map(codex_user_message));
+                    values
+                        .iter()
+                        .flat_map(|value| parse_turns(value, &evidence))
+                        .collect()
+                } else {
+                    Vec::new()
+                };
+                let models = values
+                    .iter()
+                    .filter(|value| value["type"] == "turn_context")
+                    .filter_map(|value| {
+                        let payload = &value["payload"];
+                        Some(crate::history::ModelObservation {
+                            model: Model {
+                                id: payload["model"].as_str()?.to_owned(),
+                                variant: payload["effort"].as_str().map(str::to_owned),
+                            },
+                            timestamp: timestamp(&value["timestamp"]),
+                        })
+                    })
+                    .collect();
+                (turns, models)
+            },
+        )
+    }
 }
 
 impl Default for CodexBackend {
@@ -146,42 +199,16 @@ impl Backend for CodexBackend {
         cursor: Option<&str>,
         bytes: usize,
     ) -> Result<crate::history::Page> {
-        let path = session
-            .store
-            .as_deref()
-            .ok_or_else(|| anyhow!("session has no source file"))?;
-        crate::history::read_file(
-            session,
-            Path::new(path),
-            cursor,
-            bytes,
-            true,
-            |values, opening, context| {
-                let mut evidence = user_message_evidence(values, opening);
-                evidence
-                    .text
-                    .extend(context.iter().filter_map(codex_user_message));
-                let turns = values
-                    .iter()
-                    .flat_map(|value| parse_turns(value, &evidence))
-                    .collect();
-                let models = values
-                    .iter()
-                    .filter(|value| value["type"] == "turn_context")
-                    .filter_map(|value| {
-                        let payload = &value["payload"];
-                        Some(crate::history::ModelObservation {
-                            model: Model {
-                                id: payload["model"].as_str()?.to_owned(),
-                                variant: payload["effort"].as_str().map(str::to_owned),
-                            },
-                            timestamp: timestamp(&value["timestamp"]),
-                        })
-                    })
-                    .collect();
-                (turns, models)
-            },
-        )
+        self.read_history(session, cursor, bytes, PageProjection::Transcript)
+    }
+
+    fn metadata_page(
+        &self,
+        session: &Session,
+        cursor: Option<&str>,
+        bytes: usize,
+    ) -> Result<crate::history::Page> {
+        self.read_history(session, cursor, bytes, PageProjection::Models)
     }
 
     fn harness(&self) -> &'static str {
