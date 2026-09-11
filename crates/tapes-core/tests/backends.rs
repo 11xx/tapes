@@ -3613,3 +3613,75 @@ fn an_empty_selection_writes_a_manifest_and_no_bundle() {
 
     fs::remove_dir_all(directory).unwrap();
 }
+
+#[test]
+fn selection_stats_preserve_read_failures_without_counting_them_as_zero_activity() {
+    let backends: Vec<Box<dyn Backend>> = vec![Box::new(BulkExportFixture {
+        sessions: vec![resolver_session("readable"), resolver_session("gone")],
+        unreadable: "gone",
+    })];
+    let summary = tapes_core::stats_summary::with_backends(&backends, &selection()).unwrap();
+    assert_eq!(summary.selected, 2);
+    assert_eq!(summary.read, 1);
+    assert_eq!(summary.failed.len(), 1);
+    assert_eq!(summary.failed[0].id, "gone");
+    assert_eq!(summary.sessions.len(), 1);
+    assert_eq!(summary.sessions[0].session.id, "readable");
+}
+
+struct TitleProjection {
+    title: &'static str,
+    origin: &'static str,
+}
+impl Backend for TitleProjection {
+    fn locate(&self, _: &str) -> anyhow::Result<Option<Session>> {
+        panic!("title selection must not re-resolve an ID")
+    }
+    fn harness(&self) -> &'static str {
+        "opencode"
+    }
+    fn available(&self) -> bool {
+        true
+    }
+    fn list(&self, _: &Query) -> anyhow::Result<Listing> {
+        let mut session = resolver_session("shared");
+        session.harness = "opencode".into();
+        session.title = Some(self.title.into());
+        session.store = Some(self.origin.into());
+        Ok(Listing::from_sessions(vec![session]))
+    }
+    fn transcript(&self, session: &Session, _: usize) -> anyhow::Result<Transcript> {
+        assert_eq!(session.store.as_deref(), Some(self.origin));
+        Ok(Transcript::new(
+            session.clone(),
+            vec![],
+            Truncation::default(),
+            None,
+            vec![],
+        ))
+    }
+}
+#[test]
+fn title_resolution_retains_the_first_opencode_projection_even_for_a_nonmatch() {
+    let backends: Vec<Box<dyn Backend>> = vec![
+        Box::new(TitleProjection {
+            title: "first",
+            origin: "primary",
+        }),
+        Box::new(TitleProjection {
+            title: "second",
+            origin: "secondary",
+        }),
+    ];
+    let selection = |title| Selection::Title {
+        title,
+        within: Where::Global,
+        harness: Some("opencode"),
+    };
+    let read = show_with_backends(&backends, selection("first"), 10).unwrap();
+    assert_eq!(read.session.store.as_deref(), Some("primary"));
+    assert!(show_with_backends(&backends, selection("second"), 10)
+        .unwrap_err()
+        .to_string()
+        .contains("was not found"));
+}

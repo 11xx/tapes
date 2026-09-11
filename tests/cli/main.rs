@@ -3412,6 +3412,213 @@ fn brief_renders_the_continuation_in_reading_order() {
 }
 
 #[test]
+fn selection_stats_agree_with_individual_reads() {
+    let (path, home) = fixture_store("stats-summary");
+    let root = TemporaryDirectory { path };
+    let run = |args: &[&str]| {
+        let mut command = tapes();
+        command.args(args);
+        with_fixture_env(&mut command, root.path(), &home, root.path());
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice::<Value>(&output.stdout).unwrap()
+    };
+    let summary = run(&["stats", "--global", "--harness", "codex", "--json"]);
+    assert_eq!(summary["schema"], "tapes-stats-summary/1");
+    assert_eq!(summary["selected"], 2);
+    assert_eq!(summary["read"], 2);
+    let mut totals = [0_u64; 4];
+    for row in summary["sessions"].as_array().unwrap() {
+        let one = run(&["stats", row["session"]["id"].as_str().unwrap(), "--json"]);
+        assert_eq!(row["tools"], one["tools"]);
+        assert_eq!(row["coverage"], one["coverage"]);
+        for (index, key) in ["calls", "results", "paired", "errors"].iter().enumerate() {
+            totals[index] += one["tools"][key].as_u64().unwrap();
+        }
+    }
+    for (index, key) in ["calls", "results", "paired", "errors"].iter().enumerate() {
+        assert_eq!(summary["by_harness"]["codex"][key], totals[index]);
+    }
+}
+
+#[test]
+fn selection_stats_cli_reports_partial_and_total_read_failure() {
+    let root = TemporaryDirectory::new(
+        std::env::temp_dir().join(format!("tapes-stats-failure-{}", std::process::id())),
+    );
+    let fixture =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/opencode/opencode2");
+    let program = root.path().join("opencode2");
+    let calls = root.path().join("calls");
+    for (pattern, reads, success) in [
+        ("/api/session/ses_api_only_fixture/message*", 1, true),
+        ("/api/session/*/message*", 0, false),
+    ] {
+        let script = format!("#!/bin/sh\nprintf '%s\\n' \"$4\" >> '{}'\ncase \"$4\" in {pattern}) exit 7;; esac\nexec '{}' \"$@\"\n", calls.display(),fixture.display());
+        fs::write(&program, script).unwrap();
+        fs::set_permissions(&program, fs::Permissions::from_mode(0o700)).unwrap();
+        let mut command = tapes();
+        command.args(["stats", "--global", "--harness", "opencode", "--json"]);
+        with_fixture_env(
+            &mut command,
+            &root.path().join("codex"),
+            &root.path().join("home"),
+            root.path(),
+        );
+        let output = command.output().unwrap();
+        assert_eq!(
+            output.status.success(),
+            success,
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(report["selected"], 2);
+        assert_eq!(report["read"], reads);
+        assert_eq!(report["failed"].as_array().unwrap().len(), 2 - reads);
+        assert_eq!(report["sessions"].as_array().unwrap().len(), reads);
+    }
+    let calls = fs::read_to_string(calls).unwrap();
+    assert!(
+        !calls.contains("parent"),
+        "summary must not request child lineage: {calls}"
+    );
+}
+
+#[test]
+fn recorded_title_selects_every_single_session_view_and_refuses_hidden_ambiguity() {
+    let root = TemporaryDirectory::new(
+        std::env::temp_dir().join(format!("tapes-title-{}", std::process::id())),
+    );
+    let home = root.path().join("home");
+    let project = home.join(".claude/projects/fixture");
+    fs::create_dir_all(&project).unwrap();
+    let body = format!(
+        "{}\n{{\"type\":\"ai-title\",\"aiTitle\":\"Exact Title\"}}\n",
+        CLAUDE_SESSION
+    );
+    fs::write(project.join("session-claude.jsonl"), &body).unwrap();
+    let run = |args: &[&str]| {
+        let mut command = tapes();
+        command.args(args);
+        with_fixture_env(&mut command, &root.path().join("codex"), &home, root.path());
+        command.output().unwrap()
+    };
+    for view in ["show", "brief", "usage", "stats", "lineage", "events"] {
+        let output = run(&[
+            view,
+            "--title",
+            "Exact Title",
+            "--global",
+            "--harness",
+            "claude",
+            "--json",
+        ]);
+        assert!(
+            output.status.success(),
+            "{view}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(value["session"]["id"], "session-claude", "{view}");
+    }
+    let output = run(&[
+        "export",
+        "--title",
+        "Exact Title",
+        "--global",
+        "--harness",
+        "claude",
+        "--bundle",
+        root.path().join("bundles").to_str().unwrap(),
+    ]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let miss = run(&[
+        "show",
+        "--title",
+        "exact title",
+        "--global",
+        "--harness",
+        "claude",
+    ]);
+    assert!(!miss.status.success());
+    assert!(String::from_utf8_lossy(&miss.stderr).contains("was not found"));
+    for i in 0..25 {
+        let content = body
+            .replace("session-claude", &format!("session-{i}"))
+            .replace("Exact Title", &format!("filler-{i}"));
+        fs::write(project.join(format!("session-{i}.jsonl")), content).unwrap();
+    }
+    fs::write(
+        project.join("duplicate.jsonl"),
+        body.replace("session-claude", "duplicate"),
+    )
+    .unwrap();
+    let ambiguous = run(&[
+        "show",
+        "--title",
+        "Exact Title",
+        "--global",
+        "--harness",
+        "claude",
+    ]);
+    let diagnostic = String::from_utf8_lossy(&ambiguous.stderr);
+    assert!(!ambiguous.status.success());
+    assert!(
+        diagnostic.contains("ambiguous")
+            && diagnostic.contains("duplicate")
+            && diagnostic.contains("session-claude"),
+        "{diagnostic}"
+    );
+    fs::remove_file(project.join("duplicate.jsonl")).unwrap();
+    fs::write(project.join("unreadable.jsonl"), "{malformed\n").unwrap();
+    let unreadable = run(&[
+        "show",
+        "--title",
+        "Exact Title",
+        "--global",
+        "--harness",
+        "claude",
+    ]);
+    assert!(!unreadable.status.success());
+    assert!(String::from_utf8_lossy(&unreadable.stderr).contains("incomplete lookup"));
+    fs::remove_file(project.join("unreadable.jsonl")).unwrap();
+
+    let hidden = format!(
+        "{}{}\n",
+        body.replace("session-claude", "hidden"),
+        format!(
+            "{{\"type\":\"padding\",\"text\":\"{}\"}}\n",
+            "x".repeat(4096)
+        )
+        .repeat(1100)
+    );
+    fs::write(project.join("hidden.jsonl"), hidden).unwrap();
+    let incomplete = run(&[
+        "show",
+        "--title",
+        "Exact Title",
+        "--global",
+        "--harness",
+        "claude",
+    ]);
+    let diagnostic = String::from_utf8_lossy(&incomplete.stderr);
+    assert!(!incomplete.status.success());
+    assert!(
+        diagnostic.contains("incomplete lookup") && diagnostic.contains("hidden"),
+        "{diagnostic}"
+    );
+}
+
+#[test]
 fn show_preserves_exec_operator_evidence_outside_the_source_tail() {
     let root = TemporaryDirectory::new(
         std::env::temp_dir().join(format!("tapes-cli-exec-header-{}", std::process::id())),

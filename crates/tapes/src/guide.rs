@@ -395,6 +395,17 @@ HISTORICAL READS
   malformed and oversized record gaps remain explicit. Budgets protect context:
   1 KiB–4 MiB per page, 1–32 pages per search, 100 excerpts/observations.
   Older model observations never silently replace current session metadata.
+TOOL USAGE OVER A SELECTION
+  tapes stats --here --since 2026-01-01 --json
+  Counts recorded tools by harness and name, retaining each session's read
+  coverage and failures. These are tool calls, not inferred shell commands.
+  A single ID or --latest keeps the single-session stats view.
+RECORDED TITLE
+  tapes show --title "Exact recorded title" --harness claude
+  The same selector works on brief, usage, stats, lineage, events and export.
+  It defaults to this project; --global or --project changes scope. Derived
+  display hints never match. An incomplete lookup reports observed candidates
+  without claiming uniqueness; choose an explicit ID or narrower scope.
 
 "#;
 
