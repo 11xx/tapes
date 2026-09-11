@@ -156,6 +156,11 @@ impl Backend for PiBackend {
         self.root.as_deref().is_some_and(Path::is_dir)
     }
 
+    fn list_titles(&self, _query: &Query) -> Result<Listing> {
+        // This backend supplies display hints, not recorded titles.
+        Ok(Listing::default())
+    }
+
     fn list(&self, query: &Query) -> Result<Listing> {
         let Some(root) = self.root.as_deref() else {
             return Ok(Listing::default());

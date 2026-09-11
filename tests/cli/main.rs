@@ -3412,6 +3412,135 @@ fn brief_renders_the_continuation_in_reading_order() {
 }
 
 #[test]
+fn recorded_title_selects_every_single_session_view_and_refuses_hidden_ambiguity() {
+    let root = TemporaryDirectory::new(
+        std::env::temp_dir().join(format!("tapes-title-{}", std::process::id())),
+    );
+    let home = root.path().join("home");
+    let project = home.join(".claude/projects/fixture");
+    fs::create_dir_all(&project).unwrap();
+    let body = format!(
+        "{}\n{{\"type\":\"ai-title\",\"aiTitle\":\"Exact Title\"}}\n",
+        CLAUDE_SESSION
+    );
+    fs::write(project.join("session-claude.jsonl"), &body).unwrap();
+    let run = |args: &[&str]| {
+        let mut command = tapes();
+        command.args(args);
+        with_fixture_env(&mut command, &root.path().join("codex"), &home, root.path());
+        command.output().unwrap()
+    };
+    for view in ["show", "brief", "usage", "stats", "lineage", "events"] {
+        let output = run(&[
+            view,
+            "--title",
+            "Exact Title",
+            "--global",
+            "--harness",
+            "claude",
+            "--json",
+        ]);
+        assert!(
+            output.status.success(),
+            "{view}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(value["session"]["id"], "session-claude", "{view}");
+    }
+    let output = run(&[
+        "export",
+        "--title",
+        "Exact Title",
+        "--global",
+        "--harness",
+        "claude",
+        "--bundle",
+        root.path().join("bundles").to_str().unwrap(),
+    ]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let miss = run(&[
+        "show",
+        "--title",
+        "exact title",
+        "--global",
+        "--harness",
+        "claude",
+    ]);
+    assert!(!miss.status.success());
+    assert!(String::from_utf8_lossy(&miss.stderr).contains("was not found"));
+    for i in 0..25 {
+        let content = body
+            .replace("session-claude", &format!("session-{i}"))
+            .replace("Exact Title", &format!("filler-{i}"));
+        fs::write(project.join(format!("session-{i}.jsonl")), content).unwrap();
+    }
+    fs::write(
+        project.join("duplicate.jsonl"),
+        body.replace("session-claude", "duplicate"),
+    )
+    .unwrap();
+    let ambiguous = run(&[
+        "show",
+        "--title",
+        "Exact Title",
+        "--global",
+        "--harness",
+        "claude",
+    ]);
+    let diagnostic = String::from_utf8_lossy(&ambiguous.stderr);
+    assert!(!ambiguous.status.success());
+    assert!(
+        diagnostic.contains("ambiguous")
+            && diagnostic.contains("duplicate")
+            && diagnostic.contains("session-claude"),
+        "{diagnostic}"
+    );
+    fs::remove_file(project.join("duplicate.jsonl")).unwrap();
+    fs::write(project.join("unreadable.jsonl"), "{malformed\n").unwrap();
+    let unreadable = run(&[
+        "show",
+        "--title",
+        "Exact Title",
+        "--global",
+        "--harness",
+        "claude",
+    ]);
+    assert!(!unreadable.status.success());
+    assert!(String::from_utf8_lossy(&unreadable.stderr).contains("incomplete lookup"));
+    fs::remove_file(project.join("unreadable.jsonl")).unwrap();
+
+    let hidden = format!(
+        "{}{}\n",
+        body.replace("session-claude", "hidden"),
+        format!(
+            "{{\"type\":\"padding\",\"text\":\"{}\"}}\n",
+            "x".repeat(4096)
+        )
+        .repeat(1100)
+    );
+    fs::write(project.join("hidden.jsonl"), hidden).unwrap();
+    let incomplete = run(&[
+        "show",
+        "--title",
+        "Exact Title",
+        "--global",
+        "--harness",
+        "claude",
+    ]);
+    let diagnostic = String::from_utf8_lossy(&incomplete.stderr);
+    assert!(!incomplete.status.success());
+    assert!(
+        diagnostic.contains("incomplete lookup") && diagnostic.contains("hidden"),
+        "{diagnostic}"
+    );
+}
+
+#[test]
 fn show_preserves_exec_operator_evidence_outside_the_source_tail() {
     let root = TemporaryDirectory::new(
         std::env::temp_dir().join(format!("tapes-cli-exec-header-{}", std::process::id())),
