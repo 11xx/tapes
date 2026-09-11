@@ -392,6 +392,17 @@ CHILD RECORDINGS
   Read a Claude child's own transcript, usage and ending with its parent and
   reference retained. It is not an ordinary listed session; nested lineage
   remains uninspected and child activity is never added to parent totals.
+TOOL USAGE OVER A SELECTION
+  tapes stats --here --since 2026-01-01 --json
+  Counts recorded tools by harness and name, retaining each session's read
+  coverage and failures. These are tool calls, not inferred shell commands.
+  A single ID or --latest keeps the single-session stats view.
+RECORDED TITLE
+  tapes show --title "Exact recorded title" --harness claude
+  The same selector works on brief, usage, stats, lineage, events and export.
+  It defaults to this project; --global or --project changes scope. Derived
+  display hints never match. An incomplete lookup reports observed candidates
+  without claiming uniqueness; choose an explicit ID or narrower scope.
 
 "#;
 

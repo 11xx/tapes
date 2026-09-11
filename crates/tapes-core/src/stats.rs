@@ -306,6 +306,10 @@ const ERROR_STATUS: &str = "error";
 
 /// Count the typed events of one bounded read. Pairing, and therefore every
 /// duration, is the event projection's own; this adds nothing to it.
+pub(crate) fn count_tools(records: &[EventRecord], paired: usize) -> ToolStats {
+    tool_stats(records, paired).stats
+}
+
 fn tool_stats(records: &[EventRecord], paired: usize) -> ToolTally {
     let calls = index_calls(records);
     let mut stats = ToolStats {
