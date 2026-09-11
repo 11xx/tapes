@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
@@ -189,6 +190,46 @@ impl Backend for ClaudeBackend {
             trailing,
             Vec::new(),
         ))
+    }
+
+    fn history_page(
+        &self,
+        session: &Session,
+        cursor: Option<&str>,
+        bytes: usize,
+    ) -> Result<crate::history::Page> {
+        let path = session
+            .store
+            .as_deref()
+            .ok_or_else(|| anyhow!("session has no source file"))?;
+        crate::history::read_file(
+            session,
+            Path::new(path),
+            cursor,
+            bytes,
+            false,
+            |values, opening, context| {
+                let _ = (opening, context);
+                let turns = values.iter().flat_map(parse_turns).collect();
+                let models = values
+                    .iter()
+                    .filter_map(|value| {
+                        let message = &value["message"];
+                        if message["role"] != "assistant" {
+                            return None;
+                        }
+                        Some(crate::history::ModelObservation {
+                            model: Model {
+                                id: message["model"].as_str()?.to_owned(),
+                                variant: None,
+                            },
+                            timestamp: timestamp(&value["timestamp"]),
+                        })
+                    })
+                    .collect();
+                (turns, models)
+            },
+        )
     }
 
     fn harness(&self) -> &'static str {
@@ -408,7 +449,11 @@ impl Backend for ClaudeBackend {
         let mut calls = agent_calls(&read.values);
 
         let mut children = Vec::new();
+        let mut notes = Vec::new();
         for file in subagent_files(&path) {
+            if let Some(note) = file.metadata_note {
+                notes.push(note);
+            }
             let call = file
                 .tool_use_id
                 .as_ref()
@@ -459,6 +504,7 @@ impl Backend for ClaudeBackend {
         Ok(Lineage {
             children,
             truncation: read_bounds(&read),
+            notes,
             ..Lineage::default()
         })
     }
@@ -649,7 +695,7 @@ fn session_files(root: &Path) -> Vec<PathBuf> {
                 })
         })
         .collect::<Vec<_>>();
-    files.sort_by_key(|path| {
+    files.sort_by_cached_key(|path| {
         fs::metadata(path)
             .and_then(|metadata| metadata.modified())
             .unwrap_or(SystemTime::UNIX_EPOCH)
@@ -866,6 +912,7 @@ impl AgentCall {
 /// A subagent transcript beside the parent's recording, and the meta record
 /// Claude writes next to it.
 struct SubagentFile {
+    metadata_note: Option<String>,
     agent_id: String,
     transcript: PathBuf,
     meta: PathBuf,
@@ -968,11 +1015,9 @@ fn subagent_files(path: &Path) -> Vec<SubagentFile> {
                 .is_some_and(|extension| extension == "jsonl")
                 .then(|| {
                     let meta = path.with_file_name(format!("agent-{agent_id}.meta.json"));
-                    let recorded = fs::read_to_string(&meta)
-                        .ok()
-                        .and_then(|text| serde_json::from_str::<Value>(&text).ok())
-                        .unwrap_or(Value::Null);
+                    let (recorded, metadata_note) = subagent_metadata(&meta);
                     SubagentFile {
+                        metadata_note,
                         agent_id,
                         transcript: path,
                         meta,
@@ -985,4 +1030,34 @@ fn subagent_files(path: &Path) -> Vec<SubagentFile> {
         .collect::<Vec<_>>();
     files.sort_by(|left, right| left.agent_id.cmp(&right.agent_id));
     files
+}
+
+fn subagent_metadata(path: &Path) -> (Value, Option<String>) {
+    const LIMIT: usize = 64 * 1024;
+    let read = || -> Result<Value> {
+        let file = fs::File::open(path)?;
+        let mut bytes = Vec::new();
+        file.take((LIMIT + 1) as u64).read_to_end(&mut bytes)?;
+        if bytes.len() > LIMIT {
+            anyhow::bail!("metadata exceeds {LIMIT} bytes");
+        }
+        Ok(serde_json::from_slice(&bytes)?)
+    };
+    match read() {
+        Ok(value) => (value, None),
+        Err(error)
+            if error
+                .downcast_ref::<std::io::Error>()
+                .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound) =>
+        {
+            (Value::Null, None)
+        }
+        Err(error) => (
+            Value::Null,
+            Some(format!(
+                "Subagent metadata {} unavailable: {error:#}",
+                path.display()
+            )),
+        ),
+    }
 }

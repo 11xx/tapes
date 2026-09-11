@@ -21,6 +21,7 @@ pub mod bundle;
 pub mod child;
 pub mod endings;
 pub mod event;
+pub mod history;
 pub mod lineage;
 pub mod model;
 pub mod scope;

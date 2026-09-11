@@ -227,6 +227,15 @@ pub trait Backend {
             self.harness()
         )
     }
+
+    fn history_page(
+        &self,
+        _session: &Session,
+        _cursor: Option<&str>,
+        _bytes: usize,
+    ) -> Result<crate::history::Page> {
+        anyhow::bail!("{} does not support file history pages", self.harness())
+    }
     fn harness(&self) -> &'static str;
     /// Report whether listing is likely to work for this backend.
     ///
@@ -898,7 +907,7 @@ pub(crate) fn jsonl_files(root: &Path) -> Vec<PathBuf> {
 
     let mut files = Vec::new();
     visit(root, &mut files);
-    files.sort_by_key(|path| {
+    files.sort_by_cached_key(|path| {
         fs::metadata(path)
             .and_then(|metadata| metadata.modified())
             .unwrap_or(SystemTime::UNIX_EPOCH)

@@ -128,7 +128,8 @@ PROBE BEFORE EXPORTING
   `truncation`: a `window` names how many turns were returned and how many
   earlier ones the --tail bound omitted, which a larger --tail or export
   recovers; `source` lists bounds the reader itself reached (a file tail, a
-  store page, cut turn text), which no request through tapes reaches past.
+  store page, cut turn text). Wider turn windows retain source bounds; use
+  explicit page reads to reach older Claude or Codex file history.
   Human output says the same in its closing notes, recommending only the
   recovery that works.
 
@@ -324,7 +325,8 @@ READ THE ENDING
 
 SIGNALS THAT THE PICTURE IS PARTIAL
   A truncated transcript is a window, not the session, and `truncation` says
-  which kind: a turn window you can widen, or a source bound you cannot.
+  which kind: a turn window you can widen, or a source bound retained by
+  ordinary show/export reads. Explicit page reads have their own byte budget.
   Transcript notes carry
   what the normalized model has no field for: pi's abandoned branches, where a
   large remainder means the user changed direction; a claude session's
@@ -392,6 +394,15 @@ CHILD RECORDINGS
   Read a Claude child's own transcript, usage and ending with its parent and
   reference retained. It is not an ordinary listed session; nested lineage
   remains uninspected and child activity is never added to parent totals.
+HISTORICAL READS
+  tapes page SESSION --bytes 65536 --json
+  tapes history-search SESSION --search TEXT --pages 8 --json
+  tapes metadata SESSION --pages 8 --json
+  Claude and Codex history is paged backward, with chronological turns within
+  each page. Pass next_cursor back as --cursor. Changed sources refuse;
+  malformed and oversized record gaps remain explicit. Budgets protect context:
+  1 KiB–4 MiB per page, 1–32 pages per search, 100 excerpts/observations.
+  Older model observations never silently replace current session metadata.
 TOOL USAGE OVER A SELECTION
   tapes stats --here --since 2026-01-01 --json
   Counts recorded tools by harness and name, retaining each session's read
