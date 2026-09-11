@@ -298,7 +298,7 @@ enum Command {
     /// turn counts, plus whatever else its harness recorded — a context
     /// window, a provider quota window, wall-clock durations, a per-model
     /// split. A scope or listing filter instead answers the whole selection
-    /// as tapes-usage-summary/1, grouped by --by and summing each counter
+    /// as tapes-usage-summary/2, grouped by --by and summing each counter
     /// over the sessions that recorded it. The accounting basis and coverage
     /// decide whether figures may be summed; cost is only what the harness
     /// recorded, and quota is a separate fact about the account rather than
@@ -376,7 +376,7 @@ enum Command {
             conflicts_with_all = ["session", "latest"]
         )]
         by: Vec<ByArg>,
-        /// Render the versioned tapes-usage/1 object, or tapes-usage-summary/1
+        /// Render the versioned tapes-usage/1 object, or tapes-usage-summary/2
         /// for a selection, as JSON.
         #[arg(long)]
         json: bool,
@@ -1493,6 +1493,24 @@ fn render_usage_summary(summary: &UsageSummary, by: &[GroupBy]) -> String {
     total.extend(tally_cells(&summary.totals));
     out.push_str(&total.join("\t"));
     out.push('\n');
+    if summary.totals.mixed_accounting {
+        out.push_str(
+            "Mixed accounting: total counters are omitted; compatible partitions follow.\n",
+        );
+    }
+    for partition in &summary.partitions {
+        out.push_str(&format!(
+            "Accounting partition {} ({}): {} sessions; {}\n",
+            partition.harness,
+            partition
+                .accounting
+                .as_ref()
+                .map(render_accounting)
+                .unwrap_or_else(|| "no accounting".to_owned()),
+            partition.tally.sessions,
+            tally_cells(&partition.tally).join(" | ")
+        ));
+    }
     out
 }
 

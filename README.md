@@ -191,7 +191,7 @@ Human output prints one line per recorded fact and closes with the same
 truncation notes `show` prints.
 
 Given a scope or a listing filter instead of a session, `usage` answers the
-whole selection as `tapes-usage-summary/1`: the same flags `list` and `export`
+whole selection as `tapes-usage-summary/2`: the same flags `list` and `export`
 take, grouped by `--by harness,model,variant,directory` and defaulting to
 harness and model. It sums the counters the listing already carries, so no
 transcript is read. Each sum covers the sessions that recorded that counter
@@ -342,7 +342,7 @@ rather than a resent history. `tapes usage --here --since <date> --json` answers
 few endings that matter instead of every tail.
 
 **Contracts you can build on.** `tapes-list/1`, `tapes-session/1`,
-`tapes-events/1`, `tapes-usage/1`, `tapes-usage-summary/1`, `tapes-lineage/1`,
+`tapes-events/1`, `tapes-usage/1`, `tapes-usage-summary/2`, `tapes-lineage/1`,
 `tapes-endings/1`, `tapes-stats/1`, and `tapes-export-manifest/1` are versioned
 
 `tapes-endings/1`, `tapes-brief/1`, and `tapes-export-manifest/1` are versioned
@@ -384,3 +384,13 @@ agent-context tool — and it names the wrong half of the job. This tool's
 primary direction is *pull*: retrieve and reconstruct a session that already
 ended. Handing context forward is one thing you might do with what it
 returns.
+
+## Compatible accounting totals
+
+Usage summaries partition counters by harness, accounting basis and coverage.
+A total or requested group spanning incompatible domains retains its session
+and contributing-counter counts, sets `mixed_accounting: true`, and omits token
+and cost sums. `partitions` retains each compatible sum, including explicitly
+missing accounting. Recorded totals, full-session request sums and read-window
+request sums are never presented as one comparable total. This contract is
+`tapes-usage-summary/2`; single-session `tapes-usage/1` is unchanged.

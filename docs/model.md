@@ -537,7 +537,7 @@ order:
 ## Usage summary
 
 `tapes usage` over a selection sums what that set of sessions spent and
-serializes as a `tapes-usage-summary/1` object. The counters come from the
+serializes as a `tapes-usage-summary/2` object. The counters come from the
 listing, so the summed set is exactly the set `list` returns for the same
 flags and no transcript is read.
 
@@ -573,7 +573,7 @@ account-wide fact, not a sum over sessions.
 
 ```json
 {
-  "schema": "tapes-usage-summary/1",
+  "schema": "tapes-usage-summary/2",
   "selection": { "scope": "global", "sort": "newest", "limit": 20 },
   "groups": [
     {
@@ -975,3 +975,13 @@ verbatim, so the exported set can be audited against the store it came from.
   "scan_truncated": false
 }
 ```
+
+### Accounting partitions in usage summary version 2
+
+`partitions` groups sessions by harness and the optional accounting basis and
+coverage. Each row carries the ordinary tally and counter-contribution counts.
+A total or requested group containing counters from multiple such domains sets
+`mixed_accounting: true` and omits `tokens` and `cost`. Sessions with no counters
+retain their counts without making otherwise compatible sums incomparable.
+Version 1 summed across domains; version 2 retains comparable partition sums
+and suppresses mixed sums. Unknown accounting is its own domain.

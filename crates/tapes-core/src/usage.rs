@@ -313,6 +313,8 @@ pub struct CoverageCounts {
 /// session recorded is absent rather than zero.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct UsageTally {
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub mixed_accounting: bool,
     pub sessions: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tokens: Option<Tokens>,
@@ -463,6 +465,7 @@ impl Tally {
             + counted.cache_write
             > 0;
         UsageTally {
+            mixed_accounting: false,
             sessions: self.sessions,
             tokens: any_token_counted.then(|| Tokens {
                 input: self.input.sum(),
@@ -854,4 +857,61 @@ mod tests {
         assert_eq!(aggregate.groups[0].key, GroupKey::default());
         assert_eq!(aggregate.groups[0].tally, aggregate.totals);
     }
+}
+
+/// A compatible accounting domain; missing counters remain absent within it.
+#[derive(Debug, Serialize)]
+pub struct AccountingPartition {
+    pub harness: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub accounting: Option<Accounting>,
+    #[serde(flatten)]
+    pub tally: UsageTally,
+}
+
+pub fn partitioned_aggregate(
+    sessions: &[Session],
+    by: &[GroupBy],
+) -> (UsageAggregate, Vec<AccountingPartition>) {
+    let mut aggregate = aggregate(sessions, by);
+    let mut partitions: BTreeMap<(String, String), (Option<Accounting>, Tally)> = BTreeMap::new();
+    let mut domains: BTreeMap<Vec<Option<String>>, std::collections::BTreeSet<(String, String)>> =
+        BTreeMap::new();
+    let mut all = std::collections::BTreeSet::new();
+    for session in sessions {
+        let key = (session.harness.clone(), format!("{:?}", session.accounting));
+        partitions
+            .entry(key.clone())
+            .or_insert_with(|| (session.accounting.clone(), Tally::default()))
+            .1
+            .add(session);
+        let group = by.iter().map(|dimension| dimension.of(session)).collect();
+        let domains = domains.entry(group).or_default();
+        if session.tokens.is_some() || session.cost.is_some() {
+            domains.insert(key.clone());
+            all.insert(key);
+        }
+    }
+    let suppress = |tally: &mut UsageTally| {
+        tally.tokens = None;
+        tally.cost = None;
+        tally.mixed_accounting = true;
+    };
+    if all.len() > 1 {
+        suppress(&mut aggregate.totals);
+    }
+    for (group, domains) in aggregate.groups.iter_mut().zip(domains.into_values()) {
+        if domains.len() > 1 {
+            suppress(&mut group.tally);
+        }
+    }
+    let partitions = partitions
+        .into_iter()
+        .map(|((harness, _), (accounting, tally))| AccountingPartition {
+            harness,
+            accounting,
+            tally: tally.finish(),
+        })
+        .collect();
+    (aggregate, partitions)
 }

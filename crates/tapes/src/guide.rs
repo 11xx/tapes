@@ -182,7 +182,7 @@ PROBE BEFORE EXPORTING
   child alone.
 
   Given a scope or a listing filter instead of a session, usage answers that
-  whole selection as tapes-usage-summary/1, using the flags list and export
+  whole selection as tapes-usage-summary/2, using the flags list and export
   take and grouping by --by (harness and model unless told otherwise). It sums
   the counters the listing already carries, so nothing is re-read. Read
   counted before a sum: it says how many of a group's sessions recorded that
