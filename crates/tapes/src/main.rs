@@ -243,6 +243,19 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Read a Claude child's own transcript, accounting and ending under its parent session.
+    Child {
+        #[command(flatten)]
+        selection: SelectionArgs,
+        /// The exact child reference reported by lineage.
+        #[arg(long)]
+        reference: String,
+        /// Maximum transcript turns to render; usage and ending cover the bounded source read.
+        #[arg(long, default_value_t = 40)]
+        tail: usize,
+        #[arg(long)]
+        json: bool,
+    },
     /// Project typed tool calls and results from one session. Pairing is exact
     /// within the bounded read; an unpaired event names which read boundary
     /// prevented a complete pair.
@@ -605,6 +618,28 @@ fn dispatch(cli: Cli) -> Result<()> {
                 println!("{}", serde_json::to_string(&transcript)?);
             } else {
                 print_transcript(&transcript, by_latest);
+            }
+        }
+        Command::Child {
+            selection,
+            reference,
+            tail,
+            json,
+        } => {
+            let child = tapes_core::child::read(selection.selection(), &reference, tail)?;
+            if json {
+                println!("{}", serde_json::to_string(&child)?);
+            } else {
+                println!(
+                    "Child {} of {} ({})",
+                    child.reference, child.parent.id, child.parent.harness
+                );
+                print_transcript(&child.transcript, false);
+                print!("{}", render_usage(&child.usage));
+                println!(
+                    "Ending facts: {:?}; incomplete: {:?}",
+                    child.ending.facts, child.ending.incomplete
+                );
             }
         }
         Command::Events {

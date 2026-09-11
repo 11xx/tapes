@@ -129,6 +129,44 @@ impl Default for ClaudeBackend {
 }
 
 impl Backend for ClaudeBackend {
+    fn child_transcript(&self, parent: &Session, reference: &str) -> Result<Transcript> {
+        if reference.is_empty()
+            || !reference
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+        {
+            anyhow::bail!(
+                "child reference must contain only letters, digits, hyphens or underscores"
+            );
+        }
+        let parent_path = Path::new(
+            parent
+                .store
+                .as_deref()
+                .ok_or_else(|| anyhow!("parent source unavailable"))?,
+        );
+        let directory = parent_path.with_extension("").join("subagents");
+        let path = directory.join(format!("agent-{reference}.jsonl"));
+        let (mut session, turns, read) = self.parse(&path)?;
+        if session.id != parent.id {
+            anyhow::bail!("child recording does not name the selected parent");
+        }
+        session.id = format!("{}::{reference}", parent.id);
+        let last_turn = read
+            .values
+            .iter()
+            .rposition(|value| !parse_turns(value).is_empty());
+        let trailing = trailing_record(read.values.iter(), last_turn, claude_trailing_kind);
+        Ok(transcript(
+            session,
+            turns,
+            usize::MAX,
+            &read,
+            trailing,
+            Vec::new(),
+        ))
+    }
+
     fn harness(&self) -> &'static str {
         "claude"
     }

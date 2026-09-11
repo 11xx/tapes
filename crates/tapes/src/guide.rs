@@ -385,6 +385,14 @@ ONE READER PER MACHINE
   tool and drifted apart; if tapes cannot express what you need, add it here.
 
   tapes <command> --help for a command's full contract.
+
+CHILD RECORDINGS
+  tapes lineage PARENT --json
+  tapes child PARENT --reference CHILD --tail 40 --json
+  Read a Claude child's own transcript, usage and ending with its parent and
+  reference retained. It is not an ordinary listed session; nested lineage
+  remains uninspected and child activity is never added to parent totals.
+
 "#;
 
 pub fn print() {

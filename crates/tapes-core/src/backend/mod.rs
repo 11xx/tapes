@@ -221,6 +221,12 @@ impl Listing {
 }
 
 pub trait Backend {
+    fn child_transcript(&self, _parent: &Session, _reference: &str) -> Result<Transcript> {
+        anyhow::bail!(
+            "{} does not support child-qualified transcript reads",
+            self.harness()
+        )
+    }
     fn harness(&self) -> &'static str;
     /// Report whether listing is likely to work for this backend.
     ///

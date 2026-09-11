@@ -18,6 +18,7 @@ pub use event::{
 pub mod backend;
 pub mod brief;
 pub mod bundle;
+pub mod child;
 pub mod endings;
 pub mod event;
 pub mod lineage;

@@ -975,3 +975,12 @@ verbatim, so the exported set can be audited against the store it came from.
   "scan_truncated": false
 }
 ```
+
+## Child-qualified read: `tapes-child/1`
+
+`parent` is the selected parent session and `reference` is the exact child
+reference. `transcript`, `usage`, and `ending` use their normalized shapes with
+the qualified child ID `PARENT::CHILD`. Transcript window coverage is separate
+from the source coverage underlying usage and ending facts. The child's native
+Claude session ID must name the parent; an inconsistent recording is refused.
+Nested lineage is explicitly unavailable rather than an asserted empty set.
