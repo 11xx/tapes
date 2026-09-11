@@ -282,7 +282,8 @@ enum Command {
     /// A relationship exists only where a record states it; nothing is
     /// inferred from directories, titles, or timestamps. A reference the
     /// store cannot resolve is kept and marked. A child is referred to, never
-    /// absorbed: read its transcript with `show` under its own id.
+    /// absorbed: use `show` for an ordinary child session ID, or
+    /// `child PARENT --reference CHILD` for a Claude subagent.
     Lineage {
         #[command(flatten)]
         selection: SelectionArgs,

@@ -32,7 +32,31 @@ impl ClaudeBackend {
     }
 
     fn parse(&self, path: &Path) -> Result<(Session, Vec<Turn>, Jsonl)> {
+        self.parse_with_parent(path, None)
+    }
+
+    fn parse_with_parent(
+        &self,
+        path: &Path,
+        parent: Option<&str>,
+    ) -> Result<(Session, Vec<Turn>, Jsonl)> {
         let recording = read_recording(path)?;
+        if let Some(parent) = parent {
+            let mut seen = false;
+            for value in recording.opening().iter().chain(&recording.tail.values) {
+                if let Some(id) = value.get("sessionId") {
+                    seen = true;
+                    if id.as_str() != Some(parent) {
+                        anyhow::bail!(
+                            "child recording contains a different or invalid native parent ID"
+                        );
+                    }
+                }
+            }
+            if !seen {
+                anyhow::bail!("child recording has no native parent identity evidence");
+            }
+        }
         let (started_at, last_activity_at) = recording
             .time_range()
             .ok_or_else(|| anyhow!("{} has no valid timestamps", path.display()))?;
@@ -147,7 +171,7 @@ impl Backend for ClaudeBackend {
         );
         let directory = parent_path.with_extension("").join("subagents");
         let path = directory.join(format!("agent-{reference}.jsonl"));
-        let (mut session, turns, read) = self.parse(&path)?;
+        let (mut session, turns, read) = self.parse_with_parent(&path, Some(&parent.id))?;
         if session.id != parent.id {
             anyhow::bail!("child recording does not name the selected parent");
         }

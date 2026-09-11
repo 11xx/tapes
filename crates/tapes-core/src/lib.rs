@@ -798,8 +798,8 @@ pub fn usage_with_backends(
 }
 
 /// One session's recorded relatives. The read never opens a child's turns:
-/// a relationship is a reference, and `show` under the child's own id is how
-/// its transcript is read.
+/// ordinary child sessions are read under their own IDs, while Claude
+/// subagent evidence is read through the parent-qualified child API.
 pub fn lineage(selection: Selection) -> Result<lineage::LineageView> {
     lineage_with_backends(&backend::backends(), selection)
 }

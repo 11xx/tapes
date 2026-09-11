@@ -297,7 +297,7 @@ fact rather than a gap.
 
 The view refers to a child and never absorbs one: resolving a reference reads
 the child's header or row and never its turns, and a child's transcript is
-read with `show` under its own id.
+read under its own session ID, or with `child PARENT --reference CHILD` for a Claude subagent.
 
 `lineage` carries an optional `parent`, an always-present `children` array,
 and an optional `forked_from`. `ParentRef` is the parent's `native_id` in the
@@ -679,7 +679,7 @@ name where those turns sit. `lineage` is present when the session's store
 records a relative: the `parent` reference the lineage view carries, the
 `children` count, how many of them are unresolved, and
 `children_by_disposition`, one count per outcome the harness recorded. No
-child is read; its own ending is read under its own id.
+child is read; its own ending is read under its own session ID or through the parent-qualified `child` command.
 
 `tail` is present only when the bounded text tail was asked for. It holds at
 most `--tail` entries, one per `operator` or `assistant` turn in the read, each
@@ -981,6 +981,7 @@ verbatim, so the exported set can be audited against the store it came from.
 `parent` is the selected parent session and `reference` is the exact child
 reference. `transcript`, `usage`, and `ending` use their normalized shapes with
 the qualified child ID `PARENT::CHILD`. Transcript window coverage is separate
-from the source coverage underlying usage and ending facts. The child's native
-Claude session ID must name the parent; an inconsistent recording is refused.
+from the source coverage underlying usage and ending facts. Every native Claude session ID observed in the bounded opening and tail must
+name the parent; missing or conflicting identity evidence is refused. Source
+bounds still limit which native records were validated.
 Nested lineage is explicitly unavailable rather than an asserted empty set.

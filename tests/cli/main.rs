@@ -3512,3 +3512,38 @@ fn child_reads_are_qualified_and_never_become_parent_activity() {
     .status
     .success());
 }
+
+#[test]
+fn child_rejects_mixed_native_parent_ids() {
+    let root = TemporaryDirectory::new(
+        std::env::temp_dir().join(format!("tapes-child-identity-{}", std::process::id())),
+    );
+    let home = root.path().join("home");
+    let project = home.join(".claude/projects/fixture");
+    let children = project.join("session-claude/subagents");
+    fs::create_dir_all(&children).unwrap();
+    fs::write(project.join("session-claude.jsonl"), CLAUDE_SESSION).unwrap();
+    fs::write(
+        children.join("agent-fixture.jsonl"),
+        format!(
+            "{}\n{}",
+            CLAUDE_SUBAGENT,
+            CLAUDE_SUBAGENT.replace("session-claude", "different-parent")
+        ),
+    )
+    .unwrap();
+    let mut command = tapes();
+    command.args([
+        "child",
+        "session-claude",
+        "--reference",
+        "fixture",
+        "--json",
+    ]);
+    with_fixture_env(&mut command, &root.path().join("codex"), &home, root.path());
+    let output = command.output().unwrap();
+    assert!(
+        !output.status.success(),
+        "mixed parent identities must refuse"
+    );
+}
