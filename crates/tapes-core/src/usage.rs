@@ -713,7 +713,7 @@ mod tests {
         })
     }
 
-    fn spenders() -> Vec<Session> {
+    pub(super) fn spenders() -> Vec<Session> {
         vec![
             spender(
                 "codex",
@@ -914,4 +914,21 @@ pub fn partitioned_aggregate(
         })
         .collect();
     (aggregate, partitions)
+}
+
+#[cfg(test)]
+mod partition_tests {
+    use super::*;
+    #[test]
+    fn an_empty_group_does_not_shift_a_later_mixed_group() {
+        let sessions = super::tests::spenders()[..3].to_vec();
+        let (aggregate, _) = partitioned_aggregate(&sessions, &[GroupBy::Variant]);
+        let empty_variant = &aggregate.groups[0];
+        let high = &aggregate.groups[1];
+        assert!(empty_variant.key.variant.is_none());
+        assert!(!empty_variant.tally.mixed_accounting);
+        assert_eq!(high.key.variant.as_deref(), Some("high"));
+        assert!(high.tally.mixed_accounting);
+        assert!(high.tally.tokens.is_none());
+    }
 }

@@ -556,7 +556,7 @@ ascending, in the order the dimensions were requested; an absent value sorts
 first. `totals` has a group's shape without its key and covers every selected
 session.
 
-Within a group or the totals, `tokens.<counter>` is the sum over the sessions
+Within a compatible group or partition, `tokens.<counter>` is the sum over the sessions
 that recorded that counter and `counted.<counter>` is how many those were, so
 a total over twelve sessions of which nine recorded reasoning tokens is not
 read as twelve. A counter no session recorded is absent rather than zero, and
@@ -574,52 +574,88 @@ account-wide fact, not a sum over sessions.
 ```json
 {
   "schema": "tapes-usage-summary/2",
-  "selection": { "scope": "global", "sort": "newest", "limit": 20 },
+  "selection": {
+    "scope": "global",
+    "sort": "newest",
+    "limit": 20
+  },
   "groups": [
     {
-      "key": { "harness": "codex", "model": "gpt-5.6-sol", "variant": "high" },
-      "sessions": 12,
-      "tokens": { "input": 120000, "output": 8000, "reasoning": 4000 },
-      "cost": { "usd": 1.23 },
+      "key": {
+        "harness": "codex",
+        "model": "fixture-model"
+      },
+      "sessions": 2,
+      "tokens": {
+        "input": 30
+      },
       "coverage": {
-        "recorded_total": 10,
-        "summed_session": 1,
-        "summed_read_window": 1,
+        "recorded_total": 2,
+        "summed_session": 0,
+        "summed_read_window": 0,
         "no_accounting": 0
       },
       "counted": {
-        "input": 12,
-        "output": 12,
-        "reasoning": 9,
-        "cache_read": 12,
-        "cache_write": 12,
-        "cost": 12
+        "input": 2,
+        "output": 0,
+        "reasoning": 0,
+        "cache_read": 0,
+        "cache_write": 0,
+        "cost": 0
       }
     }
   ],
   "totals": {
-    "sessions": 12,
-    "tokens": { "input": 120000, "output": 8000, "reasoning": 4000 },
-    "cost": { "usd": 1.23 },
+    "sessions": 2,
+    "tokens": {
+      "input": 30
+    },
     "coverage": {
-      "recorded_total": 10,
-      "summed_session": 1,
-      "summed_read_window": 1,
+      "recorded_total": 2,
+      "summed_session": 0,
+      "summed_read_window": 0,
       "no_accounting": 0
     },
     "counted": {
-      "input": 12,
-      "output": 12,
-      "reasoning": 9,
-      "cache_read": 12,
-      "cache_write": 12,
-      "cost": 12
+      "input": 2,
+      "output": 0,
+      "reasoning": 0,
+      "cache_read": 0,
+      "cache_write": 0,
+      "cost": 0
     }
   },
+  "partitions": [
+    {
+      "harness": "codex",
+      "accounting": {
+        "basis": "recorded-total",
+        "coverage": "session"
+      },
+      "sessions": 2,
+      "tokens": {
+        "input": 30
+      },
+      "coverage": {
+        "recorded_total": 2,
+        "summed_session": 0,
+        "summed_read_window": 0,
+        "no_accounting": 0
+      },
+      "counted": {
+        "input": 2,
+        "output": 0,
+        "reasoning": 0,
+        "cache_read": 0,
+        "cache_write": 0,
+        "cost": 0
+      }
+    }
+  ],
   "unavailable": [],
   "unreadable": [],
   "unsearched": [],
-  "scanned": 12,
+  "scanned": 2,
   "scan_truncated": false
 }
 ```
