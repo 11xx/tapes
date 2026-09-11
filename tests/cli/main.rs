@@ -3410,3 +3410,41 @@ fn brief_renders_the_continuation_in_reading_order() {
 
     fs::remove_dir_all(codex_home).unwrap();
 }
+
+#[test]
+fn show_preserves_exec_operator_evidence_outside_the_source_tail() {
+    let root = TemporaryDirectory::new(
+        std::env::temp_dir().join(format!("tapes-cli-exec-header-{}", std::process::id())),
+    );
+    let codex = root.path().join("codex");
+    let sessions = codex.join("sessions");
+    fs::create_dir_all(&sessions).unwrap();
+    let id = "40000000-0000-0000-0000-000000000001";
+    let header = serde_json::json!({"type":"session_meta","timestamp":"2026-01-01T10:00:00Z",
+        "payload":{"id":id,"source":"exec","cwd":"/fixture"}});
+    let padding = serde_json::json!({"type":"padding","text":"x".repeat(4096)});
+    let prompt = serde_json::json!({"type":"response_item","timestamp":"2026-01-01T10:01:00Z",
+        "payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"finish the bounded task"}]}});
+    let body = format!(
+        "{header}\n{}{prompt}\n",
+        format!("{padding}\n").repeat(1100)
+    );
+    fs::write(
+        sessions.join(format!("rollout-2026-01-01T10-00-00-{id}.jsonl")),
+        body,
+    )
+    .unwrap();
+    let mut command = tapes();
+    command.args(["show", id, "--json"]);
+    with_fixture_env(&mut command, &codex, &root.path().join("home"), root.path());
+    let output = command.output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let view: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(view["turns"].as_array().unwrap().len(), 1);
+    assert_eq!(view["turns"][0]["kind"], "operator");
+    assert_eq!(view["truncation"]["source"][0]["kind"], "file-tail");
+}
