@@ -292,6 +292,19 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Read a Claude child's own transcript, accounting and ending as tapes-child/1 under its parent session.
+    Child {
+        #[command(flatten)]
+        selection: SelectionArgs,
+        /// The exact child reference reported by lineage.
+        #[arg(long)]
+        reference: String,
+        /// Maximum transcript turns to render; usage and ending cover the bounded source read.
+        #[arg(long, default_value_t = 40)]
+        tail: usize,
+        #[arg(long)]
+        json: bool,
+    },
     /// Project typed tool calls and results from one session. Pairing is exact
     /// within the bounded read; an unpaired event names which read boundary
     /// prevented a complete pair.
@@ -318,7 +331,8 @@ enum Command {
     /// A relationship exists only where a record states it; nothing is
     /// inferred from directories, titles, or timestamps. A reference the
     /// store cannot resolve is kept and marked. A child is referred to, never
-    /// absorbed: read its transcript with `show` under its own id.
+    /// absorbed: use `show` for an ordinary child session ID, or
+    /// `child PARENT --reference CHILD` for a Claude subagent.
     Lineage {
         #[command(flatten)]
         selection: SelectionArgs,
@@ -824,6 +838,28 @@ fn dispatch(cli: Cli) -> Result<()> {
                 if let Some(cursor) = report.next_cursor {
                     println!("Unread metadata history remains. Next cursor: {cursor}");
                 }
+            }
+        }
+        Command::Child {
+            selection,
+            reference,
+            tail,
+            json,
+        } => {
+            let child = tapes_core::child::read(selection.selection(), &reference, tail)?;
+            if json {
+                println!("{}", serde_json::to_string(&child)?);
+            } else {
+                println!(
+                    "Child {} of {} ({})",
+                    child.reference, child.parent.id, child.parent.harness
+                );
+                print_transcript(&child.transcript, false);
+                print!("{}", render_usage(&child.usage));
+                println!(
+                    "Ending facts: {:?}; incomplete: {:?}",
+                    child.ending.facts, child.ending.incomplete
+                );
             }
         }
         Command::Events {

@@ -3926,3 +3926,102 @@ fn lineage_bounds_subagent_metadata_and_reports_the_gap() {
         .iter()
         .any(|note| note.as_str().unwrap().contains("exceeds 65536 bytes")));
 }
+
+#[test]
+fn child_reads_are_qualified_and_never_become_parent_activity() {
+    let root = TemporaryDirectory::new(
+        std::env::temp_dir().join(format!("tapes-child-read-{}", std::process::id())),
+    );
+    let home = root.path().join("home");
+    let project = home.join(".claude/projects/fixture");
+    let children = project.join("session-claude/subagents");
+    fs::create_dir_all(&children).unwrap();
+    fs::write(project.join("session-claude.jsonl"), CLAUDE_SESSION).unwrap();
+    fs::write(children.join("agent-fixture.jsonl"), CLAUDE_SUBAGENT).unwrap();
+    let run = |args: &[&str]| {
+        let mut command = tapes();
+        command.args(args);
+        with_fixture_env(&mut command, &root.path().join("codex"), &home, root.path());
+        command.output().unwrap()
+    };
+    let output = run(&[
+        "child",
+        "session-claude",
+        "--reference",
+        "fixture",
+        "--tail",
+        "0",
+        "--json",
+    ]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let view: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(view["schema"], "tapes-child/1");
+    assert_eq!(view["parent"]["id"], "session-claude");
+    assert_eq!(
+        view["transcript"]["session"]["id"],
+        "session-claude::fixture"
+    );
+    assert!(view["transcript"]["turns"].as_array().unwrap().is_empty());
+    assert_eq!(view["usage"]["turns"]["total"], 1);
+    assert_eq!(view["ending"]["session"]["id"], "session-claude::fixture");
+    let listing = run(&["list", "--harness", "claude", "--json"]);
+    let listed: Value = serde_json::from_slice(&listing.stdout).unwrap();
+    assert_eq!(listed["sessions"].as_array().unwrap().len(), 1);
+    assert!(!run(&[
+        "child",
+        "session-claude",
+        "--reference",
+        "missing",
+        "--json"
+    ])
+    .status
+    .success());
+    assert!(!run(&[
+        "child",
+        "session-claude",
+        "--reference",
+        "../fixture",
+        "--json"
+    ])
+    .status
+    .success());
+}
+
+#[test]
+fn child_rejects_mixed_native_parent_ids() {
+    let root = TemporaryDirectory::new(
+        std::env::temp_dir().join(format!("tapes-child-identity-{}", std::process::id())),
+    );
+    let home = root.path().join("home");
+    let project = home.join(".claude/projects/fixture");
+    let children = project.join("session-claude/subagents");
+    fs::create_dir_all(&children).unwrap();
+    fs::write(project.join("session-claude.jsonl"), CLAUDE_SESSION).unwrap();
+    fs::write(
+        children.join("agent-fixture.jsonl"),
+        format!(
+            "{}\n{}",
+            CLAUDE_SUBAGENT,
+            CLAUDE_SUBAGENT.replace("session-claude", "different-parent")
+        ),
+    )
+    .unwrap();
+    let mut command = tapes();
+    command.args([
+        "child",
+        "session-claude",
+        "--reference",
+        "fixture",
+        "--json",
+    ]);
+    with_fixture_env(&mut command, &root.path().join("codex"), &home, root.path());
+    let output = command.output().unwrap();
+    assert!(
+        !output.status.success(),
+        "mixed parent identities must refuse"
+    );
+}

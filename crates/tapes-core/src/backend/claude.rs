@@ -33,7 +33,31 @@ impl ClaudeBackend {
     }
 
     fn parse(&self, path: &Path) -> Result<(Session, Vec<Turn>, Jsonl)> {
+        self.parse_with_parent(path, None)
+    }
+
+    fn parse_with_parent(
+        &self,
+        path: &Path,
+        parent: Option<&str>,
+    ) -> Result<(Session, Vec<Turn>, Jsonl)> {
         let recording = read_recording(path)?;
+        if let Some(parent) = parent {
+            let mut seen = false;
+            for value in recording.opening().iter().chain(&recording.tail.values) {
+                if let Some(id) = value.get("sessionId") {
+                    seen = true;
+                    if id.as_str() != Some(parent) {
+                        anyhow::bail!(
+                            "child recording contains a different or invalid native parent ID"
+                        );
+                    }
+                }
+            }
+            if !seen {
+                anyhow::bail!("child recording has no native parent identity evidence");
+            }
+        }
         let (started_at, last_activity_at) = recording
             .time_range()
             .ok_or_else(|| anyhow!("{} has no valid timestamps", path.display()))?;
@@ -130,6 +154,44 @@ impl Default for ClaudeBackend {
 }
 
 impl Backend for ClaudeBackend {
+    fn child_transcript(&self, parent: &Session, reference: &str) -> Result<Transcript> {
+        if reference.is_empty()
+            || !reference
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+        {
+            anyhow::bail!(
+                "child reference must contain only letters, digits, hyphens or underscores"
+            );
+        }
+        let parent_path = Path::new(
+            parent
+                .store
+                .as_deref()
+                .ok_or_else(|| anyhow!("parent source unavailable"))?,
+        );
+        let directory = parent_path.with_extension("").join("subagents");
+        let path = directory.join(format!("agent-{reference}.jsonl"));
+        let (mut session, turns, read) = self.parse_with_parent(&path, Some(&parent.id))?;
+        if session.id != parent.id {
+            anyhow::bail!("child recording does not name the selected parent");
+        }
+        session.id = format!("{}::{reference}", parent.id);
+        let last_turn = read
+            .values
+            .iter()
+            .rposition(|value| !parse_turns(value).is_empty());
+        let trailing = trailing_record(read.values.iter(), last_turn, claude_trailing_kind);
+        Ok(transcript(
+            session,
+            turns,
+            usize::MAX,
+            &read,
+            trailing,
+            Vec::new(),
+        ))
+    }
+
     fn history_page(
         &self,
         session: &Session,

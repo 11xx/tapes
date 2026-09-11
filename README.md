@@ -344,7 +344,7 @@ few endings that matter instead of every tail.
 
 **Contracts you can build on.** `tapes-list/1`, `tapes-session/1`,
 `tapes-events/1`, `tapes-usage/1`, `tapes-usage-summary/1`, `tapes-lineage/1`,
-`tapes-endings/1`, `tapes-stats/1`, `tapes-stats-summary/1`, `tapes-brief/1`,
+`tapes-endings/1`, `tapes-child/1`, `tapes-stats/1`, `tapes-stats-summary/1`, `tapes-brief/1`,
 `tapes-page/1`, `tapes-history-search/1`, `tapes-metadata-history/1`,
 and `tapes-export-manifest/1` are versioned
 JSON; a breaking shape change bumps the version. A single-session `export`
@@ -444,3 +444,17 @@ origins. Incomplete scans, unreadable records, and incomplete title evidence
 refuse even when one candidate was observed. Choose an explicit ID or narrow
 the scope in that case. Missing harnesses are skipped. Codex and Pi recordings
 currently supply derived display hints rather than recorded titles.
+
+## Claude child recordings
+
+`tapes child PARENT --reference CHILD --json` reads the child's own transcript,
+usage and ending evidence. Find `CHILD` in the parent's `lineage` output. The
+`tapes-child/1` report retains parent identity and child reference; its transcript
+uses the qualified ID `PARENT::CHILD`. This ID does not become an ordinary
+listed session: use the child command to read it. Missing references refuse.
+
+`--tail` bounds rendered transcript turns (default 40). Usage and ending facts
+cover the child's own bounded source read, with source coverage retained.
+Nested child lineage is explicitly uninspected; no child activity is absorbed
+into its parent. Other harnesses' ordinary child sessions remain addressable
+by their recorded session IDs.

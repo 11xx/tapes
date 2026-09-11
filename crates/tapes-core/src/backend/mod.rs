@@ -221,6 +221,13 @@ impl Listing {
 }
 
 pub trait Backend {
+    fn child_transcript(&self, _parent: &Session, _reference: &str) -> Result<Transcript> {
+        anyhow::bail!(
+            "{} does not support child-qualified transcript reads",
+            self.harness()
+        )
+    }
+
     fn history_page(
         &self,
         _session: &Session,

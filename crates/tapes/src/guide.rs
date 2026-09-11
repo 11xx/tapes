@@ -173,9 +173,9 @@ PROBE BEFORE EXPORTING
   parent column. Nothing is inferred from directories, titles, or times, and a
   reference the store cannot resolve is kept with resolved: false, because a
   child whose recording is gone is exactly what a reader is looking for.
-  A parent refers to a child and never absorbs it: read the child with
-  `show` under its own id, and expect a claude subagent, which is not
-  addressable as a session, to carry no session id.
+  A parent refers to a child and never absorbs it. Use `show` with an ordinary
+  child session ID, or `child PARENT --reference CHILD` for a Claude subagent.
+  Claude child references do not become ordinary session IDs.
   What each harness records differs: claude names its subagent transcripts and
   the Agent calls that spawned them, codex joins spawn and wait calls to the
   rollout headers naming this session as their parent, opencode reads the
@@ -388,6 +388,12 @@ ONE READER PER MACHINE
 
   tapes <command> --help for a command's full contract.
 
+CHILD RECORDINGS
+  tapes lineage PARENT --json
+  tapes child PARENT --reference CHILD --tail 40 --json
+  Read a Claude child's own transcript, usage and ending with its parent and
+  reference retained. It is not an ordinary listed session; nested lineage
+  remains uninspected and child activity is never added to parent totals.
 HISTORICAL READS
   tapes page SESSION --bytes 65536 --json
   tapes history-search SESSION --search TEXT --pages 8 --json
