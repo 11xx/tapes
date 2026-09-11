@@ -394,3 +394,19 @@ aggregates by harness and tool name. Pair durations cover complete timestamped
 pairs only. Read failures have unknown activity and contribute no counters.
 These are recorded harness tool names, such as `bash`, not inferred shell
 commands. Child recordings contribute only when independently selected.
+
+## Recorded-title lookup
+
+Single-session commands accept `--title "Exact recorded title"` instead of an
+ID or `--latest`: `show`, `brief`, `usage`, `stats`, `lineage`, `events`, and
+`export`. Matching is case-sensitive and uses the recorded title only, never
+a derived display hint. Lookup defaults to the current project; `--project`,
+`--global`, and `--harness` choose its scope.
+
+Lookup parses at most 5,000 candidates per backend, independently of the
+ordinary listing limit. Claude discovery also stops after 10,000 directory
+entries; Codex and Pi require no title scan. Multiple matches refuse with candidate IDs and
+origins. Incomplete scans, unreadable records, and incomplete title evidence
+refuse even when one candidate was observed. Choose an explicit ID or narrow
+the scope in that case. Missing harnesses are skipped. Codex and Pi recordings
+currently supply derived display hints rather than recorded titles.

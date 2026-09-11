@@ -137,6 +137,116 @@ impl Backend for ClaudeBackend {
         self.root.as_deref().is_some_and(Path::is_dir)
     }
 
+    fn list_titles(&self, query: &Query) -> Result<Listing> {
+        let Some(root) = self.root.as_deref() else {
+            return Ok(Listing::default());
+        };
+        let mut listing = Listing::default();
+        let mut entries_seen = 0;
+        let entry_limit = query.ceiling.saturating_mul(2);
+        for project in fs::read_dir(root)? {
+            entries_seen += 1;
+            if entries_seen > entry_limit {
+                listing.scan_truncated = true;
+                break;
+            }
+            let project = match project {
+                Ok(entry) => entry,
+                Err(error) => {
+                    listing
+                        .unavailable
+                        .push(format!("Claude project entry: {error}"));
+                    continue;
+                }
+            };
+            let kind = match project.file_type() {
+                Ok(kind) => kind,
+                Err(error) => {
+                    listing
+                        .unavailable
+                        .push(format!("{}: {error}", project.path().display()));
+                    continue;
+                }
+            };
+            if !kind.is_dir() {
+                continue;
+            }
+            let entries = match fs::read_dir(project.path()) {
+                Ok(entries) => entries,
+                Err(error) => {
+                    listing
+                        .unavailable
+                        .push(format!("{}: {error}", project.path().display()));
+                    continue;
+                }
+            };
+            for entry in entries {
+                entries_seen += 1;
+                if entries_seen > entry_limit || listing.scanned >= query.ceiling {
+                    listing.scan_truncated = true;
+                    break;
+                }
+                let entry = match entry {
+                    Ok(entry) => entry,
+                    Err(error) => {
+                        listing
+                            .unavailable
+                            .push(format!("Claude session entry: {error}"));
+                        continue;
+                    }
+                };
+                let path = entry.path();
+                let kind = match entry.file_type() {
+                    Ok(kind) => kind,
+                    Err(error) => {
+                        listing
+                            .unavailable
+                            .push(format!("{}: {error}", path.display()));
+                        continue;
+                    }
+                };
+                if !kind.is_file()
+                    || path
+                        .extension()
+                        .is_none_or(|extension| extension != "jsonl")
+                {
+                    continue;
+                }
+                listing.scanned += 1;
+                match self.parse(&path) {
+                    Ok((session, _, read)) => {
+                        if let Some(scope) = query.scope {
+                            match session.directory.as_deref() {
+                                Some(directory) if !scope.contains(directory) => continue,
+                                None => {
+                                    listing
+                                        .unavailable
+                                        .push(format!("{}: unknown project scope", path.display()));
+                                    continue;
+                                }
+                                _ => {}
+                            }
+                        }
+                        if read.skipped > 0 || (read.truncated && session.title.is_none()) {
+                            listing.unsearched.push(format!(
+                                "{} (claude): incomplete recorded-title evidence",
+                                session.id
+                            ));
+                        }
+                        listing.sessions.push(session);
+                    }
+                    Err(error) => listing
+                        .unavailable
+                        .push(format!("{}: {error:#}", path.display())),
+                }
+            }
+            if listing.scan_truncated {
+                break;
+            }
+        }
+        Ok(listing)
+    }
+
     fn list(&self, query: &Query) -> Result<Listing> {
         let Some(root) = self.root.as_deref() else {
             return Ok(Listing::default());

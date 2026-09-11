@@ -6,9 +6,9 @@ use serde_json::Value;
 
 use super::{
     accounting_for, head_directory, head_jsonl, home_path, jsonl_files, list_files,
-    list_files_with_search, matching_session_file, read_bounds, read_jsonl, read_recording,
-    session_file, timestamp, trailing_record, transcript, Backend, Jsonl, Listing, ParsedFile,
-    Query, TokenTotals,
+    list_files_with_search, matching_session_file, read_bounds, read_recording, session_file,
+    timestamp, trailing_record, transcript, Backend, Jsonl, Listing, ParsedFile, Query,
+    TokenTotals,
 };
 use crate::event::{Bounded, EventKind, ToolEvent};
 use crate::lineage::{ChildRef, Lineage, ParentRef, SourceRef};
@@ -146,6 +146,11 @@ impl Backend for CodexBackend {
 
     fn available(&self) -> bool {
         self.root.as_deref().is_some_and(Path::is_dir)
+    }
+
+    fn list_titles(&self, _query: &Query) -> Result<Listing> {
+        // This backend supplies display hints, not recorded titles.
+        Ok(Listing::default())
     }
 
     fn list(&self, query: &Query) -> Result<Listing> {
@@ -298,8 +303,9 @@ impl Backend for CodexBackend {
 }
 
 fn read_transcript(path: &Path) -> Result<(Vec<Turn>, Jsonl, Option<TrailingRecord>)> {
-    let read = read_jsonl(path)?;
-    let evidence = user_message_evidence(&read.values, &[]);
+    let recording = read_recording(path)?;
+    let read = &recording.tail;
+    let evidence = user_message_evidence(&read.values, recording.opening());
     let mut turns = Vec::new();
     let mut last_turn = None;
     for (index, value) in read.values.iter().enumerate() {
@@ -310,7 +316,7 @@ fn read_transcript(path: &Path) -> Result<(Vec<Turn>, Jsonl, Option<TrailingReco
         turns.extend(parsed);
     }
     let trailing_record = trailing_record(read.values.iter(), last_turn, codex_trailing_kind);
-    Ok((turns, read, trailing_record))
+    Ok((turns, recording.tail, trailing_record))
 }
 
 /// Codex records the working directory in its `session_meta` header and
