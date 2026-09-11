@@ -3577,3 +3577,39 @@ fn show_preserves_exec_operator_evidence_outside_the_source_tail() {
     assert_eq!(view["turns"][0]["kind"], "operator");
     assert_eq!(view["truncation"]["source"][0]["kind"], "file-tail");
 }
+
+#[test]
+fn lineage_bounds_subagent_metadata_and_reports_the_gap() {
+    let root = TemporaryDirectory::new(
+        std::env::temp_dir().join(format!("tapes-meta-bound-{}", std::process::id())),
+    );
+    let home = root.path().join("home");
+    let project = home.join(".claude/projects/fixture");
+    let children = project.join("session-claude/subagents");
+    fs::create_dir_all(&children).unwrap();
+    fs::write(project.join("session-claude.jsonl"), CLAUDE_SESSION).unwrap();
+    fs::write(children.join("agent-fixture.jsonl"), CLAUDE_SUBAGENT).unwrap();
+    fs::write(
+        children.join("agent-fixture.meta.json"),
+        serde_json::json!({"model":"x".repeat(100000)}).to_string(),
+    )
+    .unwrap();
+    let mut command = tapes();
+    command.args(["lineage", "session-claude", "--json"]);
+    with_fixture_env(&mut command, &root.path().join("codex"), &home, root.path());
+    let output = command.output().unwrap();
+    assert!(output.status.success());
+    let view: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let child = view["lineage"]["children"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|child| child["reference"] == "fixture")
+        .unwrap();
+    assert!(child["model"] == "claude-fixture-sonnet");
+    assert!(view["notes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|note| note.as_str().unwrap().contains("exceeds 65536 bytes")));
+}

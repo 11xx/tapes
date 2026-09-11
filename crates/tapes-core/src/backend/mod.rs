@@ -892,7 +892,7 @@ pub(crate) fn jsonl_files(root: &Path) -> Vec<PathBuf> {
 
     let mut files = Vec::new();
     visit(root, &mut files);
-    files.sort_by_key(|path| {
+    files.sort_by_cached_key(|path| {
         fs::metadata(path)
             .and_then(|metadata| metadata.modified())
             .unwrap_or(SystemTime::UNIX_EPOCH)
