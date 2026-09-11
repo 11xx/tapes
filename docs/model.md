@@ -1021,3 +1021,16 @@ A total or requested group containing counters from multiple such domains sets
 retain their counts without making otherwise compatible sums incomparable.
 Version 1 summed across domains; version 2 retains comparable partition sums
 and suppresses mixed sums. Unknown accounting is its own domain.
+
+## Selection statistics: `tapes-stats-summary/1`
+
+`selection` records the listing query. `selected` counts its sessions, `read`
+counts successful transcript reads, and `failed` names each read failure with
+ID, harness, store and diagnostic. `sessions` holds each read session's identity,
+`coverage` and `tools` in the same shapes as `tapes-stats/1`. `by_harness` maps
+harness names to accumulated tool counters, including tool-name rows and
+complete-pair duration totals, maxima and contributing counts. Counters never
+cross-pair records from different sessions. Listing diagnostics (`unavailable`,
+`unreadable`, `unsearched`, `scanned`, `scan_truncated`) remain separate from
+transcript failures and per-session read bounds. An all-failed selected set
+still emits the report and exits unsuccessfully.

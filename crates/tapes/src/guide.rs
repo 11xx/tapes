@@ -385,6 +385,19 @@ ONE READER PER MACHINE
   tool and drifted apart; if tapes cannot express what you need, add it here.
 
   tapes <command> --help for a command's full contract.
+
+TOOL USAGE OVER A SELECTION
+  tapes stats --here --since 2026-01-01 --json
+  Counts recorded tools by harness and name, retaining each session's read
+  coverage and failures. These are tool calls, not inferred shell commands.
+  A single ID or --latest keeps the single-session stats view.
+RECORDED TITLE
+  tapes show --title "Exact recorded title" --harness claude
+  The same selector works on brief, usage, stats, lineage, events and export.
+  It defaults to this project; --global or --project changes scope. Derived
+  display hints never match. An incomplete lookup reports observed candidates
+  without claiming uniqueness; choose an explicit ID or narrower scope.
+
 "#;
 
 pub fn print() {
