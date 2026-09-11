@@ -250,6 +250,61 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Read one bounded page of older Claude or Codex history. Resume with the returned cursor.
+    Page {
+        #[command(flatten)]
+        selection: SelectionArgs,
+        #[arg(long)]
+        cursor: Option<String>,
+        /// Maximum payload bytes per page, between 1024 and 4194304.
+        /// Bounded header, alignment and provenance context reads are separate.
+        #[arg(long, default_value_t = tapes_core::history::DEFAULT_BYTES)]
+        bytes: usize,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Search normalized historical turns within an explicit page budget, retaining coverage gaps.
+    HistorySearch {
+        #[command(flatten)]
+        selection: SelectionArgs,
+        #[arg(long)]
+        cursor: Option<String>,
+        #[arg(long, default_value_t = tapes_core::history::DEFAULT_BYTES)]
+        bytes: usize,
+        /// Maximum pages to read, between 1 and 32.
+        #[arg(long, default_value_t = 1)]
+        pages: usize,
+        #[arg(long)]
+        search: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Recover recorded model observations outside the usual source tail, with explicit history coverage.
+    Metadata {
+        #[command(flatten)]
+        selection: SelectionArgs,
+        #[arg(long)]
+        cursor: Option<String>,
+        #[arg(long, default_value_t = tapes_core::history::DEFAULT_BYTES)]
+        bytes: usize,
+        #[arg(long, default_value_t = 1)]
+        pages: usize,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Read a Claude child's own transcript, accounting and ending as tapes-child/1 under its parent session.
+    Child {
+        #[command(flatten)]
+        selection: SelectionArgs,
+        /// The exact child reference reported by lineage.
+        #[arg(long)]
+        reference: String,
+        /// Maximum transcript turns to render; usage and ending cover the bounded source read.
+        #[arg(long, default_value_t = 40)]
+        tail: usize,
+        #[arg(long)]
+        json: bool,
+    },
     /// Project typed tool calls and results from one session. Pairing is exact
     /// within the bounded read; an unpaired event names which read boundary
     /// prevented a complete pair.
@@ -276,7 +331,8 @@ enum Command {
     /// A relationship exists only where a record states it; nothing is
     /// inferred from directories, titles, or timestamps. A reference the
     /// store cannot resolve is kept and marked. A child is referred to, never
-    /// absorbed: read its transcript with `show` under its own id.
+    /// absorbed: use `show` for an ordinary child session ID, or
+    /// `child PARENT --reference CHILD` for a Claude subagent.
     Lineage {
         #[command(flatten)]
         selection: SelectionArgs,
@@ -683,6 +739,127 @@ fn dispatch(cli: Cli) -> Result<()> {
                 println!("{}", serde_json::to_string(&transcript)?);
             } else {
                 print_transcript(&transcript, by_latest);
+            }
+        }
+        Command::Page {
+            selection,
+            cursor,
+            bytes,
+            json,
+        } => {
+            let page = tapes_core::history::page(selection.selection(), cursor.as_deref(), bytes)?;
+            if json {
+                println!("{}", serde_json::to_string(&page)?);
+            } else {
+                println!(
+                    "{} ({}): bytes {}..{} of {}; {} malformed records, {} skipped fragment bytes",
+                    page.session.id,
+                    page.session.harness,
+                    page.start,
+                    page.end,
+                    page.source_bytes,
+                    page.skipped_records,
+                    page.skipped_fragment_bytes
+                );
+                for turn in &page.turns {
+                    println!("[{} #{}] {}", human_speaker(turn), turn.ordinal, turn.text);
+                }
+                if let Some(cursor) = page.next_cursor {
+                    println!("Next cursor: {cursor}");
+                }
+            }
+        }
+        Command::HistorySearch {
+            selection,
+            cursor,
+            bytes,
+            pages,
+            search,
+            json,
+        } => {
+            let report = tapes_core::history::search(
+                selection.selection(),
+                cursor.as_deref(),
+                bytes,
+                pages,
+                &search,
+            )?;
+            if json {
+                println!("{}", serde_json::to_string(&report)?);
+            } else {
+                println!(
+                    "{} pages, {} bytes read; {} malformed records, {} skipped fragment bytes",
+                    report.pages_read,
+                    report.bytes_read,
+                    report.skipped_records,
+                    report.skipped_fragment_bytes
+                );
+                for found in report.matches {
+                    println!(
+                        "[page {} #{}] {}",
+                        found.page_start, found.ordinal, found.text
+                    );
+                }
+                if report.matches_truncated {
+                    println!("Match output stopped at 100 records.");
+                }
+                if let Some(cursor) = report.next_cursor {
+                    println!("Unsearched history remains. Next cursor: {cursor}");
+                }
+            }
+        }
+        Command::Metadata {
+            selection,
+            cursor,
+            bytes,
+            pages,
+            json,
+        } => {
+            let report = tapes_core::history::metadata(
+                selection.selection(),
+                cursor.as_deref(),
+                bytes,
+                pages,
+            )?;
+            if json {
+                println!("{}", serde_json::to_string(&report)?);
+            } else {
+                println!("Recorded model observations: {} pages, {} bytes; {} malformed records, {} skipped fragment bytes", report.pages_read, report.bytes_read, report.skipped_records, report.skipped_fragment_bytes);
+                for observation in report.observations {
+                    println!(
+                        "{} {:?}",
+                        observation.model.identity(),
+                        observation.timestamp
+                    );
+                }
+                if report.observations_truncated {
+                    println!("Observation output stopped at 100 records.");
+                }
+                if let Some(cursor) = report.next_cursor {
+                    println!("Unread metadata history remains. Next cursor: {cursor}");
+                }
+            }
+        }
+        Command::Child {
+            selection,
+            reference,
+            tail,
+            json,
+        } => {
+            let child = tapes_core::child::read(selection.selection(), &reference, tail)?;
+            if json {
+                println!("{}", serde_json::to_string(&child)?);
+            } else {
+                println!(
+                    "Child {} of {} ({})",
+                    child.reference, child.parent.id, child.parent.harness
+                );
+                print_transcript(&child.transcript, false);
+                print!("{}", render_usage(&child.usage));
+                println!(
+                    "Ending facts: {:?}; incomplete: {:?}",
+                    child.ending.facts, child.ending.incomplete
+                );
             }
         }
         Command::Events {

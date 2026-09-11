@@ -294,3 +294,8 @@ role and model, the call and result supply the spawn and ending timestamps,
 and `status` is the disposition. A subagent transcript is not addressable as a
 session of its own, so a child carries no session id. A call whose transcript
 is absent from the store stays a child with `resolved: false`.
+
+Subagent metadata files are capped at 64 KiB. Missing optional metadata leaves
+its fields absent. Oversized, malformed or unreadable metadata leaves those
+fields unavailable and adds a lineage diagnostic; the child transcript
+reference remains available independently of the metadata.

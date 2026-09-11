@@ -138,7 +138,7 @@ and prints normalized turns in chronological order. Every turn carries a
 only from fields the harness itself wrote, so a `/exit` command or an injected
 notice is not read as an unanswered prompt and a record with no such field
 stays `unknown` (see `docs/model.md`). Human output heads a user turn holding
-anything but an operator's message `user/<kind>`. Every turn also carries its
+anything but an operator's message `user/<kind>`. Every turn in `show` also carries its
 zero-based `ordinal` in the session's normalized sequence, which a file-backed
 session keeps under any window while a paged OpenCode API read renumbers when
 a wider window fetches further back (see `docs/model.md`), and a `native_id`
@@ -149,8 +149,9 @@ coordinate it was read from. Human timestamps are RFC
 that dropped any is marked `truncated`, and JSON says why under `truncation`:
 a `window` names the turns returned and the earlier turns the bound omitted,
 which a larger `--tail` or `export` recovers, while `source` lists bounds the
-reader itself reached (a file tail, a store page, cut turn text), which no
-request through `tapes` passes. Human output closes with one note per cause
+reader itself reached (a file tail, a store page, cut turn text). Wider
+`show`/`export` turn windows retain those bounds; explicit `page` reads can
+reach older Claude and Codex file history. Human output closes with one note per cause
 and recommends only the recovery that works. When a backend verifies a final
 non-turn record, human output names its kind and timestamp and JSON carries an
 optional `trailing_record` object; unavailable source timestamps remain absent.
@@ -343,7 +344,8 @@ few endings that matter instead of every tail.
 
 **Contracts you can build on.** `tapes-list/1`, `tapes-session/1`,
 `tapes-events/1`, `tapes-usage/1`, `tapes-usage-summary/2`, `tapes-lineage/1`,
-`tapes-endings/1`, `tapes-stats/1`, `tapes-stats-summary/1`, `tapes-brief/1`,
+`tapes-endings/1`, `tapes-child/1`, `tapes-stats/1`, `tapes-stats-summary/1`, `tapes-brief/1`,
+`tapes-page/1`, `tapes-history-search/1`, `tapes-metadata-history/1`,
 and `tapes-export-manifest/1` are versioned
 JSON; a breaking shape change bumps the version. A single-session `export`
 prints
@@ -384,6 +386,78 @@ primary direction is *pull*: retrieve and reconstruct a session that already
 ended. Handing context forward is one thing you might do with what it
 returns.
 
+## Historical pages
+
+`tapes page SESSION --bytes 65536 --json` reads backward from the end of a
+Claude or Codex recording. Pass its `next_cursor` to `--cursor` to continue.
+Turns are chronological within a page; ordinals are page-local. The source
+byte range plus session ID and store identify the page. Byte budgets range
+from 1 KiB to 4 MiB; the default is 64 KiB. Session metadata and the bounded
+opening-header probe are read separately. A page also probes at most one
+alignment byte, counted separately as `alignment_bytes`. Codex also reads up
+to 64 KiB of newer context to corroborate user-message provenance across page
+boundaries, counted as `context_bytes`; those records are not returned as turns.
+A kind remains unknown when its corroborating evidence is outside these bounds. Ordinary show/export retain their
+source bounds.
+
+A cursor binds the recording's identity, size, modification time and change time. Changed
+or replaced recordings refuse continuation; restart without a cursor. Malformed
+records and skipped fragments of records larger than a page are counted.
+Those gaps prevent a complete-history claim even when no cursor remains.
+Unsupported harnesses report unsupported paging.
+
+`tapes history-search SESSION --search TEXT --pages 8 --json` searches
+normalized text in at most eight pages. `--bytes` sets the page budget and
+`--cursor` resumes older history. Search is case-insensitive; output is capped
+at 100 matching records and 600 characters per excerpt, with explicit output
+truncation. Remaining history is not a proven miss.
+
+`tapes metadata SESSION --pages 8 --bytes 1048576 --json` recovers recorded
+model observations outside the ordinary source tail. It reports observations
+in reverse record order, page coverage and gaps, and a continuation cursor.
+An older observation is not asserted to be the current model, and ordinary
+session metadata is not overwritten. At most 100 observations are returned.
+History search and metadata accept 1–32 pages per call.
+## Tool usage across sessions
+
+`tapes stats --here --since 2026-01-01 --json` returns
+`tapes-stats-summary/1`. Listing filters select the sessions; each costs one
+bounded transcript read through its listed backend origin. The report includes
+selected/read/failed counts, per-session coverage and tool statistics, and
+aggregates by harness and tool name. Pair durations cover complete timestamped
+pairs only. Read failures have unknown activity and contribute no counters.
+These are recorded harness tool names, such as `bash`, not inferred shell
+commands. Child recordings contribute only when independently selected.
+
+## Recorded-title lookup
+
+Single-session commands accept `--title "Exact recorded title"` instead of an
+ID or `--latest`: `show`, `brief`, `usage`, `stats`, `lineage`, `events`, and
+`export`. Matching is case-sensitive and uses the recorded title only, never
+a derived display hint. Lookup defaults to the current project; `--project`,
+`--global`, and `--harness` choose its scope.
+
+Lookup parses at most 5,000 candidates per backend, independently of the
+ordinary listing limit. Claude discovery also stops after 10,000 directory
+entries; Codex and Pi require no title scan. Multiple matches refuse with candidate IDs and
+origins. Incomplete scans, unreadable records, and incomplete title evidence
+refuse even when one candidate was observed. Choose an explicit ID or narrow
+the scope in that case. Missing harnesses are skipped. Codex and Pi recordings
+currently supply derived display hints rather than recorded titles.
+
+## Claude child recordings
+
+`tapes child PARENT --reference CHILD --json` reads the child's own transcript,
+usage and ending evidence. Find `CHILD` in the parent's `lineage` output. The
+`tapes-child/1` report retains parent identity and child reference; its transcript
+uses the qualified ID `PARENT::CHILD`. This ID does not become an ordinary
+listed session: use the child command to read it. Missing references refuse.
+
+`--tail` bounds rendered transcript turns (default 40). Usage and ending facts
+cover the child's own bounded source read, with source coverage retained.
+Nested child lineage is explicitly uninspected; no child activity is absorbed
+into its parent. Other harnesses' ordinary child sessions remain addressable
+by their recorded session IDs.
 ## Tool usage across sessions
 
 `tapes stats --here --since 2026-01-01 --json` returns
