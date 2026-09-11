@@ -124,10 +124,9 @@ impl ScopeArgs {
     }
 }
 
-/// Which session a command acts on: one named, or the latest in scope.
-/// A named session is looked up by id across every store, so every flag that
-/// narrows a *search* is a contradiction beside one — and silently ignoring
-/// them would answer a question the caller did not ask.
+/// Select one session by ID, exact recorded title, or latest activity.
+/// ID resolution crosses stores; title and latest selection honor explicit
+/// scope and harness restrictions.
 #[derive(Args)]
 struct SelectionArgs {
     /// Session identifier, full or an unambiguous prefix.
