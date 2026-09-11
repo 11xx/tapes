@@ -192,7 +192,7 @@ Human output prints one line per recorded fact and closes with the same
 truncation notes `show` prints.
 
 Given a scope or a listing filter instead of a session, `usage` answers the
-whole selection as `tapes-usage-summary/1`: the same flags `list` and `export`
+whole selection as `tapes-usage-summary/2`: the same flags `list` and `export`
 take, grouped by `--by harness,model,variant,directory` and defaulting to
 harness and model. It sums the counters the listing already carries, so no
 transcript is read. Each sum covers the sessions that recorded that counter
@@ -200,8 +200,8 @@ and `counted` says how many those were — a counter nine of twelve sessions
 recorded is not a figure about twelve — while `coverage` counts the sessions
 behind a sum by their accounting, including those whose harness recorded
 nothing to sum. Cost is summed only where a harness recorded one, never
-inferred from tokens. Human output is one row per group, a totals row, and
-the listing's own diagnostics.
+inferred from tokens. Human output includes group and total rows, compatible accounting partitions,
+a mixed-accounting explanation when sums are omitted, and listing diagnostics.
 
 `endings` answers what each session of a selection ends on as
 `tapes-endings/1`, so deciding which endings deserve reading costs one bounded
@@ -343,7 +343,7 @@ rather than a resent history. `tapes usage --here --since <date> --json` answers
 few endings that matter instead of every tail.
 
 **Contracts you can build on.** `tapes-list/1`, `tapes-session/1`,
-`tapes-events/1`, `tapes-usage/1`, `tapes-usage-summary/1`, `tapes-lineage/1`,
+`tapes-events/1`, `tapes-usage/1`, `tapes-usage-summary/2`, `tapes-lineage/1`,
 `tapes-endings/1`, `tapes-child/1`, `tapes-stats/1`, `tapes-stats-summary/1`, `tapes-brief/1`,
 `tapes-page/1`, `tapes-history-search/1`, `tapes-metadata-history/1`,
 and `tapes-export-manifest/1` are versioned
@@ -458,3 +458,12 @@ cover the child's own bounded source read, with source coverage retained.
 Nested child lineage is explicitly uninspected; no child activity is absorbed
 into its parent. Other harnesses' ordinary child sessions remain addressable
 by their recorded session IDs.
+## Compatible accounting totals
+
+Usage summaries partition counters by harness, accounting basis and coverage.
+A total or requested group spanning incompatible domains retains its session
+and contributing-counter counts, sets `mixed_accounting: true`, and omits token
+and cost sums. `partitions` retains each compatible sum, including explicitly
+missing accounting. Recorded totals, full-session request sums and read-window
+request sums are never presented as one comparable total. This contract is
+`tapes-usage-summary/2`; single-session `tapes-usage/1` is unchanged.

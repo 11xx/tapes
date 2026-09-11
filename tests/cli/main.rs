@@ -2333,7 +2333,7 @@ fn usage_help_names_the_schema_and_what_the_figures_mean() {
         "{help}"
     );
     assert!(help.contains("quota is a separate fact"), "{help}");
-    assert!(help.contains("tapes-usage-summary/1"), "{help}");
+    assert!(help.contains("tapes-usage-summary/2"), "{help}");
     assert!(help.contains("--by"), "{help}");
 }
 
@@ -2486,7 +2486,7 @@ fn usage_summary_sums_the_listings_own_counters_and_counts_the_sessions_behind_t
     );
     let value: Value = serde_json::from_slice(&output.stdout).unwrap();
 
-    assert_eq!(value["schema"], "tapes-usage-summary/1");
+    assert_eq!(value["schema"], "tapes-usage-summary/2");
     assert_eq!(value["selection"]["scope"], "global");
     assert_eq!(value["selection"]["harness"], "codex");
     assert_eq!(value["scanned"], 4);
@@ -4024,4 +4024,47 @@ fn child_rejects_mixed_native_parent_ids() {
         !output.status.success(),
         "mixed parent identities must refuse"
     );
+}
+
+#[test]
+fn usage_summary_partitions_incompatible_accounting_without_a_grand_sum() {
+    let root = TemporaryDirectory::new(
+        std::env::temp_dir().join(format!("tapes-usage-domains-{}", std::process::id())),
+    );
+    let home = root.path().join("home");
+    let project = home.join(".claude/projects/fixture");
+    fs::create_dir_all(&project).unwrap();
+    fs::write(project.join("session-claude.jsonl"), CLAUDE_SESSION).unwrap();
+    let pi = home.join(".pi/agent/sessions");
+    fs::create_dir_all(&pi).unwrap();
+    fs::write(
+        pi.join("2026-01-01T10-00-00-000Z_session-pi.jsonl"),
+        PI_SESSION,
+    )
+    .unwrap();
+    let mut command = tapes();
+    command.args(["usage", "--global", "--json"]);
+    with_fixture_env(&mut command, &root.path().join("codex"), &home, root.path());
+    let output = command.output().unwrap();
+    assert!(output.status.success());
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["totals"]["mixed_accounting"], true);
+    assert!(report["totals"].get("tokens").is_none());
+    assert!(report["totals"].get("cost").is_none());
+    assert_eq!(report["partitions"].as_array().unwrap().len(), 2);
+    let recorded = format!("{}\n{{\"type\":\"cost-state\",\"modelUsage\":{{\"claude-fixture\":{{\"inputTokens\":100,\"outputTokens\":20}}}},\"totalCostUSD\":1.0}}\n", CLAUDE_SESSION.replace("session-claude","recorded"));
+    fs::write(project.join("recorded.jsonl"), recorded).unwrap();
+    let mut command = tapes();
+    command.args(["usage", "--global", "--harness", "claude", "--json"]);
+    with_fixture_env(&mut command, &root.path().join("codex"), &home, root.path());
+    let output = command.output().unwrap();
+    assert!(output.status.success());
+    let same_harness: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(same_harness["totals"]["mixed_accounting"], true);
+    assert_eq!(same_harness["partitions"].as_array().unwrap().len(), 2);
+    assert!(same_harness["groups"][0].get("tokens").is_none());
+
+    for row in report["partitions"].as_array().unwrap() {
+        assert!(row.get("tokens").is_some());
+    }
 }

@@ -32,7 +32,7 @@ pub mod usage;
 
 pub const LIST_SCHEMA: &str = "tapes-list/1";
 pub const EXPORT_MANIFEST_SCHEMA: &str = "tapes-export-manifest/1";
-pub const USAGE_SUMMARY_SCHEMA: &str = "tapes-usage-summary/1";
+pub const USAGE_SUMMARY_SCHEMA: &str = "tapes-usage-summary/2";
 /// Number of normalized turns a `list --search` query inspects per session.
 /// Keeping this fixed makes the listing's cost predictable for callers.
 pub const LIST_SEARCH_TAIL: usize = 32;
@@ -1097,6 +1097,7 @@ pub struct UsageSummary {
     pub groups: Vec<usage::UsageGroup>,
     /// Every selected session, whatever it was grouped under.
     pub totals: usage::UsageTally,
+    pub partitions: Vec<usage::AccountingPartition>,
     pub unavailable: Vec<String>,
     pub unreadable: Vec<String>,
     pub unsearched: Vec<String>,
@@ -1131,12 +1132,13 @@ pub fn usage_summary_with_backends(
         &selection.filters,
         selection.sort,
     )?;
-    let aggregate = usage::aggregate(&listed.sessions, by);
+    let (aggregate, partitions) = usage::partitioned_aggregate(&listed.sessions, by);
     Ok(UsageSummary {
         schema: USAGE_SUMMARY_SCHEMA,
         selection: selection_record(selection, limit),
         groups: aggregate.groups,
         totals: aggregate.totals,
+        partitions,
         unavailable: listed.unavailable,
         unreadable: listed.unreadable,
         unsearched: listed.unsearched,

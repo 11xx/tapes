@@ -538,7 +538,7 @@ order:
 ## Usage summary
 
 `tapes usage` over a selection sums what that set of sessions spent and
-serializes as a `tapes-usage-summary/1` object. The counters come from the
+serializes as a `tapes-usage-summary/2` object. The counters come from the
 listing, so the summed set is exactly the set `list` returns for the same
 flags and no transcript is read.
 
@@ -557,7 +557,7 @@ ascending, in the order the dimensions were requested; an absent value sorts
 first. `totals` has a group's shape without its key and covers every selected
 session.
 
-Within a group or the totals, `tokens.<counter>` is the sum over the sessions
+Within a compatible group or partition, `tokens.<counter>` is the sum over the sessions
 that recorded that counter and `counted.<counter>` is how many those were, so
 a total over twelve sessions of which nine recorded reasoning tokens is not
 read as twelve. A counter no session recorded is absent rather than zero, and
@@ -574,56 +574,103 @@ account-wide fact, not a sum over sessions.
 
 ```json
 {
-  "schema": "tapes-usage-summary/1",
-  "selection": { "scope": "global", "sort": "newest", "limit": 20 },
+  "schema": "tapes-usage-summary/2",
+  "selection": {
+    "scope": "global",
+    "sort": "newest",
+    "limit": 20
+  },
   "groups": [
     {
-      "key": { "harness": "codex", "model": "gpt-5.6-sol", "variant": "high" },
-      "sessions": 12,
-      "tokens": { "input": 120000, "output": 8000, "reasoning": 4000 },
-      "cost": { "usd": 1.23 },
+      "key": {
+        "harness": "codex",
+        "model": "fixture-model"
+      },
+      "sessions": 2,
+      "tokens": {
+        "input": 30
+      },
       "coverage": {
-        "recorded_total": 10,
-        "summed_session": 1,
-        "summed_read_window": 1,
+        "recorded_total": 2,
+        "summed_session": 0,
+        "summed_read_window": 0,
         "no_accounting": 0
       },
       "counted": {
-        "input": 12,
-        "output": 12,
-        "reasoning": 9,
-        "cache_read": 12,
-        "cache_write": 12,
-        "cost": 12
+        "input": 2,
+        "output": 0,
+        "reasoning": 0,
+        "cache_read": 0,
+        "cache_write": 0,
+        "cost": 0
       }
     }
   ],
   "totals": {
-    "sessions": 12,
-    "tokens": { "input": 120000, "output": 8000, "reasoning": 4000 },
-    "cost": { "usd": 1.23 },
+    "sessions": 2,
+    "tokens": {
+      "input": 30
+    },
     "coverage": {
-      "recorded_total": 10,
-      "summed_session": 1,
-      "summed_read_window": 1,
+      "recorded_total": 2,
+      "summed_session": 0,
+      "summed_read_window": 0,
       "no_accounting": 0
     },
     "counted": {
-      "input": 12,
-      "output": 12,
-      "reasoning": 9,
-      "cache_read": 12,
-      "cache_write": 12,
-      "cost": 12
+      "input": 2,
+      "output": 0,
+      "reasoning": 0,
+      "cache_read": 0,
+      "cache_write": 0,
+      "cost": 0
     }
   },
+  "partitions": [
+    {
+      "harness": "codex",
+      "accounting": {
+        "basis": "recorded-total",
+        "coverage": "session"
+      },
+      "sessions": 2,
+      "tokens": {
+        "input": 30
+      },
+      "coverage": {
+        "recorded_total": 2,
+        "summed_session": 0,
+        "summed_read_window": 0,
+        "no_accounting": 0
+      },
+      "counted": {
+        "input": 2,
+        "output": 0,
+        "reasoning": 0,
+        "cache_read": 0,
+        "cache_write": 0,
+        "cost": 0
+      }
+    }
+  ],
   "unavailable": [],
   "unreadable": [],
   "unsearched": [],
-  "scanned": 12,
+  "scanned": 2,
   "scan_truncated": false
 }
 ```
+
+### Accounting partitions in usage summary version 2
+
+`partitions` groups sessions by harness and the optional accounting basis and
+coverage. Each row carries the ordinary tally and counter-contribution counts.
+A total or requested group containing counters from multiple such domains sets
+`mixed_accounting: true` and omits `tokens` and `cost`. Sessions with no counters
+retain their counts without making otherwise compatible sums incomparable.
+Version 1 summed across domains; version 2 retains comparable partition sums
+and suppresses mixed sums. Unknown accounting is its own domain.
+
 
 ## Endings report
 
