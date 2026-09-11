@@ -190,3 +190,7 @@ parsed OpenCode. The logic was codex-specific throughout and parsed live
 rollouts correctly; the docstring was stale from a copied file. Nothing in this
 document is inherited from that claim — every row above was checked against a
 real rollout.
+
+The transcript reader consults the bounded opening header for `source=exec`
+evidence even when the header is outside the source tail. Opening turns are
+not added to the returned transcript.
