@@ -128,7 +128,8 @@ PROBE BEFORE EXPORTING
   `truncation`: a `window` names how many turns were returned and how many
   earlier ones the --tail bound omitted, which a larger --tail or export
   recovers; `source` lists bounds the reader itself reached (a file tail, a
-  store page, cut turn text), which no request through tapes reaches past.
+  store page, cut turn text). Wider turn windows retain source bounds; use
+  explicit page reads to reach older Claude or Codex file history.
   Human output says the same in its closing notes, recommending only the
   recovery that works.
 
@@ -172,9 +173,9 @@ PROBE BEFORE EXPORTING
   parent column. Nothing is inferred from directories, titles, or times, and a
   reference the store cannot resolve is kept with resolved: false, because a
   child whose recording is gone is exactly what a reader is looking for.
-  A parent refers to a child and never absorbs it: read the child with
-  `show` under its own id, and expect a claude subagent, which is not
-  addressable as a session, to carry no session id.
+  A parent refers to a child and never absorbs it. Use `show` with an ordinary
+  child session ID, or `child PARENT --reference CHILD` for a Claude subagent.
+  Claude child references do not become ordinary session IDs.
   What each harness records differs: claude names its subagent transcripts and
   the Agent calls that spawned them, codex joins spawn and wait calls to the
   rollout headers naming this session as their parent, opencode reads the
@@ -182,7 +183,7 @@ PROBE BEFORE EXPORTING
   child alone.
 
   Given a scope or a listing filter instead of a session, usage answers that
-  whole selection as tapes-usage-summary/1, using the flags list and export
+  whole selection as tapes-usage-summary/2, using the flags list and export
   take and grouping by --by (harness and model unless told otherwise). It sums
   the counters the listing already carries, so nothing is re-read. Read
   counted before a sum: it says how many of a group's sessions recorded that
@@ -324,7 +325,8 @@ READ THE ENDING
 
 SIGNALS THAT THE PICTURE IS PARTIAL
   A truncated transcript is a window, not the session, and `truncation` says
-  which kind: a turn window you can widen, or a source bound you cannot.
+  which kind: a turn window you can widen, or a source bound retained by
+  ordinary show/export reads. Explicit page reads have their own byte budget.
   Transcript notes carry
   what the normalized model has no field for: pi's abandoned branches, where a
   large remainder means the user changed direction; a claude session's
@@ -386,6 +388,26 @@ ONE READER PER MACHINE
 
   tapes <command> --help for a command's full contract.
 
+CHILD RECORDINGS
+  tapes lineage PARENT --json
+  tapes child PARENT --reference CHILD --tail 40 --json
+  Read a Claude child's own transcript, usage and ending with its parent and
+  reference retained. It is not an ordinary listed session; nested lineage
+  remains uninspected and child activity is never added to parent totals.
+HISTORICAL READS
+  tapes page SESSION --bytes 65536 --json
+  tapes history-search SESSION --search TEXT --pages 8 --json
+  tapes metadata SESSION --pages 8 --json
+  Claude and Codex history is paged backward, with chronological turns within
+  each page. Pass next_cursor back as --cursor. Changed sources refuse;
+  malformed and oversized record gaps remain explicit. Budgets protect context:
+  1 KiB–4 MiB per page, 1–32 pages per search, 100 excerpts/observations.
+  Older model observations never silently replace current session metadata.
+TOOL USAGE OVER A SELECTION
+  tapes stats --here --since 2026-01-01 --json
+  Counts recorded tools by harness and name, retaining each session's read
+  coverage and failures. These are tool calls, not inferred shell commands.
+  A single ID or --latest keeps the single-session stats view.
 RECORDED TITLE
   tapes show --title "Exact recorded title" --harness claude
   The same selector works on brief, usage, stats, lineage, events and export.

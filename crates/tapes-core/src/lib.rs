@@ -18,18 +18,21 @@ pub use event::{
 pub mod backend;
 pub mod brief;
 pub mod bundle;
+pub mod child;
 pub mod endings;
 pub mod event;
+pub mod history;
 pub mod lineage;
 pub mod model;
 pub mod scope;
 pub mod stats;
+pub mod stats_summary;
 pub mod title;
 pub mod usage;
 
 pub const LIST_SCHEMA: &str = "tapes-list/1";
 pub const EXPORT_MANIFEST_SCHEMA: &str = "tapes-export-manifest/1";
-pub const USAGE_SUMMARY_SCHEMA: &str = "tapes-usage-summary/1";
+pub const USAGE_SUMMARY_SCHEMA: &str = "tapes-usage-summary/2";
 /// Number of normalized turns a `list --search` query inspects per session.
 /// Keeping this fixed makes the listing's cost predictable for callers.
 pub const LIST_SEARCH_TAIL: usize = 32;
@@ -748,8 +751,7 @@ pub fn resolve_session(
     }
 }
 
-/// Which session a command was asked for: one named by the caller, or the
-/// latest in a scope.
+/// Select one session by ID, exact recorded title, or latest activity in scope.
 #[derive(Clone, Debug)]
 pub enum Selection<'a> {
     Id(&'a str),
@@ -811,8 +813,8 @@ pub fn usage_with_backends(
 }
 
 /// One session's recorded relatives. The read never opens a child's turns:
-/// a relationship is a reference, and `show` under the child's own id is how
-/// its transcript is read.
+/// ordinary child sessions are read under their own IDs, while Claude
+/// subagent evidence is read through the parent-qualified child API.
 pub fn lineage(selection: Selection) -> Result<lineage::LineageView> {
     lineage_with_backends(&backend::backends(), selection)
 }
@@ -1095,6 +1097,7 @@ pub struct UsageSummary {
     pub groups: Vec<usage::UsageGroup>,
     /// Every selected session, whatever it was grouped under.
     pub totals: usage::UsageTally,
+    pub partitions: Vec<usage::AccountingPartition>,
     pub unavailable: Vec<String>,
     pub unreadable: Vec<String>,
     pub unsearched: Vec<String>,
@@ -1129,12 +1132,13 @@ pub fn usage_summary_with_backends(
         &selection.filters,
         selection.sort,
     )?;
-    let aggregate = usage::aggregate(&listed.sessions, by);
+    let (aggregate, partitions) = usage::partitioned_aggregate(&listed.sessions, by);
     Ok(UsageSummary {
         schema: USAGE_SUMMARY_SCHEMA,
         selection: selection_record(selection, limit),
         groups: aggregate.groups,
         totals: aggregate.totals,
+        partitions,
         unavailable: listed.unavailable,
         unreadable: listed.unreadable,
         unsearched: listed.unsearched,

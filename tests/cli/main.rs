@@ -2333,7 +2333,7 @@ fn usage_help_names_the_schema_and_what_the_figures_mean() {
         "{help}"
     );
     assert!(help.contains("quota is a separate fact"), "{help}");
-    assert!(help.contains("tapes-usage-summary/1"), "{help}");
+    assert!(help.contains("tapes-usage-summary/2"), "{help}");
     assert!(help.contains("--by"), "{help}");
 }
 
@@ -2486,7 +2486,7 @@ fn usage_summary_sums_the_listings_own_counters_and_counts_the_sessions_behind_t
     );
     let value: Value = serde_json::from_slice(&output.stdout).unwrap();
 
-    assert_eq!(value["schema"], "tapes-usage-summary/1");
+    assert_eq!(value["schema"], "tapes-usage-summary/2");
     assert_eq!(value["selection"]["scope"], "global");
     assert_eq!(value["selection"]["harness"], "codex");
     assert_eq!(value["scanned"], 4);
@@ -3412,6 +3412,84 @@ fn brief_renders_the_continuation_in_reading_order() {
 }
 
 #[test]
+fn selection_stats_agree_with_individual_reads() {
+    let (path, home) = fixture_store("stats-summary");
+    let root = TemporaryDirectory { path };
+    let run = |args: &[&str]| {
+        let mut command = tapes();
+        command.args(args);
+        with_fixture_env(&mut command, root.path(), &home, root.path());
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice::<Value>(&output.stdout).unwrap()
+    };
+    let summary = run(&["stats", "--global", "--harness", "codex", "--json"]);
+    assert_eq!(summary["schema"], "tapes-stats-summary/1");
+    assert_eq!(summary["selected"], 2);
+    assert_eq!(summary["read"], 2);
+    let mut totals = [0_u64; 4];
+    for row in summary["sessions"].as_array().unwrap() {
+        let one = run(&["stats", row["session"]["id"].as_str().unwrap(), "--json"]);
+        assert_eq!(row["tools"], one["tools"]);
+        assert_eq!(row["coverage"], one["coverage"]);
+        for (index, key) in ["calls", "results", "paired", "errors"].iter().enumerate() {
+            totals[index] += one["tools"][key].as_u64().unwrap();
+        }
+    }
+    for (index, key) in ["calls", "results", "paired", "errors"].iter().enumerate() {
+        assert_eq!(summary["by_harness"]["codex"][key], totals[index]);
+    }
+}
+
+#[test]
+fn selection_stats_cli_reports_partial_and_total_read_failure() {
+    let root = TemporaryDirectory::new(
+        std::env::temp_dir().join(format!("tapes-stats-failure-{}", std::process::id())),
+    );
+    let fixture =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/opencode/opencode2");
+    let program = root.path().join("opencode2");
+    let calls = root.path().join("calls");
+    for (pattern, reads, success) in [
+        ("/api/session/ses_api_only_fixture/message*", 1, true),
+        ("/api/session/*/message*", 0, false),
+    ] {
+        let script = format!("#!/bin/sh\nprintf '%s\\n' \"$4\" >> '{}'\ncase \"$4\" in {pattern}) exit 7;; esac\nexec '{}' \"$@\"\n", calls.display(),fixture.display());
+        fs::write(&program, script).unwrap();
+        fs::set_permissions(&program, fs::Permissions::from_mode(0o700)).unwrap();
+        let mut command = tapes();
+        command.args(["stats", "--global", "--harness", "opencode", "--json"]);
+        with_fixture_env(
+            &mut command,
+            &root.path().join("codex"),
+            &root.path().join("home"),
+            root.path(),
+        );
+        let output = command.output().unwrap();
+        assert_eq!(
+            output.status.success(),
+            success,
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(report["selected"], 2);
+        assert_eq!(report["read"], reads);
+        assert_eq!(report["failed"].as_array().unwrap().len(), 2 - reads);
+        assert_eq!(report["sessions"].as_array().unwrap().len(), reads);
+    }
+    let calls = fs::read_to_string(calls).unwrap();
+    assert!(
+        !calls.contains("parent"),
+        "summary must not request child lineage: {calls}"
+    );
+}
+
+#[test]
 fn recorded_title_selects_every_single_session_view_and_refuses_hidden_ambiguity() {
     let root = TemporaryDirectory::new(
         std::env::temp_dir().join(format!("tapes-title-{}", std::process::id())),
@@ -3576,4 +3654,417 @@ fn show_preserves_exec_operator_evidence_outside_the_source_tail() {
     assert_eq!(view["turns"].as_array().unwrap().len(), 1);
     assert_eq!(view["turns"][0]["kind"], "operator");
     assert_eq!(view["truncation"]["source"][0]["kind"], "file-tail");
+}
+
+#[test]
+fn history_pages_cover_records_once_and_reject_changed_sources() {
+    let root = TemporaryDirectory::new(
+        std::env::temp_dir().join(format!("tapes-history-{}", std::process::id())),
+    );
+    let codex = root.path().join("codex");
+    let sessions = codex.join("sessions");
+    fs::create_dir_all(&sessions).unwrap();
+    let id = "50000000-0000-0000-0000-000000000001";
+    let path = sessions.join(format!("rollout-2026-01-01T10-00-00-{id}.jsonl"));
+    let header = serde_json::json!({"type":"session_meta","timestamp":"2026-01-01T10:00:00Z","payload":{"id":id,"source":"exec","cwd":"/fixture"}});
+    let mut body = format!("{header}\n");
+    for i in 0..40 {
+        let turn = serde_json::json!({"type":"response_item","timestamp":"2026-01-01T10:01:00Z","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":format!("historical request {i:02}")}]}});
+        body.push_str(&format!("{turn}\n"));
+    }
+    fs::write(&path, &body).unwrap();
+    let run = |args: &[&str]| {
+        let mut command = tapes();
+        command.args(args);
+        with_fixture_env(&mut command, &codex, &root.path().join("home"), root.path());
+        command.output().unwrap()
+    };
+    let mut cursor: Option<String> = None;
+    let mut seen = std::collections::BTreeSet::new();
+    let mut pages = 0;
+    loop {
+        let mut args = vec!["page", id, "--bytes", "1024", "--json"];
+        if let Some(cursor) = cursor.as_deref() {
+            args.extend(["--cursor", cursor]);
+        }
+        let output = run(&args);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let page: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert!(page["bytes_read"].as_u64().unwrap() <= 1024);
+        assert_eq!(page["skipped_records"], 0);
+        assert_eq!(page["skipped_fragment_bytes"], 0);
+        for turn in page["turns"].as_array().unwrap() {
+            assert_eq!(turn["kind"], "operator");
+            assert!(
+                seen.insert(turn["text"].as_str().unwrap().to_owned()),
+                "duplicate {turn}"
+            );
+        }
+        cursor = page["next_cursor"].as_str().map(str::to_owned);
+        pages += 1;
+        assert!(pages < 50);
+        if cursor.is_none() {
+            break;
+        }
+    }
+    assert_eq!(seen.len(), 40);
+    let output = run(&["page", id, "--bytes", "1024", "--json"]);
+    let first_cursor = serde_json::from_slice::<Value>(&output.stdout).unwrap()["next_cursor"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let output = run(&[
+        "history-search",
+        id,
+        "--bytes",
+        "1024",
+        "--pages",
+        "1",
+        "--search",
+        "request 00",
+        "--json",
+    ]);
+    let limited: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(limited["matches"].as_array().unwrap().is_empty());
+    assert!(limited["next_cursor"].is_string());
+    let output = run(&[
+        "history-search",
+        id,
+        "--bytes",
+        "1024",
+        "--pages",
+        "32",
+        "--search",
+        "request 00",
+        "--json",
+    ]);
+    let complete: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(complete["matches"].as_array().unwrap().len(), 1);
+    assert!(
+        complete["matches"][0]["page_end"].as_u64().unwrap()
+            > complete["matches"][0]["page_start"].as_u64().unwrap()
+    );
+    assert!(complete["next_cursor"].is_null());
+    fs::write(&path, format!("{body}\n")).unwrap();
+    let changed = run(&["page", id, "--cursor", &first_cursor, "--json"]);
+    assert!(!changed.status.success());
+    assert!(String::from_utf8_lossy(&changed.stderr).contains("source changed"));
+}
+
+#[test]
+fn metadata_history_recovers_midfile_models_and_reports_record_gaps() {
+    let root = TemporaryDirectory::new(
+        std::env::temp_dir().join(format!("tapes-history-models-{}", std::process::id())),
+    );
+    let codex = root.path().join("codex");
+    let sessions = codex.join("sessions");
+    fs::create_dir_all(&sessions).unwrap();
+    let id = "60000000-0000-0000-0000-000000000001";
+    let header = serde_json::json!({"type":"session_meta","timestamp":"2026-01-01T10:00:00Z","payload":{"id":id,"source":"exec","cwd":"/fixture"}});
+    let model = serde_json::json!({"type":"turn_context","timestamp":"2026-01-01T10:01:00Z","payload":{"model":"recorded-model","effort":"medium"}});
+    let padding = format!(
+        "{{\"type\":\"padding\",\"text\":\"{}\"}}\n",
+        "x".repeat(4096)
+    );
+    let body = format!(
+        "{header}\n{}{model}\n{}malformed\n",
+        padding.repeat(20),
+        padding.repeat(1100)
+    );
+    fs::write(
+        sessions.join(format!("rollout-2026-01-01T10-00-00-{id}.jsonl")),
+        body,
+    )
+    .unwrap();
+    let run = |args: &[&str]| {
+        let mut command = tapes();
+        command.args(args);
+        with_fixture_env(&mut command, &codex, &root.path().join("home"), root.path());
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice::<Value>(&output.stdout).unwrap()
+    };
+    let shown = run(&["show", id, "--json"]);
+    assert!(shown["session"]["model"].is_null());
+    let metadata = run(&[
+        "metadata", id, "--bytes", "1048576", "--pages", "8", "--json",
+    ]);
+    assert!(metadata["next_cursor"].is_null());
+    assert_eq!(metadata["skipped_records"], 1);
+    assert_eq!(metadata["observations"][0]["model"]["id"], "recorded-model");
+    let tiny = run(&["metadata", id, "--bytes", "1024", "--pages", "2", "--json"]);
+    assert!(tiny["skipped_fragment_bytes"].as_u64().unwrap() > 0);
+    assert!(tiny["next_cursor"].is_string());
+}
+
+#[test]
+fn history_page_preserves_a_record_exactly_aligned_with_the_byte_budget() {
+    let root = TemporaryDirectory::new(
+        std::env::temp_dir().join(format!("tapes-page-alignment-{}", std::process::id())),
+    );
+    let codex = root.path().join("codex");
+    let sessions = codex.join("sessions");
+    fs::create_dir_all(&sessions).unwrap();
+    let id = "80000000-0000-0000-0000-000000000001";
+    let header = serde_json::json!({"type":"session_meta","timestamp":"2026-01-01T10:00:00Z","payload":{"id":id,"source":"exec","cwd":"/fixture"}});
+    let mut record = serde_json::json!({"type":"response_item","timestamp":"2026-01-01T10:01:00Z","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":""}]}});
+    let padding = 1023 - record.to_string().len();
+    record["payload"]["content"][0]["text"] = Value::String("x".repeat(padding));
+    let line = format!("{record}\n");
+    assert_eq!(line.len(), 1024);
+    fs::write(
+        sessions.join(format!("rollout-2026-01-01T10-00-00-{id}.jsonl")),
+        format!("{header}\n{line}{line}"),
+    )
+    .unwrap();
+    let mut command = tapes();
+    command.args(["page", id, "--bytes", "1024", "--json"]);
+    with_fixture_env(&mut command, &codex, &root.path().join("home"), root.path());
+    let output = command.output().unwrap();
+    assert!(output.status.success());
+    let page: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(page["turns"].as_array().unwrap().len(), 1);
+    assert_eq!(page["skipped_fragment_bytes"], 0);
+    assert_eq!(page["bytes_read"], 1024);
+    assert_eq!(page["alignment_bytes"], 1);
+}
+
+#[test]
+fn history_pages_keep_newer_provenance_context_and_detect_same_size_edits() {
+    let root = TemporaryDirectory::new(
+        std::env::temp_dir().join(format!("tapes-page-context-{}", std::process::id())),
+    );
+    let codex = root.path().join("codex");
+    let sessions = codex.join("sessions");
+    fs::create_dir_all(&sessions).unwrap();
+    let id = "90000000-0000-0000-0000-000000000001";
+    let path = sessions.join(format!("rollout-2026-01-01T10-00-00-{id}.jsonl"));
+    let header = serde_json::json!({"type":"session_meta","timestamp":"2026-01-01T10:00:00Z","payload":{"id":id,"source":"cli","cwd":"/fixture"}});
+    let user = serde_json::json!({"type":"response_item","timestamp":"2026-01-01T10:01:00Z","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"corroborated request"}]}});
+    let evidence = serde_json::json!({"type":"event_msg","timestamp":"2026-01-01T10:01:00Z","payload":{"type":"user_message","message":"corroborated request"}});
+    let mut body = format!(
+        "{header}\n{}\n{user}\n",
+        format!("{{\"padding\":\"{}\"}}\n", "x".repeat(4000)).repeat(20)
+    );
+    let mut newer = format!("{evidence}\n");
+    newer.push_str(&" ".repeat(1023 - newer.len()));
+    newer.push('\n');
+    assert_eq!(newer.len(), 1024);
+    body.push_str(&newer);
+    fs::write(&path, &body).unwrap();
+    let run = |args: &[&str]| {
+        let mut command = tapes();
+        command.args(args);
+        with_fixture_env(&mut command, &codex, &root.path().join("home"), root.path());
+        command.output().unwrap()
+    };
+    let first = run(&["page", id, "--bytes", "1024", "--json"]);
+    assert!(first.status.success());
+    let first: Value = serde_json::from_slice(&first.stdout).unwrap();
+    assert_eq!(first["skipped_records"], 0);
+    let cursor = first["next_cursor"].as_str().unwrap();
+    let older = run(&["page", id, "--bytes", "1024", "--cursor", cursor, "--json"]);
+    assert!(older.status.success());
+    let older: Value = serde_json::from_slice(&older.stdout).unwrap();
+    assert_eq!(older["turns"][0]["kind"], "operator");
+    assert_eq!(older["context_bytes"], 1024);
+    let original = fs::metadata(&path).unwrap().modified().unwrap();
+    let changed_body = body.replace("corroborated request", "CORROBORATED REQUEST");
+    assert_eq!(changed_body.len(), body.len());
+    fs::write(&path, changed_body).unwrap();
+    fs::File::options()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_modified(original)
+        .unwrap();
+    let changed = run(&["page", id, "--cursor", cursor, "--json"]);
+    assert!(!changed.status.success());
+    assert!(String::from_utf8_lossy(&changed.stderr).contains("source changed"));
+}
+
+#[test]
+fn lineage_bounds_subagent_metadata_and_reports_the_gap() {
+    let root = TemporaryDirectory::new(
+        std::env::temp_dir().join(format!("tapes-meta-bound-{}", std::process::id())),
+    );
+    let home = root.path().join("home");
+    let project = home.join(".claude/projects/fixture");
+    let children = project.join("session-claude/subagents");
+    fs::create_dir_all(&children).unwrap();
+    fs::write(project.join("session-claude.jsonl"), CLAUDE_SESSION).unwrap();
+    fs::write(children.join("agent-fixture.jsonl"), CLAUDE_SUBAGENT).unwrap();
+    fs::write(
+        children.join("agent-fixture.meta.json"),
+        serde_json::json!({"model":"x".repeat(100000)}).to_string(),
+    )
+    .unwrap();
+    let mut command = tapes();
+    command.args(["lineage", "session-claude", "--json"]);
+    with_fixture_env(&mut command, &root.path().join("codex"), &home, root.path());
+    let output = command.output().unwrap();
+    assert!(output.status.success());
+    let view: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let child = view["lineage"]["children"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|child| child["reference"] == "fixture")
+        .unwrap();
+    assert!(child["model"] == "claude-fixture-sonnet");
+    assert!(view["notes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|note| note.as_str().unwrap().contains("exceeds 65536 bytes")));
+}
+
+#[test]
+fn child_reads_are_qualified_and_never_become_parent_activity() {
+    let root = TemporaryDirectory::new(
+        std::env::temp_dir().join(format!("tapes-child-read-{}", std::process::id())),
+    );
+    let home = root.path().join("home");
+    let project = home.join(".claude/projects/fixture");
+    let children = project.join("session-claude/subagents");
+    fs::create_dir_all(&children).unwrap();
+    fs::write(project.join("session-claude.jsonl"), CLAUDE_SESSION).unwrap();
+    fs::write(children.join("agent-fixture.jsonl"), CLAUDE_SUBAGENT).unwrap();
+    let run = |args: &[&str]| {
+        let mut command = tapes();
+        command.args(args);
+        with_fixture_env(&mut command, &root.path().join("codex"), &home, root.path());
+        command.output().unwrap()
+    };
+    let output = run(&[
+        "child",
+        "session-claude",
+        "--reference",
+        "fixture",
+        "--tail",
+        "0",
+        "--json",
+    ]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let view: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(view["schema"], "tapes-child/1");
+    assert_eq!(view["parent"]["id"], "session-claude");
+    assert_eq!(
+        view["transcript"]["session"]["id"],
+        "session-claude::fixture"
+    );
+    assert!(view["transcript"]["turns"].as_array().unwrap().is_empty());
+    assert_eq!(view["usage"]["turns"]["total"], 1);
+    assert_eq!(view["ending"]["session"]["id"], "session-claude::fixture");
+    let listing = run(&["list", "--harness", "claude", "--json"]);
+    let listed: Value = serde_json::from_slice(&listing.stdout).unwrap();
+    assert_eq!(listed["sessions"].as_array().unwrap().len(), 1);
+    assert!(!run(&[
+        "child",
+        "session-claude",
+        "--reference",
+        "missing",
+        "--json"
+    ])
+    .status
+    .success());
+    assert!(!run(&[
+        "child",
+        "session-claude",
+        "--reference",
+        "../fixture",
+        "--json"
+    ])
+    .status
+    .success());
+}
+
+#[test]
+fn child_rejects_mixed_native_parent_ids() {
+    let root = TemporaryDirectory::new(
+        std::env::temp_dir().join(format!("tapes-child-identity-{}", std::process::id())),
+    );
+    let home = root.path().join("home");
+    let project = home.join(".claude/projects/fixture");
+    let children = project.join("session-claude/subagents");
+    fs::create_dir_all(&children).unwrap();
+    fs::write(project.join("session-claude.jsonl"), CLAUDE_SESSION).unwrap();
+    fs::write(
+        children.join("agent-fixture.jsonl"),
+        format!(
+            "{}\n{}",
+            CLAUDE_SUBAGENT,
+            CLAUDE_SUBAGENT.replace("session-claude", "different-parent")
+        ),
+    )
+    .unwrap();
+    let mut command = tapes();
+    command.args([
+        "child",
+        "session-claude",
+        "--reference",
+        "fixture",
+        "--json",
+    ]);
+    with_fixture_env(&mut command, &root.path().join("codex"), &home, root.path());
+    let output = command.output().unwrap();
+    assert!(
+        !output.status.success(),
+        "mixed parent identities must refuse"
+    );
+}
+
+#[test]
+fn usage_summary_partitions_incompatible_accounting_without_a_grand_sum() {
+    let root = TemporaryDirectory::new(
+        std::env::temp_dir().join(format!("tapes-usage-domains-{}", std::process::id())),
+    );
+    let home = root.path().join("home");
+    let project = home.join(".claude/projects/fixture");
+    fs::create_dir_all(&project).unwrap();
+    fs::write(project.join("session-claude.jsonl"), CLAUDE_SESSION).unwrap();
+    let pi = home.join(".pi/agent/sessions");
+    fs::create_dir_all(&pi).unwrap();
+    fs::write(
+        pi.join("2026-01-01T10-00-00-000Z_session-pi.jsonl"),
+        PI_SESSION,
+    )
+    .unwrap();
+    let mut command = tapes();
+    command.args(["usage", "--global", "--json"]);
+    with_fixture_env(&mut command, &root.path().join("codex"), &home, root.path());
+    let output = command.output().unwrap();
+    assert!(output.status.success());
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["totals"]["mixed_accounting"], true);
+    assert!(report["totals"].get("tokens").is_none());
+    assert!(report["totals"].get("cost").is_none());
+    assert_eq!(report["partitions"].as_array().unwrap().len(), 2);
+    let recorded = format!("{}\n{{\"type\":\"cost-state\",\"modelUsage\":{{\"claude-fixture\":{{\"inputTokens\":100,\"outputTokens\":20}}}},\"totalCostUSD\":1.0}}\n", CLAUDE_SESSION.replace("session-claude","recorded"));
+    fs::write(project.join("recorded.jsonl"), recorded).unwrap();
+    let mut command = tapes();
+    command.args(["usage", "--global", "--harness", "claude", "--json"]);
+    with_fixture_env(&mut command, &root.path().join("codex"), &home, root.path());
+    let output = command.output().unwrap();
+    assert!(output.status.success());
+    let same_harness: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(same_harness["totals"]["mixed_accounting"], true);
+    assert_eq!(same_harness["partitions"].as_array().unwrap().len(), 2);
+    assert!(same_harness["groups"][0].get("tokens").is_none());
+
+    for row in report["partitions"].as_array().unwrap() {
+        assert!(row.get("tokens").is_some());
+    }
 }

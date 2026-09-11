@@ -103,7 +103,7 @@ A tool turn also carries one typed `ToolEvent` inside the process for the
 `events` projection. The field is skipped by serialization, so
 `tapes-session/1` and export bundles retain the tool's harness envelope only in
 `text`.
-The ordinal is the turn's zero-based position in the session's normalized turn
+In ordinary transcript views, the ordinal is the turn's zero-based position in the normalized turn
 sequence, counted from the first turn the reader reaches. For a file-backed
 session the reader's reach is the file's last 4 MiB whatever the window, so
 the ordinal does not change with `--tail`: `show --tail 1` returns the turn
@@ -297,7 +297,7 @@ fact rather than a gap.
 
 The view refers to a child and never absorbs one: resolving a reference reads
 the child's header or row and never its turns, and a child's transcript is
-read with `show` under its own id.
+read under its own session ID, or with `child PARENT --reference CHILD` for a Claude subagent.
 
 `lineage` carries an optional `parent`, an always-present `children` array,
 and an optional `forked_from`. `ParentRef` is the parent's `native_id` in the
@@ -397,9 +397,10 @@ session's start, so `native_id` is the stable reference for such a store. Its
 `record-page` with the newest `records` a paged store read fetched before its
 ceiling (a message cap, or a message the transport cannot carry) and what they
 are (`of`), and `turn-text` with how many `turns` carry text cut at `chars`
-characters. How much lies beyond a source bound is unknown, and no request
-through `tapes` passes it: `export` reads with an unbounded window and still
-reports the same `source` entries. A content search whose bounded read reached
+characters. How much lies beyond a source bound is unknown. `export` reads
+with an unbounded turn window and still reports the same `source` entries.
+Explicit `page` reads can reach older Claude and Codex file history, with
+separate byte ranges and page-local ordinals. A content search whose bounded read reached
 fewer turns than it was asked to search behind a source bound reports the
 session as unsearched rather than as a non-match.
 Notes preserve harness-specific facts that do not fit the normalized fields,
@@ -537,7 +538,7 @@ order:
 ## Usage summary
 
 `tapes usage` over a selection sums what that set of sessions spent and
-serializes as a `tapes-usage-summary/1` object. The counters come from the
+serializes as a `tapes-usage-summary/2` object. The counters come from the
 listing, so the summed set is exactly the set `list` returns for the same
 flags and no transcript is read.
 
@@ -556,7 +557,7 @@ ascending, in the order the dimensions were requested; an absent value sorts
 first. `totals` has a group's shape without its key and covers every selected
 session.
 
-Within a group or the totals, `tokens.<counter>` is the sum over the sessions
+Within a compatible group or partition, `tokens.<counter>` is the sum over the sessions
 that recorded that counter and `counted.<counter>` is how many those were, so
 a total over twelve sessions of which nine recorded reasoning tokens is not
 read as twelve. A counter no session recorded is absent rather than zero, and
@@ -573,56 +574,103 @@ account-wide fact, not a sum over sessions.
 
 ```json
 {
-  "schema": "tapes-usage-summary/1",
-  "selection": { "scope": "global", "sort": "newest", "limit": 20 },
+  "schema": "tapes-usage-summary/2",
+  "selection": {
+    "scope": "global",
+    "sort": "newest",
+    "limit": 20
+  },
   "groups": [
     {
-      "key": { "harness": "codex", "model": "gpt-5.6-sol", "variant": "high" },
-      "sessions": 12,
-      "tokens": { "input": 120000, "output": 8000, "reasoning": 4000 },
-      "cost": { "usd": 1.23 },
+      "key": {
+        "harness": "codex",
+        "model": "fixture-model"
+      },
+      "sessions": 2,
+      "tokens": {
+        "input": 30
+      },
       "coverage": {
-        "recorded_total": 10,
-        "summed_session": 1,
-        "summed_read_window": 1,
+        "recorded_total": 2,
+        "summed_session": 0,
+        "summed_read_window": 0,
         "no_accounting": 0
       },
       "counted": {
-        "input": 12,
-        "output": 12,
-        "reasoning": 9,
-        "cache_read": 12,
-        "cache_write": 12,
-        "cost": 12
+        "input": 2,
+        "output": 0,
+        "reasoning": 0,
+        "cache_read": 0,
+        "cache_write": 0,
+        "cost": 0
       }
     }
   ],
   "totals": {
-    "sessions": 12,
-    "tokens": { "input": 120000, "output": 8000, "reasoning": 4000 },
-    "cost": { "usd": 1.23 },
+    "sessions": 2,
+    "tokens": {
+      "input": 30
+    },
     "coverage": {
-      "recorded_total": 10,
-      "summed_session": 1,
-      "summed_read_window": 1,
+      "recorded_total": 2,
+      "summed_session": 0,
+      "summed_read_window": 0,
       "no_accounting": 0
     },
     "counted": {
-      "input": 12,
-      "output": 12,
-      "reasoning": 9,
-      "cache_read": 12,
-      "cache_write": 12,
-      "cost": 12
+      "input": 2,
+      "output": 0,
+      "reasoning": 0,
+      "cache_read": 0,
+      "cache_write": 0,
+      "cost": 0
     }
   },
+  "partitions": [
+    {
+      "harness": "codex",
+      "accounting": {
+        "basis": "recorded-total",
+        "coverage": "session"
+      },
+      "sessions": 2,
+      "tokens": {
+        "input": 30
+      },
+      "coverage": {
+        "recorded_total": 2,
+        "summed_session": 0,
+        "summed_read_window": 0,
+        "no_accounting": 0
+      },
+      "counted": {
+        "input": 2,
+        "output": 0,
+        "reasoning": 0,
+        "cache_read": 0,
+        "cache_write": 0,
+        "cost": 0
+      }
+    }
+  ],
   "unavailable": [],
   "unreadable": [],
   "unsearched": [],
-  "scanned": 12,
+  "scanned": 2,
   "scan_truncated": false
 }
 ```
+
+### Accounting partitions in usage summary version 2
+
+`partitions` groups sessions by harness and the optional accounting basis and
+coverage. Each row carries the ordinary tally and counter-contribution counts.
+A total or requested group containing counters from multiple such domains sets
+`mixed_accounting: true` and omits `tokens` and `cost`. Sessions with no counters
+retain their counts without making otherwise compatible sums incomparable.
+Version 1 summed across domains; version 2 retains comparable partition sums
+and suppresses mixed sums. Unknown accounting is its own domain.
+
 
 ## Endings report
 
@@ -668,7 +716,7 @@ and labels no session complete.
 
 | value | meaning |
 |---|---|
-| `read-window` | a `file-tail` or `record-page` source bound withheld turns, so the recording continues past what any request through `tapes` reaches |
+| `read-window` | a `file-tail` or `record-page` source bound withheld turns, so the recording continues beyond this read |
 | `tail-window` | the `--tail` window omitted turns the read produced; a wider window recovers them |
 | `kind-unknown` | a user turn in the read is `unknown`, so what it holds is not established |
 | `no-timestamps` | a turn an ordering depended on carries no timestamp, so the order rests on the normalized sequence alone |
@@ -679,7 +727,7 @@ name where those turns sit. `lineage` is present when the session's store
 records a relative: the `parent` reference the lineage view carries, the
 `children` count, how many of them are unresolved, and
 `children_by_disposition`, one count per outcome the harness recorded. No
-child is read; its own ending is read under its own id.
+child is read; its own ending is read under its own session ID or through the parent-qualified `child` command.
 
 `tail` is present only when the bounded text tail was asked for. It holds at
 most `--tail` entries, one per `operator` or `assistant` turn in the read, each
@@ -975,3 +1023,52 @@ verbatim, so the exported set can be audited against the store it came from.
   "scan_truncated": false
 }
 ```
+
+## Historical evidence
+
+`tapes-page/1` carries a normalized session, chronological `turns` with page-local
+ordinals, recorded `models`, source `start`/`end` byte offsets, `source_bytes`,
+`bytes_read`, separately counted `alignment_bytes` and `context_bytes`, malformed `skipped_records`, `skipped_fragment_bytes`, and an
+optional `next_cursor`. A missing cursor means the source beginning was reached,
+not that malformed or oversized records were decoded. The cursor is opaque;
+it binds the session and file snapshot and must be passed back unchanged.
+
+`tapes-history-search/1` carries session identity, accumulated pages/bytes/gaps,
+matching text excerpts identified by page start, end and ordinal, an output-truncation
+flag, and a continuation cursor. `tapes-metadata-history/1` carries the same
+coverage facts with up to 100 reverse-record-ordered model observations and
+an observation-truncation flag. Neither schema infers facts outside its reads.
+## Selection statistics: `tapes-stats-summary/1`
+
+`selection` records the listing query. `selected` counts its sessions, `read`
+counts successful transcript reads, and `failed` names each read failure with
+ID, harness, store and diagnostic. `sessions` holds each read session's identity,
+`coverage` and `tools` in the same shapes as `tapes-stats/1`. `by_harness` maps
+harness names to accumulated tool counters, including tool-name rows and
+complete-pair duration totals, maxima and contributing counts. Counters never
+cross-pair records from different sessions. Listing diagnostics (`unavailable`,
+`unreadable`, `unsearched`, `scanned`, `scan_truncated`) remain separate from
+transcript failures and per-session read bounds. An all-failed selected set
+still emits the report and exits unsuccessfully.
+
+## Child-qualified read: `tapes-child/1`
+
+`parent` is the selected parent session and `reference` is the exact child
+reference. `transcript`, `usage`, and `ending` use their normalized shapes with
+the qualified child ID `PARENT::CHILD`. Transcript window coverage is separate
+from the source coverage underlying usage and ending facts. Every native Claude session ID observed in the bounded opening and tail must
+name the parent; missing or conflicting identity evidence is refused. Source
+bounds still limit which native records were validated.
+Nested lineage is explicitly unavailable rather than an asserted empty set.
+## Selection statistics: `tapes-stats-summary/1`
+
+`selection` records the listing query. `selected` counts its sessions, `read`
+counts successful transcript reads, and `failed` names each read failure with
+ID, harness, store and diagnostic. `sessions` holds each read session's identity,
+`coverage` and `tools` in the same shapes as `tapes-stats/1`. `by_harness` maps
+harness names to accumulated tool counters, including tool-name rows and
+complete-pair duration totals, maxima and contributing counts. Counters never
+cross-pair records from different sessions. Listing diagnostics (`unavailable`,
+`unreadable`, `unsearched`, `scanned`, `scan_truncated`) remain separate from
+transcript failures and per-session read bounds. An all-failed selected set
+still emits the report and exits unsuccessfully.
