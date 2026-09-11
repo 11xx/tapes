@@ -130,6 +130,46 @@ impl Default for ClaudeBackend {
 }
 
 impl Backend for ClaudeBackend {
+    fn history_page(
+        &self,
+        session: &Session,
+        cursor: Option<&str>,
+        bytes: usize,
+    ) -> Result<crate::history::Page> {
+        let path = session
+            .store
+            .as_deref()
+            .ok_or_else(|| anyhow!("session has no source file"))?;
+        crate::history::read_file(
+            session,
+            Path::new(path),
+            cursor,
+            bytes,
+            false,
+            |values, opening, context| {
+                let _ = (opening, context);
+                let turns = values.iter().flat_map(parse_turns).collect();
+                let models = values
+                    .iter()
+                    .filter_map(|value| {
+                        let message = &value["message"];
+                        if message["role"] != "assistant" {
+                            return None;
+                        }
+                        Some(crate::history::ModelObservation {
+                            model: Model {
+                                id: message["model"].as_str()?.to_owned(),
+                                variant: None,
+                            },
+                            timestamp: timestamp(&value["timestamp"]),
+                        })
+                    })
+                    .collect();
+                (turns, models)
+            },
+        )
+    }
+
     fn harness(&self) -> &'static str {
         "claude"
     }

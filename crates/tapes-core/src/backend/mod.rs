@@ -221,6 +221,14 @@ impl Listing {
 }
 
 pub trait Backend {
+    fn history_page(
+        &self,
+        _session: &Session,
+        _cursor: Option<&str>,
+        _bytes: usize,
+    ) -> Result<crate::history::Page> {
+        anyhow::bail!("{} does not support file history pages", self.harness())
+    }
     fn harness(&self) -> &'static str;
     /// Report whether listing is likely to work for this backend.
     ///

@@ -103,7 +103,7 @@ A tool turn also carries one typed `ToolEvent` inside the process for the
 `events` projection. The field is skipped by serialization, so
 `tapes-session/1` and export bundles retain the tool's harness envelope only in
 `text`.
-The ordinal is the turn's zero-based position in the session's normalized turn
+In ordinary transcript views, the ordinal is the turn's zero-based position in the normalized turn
 sequence, counted from the first turn the reader reaches. For a file-backed
 session the reader's reach is the file's last 4 MiB whatever the window, so
 the ordinal does not change with `--tail`: `show --tail 1` returns the turn
@@ -397,9 +397,10 @@ session's start, so `native_id` is the stable reference for such a store. Its
 `record-page` with the newest `records` a paged store read fetched before its
 ceiling (a message cap, or a message the transport cannot carry) and what they
 are (`of`), and `turn-text` with how many `turns` carry text cut at `chars`
-characters. How much lies beyond a source bound is unknown, and no request
-through `tapes` passes it: `export` reads with an unbounded window and still
-reports the same `source` entries. A content search whose bounded read reached
+characters. How much lies beyond a source bound is unknown. `export` reads
+with an unbounded turn window and still reports the same `source` entries.
+Explicit `page` reads can reach older Claude and Codex file history, with
+separate byte ranges and page-local ordinals. A content search whose bounded read reached
 fewer turns than it was asked to search behind a source bound reports the
 session as unsearched rather than as a non-match.
 Notes preserve harness-specific facts that do not fit the normalized fields,
@@ -668,7 +669,7 @@ and labels no session complete.
 
 | value | meaning |
 |---|---|
-| `read-window` | a `file-tail` or `record-page` source bound withheld turns, so the recording continues past what any request through `tapes` reaches |
+| `read-window` | a `file-tail` or `record-page` source bound withheld turns, so the recording continues beyond this read |
 | `tail-window` | the `--tail` window omitted turns the read produced; a wider window recovers them |
 | `kind-unknown` | a user turn in the read is `unknown`, so what it holds is not established |
 | `no-timestamps` | a turn an ordering depended on carries no timestamp, so the order rests on the normalized sequence alone |
@@ -976,6 +977,20 @@ verbatim, so the exported set can be audited against the store it came from.
 }
 ```
 
+## Historical evidence
+
+`tapes-page/1` carries a normalized session, chronological `turns` with page-local
+ordinals, recorded `models`, source `start`/`end` byte offsets, `source_bytes`,
+`bytes_read`, separately counted `alignment_bytes` and `context_bytes`, malformed `skipped_records`, `skipped_fragment_bytes`, and an
+optional `next_cursor`. A missing cursor means the source beginning was reached,
+not that malformed or oversized records were decoded. The cursor is opaque;
+it binds the session and file snapshot and must be passed back unchanged.
+
+`tapes-history-search/1` carries session identity, accumulated pages/bytes/gaps,
+matching text excerpts identified by page start, end and ordinal, an output-truncation
+flag, and a continuation cursor. `tapes-metadata-history/1` carries the same
+coverage facts with up to 100 reverse-record-ordered model observations and
+an observation-truncation flag. Neither schema infers facts outside its reads.
 ## Selection statistics: `tapes-stats-summary/1`
 
 `selection` records the listing query. `selected` counts its sessions, `read`
