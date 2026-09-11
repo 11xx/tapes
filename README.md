@@ -199,8 +199,8 @@ and `counted` says how many those were — a counter nine of twelve sessions
 recorded is not a figure about twelve — while `coverage` counts the sessions
 behind a sum by their accounting, including those whose harness recorded
 nothing to sum. Cost is summed only where a harness recorded one, never
-inferred from tokens. Human output is one row per group, a totals row, and
-the listing's own diagnostics.
+inferred from tokens. Human output includes group and total rows, compatible accounting partitions,
+a mixed-accounting explanation when sums are omitted, and listing diagnostics.
 
 `endings` answers what each session of a selection ends on as
 `tapes-endings/1`, so deciding which endings deserve reading costs one bounded
