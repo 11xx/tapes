@@ -3877,7 +3877,7 @@ fn history_pages_keep_newer_provenance_context_and_detect_same_size_edits() {
     assert_eq!(older["turns"][0]["kind"], "operator");
     assert_eq!(older["context_bytes"], 1024);
     let original = fs::metadata(&path).unwrap().modified().unwrap();
-    let changed_body = body.replace("corroborated request", "substituted request");
+    let changed_body = body.replace("corroborated request", "CORROBORATED REQUEST");
     assert_eq!(changed_body.len(), body.len());
     fs::write(&path, changed_body).unwrap();
     fs::File::options()
