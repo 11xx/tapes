@@ -22,6 +22,51 @@ tapes endings --here --since 2026-01-01 --json
 tapes export ses_07e16cc8 --bundle /tmp/
 ```
 
+## Install
+
+Build from a local checkout with a Rust toolchain and Cargo on a Unix-like host:
+
+```sh
+cargo install --path crates/tapes --locked
+```
+
+Ensure Cargo's binary directory is on `PATH`, then run `tapes` for the workflow
+guide. File-backed harnesses need only their recording stores. OpenCode access
+uses its installed CLI; absent harnesses remain optional. Development checks
+are `cargo build --all-targets`, `cargo test`, and
+`cargo clippy --all-targets -- -D warnings && cargo fmt --check`.
+
+## Fixture demo
+
+The demo uses only committed Codex fixtures. It creates an isolated temporary
+home and empty executable search path, then removes the temporary files. It
+requires Python 3 and a built binary:
+
+```sh
+cargo build -p tapes
+python3 scripts/fixture-demo
+```
+
+Pass a binary path as the script's first argument to use another build.
+Temporary path prefixes are displayed as `<fixture-store>`. Example output:
+
+```text
+$ tapes list --harness codex --limit 2
+ID	LIVE	HARNESS	MODEL	TITLE	DIRECTORY	LAST ACTIVITY
+10000000-0000-0000-0000-000000000002		codex	gpt-fixture (medium)	~Read valid lines.	/fixtures/project	2026-01-01T11:00:03Z
+00000000-0000-0000-0000-000000000001		codex	gpt-fixture (high)	~Inspect the fixture.	/fixtures/project	2026-01-01T10:00:07Z
+$ tapes show 00000000-0000-0000-0000-000000000001 --tail 1
+[tool #5 2026-01-01T10:00:06Z]
+{"call_id":"call-pending","id":"ctc_fixture_pending","input":"check fixture","name":"fixture_pending","status":"completed","type":"custom_tool_call"}
+Note: The store records activity at 2026-01-01T10:00:07Z, after the newest turn rendered here (2026-01-01T10:00:06Z). The newest trailing record is `event_msg` at 2026-01-01T10:00:07Z; `show` does not render it as a turn.
+Note: Showing the last 1 of 6 turns; 5 earlier turns fall outside the 1-turn window. Use --tail 6 to see them, or `tapes export` for every turn the reader can reach.
+```
+
+## License
+
+The workspace and both crates declare `Unlicense`. The complete
+[Unlicense text](LICENSE) accompanies the source.
+
 ## Orientation
 
 `tapes` with no arguments prints the workflow guide: what the tool owns, the
