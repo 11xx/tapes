@@ -146,9 +146,9 @@ pub struct LineageSession {
     pub store: Option<String>,
 }
 
-/// One session's lineage. The relationships are the store's, and every one of
-/// them is a reference: a child's transcript is read with `show` under its own
-/// id, never through its parent.
+/// One session's recorded relationships. Ordinary children are read under
+/// their session IDs; Claude child transcripts use parent-qualified references.
+/// Child activity is never absorbed into its parent.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct LineageView {
     pub schema: &'static str,
