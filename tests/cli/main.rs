@@ -3501,6 +3501,19 @@ fn recorded_title_selects_every_single_session_view_and_refuses_hidden_ambiguity
         "{diagnostic}"
     );
     fs::remove_file(project.join("duplicate.jsonl")).unwrap();
+    fs::write(project.join("unreadable.jsonl"), "{malformed\n").unwrap();
+    let unreadable = run(&[
+        "show",
+        "--title",
+        "Exact Title",
+        "--global",
+        "--harness",
+        "claude",
+    ]);
+    assert!(!unreadable.status.success());
+    assert!(String::from_utf8_lossy(&unreadable.stderr).contains("incomplete lookup"));
+    fs::remove_file(project.join("unreadable.jsonl")).unwrap();
+
     let hidden = format!(
         "{}{}\n",
         body.replace("session-claude", "hidden"),

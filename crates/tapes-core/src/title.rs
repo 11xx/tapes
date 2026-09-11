@@ -34,7 +34,7 @@ pub fn resolve(
         if harness.is_some_and(|name| name != backend.harness()) || !backend.available() {
             continue;
         }
-        let listing = match backend.list(&query) {
+        let listing = match backend.list_titles(&query) {
             Ok(listing) => listing,
             Err(error) => {
                 incomplete.push(format!("{}: {error:#}", backend.harness()));
@@ -52,16 +52,6 @@ pub fn resolve(
         for session in listing.sessions {
             if backend.harness() == "opencode" && !opencode_ids.insert(session.id.clone()) {
                 continue;
-            }
-            match backend.title_complete(&session) {
-                Ok(true) => {}
-                Ok(false) => incomplete.push(format!(
-                    "{} ({}): incomplete recorded-title evidence",
-                    session.id, session.harness
-                )),
-                Err(error) => {
-                    incomplete.push(format!("{} ({}): {error:#}", session.id, session.harness))
-                }
             }
             if session.title.as_deref() == Some(title) {
                 matches.push(ResolvedSession {

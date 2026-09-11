@@ -393,8 +393,9 @@ ID or `--latest`: `show`, `brief`, `usage`, `stats`, `lineage`, `events`, and
 a derived display hint. Lookup defaults to the current project; `--project`,
 `--global`, and `--harness` choose its scope.
 
-Lookup inspects at most 5,000 candidates per backend, independently of the
-ordinary listing limit. Multiple matches refuse with candidate IDs and
+Lookup parses at most 5,000 candidates per backend, independently of the
+ordinary listing limit. Claude discovery also stops after 10,000 directory
+entries; Codex and Pi require no title scan. Multiple matches refuse with candidate IDs and
 origins. Incomplete scans, unreadable records, and incomplete title evidence
 refuse even when one candidate was observed. Choose an explicit ID or narrow
 the scope in that case. Missing harnesses are skipped. Codex and Pi recordings

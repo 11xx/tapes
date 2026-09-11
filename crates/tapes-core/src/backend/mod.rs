@@ -230,9 +230,9 @@ pub trait Backend {
     /// methods can report their own absence or failure.
     fn available(&self) -> bool;
     fn list(&self, query: &Query) -> Result<Listing>;
-    /// Whether the listing reached the recorded title evidence for this session.
-    fn title_complete(&self, _session: &Session) -> Result<bool> {
-        Ok(true)
+    /// Enumerate title evidence with bounded candidate discovery and explicit gaps.
+    fn list_titles(&self, query: &Query) -> Result<Listing> {
+        self.list(query)
     }
     /// List sessions after a bounded content search. File-backed backends can
     /// override this to search while their existing candidate parse is open;
