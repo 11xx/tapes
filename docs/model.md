@@ -975,3 +975,18 @@ verbatim, so the exported set can be audited against the store it came from.
   "scan_truncated": false
 }
 ```
+
+## Historical evidence
+
+`tapes-page/1` carries a normalized session, chronological `turns` with page-local
+ordinals, recorded `models`, source `start`/`end` byte offsets, `source_bytes`,
+`bytes_read`, malformed `skipped_records`, `skipped_fragment_bytes`, and an
+optional `next_cursor`. A missing cursor means the source beginning was reached,
+not that malformed or oversized records were decoded. The cursor is opaque;
+it binds the session and file snapshot and must be passed back unchanged.
+
+`tapes-history-search/1` carries session identity, accumulated pages/bytes/gaps,
+matching text excerpts identified by page start and ordinal, an output-truncation
+flag, and a continuation cursor. `tapes-metadata-history/1` carries the same
+coverage facts with up to 100 reverse-record-ordered model observations and
+an observation-truncation flag. Neither schema infers facts outside its reads.

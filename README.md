@@ -384,3 +384,32 @@ agent-context tool — and it names the wrong half of the job. This tool's
 primary direction is *pull*: retrieve and reconstruct a session that already
 ended. Handing context forward is one thing you might do with what it
 returns.
+
+## Historical pages
+
+`tapes page SESSION --bytes 65536 --json` reads backward from the end of a
+Claude or Codex recording. Pass its `next_cursor` to `--cursor` to continue.
+Turns are chronological within a page; ordinals are page-local. The source
+byte range plus session ID and store identify the page. Byte budgets range
+from 1 KiB to 4 MiB; the default is 64 KiB. Session metadata and the bounded
+opening-header probe are read separately. Ordinary show/export retain their
+source bounds.
+
+A cursor binds the recording's identity, size and modification time. Changed
+or replaced recordings refuse continuation; restart without a cursor. Malformed
+records and skipped fragments of records larger than a page are counted.
+Those gaps prevent a complete-history claim even when no cursor remains.
+Unsupported harnesses report unsupported paging.
+
+`tapes history-search SESSION --search TEXT --pages 8 --json` searches
+normalized text in at most eight pages. `--bytes` sets the page budget and
+`--cursor` resumes older history. Search is case-insensitive; output is capped
+at 100 matching records and 600 characters per excerpt, with explicit output
+truncation. Remaining history is not a proven miss.
+
+`tapes metadata SESSION --pages 8 --bytes 1048576 --json` recovers recorded
+model observations outside the ordinary source tail. It reports observations
+in reverse record order, page coverage and gaps, and a continuation cursor.
+An older observation is not asserted to be the current model, and ordinary
+session metadata is not overwritten. At most 100 observations are returned.
+History search and metadata accept 1–32 pages per call.

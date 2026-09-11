@@ -140,6 +140,46 @@ impl Default for CodexBackend {
 }
 
 impl Backend for CodexBackend {
+    fn history_page(
+        &self,
+        session: &Session,
+        cursor: Option<&str>,
+        bytes: usize,
+    ) -> Result<crate::history::Page> {
+        let path = session
+            .store
+            .as_deref()
+            .ok_or_else(|| anyhow!("session has no source file"))?;
+        crate::history::read_file(
+            session,
+            Path::new(path),
+            cursor,
+            bytes,
+            |values, opening| {
+                let evidence = user_message_evidence(values, opening);
+                let turns = values
+                    .iter()
+                    .flat_map(|value| parse_turns(value, &evidence))
+                    .collect();
+                let models = values
+                    .iter()
+                    .filter(|value| value["type"] == "turn_context")
+                    .filter_map(|value| {
+                        let payload = &value["payload"];
+                        Some(crate::history::ModelObservation {
+                            model: Model {
+                                id: payload["model"].as_str()?.to_owned(),
+                                variant: payload["effort"].as_str().map(str::to_owned),
+                            },
+                            timestamp: timestamp(&value["timestamp"]),
+                        })
+                    })
+                    .collect();
+                (turns, models)
+            },
+        )
+    }
+
     fn harness(&self) -> &'static str {
         "codex"
     }

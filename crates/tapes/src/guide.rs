@@ -385,6 +385,17 @@ ONE READER PER MACHINE
   tool and drifted apart; if tapes cannot express what you need, add it here.
 
   tapes <command> --help for a command's full contract.
+
+HISTORICAL READS
+  tapes page SESSION --bytes 65536 --json
+  tapes history-search SESSION --search TEXT --pages 8 --json
+  tapes metadata SESSION --pages 8 --json
+  Claude and Codex history is paged backward, with chronological turns within
+  each page. Pass next_cursor back as --cursor. Changed sources refuse;
+  malformed and oversized record gaps remain explicit. Budgets protect context:
+  1 KiB–4 MiB per page, 1–32 pages per search, 100 excerpts/observations.
+  Older model observations never silently replace current session metadata.
+
 "#;
 
 pub fn print() {
