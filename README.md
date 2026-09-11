@@ -138,7 +138,7 @@ and prints normalized turns in chronological order. Every turn carries a
 only from fields the harness itself wrote, so a `/exit` command or an injected
 notice is not read as an unanswered prompt and a record with no such field
 stays `unknown` (see `docs/model.md`). Human output heads a user turn holding
-anything but an operator's message `user/<kind>`. Every turn also carries its
+anything but an operator's message `user/<kind>`. Every turn in `show` also carries its
 zero-based `ordinal` in the session's normalized sequence, which a file-backed
 session keeps under any window while a paged OpenCode API read renumbers when
 a wider window fetches further back (see `docs/model.md`), and a `native_id`
@@ -149,8 +149,9 @@ coordinate it was read from. Human timestamps are RFC
 that dropped any is marked `truncated`, and JSON says why under `truncation`:
 a `window` names the turns returned and the earlier turns the bound omitted,
 which a larger `--tail` or `export` recovers, while `source` lists bounds the
-reader itself reached (a file tail, a store page, cut turn text), which no
-request through `tapes` passes. Human output closes with one note per cause
+reader itself reached (a file tail, a store page, cut turn text). Wider
+`show`/`export` turn windows retain those bounds; explicit `page` reads can
+reach older Claude and Codex file history. Human output closes with one note per cause
 and recommends only the recovery that works. When a backend verifies a final
 non-turn record, human output names its kind and timestamp and JSON carries an
 optional `trailing_record` object; unavailable source timestamps remain absent.
@@ -344,6 +345,7 @@ few endings that matter instead of every tail.
 **Contracts you can build on.** `tapes-list/1`, `tapes-session/1`,
 `tapes-events/1`, `tapes-usage/1`, `tapes-usage-summary/1`, `tapes-lineage/1`,
 `tapes-endings/1`, `tapes-stats/1`, `tapes-stats-summary/1`, `tapes-brief/1`,
+`tapes-page/1`, `tapes-history-search/1`, `tapes-metadata-history/1`,
 and `tapes-export-manifest/1` are versioned
 JSON; a breaking shape change bumps the version. A single-session `export`
 prints

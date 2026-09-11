@@ -80,8 +80,7 @@ impl Fact {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Incomplete {
-    /// A source bound withheld turns, so the recording continues past what
-    /// any request through `tapes` reaches.
+    /// A source bound withheld turns, so the recording continues beyond this read.
     ReadWindow,
     /// The turn window omitted turns the read had produced. A wider `--tail`
     /// recovers them.

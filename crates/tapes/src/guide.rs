@@ -128,7 +128,8 @@ PROBE BEFORE EXPORTING
   `truncation`: a `window` names how many turns were returned and how many
   earlier ones the --tail bound omitted, which a larger --tail or export
   recovers; `source` lists bounds the reader itself reached (a file tail, a
-  store page, cut turn text), which no request through tapes reaches past.
+  store page, cut turn text). Wider turn windows retain source bounds; use
+  explicit page reads to reach older Claude or Codex file history.
   Human output says the same in its closing notes, recommending only the
   recovery that works.
 
@@ -324,7 +325,8 @@ READ THE ENDING
 
 SIGNALS THAT THE PICTURE IS PARTIAL
   A truncated transcript is a window, not the session, and `truncation` says
-  which kind: a turn window you can widen, or a source bound you cannot.
+  which kind: a turn window you can widen, or a source bound retained by
+  ordinary show/export reads. Explicit page reads have their own byte budget.
   Transcript notes carry
   what the normalized model has no field for: pi's abandoned branches, where a
   large remainder means the user changed direction; a claude session's
