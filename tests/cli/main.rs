@@ -3410,3 +3410,33 @@ fn brief_renders_the_continuation_in_reading_order() {
 
     fs::remove_dir_all(codex_home).unwrap();
 }
+
+#[test]
+fn selection_stats_agree_with_individual_reads() {
+    let (path, home) = fixture_store("stats-summary");
+    let root = TemporaryDirectory { path };
+    let run = |args: &[&str]| {
+        let mut command = tapes();
+        command.args(args);
+        with_fixture_env(&mut command, root.path(), &home, root.path());
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice::<Value>(&output.stdout).unwrap()
+    };
+    let summary = run(&["stats", "--global", "--harness", "codex", "--json"]);
+    assert_eq!(summary["schema"], "tapes-stats-summary/1");
+    assert_eq!(summary["selected"], 2);
+    assert_eq!(summary["read"], 2);
+    let mut calls = 0;
+    for row in summary["sessions"].as_array().unwrap() {
+        let one = run(&["stats", row["session"]["id"].as_str().unwrap(), "--json"]);
+        assert_eq!(row["tools"], one["tools"]);
+        assert_eq!(row["coverage"], one["coverage"]);
+        calls += one["tools"]["calls"].as_u64().unwrap();
+    }
+    assert_eq!(summary["by_harness"]["codex"]["calls"], calls);
+}

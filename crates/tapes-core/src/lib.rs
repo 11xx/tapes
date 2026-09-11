@@ -24,6 +24,7 @@ pub mod lineage;
 pub mod model;
 pub mod scope;
 pub mod stats;
+pub mod stats_summary;
 pub mod usage;
 
 pub const LIST_SCHEMA: &str = "tapes-list/1";

@@ -384,3 +384,14 @@ agent-context tool — and it names the wrong half of the job. This tool's
 primary direction is *pull*: retrieve and reconstruct a session that already
 ended. Handing context forward is one thing you might do with what it
 returns.
+
+## Tool usage across sessions
+
+`tapes stats --here --since 2026-01-01 --json` returns
+`tapes-stats-summary/1`. Listing filters select the sessions; each costs one
+bounded transcript read through its listed backend origin. The report includes
+selected/read/failed counts, per-session coverage and tool statistics, and
+aggregates by harness and tool name. Pair durations cover complete timestamped
+pairs only. Read failures have unknown activity and contribute no counters.
+These are recorded harness tool names, such as `bash`, not inferred shell
+commands. Child recordings contribute only when independently selected.
