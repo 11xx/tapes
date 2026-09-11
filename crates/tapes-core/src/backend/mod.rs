@@ -236,6 +236,16 @@ pub trait Backend {
     ) -> Result<crate::history::Page> {
         anyhow::bail!("{} does not support file history pages", self.harness())
     }
+    /// Read model observations without decoding transcript turns when the backend supports it.
+    fn metadata_page(
+        &self,
+        session: &Session,
+        cursor: Option<&str>,
+        bytes: usize,
+    ) -> Result<crate::history::Page> {
+        self.history_page(session, cursor, bytes)
+    }
+
     fn harness(&self) -> &'static str;
     /// Report whether listing is likely to work for this backend.
     ///
