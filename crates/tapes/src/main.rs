@@ -749,8 +749,8 @@ fn dispatch(cli: Cli) -> Result<()> {
                 );
                 for found in report.matches {
                     println!(
-                        "[page {} #{}] {}",
-                        found.page_start, found.ordinal, found.text
+                        "[page {}..{} #{}] {}",
+                        found.page_start, found.page_end, found.ordinal, found.text
                     );
                 }
                 if report.matches_truncated {
@@ -779,11 +779,14 @@ fn dispatch(cli: Cli) -> Result<()> {
             } else {
                 println!("Recorded model observations: {} pages, {} bytes; {} malformed records, {} skipped fragment bytes", report.pages_read, report.bytes_read, report.skipped_records, report.skipped_fragment_bytes);
                 for observation in report.observations {
-                    println!(
-                        "{} {:?}",
-                        observation.model.identity(),
-                        observation.timestamp
-                    );
+                    match observation.timestamp {
+                        Some(timestamp) => println!(
+                            "{} {}",
+                            observation.model.identity(),
+                            human_timestamp(timestamp)
+                        ),
+                        None => println!("{}", observation.model.identity()),
+                    }
                 }
                 if report.observations_truncated {
                     println!("Observation output stopped at 100 records.");
@@ -809,10 +812,30 @@ fn dispatch(cli: Cli) -> Result<()> {
                 );
                 print_transcript(&child.transcript, false);
                 print!("{}", render_usage(&child.usage));
-                println!(
-                    "Ending facts: {:?}; incomplete: {:?}",
-                    child.ending.facts, child.ending.incomplete
-                );
+                if !child.ending.facts.is_empty() {
+                    println!(
+                        "Ending facts: {}",
+                        child
+                            .ending
+                            .facts
+                            .iter()
+                            .map(|fact| fact.label())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    );
+                }
+                if !child.ending.incomplete.is_empty() {
+                    println!(
+                        "Incomplete: {}",
+                        child
+                            .ending
+                            .incomplete
+                            .iter()
+                            .map(|cause| cause.label())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    );
+                }
             }
         }
         Command::Events {
@@ -856,40 +879,7 @@ fn dispatch(cli: Cli) -> Result<()> {
                 if json {
                     println!("{}", serde_json::to_string(&summary)?);
                 } else {
-                    println!(
-                        "Recorded tool usage: {} selected, {} read, {} failed",
-                        summary.selected,
-                        summary.read,
-                        summary.failed.len()
-                    );
-                    for (harness, tools) in &summary.by_harness {
-                        println!("{harness}: {} calls, {} results, {} complete pairs, {} incomplete, {} recorded errors", tools.calls, tools.results, tools.paired, tools.incomplete.total(), tools.errors);
-                        for row in &tools.by_name {
-                            println!(
-                                "  {}: {} calls, {} paired, {} errors",
-                                row.name, row.calls, row.paired, row.errors
-                            );
-                        }
-                    }
-                    for session in &summary.sessions {
-                        println!(
-                            "  {} ({}): {:?} coverage",
-                            session.session.id, session.session.harness, session.coverage.turns
-                        );
-                    }
-                    for failure in &summary.failed {
-                        println!(
-                            "Unread {} ({}): {}",
-                            failure.id, failure.harness, failure.error
-                        );
-                    }
-                    print_diagnostics(
-                        summary.scan_truncated,
-                        summary.scanned,
-                        &summary.unreadable,
-                        &summary.unsearched,
-                        &summary.unavailable,
-                    );
+                    print_stats_summary(&summary);
                 }
                 if summary.read == 0 && !summary.failed.is_empty() {
                     return Err(anyhow!("no selected session could be read"));
@@ -1024,6 +1014,59 @@ fn dispatch(cli: Cli) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn coverage_name(coverage: TurnCoverage) -> &'static str {
+    match coverage {
+        TurnCoverage::Session => "session",
+        TurnCoverage::ReadWindow => "read-window",
+    }
+}
+
+fn print_stats_summary(summary: &tapes_core::stats_summary::StatsSummary) {
+    println!(
+        "Recorded tool usage: {} selected, {} read, {} failed",
+        summary.selected,
+        summary.read,
+        summary.failed.len()
+    );
+    for (harness, tools) in &summary.by_harness {
+        println!(
+            "{harness}: {} calls, {} results, {} complete pairs, {} incomplete, {} recorded errors",
+            tools.calls,
+            tools.results,
+            tools.paired,
+            tools.incomplete.total(),
+            tools.errors
+        );
+        for row in &tools.by_name {
+            println!(
+                "  {}: {} calls, {} paired, {} errors",
+                row.name, row.calls, row.paired, row.errors
+            );
+        }
+    }
+    for session in &summary.sessions {
+        println!(
+            "  {} ({}): {} coverage",
+            session.session.id,
+            session.session.harness,
+            coverage_name(session.coverage.turns)
+        );
+    }
+    for failure in &summary.failed {
+        println!(
+            "Unread {} ({}): {}",
+            failure.id, failure.harness, failure.error
+        );
+    }
+    print_diagnostics(
+        summary.scan_truncated,
+        summary.scanned,
+        &summary.unreadable,
+        &summary.unsearched,
+        &summary.unavailable,
+    );
 }
 
 /// The continuation's own reading order: which session this is, where it
