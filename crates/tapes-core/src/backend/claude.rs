@@ -137,6 +137,15 @@ impl Backend for ClaudeBackend {
         self.root.as_deref().is_some_and(Path::is_dir)
     }
 
+    fn title_complete(&self, session: &Session) -> Result<bool> {
+        let path = session
+            .store
+            .as_deref()
+            .ok_or_else(|| anyhow!("missing Claude source"))?;
+        let read = read_jsonl(Path::new(path))?;
+        Ok(read.skipped == 0 && (!read.truncated || session.title.is_some()))
+    }
+
     fn list(&self, query: &Query) -> Result<Listing> {
         let Some(root) = self.root.as_deref() else {
             return Ok(Listing::default());

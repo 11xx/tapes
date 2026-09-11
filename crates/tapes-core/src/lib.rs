@@ -24,6 +24,7 @@ pub mod lineage;
 pub mod model;
 pub mod scope;
 pub mod stats;
+pub mod title;
 pub mod usage;
 
 pub const LIST_SCHEMA: &str = "tapes-list/1";
@@ -752,6 +753,11 @@ pub fn resolve_session(
 #[derive(Clone, Debug)]
 pub enum Selection<'a> {
     Id(&'a str),
+    Title {
+        title: &'a str,
+        within: Where<'a>,
+        harness: Option<&'a str>,
+    },
     Latest {
         within: Where<'a>,
         harness: Option<&'a str>,
@@ -763,6 +769,14 @@ impl Selection<'_> {
     fn resolve(&self, backends: &[Box<dyn Backend>]) -> Result<ResolvedSession> {
         match self {
             Self::Id(id) => Ok(resolve_session(backends, id)?),
+            Self::Title {
+                title,
+                within,
+                harness,
+            } => {
+                let scope = within.resolve()?;
+                title::resolve(backends, title, *harness, scope.as_ref())
+            }
             Self::Latest {
                 within,
                 harness,

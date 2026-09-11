@@ -132,10 +132,13 @@ impl ScopeArgs {
 struct SelectionArgs {
     /// Session identifier, full or an unambiguous prefix.
     #[arg(
-        required_unless_present = "latest",
-        conflicts_with_all = ["latest", "exclude", "harness", "here", "project", "global"]
+        required_unless_present_any = ["latest", "title"],
+        conflicts_with_all = ["latest", "title", "exclude", "harness", "here", "project", "global"]
     )]
     session: Option<String>,
+    /// Match the recorded title exactly in scope; incomplete or ambiguous lookup refuses.
+    #[arg(long, conflicts_with_all = ["session", "latest", "exclude"])]
+    title: Option<String>,
     /// Take the most recent session in scope instead of naming one. A
     /// caller asking from inside a live session is usually itself the most
     /// recent one in its own project, so reaching an older session takes
@@ -146,8 +149,8 @@ struct SelectionArgs {
     /// asking from inside its own session passes its own id here.
     #[arg(long, requires = "latest")]
     exclude: Vec<String>,
-    /// With --latest, take the most recent session of one harness.
-    #[arg(long, requires = "latest")]
+    /// Restrict title or latest lookup to one harness.
+    #[arg(long)]
     harness: Option<String>,
     #[command(flatten)]
     scope: ScopeArgs,
@@ -157,6 +160,11 @@ impl SelectionArgs {
     fn selection(&self) -> Selection<'_> {
         match &self.session {
             Some(session) => Selection::Id(session),
+            None if self.title.is_some() => Selection::Title {
+                title: self.title.as_deref().unwrap(),
+                within: self.scope.within_or_here(),
+                harness: self.harness.as_deref(),
+            },
             None => Selection::Latest {
                 within: self.scope.within_or_here(),
                 harness: self.harness.as_deref(),
@@ -305,8 +313,11 @@ enum Command {
     /// these sessions.
     Usage {
         /// Session identifier, full or an unambiguous prefix.
-        #[arg(conflicts_with_all = ["latest", "exclude", "harness", "here", "project", "global"])]
+        #[arg(conflicts_with_all = ["latest", "title", "exclude", "harness", "here", "project", "global"])]
         session: Option<String>,
+        /// Match the recorded title exactly in scope; incomplete or ambiguous lookup refuses.
+        #[arg(long, conflicts_with_all = ["session", "latest", "exclude", "limit", "model", "directory", "since", "until", "sort", "search"])]
+        title: Option<String>,
         /// Take the most recent session in scope instead of naming one. A
         /// caller asking from inside a live session is usually itself the most
         /// recent one in its own project, so reaching an older session takes
@@ -324,15 +335,15 @@ enum Command {
         #[command(flatten)]
         scope: ScopeArgs,
         /// Take at most this many sessions from each harness [default: 20].
-        #[arg(long, conflicts_with_all = ["session", "latest"])]
+        #[arg(long, conflicts_with_all = ["session", "latest", "title"])]
         limit: Option<usize>,
         /// Match case-insensitively against the full model identity, `id` or
         /// `id (variant)`. Sessions without a model never match.
-        #[arg(long, value_name = "SUBSTRING", conflicts_with_all = ["session", "latest"])]
+        #[arg(long, value_name = "SUBSTRING", conflicts_with_all = ["session", "latest", "title"])]
         model: Option<String>,
         /// Match case-insensitively against the recorded directory path.
         /// Sessions without a directory never match.
-        #[arg(long, value_name = "SUBSTRING", conflicts_with_all = ["session", "latest"])]
+        #[arg(long, value_name = "SUBSTRING", conflicts_with_all = ["session", "latest", "title"])]
         directory: Option<String>,
         /// Keep sessions whose newest recorded activity, `last_activity_at`,
         /// is at or after this timestamp. RFC 3339 timestamps with an offset
@@ -341,7 +352,7 @@ enum Command {
             long,
             value_name = "TIMESTAMP",
             value_parser = tapes_core::parse_activity_timestamp,
-            conflicts_with_all = ["session", "latest"]
+            conflicts_with_all = ["session", "latest", "title"]
         )]
         since: Option<tapes_core::ActivityTimestamp>,
         /// Keep sessions whose newest recorded activity, `last_activity_at`,
@@ -351,17 +362,17 @@ enum Command {
             long,
             value_name = "TIMESTAMP",
             value_parser = tapes_core::parse_activity_timestamp,
-            conflicts_with_all = ["session", "latest"]
+            conflicts_with_all = ["session", "latest", "title"]
         )]
         until: Option<tapes_core::ActivityTimestamp>,
         /// Order the selection by `last_activity_at` before --limit takes
         /// from it: newest first by default, or oldest first.
-        #[arg(long, value_enum, value_name = "ORDER", conflicts_with_all = ["session", "latest"])]
+        #[arg(long, value_enum, value_name = "ORDER", conflicts_with_all = ["session", "latest", "title"])]
         sort: Option<SortArg>,
         /// Match case-insensitively against the last 32 normalized turns in
         /// each candidate session. The fixed tail keeps the selection bounded;
         /// a match outside it is not considered.
-        #[arg(long, value_name = "SUBSTRING", conflicts_with_all = ["session", "latest"])]
+        #[arg(long, value_name = "SUBSTRING", conflicts_with_all = ["session", "latest", "title"])]
         search: Option<String>,
         /// Group the summed sessions by this dimension. Repeatable and
         /// comma-separated; groups are keyed in the order given
@@ -373,7 +384,7 @@ enum Command {
             value_enum,
             value_name = "DIMENSION",
             value_delimiter = ',',
-            conflicts_with_all = ["session", "latest"]
+            conflicts_with_all = ["session", "latest", "title"]
         )]
         by: Vec<ByArg>,
         /// Render the versioned tapes-usage/1 object, or tapes-usage-summary/1
@@ -471,10 +482,13 @@ enum Command {
     Export {
         /// Session identifier, full or an unambiguous prefix.
         #[arg(
-            required_unless_present_any = ["latest", "here", "project", "global", "harness", "model", "directory", "since", "until", "search"],
-            conflicts_with_all = ["latest", "exclude", "harness", "here", "project", "global"]
+            required_unless_present_any = ["latest", "title", "here", "project", "global", "harness", "model", "directory", "since", "until", "search"],
+            conflicts_with_all = ["latest", "title", "exclude", "harness", "here", "project", "global"]
         )]
         session: Option<String>,
+        /// Match the recorded title exactly in scope; incomplete or ambiguous lookup refuses.
+        #[arg(long, conflicts_with_all = ["session", "latest", "exclude", "limit", "model", "directory", "since", "until", "sort", "search"])]
+        title: Option<String>,
         /// Take the most recent session in scope instead of naming one. A
         /// caller asking from inside a live session is usually itself the most
         /// recent one in its own project, so reaching an older session takes
@@ -492,15 +506,15 @@ enum Command {
         #[command(flatten)]
         scope: ScopeArgs,
         /// Take at most this many sessions from each harness [default: 20].
-        #[arg(long, conflicts_with_all = ["session", "latest"])]
+        #[arg(long, conflicts_with_all = ["session", "latest", "title"])]
         limit: Option<usize>,
         /// Match case-insensitively against the full model identity, `id` or
         /// `id (variant)`. Sessions without a model never match.
-        #[arg(long, value_name = "SUBSTRING", conflicts_with_all = ["session", "latest"])]
+        #[arg(long, value_name = "SUBSTRING", conflicts_with_all = ["session", "latest", "title"])]
         model: Option<String>,
         /// Match case-insensitively against the recorded directory path.
         /// Sessions without a directory never match.
-        #[arg(long, value_name = "SUBSTRING", conflicts_with_all = ["session", "latest"])]
+        #[arg(long, value_name = "SUBSTRING", conflicts_with_all = ["session", "latest", "title"])]
         directory: Option<String>,
         /// Keep sessions whose newest recorded activity, `last_activity_at`,
         /// is at or after this timestamp. RFC 3339 timestamps with an offset
@@ -509,7 +523,7 @@ enum Command {
             long,
             value_name = "TIMESTAMP",
             value_parser = tapes_core::parse_activity_timestamp,
-            conflicts_with_all = ["session", "latest"]
+            conflicts_with_all = ["session", "latest", "title"]
         )]
         since: Option<tapes_core::ActivityTimestamp>,
         /// Keep sessions whose newest recorded activity, `last_activity_at`,
@@ -519,18 +533,18 @@ enum Command {
             long,
             value_name = "TIMESTAMP",
             value_parser = tapes_core::parse_activity_timestamp,
-            conflicts_with_all = ["session", "latest"]
+            conflicts_with_all = ["session", "latest", "title"]
         )]
         until: Option<tapes_core::ActivityTimestamp>,
         /// Order the selection by `last_activity_at`: newest first by
         /// default, or oldest first. Bundles are written, and the manifest
         /// lists them, in this order.
-        #[arg(long, value_enum, value_name = "ORDER", conflicts_with_all = ["session", "latest"])]
+        #[arg(long, value_enum, value_name = "ORDER", conflicts_with_all = ["session", "latest", "title"])]
         sort: Option<SortArg>,
         /// Match case-insensitively against the last 32 normalized turns in
         /// each candidate session. The fixed tail keeps the selection bounded;
         /// a match outside it is not considered.
-        #[arg(long, value_name = "SUBSTRING", conflicts_with_all = ["session", "latest"])]
+        #[arg(long, value_name = "SUBSTRING", conflicts_with_all = ["session", "latest", "title"])]
         search: Option<String>,
         /// Directory for the exported bundles and their manifest.
         #[arg(long)]
@@ -642,6 +656,7 @@ fn dispatch(cli: Cli) -> Result<()> {
         }
         Command::Usage {
             session,
+            title,
             latest,
             exclude,
             harness,
@@ -658,6 +673,12 @@ fn dispatch(cli: Cli) -> Result<()> {
         } => {
             let one = if let Some(session) = &session {
                 Some(Selection::Id(session))
+            } else if let Some(title) = &title {
+                Some(Selection::Title {
+                    title,
+                    within: scope.within_or_here(),
+                    harness: harness.as_deref(),
+                })
             } else if latest {
                 Some(Selection::Latest {
                     within: scope.within_or_here(),
@@ -813,6 +834,7 @@ fn dispatch(cli: Cli) -> Result<()> {
         }
         Command::Export {
             session,
+            title,
             latest,
             exclude,
             harness,
@@ -829,6 +851,15 @@ fn dispatch(cli: Cli) -> Result<()> {
             if let Some(session) = &session {
                 print_manifest(&tapes_core::export(
                     Selection::Id(session),
+                    bundle.as_deref(),
+                )?);
+            } else if let Some(title) = &title {
+                print_manifest(&tapes_core::export(
+                    Selection::Title {
+                        title,
+                        within: scope.within_or_here(),
+                        harness: harness.as_deref(),
+                    },
                     bundle.as_deref(),
                 )?);
             } else if latest {
