@@ -157,18 +157,152 @@ struct SelectionArgs {
 
 impl SelectionArgs {
     fn selection(&self) -> Selection<'_> {
-        match &self.session {
-            Some(session) => Selection::Id(session),
-            None if self.title.is_some() => Selection::Title {
-                title: self.title.as_deref().unwrap(),
+        match (self.session.as_deref(), self.title.as_deref()) {
+            (Some(session), _) => Selection::Id(session),
+            (None, Some(title)) => Selection::Title {
+                title,
                 within: self.scope.within_or_here(),
                 harness: self.harness.as_deref(),
             },
-            None => Selection::Latest {
+            (None, None) => Selection::Latest {
                 within: self.scope.within_or_here(),
                 harness: self.harness.as_deref(),
                 exclude: &self.exclude,
             },
+        }
+    }
+}
+
+/// The common single-session and session-set selectors for aggregate-capable views.
+#[derive(Args)]
+#[group(multiple = true)]
+struct SessionQueryArgs {
+    /// Session identifier, full or an unambiguous prefix.
+    #[arg(conflicts_with_all = ["title", "latest", "exclude", "harness", "here", "project", "global"])]
+    session: Option<String>,
+    /// Match the recorded title exactly in scope; incomplete or ambiguous lookup refuses.
+    #[arg(long, conflicts_with_all = ["session", "latest", "exclude", "limit", "model", "directory", "since", "until", "sort", "search"])]
+    title: Option<String>,
+    /// Take the most recent session in scope instead of naming one. A
+    /// caller asking from inside a live session is usually itself the most
+    /// recent one in its own project, so reaching an older session takes
+    /// `--exclude <own-id>`.
+    #[arg(long)]
+    latest: bool,
+    /// Pass over this session when taking the latest. Repeatable. An agent
+    /// asking from inside its own session passes its own id here.
+    #[arg(long, requires = "latest")]
+    exclude: Vec<String>,
+    /// Restrict title, latest, or set selection to one harness.
+    #[arg(long, conflicts_with = "session")]
+    harness: Option<String>,
+    #[command(flatten)]
+    scope: ScopeArgs,
+    /// Take at most this many sessions from each harness [default: 20].
+    #[arg(long, conflicts_with_all = ["session", "latest", "title"])]
+    limit: Option<usize>,
+    /// Match case-insensitively against the full model identity, `id` or
+    /// `id (variant)`. Sessions without a model never match.
+    #[arg(long, value_name = "SUBSTRING", conflicts_with_all = ["session", "latest", "title"])]
+    model: Option<String>,
+    /// Match case-insensitively against the recorded directory path.
+    /// Sessions without a directory never match.
+    #[arg(long, value_name = "SUBSTRING", conflicts_with_all = ["session", "latest", "title"])]
+    directory: Option<String>,
+    /// Keep sessions whose newest recorded activity, `last_activity_at`,
+    /// is at or after this timestamp. RFC 3339 timestamps with an offset
+    /// and bare YYYY-MM-DD dates are accepted.
+    #[arg(
+        long,
+        value_name = "TIMESTAMP",
+        value_parser = tapes_core::parse_activity_timestamp,
+        conflicts_with_all = ["session", "latest", "title"]
+    )]
+    since: Option<tapes_core::ActivityTimestamp>,
+    /// Keep sessions whose newest recorded activity, `last_activity_at`,
+    /// is before this timestamp. RFC 3339 timestamps with an offset and
+    /// bare YYYY-MM-DD dates are accepted.
+    #[arg(
+        long,
+        value_name = "TIMESTAMP",
+        value_parser = tapes_core::parse_activity_timestamp,
+        conflicts_with_all = ["session", "latest", "title"]
+    )]
+    until: Option<tapes_core::ActivityTimestamp>,
+    /// Order the selection by `last_activity_at` before --limit takes
+    /// from it: newest first by default, or oldest first.
+    #[arg(long, value_enum, value_name = "ORDER", conflicts_with_all = ["session", "latest", "title"])]
+    sort: Option<SortArg>,
+    /// Match case-insensitively against the last 32 normalized turns in
+    /// each candidate session. The fixed tail keeps the selection bounded;
+    /// a match outside it is not considered.
+    #[arg(long, value_name = "SUBSTRING", conflicts_with_all = ["session", "latest", "title"])]
+    search: Option<String>,
+}
+
+impl SessionQueryArgs {
+    fn single(&self) -> Option<Selection<'_>> {
+        if let Some(id) = self.session.as_deref() {
+            return Some(Selection::Id(id));
+        }
+        if let Some(title) = self.title.as_deref() {
+            return Some(Selection::Title {
+                title,
+                within: self.scope.within_or_here(),
+                harness: self.harness.as_deref(),
+            });
+        }
+        self.latest.then_some(Selection::Latest {
+            within: self.scope.within_or_here(),
+            harness: self.harness.as_deref(),
+            exclude: &self.exclude,
+        })
+    }
+
+    fn has_set_selection(&self) -> bool {
+        self.scope.here
+            || self.scope.global
+            || self.scope.project.is_some()
+            || self.harness.is_some()
+            || self.limit.is_some()
+            || self.model.is_some()
+            || self.directory.is_some()
+            || self.since.is_some()
+            || self.until.is_some()
+            || self.sort.is_some()
+            || self.search.is_some()
+    }
+
+    fn set(&self) -> tapes_core::SessionSelection<'_> {
+        tapes_core::SessionSelection {
+            within: self.scope.within(),
+            harness: self.harness.as_deref(),
+            limit: self.limit,
+            filters: tapes_core::ListFilters {
+                model: self.model.as_deref(),
+                directory: self.directory.as_deref(),
+                since: self.since,
+                until: self.until,
+                search: self.search.as_deref(),
+            },
+            sort: self.sort.unwrap_or(SortArg::Newest).into(),
+        }
+    }
+
+    fn validate_window(&self) -> Result<()> {
+        if self
+            .since
+            .zip(self.until)
+            .is_some_and(|(since, until)| since >= until)
+        {
+            return Err(anyhow!("--since must be earlier than --until"));
+        }
+        Ok(())
+    }
+
+    fn describe_search(&self) {
+        if self.search.is_some() {
+            eprintln!("Searching the last 32 normalized turns of each candidate session before applying --limit.");
         }
     }
 }
@@ -354,68 +488,8 @@ enum Command {
     /// with per-session read coverage, pairing counts and failures. Children
     /// are not read through their parents.
     Stats {
-        /// Session identifier, full or an unambiguous prefix.
-        #[arg(conflicts_with_all = ["title", "latest", "exclude", "harness", "here", "project", "global"])]
-        session: Option<String>,
-        /// Match the recorded title exactly in scope; incomplete or ambiguous lookup refuses.
-        #[arg(long, conflicts_with_all = ["session", "latest", "exclude", "limit", "model", "directory", "since", "until", "sort", "search"])]
-        title: Option<String>,
-        /// Take the most recent session in scope instead of naming one. A
-        /// caller asking from inside a live session is usually itself the most
-        /// recent one in its own project, so reaching an older session takes
-        /// `--exclude <own-id>`.
-        #[arg(long)]
-        latest: bool,
-        /// Pass over this session when taking the latest. Repeatable. An agent
-        /// asking from inside its own session passes its own id here.
-        #[arg(long, requires = "latest")]
-        exclude: Vec<String>,
-        /// Restrict to one harness: the most recent session of it with
-        /// --latest, every selected session of it otherwise.
-        #[arg(long, conflicts_with = "session")]
-        harness: Option<String>,
         #[command(flatten)]
-        scope: ScopeArgs,
-        /// Take at most this many sessions from each harness [default: 20].
-        #[arg(long, conflicts_with_all = ["session", "latest", "title"])]
-        limit: Option<usize>,
-        /// Match case-insensitively against the full model identity, `id` or
-        /// `id (variant)`. Sessions without a model never match.
-        #[arg(long, value_name = "SUBSTRING", conflicts_with_all = ["session", "latest", "title"])]
-        model: Option<String>,
-        /// Match case-insensitively against the recorded directory path.
-        /// Sessions without a directory never match.
-        #[arg(long, value_name = "SUBSTRING", conflicts_with_all = ["session", "latest", "title"])]
-        directory: Option<String>,
-        /// Keep sessions whose newest recorded activity, `last_activity_at`,
-        /// is at or after this timestamp. RFC 3339 timestamps with an offset
-        /// and bare YYYY-MM-DD dates are accepted.
-        #[arg(
-            long,
-            value_name = "TIMESTAMP",
-            value_parser = tapes_core::parse_activity_timestamp,
-            conflicts_with_all = ["session", "latest", "title"]
-        )]
-        since: Option<tapes_core::ActivityTimestamp>,
-        /// Keep sessions whose newest recorded activity, `last_activity_at`,
-        /// is before this timestamp. RFC 3339 timestamps with an offset and
-        /// bare YYYY-MM-DD dates are accepted.
-        #[arg(
-            long,
-            value_name = "TIMESTAMP",
-            value_parser = tapes_core::parse_activity_timestamp,
-            conflicts_with_all = ["session", "latest", "title"]
-        )]
-        until: Option<tapes_core::ActivityTimestamp>,
-        /// Order the selection by `last_activity_at` before --limit takes
-        /// from it: newest first by default, or oldest first.
-        #[arg(long, value_enum, value_name = "ORDER", conflicts_with_all = ["session", "latest", "title"])]
-        sort: Option<SortArg>,
-        /// Match case-insensitively against the last 32 normalized turns in
-        /// each candidate session. The fixed tail keeps the selection bounded;
-        /// a match outside it is not considered.
-        #[arg(long, value_name = "SUBSTRING", conflicts_with_all = ["session", "latest", "title"])]
-        search: Option<String>,
+        query: SessionQueryArgs,
         /// Render the versioned tapes-stats/1 object, or tapes-stats-summary/1
         /// for a selection, as JSON.
         #[arg(long)]
@@ -432,68 +506,8 @@ enum Command {
     /// recorded, and quota is a separate fact about the account rather than
     /// these sessions.
     Usage {
-        /// Session identifier, full or an unambiguous prefix.
-        #[arg(conflicts_with_all = ["latest", "title", "exclude", "harness", "here", "project", "global"])]
-        session: Option<String>,
-        /// Match the recorded title exactly in scope; incomplete or ambiguous lookup refuses.
-        #[arg(long, conflicts_with_all = ["session", "latest", "exclude", "limit", "model", "directory", "since", "until", "sort", "search"])]
-        title: Option<String>,
-        /// Take the most recent session in scope instead of naming one. A
-        /// caller asking from inside a live session is usually itself the most
-        /// recent one in its own project, so reaching an older session takes
-        /// `--exclude <own-id>`.
-        #[arg(long)]
-        latest: bool,
-        /// Pass over this session when taking the latest. Repeatable. An agent
-        /// asking from inside its own session passes its own id here.
-        #[arg(long, requires = "latest")]
-        exclude: Vec<String>,
-        /// Restrict to one harness: the most recent session of it with
-        /// --latest, every selected session of it otherwise.
-        #[arg(long, conflicts_with = "session")]
-        harness: Option<String>,
         #[command(flatten)]
-        scope: ScopeArgs,
-        /// Take at most this many sessions from each harness [default: 20].
-        #[arg(long, conflicts_with_all = ["session", "latest", "title"])]
-        limit: Option<usize>,
-        /// Match case-insensitively against the full model identity, `id` or
-        /// `id (variant)`. Sessions without a model never match.
-        #[arg(long, value_name = "SUBSTRING", conflicts_with_all = ["session", "latest", "title"])]
-        model: Option<String>,
-        /// Match case-insensitively against the recorded directory path.
-        /// Sessions without a directory never match.
-        #[arg(long, value_name = "SUBSTRING", conflicts_with_all = ["session", "latest", "title"])]
-        directory: Option<String>,
-        /// Keep sessions whose newest recorded activity, `last_activity_at`,
-        /// is at or after this timestamp. RFC 3339 timestamps with an offset
-        /// and bare YYYY-MM-DD dates are accepted.
-        #[arg(
-            long,
-            value_name = "TIMESTAMP",
-            value_parser = tapes_core::parse_activity_timestamp,
-            conflicts_with_all = ["session", "latest", "title"]
-        )]
-        since: Option<tapes_core::ActivityTimestamp>,
-        /// Keep sessions whose newest recorded activity, `last_activity_at`,
-        /// is before this timestamp. RFC 3339 timestamps with an offset and
-        /// bare YYYY-MM-DD dates are accepted.
-        #[arg(
-            long,
-            value_name = "TIMESTAMP",
-            value_parser = tapes_core::parse_activity_timestamp,
-            conflicts_with_all = ["session", "latest", "title"]
-        )]
-        until: Option<tapes_core::ActivityTimestamp>,
-        /// Order the selection by `last_activity_at` before --limit takes
-        /// from it: newest first by default, or oldest first.
-        #[arg(long, value_enum, value_name = "ORDER", conflicts_with_all = ["session", "latest", "title"])]
-        sort: Option<SortArg>,
-        /// Match case-insensitively against the last 32 normalized turns in
-        /// each candidate session. The fixed tail keeps the selection bounded;
-        /// a match outside it is not considered.
-        #[arg(long, value_name = "SUBSTRING", conflicts_with_all = ["session", "latest", "title"])]
-        search: Option<String>,
+        query: SessionQueryArgs,
         /// Group the summed sessions by this dimension. Repeatable and
         /// comma-separated; groups are keyed in the order given
         /// [default: harness,model]. `model` is the model id and `variant`
@@ -599,73 +613,12 @@ enum Command {
     /// session keeps its own bounded bundle; a session whose store cannot be
     /// read is recorded in the manifest's `failed` and does not stop the run,
     /// which fails only when every selected session did.
+    #[command(group(clap::ArgGroup::new("export_selection")
+        .args(["session", "latest", "title", "here", "project", "global", "harness", "model", "directory", "since", "until", "search"])
+        .required(true).multiple(true)))]
     Export {
-        /// Session identifier, full or an unambiguous prefix.
-        #[arg(
-            required_unless_present_any = ["latest", "title", "here", "project", "global", "harness", "model", "directory", "since", "until", "search"],
-            conflicts_with_all = ["latest", "title", "exclude", "harness", "here", "project", "global"]
-        )]
-        session: Option<String>,
-        /// Match the recorded title exactly in scope; incomplete or ambiguous lookup refuses.
-        #[arg(long, conflicts_with_all = ["session", "latest", "exclude", "limit", "model", "directory", "since", "until", "sort", "search"])]
-        title: Option<String>,
-        /// Take the most recent session in scope instead of naming one. A
-        /// caller asking from inside a live session is usually itself the most
-        /// recent one in its own project, so reaching an older session takes
-        /// `--exclude <own-id>`.
-        #[arg(long)]
-        latest: bool,
-        /// Pass over this session when taking the latest. Repeatable. An agent
-        /// asking from inside its own session passes its own id here.
-        #[arg(long, requires = "latest")]
-        exclude: Vec<String>,
-        /// Restrict to one harness: the most recent session of it with
-        /// --latest, every selected session of it otherwise.
-        #[arg(long, conflicts_with = "session")]
-        harness: Option<String>,
         #[command(flatten)]
-        scope: ScopeArgs,
-        /// Take at most this many sessions from each harness [default: 20].
-        #[arg(long, conflicts_with_all = ["session", "latest", "title"])]
-        limit: Option<usize>,
-        /// Match case-insensitively against the full model identity, `id` or
-        /// `id (variant)`. Sessions without a model never match.
-        #[arg(long, value_name = "SUBSTRING", conflicts_with_all = ["session", "latest", "title"])]
-        model: Option<String>,
-        /// Match case-insensitively against the recorded directory path.
-        /// Sessions without a directory never match.
-        #[arg(long, value_name = "SUBSTRING", conflicts_with_all = ["session", "latest", "title"])]
-        directory: Option<String>,
-        /// Keep sessions whose newest recorded activity, `last_activity_at`,
-        /// is at or after this timestamp. RFC 3339 timestamps with an offset
-        /// and bare YYYY-MM-DD dates are accepted.
-        #[arg(
-            long,
-            value_name = "TIMESTAMP",
-            value_parser = tapes_core::parse_activity_timestamp,
-            conflicts_with_all = ["session", "latest", "title"]
-        )]
-        since: Option<tapes_core::ActivityTimestamp>,
-        /// Keep sessions whose newest recorded activity, `last_activity_at`,
-        /// is before this timestamp. RFC 3339 timestamps with an offset and
-        /// bare YYYY-MM-DD dates are accepted.
-        #[arg(
-            long,
-            value_name = "TIMESTAMP",
-            value_parser = tapes_core::parse_activity_timestamp,
-            conflicts_with_all = ["session", "latest", "title"]
-        )]
-        until: Option<tapes_core::ActivityTimestamp>,
-        /// Order the selection by `last_activity_at`: newest first by
-        /// default, or oldest first. Bundles are written, and the manifest
-        /// lists them, in this order.
-        #[arg(long, value_enum, value_name = "ORDER", conflicts_with_all = ["session", "latest", "title"])]
-        sort: Option<SortArg>,
-        /// Match case-insensitively against the last 32 normalized turns in
-        /// each candidate session. The fixed tail keeps the selection bounded;
-        /// a match outside it is not considered.
-        #[arg(long, value_name = "SUBSTRING", conflicts_with_all = ["session", "latest", "title"])]
-        search: Option<String>,
+        query: SessionQueryArgs,
         /// Directory for the exported bundles and their manifest.
         #[arg(long)]
         bundle: Option<PathBuf>,
@@ -887,38 +840,8 @@ fn dispatch(cli: Cli) -> Result<()> {
                 print!("{}", render_lineage(&lineage));
             }
         }
-        Command::Stats {
-            session,
-            title,
-            latest,
-            exclude,
-            harness,
-            scope,
-            limit,
-            model,
-            directory,
-            since,
-            until,
-            sort,
-            search,
-            json,
-        } => {
-            if session.is_some() || title.is_some() || latest {
-                let one = if let Some(id) = session.as_deref() {
-                    Selection::Id(id)
-                } else if let Some(title) = title.as_deref() {
-                    Selection::Title {
-                        title,
-                        within: scope.within_or_here(),
-                        harness: harness.as_deref(),
-                    }
-                } else {
-                    Selection::Latest {
-                        within: scope.within_or_here(),
-                        harness: harness.as_deref(),
-                        exclude: &exclude,
-                    }
-                };
+        Command::Stats { query, json } => {
+            if let Some(one) = query.single() {
                 let stats = tapes_core::stats(one)?;
                 if json {
                     println!("{}", serde_json::to_string(&stats)?);
@@ -926,33 +849,10 @@ fn dispatch(cli: Cli) -> Result<()> {
                     print!("{}", render_stats(&stats));
                 }
             } else {
-                if !(scope.here
-                    || scope.global
-                    || scope.project.is_some()
-                    || harness.is_some()
-                    || limit.is_some()
-                    || model.is_some()
-                    || directory.is_some()
-                    || since.is_some()
-                    || until.is_some()
-                    || sort.is_some()
-                    || search.is_some())
-                {
+                if !query.has_set_selection() {
                     return Err(anyhow!("stats needs a session ID, --latest, or an explicit selection such as --here"));
                 }
-                let summary = tapes_core::stats_summary::summary(&tapes_core::SessionSelection {
-                    within: scope.within(),
-                    harness: harness.as_deref(),
-                    limit,
-                    filters: tapes_core::ListFilters {
-                        model: model.as_deref(),
-                        directory: directory.as_deref(),
-                        since,
-                        until,
-                        search: search.as_deref(),
-                    },
-                    sort: sort.unwrap_or(SortArg::Newest).into(),
-                })?;
+                let summary = tapes_core::stats_summary::summary(&query.set())?;
                 if json {
                     println!("{}", serde_json::to_string(&summary)?);
                 } else {
@@ -996,41 +896,8 @@ fn dispatch(cli: Cli) -> Result<()> {
                 }
             }
         }
-        Command::Usage {
-            session,
-            title,
-            latest,
-            exclude,
-            harness,
-            scope,
-            limit,
-            model,
-            directory,
-            since,
-            until,
-            sort,
-            search,
-            by,
-            json,
-        } => {
-            let one = if let Some(session) = &session {
-                Some(Selection::Id(session))
-            } else if let Some(title) = &title {
-                Some(Selection::Title {
-                    title,
-                    within: scope.within_or_here(),
-                    harness: harness.as_deref(),
-                })
-            } else if latest {
-                Some(Selection::Latest {
-                    within: scope.within_or_here(),
-                    harness: harness.as_deref(),
-                    exclude: &exclude,
-                })
-            } else {
-                None
-            };
-            if let Some(one) = one {
+        Command::Usage { query, by, json } => {
+            if let Some(one) = query.single() {
                 let usage = tapes_core::usage(one)?;
                 if json {
                     println!("{}", serde_json::to_string(&usage)?);
@@ -1038,18 +905,7 @@ fn dispatch(cli: Cli) -> Result<()> {
                     print!("{}", render_usage(&usage));
                 }
             } else {
-                let selected = scope.here
-                    || scope.global
-                    || scope.project.is_some()
-                    || harness.is_some()
-                    || model.is_some()
-                    || directory.is_some()
-                    || since.is_some()
-                    || until.is_some()
-                    || search.is_some()
-                    || limit.is_some()
-                    || sort.is_some()
-                    || !by.is_empty();
+                let selected = query.has_set_selection() || !by.is_empty();
                 if !selected {
                     return Err(anyhow!(
                         "usage answers one session or a selection of them: name a session id, \
@@ -1057,34 +913,10 @@ fn dispatch(cli: Cli) -> Result<()> {
                          or a listing filter"
                     ));
                 }
-                if since
-                    .zip(until)
-                    .is_some_and(|(since, until)| since >= until)
-                {
-                    return Err(anyhow!("--since must be earlier than --until"));
-                }
-                if search.is_some() {
-                    eprintln!(
-                        "Searching the last 32 normalized turns of each candidate session before applying --limit."
-                    );
-                }
+                query.validate_window()?;
+                query.describe_search();
                 let by = grouping(&by);
-                let summary = tapes_core::usage_summary(
-                    &tapes_core::SessionSelection {
-                        within: scope.within(),
-                        harness: harness.as_deref(),
-                        limit,
-                        filters: tapes_core::ListFilters {
-                            model: model.as_deref(),
-                            directory: directory.as_deref(),
-                            since,
-                            until,
-                            search: search.as_deref(),
-                        },
-                        sort: sort.unwrap_or(SortArg::Newest).into(),
-                    },
-                    &by,
-                )?;
+                let summary = tapes_core::usage_summary(&query.set(), &by)?;
                 if json {
                     println!("{}", serde_json::to_string(&summary)?);
                 } else {
@@ -1174,73 +1006,13 @@ fn dispatch(cli: Cli) -> Result<()> {
                 );
             }
         }
-        Command::Export {
-            session,
-            title,
-            latest,
-            exclude,
-            harness,
-            scope,
-            limit,
-            model,
-            directory,
-            since,
-            until,
-            sort,
-            search,
-            bundle,
-        } => {
-            if let Some(session) = &session {
-                print_manifest(&tapes_core::export(
-                    Selection::Id(session),
-                    bundle.as_deref(),
-                )?);
-            } else if let Some(title) = &title {
-                print_manifest(&tapes_core::export(
-                    Selection::Title {
-                        title,
-                        within: scope.within_or_here(),
-                        harness: harness.as_deref(),
-                    },
-                    bundle.as_deref(),
-                )?);
-            } else if latest {
-                print_manifest(&tapes_core::export(
-                    Selection::Latest {
-                        within: scope.within_or_here(),
-                        harness: harness.as_deref(),
-                        exclude: &exclude,
-                    },
-                    bundle.as_deref(),
-                )?);
+        Command::Export { query, bundle } => {
+            if let Some(one) = query.single() {
+                print_manifest(&tapes_core::export(one, bundle.as_deref())?);
             } else {
-                if since
-                    .zip(until)
-                    .is_some_and(|(since, until)| since >= until)
-                {
-                    return Err(anyhow!("--since must be earlier than --until"));
-                }
-                if search.is_some() {
-                    eprintln!(
-                        "Searching the last 32 normalized turns of each candidate session before applying --limit."
-                    );
-                }
-                let export = tapes_core::export_selection(
-                    &tapes_core::SessionSelection {
-                        within: scope.within(),
-                        harness: harness.as_deref(),
-                        limit,
-                        filters: tapes_core::ListFilters {
-                            model: model.as_deref(),
-                            directory: directory.as_deref(),
-                            since,
-                            until,
-                            search: search.as_deref(),
-                        },
-                        sort: sort.unwrap_or(SortArg::Newest).into(),
-                    },
-                    bundle.as_deref(),
-                )?;
+                query.validate_window()?;
+                query.describe_search();
+                let export = tapes_core::export_selection(&query.set(), bundle.as_deref())?;
                 print_selection_manifest(&export);
                 if export.every_session_failed() {
                     return Err(anyhow!(
