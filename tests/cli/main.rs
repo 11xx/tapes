@@ -3412,6 +3412,84 @@ fn brief_renders_the_continuation_in_reading_order() {
 }
 
 #[test]
+fn selection_stats_agree_with_individual_reads() {
+    let (path, home) = fixture_store("stats-summary");
+    let root = TemporaryDirectory { path };
+    let run = |args: &[&str]| {
+        let mut command = tapes();
+        command.args(args);
+        with_fixture_env(&mut command, root.path(), &home, root.path());
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice::<Value>(&output.stdout).unwrap()
+    };
+    let summary = run(&["stats", "--global", "--harness", "codex", "--json"]);
+    assert_eq!(summary["schema"], "tapes-stats-summary/1");
+    assert_eq!(summary["selected"], 2);
+    assert_eq!(summary["read"], 2);
+    let mut totals = [0_u64; 4];
+    for row in summary["sessions"].as_array().unwrap() {
+        let one = run(&["stats", row["session"]["id"].as_str().unwrap(), "--json"]);
+        assert_eq!(row["tools"], one["tools"]);
+        assert_eq!(row["coverage"], one["coverage"]);
+        for (index, key) in ["calls", "results", "paired", "errors"].iter().enumerate() {
+            totals[index] += one["tools"][key].as_u64().unwrap();
+        }
+    }
+    for (index, key) in ["calls", "results", "paired", "errors"].iter().enumerate() {
+        assert_eq!(summary["by_harness"]["codex"][key], totals[index]);
+    }
+}
+
+#[test]
+fn selection_stats_cli_reports_partial_and_total_read_failure() {
+    let root = TemporaryDirectory::new(
+        std::env::temp_dir().join(format!("tapes-stats-failure-{}", std::process::id())),
+    );
+    let fixture =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/opencode/opencode2");
+    let program = root.path().join("opencode2");
+    let calls = root.path().join("calls");
+    for (pattern, reads, success) in [
+        ("/api/session/ses_api_only_fixture/message*", 1, true),
+        ("/api/session/*/message*", 0, false),
+    ] {
+        let script = format!("#!/bin/sh\nprintf '%s\\n' \"$4\" >> '{}'\ncase \"$4\" in {pattern}) exit 7;; esac\nexec '{}' \"$@\"\n", calls.display(),fixture.display());
+        fs::write(&program, script).unwrap();
+        fs::set_permissions(&program, fs::Permissions::from_mode(0o700)).unwrap();
+        let mut command = tapes();
+        command.args(["stats", "--global", "--harness", "opencode", "--json"]);
+        with_fixture_env(
+            &mut command,
+            &root.path().join("codex"),
+            &root.path().join("home"),
+            root.path(),
+        );
+        let output = command.output().unwrap();
+        assert_eq!(
+            output.status.success(),
+            success,
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(report["selected"], 2);
+        assert_eq!(report["read"], reads);
+        assert_eq!(report["failed"].as_array().unwrap().len(), 2 - reads);
+        assert_eq!(report["sessions"].as_array().unwrap().len(), reads);
+    }
+    let calls = fs::read_to_string(calls).unwrap();
+    assert!(
+        !calls.contains("parent"),
+        "summary must not request child lineage: {calls}"
+    );
+}
+
+#[test]
 fn recorded_title_selects_every_single_session_view_and_refuses_hidden_ambiguity() {
     let root = TemporaryDirectory::new(
         std::env::temp_dir().join(format!("tapes-title-{}", std::process::id())),

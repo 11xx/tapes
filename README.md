@@ -343,9 +343,8 @@ few endings that matter instead of every tail.
 
 **Contracts you can build on.** `tapes-list/1`, `tapes-session/1`,
 `tapes-events/1`, `tapes-usage/1`, `tapes-usage-summary/1`, `tapes-lineage/1`,
-`tapes-endings/1`, `tapes-stats/1`, and `tapes-export-manifest/1` are versioned
-
-`tapes-endings/1`, `tapes-brief/1`, and `tapes-export-manifest/1` are versioned
+`tapes-endings/1`, `tapes-stats/1`, `tapes-stats-summary/1`, `tapes-brief/1`,
+and `tapes-export-manifest/1` are versioned
 JSON; a breaking shape change bumps the version. A single-session `export`
 prints
 exactly three paths and their sizes on stdout, in reading order, and writes each
@@ -384,6 +383,17 @@ agent-context tool — and it names the wrong half of the job. This tool's
 primary direction is *pull*: retrieve and reconstruct a session that already
 ended. Handing context forward is one thing you might do with what it
 returns.
+
+## Tool usage across sessions
+
+`tapes stats --here --since 2026-01-01 --json` returns
+`tapes-stats-summary/1`. Listing filters select the sessions; each costs one
+bounded transcript read through its listed backend origin. The report includes
+selected/read/failed counts, per-session coverage and tool statistics, and
+aggregates by harness and tool name. Pair durations cover complete timestamped
+pairs only. Read failures have unknown activity and contribute no counters.
+These are recorded harness tool names, such as `bash`, not inferred shell
+commands. Child recordings contribute only when independently selected.
 
 ## Recorded-title lookup
 

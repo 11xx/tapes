@@ -124,10 +124,9 @@ impl ScopeArgs {
     }
 }
 
-/// Which session a command acts on: one named, or the latest in scope.
-/// A named session is looked up by id across every store, so every flag that
-/// narrows a *search* is a contradiction beside one — and silently ignoring
-/// them would answer a question the caller did not ask.
+/// Select one session by ID, exact recorded title, or latest activity.
+/// ID resolution crosses stores; title and latest selection honor explicit
+/// scope and harness restrictions.
 #[derive(Args)]
 struct SelectionArgs {
     /// Session identifier, full or an unambiguous prefix.
@@ -294,10 +293,75 @@ enum Command {
     /// `read-window` when a source bound withheld turns, durations come from
     /// complete pairs only, and a cache ratio is a share of recorded token
     /// counts rather than of cost. Nothing is judged, ranked, or explained.
+    /// A scope or listing filter selects multiple sessions and returns
+    /// tapes-stats-summary/1: recorded tools grouped by harness and name,
+    /// with per-session read coverage, pairing counts and failures. Children
+    /// are not read through their parents.
     Stats {
+        /// Session identifier, full or an unambiguous prefix.
+        #[arg(conflicts_with_all = ["title", "latest", "exclude", "harness", "here", "project", "global"])]
+        session: Option<String>,
+        /// Match the recorded title exactly in scope; incomplete or ambiguous lookup refuses.
+        #[arg(long, conflicts_with_all = ["session", "latest", "exclude", "limit", "model", "directory", "since", "until", "sort", "search"])]
+        title: Option<String>,
+        /// Take the most recent session in scope instead of naming one. A
+        /// caller asking from inside a live session is usually itself the most
+        /// recent one in its own project, so reaching an older session takes
+        /// `--exclude <own-id>`.
+        #[arg(long)]
+        latest: bool,
+        /// Pass over this session when taking the latest. Repeatable. An agent
+        /// asking from inside its own session passes its own id here.
+        #[arg(long, requires = "latest")]
+        exclude: Vec<String>,
+        /// Restrict to one harness: the most recent session of it with
+        /// --latest, every selected session of it otherwise.
+        #[arg(long, conflicts_with = "session")]
+        harness: Option<String>,
         #[command(flatten)]
-        selection: SelectionArgs,
-        /// Render the versioned tapes-stats/1 object as JSON.
+        scope: ScopeArgs,
+        /// Take at most this many sessions from each harness [default: 20].
+        #[arg(long, conflicts_with_all = ["session", "latest", "title"])]
+        limit: Option<usize>,
+        /// Match case-insensitively against the full model identity, `id` or
+        /// `id (variant)`. Sessions without a model never match.
+        #[arg(long, value_name = "SUBSTRING", conflicts_with_all = ["session", "latest", "title"])]
+        model: Option<String>,
+        /// Match case-insensitively against the recorded directory path.
+        /// Sessions without a directory never match.
+        #[arg(long, value_name = "SUBSTRING", conflicts_with_all = ["session", "latest", "title"])]
+        directory: Option<String>,
+        /// Keep sessions whose newest recorded activity, `last_activity_at`,
+        /// is at or after this timestamp. RFC 3339 timestamps with an offset
+        /// and bare YYYY-MM-DD dates are accepted.
+        #[arg(
+            long,
+            value_name = "TIMESTAMP",
+            value_parser = tapes_core::parse_activity_timestamp,
+            conflicts_with_all = ["session", "latest", "title"]
+        )]
+        since: Option<tapes_core::ActivityTimestamp>,
+        /// Keep sessions whose newest recorded activity, `last_activity_at`,
+        /// is before this timestamp. RFC 3339 timestamps with an offset and
+        /// bare YYYY-MM-DD dates are accepted.
+        #[arg(
+            long,
+            value_name = "TIMESTAMP",
+            value_parser = tapes_core::parse_activity_timestamp,
+            conflicts_with_all = ["session", "latest", "title"]
+        )]
+        until: Option<tapes_core::ActivityTimestamp>,
+        /// Order the selection by `last_activity_at` before --limit takes
+        /// from it: newest first by default, or oldest first.
+        #[arg(long, value_enum, value_name = "ORDER", conflicts_with_all = ["session", "latest", "title"])]
+        sort: Option<SortArg>,
+        /// Match case-insensitively against the last 32 normalized turns in
+        /// each candidate session. The fixed tail keeps the selection bounded;
+        /// a match outside it is not considered.
+        #[arg(long, value_name = "SUBSTRING", conflicts_with_all = ["session", "latest", "title"])]
+        search: Option<String>,
+        /// Render the versioned tapes-stats/1 object, or tapes-stats-summary/1
+        /// for a selection, as JSON.
         #[arg(long)]
         json: bool,
     },
@@ -646,12 +710,113 @@ fn dispatch(cli: Cli) -> Result<()> {
                 print!("{}", render_lineage(&lineage));
             }
         }
-        Command::Stats { selection, json } => {
-            let stats = tapes_core::stats(selection.selection())?;
-            if json {
-                println!("{}", serde_json::to_string(&stats)?);
+        Command::Stats {
+            session,
+            title,
+            latest,
+            exclude,
+            harness,
+            scope,
+            limit,
+            model,
+            directory,
+            since,
+            until,
+            sort,
+            search,
+            json,
+        } => {
+            if session.is_some() || title.is_some() || latest {
+                let one = if let Some(id) = session.as_deref() {
+                    Selection::Id(id)
+                } else if let Some(title) = title.as_deref() {
+                    Selection::Title {
+                        title,
+                        within: scope.within_or_here(),
+                        harness: harness.as_deref(),
+                    }
+                } else {
+                    Selection::Latest {
+                        within: scope.within_or_here(),
+                        harness: harness.as_deref(),
+                        exclude: &exclude,
+                    }
+                };
+                let stats = tapes_core::stats(one)?;
+                if json {
+                    println!("{}", serde_json::to_string(&stats)?);
+                } else {
+                    print!("{}", render_stats(&stats));
+                }
             } else {
-                print!("{}", render_stats(&stats));
+                if !(scope.here
+                    || scope.global
+                    || scope.project.is_some()
+                    || harness.is_some()
+                    || limit.is_some()
+                    || model.is_some()
+                    || directory.is_some()
+                    || since.is_some()
+                    || until.is_some()
+                    || sort.is_some()
+                    || search.is_some())
+                {
+                    return Err(anyhow!("stats needs a session ID, --latest, or an explicit selection such as --here"));
+                }
+                let summary = tapes_core::stats_summary::summary(&tapes_core::SessionSelection {
+                    within: scope.within(),
+                    harness: harness.as_deref(),
+                    limit,
+                    filters: tapes_core::ListFilters {
+                        model: model.as_deref(),
+                        directory: directory.as_deref(),
+                        since,
+                        until,
+                        search: search.as_deref(),
+                    },
+                    sort: sort.unwrap_or(SortArg::Newest).into(),
+                })?;
+                if json {
+                    println!("{}", serde_json::to_string(&summary)?);
+                } else {
+                    println!(
+                        "Recorded tool usage: {} selected, {} read, {} failed",
+                        summary.selected,
+                        summary.read,
+                        summary.failed.len()
+                    );
+                    for (harness, tools) in &summary.by_harness {
+                        println!("{harness}: {} calls, {} results, {} complete pairs, {} incomplete, {} recorded errors", tools.calls, tools.results, tools.paired, tools.incomplete.total(), tools.errors);
+                        for row in &tools.by_name {
+                            println!(
+                                "  {}: {} calls, {} paired, {} errors",
+                                row.name, row.calls, row.paired, row.errors
+                            );
+                        }
+                    }
+                    for session in &summary.sessions {
+                        println!(
+                            "  {} ({}): {:?} coverage",
+                            session.session.id, session.session.harness, session.coverage.turns
+                        );
+                    }
+                    for failure in &summary.failed {
+                        println!(
+                            "Unread {} ({}): {}",
+                            failure.id, failure.harness, failure.error
+                        );
+                    }
+                    print_diagnostics(
+                        summary.scan_truncated,
+                        summary.scanned,
+                        &summary.unreadable,
+                        &summary.unsearched,
+                        &summary.unavailable,
+                    );
+                }
+                if summary.read == 0 && !summary.failed.is_empty() {
+                    return Err(anyhow!("no selected session could be read"));
+                }
             }
         }
         Command::Usage {

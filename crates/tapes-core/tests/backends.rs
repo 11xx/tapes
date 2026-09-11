@@ -3614,6 +3614,21 @@ fn an_empty_selection_writes_a_manifest_and_no_bundle() {
     fs::remove_dir_all(directory).unwrap();
 }
 
+#[test]
+fn selection_stats_preserve_read_failures_without_counting_them_as_zero_activity() {
+    let backends: Vec<Box<dyn Backend>> = vec![Box::new(BulkExportFixture {
+        sessions: vec![resolver_session("readable"), resolver_session("gone")],
+        unreadable: "gone",
+    })];
+    let summary = tapes_core::stats_summary::with_backends(&backends, &selection()).unwrap();
+    assert_eq!(summary.selected, 2);
+    assert_eq!(summary.read, 1);
+    assert_eq!(summary.failed.len(), 1);
+    assert_eq!(summary.failed[0].id, "gone");
+    assert_eq!(summary.sessions.len(), 1);
+    assert_eq!(summary.sessions[0].session.id, "readable");
+}
+
 struct TitleProjection {
     title: &'static str,
     origin: &'static str,

@@ -24,6 +24,7 @@ pub mod lineage;
 pub mod model;
 pub mod scope;
 pub mod stats;
+pub mod stats_summary;
 pub mod title;
 pub mod usage;
 
@@ -748,8 +749,7 @@ pub fn resolve_session(
     }
 }
 
-/// Which session a command was asked for: one named by the caller, or the
-/// latest in a scope.
+/// Select one session by ID, exact recorded title, or latest activity in scope.
 #[derive(Clone, Debug)]
 pub enum Selection<'a> {
     Id(&'a str),
