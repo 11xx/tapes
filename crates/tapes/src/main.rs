@@ -286,6 +286,10 @@ enum Command {
     /// `read-window` when a source bound withheld turns, durations come from
     /// complete pairs only, and a cache ratio is a share of recorded token
     /// counts rather than of cost. Nothing is judged, ranked, or explained.
+    /// A scope or listing filter selects multiple sessions and returns
+    /// tapes-stats-summary/1: recorded tools grouped by harness and name,
+    /// with per-session read coverage, pairing counts and failures. Children
+    /// are not read through their parents.
     Stats {
         /// Session identifier, full or an unambiguous prefix.
         #[arg(conflicts_with_all = ["latest", "exclude", "harness", "here", "project", "global"])]

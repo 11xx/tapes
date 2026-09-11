@@ -343,9 +343,8 @@ few endings that matter instead of every tail.
 
 **Contracts you can build on.** `tapes-list/1`, `tapes-session/1`,
 `tapes-events/1`, `tapes-usage/1`, `tapes-usage-summary/1`, `tapes-lineage/1`,
-`tapes-endings/1`, `tapes-stats/1`, and `tapes-export-manifest/1` are versioned
-
-`tapes-endings/1`, `tapes-brief/1`, and `tapes-export-manifest/1` are versioned
+`tapes-endings/1`, `tapes-stats/1`, `tapes-stats-summary/1`, `tapes-brief/1`,
+and `tapes-export-manifest/1` are versioned
 JSON; a breaking shape change bumps the version. A single-session `export`
 prints
 exactly three paths and their sizes on stdout, in reading order, and writes each
