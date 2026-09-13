@@ -13,7 +13,7 @@
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 
-use crate::model::{Model, Session, SourceDescriptor, Truncation};
+use crate::model::{Model, Session, SessionMetadata, SourceDescriptor, Truncation};
 
 pub const LINEAGE_SCHEMA: &str = "tapes-lineage/2";
 
@@ -137,6 +137,8 @@ pub struct LineageSession {
     pub id: String,
     pub source: SourceDescriptor,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<SessionMetadata>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<Model>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub started_at: Option<DateTime<Utc>>,
@@ -172,6 +174,7 @@ pub fn view(session: &Session, mut lineage: Lineage) -> LineageView {
         session: LineageSession {
             id: session.id.clone(),
             source: session.source.clone(),
+            metadata: session.metadata.clone(),
             model: session.model.clone(),
             started_at: session.started_at,
             last_activity_at: session.last_activity_at,
@@ -197,6 +200,7 @@ mod tests {
         Session {
             id: "fixture-session".to_owned(),
             source: SourceDescriptor::installed("fixture", "fixture-recording"),
+            metadata: None,
             model: None,
             title: None,
             derived_title: None,

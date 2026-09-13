@@ -22,8 +22,9 @@ use crate::content::{self, ContentAvailability, ContentCarrier, ContentCoverage,
 use crate::lineage::Lineage;
 use crate::model::{
     ByteSpan, EmptyTextTailReason, Model, ReadEvidence, ReadRange, ReadRangeKind, RecordRef, Role,
-    ScopeAuthority, Session, SourceDescriptor, SourceLocation, SourceScope, TerminalObservation,
-    TextTailEvidence, Transcript, TranscriptEvidence, Truncation, Turn, TurnKind,
+    ScopeAuthority, Session, SessionMetadata, SourceDescriptor, SourceLocation, SourceScope,
+    TerminalObservation, TextTailEvidence, Transcript, TranscriptEvidence, Truncation, Turn,
+    TurnKind,
 };
 
 pub const DEFAULT_SCAN_BYTES: u64 = 512 * 1024 * 1024;
@@ -42,6 +43,7 @@ pub enum InputFormat {
     Auto,
     Openai,
     ChatgptExporter,
+    Perplexity,
 }
 
 impl InputFormat {
@@ -50,7 +52,8 @@ impl InputFormat {
             "auto" => Ok(Self::Auto),
             "openai" => Ok(Self::Openai),
             "chatgpt-exporter" => Ok(Self::ChatgptExporter),
-            _ => bail!("input format must be auto, openai, or chatgpt-exporter"),
+            "perplexity" => Ok(Self::Perplexity),
+            _ => bail!("input format must be auto, openai, chatgpt-exporter, or perplexity"),
         }
     }
 
@@ -59,6 +62,7 @@ impl InputFormat {
             Self::Auto => "auto",
             Self::Openai => "openai",
             Self::ChatgptExporter => "chatgpt-exporter",
+            Self::Perplexity => "perplexity",
         }
     }
 }
@@ -444,6 +448,7 @@ struct Scanner<'a, R> {
     position: usize,
     length: usize,
     offset: u64,
+    pending: Option<u8>,
 }
 
 impl<'a, R: Read> Scanner<'a, R> {
@@ -455,12 +460,18 @@ impl<'a, R: Read> Scanner<'a, R> {
             position: 0,
             length: 0,
             offset: 0,
+            pending: None,
         }
     }
 
     fn byte(&mut self) -> io::Result<Option<u8>> {
         if self.budget.scan_used >= self.budget.scan_limit {
             return Err(io::Error::other("input scan budget exhausted"));
+        }
+        if let Some(byte) = self.pending.take() {
+            self.offset += 1;
+            self.budget.scan_used += 1;
+            return Ok(Some(byte));
         }
         if self.position == self.length {
             let read = self.reader.read(&mut self.buffer)?;
@@ -541,6 +552,105 @@ impl<'a, R: Read> Scanner<'a, R> {
                 bytes,
                 span: ByteSpan { start, end },
             })
+        }
+    }
+
+    fn scalar(&mut self, first: u8, start: u64, max: u64) -> io::Result<Frame> {
+        let mut bytes = vec![first];
+        let mut in_string = first == b'"';
+        let mut escaped = false;
+        let mut oversized = false;
+        loop {
+            let Some(byte) = self.byte()? else {
+                let end = self.offset;
+                return if oversized {
+                    Ok(Frame::Oversized {
+                        span: ByteSpan { start, end },
+                    })
+                } else {
+                    Ok(Frame::Record {
+                        bytes,
+                        span: ByteSpan { start, end },
+                    })
+                };
+            };
+            if in_string {
+                if !oversized {
+                    if bytes.len() as u64 >= max {
+                        oversized = true;
+                        bytes.clear();
+                    } else {
+                        bytes.push(byte);
+                    }
+                }
+                if escaped {
+                    escaped = false;
+                } else if byte == b'\\' {
+                    escaped = true;
+                } else if byte == b'"' {
+                    in_string = false;
+                }
+                continue;
+            }
+            if byte.is_ascii_whitespace() || matches!(byte, b',' | b'}' | b']') {
+                self.offset = self.offset.saturating_sub(1);
+                self.budget.scan_used = self.budget.scan_used.saturating_sub(1);
+                self.pending = Some(byte);
+                let end = self.offset;
+                return if oversized {
+                    Ok(Frame::Oversized {
+                        span: ByteSpan { start, end },
+                    })
+                } else {
+                    Ok(Frame::Record {
+                        bytes,
+                        span: ByteSpan { start, end },
+                    })
+                };
+            }
+            if !oversized {
+                if bytes.len() as u64 >= max {
+                    oversized = true;
+                    bytes.clear();
+                } else {
+                    bytes.push(byte);
+                }
+            }
+        }
+    }
+
+    fn string(&mut self, _start: u64, max: usize) -> io::Result<String> {
+        let mut value = Vec::new();
+        let mut escaped = false;
+        loop {
+            let Some(byte) = self.byte()? else {
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "unterminated JSON object key",
+                ));
+            };
+            if escaped {
+                escaped = false;
+                if value.len() < max {
+                    value.push(byte);
+                }
+                continue;
+            }
+            match byte {
+                b'\\' => escaped = true,
+                b'"' => {
+                    return String::from_utf8(value).map_err(|_| {
+                        io::Error::new(io::ErrorKind::InvalidData, "JSON object key is not UTF-8")
+                    })
+                }
+                _ if value.len() < max => value.push(byte),
+                _ => {}
+            }
+            if value.len() >= max {
+                return Err(io::Error::other(
+                    "JSON object key exceeds the structural bound",
+                ));
+            }
         }
     }
 }
@@ -637,59 +747,39 @@ fn scan_reader<R: Read>(
             }
         },
         b'{' => {
-            let mut next = Some((first, start));
-            while let Some((first, start)) = next.take() {
-                let frame = scanner.value(first, start, options.record_bytes)?;
-                match frame {
-                    Frame::Record { bytes, span } => {
-                        *scanned += 1;
-                        scanner.budget.decoded_used = scanner
-                            .budget
-                            .decoded_used
-                            .saturating_add(bytes.len() as u64);
-                        if scanner.budget.decoded_used <= scanner.budget.decoded_limit {
-                            parse_record(
-                                &bytes,
-                                span,
-                                locator,
-                                member,
-                                source_length,
-                                revision.clone(),
-                                options,
-                                occurrences,
-                                diagnostics,
-                            )?;
-                        } else {
-                            diagnostics.push(format!("{locator}: decoded-byte budget exhausted"));
-                            break;
-                        }
-                    }
-                    Frame::Oversized { span } => {
-                        *scanned += 1;
-                        gaps.push(crate::model::ReadGap {
-                            span,
-                            reason: "record-bytes-bound".to_owned(),
-                        });
-                        diagnostics.push(format!(
-                            "{locator}: skipped oversized object at {}..{}",
-                            span.start, span.end
-                        ));
-                    }
-                    Frame::Invalid | Frame::Incomplete => {
-                        diagnostics.push(format!("{locator}: incomplete top-level object"));
-                        break;
-                    }
+            scan_root_object(
+                &mut scanner,
+                start,
+                locator,
+                member,
+                source_length,
+                &revision,
+                options,
+                occurrences,
+                diagnostics,
+                scanned,
+                &mut gaps,
+            )?;
+            while let Some((next, next_start)) = scanner.non_whitespace()? {
+                if next != b'{' {
+                    diagnostics.push(format!(
+                        "{locator}: unexpected trailing byte {next:?} at {next_start}"
+                    ));
+                    break;
                 }
-                next = match scanner.non_whitespace()? {
-                    None => None,
-                    Some((byte, offset)) if byte == b'{' => Some((byte, offset)),
-                    Some((byte, offset)) => {
-                        diagnostics.push(format!(
-                            "{locator}: unexpected trailing byte {byte:?} at {offset}"
-                        ));
-                        None
-                    }
-                };
+                scan_root_object(
+                    &mut scanner,
+                    next_start,
+                    locator,
+                    member,
+                    source_length,
+                    &revision,
+                    options,
+                    occurrences,
+                    diagnostics,
+                    scanned,
+                    &mut gaps,
+                )?;
             }
         }
         _ => diagnostics.push(format!("{locator}: root must be a JSON array or object")),
@@ -698,6 +788,231 @@ fn scan_reader<R: Read>(
         occurrence.evidence.gaps.extend(gaps.iter().cloned());
     }
     Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn scan_root_object<R: Read>(
+    scanner: &mut Scanner<'_, R>,
+    start: u64,
+    locator: &str,
+    member: Option<&str>,
+    source_length: u64,
+    revision: &str,
+    options: &InputOptions,
+    occurrences: &mut Vec<InputOccurrence>,
+    diagnostics: &mut Vec<String>,
+    scanned: &mut usize,
+    gaps: &mut Vec<crate::model::ReadGap>,
+) -> Result<()> {
+    let mut fields = serde_json::Map::new();
+    let mut has_conversations = false;
+    let mut field_bytes = 0u64;
+    loop {
+        let Some((first, key_start)) = scanner.non_whitespace()? else {
+            diagnostics.push(format!("{locator}: incomplete top-level object"));
+            return Ok(());
+        };
+        if first == b'}' {
+            break;
+        }
+        if first != b'"' {
+            diagnostics.push(format!("{locator}: top-level object expected a quoted key"));
+            return Ok(());
+        }
+        let key = scanner.string(key_start, 64 * 1024)?;
+        let Some((colon, _)) = scanner.non_whitespace()? else {
+            diagnostics.push(format!("{locator}: object key has no value"));
+            return Ok(());
+        };
+        if colon != b':' {
+            diagnostics.push(format!("{locator}: top-level object expected a colon"));
+            return Ok(());
+        }
+        let Some((value_first, value_start)) = scanner.non_whitespace()? else {
+            diagnostics.push(format!("{locator}: object key has no value"));
+            return Ok(());
+        };
+        if key == "conversations" && value_first == b'[' {
+            has_conversations = true;
+            scan_array_items(
+                scanner,
+                value_start,
+                locator,
+                member,
+                source_length,
+                revision,
+                options,
+                occurrences,
+                diagnostics,
+                scanned,
+                gaps,
+            )?;
+        } else {
+            let frame = if matches!(value_first, b'{' | b'[') {
+                scanner.value(value_first, value_start, options.record_bytes)?
+            } else {
+                scanner.scalar(value_first, value_start, options.record_bytes)?
+            };
+            match frame {
+                Frame::Record { bytes, .. } => {
+                    field_bytes = field_bytes.saturating_add(bytes.len() as u64);
+                    if field_bytes <= options.record_bytes {
+                        scanner.budget.decoded_used = scanner
+                            .budget
+                            .decoded_used
+                            .saturating_add(bytes.len() as u64);
+                        if scanner.budget.decoded_used <= scanner.budget.decoded_limit {
+                            if let Ok(value) = serde_json::from_slice(&bytes) {
+                                fields.insert(key, value);
+                            } else {
+                                diagnostics.push(format!("{locator}: malformed object member"));
+                            }
+                        } else {
+                            diagnostics.push(format!("{locator}: decoded-byte budget exhausted"));
+                            break;
+                        }
+                    } else {
+                        diagnostics.push(format!(
+                            "{locator}: top-level object fields exceed --record-bytes"
+                        ));
+                    }
+                }
+                Frame::Oversized { span } => {
+                    gaps.push(crate::model::ReadGap {
+                        span,
+                        reason: "record-bytes-bound".to_owned(),
+                    });
+                    diagnostics.push(format!(
+                        "{locator}: skipped oversized object member at {}..{}",
+                        span.start, span.end
+                    ));
+                }
+                Frame::Invalid | Frame::Incomplete => {
+                    diagnostics.push(format!("{locator}: incomplete top-level object member"));
+                    return Ok(());
+                }
+            }
+        }
+        let Some((separator, _)) = scanner.non_whitespace()? else {
+            diagnostics.push(format!("{locator}: incomplete top-level object"));
+            return Ok(());
+        };
+        if separator == b'}' {
+            break;
+        }
+        if separator != b',' {
+            diagnostics.push(format!(
+                "{locator}: top-level object has an unexpected separator"
+            ));
+            return Ok(());
+        }
+    }
+    if has_conversations {
+        return Ok(());
+    }
+    let bytes = serde_json::to_vec(&Value::Object(fields))?;
+    *scanned += 1;
+    if bytes.len() as u64 > options.record_bytes {
+        diagnostics.push(format!(
+            "{locator}: top-level object exceeds --record-bytes at {}..{}",
+            start, scanner.offset
+        ));
+        return Ok(());
+    }
+    parse_record(
+        &bytes,
+        ByteSpan {
+            start,
+            end: scanner.offset,
+        },
+        locator,
+        member,
+        source_length,
+        revision.to_owned(),
+        options,
+        occurrences,
+        diagnostics,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn scan_array_items<R: Read>(
+    scanner: &mut Scanner<'_, R>,
+    _start: u64,
+    locator: &str,
+    member: Option<&str>,
+    source_length: u64,
+    revision: &str,
+    options: &InputOptions,
+    occurrences: &mut Vec<InputOccurrence>,
+    diagnostics: &mut Vec<String>,
+    scanned: &mut usize,
+    gaps: &mut Vec<crate::model::ReadGap>,
+) -> Result<()> {
+    loop {
+        let Some((first, item_start)) = scanner.non_whitespace()? else {
+            diagnostics.push(format!("{locator}: incomplete top-level array"));
+            return Ok(());
+        };
+        if first == b']' {
+            return Ok(());
+        }
+        let frame = scanner.value(first, item_start, options.record_bytes)?;
+        match frame {
+            Frame::Record { bytes, span } => {
+                *scanned += 1;
+                scanner.budget.decoded_used = scanner
+                    .budget
+                    .decoded_used
+                    .saturating_add(bytes.len() as u64);
+                if scanner.budget.decoded_used > scanner.budget.decoded_limit {
+                    diagnostics.push(format!("{locator}: decoded-byte budget exhausted"));
+                    return Ok(());
+                }
+                parse_record(
+                    &bytes,
+                    span,
+                    locator,
+                    member,
+                    source_length,
+                    revision.to_owned(),
+                    options,
+                    occurrences,
+                    diagnostics,
+                )?;
+            }
+            Frame::Oversized { span } => {
+                *scanned += 1;
+                gaps.push(crate::model::ReadGap {
+                    span,
+                    reason: "record-bytes-bound".to_owned(),
+                });
+                diagnostics.push(format!(
+                    "{locator}: skipped oversized record at {}..{}",
+                    span.start, span.end
+                ));
+            }
+            Frame::Invalid | Frame::Incomplete => {
+                diagnostics.push(format!(
+                    "{locator}: top-level array lost structural synchronization"
+                ));
+                return Ok(());
+            }
+        }
+        let Some((separator, _)) = scanner.non_whitespace()? else {
+            diagnostics.push(format!("{locator}: incomplete top-level array"));
+            return Ok(());
+        };
+        if separator == b']' {
+            return Ok(());
+        }
+        if separator != b',' {
+            diagnostics.push(format!(
+                "{locator}: top-level array has an unexpected separator"
+            ));
+            return Ok(());
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -751,8 +1066,17 @@ fn parse_record(
         return Ok(());
     };
     let ordinal = occurrences.len();
-    let Some((id, title, started_at, last_activity_at, directory, model, turns, mut notes)) =
-        normalize_value(&value, format, ordinal)?
+    let Some((
+        id,
+        title,
+        started_at,
+        last_activity_at,
+        directory,
+        model,
+        metadata,
+        turns,
+        mut notes,
+    )) = normalize_value(&value, format, ordinal)?
     else {
         return Ok(());
     };
@@ -769,6 +1093,11 @@ fn parse_record(
             "chatgpt-exporter",
             "chatgpt-exporter-conversation",
             Some("ChatGPT Exporter"),
+        ),
+        InputFormat::Perplexity => (
+            "perplexity",
+            "perplexity-conversation-export",
+            Some("Perplexity export"),
         ),
         InputFormat::Auto => unreachable!(),
     };
@@ -810,6 +1139,7 @@ fn parse_record(
         id,
         occurrence: Some(occurrence),
         source,
+        metadata,
         model,
         title,
         derived_title: None,
@@ -863,6 +1193,7 @@ type NormalizedConversation = Option<(
     Option<DateTime<Utc>>,
     Option<PathBuf>,
     Option<Model>,
+    Option<SessionMetadata>,
     Vec<Turn>,
     Vec<String>,
 )>;
@@ -875,6 +1206,7 @@ fn normalize_value(
     match format {
         InputFormat::Openai => normalize_openai(value, ordinal),
         InputFormat::ChatgptExporter => normalize_chatgpt_exporter(value, ordinal),
+        InputFormat::Perplexity => normalize_perplexity(value, ordinal),
         InputFormat::Auto => unreachable!(),
     }
 }
@@ -912,6 +1244,7 @@ fn normalize_openai(value: &Value, ordinal: usize) -> Result<NormalizedConversat
             last_activity_at,
             directory,
             model,
+            None,
             Vec::new(),
             notes,
         )));
@@ -988,6 +1321,7 @@ fn normalize_openai(value: &Value, ordinal: usize) -> Result<NormalizedConversat
         last_activity_at,
         directory,
         model,
+        None,
         turns,
         notes,
     )))
@@ -1118,9 +1452,203 @@ fn normalize_chatgpt_exporter(value: &Value, ordinal: usize) -> Result<Normalize
         last_activity_at,
         directory,
         model,
+        None,
         turns,
         notes,
     )))
+}
+
+fn normalize_perplexity(value: &Value, _ordinal: usize) -> Result<NormalizedConversation> {
+    let Some(object) = value.as_object() else {
+        return Ok(None);
+    };
+    let Some(id) = object.get("context_uuid").and_then(Value::as_str) else {
+        return Ok(None);
+    };
+    let mut notes = Vec::new();
+    let started_at = timestamp_with_note(object.get("created_at"), "created_at", &mut notes);
+    let last_activity_at = timestamp_with_note(object.get("updated_at"), "updated_at", &mut notes);
+    let Some(entries) = object.get("entries").and_then(Value::as_array) else {
+        return Ok(None);
+    };
+    let metadata = SessionMetadata {
+        collection: string_field(object.get("collection_uuid")),
+        mode: string_field(object.get("mode")),
+        engine: string_field(object.get("engine_mode")).or_else(|| {
+            entries
+                .iter()
+                .find_map(|entry| entry.get("engine_mode").and_then(Value::as_str))
+                .map(str::to_owned)
+        }),
+        status: string_field(object.get("query_status")).or_else(|| {
+            entries
+                .iter()
+                .find_map(|entry| entry.get("query_status").and_then(Value::as_str))
+                .map(str::to_owned)
+        }),
+        label: string_field(object.get("label")).or_else(|| {
+            entries
+                .iter()
+                .find_map(|entry| entry.get("label").and_then(Value::as_str))
+                .map(str::to_owned)
+        }),
+    };
+    let metadata = [
+        metadata.collection.is_some(),
+        metadata.mode.is_some(),
+        metadata.engine.is_some(),
+        metadata.status.is_some(),
+        metadata.label.is_some(),
+    ]
+    .into_iter()
+    .any(|present| present)
+    .then_some(metadata);
+    let mut turns = Vec::new();
+    for (index, entry) in entries.iter().enumerate() {
+        let Some(entry) = entry.as_object() else {
+            notes.push(format!("entry {index} has a non-object shape"));
+            continue;
+        };
+        let native_id = entry
+            .get("entry_uuid")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        let created_at =
+            timestamp_with_note(entry.get("created_at"), "entry.created_at", &mut notes);
+        if let Some(query) = entry.get("query") {
+            turns.push(perplexity_turn(
+                query,
+                Role::User,
+                TurnKind::Operator,
+                "entry.query",
+                native_id.clone(),
+                created_at,
+                format!("/entries/{index}/query"),
+            ));
+        }
+        if let Some(answer) = entry.get("answer") {
+            turns.push(perplexity_turn(
+                answer,
+                Role::Assistant,
+                TurnKind::Assistant,
+                "entry.answer",
+                native_id,
+                None,
+                format!("/entries/{index}/answer"),
+            ));
+        }
+    }
+    Ok(Some((
+        id.to_owned(),
+        object
+            .get("context_title")
+            .and_then(Value::as_str)
+            .filter(|title| !title.is_empty())
+            .map(str::to_owned),
+        started_at,
+        last_activity_at,
+        None,
+        None,
+        metadata,
+        turns,
+        notes,
+    )))
+}
+
+fn perplexity_turn(
+    value: &Value,
+    role: Role,
+    kind: TurnKind,
+    source_field: &str,
+    native_id: Option<String>,
+    ts: Option<DateTime<Utc>>,
+    pointer: String,
+) -> Turn {
+    let (parts, coverage) = match value {
+        Value::String(text) => (
+            vec![content::text_part(text, source_field, "text")],
+            ContentCoverage {
+                carrier: ContentCarrier::DirectPart,
+                availability: ContentAvailability::RetainedBody,
+                retained_parts: 1,
+                omitted_parts: 0,
+                omitted_reason: None,
+            },
+        ),
+        Value::Null => (
+            vec![ContentPart::Unknown {
+                native_kind: "null".to_owned(),
+                descriptor: content::bounded_shape(value),
+                source_field: source_field.to_owned(),
+                record_ref: None,
+            }],
+            ContentCoverage {
+                carrier: ContentCarrier::DirectPart,
+                availability: ContentAvailability::Unknown,
+                retained_parts: 0,
+                omitted_parts: 0,
+                omitted_reason: Some("source field was null".to_owned()),
+            },
+        ),
+        _ => (
+            vec![ContentPart::Unknown {
+                native_kind: "non-string".to_owned(),
+                descriptor: content::bounded_shape(value),
+                source_field: source_field.to_owned(),
+                record_ref: None,
+            }],
+            ContentCoverage {
+                carrier: ContentCarrier::DirectPart,
+                availability: ContentAvailability::Unknown,
+                retained_parts: 0,
+                omitted_parts: 0,
+                omitted_reason: Some("source field was not a string".to_owned()),
+            },
+        ),
+    };
+    let text = content::project_text(&parts);
+    Turn {
+        role: role.clone(),
+        kind,
+        text,
+        ts,
+        ordinal: 0,
+        native_id: native_id.clone(),
+        request_turn_id: None,
+        record_ref: Some(RecordRef {
+            domain: "input-pending".to_owned(),
+            revision: None,
+            span: None,
+            native_id,
+            pointer: Some(pointer),
+            part_index: 0,
+        }),
+        channel: None,
+        recipient: None,
+        parts,
+        coverage: Some(coverage),
+        tool: None,
+    }
+}
+
+fn string_field(value: Option<&Value>) -> Option<String> {
+    value.and_then(Value::as_str).map(str::to_owned)
+}
+
+fn timestamp_with_note(
+    value: Option<&Value>,
+    field: &str,
+    notes: &mut Vec<String>,
+) -> Option<DateTime<Utc>> {
+    let value = value?;
+    if value.is_null() {
+        return None;
+    }
+    let parsed = timestamp_value(value);
+    if parsed.is_none() {
+        notes.push(format!("{field} was present but not a valid timestamp"));
+    }
+    parsed
 }
 
 fn message_parts(message: &Value) -> (Vec<ContentPart>, ContentCoverage) {
@@ -1207,7 +1735,11 @@ fn timestamp_value(value: &Value) -> Option<DateTime<Utc>> {
 }
 
 fn detect_format(value: &Value) -> Option<InputFormat> {
-    if value["mapping"].is_object() || value["conversation_id"].is_string() {
+    if value["conversations"].is_array()
+        || (value["context_uuid"].is_string() && value["entries"].is_array())
+    {
+        Some(InputFormat::Perplexity)
+    } else if value["mapping"].is_object() || value["conversation_id"].is_string() {
         Some(InputFormat::Openai)
     } else if value["messages"].is_array()
         || value["entries"].is_array()

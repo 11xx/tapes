@@ -100,10 +100,14 @@ never fails a listing. Listing works with any subset installed.
 
 Use `--input PATH` one or more times to read an explicit file, extracted
 directory, or ZIP archive. `--input-format auto` detects the supported
-OpenAI and ChatGPT Exporter shapes; `--input-format openai` and
-`--input-format chatgpt-exporter` require the named representation and never
+OpenAI, ChatGPT Exporter, and Perplexity shapes; `--input-format openai`,
+`--input-format chatgpt-exporter`, and `--input-format perplexity` require the
+named representation and never
 fall back to another parser. `--source-scope <label>` records a caller-declared
 source namespace.
+
+For example, a Perplexity export can be surveyed with
+`tapes list --input ./fixtures/perplexity-export.zip --input-format perplexity --json`.
 
 Supplied inputs are isolated from installed stores. `list` enumerates each
 occurrence, while single-session views accept an ID, exact title, or the

@@ -2121,6 +2121,7 @@ fn resolver_session(id: &str) -> Session {
     Session {
         id: id.into(),
         source: SourceDescriptor::installed("fixture", "fixture-recording"),
+        metadata: None,
         model: None,
         title: None,
         derived_title: None,

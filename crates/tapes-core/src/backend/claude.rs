@@ -134,6 +134,7 @@ impl ClaudeBackend {
         let session = Session {
             id,
             source: SourceDescriptor::installed("claude", path.display().to_string()),
+            metadata: None,
             model,
             title,
             derived_title: None,

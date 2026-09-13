@@ -692,6 +692,130 @@ fn supplied_jsonl_keeps_structural_gaps_and_reaches_a_later_record() {
 }
 
 #[test]
+fn perplexity_envelope_preserves_entry_fields_and_separate_response_evidence() {
+    let input = supplied_fixture("perplexity-export.json");
+    let input = input.to_str().unwrap();
+    let listed = tapes()
+        .args(["list", "--input", input, "--input-format", "auto", "--json"])
+        .output()
+        .unwrap();
+    assert!(
+        listed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&listed.stderr)
+    );
+    let listed: Value = serde_json::from_slice(&listed.stdout).unwrap();
+    assert_eq!(listed["sessions"].as_array().unwrap().len(), 2);
+    assert_eq!(listed["scanned"], 2);
+    assert_eq!(listed["sessions"][0]["source"]["origin"], "perplexity");
+    assert_eq!(listed["sessions"][0]["metadata"]["mode"], "research");
+    assert_eq!(listed["sessions"][0]["metadata"]["status"], "COMPLETED");
+
+    let shown = tapes()
+        .args(["show", "perplexity-1", "--input", input, "--json"])
+        .output()
+        .unwrap();
+    assert!(shown.status.success());
+    let shown: Value = serde_json::from_slice(&shown.stdout).unwrap();
+    let turns = shown["turns"].as_array().unwrap();
+    assert_eq!(turns.len(), 6);
+    assert_eq!(turns[0]["text"], "Draw a diagram");
+    assert!(turns[1]["text"].as_str().unwrap().contains("graph TD"));
+    assert_eq!(turns[0]["ts"], "2026-09-12T10:01:00Z");
+    assert!(turns[1].get("ts").is_none());
+    assert_eq!(turns[2]["text"], "");
+    assert_eq!(turns[2]["parts"][0]["kind"], "text");
+    assert_eq!(turns[3]["parts"][0]["native_kind"], "null");
+    assert_eq!(
+        turns[3]["coverage"]["omitted_reason"],
+        "source field was null"
+    );
+    assert_eq!(turns[5]["parts"][0]["native_kind"], "non-string");
+    assert!(shown["notes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|note| note.as_str().unwrap().contains("valid timestamp")));
+    assert_eq!(turns[0]["record_ref"]["pointer"], "/entries/0/query");
+    assert_eq!(turns[1]["record_ref"]["pointer"], "/entries/0/answer");
+
+    let usage = tapes()
+        .args(["usage", "perplexity-1", "--input", input, "--json"])
+        .output()
+        .unwrap();
+    let usage: Value = serde_json::from_slice(&usage.stdout).unwrap();
+    assert_eq!(usage["session"]["metadata"]["collection"], "collection-1");
+
+    let brief = tapes()
+        .args(["brief", "perplexity-1", "--input", input, "--json"])
+        .output()
+        .unwrap();
+    let brief: Value = serde_json::from_slice(&brief.stdout).unwrap();
+    assert_eq!(brief["session"]["metadata"]["engine"], "research");
+}
+
+#[test]
+fn perplexity_zip_ignores_an_unrelated_workbook_and_declared_wrong_format_does_not_fallback() {
+    let root = TemporaryDirectory::new(
+        std::env::temp_dir().join(format!("tapes-perplexity-zip-{}", std::process::id())),
+    );
+    let archive_path = root.path().join("renamed-export.bin");
+    let file = fs::File::create(&archive_path).unwrap();
+    let mut archive = zip::ZipWriter::new(file);
+    let options = zip::write::SimpleFileOptions::default();
+    archive
+        .start_file("conversation-part.json", options)
+        .unwrap();
+    archive
+        .write_all(
+            fs::read(supplied_fixture("perplexity-export.json"))
+                .unwrap()
+                .as_slice(),
+        )
+        .unwrap();
+    archive.start_file("profile.xlsx", options).unwrap();
+    archive.write_all(b"profile workbook bytes").unwrap();
+    archive.finish().unwrap();
+
+    let archive = archive_path.to_str().unwrap();
+    let listed = tapes()
+        .args([
+            "list",
+            "--input",
+            archive,
+            "--input-format",
+            "perplexity",
+            "--json",
+        ])
+        .output()
+        .unwrap();
+    assert!(listed.status.success());
+    let listed: Value = serde_json::from_slice(&listed.stdout).unwrap();
+    assert_eq!(listed["sessions"].as_array().unwrap().len(), 2);
+    assert_eq!(listed["unsearched"].as_array().unwrap().len(), 0);
+
+    let wrong = tapes()
+        .args([
+            "list",
+            "--input",
+            archive,
+            "--input-format",
+            "openai",
+            "--json",
+        ])
+        .output()
+        .unwrap();
+    assert!(wrong.status.success());
+    let wrong: Value = serde_json::from_slice(&wrong.stdout).unwrap();
+    assert!(wrong["sessions"].as_array().unwrap().is_empty());
+    assert!(wrong["unsearched"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|diagnostic| diagnostic.as_str().unwrap().contains("no openai")));
+}
+
+#[test]
 fn show_help_exits_successfully() {
     assert!(tapes().args(["show", "--help"]).status().unwrap().success());
 }

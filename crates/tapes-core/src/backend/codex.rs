@@ -109,6 +109,7 @@ impl CodexBackend {
         let session = Session {
             id,
             source: SourceDescriptor::installed("codex", path.display().to_string()),
+            metadata: None,
             model,
             title: None,
             derived_title: None,

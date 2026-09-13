@@ -1350,6 +1350,7 @@ fn parse_database_session(value: &Value) -> Result<Session> {
     Ok(Session {
         id,
         source: SourceDescriptor::installed("opencode", "opencode-database"),
+        metadata: None,
         model,
         title: value["title"]
             .as_str()
@@ -1426,6 +1427,7 @@ fn parse_session(value: &Value) -> Result<Session> {
     Ok(Session {
         id,
         source: SourceDescriptor::installed("opencode", "opencode-api"),
+        metadata: None,
         model,
         title: value["title"].as_str().map(str::to_owned),
         derived_title: None,

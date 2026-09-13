@@ -21,6 +21,8 @@ pub struct Session {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub occurrence: Option<String>,
     pub source: SourceDescriptor,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<SessionMetadata>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<Model>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -62,6 +64,22 @@ pub struct Session {
     /// them; the usage projection is where they reach a consumer.
     #[serde(skip)]
     pub usage_detail: Option<UsageDetail>,
+}
+
+/// Provider metadata attached to a supplied conversation without treating a
+/// mode, collection, or status label as a model or outcome.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionMetadata {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub collection: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub engine: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
 }
 
 /// Whether a normalized session came from a harness-owned recording or from a
@@ -977,6 +995,7 @@ mod tests {
         Session {
             id: "session-1".into(),
             source: SourceDescriptor::installed("codex", "/work/recording.jsonl"),
+            metadata: None,
             model: Some(Model {
                 id: "gpt-5.6-sol".into(),
                 variant: Some("high".into()),

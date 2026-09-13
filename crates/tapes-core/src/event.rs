@@ -308,6 +308,7 @@ mod tests {
         Session {
             id: "fixture-session".to_owned(),
             source: SourceDescriptor::installed("fixture", "fixture-recording"),
+            metadata: None,
             model: None,
             title: None,
             derived_title: None,
