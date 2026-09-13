@@ -121,7 +121,9 @@ READ A SUPPLIED EXPORT
   `--input` reads files, extracted directories, and ZIP archives as a separate
   source collection. It never falls back to installed harness stores. `auto`
   detects OpenAI, ChatGPT Exporter, and Perplexity shapes; a declared format never hands a
-  failed record to another parser. `list` emits an opaque occurrence coordinate
+  failed record to another parser. Auto-detected overlapping representations
+  leave producer provenance absent, while an explicit format marks it declared.
+  `list` emits an opaque occurrence coordinate
   for every supplied record. Use `--occurrence` when a native ID repeats, and
   `--after-occurrence` to continue a collection only when the ordered supplied
   input observation is unchanged; the cursor can cross files and ZIP members.

@@ -162,8 +162,9 @@ struct InputArgs {
     /// harness stores.
     #[arg(long = "input", value_name = "PATH")]
     input: Vec<PathBuf>,
-    /// Interpret the supplied source structurally, or require one producer's
-    /// shape when a format is named explicitly.
+    /// Detect the supplied representation structurally, or require the named
+    /// representation explicitly. Explicit producer labels are marked as
+    /// declared; ambiguous auto-detection leaves producer provenance absent.
     #[arg(long, value_enum, default_value_t = InputFormatArg::Auto)]
     input_format: InputFormatArg,
     /// Record the caller's scope label as declared source metadata.

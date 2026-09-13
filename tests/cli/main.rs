@@ -511,9 +511,32 @@ fn supplied_chatgpt_exporter_raw_graph_preserves_branches_and_auto_provenance() 
     assert!(listed.status.success());
     let listed: Value = serde_json::from_slice(&listed.stdout).unwrap();
     assert_eq!(listed["sessions"].as_array().unwrap().len(), 1);
+    assert!(listed["sessions"][0]["source"].get("producer").is_none());
     assert_eq!(
-        listed["sessions"][0]["source"]["producer"],
-        "ChatGPT Exporter"
+        listed["sessions"][0]["source"]["representation"],
+        "chatgpt-exporter-conversation"
+    );
+
+    let explicitly_openai = tapes()
+        .args([
+            "list",
+            "--input",
+            input,
+            "--input-format",
+            "openai",
+            "--json",
+        ])
+        .output()
+        .unwrap();
+    assert!(explicitly_openai.status.success());
+    let explicitly_openai: Value = serde_json::from_slice(&explicitly_openai.stdout).unwrap();
+    assert_eq!(
+        explicitly_openai["sessions"][0]["source"]["producer"],
+        "OpenAI export"
+    );
+    assert_eq!(
+        explicitly_openai["sessions"][0]["source"]["producer_authority"],
+        "declared"
     );
 
     let shown = tapes()
@@ -780,6 +803,42 @@ fn supplied_zip_reads_conversations_and_retains_associated_report_evidence() {
             br#"{"backing_conversation_id":"associated-1","widget_session_id":"report-1","widget_state":{"status":"completed","report_message":{"id":"report-message","author":{"role":"assistant"},"content":{"parts":[{"type":"text","text":"private report body"}],"content_references":[{"type":"attribution","url":"https://example.test/source","start_idx":0,"end_idx":18}]}}}}"#,
         )
         .unwrap();
+    archive.start_file("grouped-report.dat", options).unwrap();
+    archive
+        .write_all(
+            br#"{"backing_conversation_id":"associated-1","widget_session_id":"grouped-report","widget_state":{"status":"completed","report_message":{"content":{"parts":["grouped body"],"content_references":{"type":"grouped_webpages","start_idx":0,"end_idx":6,"items":[{"url":"https://example.invalid/grouped-target","title":"Grouped source"}]}}}}}"#,
+        )
+        .unwrap();
+    let sources = (0..65)
+        .map(|index| {
+            serde_json::json!({
+                "url": format!("https://example.invalid/bounded-{index}"),
+                "title": format!("Bounded source {index}")
+            })
+        })
+        .collect::<Vec<_>>();
+    archive
+        .start_file("bounded-grouped-report.dat", options)
+        .unwrap();
+    archive
+        .write_all(
+            &serde_json::to_vec(&serde_json::json!({
+                "backing_conversation_id":"associated-1",
+                "widget_session_id":"bounded-grouped-report",
+                "widget_state": {
+                    "report_message": {
+                        "content": {
+                            "content_references": {
+                                "type":"grouped_webpages",
+                                "items": sources
+                            }
+                        }
+                    }
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
     archive.start_file("empty-report.dat", options).unwrap();
     archive
         .write_all(
@@ -827,7 +886,25 @@ fn supplied_zip_reads_conversations_and_retains_associated_report_evidence() {
         report["reference"]["citations"][0]["uri"],
         "https://example.test/source"
     );
-    assert_eq!(output["content"]["references"], 1);
+    assert_eq!(output["content"]["references"], 3);
+
+    let grouped = parts
+        .iter()
+        .find(|part| part["reference"]["identity"] == "grouped-report")
+        .unwrap();
+    assert_eq!(
+        grouped["reference"]["citations"][0]["sources"][0]["uri"],
+        "https://example.invalid/grouped-target"
+    );
+    assert_eq!(
+        grouped["reference"]["citations"][0]["sources"][0]["title"],
+        "Grouped source"
+    );
+    let bounded = parts
+        .iter()
+        .find(|part| part["reference"]["identity"] == "bounded-grouped-report")
+        .unwrap();
+    assert_eq!(bounded["reference"]["citations"][0]["omitted_sources"], 1);
 
     let bundle_root = TemporaryDirectory::new(
         std::env::temp_dir().join(format!("tapes-input-report-export-{}", std::process::id())),
@@ -855,6 +932,16 @@ fn supplied_zip_reads_conversations_and_retains_associated_report_evidence() {
         bundle_json["artifacts"][0]["citations"][0]["uri"],
         "https://example.test/source"
     );
+    let grouped_bundle = bundle_json["artifacts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|artifact| artifact["identity"] == "grouped-report")
+        .unwrap();
+    assert_eq!(
+        grouped_bundle["citations"][0]["sources"][0]["uri"],
+        "https://example.invalid/grouped-target"
+    );
 
     let listed = tapes()
         .args(["list", "--input", archive, "--json"])
@@ -862,7 +949,7 @@ fn supplied_zip_reads_conversations_and_retains_associated_report_evidence() {
         .unwrap();
     assert!(listed.status.success());
     let listed: Value = serde_json::from_slice(&listed.stdout).unwrap();
-    assert_eq!(listed["artifacts"].as_array().unwrap().len(), 3);
+    assert_eq!(listed["artifacts"].as_array().unwrap().len(), 5);
     assert!(listed["unsearched"]
         .as_array()
         .unwrap()

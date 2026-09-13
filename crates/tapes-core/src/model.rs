@@ -124,6 +124,11 @@ pub struct SourceDescriptor {
     pub representation: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub producer: Option<String>,
+    /// Whether the producer label came from the caller's declared input
+    /// format. Auto-detection leaves this absent when the representation is
+    /// shared by more than one producer.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub producer_authority: Option<ScopeAuthority>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub location: Option<SourceLocation>,
 }
@@ -137,6 +142,7 @@ impl SourceDescriptor {
             scope: None,
             representation: format!("{harness}-recording"),
             producer: Some(harness.to_owned()),
+            producer_authority: None,
             location: Some(SourceLocation {
                 locator: locator.into(),
                 member: None,
@@ -158,6 +164,7 @@ impl SourceDescriptor {
             scope,
             representation: representation.to_owned(),
             producer: producer.map(str::to_owned),
+            producer_authority: None,
             location: Some(SourceLocation {
                 locator: locator.into(),
                 member: None,

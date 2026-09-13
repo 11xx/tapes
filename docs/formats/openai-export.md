@@ -19,10 +19,12 @@ Each conversation has a native `conversation_id`, a `mapping` graph, and a
 `current_node`. ChatGPT Exporter raw inputs use a native `id` with the same
 mapping shape, while its convenience inputs may be a conversation object with
 `messages` or `entries`, an array of such objects, or one conversation per
-explicit file/member. Auto detection uses these structural distinctions; a
-filename does not choose a producer. A declared `--input-format` that does not
-recognize a record reports the bounded diagnostic and does not try another
-adapter.
+explicit file/member. Auto detection uses these structural distinctions for
+the representation but does not infer producer provenance from overlapping
+mapping fields; ambiguous auto reads omit `source.producer`. A filename does
+not choose a producer. A declared `--input-format` records its producer as a
+caller declaration and, when it does not recognize a record, reports the
+bounded diagnostic without trying another adapter.
 
 ## Mapping graph
 
@@ -55,7 +57,8 @@ OpenAI library/report `.dat` members are decoded only when they contain the
 recognized widget-state report shape. A report reference retains bounded
 identity, origin, backing conversation, authorship, completion state, source
 member, byte size, citation count, a bounded body when present, and native
-citation spans. When a report names a uniquely reached conversation it is
+citation spans. Grouped citation spans retain bounded nested source URLs and
+titles, with omission counts at each bound. When a report names a uniquely reached conversation it is
 attached as a structured artifact part of an existing turn and also remains
 in the artifact collection. A report without a reached outer conversation
 remains an explicit artifact with its unresolved association; it never becomes

@@ -1120,7 +1120,7 @@ fn parse_record(
     else {
         return Ok(());
     };
-    let (source_origin, representation, producer) = match format {
+    let (source_origin, representation, identified_producer) = match format {
         InputFormat::Openai => ("openai", "openai-conversation", Some("OpenAI export")),
         InputFormat::ChatgptExporter => (
             "chatgpt-exporter",
@@ -1134,6 +1134,11 @@ fn parse_record(
         ),
         InputFormat::Auto => unreachable!(),
     };
+    let (producer, producer_authority) = if options.format == InputFormat::Auto {
+        (None, None)
+    } else {
+        (identified_producer, Some(ScopeAuthority::Declared))
+    };
     let scope = options.source_scope.clone().map(|value| SourceScope {
         value,
         authority: ScopeAuthority::Declared,
@@ -1145,6 +1150,7 @@ fn parse_record(
         locator.to_owned(),
         scope,
     );
+    source.producer_authority = producer_authority;
     source.location = Some(SourceLocation {
         locator: locator.to_owned(),
         member: member.map(str::to_owned),
@@ -2250,15 +2256,16 @@ fn read_associated_report<R: Read>(
         .and_then(Value::as_str)
         .or_else(|| report_message.and_then(|message| message["status"].as_str()))
         .map(str::to_owned);
-    let (body, citations) = report_message
+    let (body, citations, omitted_citations) = report_message
         .map(|message| {
             let (parts, _) = message_parts(message);
             let body = parts.iter().any(|part| part.text().is_some()).then(|| {
                 content::bounded_text(&content::project_text(&parts), MAX_ARTIFACT_BODY_CHARS)
             });
-            (body, collect_citations(message))
+            let (citations, omitted_citations) = collect_citations(message);
+            (body, citations, omitted_citations)
         })
-        .unwrap_or((None, Vec::new()));
+        .unwrap_or((None, Vec::new(), 0));
     let mut reference = content::artifact_reference(&value, "openai-library-report")
         .unwrap_or_else(|| crate::content::ArtifactReference {
             kind: "openai-library-report".to_owned(),
@@ -2278,6 +2285,7 @@ fn read_associated_report<R: Read>(
             body: None,
             body_availability: None,
             citations: Vec::new(),
+            omitted_citations: 0,
         });
     reference.identity = identity;
     reference.origin = Some("openai-widget-state".to_owned());
@@ -2305,6 +2313,7 @@ fn read_associated_report<R: Read>(
         ContentAvailability::UnsupportedRepresentation
     });
     reference.citations = citations;
+    reference.omitted_citations = omitted_citations;
     Ok(Some(AssociatedReport {
         member: member.to_owned(),
         backing,
@@ -2319,19 +2328,21 @@ fn read_associated_report<R: Read>(
     }))
 }
 
-fn collect_citations(value: &Value) -> Vec<content::ArtifactCitation> {
+fn collect_citations(value: &Value) -> (Vec<content::ArtifactCitation>, usize) {
     let mut citations = Vec::new();
-    collect_citations_inner(value, 0, &mut citations);
-    citations
+    let mut omitted = 0;
+    collect_citations_inner(value, 0, &mut citations, &mut omitted);
+    (citations, omitted)
 }
 
 fn collect_citations_inner(
     value: &Value,
     depth: usize,
     citations: &mut Vec<content::ArtifactCitation>,
+    omitted: &mut usize,
 ) {
-    if depth >= content::MAX_STRUCTURED_DEPTH || citations.len() >= content::MAX_ARTIFACT_REFERENCES
-    {
+    if depth >= content::MAX_STRUCTURED_DEPTH {
+        *omitted = omitted.saturating_add(1);
         return;
     }
     let Some(object) = value.as_object() else {
@@ -2339,9 +2350,9 @@ fn collect_citations_inner(
     };
     for (key, value) in object {
         if key == "content_references" {
-            collect_citation_values(value, depth + 1, citations);
+            collect_citation_values(value, depth + 1, citations, omitted);
         } else {
-            collect_citations_inner(value, depth + 1, citations);
+            collect_citations_inner(value, depth + 1, citations, omitted);
         }
     }
 }
@@ -2350,26 +2361,97 @@ fn collect_citation_values(
     value: &Value,
     depth: usize,
     citations: &mut Vec<content::ArtifactCitation>,
+    omitted: &mut usize,
 ) {
     if depth >= content::MAX_STRUCTURED_DEPTH {
+        *omitted = omitted.saturating_add(1);
+        return;
+    }
+    if citations.len() >= content::MAX_ARTIFACT_REFERENCES {
+        *omitted = omitted.saturating_add(1);
         return;
     }
     match value {
         Value::Array(values) => {
-            for value in values {
-                collect_citation_values(value, depth + 1, citations);
+            for (index, value) in values.iter().enumerate() {
                 if citations.len() >= content::MAX_ARTIFACT_REFERENCES {
+                    *omitted = omitted.saturating_add(values.len().saturating_sub(index));
                     break;
                 }
+                collect_citation_values(value, depth + 1, citations, omitted);
             }
         }
         Value::Object(object) => {
-            if let Some(citation) = citation_from_value(object) {
+            if let Some(mut citation) = citation_from_value(object) {
+                let mut omitted_sources = 0;
+                for key in ["items", "sources", "source"] {
+                    if let Some(value) = object.get(key) {
+                        collect_citation_sources(
+                            value,
+                            depth + 1,
+                            &mut citation.sources,
+                            &mut omitted_sources,
+                        );
+                    }
+                }
+                citation.omitted_sources = omitted_sources;
                 citations.push(citation);
             } else {
                 for value in object.values() {
-                    collect_citation_values(value, depth + 1, citations);
+                    collect_citation_values(value, depth + 1, citations, omitted);
                     if citations.len() >= content::MAX_ARTIFACT_REFERENCES {
+                        break;
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn collect_citation_sources(
+    value: &Value,
+    depth: usize,
+    sources: &mut Vec<content::ArtifactCitationSource>,
+    omitted: &mut usize,
+) {
+    if depth >= content::MAX_STRUCTURED_DEPTH {
+        *omitted = omitted.saturating_add(1);
+        return;
+    }
+    if sources.len() >= content::MAX_ARTIFACT_REFERENCES {
+        *omitted = omitted.saturating_add(1);
+        return;
+    }
+    match value {
+        Value::Array(values) => {
+            for (index, value) in values.iter().enumerate() {
+                if sources.len() >= content::MAX_ARTIFACT_REFERENCES {
+                    *omitted = omitted.saturating_add(values.len().saturating_sub(index));
+                    break;
+                }
+                collect_citation_sources(value, depth + 1, sources, omitted);
+            }
+        }
+        Value::Object(object) => {
+            if let Some(mut source) = citation_source_from_value(object) {
+                let mut nested_omitted = 0;
+                for key in ["items", "sources", "source"] {
+                    if let Some(value) = object.get(key) {
+                        collect_citation_sources(
+                            value,
+                            depth + 1,
+                            &mut source.sources,
+                            &mut nested_omitted,
+                        );
+                    }
+                }
+                source.omitted_sources = nested_omitted;
+                sources.push(source);
+            } else {
+                for value in object.values() {
+                    collect_citation_sources(value, depth + 1, sources, omitted);
+                    if sources.len() >= content::MAX_ARTIFACT_REFERENCES {
                         break;
                     }
                 }
@@ -2382,6 +2464,42 @@ fn collect_citation_values(
 fn citation_from_value(
     value: &serde_json::Map<String, Value>,
 ) -> Option<content::ArtifactCitation> {
+    let (kind, uri, title, start, end) = citation_fields(value)?;
+    Some(content::ArtifactCitation {
+        kind,
+        uri,
+        title,
+        start,
+        end,
+        sources: Vec::new(),
+        omitted_sources: 0,
+    })
+}
+
+fn citation_source_from_value(
+    value: &serde_json::Map<String, Value>,
+) -> Option<content::ArtifactCitationSource> {
+    let (kind, uri, title, start, end) = citation_fields(value)?;
+    Some(content::ArtifactCitationSource {
+        kind,
+        uri,
+        title,
+        start,
+        end,
+        sources: Vec::new(),
+        omitted_sources: 0,
+    })
+}
+
+type CitationFields = (
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<usize>,
+    Option<usize>,
+);
+
+fn citation_fields(value: &serde_json::Map<String, Value>) -> Option<CitationFields> {
     let kind = value.get("type").and_then(Value::as_str).map(str::to_owned);
     let uri = ["uri", "url", "href"]
         .into_iter()
@@ -2399,13 +2517,7 @@ fn citation_from_value(
         .find_map(|key| value.get(key).and_then(Value::as_u64))
         .and_then(|value| usize::try_from(value).ok());
     (kind.is_some() || uri.is_some() || title.is_some() || start.is_some() || end.is_some())
-        .then_some(content::ArtifactCitation {
-            kind,
-            uri,
-            title,
-            start,
-            end,
-        })
+        .then_some((kind, uri, title, start, end))
 }
 
 fn attach_associated_reports(

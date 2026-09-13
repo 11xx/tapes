@@ -224,6 +224,10 @@ a wider window fetches further back (see `docs/model.md`), and a `native_id`
 where the harness records one; the session carries `source`, the opaque
 coordinate it was read from. Human timestamps are RFC
 3339 whole seconds with `Z`; JSON preserves the recorded timestamp precision.
+For supplied inputs, `source.representation` records the detected or declared
+shape. `source.producer` is omitted when auto-detection cannot establish who
+produced an overlapping representation; an explicit input format carries
+`producer_authority: "declared"`.
 `--tail` bounds the turns returned and defaults to the last 100; a transcript
 that dropped any is marked `truncated`, and JSON says why under `truncation`:
 a `window` names the turns returned and the earlier turns the bound omitted,
