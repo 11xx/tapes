@@ -12,10 +12,13 @@ use serde::Serialize;
 
 use crate::event::{self, EventKind, EventRecord, Incomplete, PairRef};
 use crate::lineage::Lineage;
-use crate::model::{Accounting, Cost, Tokens, Transcript, Truncation, TurnKind};
+use crate::model::{
+    Accounting, Cost, ReadEvidence, TerminalObservation, TextTailEvidence, Tokens, Transcript,
+    Truncation, TurnKind,
+};
 use crate::usage::{self, TurnCoverage, UsageSession};
 
-pub const STATS_SCHEMA: &str = "tapes-stats/1";
+pub const STATS_SCHEMA: &str = "tapes-stats/2";
 
 /// One session's counted facts, in the order a reader takes them: what the
 /// figures cover, the turns, the tool calls behind them, the recorded clock,
@@ -25,6 +28,12 @@ pub const STATS_SCHEMA: &str = "tapes-stats/1";
 pub struct StatsView {
     pub schema: &'static str,
     pub session: UsageSession,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub read: Option<ReadEvidence>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub terminal: Option<TerminalObservation>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text_tail: Option<TextTailEvidence>,
     pub coverage: Coverage,
     pub turns: TurnKindCounts,
     pub tools: ToolStats,
@@ -198,6 +207,9 @@ pub enum Warning {
 /// `events` returns, so nothing is parsed twice and nothing is read from a
 /// turn's harness envelope.
 pub fn stats(transcript: Transcript, lineage: &Lineage) -> StatsView {
+    let read = transcript.read.clone();
+    let terminal = transcript.terminal.clone();
+    let text_tail = transcript.text_tail.clone();
     let usage = usage::usage(&transcript);
     let turns = turn_kinds(&transcript);
     let clock = clock(&transcript);
@@ -213,6 +225,9 @@ pub fn stats(transcript: Transcript, lineage: &Lineage) -> StatsView {
     StatsView {
         schema: STATS_SCHEMA,
         session: usage.session,
+        read,
+        terminal,
+        text_tail,
         coverage,
         turns,
         tools: tools.stats,
@@ -529,6 +544,7 @@ mod tests {
             ts: seconds.map(|seconds| Utc.timestamp_opt(seconds, 0).unwrap()),
             ordinal,
             native_id: Some(format!("native-{ordinal}")),
+            request_turn_id: None,
             tool: None,
         }
     }

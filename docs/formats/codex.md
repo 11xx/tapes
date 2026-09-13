@@ -25,7 +25,7 @@ Every line is `{"type": …, "timestamp": …, "payload": {…}}` with an RFC 33
 | `type` | Carries |
 |---|---|
 | `session_meta` | `payload.id` (session UUID), `payload.cwd`, `payload.source` |
-| `turn_context` | `payload.model`, `payload.effort`, `payload.cwd` |
+| `turn_context` | `payload.model`, `payload.effort`, `payload.cwd`, and sometimes `payload.turn_id` |
 | `response_item` | the conversation itself, discriminated by `payload.type` |
 | `event_msg` | harness lifecycle and accounting state, discriminated by `payload.type` |
 | `world_state` | harness state outside the conversation |
@@ -41,7 +41,16 @@ normalized trailing-record kind stays the top-level `event_msg`. When one of
 these kinds is the final record after the newest rendered turn, the backend
 reports its kind and top-level timestamp as `trailing_record`. A
 `response_item` whose payload carries an `id` (reasoning items do, as `rs_…`)
-gives its turn that id as `native_id`; one without leaves the field absent.
+gives its turn that id as `native_id`; one without leaves the field absent. A
+payload `turn_id` is retained separately as `request_turn_id` and is never
+invented from a neighboring record.
+
+The normalized transcript also retains a bounded `read` descriptor. It records
+the source length, the 4 MiB configured tail bound, the physical head and tail
+ranges, each decoded record's absolute byte span, and gaps for the discarded
+partial prefix or malformed records. The head and tail are read through one
+open descriptor and the descriptor is checked again before the result is
+returned; a mutation aborts the read.
 
 The normalized reader retains only a bounded 4 MiB tail for transcript reads,
 plus the first 64 KiB of the file. `session_meta` is the first line, so the
@@ -144,9 +153,12 @@ is the whole session's accounting so far, not the accounting of the window.
 The same event carries two facts that are not accounting.
 `info.model_context_window` is how many tokens the session's model holds at
 once. `rate_limits` sits beside `info` and describes the account's provider
-quota rather than this session: `limit_id`, `plan_type`, and `primary` and
-`secondary` windows, each with `used_percent`, `window_minutes`, and a
-`resets_at` in epoch seconds. A quota refresh is written as a `token_count`
+quota rather than this session: `limit_id`, `plan_type`, optional `credits`
+(`balance`, `has_credits`, and `unlimited`), reached-limit fields, and
+`primary` and `secondary` windows, each with `used_percent`, `window_minutes`,
+and a `resets_at` in epoch seconds. The normalized reader preserves the native
+JSON type of balances and percentages, including false and string zero. A
+quota refresh is written as a `token_count`
 event with `info: null`, so the newest event carrying each fact answers for
 it independently. The usage view reports them as `context_window` and
 `rate_limits`, never folded into the session's counters.

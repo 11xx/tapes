@@ -1,5 +1,6 @@
 use std::fs::{self, File};
 use std::io::{Read, Seek, SeekFrom};
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
@@ -10,8 +11,9 @@ use serde_json::Value;
 use crate::event::{self, EventTranscript};
 use crate::lineage::Lineage;
 use crate::model::{
-    Accounting, AccountingBasis, AccountingCoverage, Cost, Session, SourceBound, Tokens,
-    TrailingRecord, Transcript, Truncation, Turn,
+    Accounting, AccountingBasis, AccountingCoverage, ByteSpan, Cost, ReadEvidence, ReadGap,
+    ReadRange, ReadRangeKind, Session, SourceBound, TerminalObservation, TextTailEvidence, Tokens,
+    TrailingRecord, Transcript, TranscriptEvidence, Truncation, Turn,
 };
 use crate::scope::Scope;
 
@@ -409,8 +411,15 @@ pub fn backends() -> Vec<Box<dyn Backend>> {
 
 pub(crate) struct Jsonl {
     pub values: Vec<Value>,
+    /// Absolute byte span for each decoded value, aligned with `values`.
+    pub spans: Vec<ByteSpan>,
     pub skipped: usize,
     pub truncated: bool,
+    pub source_length: u64,
+    pub read_start: u64,
+    pub read_end: u64,
+    pub configured_bound: u64,
+    pub gaps: Vec<ReadGap>,
 }
 
 pub(crate) struct ParsedFile {
@@ -438,6 +447,8 @@ enum SearchOutcome {
 /// file. Neither window grows with the file.
 pub(crate) struct Recording {
     pub head: Vec<Value>,
+    pub head_spans: Vec<ByteSpan>,
+    pub head_read_end: u64,
     pub tail: Jsonl,
 }
 
@@ -477,58 +488,141 @@ impl Recording {
 }
 
 pub(crate) fn read_recording(path: &Path) -> Result<Recording> {
-    let tail = read_jsonl(path)?;
+    let mut file =
+        File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
+    let metadata = file.metadata()?;
+    let tail = read_jsonl_from(&mut file, &metadata)?;
     let head = if tail.truncated {
-        head_jsonl(path)
+        let (values, spans, read_end) = head_jsonl_from(&mut file, tail.source_length)?;
+        (values, spans, read_end)
     } else {
-        Vec::new()
+        (Vec::new(), Vec::new(), 0)
     };
-    Ok(Recording { head, tail })
+    let after = file.metadata()?;
+    if !same_source(&metadata, &after) {
+        anyhow::bail!("recording source changed during the read; restart without a cursor");
+    }
+    Ok(Recording {
+        head: head.0,
+        head_spans: head.1,
+        head_read_end: head.2,
+        tail,
+    })
 }
 
 pub(crate) fn read_jsonl(path: &Path) -> Result<Jsonl> {
     let mut file =
         File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
-    let len = file
+    let metadata = file
         .metadata()
-        .with_context(|| format!("failed to inspect {}", path.display()))?
-        .len();
-    let truncated = len > MAX_TRANSCRIPT_BYTES;
-    let start = len.saturating_sub(MAX_TRANSCRIPT_BYTES);
-    file.seek(SeekFrom::Start(start))
-        .with_context(|| format!("failed to seek {}", path.display()))?;
+        .with_context(|| format!("failed to inspect {}", path.display()))?;
+    let read = read_jsonl_from(&mut file, &metadata)?;
+    let after = file.metadata()?;
+    if !same_source(&metadata, &after) {
+        anyhow::bail!("recording source changed during the read; restart without a cursor");
+    }
+    Ok(read)
+}
 
-    let mut bytes = Vec::with_capacity((len - start) as usize);
-    file.take(MAX_TRANSCRIPT_BYTES)
-        .read_to_end(&mut bytes)
-        .with_context(|| format!("failed to read {}", path.display()))?;
+fn read_jsonl_from(file: &mut File, metadata: &std::fs::Metadata) -> Result<Jsonl> {
+    let source_length = metadata.len();
+    let configured_bound = MAX_TRANSCRIPT_BYTES;
+    let truncated = source_length > configured_bound;
+    let read_start = source_length.saturating_sub(configured_bound);
+    let read_end = source_length;
+    file.seek(SeekFrom::Start(read_start))?;
+    let mut bytes = Vec::with_capacity((read_end - read_start) as usize);
+    file.take(configured_bound).read_to_end(&mut bytes)?;
 
-    let bytes = if truncated {
+    let normalized_start = if truncated {
         bytes
             .iter()
             .position(|byte| *byte == b'\n')
-            .map_or(&[][..], |newline| &bytes[newline + 1..])
+            .map_or(bytes.len(), |newline| newline + 1)
     } else {
-        &bytes
+        0
     };
-
-    let mut values = Vec::new();
-    let mut skipped = 0;
-    for line in bytes.split(|byte| *byte == b'\n') {
-        if line.iter().all(u8::is_ascii_whitespace) {
-            continue;
+    let (values, spans, skipped, mut gaps) = parse_jsonl_records(
+        &bytes[normalized_start..],
+        read_start + normalized_start as u64,
+    );
+    if truncated {
+        if read_start > 0 {
+            gaps.push(ReadGap {
+                span: ByteSpan {
+                    start: 0,
+                    end: read_start,
+                },
+                reason: "outside-configured-tail-bound".to_owned(),
+            });
         }
-        match serde_json::from_slice(line) {
-            Ok(value) => values.push(value),
-            Err(_) => skipped += 1,
+        if normalized_start > 0 {
+            gaps.push(ReadGap {
+                span: ByteSpan {
+                    start: read_start,
+                    end: read_start + normalized_start as u64,
+                },
+                reason: "discarded-partial-record".to_owned(),
+            });
         }
     }
-
     Ok(Jsonl {
         values,
+        spans,
         skipped,
         truncated,
+        source_length,
+        read_start,
+        read_end,
+        configured_bound,
+        gaps,
     })
+}
+
+fn parse_jsonl_records(
+    bytes: &[u8],
+    base: u64,
+) -> (Vec<Value>, Vec<ByteSpan>, usize, Vec<ReadGap>) {
+    let mut values = Vec::new();
+    let mut spans = Vec::new();
+    let mut gaps = Vec::new();
+    let mut skipped = 0;
+    let mut offset = 0;
+    for line in bytes.split_inclusive(|byte| *byte == b'\n') {
+        let span = ByteSpan {
+            start: base + offset,
+            end: base + offset + line.len() as u64,
+        };
+        offset += line.len() as u64;
+        let content = line.strip_suffix(b"\n").unwrap_or(line);
+        if content.iter().all(u8::is_ascii_whitespace) {
+            continue;
+        }
+        match serde_json::from_slice(content) {
+            Ok(value) => {
+                values.push(value);
+                spans.push(span);
+            }
+            Err(_) => {
+                skipped += 1;
+                gaps.push(ReadGap {
+                    span,
+                    reason: "malformed-record".to_owned(),
+                });
+            }
+        }
+    }
+    (values, spans, skipped, gaps)
+}
+
+fn same_source(before: &std::fs::Metadata, after: &std::fs::Metadata) -> bool {
+    before.dev() == after.dev()
+        && before.ino() == after.ino()
+        && before.len() == after.len()
+        && before.mtime() == after.mtime()
+        && before.mtime_nsec() == after.mtime_nsec()
+        && before.ctime() == after.ctime()
+        && before.ctime_nsec() == after.ctime_nsec()
 }
 
 /// A negative result is safe only for plain ASCII JSON. JSON permits any
@@ -575,6 +669,20 @@ pub(crate) fn head_jsonl(path: &Path) -> Vec<Value> {
     let Ok(mut file) = File::open(path) else {
         return Vec::new();
     };
+    let Ok(metadata) = file.metadata() else {
+        return Vec::new();
+    };
+    let Ok((values, _, _)) = head_jsonl_from(&mut file, metadata.len()) else {
+        return Vec::new();
+    };
+    values
+}
+
+fn head_jsonl_from(
+    file: &mut File,
+    source_length: u64,
+) -> Result<(Vec<Value>, Vec<ByteSpan>, u64)> {
+    file.seek(SeekFrom::Start(0))?;
     // The probe grows only while it holds no complete line, so a store of
     // ordinary files costs one small read each and a file whose first record
     // outgrows the probe costs one larger read rather than a wrong answer.
@@ -582,9 +690,7 @@ pub(crate) fn head_jsonl(path: &Path) -> Vec<Value> {
     let mut window = HEAD_PROBE_BYTES;
     loop {
         let wanted = window - bytes.len() as u64;
-        if (&mut file).take(wanted).read_to_end(&mut bytes).is_err() {
-            return Vec::new();
-        }
+        (&mut *file).take(wanted).read_to_end(&mut bytes)?;
         let filled = bytes.len() as u64 == window;
         if !filled || bytes.contains(&b'\n') || window >= HEAD_PROBE_MAX_BYTES {
             break;
@@ -599,14 +705,16 @@ pub(crate) fn head_jsonl(path: &Path) -> Vec<Value> {
         bytes
             .iter()
             .rposition(|byte| *byte == b'\n')
-            .map_or(&[][..], |newline| &bytes[..newline])
+            .map_or(&[][..], |newline| &bytes[..=newline])
     } else {
         &bytes
     };
-    complete
-        .split(|byte| *byte == b'\n')
-        .filter_map(|line| serde_json::from_slice(line).ok())
-        .collect()
+    let (values, spans, _, _) = parse_jsonl_records(complete, 0);
+    Ok((
+        values,
+        spans,
+        bytes.len().min(source_length as usize) as u64,
+    ))
 }
 
 /// The working directory a session recorded, read from the file's opening
@@ -824,7 +932,8 @@ pub(crate) fn time_range(values: &[Value]) -> Option<(DateTime<Utc>, DateTime<Ut
 
 /// Report the final verified record after the last record that rendered a
 /// turn. A newer unrecognized record suppresses an older candidate: naming the
-/// older one would misidentify the store's actual ending.
+/// older one would misidentify the store's actual ending. A recording with no
+/// normalized turns may still have a verified final record.
 pub(crate) fn trailing_record<'a, I, K>(
     values: I,
     last_turn: Option<usize>,
@@ -835,10 +944,13 @@ where
     K: Fn(&Value) -> Option<&'static str>,
 {
     let values = values.into_iter().collect::<Vec<_>>();
-    let last_turn = last_turn?;
-    let value = values.get(last_turn + 1..)?.last().copied()?;
+    if last_turn.is_some_and(|last_turn| last_turn + 1 >= values.len()) {
+        return None;
+    }
+    let value = values.last().copied()?;
+    let kind = known_kind(value)?.to_owned();
     Some(TrailingRecord {
-        kind: known_kind(value)?.to_owned(),
+        kind,
         timestamp: timestamp(&value["timestamp"]),
     })
 }
@@ -850,22 +962,133 @@ pub(crate) fn read_bounds(read: &Jsonl) -> Truncation {
         source: read
             .truncated
             .then_some(SourceBound::FileTail {
-                bytes: MAX_TRANSCRIPT_BYTES,
+                bytes: read.configured_bound,
             })
             .into_iter()
             .collect(),
     }
 }
 
+pub(crate) fn read_evidence(read: &Jsonl) -> ReadEvidence {
+    ReadEvidence {
+        source_length: read.source_length,
+        configured_bound: read.configured_bound,
+        ranges: vec![ReadRange {
+            kind: ReadRangeKind::Tail,
+            span: ByteSpan {
+                start: read.read_start,
+                end: read.read_end,
+            },
+        }],
+        records: read.spans.clone(),
+        gaps: read.gaps.clone(),
+    }
+}
+
+pub(crate) fn recording_evidence(recording: &Recording) -> ReadEvidence {
+    let mut ranges = Vec::with_capacity(2);
+    if recording.head_read_end > 0 {
+        ranges.push(ReadRange {
+            kind: ReadRangeKind::Head,
+            span: ByteSpan {
+                start: 0,
+                end: recording.head_read_end,
+            },
+        });
+    }
+    ranges.push(ReadRange {
+        kind: ReadRangeKind::Tail,
+        span: ByteSpan {
+            start: recording.tail.read_start,
+            end: recording.tail.read_end,
+        },
+    });
+    let mut records = recording.head_spans.clone();
+    records.extend(recording.tail.spans.iter().copied());
+    ReadEvidence {
+        source_length: recording.tail.source_length,
+        configured_bound: recording.tail.configured_bound,
+        ranges,
+        records,
+        gaps: recording.tail.gaps.clone(),
+    }
+}
+
+pub(crate) fn terminal_from_values(
+    values: &[Value],
+    parse: impl Fn(&Value) -> Option<TerminalObservation>,
+) -> Option<TerminalObservation> {
+    values.iter().rev().find_map(parse)
+}
+
 pub(crate) fn transcript(
     session: Session,
-    mut turns: Vec<Turn>,
+    turns: Vec<Turn>,
     tail: usize,
     read: &Jsonl,
     trailing_record: Option<TrailingRecord>,
+    notes: Vec<String>,
+) -> Transcript {
+    transcript_with_facts(
+        session,
+        turns,
+        tail,
+        TranscriptFacts {
+            read_evidence: read_evidence(read),
+            terminal: None,
+            read,
+        },
+        trailing_record,
+        notes,
+    )
+}
+
+pub(crate) fn transcript_from_recording(
+    session: Session,
+    turns: Vec<Turn>,
+    tail: usize,
+    recording: &Recording,
+    terminal: Option<TerminalObservation>,
+    trailing_record: Option<TrailingRecord>,
+    notes: Vec<String>,
+) -> Transcript {
+    transcript_with_facts(
+        session,
+        turns,
+        tail,
+        TranscriptFacts {
+            read_evidence: recording_evidence(recording),
+            terminal,
+            read: &recording.tail,
+        },
+        trailing_record,
+        notes,
+    )
+}
+
+fn transcript_with_facts(
+    session: Session,
+    mut turns: Vec<Turn>,
+    tail: usize,
+    facts: TranscriptFacts<'_>,
+    trailing_record: Option<TrailingRecord>,
     mut notes: Vec<String>,
 ) -> Transcript {
+    let TranscriptFacts {
+        read_evidence,
+        terminal,
+        read,
+    } = facts;
     let total = turns.len();
+    let text_count_in_read = turns
+        .iter()
+        .filter(|turn| {
+            matches!(
+                turn.kind,
+                crate::model::TurnKind::Operator | crate::model::TurnKind::Assistant
+            )
+        })
+        .count();
     for (ordinal, turn) in turns.iter_mut().enumerate() {
         turn.ordinal = ordinal;
     }
@@ -881,13 +1104,54 @@ pub(crate) fn transcript(
         source: read
             .truncated
             .then_some(SourceBound::FileTail {
-                bytes: MAX_TRANSCRIPT_BYTES,
+                bytes: read.configured_bound,
             })
             .into_iter()
             .collect(),
     };
+    let text_count_returned = turns
+        .iter()
+        .filter(|turn| {
+            matches!(
+                turn.kind,
+                crate::model::TurnKind::Operator | crate::model::TurnKind::Assistant
+            )
+        })
+        .count();
+    let empty_reason = if text_count_returned > 0 {
+        None
+    } else if tail == 0 {
+        Some(crate::model::EmptyTextTailReason::ZeroRequestedTail)
+    } else if text_count_in_read == 0 && read.truncated {
+        Some(crate::model::EmptyTextTailReason::NoOperatorAssistantTextInRead)
+    } else if text_count_in_read == 0 {
+        Some(crate::model::EmptyTextTailReason::EmptyCompleteProjection)
+    } else {
+        Some(crate::model::EmptyTextTailReason::NoOperatorAssistantTextInRead)
+    };
 
-    Transcript::new(session, turns, truncation, trailing_record, notes)
+    Transcript::with_evidence(
+        session,
+        turns,
+        truncation,
+        TranscriptEvidence {
+            read: Some(read_evidence),
+            terminal,
+            text_tail: Some(TextTailEvidence {
+                requested: tail,
+                returned: text_count_returned,
+                empty_reason,
+            }),
+        },
+        trailing_record,
+        notes,
+    )
+}
+
+struct TranscriptFacts<'a> {
+    read_evidence: ReadEvidence,
+    terminal: Option<TerminalObservation>,
+    read: &'a Jsonl,
 }
 
 pub(crate) fn home_path(parts: &[&str]) -> Option<PathBuf> {

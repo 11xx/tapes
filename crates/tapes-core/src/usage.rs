@@ -10,13 +10,14 @@ use std::collections::BTreeMap;
 
 use chrono::{DateTime, Utc};
 use serde::Serialize;
+use serde_json::Value;
 
 use crate::model::{
-    Accounting, AccountingBasis, AccountingCoverage, Cost, Model, Role, Session, SourceBound,
-    Tokens, Transcript, Truncation,
+    Accounting, AccountingBasis, AccountingCoverage, Cost, Model, ReadEvidence, Role, Session,
+    SourceBound, TerminalObservation, TextTailEvidence, Tokens, Transcript, Truncation,
 };
 
-pub const USAGE_SCHEMA: &str = "tapes-usage/1";
+pub const USAGE_SCHEMA: &str = "tapes-usage/2";
 
 /// Usage facts a harness records that the normalized session model has no
 /// field for. Each member is present exactly when the harness recorded it.
@@ -57,11 +58,46 @@ pub struct RateLimits {
     /// The account's plan, as the harness names it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub plan: Option<String>,
+    /// Credits are an account observation. The native balance may be a
+    /// number, string, or boolean, so its JSON representation is retained.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub credits: Option<Credits>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub spend_control_reached: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rate_limit_reached: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rate_limit_reached_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub observed_at: Option<DateTime<Utc>>,
 }
 
 impl RateLimits {
     pub fn is_empty(&self) -> bool {
-        self.primary.is_none() && self.secondary.is_none() && self.plan.is_none()
+        self.primary.is_none()
+            && self.secondary.is_none()
+            && self.plan.is_none()
+            && self.credits.is_none()
+            && self.spend_control_reached.is_none()
+            && self.rate_limit_reached.is_none()
+            && self.rate_limit_reached_type.is_none()
+            && self.observed_at.is_none()
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+pub struct Credits {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub balance: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub has_credits: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unlimited: Option<bool>,
+}
+
+impl Credits {
+    pub fn is_empty(&self) -> bool {
+        self.balance.is_none() && self.has_credits.is_none() && self.unlimited.is_none()
     }
 }
 
@@ -69,7 +105,9 @@ impl RateLimits {
 /// starts over.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct RateWindow {
-    pub used_percent: f64,
+    /// Preserve the native number/string representation instead of coercing
+    /// a recorded value into a different type.
+    pub used_percent: Value,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub window_minutes: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -168,6 +206,12 @@ pub struct UsageView {
     pub durations_ms: Option<Durations>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub by_model: Option<Vec<ModelUsage>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub read: Option<ReadEvidence>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub terminal: Option<TerminalObservation>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text_tail: Option<TextTailEvidence>,
     pub truncated: bool,
     #[serde(skip_serializing_if = "Truncation::is_empty")]
     pub truncation: Truncation,
@@ -200,6 +244,9 @@ pub fn usage(transcript: &Transcript) -> UsageView {
         rate_limits: detail.rate_limits,
         durations_ms: detail.durations_ms,
         by_model: detail.by_model,
+        read: transcript.read.clone(),
+        terminal: transcript.terminal.clone(),
+        text_tail: transcript.text_tail.clone(),
         truncated: transcript.truncated,
         truncation: transcript.truncation.clone(),
         notes: transcript.notes.clone(),
@@ -519,6 +566,7 @@ mod tests {
             ts: None,
             ordinal: 0,
             native_id: None,
+            request_turn_id: None,
             tool: None,
         }
     }
@@ -580,12 +628,17 @@ mod tests {
             context_window: Some(828_400),
             rate_limits: Some(RateLimits {
                 primary: Some(RateWindow {
-                    used_percent: 1.0,
+                    used_percent: json!(1.0),
                     window_minutes: Some(300),
                     resets_at: Some(Utc.timestamp_opt(1_788_512_962, 0).unwrap()),
                 }),
                 secondary: None,
                 plan: Some("plus".to_owned()),
+                credits: None,
+                spend_control_reached: None,
+                rate_limit_reached: None,
+                rate_limit_reached_type: None,
+                observed_at: None,
             }),
             durations_ms: Some(Durations {
                 api: Some(1_000),

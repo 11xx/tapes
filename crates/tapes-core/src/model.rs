@@ -2,11 +2,12 @@ use std::path::PathBuf;
 
 use chrono::{DateTime, SecondsFormat, Utc};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde_json::Value;
 
 use crate::event::ToolEvent;
 use crate::usage::UsageDetail;
 
-pub const SESSION_SCHEMA: &str = "tapes-session/1";
+pub const SESSION_SCHEMA: &str = "tapes-session/2";
 /// Maximum length of a title derived from the first user turn.
 pub const DERIVED_TITLE_MAX_CHARS: usize = 96;
 
@@ -54,7 +55,7 @@ pub struct Session {
     pub start_uncertain: bool,
     /// Usage facts a harness records beside the normalized counters, filled
     /// by the backend that holds them. They are harness-shaped rather than
-    /// part of the session contract, so `tapes-session/1` does not carry
+    /// part of the session contract, so the session wire object does not carry
     /// them; the usage projection is where they reach a consumer.
     #[serde(skip)]
     pub usage_detail: Option<UsageDetail>,
@@ -146,6 +147,10 @@ pub struct Turn {
     /// message, its reasoning, and its tool calls.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub native_id: Option<String>,
+    /// The request/turn identity recorded by a harness, kept separate from
+    /// the message or item identity that carries the content.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_turn_id: Option<String>,
     /// Harness-neutral tool data used by in-process projections. Session JSON
     /// keeps the harness envelope in `text` as its stable wire contract.
     #[serde(skip)]
@@ -157,6 +162,120 @@ pub struct TrailingRecord {
     pub kind: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timestamp: Option<DateTime<Utc>>,
+}
+
+/// A byte interval in the source descriptor used by one bounded read.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ByteSpan {
+    pub start: u64,
+    pub end: u64,
+}
+
+impl ByteSpan {
+    pub fn len(self) -> u64 {
+        self.end.saturating_sub(self.start)
+    }
+
+    pub fn is_empty(self) -> bool {
+        self.start >= self.end
+    }
+}
+
+/// The purpose of one physical source read. Alignment and context are kept
+/// apart from the bytes whose records were normalized.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ReadRangeKind {
+    Head,
+    Tail,
+    Context,
+    Alignment,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReadRange {
+    pub kind: ReadRangeKind,
+    pub span: ByteSpan,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReadGap {
+    pub span: ByteSpan,
+    pub reason: String,
+}
+
+/// What one bounded source observation actually inspected. A source length is
+/// not a claim that the source is append-only, and a file validator remains a
+/// local observation rather than a portable content identity.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReadEvidence {
+    pub source_length: u64,
+    pub configured_bound: u64,
+    pub ranges: Vec<ReadRange>,
+    /// Decoded source records in read order, with the same absolute spans used
+    /// by normalized values.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub records: Vec<ByteSpan>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub gaps: Vec<ReadGap>,
+}
+
+/// A bounded text observation whose shortening is explicit.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BoundedText {
+    pub text: String,
+    pub chars: usize,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub truncated: bool,
+}
+
+/// A terminal record observed in the reached source window. The reader only
+/// fills outcome, code, message, and duration when the native record supplied
+/// them; an unknown subtype never becomes an invented success or failure.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct TerminalObservation {
+    pub record_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub payload_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timestamp: Option<DateTime<Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub native_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub turn_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub code: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<BoundedText>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<i64>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum EmptyTextTailReason {
+    NoOperatorAssistantTextInRead,
+    ZeroRequestedTail,
+    EmptyCompleteProjection,
+}
+
+/// The result of the text-only tail projection, kept distinct from source and
+/// turn truncation so an empty result has an honest reason.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TextTailEvidence {
+    pub requested: usize,
+    pub returned: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub empty_reason: Option<EmptyTextTailReason>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct TranscriptEvidence {
+    pub read: Option<ReadEvidence>,
+    pub terminal: Option<TerminalObservation>,
+    pub text_tail: Option<TextTailEvidence>,
 }
 
 /// Why a transcript is not the whole session, one entry per cause. The two
@@ -534,6 +653,9 @@ pub struct Transcript {
     pub turns: Vec<Turn>,
     pub truncated: bool,
     pub truncation: Truncation,
+    pub read: Option<ReadEvidence>,
+    pub terminal: Option<TerminalObservation>,
+    pub text_tail: Option<TextTailEvidence>,
     pub trailing_record: Option<TrailingRecord>,
     pub notes: Vec<String>,
 }
@@ -546,11 +668,36 @@ impl Transcript {
         trailing_record: Option<TrailingRecord>,
         notes: Vec<String>,
     ) -> Self {
+        Self::with_evidence(
+            session,
+            turns,
+            truncation,
+            TranscriptEvidence {
+                read: None,
+                terminal: None,
+                text_tail: None,
+            },
+            trailing_record,
+            notes,
+        )
+    }
+
+    pub fn with_evidence(
+        session: Session,
+        turns: Vec<Turn>,
+        truncation: Truncation,
+        evidence: TranscriptEvidence,
+        trailing_record: Option<TrailingRecord>,
+        notes: Vec<String>,
+    ) -> Self {
         Self {
             session,
             turns,
             truncated: !truncation.is_empty(),
             truncation,
+            read: evidence.read,
+            terminal: evidence.terminal,
+            text_tail: evidence.text_tail,
             trailing_record,
             notes,
         }
@@ -568,6 +715,9 @@ impl Serialize for Transcript {
             turns: &self.turns,
             truncated: self.truncated,
             truncation: &self.truncation,
+            read: self.read.as_ref(),
+            terminal: self.terminal.as_ref(),
+            text_tail: self.text_tail.as_ref(),
             trailing_record: self.trailing_record.as_ref(),
             notes: &self.notes,
         }
@@ -597,6 +747,9 @@ impl<'de> Deserialize<'de> for Transcript {
             turns: serialized.turns,
             truncated: serialized.truncated,
             truncation: serialized.truncation,
+            read: serialized.read,
+            terminal: serialized.terminal,
+            text_tail: serialized.text_tail,
             trailing_record: serialized.trailing_record,
             notes: serialized.notes,
         })
@@ -612,6 +765,12 @@ struct TranscriptRef<'a> {
     #[serde(skip_serializing_if = "truncation_is_empty")]
     truncation: &'a Truncation,
     #[serde(skip_serializing_if = "Option::is_none")]
+    read: Option<&'a ReadEvidence>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    terminal: Option<&'a TerminalObservation>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    text_tail: Option<&'a TextTailEvidence>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     trailing_record: Option<&'a TrailingRecord>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     notes: &'a Vec<String>,
@@ -625,6 +784,12 @@ struct SerializedTranscript {
     truncated: bool,
     #[serde(default)]
     truncation: Truncation,
+    #[serde(default)]
+    read: Option<ReadEvidence>,
+    #[serde(default)]
+    terminal: Option<TerminalObservation>,
+    #[serde(default)]
+    text_tail: Option<TextTailEvidence>,
     #[serde(default)]
     trailing_record: Option<TrailingRecord>,
     #[serde(default)]
@@ -712,6 +877,7 @@ mod tests {
             ts: Some(timestamp(1_700_000_050)),
             ordinal: 0,
             native_id: None,
+            request_turn_id: None,
             tool: None,
         };
         let transcript = Transcript {
@@ -719,6 +885,9 @@ mod tests {
             turns: vec![turn.clone()],
             truncated: true,
             truncation: Truncation::default(),
+            read: None,
+            terminal: None,
+            text_tail: None,
             trailing_record: Some(TrailingRecord {
                 kind: "event_msg".into(),
                 timestamp: Some(timestamp(1_700_000_060)),
@@ -816,6 +985,7 @@ mod tests {
                 ts: None,
                 ordinal: 0,
                 native_id: None,
+                request_turn_id: None,
                 tool: None,
             },
             Turn {
@@ -825,6 +995,7 @@ mod tests {
                 ts: None,
                 ordinal: 0,
                 native_id: None,
+                request_turn_id: None,
                 tool: None,
             },
         ]);
@@ -855,6 +1026,7 @@ mod tests {
             ts: None,
             ordinal: 0,
             native_id: None,
+            request_turn_id: None,
             tool: None,
         }]);
         let complete_json = serde_json::to_value(complete).unwrap();
@@ -870,6 +1042,7 @@ mod tests {
             ts: None,
             ordinal: 0,
             native_id: None,
+            request_turn_id: None,
             tool: None,
         }]);
         let shortened_json = serde_json::to_value(shortened).unwrap();
@@ -891,6 +1064,7 @@ mod tests {
             ts: None,
             ordinal: 0,
             native_id: None,
+            request_turn_id: None,
             tool: None,
         }]);
 
@@ -910,6 +1084,7 @@ mod tests {
             ts: None,
             ordinal: 0,
             native_id: None,
+            request_turn_id: None,
             tool: None,
         }]);
 
@@ -931,6 +1106,9 @@ mod tests {
             turns: Vec::new(),
             truncated: true,
             truncation: Truncation::default(),
+            read: None,
+            terminal: None,
+            text_tail: None,
             trailing_record: None,
             notes: Vec::new(),
         };
@@ -1006,6 +1184,7 @@ mod tests {
             ts: None,
             ordinal: 12,
             native_id: None,
+            request_turn_id: None,
             tool: None,
         };
         let value = serde_json::to_value(&turn).unwrap();
@@ -1054,6 +1233,9 @@ mod tests {
             turns: Vec::new(),
             truncated: false,
             truncation: Truncation::default(),
+            read: None,
+            terminal: None,
+            text_tail: None,
             trailing_record: Some(TrailingRecord {
                 kind: "last-prompt".into(),
                 timestamp: None,

@@ -1663,6 +1663,7 @@ fn parse_message(message: &Value) -> Vec<Turn> {
                 ts: message_ts,
                 ordinal: 0,
                 native_id: message_id,
+                request_turn_id: None,
                 tool: None,
             })
             .into_iter()
@@ -1698,6 +1699,7 @@ fn parse_message(message: &Value) -> Vec<Turn> {
                 ts,
                 ordinal: 0,
                 native_id,
+                request_turn_id: None,
                 tool,
             })
         })
