@@ -12,8 +12,8 @@ use super::{
 use crate::event::{Bounded, EventKind, ToolEvent};
 use crate::lineage::{Lineage, ParentRef};
 use crate::model::{
-    AccountingBasis, AccountingCoverage, Cost, Model, Role, Session, Tokens, TrailingRecord,
-    Transcript, Turn, TurnKind,
+    AccountingBasis, AccountingCoverage, Cost, Model, Role, Session, SourceDescriptor, Tokens,
+    TrailingRecord, Transcript, Turn, TurnKind,
 };
 
 #[derive(Clone, Debug)]
@@ -32,7 +32,9 @@ impl PiBackend {
         let recording = read_recording(path)?;
         let (started_at, last_activity_at) = recording
             .time_range()
-            .ok_or_else(|| anyhow!("{} has no valid timestamps", path.display()))?;
+            .map_or((None, None), |(started, activity)| {
+                (Some(started), Some(activity))
+            });
         // pi writes the session header once, as the first line, and nothing
         // past it repeats the id or the working directory. The opening is the
         // only place either can be read on a file past the bounded tail.
@@ -102,7 +104,7 @@ impl PiBackend {
 
         let session = Session {
             id,
-            harness: "pi".into(),
+            source: SourceDescriptor::installed("pi", path.display().to_string()),
             model,
             title: None,
             derived_title: None,
@@ -114,7 +116,6 @@ impl PiBackend {
             cost,
             tokens,
             accounting,
-            store: Some(path.display().to_string()),
             start_uncertain: recording.start_uncertain(),
             usage_detail: None,
         };
@@ -301,7 +302,18 @@ fn read_transcript(
     let mut turns = Vec::new();
     let mut last_turn = None;
     for (index, value) in active.iter().enumerate() {
-        let parsed = parse_turns(value);
+        let mut parsed = parse_turns(value);
+        let span = read
+            .values
+            .iter()
+            .position(|candidate| std::ptr::eq(candidate, *value))
+            .and_then(|source_index| read.spans.get(source_index).copied());
+        super::attach_record_refs(
+            &mut parsed,
+            &format!("file:{}", path.display()),
+            Some(&read.source_revision),
+            span,
+        );
         if !parsed.is_empty() {
             last_turn = Some(index);
         }
@@ -425,6 +437,7 @@ fn parse_turns(value: &Value) -> Vec<Turn> {
                 ordinal: 0,
                 native_id,
                 request_turn_id: None,
+                record_ref: None,
                 tool: Some(pi_result_event(message)),
             }];
         }
@@ -441,6 +454,7 @@ fn parse_turns(value: &Value) -> Vec<Turn> {
                 ordinal: 0,
                 native_id,
                 request_turn_id: None,
+                record_ref: None,
                 tool: None,
             })
             .into_iter()
@@ -470,6 +484,7 @@ fn parse_turns(value: &Value) -> Vec<Turn> {
                 ordinal: 0,
                 native_id: native_id.clone(),
                 request_turn_id: None,
+                record_ref: None,
                 tool,
             })
         })

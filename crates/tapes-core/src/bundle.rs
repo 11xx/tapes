@@ -122,7 +122,7 @@ fn bundle_stem(session: &Session) -> String {
     format!(
         "{}-{}-{id}",
         Utc::now().format("%Y%m%dT%H%M%SZ"),
-        session.harness
+        session.harness()
     )
 }
 
@@ -192,7 +192,7 @@ fn render_trace(transcript: &Transcript) -> String {
 
 fn write_header(out: &mut String, transcript: &Transcript, kind: &str) {
     let session = &transcript.session;
-    let _ = writeln!(out, "# {} {} ({kind})", session.harness, session.id);
+    let _ = writeln!(out, "# {} {} ({kind})", session.harness(), session.id);
     let _ = writeln!(out);
     let title = human_title(session);
     if !title.is_empty() {
@@ -211,11 +211,11 @@ fn write_header(out: &mut String, transcript: &Transcript, kind: &str) {
     if let Some(directory) = &session.directory {
         let _ = writeln!(out, "- directory: {}", directory.display());
     }
-    let _ = writeln!(
-        out,
-        "- last activity: {}",
-        human_timestamp(session.last_activity_at)
-    );
+    if let Some(last_activity) = session.last_activity_at {
+        let _ = writeln!(out, "- last activity: {}", human_timestamp(last_activity));
+    } else {
+        let _ = writeln!(out, "- last activity: unavailable");
+    }
     if let Some(tokens) = &session.tokens {
         let mut counters = Vec::new();
         if let Some(input) = tokens.input {
@@ -401,8 +401,8 @@ mod tests {
 
     use super::*;
     use crate::model::{
-        Accounting, AccountingBasis, AccountingCoverage, LiveState, Model, Tokens, TrailingRecord,
-        Truncation, Turn,
+        Accounting, AccountingBasis, AccountingCoverage, LiveState, Model, SourceDescriptor,
+        Tokens, TrailingRecord, Truncation, Turn,
     };
 
     fn transcript() -> Transcript {
@@ -410,7 +410,7 @@ mod tests {
         Transcript {
             session: Session {
                 id: "ses_abc".into(),
-                harness: "opencode".into(),
+                source: SourceDescriptor::installed("opencode", "opencode-database"),
                 model: Some(Model {
                     id: "kimi-k3".into(),
                     variant: Some("max".into()),
@@ -419,13 +419,12 @@ mod tests {
                 derived_title: None,
                 derived_title_truncated: None,
                 directory: None,
-                started_at: ts,
-                last_activity_at: ts,
+                started_at: Some(ts),
+                last_activity_at: Some(ts),
                 live: None,
                 cost: None,
                 tokens: None,
                 accounting: None,
-                store: None,
                 start_uncertain: false,
                 usage_detail: None,
             },
@@ -438,6 +437,7 @@ mod tests {
                     ordinal: 0,
                     native_id: None,
                     request_turn_id: None,
+                    record_ref: None,
                     tool: None,
                 },
                 Turn {
@@ -448,6 +448,7 @@ mod tests {
                     ordinal: 0,
                     native_id: None,
                     request_turn_id: None,
+                    record_ref: None,
                     tool: None,
                 },
                 Turn {
@@ -458,6 +459,7 @@ mod tests {
                     ordinal: 0,
                     native_id: None,
                     request_turn_id: None,
+                    record_ref: None,
                     tool: None,
                 },
                 Turn {
@@ -468,6 +470,7 @@ mod tests {
                     ordinal: 0,
                     native_id: None,
                     request_turn_id: None,
+                    record_ref: None,
                     tool: None,
                 },
             ],
@@ -599,7 +602,7 @@ mod tests {
         let ts = Utc.timestamp_opt(1_700_000_000, 123_456_789).unwrap();
         transcript.session.title = None;
         transcript.session.derived_title = Some("Inspect the fixture".into());
-        transcript.session.last_activity_at = ts;
+        transcript.session.last_activity_at = Some(ts);
         for turn in &mut transcript.turns {
             turn.ts = Some(ts);
         }
@@ -674,6 +677,7 @@ mod tests {
             ordinal: 0,
             native_id: None,
             request_turn_id: None,
+            record_ref: None,
             tool: None,
         };
         assert_eq!(tool_label(&turn(r#"{"name":"shell"}"#)), "shell");

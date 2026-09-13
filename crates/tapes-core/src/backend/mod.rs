@@ -12,8 +12,8 @@ use crate::event::{self, EventTranscript};
 use crate::lineage::Lineage;
 use crate::model::{
     Accounting, AccountingBasis, AccountingCoverage, ByteSpan, Cost, ReadEvidence, ReadGap,
-    ReadRange, ReadRangeKind, Session, SourceBound, TerminalObservation, TextTailEvidence, Tokens,
-    TrailingRecord, Transcript, TranscriptEvidence, Truncation, Turn,
+    ReadRange, ReadRangeKind, RecordRef, Session, SourceBound, TerminalObservation,
+    TextTailEvidence, Tokens, TrailingRecord, Transcript, TranscriptEvidence, Truncation, Turn,
 };
 use crate::scope::Scope;
 
@@ -183,12 +183,16 @@ impl<'a> Query<'a> {
                 directory.to_string_lossy().to_lowercase().contains(needle)
             })
         });
-        let since_matches = self
-            .since
-            .is_none_or(|since| session.last_activity_at >= since);
-        let until_matches = self
-            .until
-            .is_none_or(|until| session.last_activity_at < until);
+        let since_matches = self.since.is_none_or(|since| {
+            session
+                .last_activity_at
+                .is_some_and(|activity| activity >= since)
+        });
+        let until_matches = self.until.is_none_or(|until| {
+            session
+                .last_activity_at
+                .is_some_and(|activity| activity < until)
+        });
         model_matches && directory_matches && since_matches && until_matches
     }
 }
@@ -419,6 +423,7 @@ pub(crate) struct Jsonl {
     pub read_start: u64,
     pub read_end: u64,
     pub configured_bound: u64,
+    pub source_revision: String,
     pub gaps: Vec<ReadGap>,
 }
 
@@ -575,6 +580,7 @@ fn read_jsonl_from(file: &mut File, metadata: &std::fs::Metadata) -> Result<Json
         read_start,
         read_end,
         configured_bound,
+        source_revision: stat_revision(metadata),
         gaps,
     })
 }
@@ -623,6 +629,19 @@ fn same_source(before: &std::fs::Metadata, after: &std::fs::Metadata) -> bool {
         && before.mtime_nsec() == after.mtime_nsec()
         && before.ctime() == after.ctime()
         && before.ctime_nsec() == after.ctime_nsec()
+}
+
+fn stat_revision(metadata: &std::fs::Metadata) -> String {
+    format!(
+        "stat:{}:{}:{}:{}:{}:{}:{}",
+        metadata.dev(),
+        metadata.ino(),
+        metadata.len(),
+        metadata.mtime(),
+        metadata.mtime_nsec(),
+        metadata.ctime(),
+        metadata.ctime_nsec()
+    )
 }
 
 /// A negative result is safe only for plain ASCII JSON. JSON permits any
@@ -823,7 +842,7 @@ pub(crate) fn list_files_with_search(
                                 let diagnostic = format!(
                                     "{} session {}: the bounded read reached {} of the last {tail} \
                                      turns, so a miss is not a non-match",
-                                    parsed.session.harness,
+                                    parsed.session.harness(),
                                     parsed.session.id,
                                     parsed.turns.len()
                                 );
@@ -973,6 +992,12 @@ pub(crate) fn read_evidence(read: &Jsonl) -> ReadEvidence {
     ReadEvidence {
         source_length: read.source_length,
         configured_bound: read.configured_bound,
+        coordinate_domain: "file-byte-range".to_owned(),
+        source_revision: Some(read.source_revision.clone()),
+        producer: None,
+        projection: crate::model::SESSION_SCHEMA.to_owned(),
+        projection_options: Vec::new(),
+        observed_at: Utc::now(),
         ranges: vec![ReadRange {
             kind: ReadRangeKind::Tail,
             span: ByteSpan {
@@ -1008,6 +1033,12 @@ pub(crate) fn recording_evidence(recording: &Recording) -> ReadEvidence {
     ReadEvidence {
         source_length: recording.tail.source_length,
         configured_bound: recording.tail.configured_bound,
+        coordinate_domain: "file-byte-range".to_owned(),
+        source_revision: Some(recording.tail.source_revision.clone()),
+        producer: None,
+        projection: crate::model::SESSION_SCHEMA.to_owned(),
+        projection_options: Vec::new(),
+        observed_at: Utc::now(),
         ranges,
         records,
         gaps: recording.tail.gaps.clone(),
@@ -1019,6 +1050,23 @@ pub(crate) fn terminal_from_values(
     parse: impl Fn(&Value) -> Option<TerminalObservation>,
 ) -> Option<TerminalObservation> {
     values.iter().rev().find_map(parse)
+}
+
+pub(crate) fn attach_record_refs(
+    turns: &mut [Turn],
+    domain: &str,
+    revision: Option<&str>,
+    span: Option<ByteSpan>,
+) {
+    for (part_index, turn) in turns.iter_mut().enumerate() {
+        turn.record_ref = Some(RecordRef {
+            domain: domain.to_owned(),
+            revision: revision.map(str::to_owned),
+            span,
+            native_id: turn.native_id.clone(),
+            part_index,
+        });
+    }
 }
 
 pub(crate) fn transcript(
@@ -1079,6 +1127,8 @@ fn transcript_with_facts(
         terminal,
         read,
     } = facts;
+    let mut read_evidence = read_evidence;
+    read_evidence.producer = session.source.producer.clone();
     let total = turns.len();
     let text_count_in_read = turns
         .iter()

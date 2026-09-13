@@ -82,7 +82,10 @@ pub fn with_backends(
                 let usage = usage::usage(&transcript);
                 let events = event::project(transcript, usize::MAX);
                 let tools = crate::stats::count_tools(&events.events, events.pairs.complete);
-                by_harness.entry(session.harness).or_default().add(&tools);
+                by_harness
+                    .entry(session.harness().to_owned())
+                    .or_default()
+                    .add(&tools);
                 report.sessions.push(SessionStats {
                     session: usage.session,
                     coverage: Coverage {
@@ -94,9 +97,9 @@ pub fn with_backends(
                 });
             }
             Err(error) => report.failed.push(ReadFailure {
-                id: session.id,
-                harness: session.harness,
-                store: session.store,
+                id: session.id.clone(),
+                harness: session.harness().to_owned(),
+                store: session.locator().map(str::to_owned),
                 error: format!("{error:#}"),
             }),
         }

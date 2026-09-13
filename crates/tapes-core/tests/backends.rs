@@ -15,8 +15,8 @@ use tapes_core::backend::pi::PiBackend;
 use tapes_core::backend::{Backend, Listing, Query};
 use tapes_core::event::{project, EventKind, Incomplete};
 use tapes_core::model::{
-    Accounting, AccountingBasis, AccountingCoverage, Cost, Role, Session, SourceBound, Tokens,
-    Transcript, Truncation, Turn, TurnKind,
+    Accounting, AccountingBasis, AccountingCoverage, Cost, Role, Session, SourceBound,
+    SourceDescriptor, Tokens, Transcript, Truncation, Turn, TurnKind,
 };
 use tapes_core::usage::{usage, Durations, ModelUsage, RateWindow, TurnCoverage};
 use tapes_core::{
@@ -214,7 +214,7 @@ fn every_backend_satisfies_shared_normalization_assertions() {
 
         let sessions = backend.list(&Query::unscoped(10)).unwrap().sessions;
         let listed = sessions.iter().find(|session| session.id == id).unwrap();
-        assert_eq!(listed.harness, backend.harness());
+        assert_eq!(listed.harness(), backend.harness());
         assert!(listed.started_at <= listed.last_activity_at);
         if listed.title.is_none() {
             assert_eq!(
@@ -1827,7 +1827,7 @@ fn a_transcript_past_the_read_window_still_reports_its_directory() {
     );
     assert_eq!(
         session.started_at,
-        "2026-01-01T10:00:00Z".parse::<DateTime<Utc>>().unwrap(),
+        Some("2026-01-01T10:00:00Z".parse::<DateTime<Utc>>().unwrap()),
         "the header's timestamp is the start, not the first retained tail entry"
     );
     assert!(
@@ -1925,6 +1925,7 @@ impl Backend for SearchFixture {
                 ordinal: 0,
                 native_id: None,
                 request_turn_id: None,
+                record_ref: None,
                 tool: None,
             }],
             truncated: self.bounded,
@@ -2115,19 +2116,18 @@ fn resolver_session(id: &str) -> Session {
     let timestamp = Utc.timestamp_opt(1_700_000_000, 0).unwrap();
     Session {
         id: id.into(),
-        harness: "fixture".into(),
+        source: SourceDescriptor::installed("fixture", "fixture-recording"),
         model: None,
         title: None,
         derived_title: None,
         derived_title_truncated: None,
         directory: None,
-        started_at: timestamp,
-        last_activity_at: timestamp,
+        started_at: Some(timestamp),
+        last_activity_at: Some(timestamp),
         live: None,
         cost: None,
         tokens: None,
         accounting: None,
-        store: None,
         start_uncertain: false,
         usage_detail: None,
     }
@@ -2495,11 +2495,13 @@ fn oversized_codex_and_claude_files_keep_their_header_facts() {
         let session = located(backend.as_ref(), id);
         assert_eq!(session.id, id, "{what}: the header names the session");
         assert_eq!(
-            session.started_at, start,
+            session.started_at,
+            Some(start),
             "{what}: the header's timestamp is the start"
         );
         assert_eq!(
-            session.last_activity_at, end,
+            session.last_activity_at,
+            Some(end),
             "{what}: the tail's newest timestamp is the end"
         );
         assert_eq!(
@@ -2516,7 +2518,7 @@ fn oversized_codex_and_claude_files_keep_their_header_facts() {
         let transcript = backend.transcript(&session, 5).unwrap();
         assert!(transcript.truncated, "{what}: the tail is still a window");
         assert_eq!(transcript.turns.len(), 5, "{what}: turns stay bounded");
-        assert_eq!(transcript.session.started_at, start);
+        assert_eq!(transcript.session.started_at, Some(start));
         let window = transcript
             .truncation
             .window
@@ -2547,7 +2549,7 @@ fn oversized_codex_and_claude_files_keep_their_header_facts() {
 
         let listed = backend.list(&Query::unscoped(10)).unwrap().sessions;
         assert_eq!(listed.len(), 1, "{what}: listing finds the session");
-        assert_eq!(listed[0].started_at, start, "{what}: listing agrees");
+        assert_eq!(listed[0].started_at, Some(start), "{what}: listing agrees");
     }
 
     fs::remove_dir_all(root).unwrap();
@@ -2591,7 +2593,7 @@ fn every_backend_gives_turns_stable_ordinals_and_names_its_store() {
     for (backend, id) in fixture_backends() {
         let harness = backend.harness();
         let session = located(backend.as_ref(), id);
-        assert!(session.store.is_some(), "{harness}: store coordinate");
+        assert!(session.locator().is_some(), "{harness}: store coordinate");
 
         let first = backend.transcript(&session, usize::MAX).unwrap();
         let second = backend.transcript(&session, usize::MAX).unwrap();
@@ -2867,7 +2869,7 @@ fn a_first_line_longer_than_the_head_probe_still_yields_the_header() {
     let session = located(&backend, id);
     assert_eq!(
         session.started_at,
-        "2026-01-01T10:00:00Z".parse::<DateTime<Utc>>().unwrap()
+        Some("2026-01-01T10:00:00Z".parse::<DateTime<Utc>>().unwrap())
     );
     assert_eq!(
         session.directory.as_deref(),
@@ -2909,7 +2911,7 @@ fn a_first_line_past_the_probe_ceiling_marks_the_start_uncertain() {
     assert!(session.start_uncertain);
     assert_eq!(
         session.started_at,
-        "2026-01-01T12:00:00Z".parse::<DateTime<Utc>>().unwrap(),
+        Some("2026-01-01T12:00:00Z".parse::<DateTime<Utc>>().unwrap()),
         "the earliest record reached"
     );
     let value = serde_json::to_value(&session).unwrap();
@@ -3434,10 +3436,10 @@ fn a_harness_without_usage_detail_omits_every_optional_object() {
         (&pi as &dyn Backend, pi_session),
     ] {
         let view = usage(&backend.transcript(&session, usize::MAX).unwrap());
-        assert!(view.context_window.is_none(), "{}", session.harness);
-        assert!(view.rate_limits.is_none(), "{}", session.harness);
-        assert!(view.durations_ms.is_none(), "{}", session.harness);
-        assert!(view.by_model.is_none(), "{}", session.harness);
+        assert!(view.context_window.is_none(), "{}", session.harness());
+        assert!(view.rate_limits.is_none(), "{}", session.harness());
+        assert!(view.durations_ms.is_none(), "{}", session.harness());
+        assert!(view.by_model.is_none(), "{}", session.harness());
 
         let value = serde_json::to_value(&view).unwrap();
         for absent in ["context_window", "rate_limits", "durations_ms", "by_model"] {
@@ -3517,6 +3519,7 @@ impl Backend for BulkExportFixture {
                 ordinal: 0,
                 native_id: None,
                 request_turn_id: None,
+                record_ref: None,
                 tool: None,
             }],
             truncated: false,
@@ -3674,13 +3677,12 @@ impl Backend for TitleProjection {
     }
     fn list(&self, _: &Query) -> anyhow::Result<Listing> {
         let mut session = resolver_session("shared");
-        session.harness = "opencode".into();
+        session.source = SourceDescriptor::installed("opencode", self.origin);
         session.title = Some(self.title.into());
-        session.store = Some(self.origin.into());
         Ok(Listing::from_sessions(vec![session]))
     }
     fn transcript(&self, session: &Session, _: usize) -> anyhow::Result<Transcript> {
-        assert_eq!(session.store.as_deref(), Some(self.origin));
+        assert_eq!(session.locator(), Some(self.origin));
         Ok(Transcript::new(
             session.clone(),
             vec![],
@@ -3708,7 +3710,7 @@ fn title_resolution_retains_the_first_opencode_projection_even_for_a_nonmatch() 
         harness: Some("opencode"),
     };
     let read = show_with_backends(&backends, selection("first"), 10).unwrap();
-    assert_eq!(read.session.store.as_deref(), Some("primary"));
+    assert_eq!(read.session.locator(), Some("primary"));
     assert!(show_with_backends(&backends, selection("second"), 10)
         .unwrap_err()
         .to_string()

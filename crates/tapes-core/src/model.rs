@@ -7,14 +7,14 @@ use serde_json::Value;
 use crate::event::ToolEvent;
 use crate::usage::UsageDetail;
 
-pub const SESSION_SCHEMA: &str = "tapes-session/2";
+pub const SESSION_SCHEMA: &str = "tapes-session/3";
 /// Maximum length of a title derived from the first user turn.
 pub const DERIVED_TITLE_MAX_CHARS: usize = 96;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Session {
     pub id: String,
-    pub harness: String,
+    pub source: SourceDescriptor,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<Model>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -30,8 +30,10 @@ pub struct Session {
     pub derived_title_truncated: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub directory: Option<PathBuf>,
-    pub started_at: DateTime<Utc>,
-    pub last_activity_at: DateTime<Utc>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<DateTime<Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_activity_at: Option<DateTime<Utc>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub live: Option<LiveState>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -42,11 +44,6 @@ pub struct Session {
     /// Present exactly when at least one of those counters is present.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub accounting: Option<Accounting>,
-    /// Where `tapes` read this session from, as an opaque coordinate: a
-    /// recording file's path, or a store and the endpoint within it. A
-    /// consumer writes it down beside the id and does not parse it.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub store: Option<String>,
     /// True when the recorded start could not be read: the recording is past
     /// the reader's file bound and its opening carried no timestamp. Then
     /// `started_at` is the earliest record the reader reached, and the true
@@ -59,6 +56,108 @@ pub struct Session {
     /// them; the usage projection is where they reach a consumer.
     #[serde(skip)]
     pub usage_detail: Option<UsageDetail>,
+}
+
+/// Whether a normalized session came from a harness-owned recording or from a
+/// caller-supplied export.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SourceKind {
+    InstalledRecording,
+    SuppliedExport,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ScopeAuthority {
+    Declared,
+    Recorded,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SourceScope {
+    pub value: String,
+    pub authority: ScopeAuthority,
+}
+
+/// The opaque source/container coordinate is separate from `Session.id`, which
+/// remains the native conversation or session identity.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SourceLocation {
+    pub locator: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub member: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SourceDescriptor {
+    pub kind: SourceKind,
+    pub origin: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recorded_harness: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scope: Option<SourceScope>,
+    pub representation: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub producer: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub location: Option<SourceLocation>,
+}
+
+impl SourceDescriptor {
+    pub fn installed(harness: &str, locator: impl Into<String>) -> Self {
+        Self {
+            kind: SourceKind::InstalledRecording,
+            origin: harness.to_owned(),
+            recorded_harness: Some(harness.to_owned()),
+            scope: None,
+            representation: format!("{harness}-recording"),
+            producer: Some(harness.to_owned()),
+            location: Some(SourceLocation {
+                locator: locator.into(),
+                member: None,
+            }),
+        }
+    }
+
+    pub fn supplied(
+        origin: &str,
+        representation: &str,
+        producer: Option<&str>,
+        locator: impl Into<String>,
+        scope: Option<SourceScope>,
+    ) -> Self {
+        Self {
+            kind: SourceKind::SuppliedExport,
+            origin: origin.to_owned(),
+            recorded_harness: None,
+            scope,
+            representation: representation.to_owned(),
+            producer: producer.map(str::to_owned),
+            location: Some(SourceLocation {
+                locator: locator.into(),
+                member: None,
+            }),
+        }
+    }
+}
+
+impl Session {
+    /// The harness authority used by existing routing and human labels. A
+    /// supplied export has no recorded harness, so its origin is the label.
+    pub fn harness(&self) -> &str {
+        self.source
+            .recorded_harness
+            .as_deref()
+            .unwrap_or(&self.source.origin)
+    }
+
+    pub fn locator(&self) -> Option<&str> {
+        self.source
+            .location
+            .as_ref()
+            .map(|location| location.locator.as_str())
+    }
 }
 
 /// The present-tense state supplied by the optional harness-status authority.
@@ -151,6 +250,10 @@ pub struct Turn {
     /// the message or item identity that carries the content.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request_turn_id: Option<String>,
+    /// A qualified source coordinate for the record and normalized part this
+    /// turn represents. Presentation ordinals are intentionally separate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub record_ref: Option<RecordRef>,
     /// Harness-neutral tool data used by in-process projections. Session JSON
     /// keeps the harness envelope in `text` as its stable wire contract.
     #[serde(skip)]
@@ -165,7 +268,7 @@ pub struct TrailingRecord {
 }
 
 /// A byte interval in the source descriptor used by one bounded read.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ByteSpan {
     pub start: u64,
     pub end: u64,
@@ -211,6 +314,15 @@ pub struct ReadGap {
 pub struct ReadEvidence {
     pub source_length: u64,
     pub configured_bound: u64,
+    pub coordinate_domain: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_revision: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub producer: Option<String>,
+    pub projection: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub projection_options: Vec<String>,
+    pub observed_at: DateTime<Utc>,
     pub ranges: Vec<ReadRange>,
     /// Decoded source records in read order, with the same absolute spans used
     /// by normalized values.
@@ -218,6 +330,22 @@ pub struct ReadEvidence {
     pub records: Vec<ByteSpan>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub gaps: Vec<ReadGap>,
+}
+
+/// A source identity that is meaningful only within its qualified domain.
+/// File spans are portable across page sizes on an unchanged path, while the
+/// path and opaque revision prevent relocation or rewrite from becoming an
+/// equality claim.
+#[derive(Clone, Debug, Hash, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecordRef {
+    pub domain: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub revision: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub span: Option<ByteSpan>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub native_id: Option<String>,
+    pub part_index: usize,
 }
 
 /// A bounded text observation whose shortening is explicit.
@@ -822,7 +950,7 @@ mod tests {
     fn session() -> Session {
         Session {
             id: "session-1".into(),
-            harness: "codex".into(),
+            source: SourceDescriptor::installed("codex", "/work/recording.jsonl"),
             model: Some(Model {
                 id: "gpt-5.6-sol".into(),
                 variant: Some("high".into()),
@@ -831,8 +959,8 @@ mod tests {
             derived_title: None,
             derived_title_truncated: None,
             directory: Some("/work/tapes".into()),
-            started_at: timestamp(1_700_000_000),
-            last_activity_at: timestamp(1_700_000_100),
+            started_at: Some(timestamp(1_700_000_000)),
+            last_activity_at: Some(timestamp(1_700_000_100)),
             live: None,
             cost: Some(Cost { usd: 0.25 }),
             tokens: Some(Tokens {
@@ -846,7 +974,6 @@ mod tests {
                 basis: AccountingBasis::RecordedTotal,
                 coverage: AccountingCoverage::Session,
             }),
-            store: None,
             start_uncertain: false,
             usage_detail: None,
         }
@@ -878,6 +1005,7 @@ mod tests {
             ordinal: 0,
             native_id: None,
             request_turn_id: None,
+            record_ref: None,
             tool: None,
         };
         let transcript = Transcript {
@@ -986,6 +1114,7 @@ mod tests {
                 ordinal: 0,
                 native_id: None,
                 request_turn_id: None,
+                record_ref: None,
                 tool: None,
             },
             Turn {
@@ -996,6 +1125,7 @@ mod tests {
                 ordinal: 0,
                 native_id: None,
                 request_turn_id: None,
+                record_ref: None,
                 tool: None,
             },
         ]);
@@ -1027,6 +1157,7 @@ mod tests {
             ordinal: 0,
             native_id: None,
             request_turn_id: None,
+            record_ref: None,
             tool: None,
         }]);
         let complete_json = serde_json::to_value(complete).unwrap();
@@ -1043,6 +1174,7 @@ mod tests {
             ordinal: 0,
             native_id: None,
             request_turn_id: None,
+            record_ref: None,
             tool: None,
         }]);
         let shortened_json = serde_json::to_value(shortened).unwrap();
@@ -1065,6 +1197,7 @@ mod tests {
             ordinal: 0,
             native_id: None,
             request_turn_id: None,
+            record_ref: None,
             tool: None,
         }]);
 
@@ -1085,6 +1218,7 @@ mod tests {
             ordinal: 0,
             native_id: None,
             request_turn_id: None,
+            record_ref: None,
             tool: None,
         }]);
 
@@ -1185,6 +1319,7 @@ mod tests {
             ordinal: 12,
             native_id: None,
             request_turn_id: None,
+            record_ref: None,
             tool: None,
         };
         let value = serde_json::to_value(&turn).unwrap();
@@ -1200,10 +1335,9 @@ mod tests {
         assert_eq!(value["native_id"], "msg_1");
         assert_round_trip(&named);
 
-        let mut session = session();
-        session.store = None;
+        let session = session();
         let value = serde_json::to_value(&session).unwrap();
-        assert!(value.get("store").is_none(), "{value}");
+        assert!(value.get("source").is_some(), "{value}");
     }
 
     #[test]

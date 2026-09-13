@@ -874,6 +874,52 @@ fn list_accepts_date_only_activity_bounds_and_omits_absent_bound() {
 }
 
 #[test]
+fn missing_recorded_activity_is_preserved_and_blocks_latest_selection() {
+    let root = TemporaryDirectory::new(
+        std::env::temp_dir().join(format!("tapes-missing-activity-{}", std::process::id())),
+    );
+    let codex = root.path().join("codex");
+    let sessions = codex.join("sessions/2026/01/01");
+    fs::create_dir_all(&sessions).unwrap();
+    let id = "60000000-0000-0000-0000-000000000001";
+    fs::write(
+        sessions.join(format!("rollout-2026-01-01T10-00-00-{id}.jsonl")),
+        format!(
+            "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"{id}\",\"cwd\":\"/fixture\"}}}}\n{{\"type\":\"response_item\",\"payload\":{{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{{\"type\":\"output_text\",\"text\":\"timestamp-free\"}}]}}}}\n"
+        ),
+    )
+    .unwrap();
+    let run = |args: &[&str]| {
+        let mut command = tapes();
+        command.args(args);
+        with_fixture_env(&mut command, &codex, &root.path().join("home"), root.path());
+        command.output().unwrap()
+    };
+    let listed = run(&["list", "--global", "--harness", "codex", "--json"]);
+    assert!(listed.status.success());
+    let listed: Value = serde_json::from_slice(&listed.stdout).unwrap();
+    let row = session(&listed, id);
+    assert!(row.get("started_at").is_none());
+    assert!(row.get("last_activity_at").is_none());
+    assert_eq!(row["source"]["recorded_harness"], "codex");
+
+    let latest = run(&[
+        "show",
+        "--global",
+        "--harness",
+        "codex",
+        "--latest",
+        "--json",
+    ]);
+    assert!(!latest.status.success());
+    assert!(
+        String::from_utf8_lossy(&latest.stderr).contains("no recorded activity timestamp"),
+        "{}",
+        String::from_utf8_lossy(&latest.stderr)
+    );
+}
+
+#[test]
 fn list_rejects_a_non_half_open_activity_window() {
     let cases = [
         ("2026-01-01T10:00:00Z", "2026-01-01T10:00:00Z"),
@@ -1996,7 +2042,7 @@ fn show_gives_every_turn_a_coordinate_a_consumer_can_write_down() {
         assert_eq!(turn["ordinal"], index, "{turn}");
     }
     assert!(
-        whole["session"]["store"]
+        whole["session"]["source"]["location"]["locator"]
             .as_str()
             .unwrap()
             .ends_with(&format!("{id}.jsonl")),
@@ -2028,7 +2074,10 @@ fn show_gives_every_turn_a_coordinate_a_consumer_can_write_down() {
     let listed: Value =
         serde_json::from_slice(&run(&["list", "--global", "--harness", "codex", "--json"]))
             .unwrap();
-    assert_eq!(session(&listed, id)["store"], whole["session"]["store"]);
+    assert_eq!(
+        session(&listed, id)["source"]["location"]["locator"],
+        whole["session"]["source"]["location"]["locator"]
+    );
 
     fs::remove_dir_all(codex_home).unwrap();
 }
@@ -2436,7 +2485,7 @@ fn usage_json_reports_recorded_facts_and_turn_counts_show_agrees_with() {
 
     assert_eq!(value["schema"], "tapes-usage/2");
     assert_eq!(value["session"]["id"], id);
-    assert_eq!(value["session"]["harness"], "codex");
+    assert_eq!(value["session"]["source"]["recorded_harness"], "codex");
     assert_eq!(
         value["tokens"],
         serde_json::json!({
@@ -2919,7 +2968,7 @@ fn endings_applies_the_activity_window_before_reading_any_transcript() {
     );
     for ending in endings {
         assert_eq!(ending["source"]["schema"], "tapes-endings/2");
-        assert_eq!(ending["source"]["harness"], "codex");
+        assert_eq!(ending["source"]["source"]["recorded_harness"], "codex");
         assert_eq!(ending["facts"], serde_json::json!(["assistant-close"]));
         // The structural report carries no transcript text of its own.
         assert!(ending.get("tail").is_none(), "{ending}");
@@ -3144,16 +3193,24 @@ fn stats_json_counts_a_chosen_recording_exactly() {
             "schema": "tapes-stats/2",
             "session": {
                 "id": id,
-                "harness": "codex",
+                "source": {
+                    "kind": "installed-recording",
+                    "origin": "codex",
+                    "recorded_harness": "codex",
+                    "representation": "codex-recording",
+                    "producer": "codex",
+                    "location": {
+                        "locator": root
+                            .path()
+                            .join("codex/sessions/2026/02/02/rollout-2026-02-02T09-00-00-44444444-0000-0000-0000-000000000001.jsonl")
+                            .display()
+                            .to_string()
+                    }
+                },
                 "model": { "id": "gpt-fixture", "variant": "high" },
                 "started_at": "2026-02-02T09:00:00Z",
                 "last_activity_at": "2026-02-02T09:00:16.500Z",
                 "directory": "/fixtures/project",
-                "store": root
-                    .path()
-                    .join("codex/sessions/2026/02/02/rollout-2026-02-02T09-00-00-44444444-0000-0000-0000-000000000001.jsonl")
-                    .display()
-                    .to_string()
             },
             "coverage": { "turns": "session", "pairs": "complete-only" },
             "turns": {
@@ -3790,6 +3847,12 @@ fn history_pages_cover_records_once_and_reject_changed_sources() {
         assert!(page["bytes_read"].as_u64().unwrap() <= 1024);
         assert_eq!(page["skipped_records"], 0);
         assert_eq!(page["skipped_fragment_bytes"], 0);
+        assert_eq!(page["read"]["coordinate_domain"], "file-byte-range");
+        assert_eq!(
+            page["read"]["source_length"],
+            fs::metadata(&path).unwrap().len()
+        );
+        assert!(!page["read"]["records"].as_array().unwrap().is_empty());
         for turn in page["turns"].as_array().unwrap() {
             assert_eq!(turn["kind"], "operator");
             assert!(
@@ -3805,6 +3868,31 @@ fn history_pages_cover_records_once_and_reject_changed_sources() {
         }
     }
     assert_eq!(seen.len(), 40);
+    let small: Value =
+        serde_json::from_slice(&run(&["page", id, "--bytes", "1024", "--json"]).stdout).unwrap();
+    let larger: Value =
+        serde_json::from_slice(&run(&["page", id, "--bytes", "2048", "--json"]).stdout).unwrap();
+    assert_eq!(small["turns"][0]["ordinal"], 0);
+    assert_eq!(larger["turns"][0]["ordinal"], 0);
+    let common = small["turns"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find_map(|turn| {
+            let text = turn["text"].as_str()?;
+            let other = larger["turns"]
+                .as_array()?
+                .iter()
+                .find(|candidate| candidate["text"] == text)?;
+            Some((turn, other))
+        })
+        .expect("the page sizes overlap a record");
+    assert_eq!(common.0["record_ref"], common.1["record_ref"]);
+    assert_eq!(common.0["record_ref"]["part_index"], 0);
+    assert!(
+        common.0["record_ref"]["span"]["end"].as_u64().unwrap()
+            > common.0["record_ref"]["span"]["start"].as_u64().unwrap()
+    );
     let output = run(&["page", id, "--bytes", "1024", "--json"]);
     let first_cursor = serde_json::from_slice::<Value>(&output.stdout).unwrap()["next_cursor"]
         .as_str()

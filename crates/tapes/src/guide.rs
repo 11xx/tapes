@@ -113,7 +113,7 @@ FIND IT
 
 PROBE BEFORE EXPORTING
   tapes show <id> --tail 40      A window, costing no bundle.
-  tapes show <id> --json         The same turns as tapes-session/2, with bounded read and terminal evidence.
+  tapes show <id> --json         The same turns as tapes-session/3, with bounded read and terminal evidence.
   tapes events <id> --json       Typed tool calls, results, pairs, and read boundaries.
   tapes usage <id> --json        Tokens, cost, quota observations, and turn counts.
   tapes stats <id> --json        The same recording, counted with its read evidence.
@@ -206,8 +206,8 @@ PROBE BEFORE EXPORTING
   paged, so a window that stopped fetching (`omitted_exact: false`) numbers
   from the oldest turn it fetched and a wider request renumbers; there the
   durable coordinate is `native_id`, which OpenCode always records. With the
-  harness, the session id, and `session.store` (where tapes read it from,
-  opaque) that is what to write down when filing something a session
+  source descriptor, the session id, and `source.location` (where tapes read
+  it from, opaque) that is what to write down when filing something a session
   produced. Human output prints the ordinal in each turn heading.
 
   When a backend can verify a non-turn record after the newest rendered turn,

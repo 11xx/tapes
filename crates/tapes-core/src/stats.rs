@@ -423,6 +423,7 @@ fn index_calls(records: &[EventRecord]) -> HashMap<PairRef, CallFacts> {
             .entry(PairRef {
                 ordinal: record.ordinal,
                 native_id: record.native_id.clone(),
+                record_ref: record.record_ref.clone(),
             })
             .or_insert_with(|| CallFacts {
                 name: record.event.name.clone(),
@@ -507,25 +508,26 @@ mod tests {
     use super::*;
     use crate::event::{Bounded, ToolEvent};
     use crate::lineage::ChildRef;
-    use crate::model::{AccountingBasis, AccountingCoverage, Role, Session, SourceBound, Turn};
+    use crate::model::{
+        AccountingBasis, AccountingCoverage, Role, Session, SourceBound, SourceDescriptor, Turn,
+    };
 
     fn session() -> Session {
         let ts = Utc.timestamp_opt(1_700_000_000, 0).unwrap();
         Session {
             id: "fixture-session".to_owned(),
-            harness: "fixture".to_owned(),
+            source: SourceDescriptor::installed("fixture", "fixture-recording"),
             model: None,
             title: None,
             derived_title: None,
             derived_title_truncated: None,
             directory: None,
-            started_at: ts,
-            last_activity_at: ts,
+            started_at: Some(ts),
+            last_activity_at: Some(ts),
             live: None,
             cost: None,
             tokens: None,
             accounting: None,
-            store: None,
             start_uncertain: false,
             usage_detail: None,
         }
@@ -545,6 +547,7 @@ mod tests {
             ordinal,
             native_id: Some(format!("native-{ordinal}")),
             request_turn_id: None,
+            record_ref: None,
             tool: None,
         }
     }

@@ -94,6 +94,23 @@ fn brief(backends: &[Box<dyn Backend>], id: &str, tail: usize) -> Brief {
     tapes_core::brief_with_backends(backends, Selection::Id(id), tail).unwrap()
 }
 
+fn strip_record_refs(value: &mut Value) {
+    match value {
+        Value::Object(object) => {
+            object.remove("record_ref");
+            for value in object.values_mut() {
+                strip_record_refs(value);
+            }
+        }
+        Value::Array(values) => {
+            for value in values {
+                strip_record_refs(value);
+            }
+        }
+        _ => {}
+    }
+}
+
 /// The whole object, so every member a continuation reads is pinned: the
 /// coordinate, the working set, the ending, both kinds of handle, and the
 /// bounded tail.
@@ -117,27 +134,37 @@ fn a_brief_states_where_the_session_stopped_and_what_it_left_open() {
         .unwrap()
         .remove("text_tail")
         .unwrap();
+    strip_record_refs(&mut comparable);
     assert_eq!(read["ranges"].as_array().unwrap().len(), 1);
     assert!(read["records"].as_array().unwrap().len() >= 8);
     assert_eq!(text_tail["returned"], 2);
+    let source = json!({
+        "kind": "installed-recording",
+        "origin": "codex",
+        "recorded_harness": "codex",
+        "representation": "codex-recording",
+        "producer": "codex",
+        "location": {
+            "locator": _store.root.join(format!(
+                "2026/01/01/rollout-2026-01-01T10-00-00-{id}.jsonl"
+            )).display().to_string(),
+        },
+    });
     assert_eq!(
         comparable,
         json!({
             "schema": BRIEF_SCHEMA,
             "session": {
                 "id": id,
-                "harness": "codex",
+                "source": source.clone(),
                 "model": { "id": "gpt-fixture" },
                 "derived_title": "Inspect the fixture.",
                 "started_at": "2026-01-01T10:00:00Z",
                 "last_activity_at": "2026-01-01T10:00:06Z",
                 "directory": "/fixtures/project",
-                "store": _store.root.join(format!(
-                    "2026/01/01/rollout-2026-01-01T10-00-00-{id}.jsonl"
-                )).display().to_string(),
             },
             "source": {
-                "harness": "codex",
+                "source": source,
                 "session": id,
                 "ts": "2026-01-01T10:00:06Z",
                 "turn": 4,

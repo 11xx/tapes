@@ -13,7 +13,7 @@
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 
-use crate::model::{Model, Session, Truncation};
+use crate::model::{Model, Session, SourceDescriptor, Truncation};
 
 pub const LINEAGE_SCHEMA: &str = "tapes-lineage/1";
 
@@ -135,15 +135,15 @@ pub enum SourceRef {
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct LineageSession {
     pub id: String,
-    pub harness: String,
+    pub source: SourceDescriptor,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<Model>,
-    pub started_at: DateTime<Utc>,
-    pub last_activity_at: DateTime<Utc>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<DateTime<Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_activity_at: Option<DateTime<Utc>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub directory: Option<std::path::PathBuf>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub store: Option<String>,
 }
 
 /// One session's recorded relationships. Ordinary children are read under
@@ -171,12 +171,11 @@ pub fn view(session: &Session, mut lineage: Lineage) -> LineageView {
         schema: LINEAGE_SCHEMA,
         session: LineageSession {
             id: session.id.clone(),
-            harness: session.harness.clone(),
+            source: session.source.clone(),
             model: session.model.clone(),
             started_at: session.started_at,
             last_activity_at: session.last_activity_at,
             directory: session.directory.clone(),
-            store: session.store.clone(),
         },
         lineage,
         truncated: !truncation.is_empty(),
@@ -191,25 +190,24 @@ mod tests {
     use serde_json::{json, Value};
 
     use super::*;
-    use crate::model::SourceBound;
+    use crate::model::{SourceBound, SourceDescriptor};
 
     fn session() -> Session {
         let ts = Utc.timestamp_opt(1_700_000_000, 0).unwrap();
         Session {
             id: "fixture-session".to_owned(),
-            harness: "fixture".to_owned(),
+            source: SourceDescriptor::installed("fixture", "fixture-recording"),
             model: None,
             title: None,
             derived_title: None,
             derived_title_truncated: None,
             directory: None,
-            started_at: ts,
-            last_activity_at: ts,
+            started_at: Some(ts),
+            last_activity_at: Some(ts),
             live: None,
             cost: None,
             tokens: None,
             accounting: None,
-            store: None,
             start_uncertain: false,
             usage_detail: None,
         }
