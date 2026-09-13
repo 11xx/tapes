@@ -267,7 +267,9 @@ pub fn project(transcript: Transcript, tail: usize) -> EventTranscript {
     let read_was_bounded = transcript.truncation.source.iter().any(|bound| {
         matches!(
             bound,
-            SourceBound::FileTail { .. } | SourceBound::RecordPage { .. }
+            SourceBound::FileTail { .. }
+                | SourceBound::RecordPage { .. }
+                | SourceBound::InputCoverage { .. }
         )
     });
     let mut records = transcript
@@ -1139,6 +1141,7 @@ mod tests {
             ordinal,
             native_id: Some(format!("native-{ordinal}")),
             request_turn_id: None,
+            metadata: None,
             record_ref: None,
             parts: Vec::new(),
             coverage: None,

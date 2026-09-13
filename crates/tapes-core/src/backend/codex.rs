@@ -676,6 +676,7 @@ fn parse_turns(value: &Value, messages: &UserMessages) -> Vec<Turn> {
                 .or_else(|| payload["id"].as_str())
                 .map(str::to_owned),
             request_turn_id: payload["turn_id"].as_str().map(str::to_owned),
+            metadata: None,
             record_ref: None,
             channel: None,
             recipient: None,
@@ -775,6 +776,7 @@ fn parse_turns(value: &Value, messages: &UserMessages) -> Vec<Turn> {
                 .as_str()
                 .or_else(|| payload["context"]["turn_id"].as_str())
                 .map(str::to_owned),
+            metadata: None,
             record_ref: None,
             channel: payload["channel"].as_str().map(str::to_owned),
             recipient: payload["recipient"].as_str().map(str::to_owned),

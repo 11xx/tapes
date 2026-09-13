@@ -123,10 +123,19 @@ turn path. Recognized associated report members retain their bounded bodies and
 citation spans as artifact evidence; a report whose backing conversation is
 unreached remains listed as an artifact with its association unresolved.
 
-The reader applies bounded per-invocation scan, decoded, record, and output
-budgets. Defaults are 512 MiB for source and decoded bytes, 8 MiB per record,
-10,000 members, and 16 MiB serialized output; the byte flags may raise those
-values only to finite ceilings of 8 GiB, 64 MiB, and 64 MiB respectively.
+An OpenAI native directory or ZIP with a root `export_manifest.json` reads only
+the declared conversation shards, library metadata, and manifest-declared
+library `.dat` members. Nested site/account/settings JSON is ignored. Missing,
+corrupt, or size-mismatched declared members are explicit input gaps; an exact
+occurrence can return known evidence with those gaps, while ID and title
+selection refuses incomplete discovery.
+
+The reader applies bounded per-invocation scan, decoded, record, resident, and
+output budgets. Defaults are 512 MiB for source and decoded bytes, 8 MiB per
+record, 512 MiB aggregate resident data, 10,000 members, and 16 MiB serialized
+output; the byte flags may raise those values only to finite ceilings of 8 GiB,
+64 MiB, 8 GiB, and 64 MiB respectively. A result limit never acts as a parser
+budget.
 History-page and child-qualified reads remain installed-recording operations;
 they refuse a supplied export explicitly.
 
@@ -247,7 +256,7 @@ liveness; `text_tail` explains an empty operator/assistant tail. Each turn also
 keeps ordered native content `parts` and a `coverage` summary, so an image,
 file reference, structured artifact, tool payload, or unknown part does not
 disappear merely because it has no readable text.
-JSON output uses the `tapes-session/6` transcript schema, with the optional
+JSON output uses the `tapes-session/7` transcript schema, with the optional
 `live` annotation when the authority answers. The human header marks the same
 state. Supplied mapping exports also carry bounded graph evidence with the
 selected canonical path, retained nodes, and retained parent-child edges.
@@ -307,7 +316,7 @@ inferred from tokens. Human output includes group and total rows, compatible acc
 a mixed-accounting explanation when sums are omitted, and listing diagnostics.
 
 `endings` answers what each session of a selection ends on as
-`tapes-endings/4`, so deciding which endings deserve reading costs one bounded
+`tapes-endings/5`, so deciding which endings deserve reading costs one bounded
 read each rather than a transcript apiece. It takes the same selection flags
 `list` and `export` do, applied before any transcript is opened, plus `--tail`
 for how many of each session's newest turns are read (12 by default) and
@@ -344,7 +353,7 @@ judged, ranked, or explained. Human output prints one line per group and no
 line for a group the recording holds nothing for.
 
 `brief` answers what a continuation of one session needs from its recording as
-`tapes-brief/4`, for the case where resuming the session itself has gone too
+`tapes-brief/5`, for the case where resuming the session itself has gone too
 expensive: where it stopped, the directory it worked in and the commit that
 directory sits on, the tool calls the read never saw a result for, the children
 whose outcome its store does not record, and the last `--tail` operator and
@@ -362,7 +371,7 @@ in one screen, in that reading order.
 
 - `.context.md` — exact operator turns and assistant-visible text, without the
   harness's own commands, notices, and attached context. Read first.
-- `.json` — the canonical `tapes-session/6` object plus turns, cost, tokens,
+- `.json` — the canonical `tapes-session/7` object plus turns, cost, tokens,
   their `accounting` basis and coverage when present, any verified
   `trailing_record`, retained graph/artifact evidence, and the session
   directory's git head and branch when they resolve. Query selectively with
@@ -447,9 +456,9 @@ rather than a resent history. `tapes usage --here --since <date> --json` answers
 <date> --json` says what each of those sessions ends on, so a scan reads the
 few endings that matter instead of every tail.
 
-**Contracts you can build on.** `tapes-list/4`, `tapes-session/6`,
+**Contracts you can build on.** `tapes-list/4`, `tapes-session/7`,
 `tapes-events/4`, `tapes-usage/3`, `tapes-usage-summary/3`, `tapes-lineage/2`,
-`tapes-endings/4`, `tapes-child/2`, `tapes-stats/3`, `tapes-stats-summary/2`, `tapes-brief/4`,
+`tapes-endings/5`, `tapes-child/2`, `tapes-stats/3`, `tapes-stats-summary/2`, `tapes-brief/5`,
 `tapes-page/3`, `tapes-history-search/3`, `tapes-metadata-history/3`,
 and `tapes-export-manifest/4` are versioned
 JSON; a breaking shape change bumps the version. A single-session `export`

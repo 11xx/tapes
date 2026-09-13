@@ -328,7 +328,9 @@ pub(crate) fn search_turns(transcript: &Transcript, needle: &str, tail: usize) -
     let turns_withheld = transcript.truncation.source.iter().any(|bound| {
         matches!(
             bound,
-            SourceBound::FileTail { .. } | SourceBound::RecordPage { .. }
+            SourceBound::FileTail { .. }
+                | SourceBound::RecordPage { .. }
+                | SourceBound::InputCoverage { .. }
         )
     });
     if transcript.turns.len() < tail && turns_withheld {

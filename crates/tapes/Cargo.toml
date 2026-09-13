@@ -19,3 +19,7 @@ zip.workspace = true
 [[test]]
 name = "cli"
 path = "../../tests/cli/main.rs"
+
+[[test]]
+name = "supplied-input-audit"
+path = "../../tests/cli/supplied_input_audit.rs"

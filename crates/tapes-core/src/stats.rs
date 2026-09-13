@@ -554,6 +554,7 @@ mod tests {
             ordinal,
             native_id: Some(format!("native-{ordinal}")),
             request_turn_id: None,
+            metadata: None,
             record_ref: None,
             parts: Vec::new(),
             coverage: None,

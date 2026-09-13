@@ -429,6 +429,11 @@ pub fn parts_from_array(value: &Value, source_field: &str) -> (Vec<ContentPart>,
     let total = parts.len();
     let mut retained = Vec::new();
     for part in parts.iter().take(MAX_CONTENT_PARTS) {
+        if let Some(text) = part.as_str() {
+            let field = format!("{source_field}[{}]", retained.len());
+            retained.push(text_part(text, &field, "text"));
+            continue;
+        }
         let native_kind = part["type"].as_str().unwrap_or("unknown");
         let field = format!("{source_field}[{}]", retained.len());
         let parsed = match native_kind {
@@ -657,6 +662,18 @@ mod tests {
         assert_eq!(parts.len(), MAX_CONTENT_PARTS);
         assert_eq!(coverage.omitted_parts, 3);
         assert_eq!(coverage.omitted_reason.as_deref(), Some("part-count-bound"));
+    }
+
+    #[test]
+    fn empty_part_arrays_have_explicit_empty_coverage() {
+        let (parts, coverage) = parts_from_array(&Value::Array(Vec::new()), "payload.content");
+        assert!(parts.is_empty());
+        assert_eq!(coverage.retained_parts, 0);
+        assert_eq!(coverage.omitted_parts, 0);
+        assert_eq!(
+            coverage.availability,
+            ContentAvailability::UnsupportedRepresentation
+        );
     }
 
     #[test]

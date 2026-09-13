@@ -130,10 +130,18 @@ READ A SUPPLIED EXPORT
   Exact titles are allowed; `--latest` is not, because supplied
   exports do not establish a global newest session.
 
+  A native OpenAI container with a root `export_manifest.json` selects only the
+  declared conversation shards, library metadata, and declared library `.dat`
+  members. Nested site/account/settings JSON is not scanned. Missing,
+  corrupt, or mismatched members remain explicit gaps; ID and title selection
+  refuses incomplete discovery, while an exact `--occurrence` can return the
+  known projection with its gaps.
+
   Source, member, pointer, and byte-span evidence stays attached to the
-  normalized result. Scan, decoded, record, member, and serialized-output
-  budgets are finite and configurable with `--scan-bytes`, `--decoded-bytes`,
-  `--record-bytes`, and `--output-bytes`. Oversized records and malformed
+  normalized result. Scan, decoded, record, member, resident, and
+  serialized-output budgets are finite and configurable with `--scan-bytes`,
+  `--decoded-bytes`, `--record-bytes`, `--resident-bytes`, and `--output-bytes`.
+  Oversized records and malformed
   members are reported as gaps or diagnostics while synchronization remains
   possible. A partial scan never becomes a not-found claim. Referenced files,
   media, and ZIP members are not opened or extracted; unsupported history-page
@@ -144,7 +152,7 @@ READ A SUPPLIED EXPORT
 
 PROBE BEFORE EXPORTING
   tapes show <id> --tail 40      A window, costing no bundle.
-  tapes show <id> --json         The same turns as tapes-session/6, with bounded read, graph, artifact, and terminal evidence.
+  tapes show <id> --json         The same turns as tapes-session/7, with bounded read, graph, artifact, and terminal evidence.
   tapes events <id> --json       Typed tool calls, results, pairs, and content parts.
   tapes usage <id> --json        Tokens, cost, quota observations, and turn counts.
   tapes stats <id> --json        The same recording, counted with its read evidence.
@@ -303,7 +311,7 @@ READ MANY ENDINGS
   tapes endings --global --harness codex --limit 50 --text
 
   endings answers what each session of a selection ends on, as
-  tapes-endings/4, so choosing which few endings deserve reading costs one
+  tapes-endings/5, so choosing which few endings deserve reading costs one
   bounded read each instead of a transcript apiece. The selection is the one
   list and export take, and the scope and filters apply before any transcript
   is opened. --tail sets how many of each session's newest turns are read (12
@@ -385,7 +393,7 @@ CONTINUE A COLD SESSION
   tapes brief <id> --tail 20 --json
 
   A continuation has two halves. brief is the transcript's half, as
-  tapes-brief/4: where the session stopped, the directory it worked in and the
+  tapes-brief/5: where the session stopped, the directory it worked in and the
   commit that directory sits on, the tool calls the read never saw a result
   for, the children whose outcome its store does not record, and the last few
   operator and assistant turns, each cut at 600 characters. --tail sets how
