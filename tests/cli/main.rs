@@ -26,6 +26,16 @@ const CODEX_SESSION_TERMINAL_ONLY: &str = concat!(
     "{\"timestamp\":\"2026-01-01T15:00:02Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\",\"turn_id\":\"turn-terminal-only\",\"outcome\":\"success\",\"duration_ms\":1250}}\n",
     "{\"timestamp\":\"2026-01-01T15:00:03Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":null,\"rate_limits\":null}}\n"
 );
+const CODEX_SESSION_INVOCATIONS: &str = concat!(
+    "{\"timestamp\":\"2026-01-01T16:00:00Z\",\"type\":\"session_meta\",\"payload\":{\"id\":\"00000000-0000-0000-0000-000000000007\",\"session_id\":\"00000000-0000-0000-0000-000000000007\",\"cwd\":\"/fixtures/project\",\"model_provider\":\"openai\"}}\n",
+    "{\"timestamp\":\"2026-01-01T16:00:01Z\",\"type\":\"turn_context\",\"payload\":{\"cwd\":\"/fixtures/project\",\"model\":\"gpt-fixture\",\"effort\":\"high\"}}\n",
+    "{\"timestamp\":\"2026-01-01T16:00:02Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"function_call\",\"name\":\"exec\",\"arguments\":\"{\\\"cmd\\\":\\\"git status && cargo test\\\",\\\"path\\\":\\\"/canary\\\",\\\"digest\\\":\\\"digest-a\\\",\\\"bytes\\\":4,\\\"why\\\":\\\"verify the fixture\\\"}\",\"call_id\":\"call-shell\"}}\n",
+    "{\"timestamp\":\"2026-01-01T16:00:03Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"function_call_output\",\"call_id\":\"call-shell\",\"output\":\"{\\\"path\\\":\\\"/canary\\\",\\\"digest\\\":\\\"digest-a\\\",\\\"bytes\\\":4}\"}}\n",
+    "{\"timestamp\":\"2026-01-01T16:00:04Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"function_call\",\"name\":\"orchestrator\",\"arguments\":\"await tools.exec_command({cmd: \\\"python -m pytest\\\", why: \\\"run tests\\\"});\",\"call_id\":\"call-js\"}}\n",
+    "{\"timestamp\":\"2026-01-01T16:00:05Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"function_call\",\"name\":\"orchestrator\",\"arguments\":\"const cmd = \\\"git status\\\"; tools.exec_command({cmd});\",\"call_id\":\"call-dynamic\"}}\n",
+    "{\"timestamp\":\"2026-01-01T16:00:06Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"item_completed\",\"item\":{\"type\":\"command_execution\",\"id\":\"runtime-1\",\"parsed_cmd\":[\"sh\",\"-c\",\"echo ok\"],\"command\":\"sh -c 'echo ok'\",\"status\":\"completed\",\"stdout\":\"ok\"}}}\n",
+    "{\"timestamp\":\"2026-01-01T16:00:07Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\"}}\n"
+);
 
 fn tapes() -> Command {
     Command::new(env!("CARGO_BIN_EXE_tapes"))
@@ -59,6 +69,21 @@ fn terminal_only_fixture_store(name: &str) -> (PathBuf, PathBuf) {
     fs::write(
         sessions.join("rollout-2026-01-01T15-00000000-0000-0000-0000-000000000006.jsonl"),
         CODEX_SESSION_TERMINAL_ONLY,
+    )
+    .unwrap();
+    (root.clone(), root.join("home"))
+}
+
+fn invocation_fixture_store(name: &str) -> (PathBuf, PathBuf) {
+    let root = std::env::temp_dir().join(format!(
+        "tapes-cli-invocations-{name}-{}",
+        std::process::id()
+    ));
+    let sessions = root.join("sessions/2026/01/01");
+    fs::create_dir_all(&sessions).unwrap();
+    fs::write(
+        sessions.join("rollout-2026-01-01T16-00000000-0000-0000-0000-000000000007.jsonl"),
+        CODEX_SESSION_INVOCATIONS,
     )
     .unwrap();
     (root.clone(), root.join("home"))
@@ -835,7 +860,8 @@ fn events_help_explains_pairing_filters_and_the_default_bound() {
     );
     assert!(help.contains("--name <NAME>"), "{help}");
     assert!(help.contains("--call-id <ID>"), "{help}");
-    assert!(help.contains("tapes-events/3"), "{help}");
+    assert!(help.contains("--program <PROGRAM>"), "{help}");
+    assert!(help.contains("tapes-events/4"), "{help}");
 }
 
 #[test]
@@ -888,7 +914,7 @@ fn events_json_answers_call_counts_and_incomplete_calls_without_raw_text() {
     );
     let value: Value = serde_json::from_slice(&output.stdout).unwrap();
 
-    assert_eq!(value["schema"], "tapes-events/3");
+    assert_eq!(value["schema"], "tapes-events/4");
     assert_eq!(value["session"]["id"], id);
     assert!(value.get("truncation").is_none(), "{value}");
     assert_eq!(
@@ -1024,6 +1050,150 @@ fn events_filters_after_pairing_and_tail_uses_show_ordinals() {
         "{human}"
     );
     assert!(human.contains("Showing the last 1 of 6 turns"), "{human}");
+}
+
+#[test]
+fn events_expose_nested_declarations_and_qualified_artifact_consumption() {
+    let (codex_home, home) = invocation_fixture_store("projection");
+    let id = "00000000-0000-0000-0000-000000000007";
+    let mut command = tapes();
+    command.args(["events", id, "--json"]);
+    with_fixture_env(
+        &mut command,
+        &codex_home,
+        &home,
+        Path::new("/definitely/missing"),
+    );
+    let output = command.output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["schema"], "tapes-events/4");
+    let events = value["events"].as_array().unwrap();
+    let shell_call = events
+        .iter()
+        .find(|event| event["call_id"] == "call-shell" && event["kind"] == "tool-call")
+        .unwrap();
+    let invocations = shell_call["invocations"].as_array().unwrap();
+    assert_eq!(
+        invocations
+            .iter()
+            .map(|invocation| invocation["program"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["git", "cargo"]
+    );
+    assert_eq!(invocations[0]["coverage"], "conditional-declaration");
+    assert_eq!(invocations[0]["intent"]["text"], "verify the fixture");
+    assert!(invocations[0]["witnessed_result"].is_object());
+    assert!(invocations[0].get("duration_ms").is_none());
+    assert_eq!(shell_call["duration_ms"], 1_000);
+    assert_eq!(shell_call["artifact_references"][0]["path"], "/canary");
+    assert_eq!(
+        shell_call["artifact_consumptions"][0]["status"],
+        "matching-consumption-observed"
+    );
+    assert!(shell_call["artifact_consumptions"][0]["consumer"].is_object());
+
+    let js_call = events
+        .iter()
+        .find(|event| event["call_id"] == "call-js" && event["kind"] == "tool-call")
+        .unwrap();
+    assert_eq!(js_call["invocations"][0]["program"], "python");
+    assert!(js_call["invocations"][0]["span"].is_object());
+    assert_eq!(js_call["invocations"][0]["intent"]["text"], "run tests");
+
+    let dynamic = events
+        .iter()
+        .find(|event| event["call_id"] == "call-dynamic")
+        .unwrap();
+    assert_eq!(dynamic["invocations"][0]["coverage"], "unsupported");
+    assert!(dynamic["invocations"][0]["unsupported_reason"]
+        .as_object()
+        .is_some());
+
+    let runtime = events
+        .iter()
+        .find(|event| event["call_id"] == "runtime-1")
+        .unwrap();
+    assert_eq!(runtime["invocations"][0]["origin"], "structured-runtime");
+    assert_eq!(runtime["invocations"][0]["program"], "sh");
+    assert_eq!(runtime["name"], "command_execution");
+
+    let mut filtered = tapes();
+    filtered.args(["events", id, "--program", "cargo", "--json"]);
+    with_fixture_env(
+        &mut filtered,
+        &codex_home,
+        &home,
+        Path::new("/definitely/missing"),
+    );
+    let filtered = filtered.output().unwrap();
+    assert!(filtered.status.success());
+    let filtered: Value = serde_json::from_slice(&filtered.stdout).unwrap();
+    assert_eq!(filtered["events"].as_array().unwrap().len(), 2);
+    assert!(filtered["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|event| event["kind"] == "tool-call" && event["call_id"] == "call-shell"));
+
+    let mut wrong_name = tapes();
+    wrong_name.args(["events", id, "--name", "git", "--json"]);
+    with_fixture_env(
+        &mut wrong_name,
+        &codex_home,
+        &home,
+        Path::new("/definitely/missing"),
+    );
+    let wrong_name = wrong_name.output().unwrap();
+    assert!(wrong_name.status.success());
+    let wrong_name: Value = serde_json::from_slice(&wrong_name.stdout).unwrap();
+    assert!(wrong_name["events"].as_array().unwrap().is_empty());
+
+    let bundle_root = TemporaryDirectory::new(
+        std::env::temp_dir().join(format!("tapes-invocation-bundle-{}", std::process::id())),
+    );
+    let mut export = tapes();
+    export
+        .args(["export", id, "--bundle"])
+        .arg(bundle_root.path());
+    with_fixture_env(
+        &mut export,
+        &codex_home,
+        &home,
+        Path::new("/definitely/missing"),
+    );
+    let export = export.output().unwrap();
+    assert!(export.status.success());
+    let bundle_json = fs::read_dir(bundle_root.path())
+        .unwrap()
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .find(|path| {
+            path.extension()
+                .is_some_and(|extension| extension == "json")
+        })
+        .unwrap();
+    let bundle: Value = serde_json::from_slice(&fs::read(&bundle_json).unwrap()).unwrap();
+    assert!(bundle["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|event| event["invocations"].is_array()));
+    let trace = fs::read_dir(bundle_root.path())
+        .unwrap()
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .find(|path| {
+            path.extension().is_some_and(|extension| extension == "md")
+                && path.to_string_lossy().contains("trace")
+        })
+        .unwrap();
+    assert!(String::from_utf8_lossy(&fs::read(trace).unwrap()).contains("invocation:"));
+    fs::remove_dir_all(codex_home).unwrap();
 }
 
 #[test]

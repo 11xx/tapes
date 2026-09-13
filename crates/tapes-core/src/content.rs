@@ -431,16 +431,25 @@ fn unknown_part(value: &Value, source_field: &str, native_kind: &str) -> Content
 }
 
 pub fn artifact_reference(value: &Value, kind: &str) -> Option<ArtifactReference> {
+    value
+        .as_object()
+        .and_then(|value| artifact_reference_object(value, kind))
+}
+
+pub fn artifact_reference_object(
+    value: &serde_json::Map<String, Value>,
+    kind: &str,
+) -> Option<ArtifactReference> {
     let uri = ["uri", "url", "href"]
         .into_iter()
-        .find_map(|key| value[key].as_str().map(str::to_owned));
-    let path = value["path"].as_str().map(str::to_owned);
+        .find_map(|key| value.get(key).and_then(Value::as_str).map(str::to_owned));
+    let path = value.get("path").and_then(Value::as_str).map(str::to_owned);
     let digest = ["digest", "sha256", "file_id", "fileId"]
         .into_iter()
-        .find_map(|key| value[key].as_str().map(str::to_owned));
+        .find_map(|key| value.get(key).and_then(Value::as_str).map(str::to_owned));
     let bytes = ["bytes", "size", "byte_count"]
         .into_iter()
-        .find_map(|key| value[key].as_u64());
+        .find_map(|key| value.get(key).and_then(Value::as_u64));
     (uri.is_some() || path.is_some() || digest.is_some() || bytes.is_some()).then_some(
         ArtifactReference {
             kind: kind.to_owned(),

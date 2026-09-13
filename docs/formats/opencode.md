@@ -105,6 +105,13 @@ call's turn ordinal and pairing key. A `pending` or `running` state has no
 result projection. Structured payloads are serialized as compact JSON before
 their bounded metadata is built.
 
+If a tool input carries a literal command or argv, the events view may retain
+a nested program declaration with static-literal coverage. The declaration is
+not an additional OpenCode call and never receives the wrapper's timing or
+status. Explicit artifact references are descriptors only; a consumption is
+reported only when a qualified result repeats the same reference in the
+bounded read.
+
 ## 2. Debug JSON export (`info` + `events`)
 
 Same export with the debug toggle: the raw durable event log.

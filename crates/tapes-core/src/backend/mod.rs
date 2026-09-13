@@ -1076,6 +1076,17 @@ pub(crate) fn attach_record_refs(
         for (part_index, part) in turn.parts.iter_mut().enumerate() {
             part.set_record_ref_part(reference.clone(), part_index);
         }
+        if let Some(tool) = turn.tool.as_mut() {
+            for invocation in &mut tool.invocations {
+                invocation.record_ref = Some(reference.clone());
+            }
+            for artifact in &mut tool.artifact_references {
+                artifact.source = Some(reference.clone());
+            }
+            for consumption in &mut tool.artifact_consumptions {
+                consumption.reference.source = Some(reference.clone());
+            }
+        }
     }
 }
 

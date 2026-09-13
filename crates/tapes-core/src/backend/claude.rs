@@ -995,6 +995,7 @@ fn is_element(text: &str, tag: &str) -> bool {
 
 fn claude_tool_event(block: &Value, subtype: &str) -> ToolEvent {
     let call = subtype == "tool_use";
+    let argument_value = block.get("input").cloned().unwrap_or(Value::Null);
     ToolEvent {
         kind: if call {
             EventKind::ToolCall
@@ -1018,6 +1019,21 @@ fn claude_tool_event(block: &Value, subtype: &str) -> ToolEvent {
             .then(|| Bounded::from_value(&block["content"]))
             .flatten(),
         completed_ts: None,
+        invocations: if call {
+            crate::event::invocations_from_tool(
+                block["name"].as_str(),
+                &argument_value,
+                "tool.input",
+            )
+        } else {
+            Vec::new()
+        },
+        artifact_references: if call {
+            crate::event::artifact_references(&argument_value)
+        } else {
+            crate::event::artifact_references(&block["content"])
+        },
+        artifact_consumptions: Vec::new(),
     }
 }
 

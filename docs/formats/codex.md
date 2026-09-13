@@ -213,3 +213,16 @@ real rollout.
 The transcript reader consults the bounded opening header for `source=exec`
 evidence even when the header is outside the source tail. Opening turns are
 not added to the returned transcript.
+
+## Runtime and nested command evidence
+
+Codex `item_started` and `item_completed` records retain structured command
+argv when the native `parsed_cmd` field supplies it. The resulting invocation
+is marked `structured-runtime`; its outcome and timing remain on the outer
+event pairing. A function-call argument carrying a literal `cmd` or `argv`
+is retained as a static declaration. Literal `tools.exec_command({cmd: ...})`
+forms inside a recorded orchestration string are inspected without executing
+JavaScript. Variables, substitutions, heredocs, loops, and conditional forms
+remain qualified coverage rather than child executions. Artifact references in
+structured arguments or results are descriptors and are matched only within
+the same qualified read.

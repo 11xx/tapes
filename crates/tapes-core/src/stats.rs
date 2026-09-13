@@ -580,6 +580,9 @@ mod tests {
             arguments: Some(Bounded::from_text("{}")),
             output: None,
             completed_ts: None,
+            invocations: Vec::new(),
+            artifact_references: Vec::new(),
+            artifact_consumptions: Vec::new(),
         }
     }
 
@@ -593,6 +596,9 @@ mod tests {
             arguments: None,
             output: Some(Bounded::from_text("done")),
             completed_ts: None,
+            invocations: Vec::new(),
+            artifact_references: Vec::new(),
+            artifact_consumptions: Vec::new(),
         }
     }
 

@@ -579,6 +579,13 @@ fn pi_call_event(block: &Value) -> ToolEvent {
         arguments: Bounded::from_value(&block["arguments"]),
         output: None,
         completed_ts: None,
+        invocations: crate::event::invocations_from_tool(
+            block["name"].as_str(),
+            &block["arguments"],
+            "toolCall.arguments",
+        ),
+        artifact_references: crate::event::artifact_references(&block["arguments"]),
+        artifact_consumptions: Vec::new(),
     }
 }
 
@@ -592,5 +599,8 @@ fn pi_result_event(message: &Value) -> ToolEvent {
         arguments: None,
         output: Bounded::from_value(&message["content"]),
         completed_ts: None,
+        invocations: Vec::new(),
+        artifact_references: crate::event::artifact_references(&message["content"]),
+        artifact_consumptions: Vec::new(),
     }
 }

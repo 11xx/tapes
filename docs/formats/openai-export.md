@@ -72,7 +72,7 @@ listing only when the source revision matches the observation that emitted the
 coordinate; changed input refuses continuation.
 
 The normal output contracts remain versioned (`tapes-list/2`,
-`tapes-session/4`, `tapes-events/3`, `tapes-brief/3`, `tapes-endings/3`,
+`tapes-session/4`, `tapes-events/4`, `tapes-brief/3`, `tapes-endings/3`,
 `tapes-stats/3`, `tapes-usage/3`, and `tapes-export-manifest/2`). History-page
 and child-qualified operations are installed-recording capabilities and
 refuse supplied exports rather than interpreting an export as JSONL history.

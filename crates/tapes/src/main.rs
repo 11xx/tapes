@@ -672,7 +672,11 @@ enum Command {
         /// Match the recorded tool call identifier exactly. Repeatable.
         #[arg(long, value_name = "ID")]
         call_id: Vec<String>,
-        /// Render the versioned tapes-events/3 object as JSON.
+        /// Match a declared or structured nested program exactly. Repeatable;
+        /// this never aliases the recorded outer tool name.
+        #[arg(long, value_name = "PROGRAM")]
+        program: Vec<String>,
+        /// Render the versioned tapes-events/4 object as JSON.
         #[arg(long)]
         json: bool,
     },
@@ -1128,6 +1132,7 @@ fn dispatch(cli: Cli) -> Result<()> {
             tail,
             name,
             call_id,
+            program,
             json,
         } => {
             selection.validate_input()?;
@@ -1144,7 +1149,7 @@ fn dispatch(cli: Cli) -> Result<()> {
                 liveness::annotate(std::slice::from_mut(&mut events.session));
                 events
             };
-            events.retain(&name, &call_id);
+            events.retain_with_program(&name, &call_id, &program);
             if json {
                 print_json(&events, &selection.input)?;
             } else {
@@ -2227,12 +2232,22 @@ fn render_event(record: &EventRecord) -> String {
         (_, _, Some(_)) => "paired".to_owned(),
         _ => "-".to_owned(),
     };
-    format!(
+    let mut rendered = format!(
         "{heading} {} {} {} {outcome}",
         record.event.name.as_deref().unwrap_or("-"),
         record.event.call_id.as_deref().unwrap_or("-"),
         record.event.status.as_deref().unwrap_or("-")
-    )
+    );
+    for invocation in &record.event.invocations {
+        rendered.push_str(&format!(
+            " declared:{}",
+            invocation.program.as_deref().unwrap_or("unknown")
+        ));
+    }
+    for consumption in &record.event.artifact_consumptions {
+        rendered.push_str(&format!(" artifact:{:?}", consumption.status));
+    }
+    rendered
 }
 
 fn incomplete_label(incomplete: &Incomplete) -> &'static str {

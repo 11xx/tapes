@@ -53,6 +53,12 @@ conversation or session identity; it is not a path, archive member, or global
 identity outside the descriptor's scope. Supplied sources also carry an opaque
 `occurrence` coordinate, so repeated native IDs remain separate observations.
 
+`Session.metadata` retains provider-specific source facts that do not identify
+the model or prove an outcome. Perplexity supplies collection, mode, engine,
+status, and label values when recorded. The same metadata is carried by the
+brief, ending, lineage, stats, and usage identity projections; absent values
+remain omitted.
+
 Caller-supplied inputs use `--input PATH` one or more times with optional
 `--input-format auto|openai|chatgpt-exporter|perplexity` and `--source-scope`.
 The reader
@@ -197,6 +203,22 @@ keep only facts the record supplies. Call arguments and result output use a
 characters. A string is measured as written, while an object or array is first
 serialized as compact JSON. The preview always ends on a character boundary.
 
+`invocations` are bounded declarations nested inside the outer recorded tool
+event. Structured runtime argv is marked `structured-runtime`; literal shell
+and JavaScript forms are marked `static-declaration`. Each declaration keeps
+its program, subcommand, bounded arguments, source field/span, coverage, and
+optional intent. Variables, interpolation, heredocs, loops, and conditional
+execution remain unsupported or conditional; declarations never inherit a
+wrapper's duration or success. `events --program` selects these exact program
+names while `--name` continues to select the outer recorded tool.
+
+`artifact_references` are explicit structured descriptors, never path-like
+text guesses. A paired result can attach an
+`artifact_consumptions` entry with `matching-consumption-observed` only when
+the qualified reference matches. Otherwise the entry says
+`no-matching-consumption-observed-in-read`; neither status claims byte delivery
+or perception, and no referenced object is opened.
+
 OpenCode records a call and its outcome in one `tool` part. Its turn carries a
 call event with the state output, native status, and completion timestamp. The
 event projection emits a result record from that same event when the state is
@@ -219,7 +241,7 @@ An unpaired event carries one `incomplete` reason:
 | `call-before-read-bound` | A `file-tail` or `record-page` source bound can hide the call for this result. |
 | `call-not-recorded` | The read reached the recording's start and contains no call for this result. |
 
-`tapes events` serializes the projection as `tapes-events/3`. The object holds
+`tapes events` serializes the projection as `tapes-events/4`. The object holds
 the same `Session` representation as `show`, the event records, complete and
 incomplete pair counts, and the transcript's truncation and notes. A
 `--tail N` window keeps events whose turn ordinals are in the final `N` turns;
@@ -235,7 +257,7 @@ fetched.
 
 ```json
 {
-  "schema": "tapes-events/3",
+  "schema": "tapes-events/4",
   "session": {
     "id": "session-1",
     "source": {

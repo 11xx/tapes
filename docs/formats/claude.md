@@ -199,6 +199,13 @@ recorded as zero.
 
 `tool_use.input` is whatever the assistant passed to the tool — for `Bash`, it's `{ "command": "..." }`; for `Read`, `{ "file_path": "..." }`; etc. The `id` matches `tool_result.tool_use_id` in the next user message.
 
+When a tool input carries a literal command or argv object, `events` may retain
+its nested program declaration separately from the recorded outer tool name.
+Dynamic shell syntax remains qualified unsupported coverage. Structured file or
+media references in a tool input or result are descriptors only; the reader
+does not open them and reports a matching consumption only for an exact
+qualified reference in the bounded result.
+
 ## `type: "system"`
 
 `message.subtype` discriminates:

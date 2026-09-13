@@ -1817,6 +1817,13 @@ fn opencode_tool_event(part: &Value) -> ToolEvent {
         arguments: Bounded::from_value(&state["input"]),
         output,
         completed_ts: epoch_millis(&part["time"]["completed"]),
+        invocations: crate::event::invocations_from_tool(
+            part["name"].as_str().or_else(|| part["tool"].as_str()),
+            &state["input"],
+            "part.state.input",
+        ),
+        artifact_references: crate::event::artifact_references(&state["input"]),
+        artifact_consumptions: Vec::new(),
     }
 }
 

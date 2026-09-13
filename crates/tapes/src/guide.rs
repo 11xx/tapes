@@ -163,11 +163,16 @@ PROBE BEFORE EXPORTING
   Human output says the same in its closing notes, recommending only the
   recovery that works.
 
-  events projects harness-neutral tool records as tapes-events/3. Pairing is
+  events projects harness-neutral tool records as tapes-events/4. Pairing is
   exact within the bounded read; an incomplete call or result says whether its
   counterpart was not reached or not recorded. Event ordinals are the same
   turn coordinates show prints. With no --tail, every event the bounded reader
-  reaches is returned; --name and --call-id filter only after pairing.
+  reaches is returned; --name and --call-id filter only after pairing. `--program`
+  filters exact nested literal or structured-runtime declarations while
+  `--name` continues to mean the recorded outer tool. Dynamic syntax remains
+  qualified evidence and never becomes an executed child call. Explicit
+  artifact references and within-read consumption observations are descriptors;
+  tapes never opens the named object.
 
   usage answers where a session's quota went as tapes-usage/3: its recorded
   tokens, cost, and accounting, and its turns counted by role. Read accounting
