@@ -463,7 +463,18 @@ pub(crate) struct Recording {
     pub head: Vec<Value>,
     pub head_spans: Vec<ByteSpan>,
     pub head_read_end: u64,
+    pub head_gaps: Vec<ReadGap>,
     pub tail: Jsonl,
+}
+
+/// The bounded opening probe's decoded records, successful spans, physical
+/// read end, and parsing gaps.
+#[derive(Default)]
+pub(crate) struct HeadJsonl {
+    pub values: Vec<Value>,
+    pub spans: Vec<ByteSpan>,
+    pub read_end: u64,
+    pub gaps: Vec<ReadGap>,
 }
 
 impl Recording {
@@ -507,19 +518,19 @@ pub(crate) fn read_recording(path: &Path) -> Result<Recording> {
     let metadata = file.metadata()?;
     let tail = read_jsonl_from(&mut file, &metadata)?;
     let head = if tail.truncated {
-        let (values, spans, read_end) = head_jsonl_from(&mut file, tail.source_length)?;
-        (values, spans, read_end)
+        head_jsonl_from(&mut file, tail.source_length)?
     } else {
-        (Vec::new(), Vec::new(), 0)
+        HeadJsonl::default()
     };
     let after = file.metadata()?;
     if !same_source(&metadata, &after) {
         anyhow::bail!("recording source changed during the read; restart without a cursor");
     }
     Ok(Recording {
-        head: head.0,
-        head_spans: head.1,
-        head_read_end: head.2,
+        head: head.values,
+        head_spans: head.spans,
+        head_read_end: head.read_end,
+        head_gaps: head.gaps,
         tail,
     })
 }
@@ -700,16 +711,13 @@ pub(crate) fn head_jsonl(path: &Path) -> Vec<Value> {
     let Ok(metadata) = file.metadata() else {
         return Vec::new();
     };
-    let Ok((values, _, _)) = head_jsonl_from(&mut file, metadata.len()) else {
+    let Ok(head) = head_jsonl_from(&mut file, metadata.len()) else {
         return Vec::new();
     };
-    values
+    head.values
 }
 
-fn head_jsonl_from(
-    file: &mut File,
-    source_length: u64,
-) -> Result<(Vec<Value>, Vec<ByteSpan>, u64)> {
+pub(crate) fn head_jsonl_from(file: &mut File, source_length: u64) -> Result<HeadJsonl> {
     file.seek(SeekFrom::Start(0))?;
     // The probe grows only while it holds no complete line, so a store of
     // ordinary files costs one small read each and a file whose first record
@@ -737,12 +745,13 @@ fn head_jsonl_from(
     } else {
         &bytes
     };
-    let (values, spans, _, _) = parse_jsonl_records(complete, 0);
-    Ok((
+    let (values, spans, _, gaps) = parse_jsonl_records(complete, 0);
+    Ok(HeadJsonl {
         values,
         spans,
-        bytes.len().min(source_length as usize) as u64,
-    ))
+        read_end: bytes.len().min(source_length as usize) as u64,
+        gaps,
+    })
 }
 
 /// The working directory a session recorded, read from the file's opening
@@ -1015,6 +1024,7 @@ pub(crate) fn read_evidence(read: &Jsonl) -> ReadEvidence {
             },
         }],
         records: read.spans.clone(),
+        context_records: Vec::new(),
         gaps: read.gaps.clone(),
     }
 }
@@ -1037,8 +1047,12 @@ pub(crate) fn recording_evidence(recording: &Recording) -> ReadEvidence {
             end: recording.tail.read_end,
         },
     });
-    let mut records = recording.head_spans.clone();
-    records.extend(recording.tail.spans.iter().copied());
+    let records = recording.tail.spans.clone();
+    let context_records = recording.head_spans.clone();
+    let covered_head = [ByteSpan {
+        start: 0,
+        end: recording.head_read_end,
+    }];
     ReadEvidence {
         source_length: recording.tail.source_length,
         configured_bound: recording.tail.configured_bound,
@@ -1050,8 +1064,84 @@ pub(crate) fn recording_evidence(recording: &Recording) -> ReadEvidence {
         observed_at: Utc::now(),
         ranges,
         records,
-        gaps: recording.tail.gaps.clone(),
+        context_records,
+        gaps: subtract_covered_ranges(
+            &recording
+                .head_gaps
+                .iter()
+                .chain(&recording.tail.gaps)
+                .cloned()
+                .collect::<Vec<_>>(),
+            &covered_head,
+            &recording.head_spans,
+        ),
     }
+}
+
+/// Remove bytes from genuine unread-region gaps. Parsing failures remain
+/// unless a successful record span proves the same partial record whole.
+pub(crate) fn subtract_covered_ranges(
+    gaps: &[ReadGap],
+    covered: &[ByteSpan],
+    successful_records: &[ByteSpan],
+) -> Vec<ReadGap> {
+    let mut normalized = Vec::new();
+    for gap in gaps {
+        if gap.reason == "discarded-partial-record"
+            && successful_records
+                .iter()
+                .any(|record| record.start <= gap.span.start && record.end >= gap.span.end)
+        {
+            continue;
+        }
+        if gap.reason != "outside-configured-tail-bound" {
+            normalized.push(gap.clone());
+            continue;
+        }
+        let mut remainder = vec![gap.span];
+        for cover in covered {
+            remainder = remainder
+                .into_iter()
+                .flat_map(|span| {
+                    if span.end <= cover.start || span.start >= cover.end {
+                        return vec![span];
+                    }
+                    let mut pieces = Vec::with_capacity(2);
+                    if span.start < cover.start {
+                        pieces.push(ByteSpan {
+                            start: span.start,
+                            end: cover.start,
+                        });
+                    }
+                    if span.end > cover.end {
+                        pieces.push(ByteSpan {
+                            start: cover.end,
+                            end: span.end,
+                        });
+                    }
+                    pieces
+                })
+                .collect();
+        }
+        normalized.extend(
+            remainder
+                .into_iter()
+                .filter(|span| !span.is_empty())
+                .map(|span| ReadGap {
+                    span,
+                    reason: gap.reason.clone(),
+                }),
+        );
+    }
+    normalized.sort_by(|left, right| {
+        (left.span.start, left.span.end, &left.reason).cmp(&(
+            right.span.start,
+            right.span.end,
+            &right.reason,
+        ))
+    });
+    normalized.dedup_by(|left, right| left.span == right.span && left.reason == right.reason);
+    normalized
 }
 
 pub(crate) fn terminal_from_values(
@@ -1075,10 +1165,11 @@ pub(crate) fn attach_record_refs(
             native_id: turn.native_id.clone(),
             pointer: None,
             part_index,
+            content_part_index: None,
         };
         turn.record_ref = Some(reference.clone());
-        for (part_index, part) in turn.parts.iter_mut().enumerate() {
-            part.set_record_ref_part(reference.clone(), part_index);
+        for (content_part_index, part) in turn.parts.iter_mut().enumerate() {
+            part.set_record_ref_part(reference.clone(), content_part_index);
         }
         if let Some(tool) = turn.tool.as_mut() {
             for invocation in &mut tool.invocations {

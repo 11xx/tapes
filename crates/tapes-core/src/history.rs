@@ -1,4 +1,5 @@
 //! Stateless backward pages of normalized file-backed session evidence.
+use std::collections::HashSet;
 use std::fs::{File, Metadata};
 use std::io::{Read, Seek, SeekFrom};
 use std::os::unix::fs::MetadataExt;
@@ -19,6 +20,9 @@ use crate::Selection;
 
 pub const DEFAULT_BYTES: usize = 64 * 1024;
 pub const MAX_BYTES: usize = 4 * 1024 * 1024;
+pub const PAGE_SCHEMA: &str = "tapes-page/4";
+pub const HISTORY_SEARCH_SCHEMA: &str = "tapes-history-search/4";
+pub const METADATA_HISTORY_SCHEMA: &str = "tapes-metadata-history/4";
 const MAX_CURSOR_BYTES: usize = 16 * 1024;
 const PROVENANCE_BYTES: u64 = 64 * 1024;
 const MAX_PAGES: usize = 32;
@@ -29,6 +33,21 @@ const EXCERPT_CHARS: usize = 600;
 pub(crate) enum PageProjection {
     Transcript,
     Models,
+}
+
+impl PageProjection {
+    fn options(self, context: ReadContext) -> Vec<String> {
+        match self {
+            Self::Transcript => {
+                let mut options = vec!["transcript".to_owned()];
+                if context != ReadContext::None {
+                    options.push("opening-and-newer-provenance".to_owned());
+                }
+                options
+            }
+            Self::Models => vec!["models-only".to_owned()],
+        }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -134,6 +153,7 @@ pub(crate) fn read_file(
     path: &Path,
     cursor: Option<&str>,
     bytes: usize,
+    projection: PageProjection,
     context: ReadContext,
     normalize: impl FnOnce(
         &[Value],
@@ -212,14 +232,16 @@ pub(crate) fn read_file(
             reason: "discarded-partial-suffix".to_owned(),
         });
     }
-    let (newer_records, context_bytes) = read_context(&mut file, end, state.size, context)?;
-    let opening = if context == ReadContext::OperatorProvenance {
-        backend::head_jsonl(path)
-    } else {
-        Vec::new()
-    };
+    let context_read = read_context(&mut file, end, state.size, context)?;
+    let (opening, opening_spans, opening_read_end, opening_gaps) =
+        if context == ReadContext::OperatorProvenance {
+            let head = backend::head_jsonl_from(&mut file, state.size)?;
+            (head.values, head.spans, head.read_end, head.gaps)
+        } else {
+            (Vec::new(), Vec::new(), 0, Vec::new())
+        };
     let revision = cursor_revision(&state);
-    let (mut turns, models) = normalize(&values, &spans, &opening, &newer_records, &revision);
+    let (mut turns, models) = normalize(&values, &spans, &opening, &context_read.values, &revision);
     for (ordinal, turn) in turns.iter_mut().enumerate() {
         turn.ordinal = ordinal;
     }
@@ -231,7 +253,16 @@ pub(crate) fn read_file(
     let next_cursor = (start > 0)
         .then(|| serde_json::to_string(&state))
         .transpose()?;
-    let mut ranges = Vec::with_capacity(3);
+    let mut ranges = Vec::with_capacity(4);
+    if opening_read_end > 0 {
+        ranges.push(ReadRange {
+            kind: ReadRangeKind::Head,
+            span: ByteSpan {
+                start: 0,
+                end: opening_read_end,
+            },
+        });
+    }
     if window_start > 0 {
         ranges.push(ReadRange {
             kind: ReadRangeKind::Alignment,
@@ -248,41 +279,58 @@ pub(crate) fn read_file(
             end,
         },
     });
-    if context_bytes > 0 {
+    if context_read.bytes > 0 {
         ranges.push(ReadRange {
             kind: ReadRangeKind::Context,
             span: ByteSpan {
                 start: end,
-                end: end + context_bytes as u64,
+                end: end + context_read.bytes as u64,
             },
         });
     }
+    let page_records = spans.iter().copied().collect::<HashSet<_>>();
+    let mut context_records = opening_spans
+        .iter()
+        .copied()
+        .chain(context_read.spans)
+        .filter(|span| !page_records.contains(span))
+        .collect::<Vec<_>>();
+    context_records.sort_by_key(|span| (span.start, span.end));
+    context_records.dedup();
+    let mut read_gaps = gaps;
+    read_gaps.extend(context_read.gaps);
+    read_gaps.extend(opening_gaps);
+    let covered_head = (opening_read_end > 0)
+        .then_some(ByteSpan {
+            start: 0,
+            end: opening_read_end,
+        })
+        .into_iter()
+        .collect::<Vec<_>>();
+    let read_gaps = backend::subtract_covered_ranges(&read_gaps, &covered_head, &opening_spans);
     let read = ReadEvidence {
         source_length: state.size,
         configured_bound: bytes as u64,
         coordinate_domain: "file-byte-range".to_owned(),
-        source_revision: Some(cursor_revision(&state)),
+        source_revision: Some(revision),
         producer: session.source.producer.clone(),
-        projection: "tapes-page/2".to_owned(),
-        projection_options: if context != ReadContext::None {
-            vec!["opening-and-newer-provenance".to_owned()]
-        } else {
-            Vec::new()
-        },
+        projection: PAGE_SCHEMA.to_owned(),
+        projection_options: projection.options(context),
         observed_at: Utc::now(),
         records: spans,
         ranges,
-        gaps,
+        context_records,
+        gaps: read_gaps,
     };
     Ok(Page {
-        schema: "tapes-page/3",
+        schema: PAGE_SCHEMA,
         session: session.clone(),
         start,
         end,
         source_bytes: state.size,
         bytes_read: data.len(),
         alignment_bytes,
-        context_bytes,
+        context_bytes: context_read.bytes,
         skipped_records,
         skipped_fragment_bytes,
         read,
@@ -339,14 +387,17 @@ fn cursor_revision(cursor: &Cursor) -> String {
     )
 }
 
-fn read_context(
-    file: &mut File,
-    end: u64,
-    size: u64,
-    context: ReadContext,
-) -> Result<(Vec<Value>, usize)> {
+#[derive(Default)]
+struct ContextRead {
+    values: Vec<Value>,
+    spans: Vec<ByteSpan>,
+    bytes: usize,
+    gaps: Vec<ReadGap>,
+}
+
+fn read_context(file: &mut File, end: u64, size: u64, context: ReadContext) -> Result<ContextRead> {
     if context == ReadContext::None {
-        return Ok((Vec::new(), 0));
+        return Ok(ContextRead::default());
     }
     let bytes = (size - end).min(PROVENANCE_BYTES) as usize;
     let mut newer = vec![0; bytes];
@@ -360,7 +411,22 @@ fn read_context(
             .rposition(|byte| *byte == b'\n')
             .map_or(0, |i| i + 1)
     };
-    Ok((parse_records(&newer[..complete], end).0, bytes))
+    let (values, spans, _skipped, mut gaps) = parse_records(&newer[..complete], end);
+    if complete < newer.len() {
+        gaps.push(ReadGap {
+            span: ByteSpan {
+                start: end + complete as u64,
+                end: end + newer.len() as u64,
+            },
+            reason: "discarded-partial-context-suffix".to_owned(),
+        });
+    }
+    Ok(ContextRead {
+        values,
+        spans,
+        bytes,
+        gaps,
+    })
 }
 
 #[derive(Default)]
@@ -486,7 +552,7 @@ pub fn search(
         },
     )?;
     Ok(Search {
-        schema: "tapes-history-search/3",
+        schema: HISTORY_SEARCH_SCHEMA,
         session: resolved.session,
         pages_read: progress.pages_read,
         bytes_read: progress.bytes_read,
@@ -553,7 +619,7 @@ pub fn metadata(
         },
     )?;
     Ok(MetadataHistory {
-        schema: "tapes-metadata-history/3",
+        schema: METADATA_HISTORY_SCHEMA,
         session: resolved.session,
         pages_read: progress.pages_read,
         bytes_read: progress.bytes_read,

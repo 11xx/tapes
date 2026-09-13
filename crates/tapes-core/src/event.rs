@@ -10,7 +10,7 @@ use crate::model::{
     TextTailEvidence, Transcript, Truncation,
 };
 
-pub const EVENTS_SCHEMA: &str = "tapes-events/4";
+pub const EVENTS_SCHEMA: &str = "tapes-events/5";
 const PREVIEW_CHARS: usize = 200;
 pub const MAX_INVOCATION_TEXT_CHARS: usize = 64 * 1024;
 pub const MAX_INVOCATIONS: usize = 32;

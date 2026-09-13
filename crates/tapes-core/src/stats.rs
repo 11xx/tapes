@@ -19,7 +19,7 @@ use crate::model::{
 };
 use crate::usage::{self, TurnCoverage, UsageSession};
 
-pub const STATS_SCHEMA: &str = "tapes-stats/3";
+pub const STATS_SCHEMA: &str = "tapes-stats/4";
 
 /// One session's counted facts, in the order a reader takes them: what the
 /// figures cover, the turns, the tool calls behind them, the recorded clock,

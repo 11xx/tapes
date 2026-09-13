@@ -30,7 +30,7 @@ use crate::model::{
 };
 use crate::{list_scoped, selection_record, SelectionRecord, SessionSelection, DEFAULT_LIST_LIMIT};
 
-pub const ENDINGS_SCHEMA: &str = "tapes-endings/4";
+pub const ENDINGS_SCHEMA: &str = "tapes-endings/5";
 /// Newest turns read per session when the caller names no window. Wide enough
 /// to hold a tool call and the exchange around it, narrow enough that a
 /// selection of hundreds stays a survey.

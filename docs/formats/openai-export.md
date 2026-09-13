@@ -42,7 +42,9 @@ dangling parents, graph bounds, unknown roles, and unrecognized content shapes
 are reported as evidence gaps or notes; traversal never follows an unbounded
 recursive graph. Native node and message IDs, JSON pointers, and absolute
 record spans remain on normalized turns and graph messages as `record_ref`
-values.
+values. `part_index` identifies the normalized turn within its source record;
+content-part references repeat it and add `content_part_index` for the part's
+position within that turn. The native JSON pointer remains unchanged.
 
 The normalized roles are `user`, `assistant`, `system`, `developer`, `tool`,
 and `reasoning` where the source supplies them. `channel`, `recipient`,
@@ -94,8 +96,8 @@ native ID or title is duplicated. `--after-occurrence` resumes collection
 listing only when the ordered supplied-input observation matches the
 observation that emitted the coordinate; changed input refuses continuation.
 
-The normal output contracts remain versioned (`tapes-list/4`,
-`tapes-session/6`, `tapes-events/4`, `tapes-brief/4`, `tapes-endings/4`,
-`tapes-stats/3`, `tapes-usage/3`, and `tapes-export-manifest/4`). History-page
+The normal output contracts remain versioned (`tapes-list/5`,
+`tapes-session/7`, `tapes-events/5`, `tapes-brief/5`, `tapes-endings/5`,
+`tapes-stats/4`, `tapes-usage/4`, and `tapes-export-manifest/5`). History-page
 and child-qualified operations are installed-recording capabilities and
 refuse supplied exports rather than interpreting an export as JSONL history.

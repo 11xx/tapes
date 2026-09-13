@@ -155,6 +155,7 @@ impl CodexBackend {
             Path::new(path),
             cursor,
             bytes,
+            projection,
             if projection == PageProjection::Transcript {
                 ReadContext::OperatorProvenance
             } else {
