@@ -1164,14 +1164,15 @@ fn parse_record(
             span: Some(span),
             native_id: turn.native_id.clone(),
             part_index: turn_index,
+            content_part_index: None,
             pointer: turn
                 .record_ref
                 .as_ref()
                 .and_then(|reference| reference.pointer.clone()),
         };
         turn.record_ref = Some(reference.clone());
-        for (part_index, part) in turn.parts.iter_mut().enumerate() {
-            part.set_record_ref_part(reference.clone(), part_index);
+        for (content_part_index, part) in turn.parts.iter_mut().enumerate() {
+            part.set_record_ref_part(reference.clone(), content_part_index);
         }
     }
     let mut graph = graph;
@@ -1186,14 +1187,15 @@ fn parse_record(
                 span: Some(span),
                 native_id: message.native_id.clone(),
                 part_index: node_index,
+                content_part_index: None,
                 pointer: message
                     .record_ref
                     .as_ref()
                     .and_then(|reference| reference.pointer.clone()),
             };
             message.record_ref = Some(reference.clone());
-            for (part_index, part) in message.parts.iter_mut().enumerate() {
-                part.set_record_ref_part(reference.clone(), part_index);
+            for (content_part_index, part) in message.parts.iter_mut().enumerate() {
+                part.set_record_ref_part(reference.clone(), content_part_index);
             }
         }
     }
@@ -1233,6 +1235,7 @@ fn parse_record(
             span,
         }],
         records: vec![span],
+        context_records: Vec::new(),
         gaps: Vec::new(),
     };
     occurrences.push(InputOccurrence {
@@ -1502,6 +1505,7 @@ fn mapping_message(
             span: None,
             native_id,
             part_index: index,
+            content_part_index: None,
             pointer: Some(format!("/mapping/{node_id}/message")),
         }),
         channel: message
@@ -1638,6 +1642,7 @@ fn normalize_chatgpt_exporter(value: &Value, ordinal: usize) -> Result<Normalize
                 span: None,
                 native_id,
                 part_index: index,
+                content_part_index: None,
                 pointer: Some(format!("/messages/{index}")),
             }),
             channel: message["channel"].as_str().map(str::to_owned),
@@ -1826,6 +1831,7 @@ fn perplexity_turn(
             native_id,
             pointer: Some(pointer),
             part_index: 0,
+            content_part_index: None,
         }),
         channel: None,
         recipient: None,
@@ -2317,6 +2323,7 @@ fn read_associated_report<R: Read>(
         native_id: reference.identity.clone(),
         pointer: Some(format!("/associated/{member}")),
         part_index: 0,
+        content_part_index: None,
     });
     reference.body = body;
     reference.body_availability = Some(if report_message.is_none() {
@@ -2768,6 +2775,7 @@ fn attach_associated_reports(
             native_id: None,
             pointer: Some(format!("/associated/{}", report.member)),
             part_index: occurrence.artifacts.len(),
+            content_part_index: None,
         };
         artifact.source = Some(artifact_reference.clone());
         occurrence.artifacts.push(artifact.clone());
@@ -2779,7 +2787,7 @@ fn attach_associated_reports(
             continue;
         };
         let mut part = report.part.clone();
-        part.set_record_ref(artifact_reference);
+        part.set_record_ref_part(artifact_reference, 0);
         turn.parts.push(part);
         if turn.coverage.is_none() {
             turn.coverage = Some(ContentCoverage {

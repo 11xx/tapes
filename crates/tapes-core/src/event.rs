@@ -10,7 +10,7 @@ use crate::model::{
     TextTailEvidence, Transcript, Truncation,
 };
 
-pub const EVENTS_SCHEMA: &str = "tapes-events/4";
+pub const EVENTS_SCHEMA: &str = "tapes-events/5";
 const PREVIEW_CHARS: usize = 200;
 pub const MAX_INVOCATION_TEXT_CHARS: usize = 64 * 1024;
 pub const MAX_INVOCATIONS: usize = 32;
@@ -615,6 +615,29 @@ fn literal_invocation(
     span: Option<ByteSpan>,
     conditional: bool,
 ) -> InvocationEvidence {
+    let shortened_name = values
+        .iter()
+        .take(2)
+        .enumerate()
+        .find_map(|(index, value)| {
+            value
+                .truncated
+                .then_some(if index == 0 { "program" } else { "subcommand" })
+        });
+    if let Some(name) = shortened_name {
+        let origin = if coverage == InvocationCoverage::StructuredRuntime {
+            InvocationOrigin::StructuredRuntime
+        } else {
+            InvocationOrigin::StaticDeclaration
+        };
+        return unsupported_invocation_from(
+            origin,
+            source_field,
+            intent,
+            &format!("{name} token was shortened; exact invocation identity is unsupported"),
+            span,
+        );
+    }
     InvocationEvidence {
         origin: InvocationOrigin::StaticDeclaration,
         program: values.first().map(|value| value.text.clone()),
@@ -2175,6 +2198,92 @@ mod tests {
             .unwrap()
             .text
             .contains("exceeded"));
+    }
+
+    #[test]
+    fn invocation_parser_does_not_publish_shortened_program_names() {
+        let long_program = "p".repeat(MAX_INVOCATION_STRING_CHARS + 1);
+        let direct = invocations_from_tool(
+            Some("exec"),
+            &serde_json::json!({"argv":[long_program.clone(), "sub"]}),
+            "payload.argv",
+        );
+        assert_eq!(direct.len(), 1);
+        assert_eq!(direct[0].coverage, InvocationCoverage::Unsupported);
+        assert!(direct[0].program.is_none());
+        assert!(direct[0]
+            .unsupported_reason
+            .as_ref()
+            .unwrap()
+            .text
+            .contains("program token"));
+
+        let long_subcommand = "s".repeat(MAX_INVOCATION_STRING_CHARS + 1);
+        let direct_subcommand = invocations_from_tool(
+            Some("exec"),
+            &serde_json::json!({"argv":["echo", long_subcommand.clone()]}),
+            "payload.argv",
+        );
+        assert_eq!(
+            direct_subcommand[0].coverage,
+            InvocationCoverage::Unsupported
+        );
+        assert!(direct_subcommand[0].program.is_none());
+        assert!(direct_subcommand[0]
+            .unsupported_reason
+            .as_ref()
+            .unwrap()
+            .text
+            .contains("subcommand token"));
+
+        let runtime = structured_runtime_invocations(
+            &serde_json::json!({"command":[long_program, "sub"]}),
+            "payload.item.command",
+        );
+        assert_eq!(runtime.len(), 1);
+        assert_eq!(runtime[0].origin, InvocationOrigin::StructuredRuntime);
+        assert_eq!(runtime[0].coverage, InvocationCoverage::Unsupported);
+        assert!(runtime[0].program.is_none());
+
+        let shell = invocations_from_tool(
+            Some("exec"),
+            &serde_json::json!({"cmd": format!("echo {long_subcommand}")}),
+            "payload.arguments",
+        );
+        assert_eq!(shell.len(), 1);
+        assert_eq!(shell[0].coverage, InvocationCoverage::Unsupported);
+        assert!(shell[0].program.is_none());
+
+        let javascript = invocations_from_tool(
+            Some("orchestrator"),
+            &serde_json::Value::String(format!(
+                "tools.exec_command({{cmd:'echo {long_subcommand}'}});"
+            )),
+            "payload.arguments",
+        );
+        assert_eq!(javascript.len(), 1);
+        assert_eq!(javascript[0].coverage, InvocationCoverage::Unsupported);
+        assert!(javascript[0].program.is_none());
+
+        let long_argument = "a".repeat(MAX_INVOCATION_STRING_CHARS + 1);
+        let bounded_argument = invocations_from_tool(
+            Some("exec"),
+            &serde_json::json!({"argv":["echo", "next", long_argument]}),
+            "payload.argv",
+        );
+        assert_eq!(bounded_argument.len(), 1);
+        assert_eq!(
+            bounded_argument[0].coverage,
+            InvocationCoverage::StaticLiteral
+        );
+        assert_eq!(bounded_argument[0].program.as_deref(), Some("echo"));
+        assert_eq!(bounded_argument[0].subcommand.as_deref(), Some("next"));
+        assert_eq!(bounded_argument[0].arguments.len(), 1);
+        assert_eq!(
+            bounded_argument[0].arguments[0].chars,
+            MAX_INVOCATION_STRING_CHARS + 1
+        );
+        assert!(bounded_argument[0].arguments[0].truncated);
     }
 
     #[test]

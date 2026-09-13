@@ -9,7 +9,7 @@ use crate::content::{ContentCoverage, ContentPart};
 use crate::event::ToolEvent;
 use crate::usage::UsageDetail;
 
-pub const SESSION_SCHEMA: &str = "tapes-session/6";
+pub const SESSION_SCHEMA: &str = "tapes-session/7";
 /// Maximum length of a title derived from the first user turn.
 pub const DERIVED_TITLE_MAX_CHARS: usize = 96;
 
@@ -412,6 +412,10 @@ pub struct ReadEvidence {
     /// by normalized values.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub records: Vec<ByteSpan>,
+    /// Decoded source records consulted only as projection context. These
+    /// spans are separate from records normalized into the returned value.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub context_records: Vec<ByteSpan>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub gaps: Vec<ReadGap>,
 }
@@ -431,7 +435,12 @@ pub struct RecordRef {
     pub native_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pointer: Option<String>,
+    /// Zero-based position of the normalized turn within its source record.
     pub part_index: usize,
+    /// Zero-based position of this content part within that normalized turn.
+    /// It is present only on references attached to a content part.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content_part_index: Option<usize>,
 }
 
 /// A bounded text observation whose shortening is explicit.
