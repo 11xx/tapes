@@ -190,7 +190,7 @@ fn a_brief_states_where_the_session_stopped_and_what_it_left_open() {
                 "session": id,
                 "ts": "2026-01-01T10:00:06Z",
                 "turn": 4,
-                "schema": "tapes-endings/5",
+                "schema": "tapes-endings/6",
                 "coverage": "session",
             },
             "working_set": {

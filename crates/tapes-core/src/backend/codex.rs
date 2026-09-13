@@ -155,6 +155,7 @@ impl CodexBackend {
             Path::new(path),
             cursor,
             bytes,
+            projection,
             if projection == PageProjection::Transcript {
                 ReadContext::OperatorProvenance
             } else {
@@ -532,9 +533,20 @@ fn codex_terminal(value: &Value) -> Option<TerminalObservation> {
     if !explicitly_terminal {
         return None;
     }
-    let message = payload
-        .get("message")
+    // Codex puts the actionable failure on `error` for usage-limit task
+    // completions. That nested record is the native error authority when it
+    // supplies either field; the outer fields remain fallbacks for terminal
+    // records written in the flatter form.
+    let nested_error = payload.get("error");
+    let code = nested_error
+        .and_then(|error| error.get("codex_error_info"))
+        .filter(|value| !value.is_null())
+        .or_else(|| payload.get("code").filter(|value| !value.is_null()))
+        .cloned();
+    let message = nested_error
+        .and_then(|error| error.get("message"))
         .and_then(Value::as_str)
+        .or_else(|| payload.get("message").and_then(Value::as_str))
         .map(bounded_terminal_text);
     Some(TerminalObservation {
         record_type: value["type"].as_str()?.to_owned(),
@@ -552,10 +564,7 @@ fn codex_terminal(value: &Value) -> Option<TerminalObservation> {
             .as_str()
             .or_else(|| payload["status"].as_str())
             .map(str::to_owned),
-        code: payload
-            .get("code")
-            .filter(|value| !value.is_null())
-            .cloned(),
+        code,
         message,
         duration_ms: payload["duration_ms"].as_i64(),
     })
@@ -663,6 +672,9 @@ fn parse_turns(value: &Value, messages: &UserMessages) -> Vec<Turn> {
     {
         let payload = &value["payload"];
         let item = &payload["item"];
+        if !is_codex_runtime_tool(item) {
+            return Vec::new();
+        }
         let completed = payload["type"] == "item_completed";
         let event = codex_runtime_tool_event(item, completed);
         return vec![Turn {
@@ -788,6 +800,16 @@ fn parse_turns(value: &Value, messages: &UserMessages) -> Vec<Turn> {
         .collect()
 }
 
+fn is_codex_runtime_tool(item: &Value) -> bool {
+    // These are the verified native item variants that describe a tool
+    // operation. AgentMessage, Reasoning, UserMessage, and ContextCompaction
+    // are lifecycle mirrors of ordinary conversation state.
+    matches!(
+        item["type"].as_str(),
+        Some("CommandExecution" | "FileChange")
+    )
+}
+
 fn codex_tool_event(payload: &Value, subtype: &str) -> ToolEvent {
     let call = matches!(subtype, "function_call" | "custom_tool_call");
     let arguments = match subtype {
@@ -844,10 +866,7 @@ fn codex_tool_event(payload: &Value, subtype: &str) -> ToolEvent {
 }
 
 fn codex_runtime_tool_event(item: &Value, completed: bool) -> ToolEvent {
-    let command = item
-        .get("parsed_cmd")
-        .filter(|value| !value.is_null())
-        .or_else(|| item.get("command"));
+    let command = item.get("command").filter(|value| !value.is_null());
     ToolEvent {
         kind: if completed {
             EventKind::ToolResult
@@ -871,7 +890,7 @@ fn codex_runtime_tool_event(item: &Value, completed: bool) -> ToolEvent {
         completed_ts: completed
             .then(|| timestamp(&item["completed_at"]))
             .flatten(),
-        invocations: crate::event::structured_runtime_invocations(item, "payload.item.parsed_cmd"),
+        invocations: crate::event::structured_runtime_invocations(item, "payload.item.command"),
         artifact_references: if completed {
             crate::event::artifact_references(item)
         } else {

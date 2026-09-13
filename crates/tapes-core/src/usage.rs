@@ -19,7 +19,7 @@ use crate::model::{
     Transcript, Truncation,
 };
 
-pub const USAGE_SCHEMA: &str = "tapes-usage/3";
+pub const USAGE_SCHEMA: &str = "tapes-usage/5";
 
 /// Usage facts a harness records that the normalized session model has no
 /// field for. Each member is present exactly when the harness recorded it.

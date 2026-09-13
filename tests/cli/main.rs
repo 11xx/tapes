@@ -23,17 +23,29 @@ const CODEX_SESSION_OTHER_MODEL: &str = include_str!(
 const CODEX_SESSION_TERMINAL_ONLY: &str = concat!(
     "{\"timestamp\":\"2026-01-01T15:00:00Z\",\"type\":\"session_meta\",\"payload\":{\"id\":\"00000000-0000-0000-0000-000000000006\",\"session_id\":\"00000000-0000-0000-0000-000000000006\",\"cwd\":\"/fixtures/project\",\"model_provider\":\"openai\"}}\n",
     "{\"timestamp\":\"2026-01-01T15:00:01Z\",\"type\":\"turn_context\",\"payload\":{\"cwd\":\"/fixtures/project\",\"model\":\"gpt-fixture\",\"effort\":\"high\",\"turn_id\":\"turn-terminal-only\"}}\n",
-    "{\"timestamp\":\"2026-01-01T15:00:02Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\",\"turn_id\":\"turn-terminal-only\",\"outcome\":\"success\",\"duration_ms\":1250}}\n",
-    "{\"timestamp\":\"2026-01-01T15:00:03Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":null,\"rate_limits\":null}}\n"
+    "{\"timestamp\":\"2026-01-01T15:00:02Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\",\"turn_id\":\"turn-terminal-only\",\"outcome\":\"error\",\"error\":{\"codex_error_info\":\"usage_limit_exceeded\",\"message\":\"synthetic quota message\"},\"duration_ms\":1250}}\n",
+    "{\"timestamp\":\"2026-01-01T15:00:03Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{\"total_token_usage\":{\"input_tokens\":17,\"output_tokens\":3,\"cached_input_tokens\":0,\"cache_write_input_tokens\":0}},\"rate_limits\":null}}\n"
 );
 const CODEX_SESSION_INVOCATIONS: &str = concat!(
     "{\"timestamp\":\"2026-01-01T16:00:00Z\",\"type\":\"session_meta\",\"payload\":{\"id\":\"00000000-0000-0000-0000-000000000007\",\"session_id\":\"00000000-0000-0000-0000-000000000007\",\"cwd\":\"/fixtures/project\",\"model_provider\":\"openai\"}}\n",
     "{\"timestamp\":\"2026-01-01T16:00:01Z\",\"type\":\"turn_context\",\"payload\":{\"cwd\":\"/fixtures/project\",\"model\":\"gpt-fixture\",\"effort\":\"high\"}}\n",
     "{\"timestamp\":\"2026-01-01T16:00:02Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"function_call\",\"name\":\"exec\",\"arguments\":\"{\\\"cmd\\\":\\\"git status && cargo test\\\",\\\"path\\\":\\\"/canary\\\",\\\"digest\\\":\\\"digest-a\\\",\\\"bytes\\\":4,\\\"why\\\":\\\"verify the fixture\\\"}\",\"call_id\":\"call-shell\"}}\n",
     "{\"timestamp\":\"2026-01-01T16:00:03Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"function_call_output\",\"call_id\":\"call-shell\",\"output\":\"{\\\"path\\\":\\\"/canary\\\",\\\"digest\\\":\\\"digest-a\\\",\\\"bytes\\\":4}\"}}\n",
+    "{\"timestamp\":\"2026-01-01T16:00:03.100Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"function_call\",\"name\":\"exec\",\"arguments\":\"{\\\"cmd\\\":\\\"echo one\\\\necho two # trailing\\\"}\",\"call_id\":\"call-shell-boundaries\"}}\n",
+    "{\"timestamp\":\"2026-01-01T16:00:03.200Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"function_call\",\"name\":\"exec\",\"arguments\":\"{\\\"cmd\\\":\\\"printf '%s' ''\\\"}\",\"call_id\":\"call-shell-empty\"}}\n",
     "{\"timestamp\":\"2026-01-01T16:00:04Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"function_call\",\"name\":\"orchestrator\",\"arguments\":\"await tools.exec_command({cmd: \\\"python -m pytest\\\", why: \\\"run tests\\\"});\",\"call_id\":\"call-js\"}}\n",
     "{\"timestamp\":\"2026-01-01T16:00:05Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"function_call\",\"name\":\"orchestrator\",\"arguments\":\"const cmd = \\\"git status\\\"; tools.exec_command({cmd});\",\"call_id\":\"call-dynamic\"}}\n",
-    "{\"timestamp\":\"2026-01-01T16:00:06Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"item_completed\",\"item\":{\"type\":\"command_execution\",\"id\":\"runtime-1\",\"parsed_cmd\":[\"sh\",\"-c\",\"echo ok\"],\"command\":\"sh -c 'echo ok'\",\"status\":\"completed\",\"stdout\":\"ok\"}}}\n",
+    "{\"timestamp\":\"2026-01-01T16:00:05.100Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"function_call\",\"name\":\"orchestrator\",\"arguments\":\"await tools.exec_command({cmd: \\\"echo actual\\\", metadata: {cmd: \\\"touch imaginary\\\"}});\",\"call_id\":\"call-js-nested\"}}\n",
+    "{\"timestamp\":\"2026-01-01T16:00:05.200Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"function_call\",\"name\":\"orchestrator\",\"arguments\":\"await tools.exec_command({cmd: \\\"echo \\\" + variable});\",\"call_id\":\"call-js-concat\"}}\n",
+    "{\"timestamp\":\"2026-01-01T16:00:05.300Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"function_call\",\"name\":\"orchestrator\",\"arguments\":\"await tools.exec_command({cmd: \\\"echo \\\\u0041\\\"});\",\"call_id\":\"call-js-unicode\"}}\n",
+    "{\"timestamp\":\"2026-01-01T16:00:05.400Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"function_call\",\"name\":\"exec\",\"arguments\":\"{\\\"argv\\\":[\\\"echo\\\",7,\\\"status\\\"]}\",\"call_id\":\"call-argv-invalid\"}}\n",
+    "{\"timestamp\":\"2026-01-01T16:00:06Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"item_started\",\"item\":{\"type\":\"CommandExecution\",\"id\":\"runtime-1\",\"process_id\":\"process-1\",\"command\":[\"sh\",\"-c\",\"echo ok\"],\"cwd\":\"/fixtures/project\",\"parsed_cmd\":[{\"kind\":\"word\"},{\"kind\":\"word\"},{\"kind\":\"word\"}],\"source\":\"fixture\",\"status\":\"in_progress\"}}}\n",
+    "{\"timestamp\":\"2026-01-01T16:00:06.100Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"item_completed\",\"item\":{\"type\":\"CommandExecution\",\"id\":\"runtime-1\",\"process_id\":\"process-1\",\"command\":[\"sh\",\"-c\",\"echo ok\"],\"cwd\":\"/fixtures/project\",\"parsed_cmd\":[{\"kind\":\"word\"},{\"kind\":\"word\"},{\"kind\":\"word\"}],\"source\":\"fixture\",\"status\":\"completed\",\"stdout\":\"ok\",\"duration\":{\"wall_ms\":1}}}}\n",
+    "{\"timestamp\":\"2026-01-01T16:00:06.150Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"item_completed\",\"item\":{\"type\":\"FileChange\",\"id\":\"file-change-1\",\"changes\":[],\"status\":\"completed\",\"stdout\":\"\",\"stderr\":\"\"}}}\n",
+    "{\"timestamp\":\"2026-01-01T16:00:06.200Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"item_completed\",\"item\":{\"type\":\"AgentMessage\",\"id\":\"agent-message-1\",\"content\":[{\"type\":\"output_text\",\"text\":\"ordinary reply\"}]}}}\n",
+    "{\"timestamp\":\"2026-01-01T16:00:06.300Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"item_completed\",\"item\":{\"type\":\"Reasoning\",\"id\":\"reasoning-1\",\"raw_content\":\"opaque\",\"summary_text\":\"reasoning\"}}}\n",
+    "{\"timestamp\":\"2026-01-01T16:00:06.400Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"item_completed\",\"item\":{\"type\":\"UserMessage\",\"id\":\"user-message-1\",\"content\":\"ordinary request\"}}}\n",
+    "{\"timestamp\":\"2026-01-01T16:00:06.500Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"item_completed\",\"item\":{\"type\":\"ContextCompaction\",\"id\":\"compaction-1\"}}}\n",
     "{\"timestamp\":\"2026-01-01T16:00:07Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\"}}\n"
 );
 
@@ -84,6 +96,161 @@ fn invocation_fixture_store(name: &str) -> (PathBuf, PathBuf) {
     fs::write(
         sessions.join("rollout-2026-01-01T16-00000000-0000-0000-0000-000000000007.jsonl"),
         CODEX_SESSION_INVOCATIONS,
+    )
+    .unwrap();
+    (root.clone(), root.join("home"))
+}
+
+fn parser_context_fixture_store(name: &str) -> (PathBuf, PathBuf) {
+    let root = std::env::temp_dir().join(format!(
+        "tapes-cli-parser-context-{name}-{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&root);
+    let sessions = root.join("sessions/2026/01/01");
+    fs::create_dir_all(&sessions).unwrap();
+    let id = "00000000-0000-0000-0000-000000000008";
+    let scripts = [
+        ("continuation", "echo \\\n next"),
+        ("assignment", "FLAG=1 echo next"),
+        ("shell-control", "if false; then echo next; fi"),
+        (
+            "arrow",
+            "const f = () => tools.exec_command({cmd:'echo next'});",
+        ),
+        (
+            "short-circuit",
+            "false && tools.exec_command({cmd:'echo next'});",
+        ),
+    ];
+    let mut body = String::new();
+    for value in [
+        serde_json::json!({
+            "timestamp": "2026-01-01T16:30:00Z",
+            "type": "session_meta",
+            "payload": {
+                "id": id,
+                "session_id": id,
+                "source": "exec",
+                "cwd": "/fixtures/project"
+            }
+        }),
+        serde_json::json!({
+            "timestamp": "2026-01-01T16:30:01Z",
+            "type": "turn_context",
+            "payload": {
+                "cwd": "/fixtures/project",
+                "model": "gpt-fixture",
+                "effort": "high"
+            }
+        }),
+    ] {
+        body.push_str(&value.to_string());
+        body.push('\n');
+    }
+    for (call_id, script) in scripts {
+        let value = serde_json::json!({
+            "timestamp": "2026-01-01T16:30:02Z",
+            "type": "response_item",
+            "payload": {
+                "type": "function_call",
+                "name": "exec",
+                "arguments": script,
+                "call_id": format!("call-context-{call_id}")
+            }
+        });
+        body.push_str(&value.to_string());
+        body.push('\n');
+    }
+    fs::write(
+        sessions.join(format!("rollout-2026-01-01T16-30-00-{id}.jsonl")),
+        body,
+    )
+    .unwrap();
+    (root.clone(), root.join("home"))
+}
+
+fn invocation_bound_fixture_store(name: &str) -> (PathBuf, PathBuf) {
+    let root = std::env::temp_dir().join(format!(
+        "tapes-cli-invocation-bound-{name}-{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&root);
+    let sessions = root.join("sessions/2026/01/01");
+    fs::create_dir_all(&sessions).unwrap();
+    let id = "00000000-0000-0000-0000-000000000009";
+    let long_program = "p".repeat(3_000);
+    let long_subcommand = "s".repeat(3_000);
+    let long_argument = "a".repeat(3_000);
+    let calls = [
+        (
+            "bound-program",
+            "exec",
+            serde_json::json!({"argv":[long_program, "sub"]}).to_string(),
+        ),
+        (
+            "bound-subcommand",
+            "exec",
+            serde_json::json!({"argv":["echo", long_subcommand.clone()]}).to_string(),
+        ),
+        (
+            "bound-shell",
+            "exec",
+            serde_json::json!({"cmd":format!("echo {long_subcommand}")}).to_string(),
+        ),
+        (
+            "bound-javascript",
+            "orchestrator",
+            format!("tools.exec_command({{cmd:'echo {long_subcommand}'}});"),
+        ),
+        (
+            "bounded-argument",
+            "exec",
+            serde_json::json!({"argv":["echo","next",long_argument]}).to_string(),
+        ),
+    ];
+    let mut body = String::new();
+    for value in [
+        serde_json::json!({
+            "timestamp": "2026-01-01T17:00:00Z",
+            "type": "session_meta",
+            "payload": {
+                "id": id,
+                "session_id": id,
+                "source": "exec",
+                "cwd": "/fixtures/project"
+            }
+        }),
+        serde_json::json!({
+            "timestamp": "2026-01-01T17:00:01Z",
+            "type": "turn_context",
+            "payload": {
+                "cwd": "/fixtures/project",
+                "model": "gpt-fixture",
+                "effort": "high"
+            }
+        }),
+    ] {
+        body.push_str(&value.to_string());
+        body.push('\n');
+    }
+    for (suffix, name, arguments) in calls {
+        let value = serde_json::json!({
+            "timestamp": "2026-01-01T17:00:02Z",
+            "type": "response_item",
+            "payload": {
+                "type": "function_call",
+                "name": name,
+                "arguments": arguments,
+                "call_id": format!("call-{suffix}")
+            }
+        });
+        body.push_str(&value.to_string());
+        body.push('\n');
+    }
+    fs::write(
+        sessions.join(format!("rollout-2026-01-01T17-00-00-{id}.jsonl")),
+        body,
     )
     .unwrap();
     (root.clone(), root.join("home"))
@@ -385,7 +552,7 @@ fn supplied_single_conversation_reaches_list_show_and_export() {
         String::from_utf8_lossy(&listed.stderr)
     );
     let listed: Value = serde_json::from_slice(&listed.stdout).unwrap();
-    assert_eq!(listed["schema"], "tapes-list/4");
+    assert_eq!(listed["schema"], "tapes-list/5");
     assert_eq!(listed["sessions"].as_array().unwrap().len(), 1);
     assert_eq!(listed["sessions"][0]["id"], "supplied-1");
     assert_eq!(listed["sessions"][0]["source"]["kind"], "supplied-export");
@@ -1086,7 +1253,7 @@ fn supplied_zip_reads_conversations_and_retains_associated_report_evidence() {
         .unwrap();
     assert!(brief.status.success());
     let brief: Value = serde_json::from_slice(&brief.stdout).unwrap();
-    assert_eq!(brief["schema"], "tapes-brief/5");
+    assert_eq!(brief["schema"], "tapes-brief/6");
     let grouped_brief_part = brief["tail"]
         .as_array()
         .unwrap()
@@ -1105,7 +1272,7 @@ fn supplied_zip_reads_conversations_and_retains_associated_report_evidence() {
         .unwrap();
     assert!(endings.status.success());
     let endings: Value = serde_json::from_slice(&endings.stdout).unwrap();
-    assert_eq!(endings["schema"], "tapes-endings/5");
+    assert_eq!(endings["schema"], "tapes-endings/6");
     let grouped_ending_part = endings["endings"]
         .as_array()
         .unwrap()
@@ -1193,7 +1360,7 @@ fn supplied_citation_descriptors_are_bounded_in_show_and_export() {
         .unwrap();
     assert!(shown.status.success());
     let shown: Value = serde_json::from_slice(&shown.stdout).unwrap();
-    assert_eq!(shown["schema"], "tapes-session/7");
+    assert_eq!(shown["schema"], "tapes-session/8");
     let citation = &shown["artifacts"][0]["citations"][0];
     assert_eq!(citation["uri"]["chars"], 5_024);
     assert_eq!(
@@ -1234,7 +1401,7 @@ fn supplied_citation_descriptors_are_bounded_in_show_and_export() {
         })
         .unwrap();
     let bundle_json: Value = serde_json::from_slice(&fs::read(json_path).unwrap()).unwrap();
-    assert_eq!(bundle_json["schema"], "tapes-session/7");
+    assert_eq!(bundle_json["schema"], "tapes-session/8");
     assert_eq!(
         bundle_json["artifacts"][0]["citations"][0]["title"]["text"]
             .as_str()
@@ -1536,7 +1703,7 @@ fn events_help_explains_pairing_filters_and_the_default_bound() {
     assert!(help.contains("--name <NAME>"), "{help}");
     assert!(help.contains("--call-id <ID>"), "{help}");
     assert!(help.contains("--program <PROGRAM>"), "{help}");
-    assert!(help.contains("tapes-events/4"), "{help}");
+    assert!(help.contains("tapes-events/6"), "{help}");
 }
 
 #[test]
@@ -1589,7 +1756,7 @@ fn events_json_answers_call_counts_and_incomplete_calls_without_raw_text() {
     );
     let value: Value = serde_json::from_slice(&output.stdout).unwrap();
 
-    assert_eq!(value["schema"], "tapes-events/4");
+    assert_eq!(value["schema"], "tapes-events/6");
     assert_eq!(value["session"]["id"], id);
     assert!(value.get("truncation").is_none(), "{value}");
     assert_eq!(
@@ -1639,7 +1806,29 @@ fn terminal_only_recording_exposes_a_structured_stop_observation() {
     assert_eq!(value["terminal"]["record_type"], "event_msg");
     assert_eq!(value["terminal"]["payload_type"], "task_complete");
     assert_eq!(value["terminal"]["turn_id"], "turn-terminal-only");
+    assert_eq!(value["terminal"]["outcome"], "error");
+    assert_eq!(value["terminal"]["code"], "usage_limit_exceeded");
+    assert_eq!(
+        value["terminal"]["message"],
+        serde_json::json!({
+            "text": "synthetic quota message",
+            "chars": 23
+        })
+    );
     assert_eq!(value["terminal"]["duration_ms"], 1250);
+    assert_eq!(
+        value["session"]["tokens"],
+        serde_json::json!({
+            "input": 17,
+            "output": 3,
+            "cache_read": 0,
+            "cache_write": 0
+        })
+    );
+    assert_eq!(
+        value["session"]["accounting"],
+        serde_json::json!({"basis":"recorded-total","coverage":"session"})
+    );
     assert_eq!(value["trailing_record"]["kind"], "event_msg");
     assert_eq!(
         value["text_tail"]["empty_reason"],
@@ -1746,7 +1935,7 @@ fn events_expose_nested_declarations_and_qualified_artifact_consumption() {
         String::from_utf8_lossy(&output.stderr)
     );
     let value: Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(value["schema"], "tapes-events/4");
+    assert_eq!(value["schema"], "tapes-events/6");
     let events = value["events"].as_array().unwrap();
     let shell_call = events
         .iter()
@@ -1762,7 +1951,7 @@ fn events_expose_nested_declarations_and_qualified_artifact_consumption() {
     );
     assert_eq!(invocations[0]["coverage"], "conditional-declaration");
     assert_eq!(invocations[0]["intent"]["text"], "verify the fixture");
-    assert!(invocations[0]["witnessed_result"].is_object());
+    assert!(invocations[0].get("witnessed_result").is_none());
     assert!(invocations[0].get("duration_ms").is_none());
     assert_eq!(shell_call["duration_ms"], 1_000);
     assert_eq!(shell_call["artifact_references"][0]["path"], "/canary");
@@ -1771,6 +1960,31 @@ fn events_expose_nested_declarations_and_qualified_artifact_consumption() {
         "matching-consumption-observed"
     );
     assert!(shell_call["artifact_consumptions"][0]["consumer"].is_object());
+
+    let shell_boundaries = events
+        .iter()
+        .find(|event| event["call_id"] == "call-shell-boundaries")
+        .unwrap();
+    assert_eq!(shell_boundaries["invocations"].as_array().unwrap().len(), 2);
+    assert_eq!(shell_boundaries["invocations"][0]["subcommand"], "one");
+    assert_eq!(shell_boundaries["invocations"][1]["subcommand"], "two");
+    assert!(shell_boundaries["invocations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|invocation| {
+            invocation
+                .get("arguments")
+                .is_none_or(|arguments| arguments.as_array().is_some_and(Vec::is_empty))
+        }));
+
+    let shell_empty = events
+        .iter()
+        .find(|event| event["call_id"] == "call-shell-empty")
+        .unwrap();
+    assert_eq!(shell_empty["invocations"][0]["program"], "printf");
+    assert_eq!(shell_empty["invocations"][0]["subcommand"], "%s");
+    assert_eq!(shell_empty["invocations"][0]["arguments"][0]["text"], "");
 
     let js_call = events
         .iter()
@@ -1789,13 +2003,75 @@ fn events_expose_nested_declarations_and_qualified_artifact_consumption() {
         .as_object()
         .is_some());
 
+    let nested = events
+        .iter()
+        .find(|event| event["call_id"] == "call-js-nested")
+        .unwrap();
+    assert_eq!(nested["invocations"].as_array().unwrap().len(), 1);
+    assert_eq!(nested["invocations"][0]["program"], "echo");
+    assert_eq!(nested["invocations"][0]["subcommand"], "actual");
+
+    let concatenated = events
+        .iter()
+        .find(|event| event["call_id"] == "call-js-concat")
+        .unwrap();
+    assert_eq!(concatenated["invocations"][0]["coverage"], "unsupported");
+    assert!(concatenated["invocations"][0]["unsupported_reason"]
+        .as_object()
+        .is_some());
+
+    let unicode = events
+        .iter()
+        .find(|event| event["call_id"] == "call-js-unicode")
+        .unwrap();
+    assert_eq!(unicode["invocations"][0]["program"], "echo");
+    assert_eq!(unicode["invocations"][0]["subcommand"], "A");
+
+    let invalid_argv = events
+        .iter()
+        .find(|event| event["call_id"] == "call-argv-invalid")
+        .unwrap();
+    assert_eq!(invalid_argv["invocations"][0]["coverage"], "unsupported");
+    assert!(invalid_argv["invocations"][0]["unsupported_reason"]
+        .as_object()
+        .is_some());
+
     let runtime = events
         .iter()
-        .find(|event| event["call_id"] == "runtime-1")
+        .find(|event| event["call_id"] == "runtime-1" && event["kind"] == "tool-call")
         .unwrap();
     assert_eq!(runtime["invocations"][0]["origin"], "structured-runtime");
     assert_eq!(runtime["invocations"][0]["program"], "sh");
-    assert_eq!(runtime["name"], "command_execution");
+    assert_eq!(
+        runtime["invocations"][0]["source_field"],
+        "payload.item.command"
+    );
+    assert_eq!(runtime["name"], "CommandExecution");
+    assert!(runtime["invocations"][0]["witnessed_result"].is_object());
+    assert!(events
+        .iter()
+        .any(|event| event["name"] == "FileChange" && event["kind"] == "tool-result"));
+    assert!(events.iter().all(|event| {
+        !matches!(
+            event["name"].as_str(),
+            Some("AgentMessage" | "Reasoning" | "UserMessage" | "ContextCompaction")
+        )
+    }));
+
+    let mut stats = tapes();
+    stats.args(["stats", id, "--json"]);
+    with_fixture_env(
+        &mut stats,
+        &codex_home,
+        &home,
+        Path::new("/definitely/missing"),
+    );
+    let stats = stats.output().unwrap();
+    assert!(stats.status.success());
+    let stats: Value = serde_json::from_slice(&stats.stdout).unwrap();
+    assert_eq!(stats["tools"]["calls"], 10);
+    assert_eq!(stats["tools"]["results"], 3);
+    assert_eq!(stats["tools"]["paired"], 2);
 
     let mut filtered = tapes();
     filtered.args(["events", id, "--program", "cargo", "--json"]);
@@ -1868,6 +2144,154 @@ fn events_expose_nested_declarations_and_qualified_artifact_consumption() {
         })
         .unwrap();
     assert!(String::from_utf8_lossy(&fs::read(trace).unwrap()).contains("invocation:"));
+    fs::remove_dir_all(codex_home).unwrap();
+}
+
+#[test]
+fn events_and_stats_qualify_ambiguous_invocation_contexts() {
+    let (codex_home, home) = parser_context_fixture_store("context");
+    let id = "00000000-0000-0000-0000-000000000008";
+    let mut events = tapes();
+    events.args(["events", id, "--json"]);
+    with_fixture_env(
+        &mut events,
+        &codex_home,
+        &home,
+        Path::new("/definitely/missing"),
+    );
+    let events = events.output().unwrap();
+    assert!(events.status.success());
+    let events: Value = serde_json::from_slice(&events.stdout).unwrap();
+    assert_eq!(events["events"].as_array().unwrap().len(), 5);
+
+    let continuation = events["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|event| event["call_id"] == "call-context-continuation")
+        .unwrap();
+    assert_eq!(continuation["invocations"].as_array().unwrap().len(), 1);
+    assert_eq!(continuation["invocations"][0]["program"], "echo");
+    assert_eq!(continuation["invocations"][0]["subcommand"], "next");
+    assert!(continuation["invocations"][0].get("arguments").is_none());
+
+    for call_id in [
+        "call-context-assignment",
+        "call-context-shell-control",
+        "call-context-arrow",
+        "call-context-short-circuit",
+    ] {
+        let event = events["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|event| event["call_id"] == call_id)
+            .unwrap();
+        assert_eq!(
+            event["invocations"].as_array().unwrap().len(),
+            1,
+            "{call_id}"
+        );
+        assert_eq!(
+            event["invocations"][0]["coverage"], "unsupported",
+            "{call_id}"
+        );
+        assert!(
+            event["invocations"][0].get("program").is_none(),
+            "{call_id}"
+        );
+    }
+
+    let mut stats = tapes();
+    stats.args(["stats", id, "--json"]);
+    with_fixture_env(
+        &mut stats,
+        &codex_home,
+        &home,
+        Path::new("/definitely/missing"),
+    );
+    let stats = stats.output().unwrap();
+    assert!(stats.status.success());
+    let stats: Value = serde_json::from_slice(&stats.stdout).unwrap();
+    assert_eq!(stats["tools"]["calls"], 5);
+    assert_eq!(stats["tools"]["results"], 0);
+    assert_eq!(stats["tools"]["paired"], 0);
+    fs::remove_dir_all(codex_home).unwrap();
+}
+
+#[test]
+fn events_qualify_shortened_invocation_names_and_bound_arguments() {
+    let (codex_home, home) = invocation_bound_fixture_store("names");
+    let id = "00000000-0000-0000-0000-000000000009";
+    let mut command = tapes();
+    command.args(["events", id, "--json"]);
+    with_fixture_env(
+        &mut command,
+        &codex_home,
+        &home,
+        Path::new("/definitely/missing"),
+    );
+    let output = command.output().unwrap();
+    assert!(output.status.success());
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["events"].as_array().unwrap().len(), 5);
+
+    for suffix in [
+        "bound-program",
+        "bound-subcommand",
+        "bound-shell",
+        "bound-javascript",
+    ] {
+        let event = value["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|event| event["call_id"] == format!("call-{suffix}"))
+            .unwrap();
+        assert_eq!(
+            event["invocations"].as_array().unwrap().len(),
+            1,
+            "{suffix}"
+        );
+        assert_eq!(
+            event["invocations"][0]["coverage"], "unsupported",
+            "{suffix}"
+        );
+        assert!(event["invocations"][0].get("program").is_none(), "{suffix}");
+        assert!(
+            event["invocations"][0]["unsupported_reason"]
+                .as_object()
+                .is_some(),
+            "{suffix}"
+        );
+    }
+
+    let bounded = value["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|event| event["call_id"] == "call-bounded-argument")
+        .unwrap();
+    assert_eq!(bounded["invocations"][0]["coverage"], "static-literal");
+    assert_eq!(bounded["invocations"][0]["program"], "echo");
+    assert_eq!(bounded["invocations"][0]["subcommand"], "next");
+    assert_eq!(
+        bounded["invocations"][0]["arguments"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(bounded["invocations"][0]["arguments"][0]["chars"], 3_000);
+    assert_eq!(
+        bounded["invocations"][0]["arguments"][0]["text"]
+            .as_str()
+            .unwrap()
+            .chars()
+            .count(),
+        2_048
+    );
+    assert_eq!(bounded["invocations"][0]["arguments"][0]["truncated"], true);
     fs::remove_dir_all(codex_home).unwrap();
 }
 
@@ -3260,6 +3684,133 @@ fn show_reports_the_recorded_start_of_an_oversized_session() {
     fs::remove_dir_all(root).unwrap();
 }
 
+#[test]
+fn show_preserves_aligned_tail_records_and_reports_only_real_partial_prefixes() {
+    let root = TemporaryDirectory::new(
+        std::env::temp_dir().join(format!("tapes-cli-tail-alignment-{}", std::process::id())),
+    );
+    let codex = root.path().join("codex");
+    let sessions = codex.join("sessions/2026/01/01");
+    fs::create_dir_all(&sessions).unwrap();
+    let bound = 4 * 1024 * 1024;
+    let header = |id: &str| {
+        format!(
+            "{}\n",
+            serde_json::json!({
+                "timestamp": "2026-01-01T10:00:00Z",
+                "type": "session_meta",
+                "payload": {"id": id, "source": "exec", "cwd": "/fixtures/project"}
+            })
+        )
+    };
+    let exact_id = "80000000-0000-0000-0000-000000000001";
+    let exact_header = header(exact_id);
+    let exact_turn = format!(
+        "{}\n",
+        serde_json::json!({
+            "timestamp": "2026-01-01T10:00:01Z",
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "EXACT_BOUNDARY_MESSAGE"}]
+            }
+        })
+    );
+    let padding_overhead = serde_json::json!({"padding": ""}).to_string().len() + 1;
+    let exact_padding = format!(
+        "{}\n",
+        serde_json::json!({
+            "padding": "x".repeat(bound - exact_turn.len() - padding_overhead)
+        })
+    );
+    assert_eq!(exact_turn.len() + exact_padding.len(), bound);
+    fs::write(
+        sessions.join(format!("rollout-2026-01-01T10-00-00-{exact_id}.jsonl")),
+        format!("{exact_header}{exact_turn}{exact_padding}"),
+    )
+    .unwrap();
+
+    let partial_id = "80000000-0000-0000-0000-000000000002";
+    let partial_header = header(partial_id);
+    let partial = format!(
+        "{}\n",
+        serde_json::json!({
+            "padding": "x".repeat(bound + 128 - padding_overhead)
+        })
+    );
+    let later = format!(
+        "{}\n",
+        serde_json::json!({
+            "timestamp": "2026-01-01T10:00:02Z",
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "AFTER_PARTIAL_RECORD"}]
+            }
+        })
+    );
+    fs::write(
+        sessions.join(format!("rollout-2026-01-01T10-00-00-{partial_id}.jsonl")),
+        format!("{partial_header}{partial}{later}"),
+    )
+    .unwrap();
+
+    let show = |id: &str| {
+        let mut command = tapes();
+        command.args(["show", id, "--json"]);
+        with_fixture_env(
+            &mut command,
+            &codex,
+            &root.path().join("home"),
+            Path::new("/definitely/missing"),
+        );
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice::<Value>(&output.stdout).unwrap()
+    };
+
+    let exact = show(exact_id);
+    assert!(exact["turns"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|turn| turn["text"] == "EXACT_BOUNDARY_MESSAGE"));
+    let exact_ranges = exact["read"]["ranges"].as_array().unwrap();
+    let exact_tail = exact_ranges
+        .iter()
+        .find(|range| range["kind"] == "tail")
+        .unwrap();
+    let exact_alignment = exact_ranges
+        .iter()
+        .find(|range| range["kind"] == "alignment")
+        .unwrap();
+    assert_eq!(exact_alignment["span"]["end"], exact_tail["span"]["start"]);
+    assert!(exact["read"].get("gaps").is_none_or(|gaps| {
+        gaps.as_array().is_some_and(|gaps| {
+            gaps.iter()
+                .all(|gap| gap["reason"] != "discarded-partial-record")
+        })
+    }));
+
+    let partial = show(partial_id);
+    assert!(partial["turns"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|turn| turn["text"] == "AFTER_PARTIAL_RECORD"));
+    assert!(partial["read"]["gaps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|gap| gap["reason"] == "discarded-partial-record"));
+}
+
 /// The recorded case: a 147-turn session shown through the default window
 /// returns 100 turns and says 47 earlier ones were windowed out, with no
 /// source bound; a wide enough window clears it; export reads every turn.
@@ -3833,7 +4384,7 @@ fn usage_help_names_the_schema_and_what_the_figures_mean() {
     let output = tapes().args(["usage", "--help"]).output().unwrap();
     assert!(output.status.success());
     let help = String::from_utf8_lossy(&output.stdout);
-    assert!(help.contains("tapes-usage/3"), "{help}");
+    assert!(help.contains("tapes-usage/5"), "{help}");
     assert!(
         help.contains("basis and coverage decide whether figures may be summed"),
         "{help}"
@@ -3866,7 +4417,7 @@ fn usage_json_reports_recorded_facts_and_turn_counts_show_agrees_with() {
     );
     let value: Value = serde_json::from_slice(&output.stdout).unwrap();
 
-    assert_eq!(value["schema"], "tapes-usage/3");
+    assert_eq!(value["schema"], "tapes-usage/5");
     assert_eq!(value["session"]["id"], id);
     assert_eq!(value["session"]["source"]["recorded_harness"], "codex");
     assert_eq!(
@@ -4170,7 +4721,7 @@ fn export_over_an_activity_window_writes_one_bundle_per_session_and_a_manifest()
     );
     let manifest: Value =
         serde_json::from_slice(&fs::read(bundle.join("manifest.json")).unwrap()).unwrap();
-    assert_eq!(manifest["schema"], "tapes-export-manifest/4");
+    assert_eq!(manifest["schema"], "tapes-export-manifest/5");
     assert_eq!(
         manifest["selection"],
         serde_json::json!({
@@ -4296,7 +4847,7 @@ fn endings_help_names_the_schema_and_what_it_does_not_do() {
     assert!(output.status.success());
     let help = String::from_utf8_lossy(&output.stdout);
 
-    assert!(help.contains("tapes-endings/5"), "{help}");
+    assert!(help.contains("tapes-endings/6"), "{help}");
     assert!(help.contains("never on their text"), "{help}");
     assert!(help.contains("labels no session complete"), "{help}");
     assert!(help.contains("--tail <N>"), "{help}");
@@ -4333,7 +4884,7 @@ fn endings_applies_the_activity_window_before_reading_any_transcript() {
     );
     let value: Value = serde_json::from_slice(&output.stdout).unwrap();
 
-    assert_eq!(value["schema"], "tapes-endings/5");
+    assert_eq!(value["schema"], "tapes-endings/6");
     assert_eq!(
         value["selection"]["activity"],
         serde_json::json!({ "since": "2026-01-01T12:00:00Z" })
@@ -4350,7 +4901,7 @@ fn endings_applies_the_activity_window_before_reading_any_transcript() {
         ]
     );
     for ending in endings {
-        assert_eq!(ending["source"]["schema"], "tapes-endings/5");
+        assert_eq!(ending["source"]["schema"], "tapes-endings/6");
         assert_eq!(ending["source"]["source"]["recorded_harness"], "codex");
         assert_eq!(ending["facts"], serde_json::json!(["assistant-close"]));
         // The structural report carries no transcript text of its own.
@@ -4536,7 +5087,7 @@ fn stats_help_names_the_schema_and_what_the_figures_cover() {
     let output = tapes().args(["stats", "--help"]).output().unwrap();
     assert!(output.status.success());
     let help = String::from_utf8_lossy(&output.stdout);
-    assert!(help.contains("tapes-stats/3"), "{help}");
+    assert!(help.contains("tapes-stats/5"), "{help}");
     assert!(help.contains("complete pairs only"), "{help}");
     assert!(
         help.contains("share of recorded token counts rather than of cost"),
@@ -4574,7 +5125,7 @@ fn stats_json_counts_a_chosen_recording_exactly() {
     assert_eq!(
         comparable,
         serde_json::json!({
-            "schema": "tapes-stats/3",
+            "schema": "tapes-stats/5",
             "session": {
                 "id": id,
                 "source": {
@@ -4868,7 +5419,7 @@ fn brief_help_names_the_schema_and_the_half_it_reads() {
     assert!(output.status.success());
     let help = String::from_utf8_lossy(&output.stdout);
 
-    assert!(help.contains("tapes-brief/5"), "{help}");
+    assert!(help.contains("tapes-brief/6"), "{help}");
     assert!(help.contains("reads the recording alone"), "{help}");
     assert!(help.contains("--tail <N>"), "{help}");
     assert!(help.contains("[default: 12]"), "{help}");
@@ -4927,7 +5478,7 @@ fn brief_renders_the_continuation_in_reading_order() {
     assert!(narrow.contains("[assistant #4"), "{narrow}");
 
     let value: Value = serde_json::from_slice(&run(&["brief", id, "--json"])).unwrap();
-    assert_eq!(value["schema"], "tapes-brief/5");
+    assert_eq!(value["schema"], "tapes-brief/6");
     assert_eq!(value["session"]["id"], id);
     assert_eq!(value["working_set"]["directory_exists"], false);
     assert!(value["working_set"].get("git").is_none(), "{value}");
@@ -4962,7 +5513,7 @@ fn selection_stats_agree_with_individual_reads() {
         serde_json::from_slice::<Value>(&output.stdout).unwrap()
     };
     let summary = run(&["stats", "--global", "--harness", "codex", "--json"]);
-    assert_eq!(summary["schema"], "tapes-stats-summary/2");
+    assert_eq!(summary["schema"], "tapes-stats-summary/3");
     assert_eq!(summary["selected"], 2);
     assert_eq!(summary["read"], 2);
     let mut totals = [0_u64; 4];
@@ -5525,7 +6076,7 @@ fn child_reads_are_qualified_and_never_become_parent_activity() {
         String::from_utf8_lossy(&output.stderr)
     );
     let view: Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(view["schema"], "tapes-child/2");
+    assert_eq!(view["schema"], "tapes-child/3");
     assert_eq!(view["parent"]["id"], "session-claude");
     assert_eq!(
         view["transcript"]["session"]["id"],

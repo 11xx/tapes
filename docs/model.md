@@ -145,8 +145,9 @@ it reaches a consumer; bounded read and terminal evidence remain on the
 transcript contract.
 
 `Turn` contains a role, a `kind`, text, an optional UTC timestamp, an
-`ordinal`, optional `native_id`, an optional `request_turn_id`, and optional
-entry-scoped metadata. Roles are `user`, `assistant`, `tool`, and `reasoning`.
+`ordinal`, optional `native_id`, an optional `request_turn_id`, optional
+entry-scoped metadata, and an optional `record_ref`. Roles are `user`, `assistant`, `tool`,
+and `reasoning`.
 A tool turn also carries one typed `ToolEvent` inside the process for the
 `events` projection. The field is skipped by serialization, so
 the session wire object and export bundles retain the tool's harness envelope only in
@@ -175,6 +176,13 @@ metadata for the native entry. It carries optional `engine`, `status`, and
 `label` values plus `source_fields`, a map from those normalized names to the
 native JSON pointers that supplied them. Empty strings remain values; null and
 absent fields are omitted. Conversation metadata remains on `Session.metadata`.
+
+`record_ref.part_index` is the zero-based position of the normalized turn
+within its source record. A `ContentPart.record_ref` repeats that parent
+coordinate and adds the optional `content_part_index`, the zero-based position
+of the part within the turn. A source-native `pointer` remains the pointer to
+the source record; the content coordinate is never packed into it or used to
+invent a second native path.
 
 `parts` is the ordered content inventory for a turn. Text and recorded
 transcription parts carry readable bodies; media and file parts carry only a
@@ -227,8 +235,10 @@ and JavaScript forms are marked `static-declaration`. Each declaration keeps
 its program, subcommand, bounded arguments, source field/span, coverage, and
 optional intent. Variables, interpolation, heredocs, loops, and conditional
 execution remain unsupported or conditional; declarations never inherit a
-wrapper's duration or success. `events --program` selects these exact program
-names while `--name` continues to select the outer recorded tool.
+wrapper's duration or success. A wrapper result does not populate a nested
+declaration's `witnessed_result`; that field requires a separate native result
+for the same structured operation. `events --program` selects these exact
+program names while `--name` continues to select the outer recorded tool.
 
 `artifact_references` are explicit structured descriptors, never path-like
 text guesses. A paired result can attach an
@@ -272,7 +282,7 @@ An unpaired event carries one `incomplete` reason:
 | `call-before-read-bound` | A `file-tail` or `record-page` source bound can hide the call for this result. |
 | `call-not-recorded` | The read reached the recording's start and contains no call for this result. |
 
-`tapes events` serializes the projection as `tapes-events/4`. The object holds
+`tapes events` serializes the projection as `tapes-events/6`. The object holds
 the same `Session` representation as `show`, the event records, complete and
 incomplete pair counts, and the transcript's truncation and notes. A
 `--tail N` window keeps events whose turn ordinals are in the final `N` turns;
@@ -288,7 +298,7 @@ fetched.
 
 ```json
 {
-  "schema": "tapes-events/4",
+  "schema": "tapes-events/6",
   "session": {
     "id": "session-1",
     "source": {
@@ -322,7 +332,7 @@ fetched.
 ## Usage view
 
 `tapes usage` answers where one session's quota went and serializes as a
-`tapes-usage/3` object. `tokens`, `cost`, and `accounting` are the session's
+`tapes-usage/5` object. `tokens`, `cost`, and `accounting` are the session's
 own fields, repeated unchanged: a `recorded-total` is cumulative and a
 `summed-requests` figure is a sum of per-request records, so either may be
 added across sessions, and `coverage` is the difference a consumer must
@@ -349,7 +359,7 @@ or null.
 
 ```json
 {
-  "schema": "tapes-usage/3",
+  "schema": "tapes-usage/5",
   "session": {
     "id": "session-1",
     "source": {
@@ -522,7 +532,7 @@ recorded.
 ## Stats view
 
 `tapes stats` counts what one session's recording holds and serializes as a
-`tapes-stats/3` object. Every figure is a count of records the harness wrote:
+`tapes-stats/5` object. Every figure is a count of records the harness wrote:
 nothing here labels a call useful, attributes a reason to a latency, classifies
 why a session ended, or recommends anything.
 
@@ -586,7 +596,7 @@ order:
 
 ```json
 {
-  "schema": "tapes-stats/3",
+  "schema": "tapes-stats/5",
   "session": {
     "id": "session-1",
     "harness": "codex",
@@ -783,7 +793,7 @@ and suppresses mixed sums. Unknown accounting is its own domain.
 ## Endings report
 
 `tapes endings` answers what each session of a selection ends on and
-serializes as a `tapes-endings/5` object. The selection is stated in the terms
+serializes as a `tapes-endings/6` object. The selection is stated in the terms
 `list` uses, so the reported set is exactly the set `list` returns for the same
 flags, and the scope and metadata filters apply before any transcript is
 opened. Each selected session then costs one bounded transcript read of
@@ -847,7 +857,7 @@ verified `trailing_record`, with the meanings they have on a transcript.
 
 ```json
 {
-  "schema": "tapes-endings/5",
+  "schema": "tapes-endings/6",
   "selection": { "scope": "global", "sort": "newest", "limit": 20 },
   "endings": [
     {
@@ -863,7 +873,7 @@ verified `trailing_record`, with the meanings they have on a transcript.
         "ts": "2026-01-01T10:00:06Z",
         "turn": 41,
         "native_id": "msg_1",
-        "schema": "tapes-endings/5",
+        "schema": "tapes-endings/6",
         "coverage": "window"
       },
       "last_turn": {
@@ -894,7 +904,7 @@ verified `trailing_record`, with the meanings they have on a transcript.
 ## Continuation brief
 
 `tapes brief` answers what a continuation of one session needs from its
-recording and serializes as a `tapes-brief/5` object. The session is named by
+recording and serializes as a `tapes-brief/6` object. The session is named by
 id or reached with `--latest`, and costs one export-shaped transcript read and
 one lineage read: pairing therefore sees every call and result the reader
 reached, while `--tail` bounds the rendered exchange alone.
@@ -944,7 +954,7 @@ its `notes`, with the meanings they have on a transcript.
 
 ```json
 {
-  "schema": "tapes-brief/5",
+  "schema": "tapes-brief/6",
   "session": {
     "id": "session-1",
     "harness": "codex",
@@ -958,7 +968,7 @@ its `notes`, with the meanings they have on a transcript.
     "session": "session-1",
     "ts": "2026-01-01T10:00:06Z",
     "turn": 41,
-    "schema": "tapes-endings/5",
+    "schema": "tapes-endings/6",
     "coverage": "session"
   },
   "working_set": {
@@ -1007,14 +1017,19 @@ its `notes`, with the meanings they have on a transcript.
 
 ## JSON contract
 
-A serialized transcript is a `tapes-session/7` object:
+A serialized transcript is a `tapes-session/8` object:
 
 ```json
 {
-  "schema": "tapes-session/7",
+  "schema": "tapes-session/8",
   "session": {
     "id": "session-1",
-    "harness": "codex",
+    "source": {
+      "kind": "installed-recording",
+      "origin": "codex",
+      "recorded_harness": "codex",
+      "representation": "codex-recording"
+    },
     "started_at": "2023-11-14T22:13:20Z",
     "last_activity_at": "2023-11-14T22:15:00Z"
   },
@@ -1034,9 +1049,12 @@ association rather than a fabricated turn.
 
 When the source reader supplies it, `read` records the source length and the
 configured byte bound, each physical head/tail/context/alignment range, the
-absolute spans of decoded records, and explicit gaps for bytes outside the
-bound, partial records, or malformed records. A range is an observation of
-this read, not a content digest or a portable source identity. A terminal
+absolute spans of decoded records, separate spans for decoded records used
+only as projection context, and explicit gaps for bytes outside the bound,
+partial records, or malformed records. A range is an observation of
+this read, not a content digest or a portable source identity. Physical
+coverage does not erase a malformed record gap; a partial gap is discharged
+only when a successful decode identifies that same record. A terminal
 observation is independent of normalized turns: it preserves the native record
 type, payload subtype, explicit turn identity, outcome/code/message, and
 duration only where the reached record supplies them. Its presence never says
@@ -1095,7 +1113,7 @@ with a `Z` suffix. The human `show` activity note compares the store's last
 activity with the newest rendered turn after both timestamps are truncated to
 whole seconds.
 
-A serialized list is a `tapes-list/4` object with `sessions`, optional
+A serialized list is a `tapes-list/5` object with `sessions`, optional
 artifact-native `artifacts`, `unavailable`,
 `unreadable`, `unsearched`, `scanned`, and `scan_truncated`. `unsearched` names
 bounded content-search failures and supplied-input structural diagnostics; its
@@ -1115,7 +1133,7 @@ session id ascending, then harness ascending.
 
 ```json
 {
-  "schema": "tapes-list/4",
+  "schema": "tapes-list/5",
   "sort": "newest",
   "activity": {
     "since": "2026-01-01T00:00:00Z",
@@ -1125,7 +1143,7 @@ session id ascending, then harness ascending.
 }
 ```
 
-An `export` over a selection writes a `tapes-export-manifest/4` object beside
+An `export` over a selection writes a `tapes-export-manifest/5` object beside
 the bundles it produced. `selection` restates the query that chose the set:
 `scope` is `here`, `project`, or `global`, `project` names the path whose
 project was selected for the first two, `sort` and `limit` are always present,
@@ -1139,7 +1157,7 @@ verbatim, so the exported set can be audited against the store it came from.
 
 ```json
 {
-  "schema": "tapes-export-manifest/4",
+  "schema": "tapes-export-manifest/5",
   "selection": {
     "scope": "global",
     "activity": { "since": "2026-01-01T00:00:00Z" },
@@ -1171,31 +1189,33 @@ verbatim, so the exported set can be audited against the store it came from.
 
 ## Historical evidence
 
-`tapes-page/3` carries a normalized session, chronological `turns` with page-local
+`tapes-page/4` carries a normalized session, chronological `turns` with page-local
 ordinals, recorded `models`, source `start`/`end` byte offsets, `source_bytes`,
 `bytes_read`, separately counted `alignment_bytes` and `context_bytes`, malformed
 `skipped_records`, `skipped_fragment_bytes`, and an
-`read` evidence with absolute record spans, and an
+`read` evidence with absolute record spans and separate context-only record
+spans, and an
 optional `next_cursor`. A missing cursor means the source beginning was reached,
 not that malformed or oversized records were decoded. The cursor is opaque;
 it binds the session and file snapshot and must be passed back unchanged.
 
-`tapes-history-search/3` carries session identity, accumulated pages/bytes/gaps
+`tapes-history-search/4` carries session identity, accumulated pages/bytes/gaps
 and one `read` descriptor per page,
 matching text excerpts identified by page start, end and ordinal, an output-truncation
-flag, and a continuation cursor. `tapes-metadata-history/3` carries the same
+flag, and a continuation cursor. `tapes-metadata-history/4` carries the same
 coverage facts with up to 100 reverse-record-ordered model observations and
 an observation-truncation flag. Neither schema infers facts outside its reads.
-Metadata traversal does not
-normalize transcript turns or read their provenance context; its `context_bytes`
-is zero for Claude and Codex. Initial session resolution is separate from the
+Metadata traversal does not normalize transcript turns or read their
+provenance context; each metadata page labels its read as the `tapes-page/4`
+envelope with the `models-only` projection option, and its `context_bytes` is
+zero for Claude and Codex. Initial session resolution is separate from the
 page-byte counters.
-## Selection statistics: `tapes-stats-summary/2`
+## Selection statistics: `tapes-stats-summary/3`
 
 `selection` records the listing query. `selected` counts its sessions, `read`
 counts successful transcript reads, and `failed` names each read failure with
 ID, harness, source and diagnostic. `sessions` holds each read session's identity,
-`coverage` and `tools` in the same shapes as `tapes-stats/3`. `by_harness` maps
+`coverage` and `tools` in the same shapes as `tapes-stats/5`. `by_harness` maps
 harness names to accumulated tool counters, including tool-name rows and
 complete-pair duration totals, maxima and contributing counts. Counters never
 cross-pair records from different sessions. Listing diagnostics (`unavailable`,
@@ -1203,7 +1223,7 @@ cross-pair records from different sessions. Listing diagnostics (`unavailable`,
 transcript failures and per-session read bounds. An all-failed selected set
 still emits the report and exits unsuccessfully.
 
-## Child-qualified read: `tapes-child/2`
+## Child-qualified read: `tapes-child/3`
 
 `parent` is the selected parent session and `reference` is the exact child
 reference. `transcript`, `usage`, and `ending` use their normalized shapes with

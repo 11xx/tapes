@@ -2782,6 +2782,100 @@ fn codex_reads_cumulative_token_totals_from_the_latest_event_with_usage() {
     assert!(without.accounting.is_none());
 }
 
+#[test]
+fn codex_terminal_prefers_nested_native_error_fields_and_keeps_later_accounting() {
+    let root =
+        std::env::temp_dir().join(format!("tapes-codex-terminal-error-{}", std::process::id()));
+    let day = root.join("2026/01/01");
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&day).unwrap();
+    let id = "00000000-0000-0000-0000-00000000a001";
+    let path = day.join(format!("rollout-2026-01-01T10-00-00-{id}.jsonl"));
+    let nested_message = "m".repeat(2_050);
+    let records = [
+        serde_json::json!({
+            "timestamp": "2026-01-01T10:00:00Z",
+            "type": "session_meta",
+            "payload": {"id": id, "source": "exec", "cwd": "/fixtures/project"}
+        }),
+        serde_json::json!({
+            "timestamp": "2026-01-01T10:00:01Z",
+            "type": "event_msg",
+            "payload": {
+                "type": "task_complete",
+                "outcome": "error",
+                "code": "outer-code",
+                "message": "outer message",
+                "error": {
+                    "codex_error_info": "usage_limit_exceeded",
+                    "message": nested_message
+                }
+            }
+        }),
+        serde_json::json!({
+            "timestamp": "2026-01-01T10:00:02Z",
+            "type": "event_msg",
+            "payload": {
+                "type": "token_count",
+                "info": {
+                    "total_token_usage": {
+                        "input_tokens": 19,
+                        "output_tokens": 4,
+                        "cached_input_tokens": 2,
+                        "cache_write_input_tokens": 0
+                    }
+                },
+                "rate_limits": null
+            }
+        }),
+    ];
+    fs::write(
+        &path,
+        records
+            .iter()
+            .map(serde_json::Value::to_string)
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n",
+    )
+    .unwrap();
+
+    let backend = CodexBackend::new(&root);
+    let session = located(&backend, id);
+    let transcript = backend.transcript(&session, usize::MAX).unwrap();
+    let terminal = transcript.terminal.as_ref().unwrap();
+    assert_eq!(
+        terminal.code,
+        Some(serde_json::json!("usage_limit_exceeded"))
+    );
+    assert_eq!(
+        terminal.message.as_ref().unwrap().text.chars().count(),
+        2_048
+    );
+    assert_eq!(terminal.message.as_ref().unwrap().chars, 2_050);
+    assert!(terminal.message.as_ref().unwrap().truncated);
+    assert_eq!(session.tokens, transcript.session.tokens);
+    assert_eq!(
+        session.tokens,
+        Some(Tokens {
+            input: Some(19),
+            output: Some(4),
+            reasoning: None,
+            cache_read: Some(2),
+            cache_write: Some(0),
+        })
+    );
+    assert_eq!(
+        session.accounting,
+        Some(Accounting {
+            basis: AccountingBasis::RecordedTotal,
+            coverage: AccountingCoverage::Session,
+        })
+    );
+
+    fs::remove_dir_all(root).unwrap();
+}
+
 /// A read that reached fewer turns than the searched tail because of a source
 /// bound cannot say the needle is absent; the session is unsearched, not a
 /// non-match. A hit inside the reached turns is still a match.

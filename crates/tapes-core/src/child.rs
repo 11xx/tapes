@@ -8,6 +8,8 @@ use crate::model::{Session, Transcript, Truncation};
 use crate::usage::{self, UsageView};
 use crate::Selection;
 
+pub const CHILD_SCHEMA: &str = "tapes-child/3";
+
 #[derive(Debug, Serialize)]
 pub struct ChildView {
     pub schema: &'static str,
@@ -39,7 +41,7 @@ pub fn read(selection: Selection<'_>, reference: &str, tail: usize) -> Result<Ch
         transcript.truncated = true;
     }
     Ok(ChildView {
-        schema: "tapes-child/2",
+        schema: CHILD_SCHEMA,
         parent: parent.session,
         reference: reference.to_owned(),
         transcript,

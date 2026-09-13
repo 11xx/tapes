@@ -288,8 +288,10 @@ impl ContentPart {
         }
     }
 
-    pub fn set_record_ref_part(&mut self, mut reference: RecordRef, part_index: usize) {
-        reference.part_index = part_index;
+    /// Attach a content part to its source record without changing the
+    /// normalized turn coordinate carried by that record.
+    pub fn set_record_ref_part(&mut self, mut reference: RecordRef, content_part_index: usize) {
+        reference.content_part_index = Some(content_part_index);
         self.set_record_ref(reference);
     }
 }

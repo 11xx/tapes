@@ -10,7 +10,7 @@ use crate::stats::{Coverage, PairCoverage, ToolNameStats, ToolStats};
 use crate::usage::{self, UsageSession};
 use crate::{list_scoped, selection_record, SelectionRecord, SessionSelection, DEFAULT_LIST_LIMIT};
 
-pub const SCHEMA: &str = "tapes-stats-summary/2";
+pub const SCHEMA: &str = "tapes-stats-summary/3";
 
 #[derive(Debug, Serialize)]
 pub struct SessionStats {

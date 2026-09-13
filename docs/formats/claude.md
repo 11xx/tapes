@@ -57,8 +57,12 @@ recording and keeps the file path as an opaque location. The optional
 `started_at` and `last_activity_at` fields remain absent when no reached record
 supplies valid timestamps; filesystem times are not substituted. Every decoded
 turn carries an absolute file `record_ref` span and the read object records the
-source revision, physical ranges, and gaps. The reference is local to that
-source observation and is not a portable content digest.
+source revision, physical ranges, context-only record spans, and gaps. A turn
+reference's `part_index` is its normalized position within the source record;
+each content-part reference repeats that value and adds its own
+`content_part_index`. Native pointers, when present in supplied projections,
+remain source pointers. The reference is local to that source observation and
+is not a portable content digest.
 
 ## `type: "user"` — the user role
 

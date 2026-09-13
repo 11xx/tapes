@@ -607,8 +607,10 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Read one bounded page of older Claude or Codex history as tapes-page/3,
-    /// including absolute record references and read evidence. Resume with the returned cursor.
+    /// Read one bounded page of older Claude or Codex history as tapes-page/4,
+    /// including absolute record references and read evidence. Codex transcript
+    /// pages retain opening and newer provenance context separately from turns.
+    /// Resume with the returned cursor.
     Page {
         #[command(flatten)]
         selection: SelectionArgs,
@@ -637,7 +639,8 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Recover recorded model observations outside the usual source tail, with explicit history coverage.
+    /// Recover recorded model observations outside the usual source tail as a
+    /// models-only tapes-page/4 projection, with explicit history coverage.
     Metadata {
         #[command(flatten)]
         selection: SelectionArgs,
@@ -650,7 +653,7 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Read a Claude child's own transcript, accounting and ending as tapes-child/2 under its parent session.
+    /// Read a Claude child's own transcript, accounting and ending as tapes-child/3 under its parent session.
     Child {
         #[command(flatten)]
         selection: SelectionArgs,
@@ -683,7 +686,7 @@ enum Command {
         /// this never aliases the recorded outer tool name.
         #[arg(long, value_name = "PROGRAM")]
         program: Vec<String>,
-        /// Render the versioned tapes-events/4 object as JSON.
+        /// Render the versioned tapes-events/6 object as JSON.
         #[arg(long)]
         json: bool,
     },
@@ -712,19 +715,19 @@ enum Command {
     /// complete pairs only, and a cache ratio is a share of recorded token
     /// counts rather than of cost. Nothing is judged, ranked, or explained.
     /// A scope or listing filter selects multiple sessions and returns
-    /// tapes-stats-summary/2: recorded tools grouped by harness and name,
+    /// tapes-stats-summary/3: recorded tools grouped by harness and name,
     /// with per-session read coverage, pairing counts and failures. Children
     /// are not read through their parents.
     Stats {
         #[command(flatten)]
         query: SessionQueryArgs,
-        /// Render the versioned tapes-stats/3 object, or tapes-stats-summary/2
+        /// Render the versioned tapes-stats/5 object, or tapes-stats-summary/3
         /// for a selection, as JSON.
         #[arg(long)]
         json: bool,
     },
     /// Where quota went. A session named by id or reached with --latest
-    /// answers that session as tapes-usage/3: its recorded tokens, cost, and
+    /// answers that session as tapes-usage/5: its recorded tokens, cost, and
     /// turn counts, plus whatever else its harness recorded — a context
     /// window, a provider quota window, wall-clock durations, a per-model
     /// split. A scope or listing filter instead answers the whole selection
@@ -749,13 +752,13 @@ enum Command {
             conflicts_with_all = ["session", "latest", "title", "occurrence"]
         )]
         by: Vec<ByArg>,
-        /// Render the versioned tapes-usage/3 object, or tapes-usage-summary/3
+        /// Render the versioned tapes-usage/5 object, or tapes-usage-summary/3
         /// for a selection, as JSON.
         #[arg(long)]
         json: bool,
     },
     /// What a continuation of one session needs from its recording, as
-    /// tapes-brief/5: where the work stopped, the working directory and the
+    /// tapes-brief/6: where the work stopped, the working directory and the
     /// commit it sits on, the calls the read never saw a result for, the
     /// children whose outcome the store does not record, and a bounded tail
     /// of the exchange. It reads the recording alone and judges nothing —
@@ -769,12 +772,12 @@ enum Command {
         /// out of the tail.
         #[arg(long, value_name = "N", default_value_t = DEFAULT_BRIEF_TAIL)]
         tail: usize,
-        /// Render the versioned tapes-brief/5 object as JSON.
+        /// Render the versioned tapes-brief/6 object as JSON.
         #[arg(long)]
         json: bool,
     },
     /// What each session of a selection ends on, one bounded record each, as
-    /// tapes-endings/5. The selection uses the flags `list` and `export` take,
+    /// tapes-endings/6. The selection uses the flags `list` and `export` take,
     /// applied before any transcript is opened; each selected session then
     /// costs one bounded read of its newest turns and one lineage read. Every
     /// fact rests on the normalized turn kinds and typed tool events of the
@@ -832,7 +835,7 @@ enum Command {
         /// attached context stay out of it.
         #[arg(long)]
         text: bool,
-        /// Render the versioned tapes-endings/5 object as JSON.
+        /// Render the versioned tapes-endings/6 object as JSON.
         #[arg(long)]
         json: bool,
     },
