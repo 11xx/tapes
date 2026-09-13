@@ -104,6 +104,32 @@ pub struct ArtifactReference {
     pub source: Option<RecordRef>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub action: Option<String>,
+    /// A bounded body retained when the source carried the artifact's text.
+    /// A missing body means the source did not expose one, not that the
+    /// reader opened a referenced resource and found it empty.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub body: Option<BoundedText>,
+    /// Whether the source exposed a usable body representation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub body_availability: Option<ContentAvailability>,
+    /// Native citation metadata retained from the artifact body.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub citations: Vec<ArtifactCitation>,
+}
+
+/// A citation span recorded inside an artifact body.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArtifactCitation {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub uri: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub start: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub end: Option<usize>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -234,6 +260,17 @@ pub fn text_part(text: impl Into<String>, source_field: &str, native_kind: &str)
         source_field: source_field.to_owned(),
         native_kind: native_kind.to_owned(),
         record_ref: None,
+    }
+}
+
+/// Keep a text body under a caller-selected character bound while retaining
+/// its full length as evidence.
+pub fn bounded_text(text: &str, max_chars: usize) -> BoundedText {
+    let chars = text.chars().count();
+    BoundedText {
+        text: text.chars().take(max_chars).collect(),
+        chars,
+        truncated: chars > max_chars,
     }
 }
 
@@ -466,6 +503,9 @@ pub fn artifact_reference_object(
             timestamp: None,
             source: None,
             action: None,
+            body: None,
+            body_availability: None,
+            citations: Vec::new(),
         },
     )
 }

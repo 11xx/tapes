@@ -56,6 +56,10 @@ struct BundleJson<'a> {
     terminal: Option<&'a crate::model::TerminalObservation>,
     #[serde(skip_serializing_if = "Option::is_none")]
     text_tail: Option<&'a crate::model::TextTailEvidence>,
+    #[serde(skip_serializing_if = "<[crate::content::ArtifactReference]>::is_empty")]
+    artifacts: &'a [crate::content::ArtifactReference],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    graph: Option<&'a crate::model::ConversationGraph>,
     #[serde(skip_serializing_if = "Option::is_none")]
     content: Option<crate::content::ContentInventory>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -88,6 +92,8 @@ pub fn export(transcript: &Transcript, directory: &Path) -> Result<Bundle> {
         read: transcript.read.as_ref(),
         terminal: transcript.terminal.as_ref(),
         text_tail: transcript.text_tail.as_ref(),
+        artifacts: &transcript.artifacts,
+        graph: transcript.graph.as_ref(),
         content: crate::content::inventory(&transcript.turns),
         trailing_record: transcript.trailing_record.as_ref(),
         notes: &transcript.notes,
@@ -538,6 +544,8 @@ mod tests {
             read: None,
             terminal: None,
             text_tail: None,
+            artifacts: Vec::new(),
+            graph: None,
             trailing_record: None,
             notes: vec!["1 entry belongs to an abandoned branch.".into()],
         }

@@ -32,8 +32,8 @@ pub mod stats_summary;
 pub mod title;
 pub mod usage;
 
-pub const LIST_SCHEMA: &str = "tapes-list/2";
-pub const EXPORT_MANIFEST_SCHEMA: &str = "tapes-export-manifest/2";
+pub const LIST_SCHEMA: &str = "tapes-list/3";
+pub const EXPORT_MANIFEST_SCHEMA: &str = "tapes-export-manifest/3";
 pub const USAGE_SUMMARY_SCHEMA: &str = "tapes-usage-summary/3";
 /// Number of normalized turns a `list --search` query inspects per session.
 /// Keeping this fixed makes the listing's cost predictable for callers.
@@ -102,6 +102,8 @@ pub struct SessionList {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub activity: Option<ActivityWindow>,
     pub sessions: Vec<Session>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub artifacts: Vec<crate::content::ArtifactReference>,
     /// Harnesses that could not be read at all.
     pub unavailable: Vec<String>,
     /// Sessions a readable harness could not normalize, each named with its
@@ -342,6 +344,7 @@ pub fn list_with_backends_options(
             until: filters.until,
         }),
         sessions: listed.sessions,
+        artifacts: listed.artifacts,
         unavailable: listed.unavailable,
         unreadable: listed.unreadable,
         unsearched: listed.unsearched,
@@ -352,6 +355,7 @@ pub fn list_with_backends_options(
 
 pub(crate) struct Listed {
     pub(crate) sessions: Vec<Session>,
+    pub(crate) artifacts: Vec<crate::content::ArtifactReference>,
     /// Which backend each session came from, positionally — kept so a
     /// selection can go straight to its transcript without resolving the id
     /// against every store again.
@@ -414,6 +418,7 @@ pub(crate) fn list_scoped(
     let mut unavailable_harnesses = Vec::new();
     let mut unreadable_sessions = Vec::new();
     let mut unsearched_sessions = Vec::new();
+    let mut artifacts = Vec::new();
     let mut scanned = 0;
     let mut scan_truncated = false;
     let mut selected_harness_counts = HashMap::<String, usize>::new();
@@ -472,6 +477,7 @@ pub(crate) fn list_scoped(
         match listing {
             Ok(Listing {
                 mut sessions,
+                artifacts: discovered_artifacts,
                 unavailable,
                 unsearched,
                 scanned: inspected,
@@ -490,8 +496,12 @@ pub(crate) fn list_scoped(
                 scanned += inspected;
                 scan_truncated |= truncated;
                 found.extend(sessions.into_iter().map(|session| (session, index)));
+                artifacts.extend(discovered_artifacts);
             }
             Err(error) => {
+                if backend.harness() == "input" {
+                    return Err(error);
+                }
                 if filters.search.is_some() {
                     unsearched_sessions
                         .push(format!("{} search failed: {error:#}", backend.harness()));
@@ -538,6 +548,7 @@ pub(crate) fn list_scoped(
     }
     Ok(Listed {
         sessions,
+        artifacts,
         origins,
         unavailable,
         unreadable: unreadable_sessions,
@@ -1047,6 +1058,8 @@ pub struct ExportManifest {
     pub selection: SelectionRecord,
     /// Exported sessions, in selection order.
     pub sessions: Vec<ExportedSession>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub artifacts: Vec<crate::content::ArtifactReference>,
     pub failed: Vec<FailedExport>,
     pub unavailable: Vec<String>,
     pub unreadable: Vec<String>,
@@ -1136,6 +1149,7 @@ pub fn export_selection_with_backends(
         schema: EXPORT_MANIFEST_SCHEMA,
         selection: selection_record(selection, limit),
         sessions,
+        artifacts: listed.artifacts,
         failed,
         unavailable: listed.unavailable,
         unreadable: listed.unreadable,

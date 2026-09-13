@@ -7,6 +7,7 @@
 
 use std::collections::HashSet;
 use std::fs::{self, File, Metadata};
+use std::hash::{Hash, Hasher};
 use std::io::{self, Read};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Component, Path, PathBuf};
@@ -18,13 +19,15 @@ use serde_json::Value;
 use zip::ZipArchive;
 
 use crate::backend::{Backend, Listing, Query};
-use crate::content::{self, ContentAvailability, ContentCarrier, ContentCoverage, ContentPart};
+use crate::content::{
+    self, ArtifactReference, ContentAvailability, ContentCarrier, ContentCoverage, ContentPart,
+};
 use crate::lineage::Lineage;
 use crate::model::{
-    ByteSpan, EmptyTextTailReason, Model, ReadEvidence, ReadRange, ReadRangeKind, RecordRef, Role,
-    ScopeAuthority, Session, SessionMetadata, SourceDescriptor, SourceLocation, SourceScope,
-    TerminalObservation, TextTailEvidence, Transcript, TranscriptEvidence, Truncation, Turn,
-    TurnKind,
+    ByteSpan, ConversationEdge, ConversationGraph, ConversationNode, EmptyTextTailReason, Model,
+    ReadEvidence, ReadRange, ReadRangeKind, RecordRef, Role, ScopeAuthority, Session,
+    SessionMetadata, SourceDescriptor, SourceLocation, SourceScope, TerminalObservation,
+    TextTailEvidence, Transcript, TranscriptEvidence, Truncation, Turn, TurnKind,
 };
 
 pub const DEFAULT_SCAN_BYTES: u64 = 512 * 1024 * 1024;
@@ -37,6 +40,7 @@ pub const MAX_RECORD_BYTES: u64 = 64 * 1024 * 1024;
 pub const MAX_OUTPUT_BYTES: u64 = 64 * 1024 * 1024;
 pub const MAX_MEMBERS: usize = 10_000;
 pub const MAX_DEPTH: usize = 128;
+pub const MAX_ARTIFACT_BODY_CHARS: usize = 64 * 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum InputFormat {
@@ -168,6 +172,7 @@ impl Backend for InputBackend {
         let dataset = self.dataset()?;
         let mut listing = Listing {
             scanned: dataset.scanned,
+            artifacts: dataset.artifacts.clone(),
             unsearched: dataset.diagnostics.clone(),
             scan_truncated: dataset.scan_truncated,
             ..Listing::default()
@@ -177,12 +182,17 @@ impl Backend for InputBackend {
             .after_occurrence
             .as_deref()
             .map(parse_occurrence);
+        let after = after
+            .as_ref()
+            .map(|after| after.as_ref().map_err(|error| anyhow!("{error}")))
+            .transpose()?;
+        if let Some((observation, _)) = after.as_ref() {
+            if observation != &dataset.observation {
+                bail!("--after-occurrence belongs to a different supplied input observation");
+            }
+        }
         for occurrence in &dataset.occurrences {
-            if let Some(after) = after.as_ref() {
-                let (revision, ordinal) = after.as_ref().map_err(|error| anyhow!("{error}"))?;
-                if revision != &occurrence.revision {
-                    bail!("--after-occurrence belongs to a different supplied input observation");
-                }
+            if let Some((_, ordinal)) = after.as_ref() {
                 if occurrence.ordinal <= *ordinal {
                     continue;
                 }
@@ -261,16 +271,21 @@ impl Backend for InputBackend {
 struct InputOccurrence {
     session: Session,
     turns: Vec<Turn>,
+    artifacts: Vec<ArtifactReference>,
+    graph: Option<ConversationGraph>,
     evidence: ReadEvidence,
     terminal: Option<TerminalObservation>,
     trailing_record: Option<crate::model::TrailingRecord>,
     notes: Vec<String>,
-    revision: String,
+    format: String,
+    member: String,
     ordinal: usize,
 }
 
 struct InputDataset {
     occurrences: Vec<InputOccurrence>,
+    artifacts: Vec<ArtifactReference>,
+    observation: String,
     diagnostics: Vec<String>,
     scanned: usize,
     scan_truncated: bool,
@@ -280,6 +295,7 @@ struct InputDataset {
 struct AssociatedReport {
     member: String,
     backing: Option<String>,
+    reference: ArtifactReference,
     part: ContentPart,
 }
 
@@ -309,7 +325,7 @@ fn input_transcript(occurrence: &InputOccurrence, tail: usize) -> Result<Transcr
         window: Truncation::window(turns.len(), total, tail),
         source: Vec::new(),
     };
-    Transcript::with_evidence(
+    let mut transcript = Transcript::with_evidence(
         occurrence.session.clone(),
         turns,
         truncation,
@@ -324,23 +340,18 @@ fn input_transcript(occurrence: &InputOccurrence, tail: usize) -> Result<Transcr
         },
         occurrence.trailing_record.clone(),
         occurrence.notes.clone(),
-    )
-    .pipe(Ok)
+    );
+    transcript.artifacts = occurrence.artifacts.clone();
+    transcript.graph = occurrence.graph.clone();
+    Ok(transcript)
 }
-
-trait Pipe: Sized {
-    fn pipe<T>(self, function: impl FnOnce(Self) -> T) -> T {
-        function(self)
-    }
-}
-
-impl<T> Pipe for T {}
 
 fn load_dataset(options: &InputOptions) -> Result<InputDataset> {
     let mut budget = Budget::new(options);
     let mut occurrences = Vec::new();
     let mut diagnostics = Vec::new();
     let mut associated_reports = Vec::new();
+    let mut observation_parts = Vec::new();
     let mut scanned = 0;
     let mut scan_truncated = false;
     for path in &options.paths {
@@ -361,6 +372,11 @@ fn load_dataset(options: &InputOptions) -> Result<InputDataset> {
                     break;
                 }
                 budget.members += 1;
+                observation_parts.push(format!(
+                    "file:{}:{}",
+                    file.display(),
+                    metadata_revision(&fs::metadata(&file)?)
+                ));
                 scan_file(
                     &file,
                     None,
@@ -380,11 +396,18 @@ fn load_dataset(options: &InputOptions) -> Result<InputDataset> {
                 &mut occurrences,
                 &mut diagnostics,
                 &mut associated_reports,
+                &mut observation_parts,
                 &mut scanned,
                 &mut scan_truncated,
             )?;
         } else {
             budget.members += 1;
+            let metadata = fs::metadata(path)?;
+            observation_parts.push(format!(
+                "file:{}:{}",
+                path.display(),
+                metadata_revision(&metadata)
+            ));
             scan_file(
                 path,
                 None,
@@ -409,7 +432,23 @@ fn load_dataset(options: &InputOptions) -> Result<InputDataset> {
         ));
     }
     attach_associated_reports(&mut occurrences, &associated_reports, &mut diagnostics);
+    let observation = observation_revision(&observation_parts);
+    for (ordinal, occurrence) in occurrences.iter_mut().enumerate() {
+        occurrence.ordinal = ordinal;
+        occurrence.session.occurrence = Some(format!(
+            "input:v2:{}:{}:{}:{}",
+            encode_component(&observation),
+            encode_component(&occurrence.format),
+            encode_component(&occurrence.member),
+            ordinal
+        ));
+    }
     Ok(InputDataset {
+        artifacts: associated_reports
+            .iter()
+            .map(|report| report.reference.clone())
+            .collect(),
+        observation,
         occurrences,
         diagnostics,
         scanned,
@@ -1075,18 +1114,12 @@ fn parse_record(
         model,
         metadata,
         turns,
+        graph,
         mut notes,
     )) = normalize_value(&value, format, ordinal)?
     else {
         return Ok(());
     };
-    let occurrence = format!(
-        "input:v1:{}:{}:{}:{}",
-        encode_component(&revision),
-        encode_component(format.name()),
-        encode_component(member.unwrap_or("root")),
-        ordinal
-    );
     let (source_origin, representation, producer) = match format {
         InputFormat::Openai => ("openai", "openai-conversation", Some("OpenAI export")),
         InputFormat::ChatgptExporter => (
@@ -1135,9 +1168,32 @@ fn parse_record(
             part.set_record_ref_part(reference.clone(), part_index);
         }
     }
+    let mut graph = graph;
+    if let Some(graph) = graph.as_mut() {
+        for (node_index, node) in graph.nodes.iter_mut().enumerate() {
+            let Some(message) = node.message.as_mut() else {
+                continue;
+            };
+            let reference = RecordRef {
+                domain: source_domain.clone(),
+                revision: Some(revision.clone()),
+                span: Some(span),
+                native_id: message.native_id.clone(),
+                part_index: node_index,
+                pointer: message
+                    .record_ref
+                    .as_ref()
+                    .and_then(|reference| reference.pointer.clone()),
+            };
+            message.record_ref = Some(reference.clone());
+            for (part_index, part) in message.parts.iter_mut().enumerate() {
+                part.set_record_ref_part(reference.clone(), part_index);
+            }
+        }
+    }
     let session = Session {
         id,
-        occurrence: Some(occurrence),
+        occurrence: None,
         source,
         metadata,
         model,
@@ -1163,7 +1219,7 @@ fn parse_record(
         coordinate_domain: "supplied-occurrence".to_owned(),
         source_revision: Some(revision.clone()),
         producer: producer.map(str::to_owned),
-        projection: "tapes-session/4".to_owned(),
+        projection: crate::model::SESSION_SCHEMA.to_owned(),
         projection_options: vec![format!("format={}", format.name())],
         observed_at: Utc::now(),
         ranges: vec![ReadRange {
@@ -1176,11 +1232,14 @@ fn parse_record(
     occurrences.push(InputOccurrence {
         session,
         turns,
+        artifacts: Vec::new(),
+        graph,
         evidence,
         terminal: None,
         trailing_record: None,
         notes,
-        revision,
+        format: format.name().to_owned(),
+        member: member.unwrap_or("root").to_owned(),
         ordinal,
     });
     Ok(())
@@ -1195,6 +1254,7 @@ type NormalizedConversation = Option<(
     Option<Model>,
     Option<SessionMetadata>,
     Vec<Turn>,
+    Option<ConversationGraph>,
     Vec<String>,
 )>;
 
@@ -1212,6 +1272,10 @@ fn normalize_value(
 }
 
 fn normalize_openai(value: &Value, ordinal: usize) -> Result<NormalizedConversation> {
+    normalize_mapping(value, ordinal)
+}
+
+fn normalize_mapping(value: &Value, ordinal: usize) -> Result<NormalizedConversation> {
     if !value.is_object() {
         return Ok(None);
     }
@@ -1235,84 +1299,18 @@ fn normalize_openai(value: &Value, ordinal: usize) -> Result<NormalizedConversat
         return Ok(None);
     };
     let mut notes = Vec::new();
-    let Some(current) = value["current_node"].as_str() else {
-        notes.push("canonical branch is unknown because current_node is absent".to_owned());
-        return Ok(Some((
-            id,
-            title,
-            started_at,
-            last_activity_at,
-            directory,
-            model,
-            None,
-            Vec::new(),
-            notes,
-        )));
-    };
-    let mut ids = Vec::new();
-    let mut seen = HashSet::new();
-    let mut current = Some(current);
-    while let Some(node_id) = current {
-        if !seen.insert(node_id) {
-            notes.push("conversation mapping cycle stopped canonical traversal".to_owned());
-            break;
-        }
-        if seen.len() > MAX_DEPTH {
-            notes.push(format!("canonical traversal stopped at depth {MAX_DEPTH}"));
-            break;
-        }
-        let Some(node) = mapping.get(node_id) else {
-            notes.push(format!(
-                "canonical traversal stopped at a dangling node {node_id}"
-            ));
-            break;
-        };
-        ids.push(node_id);
-        current = node["parent"].as_str();
-    }
-    ids.reverse();
+    let (graph, selected_path) =
+        normalize_mapping_graph(mapping, value["current_node"].as_str(), &mut notes);
     let mut turns = Vec::new();
-    for (index, node_id) in ids.into_iter().enumerate() {
-        let node = &mapping[node_id];
-        let Some(message) = node.get("message").filter(|value| !value.is_null()) else {
+    for (index, node_id) in selected_path.iter().enumerate() {
+        let Some(node) = graph.nodes.iter().find(|node| node.id == *node_id) else {
             continue;
         };
-        let Some(role) = role_from_str(message["author"]["role"].as_str()) else {
-            notes.push(format!("node {node_id} has an unknown author role"));
+        let Some(mut turn) = node.message.clone() else {
             continue;
         };
-        let (parts, coverage) = message_parts(message);
-        let text = content::project_text(&parts);
-        if text.is_empty() && parts.is_empty() {
-            continue;
-        }
-        let native_id = message["id"].as_str().map(str::to_owned);
-        let kind = role.kind().unwrap_or(TurnKind::Unknown);
-        turns.push(Turn {
-            role,
-            kind,
-            text,
-            ts: timestamp_value(&message["create_time"]),
-            ordinal: index,
-            native_id: native_id.clone(),
-            request_turn_id: message["metadata"]["turn_id"]
-                .as_str()
-                .or_else(|| message["turn_id"].as_str())
-                .map(str::to_owned),
-            record_ref: Some(RecordRef {
-                domain: "input-pending".to_owned(),
-                revision: None,
-                span: None,
-                native_id,
-                part_index: index,
-                pointer: Some(format!("/mapping/{node_id}/message")),
-            }),
-            channel: message["channel"].as_str().map(str::to_owned),
-            recipient: message["recipient"].as_str().map(str::to_owned),
-            parts,
-            coverage: Some(coverage),
-            tool: None,
-        });
+        turn.ordinal = index;
+        turns.push(turn);
     }
     Ok(Some((
         id,
@@ -1323,11 +1321,209 @@ fn normalize_openai(value: &Value, ordinal: usize) -> Result<NormalizedConversat
         model,
         None,
         turns,
+        Some(graph),
         notes,
     )))
 }
 
+const MAX_GRAPH_NODES: usize = 4096;
+const MAX_GRAPH_EDGES: usize = 8192;
+const MAX_CANONICAL_PATH: usize = 4096;
+
+fn normalize_mapping_graph(
+    mapping: &serde_json::Map<String, Value>,
+    current: Option<&str>,
+    notes: &mut Vec<String>,
+) -> (ConversationGraph, Vec<String>) {
+    let selected_path = canonical_path(mapping, current, notes);
+    let mut ids = mapping.keys().cloned().collect::<Vec<_>>();
+    ids.sort();
+    let mut retained_ids = selected_path.clone();
+    retained_ids.truncate(MAX_GRAPH_NODES);
+    for id in &ids {
+        if retained_ids.len() >= MAX_GRAPH_NODES {
+            break;
+        }
+        if !retained_ids.contains(id) {
+            retained_ids.push(id.clone());
+        }
+    }
+
+    let nodes = retained_ids
+        .iter()
+        .enumerate()
+        .map(|(index, id)| {
+            let value = &mapping[id];
+            let message = value
+                .get("message")
+                .filter(|message| !message.is_null())
+                .and_then(|message| mapping_message(message, id, index, notes));
+            ConversationNode {
+                id: id.clone(),
+                parent: value
+                    .get("parent")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
+                message,
+            }
+        })
+        .collect::<Vec<_>>();
+
+    let mut edge_pairs = Vec::new();
+    for id in &ids {
+        let value = &mapping[id];
+        if let Some(parent) = value.get("parent").and_then(Value::as_str) {
+            edge_pairs.push((parent.to_owned(), id.clone()));
+        }
+        if let Some(children) = value.get("children").and_then(Value::as_array) {
+            edge_pairs.extend(
+                children
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(|child| (id.clone(), child.to_owned())),
+            );
+        }
+    }
+    edge_pairs.sort();
+    edge_pairs.dedup();
+    let omitted_edges = edge_pairs.len().saturating_sub(MAX_GRAPH_EDGES);
+    let edges = edge_pairs
+        .into_iter()
+        .take(MAX_GRAPH_EDGES)
+        .map(|(parent, child)| ConversationEdge { parent, child })
+        .collect();
+    let omitted_nodes = mapping.len().saturating_sub(nodes.len());
+    if omitted_nodes > 0 {
+        notes.push(format!(
+            "conversation mapping retained {}/{} nodes; {omitted_nodes} fell outside the graph bound",
+            nodes.len(),
+            mapping.len()
+        ));
+    }
+    if omitted_edges > 0 {
+        notes.push(format!(
+            "conversation mapping retained {} edges; {omitted_edges} fell outside the graph bound",
+            MAX_GRAPH_EDGES
+        ));
+    }
+    (
+        ConversationGraph {
+            current_node: current.map(str::to_owned),
+            selected_path: selected_path.clone(),
+            nodes,
+            edges,
+            omitted_nodes,
+            omitted_edges,
+        },
+        selected_path,
+    )
+}
+
+fn canonical_path(
+    mapping: &serde_json::Map<String, Value>,
+    current: Option<&str>,
+    notes: &mut Vec<String>,
+) -> Vec<String> {
+    let Some(current) = current else {
+        notes.push("canonical branch is unknown because current_node is absent".to_owned());
+        return Vec::new();
+    };
+    let mut ids = Vec::new();
+    let mut seen = HashSet::new();
+    let mut current = Some(current);
+    while let Some(node_id) = current {
+        if !seen.insert(node_id) {
+            notes.push("conversation mapping cycle stopped canonical traversal".to_owned());
+            break;
+        }
+        if ids.len() >= MAX_CANONICAL_PATH {
+            notes.push(format!(
+                "canonical traversal stopped at path bound {MAX_CANONICAL_PATH}"
+            ));
+            break;
+        }
+        let Some(node) = mapping.get(node_id) else {
+            notes.push(format!(
+                "canonical traversal stopped at a dangling node {node_id}"
+            ));
+            break;
+        };
+        ids.push(node_id.to_owned());
+        current = node.get("parent").and_then(Value::as_str);
+    }
+    ids.reverse();
+    ids
+}
+
+fn mapping_message(
+    message: &Value,
+    node_id: &str,
+    index: usize,
+    notes: &mut Vec<String>,
+) -> Option<Turn> {
+    let Some(role) = role_from_str(
+        message
+            .get("author")
+            .and_then(|author| author.get("role"))
+            .and_then(Value::as_str),
+    ) else {
+        notes.push(format!("node {node_id} has an unknown author role"));
+        return None;
+    };
+    let (parts, coverage) = message_parts(message);
+    let text = content::project_text(&parts);
+    if text.is_empty() && parts.is_empty() {
+        return None;
+    }
+    let native_id = message.get("id").and_then(Value::as_str).map(str::to_owned);
+    let kind = imported_kind(&role);
+    Some(Turn {
+        role,
+        kind,
+        text,
+        ts: message.get("create_time").and_then(timestamp_value),
+        ordinal: index,
+        native_id: native_id.clone(),
+        request_turn_id: message
+            .get("metadata")
+            .and_then(|metadata| metadata.get("turn_id"))
+            .and_then(Value::as_str)
+            .or_else(|| message.get("turn_id").and_then(Value::as_str))
+            .map(str::to_owned),
+        record_ref: Some(RecordRef {
+            domain: "input-pending".to_owned(),
+            revision: None,
+            span: None,
+            native_id,
+            part_index: index,
+            pointer: Some(format!("/mapping/{node_id}/message")),
+        }),
+        channel: message
+            .get("channel")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        recipient: message
+            .get("recipient")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        parts,
+        coverage: Some(coverage),
+        tool: None,
+    })
+}
+
+fn imported_kind(role: &Role) -> TurnKind {
+    if *role == Role::User {
+        TurnKind::Operator
+    } else {
+        role.kind().unwrap_or(TurnKind::Unknown)
+    }
+}
+
 fn normalize_chatgpt_exporter(value: &Value, ordinal: usize) -> Result<NormalizedConversation> {
+    if value["mapping"].is_object() {
+        return normalize_mapping(value, ordinal);
+    }
     let object = value.as_object();
     let explicit_messages = object
         .and_then(|object| object.get("messages").or_else(|| object.get("entries")))
@@ -1419,7 +1615,7 @@ fn normalize_chatgpt_exporter(value: &Value, ordinal: usize) -> Result<Normalize
             .into_iter()
             .find_map(|key| message[key].as_str())
             .map(str::to_owned);
-        let kind = role.kind().unwrap_or(TurnKind::Unknown);
+        let kind = imported_kind(&role);
         turns.push(Turn {
             role,
             kind,
@@ -1454,6 +1650,7 @@ fn normalize_chatgpt_exporter(value: &Value, ordinal: usize) -> Result<Normalize
         model,
         None,
         turns,
+        None,
         notes,
     )))
 }
@@ -1551,6 +1748,7 @@ fn normalize_perplexity(value: &Value, _ordinal: usize) -> Result<NormalizedConv
         None,
         metadata,
         turns,
+        None,
         notes,
     )))
 }
@@ -1739,7 +1937,13 @@ fn detect_format(value: &Value) -> Option<InputFormat> {
         || (value["context_uuid"].is_string() && value["entries"].is_array())
     {
         Some(InputFormat::Perplexity)
-    } else if value["mapping"].is_object() || value["conversation_id"].is_string() {
+    } else if value["mapping"].is_object() && value["conversation_id"].is_string() {
+        Some(InputFormat::Openai)
+    } else if value["mapping"].is_object()
+        && (value["id"].is_string() || value["current_node"].is_string())
+    {
+        Some(InputFormat::ChatgptExporter)
+    } else if value["mapping"].is_object() {
         Some(InputFormat::Openai)
     } else if value["messages"].is_array()
         || value["entries"].is_array()
@@ -1839,6 +2043,7 @@ fn scan_zip(
     occurrences: &mut Vec<InputOccurrence>,
     diagnostics: &mut Vec<String>,
     associated_reports: &mut Vec<AssociatedReport>,
+    observation_parts: &mut Vec<String>,
     scanned: &mut usize,
     scan_truncated: &mut bool,
 ) -> Result<()> {
@@ -1866,6 +2071,14 @@ fn scan_zip(
         if !names.insert(name.clone()) {
             bail!("supplied ZIP has duplicate normalized member {name}");
         }
+        observation_parts.push(format!(
+            "zip:{}:{}:{}:{}:{}",
+            path.display(),
+            metadata_revision(&metadata),
+            name,
+            member_file.size(),
+            member_file.crc32()
+        ));
         if member_file.is_dir() {
             continue;
         }
@@ -2037,7 +2250,15 @@ fn read_associated_report<R: Read>(
         .and_then(Value::as_str)
         .or_else(|| report_message.and_then(|message| message["status"].as_str()))
         .map(str::to_owned);
-    let citation_count = count_reference_nodes(&value, 0);
+    let (body, citations) = report_message
+        .map(|message| {
+            let (parts, _) = message_parts(message);
+            let body = parts.iter().any(|part| part.text().is_some()).then(|| {
+                content::bounded_text(&content::project_text(&parts), MAX_ARTIFACT_BODY_CHARS)
+            });
+            (body, collect_citations(message))
+        })
+        .unwrap_or((None, Vec::new()));
     let mut reference = content::artifact_reference(&value, "openai-library-report")
         .unwrap_or_else(|| crate::content::ArtifactReference {
             kind: "openai-library-report".to_owned(),
@@ -2054,19 +2275,40 @@ fn read_associated_report<R: Read>(
             timestamp: None,
             source: None,
             action: None,
+            body: None,
+            body_availability: None,
+            citations: Vec::new(),
         });
     reference.identity = identity;
     reference.origin = Some("openai-widget-state".to_owned());
     reference.backing = backing.clone();
     reference.author = author;
     reference.completion = completion;
-    reference.citation_count = Some(citation_count);
+    reference.citation_count = Some(citations.len());
     reference.path = Some(member.to_owned());
     reference.bytes = Some(member_size);
     reference.action = Some("associated-report".to_owned());
+    reference.source = Some(RecordRef {
+        domain: "supplied-artifact".to_owned(),
+        revision: None,
+        span: None,
+        native_id: reference.identity.clone(),
+        pointer: Some(format!("/associated/{member}")),
+        part_index: 0,
+    });
+    reference.body = body;
+    reference.body_availability = Some(if report_message.is_none() {
+        ContentAvailability::Unknown
+    } else if reference.body.is_some() {
+        ContentAvailability::RetainedBody
+    } else {
+        ContentAvailability::UnsupportedRepresentation
+    });
+    reference.citations = citations;
     Ok(Some(AssociatedReport {
         member: member.to_owned(),
         backing,
+        reference: reference.clone(),
         part: ContentPart::StructuredArtifact {
             descriptor: content::bounded_shape(&value),
             source_field: format!("zip-member:{member}"),
@@ -2077,31 +2319,93 @@ fn read_associated_report<R: Read>(
     }))
 }
 
-fn count_reference_nodes(value: &Value, depth: usize) -> usize {
+fn collect_citations(value: &Value) -> Vec<content::ArtifactCitation> {
+    let mut citations = Vec::new();
+    collect_citations_inner(value, 0, &mut citations);
+    citations
+}
+
+fn collect_citations_inner(
+    value: &Value,
+    depth: usize,
+    citations: &mut Vec<content::ArtifactCitation>,
+) {
+    if depth >= content::MAX_STRUCTURED_DEPTH || citations.len() >= content::MAX_ARTIFACT_REFERENCES
+    {
+        return;
+    }
+    let Some(object) = value.as_object() else {
+        return;
+    };
+    for (key, value) in object {
+        if key == "content_references" {
+            collect_citation_values(value, depth + 1, citations);
+        } else {
+            collect_citations_inner(value, depth + 1, citations);
+        }
+    }
+}
+
+fn collect_citation_values(
+    value: &Value,
+    depth: usize,
+    citations: &mut Vec<content::ArtifactCitation>,
+) {
     if depth >= content::MAX_STRUCTURED_DEPTH {
-        return 0;
+        return;
     }
     match value {
-        Value::Array(values) => values
-            .iter()
-            .map(|value| count_reference_nodes(value, depth + 1))
-            .sum::<usize>()
-            .min(content::MAX_ARTIFACT_REFERENCES),
-        Value::Object(values) => {
-            let own = ["uri", "url", "href", "file_id", "fileId"]
-                .iter()
-                .filter(|key| values.get(**key).is_some_and(|value| value.is_string()))
-                .count();
-            own.saturating_add(
-                values
-                    .values()
-                    .map(|value| count_reference_nodes(value, depth + 1))
-                    .sum::<usize>(),
-            )
-            .min(content::MAX_ARTIFACT_REFERENCES)
+        Value::Array(values) => {
+            for value in values {
+                collect_citation_values(value, depth + 1, citations);
+                if citations.len() >= content::MAX_ARTIFACT_REFERENCES {
+                    break;
+                }
+            }
         }
-        _ => 0,
+        Value::Object(object) => {
+            if let Some(citation) = citation_from_value(object) {
+                citations.push(citation);
+            } else {
+                for value in object.values() {
+                    collect_citation_values(value, depth + 1, citations);
+                    if citations.len() >= content::MAX_ARTIFACT_REFERENCES {
+                        break;
+                    }
+                }
+            }
+        }
+        _ => {}
     }
+}
+
+fn citation_from_value(
+    value: &serde_json::Map<String, Value>,
+) -> Option<content::ArtifactCitation> {
+    let kind = value.get("type").and_then(Value::as_str).map(str::to_owned);
+    let uri = ["uri", "url", "href"]
+        .into_iter()
+        .find_map(|key| value.get(key).and_then(Value::as_str).map(str::to_owned));
+    let title = value
+        .get("title")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    let start = ["start_idx", "start_index", "start"]
+        .into_iter()
+        .find_map(|key| value.get(key).and_then(Value::as_u64))
+        .and_then(|value| usize::try_from(value).ok());
+    let end = ["end_idx", "end_index", "end"]
+        .into_iter()
+        .find_map(|key| value.get(key).and_then(Value::as_u64))
+        .and_then(|value| usize::try_from(value).ok());
+    (kind.is_some() || uri.is_some() || title.is_some() || start.is_some() || end.is_some())
+        .then_some(content::ArtifactCitation {
+            kind,
+            uri,
+            title,
+            start,
+            end,
+        })
 }
 
 fn attach_associated_reports(
@@ -2117,38 +2421,57 @@ fn attach_associated_reports(
             ));
             continue;
         };
-        let Some(occurrence) = occurrences
-            .iter_mut()
-            .find(|occurrence| occurrence.session.id == backing)
-        else {
+        let matching = occurrences
+            .iter()
+            .filter(|occurrence| occurrence.session.id == backing)
+            .count();
+        if matching == 0 {
             diagnostics.push(format!(
                 "associated report {} names an unreached backing conversation",
                 report.member
             ));
             continue;
-        };
-        let Some(turn) = occurrence.turns.last_mut() else {
+        }
+        if matching > 1 {
             diagnostics.push(format!(
-                "associated report {} has a backing conversation without a readable turn",
+                "associated report {} names an ambiguous backing conversation {backing} and remains unjoined",
                 report.member
             ));
             continue;
-        };
-        let reference = RecordRef {
+        }
+        let occurrence = occurrences
+            .iter_mut()
+            .find(|occurrence| occurrence.session.id == backing)
+            .expect("matching associated report occurrence");
+        let mut artifact = report.reference.clone();
+        let artifact_reference = RecordRef {
             domain: format!("{}:associated", occurrence.session.source.origin),
             revision: occurrence.evidence.source_revision.clone(),
             span: None,
             native_id: None,
             pointer: Some(format!("/associated/{}", report.member)),
-            part_index: turn.parts.len(),
+            part_index: occurrence.artifacts.len(),
+        };
+        artifact.source = Some(artifact_reference.clone());
+        occurrence.artifacts.push(artifact.clone());
+        let Some(turn) = occurrence.turns.last_mut() else {
+            diagnostics.push(format!(
+                "associated report {} has a backing conversation without a readable turn and remains an unjoined artifact",
+                report.member
+            ));
+            continue;
         };
         let mut part = report.part.clone();
-        part.set_record_ref(reference);
+        part.set_record_ref(artifact_reference);
         turn.parts.push(part);
         if turn.coverage.is_none() {
             turn.coverage = Some(ContentCoverage {
                 carrier: ContentCarrier::AssociatedArtifact,
-                availability: ContentAvailability::ReferenceOnly,
+                availability: if artifact.body.is_some() {
+                    ContentAvailability::RetainedBody
+                } else {
+                    ContentAvailability::ReferenceOnly
+                },
                 retained_parts: 1,
                 omitted_parts: 0,
                 omitted_reason: None,
@@ -2170,16 +2493,26 @@ fn metadata_revision(metadata: &Metadata) -> String {
     )
 }
 
+fn observation_revision(parts: &[String]) -> String {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    parts.hash(&mut hasher);
+    format!(
+        "input-observation-v1:{:016x}:{}",
+        hasher.finish(),
+        parts.len()
+    )
+}
+
 fn parse_occurrence(value: &str) -> Result<(String, usize)> {
     let pieces = value.split(':').collect::<Vec<_>>();
-    if pieces.len() != 6 || pieces[0] != "input" || pieces[1] != "v1" {
+    if pieces.len() != 6 || pieces[0] != "input" || pieces[1] != "v2" {
         bail!("invalid occurrence prefix");
     }
-    let revision = decode_component(pieces[2])?;
+    let observation = decode_component(pieces[2])?;
     let ordinal = pieces[5]
         .parse::<usize>()
         .context("occurrence offset is not numeric")?;
-    Ok((revision, ordinal))
+    Ok((observation, ordinal))
 }
 
 fn encode_component(value: &str) -> String {

@@ -123,8 +123,9 @@ READ A SUPPLIED EXPORT
   detects OpenAI, ChatGPT Exporter, and Perplexity shapes; a declared format never hands a
   failed record to another parser. `list` emits an opaque occurrence coordinate
   for every supplied record. Use `--occurrence` when a native ID repeats, and
-  `--after-occurrence` to continue a collection only when the source revision
-  is unchanged. Exact titles are allowed; `--latest` is not, because supplied
+  `--after-occurrence` to continue a collection only when the ordered supplied
+  input observation is unchanged; the cursor can cross files and ZIP members.
+  Exact titles are allowed; `--latest` is not, because supplied
   exports do not establish a global newest session.
 
   Source, member, pointer, and byte-span evidence stays attached to the
@@ -135,10 +136,13 @@ READ A SUPPLIED EXPORT
   possible. A partial scan never becomes a not-found claim. Referenced files,
   media, and ZIP members are not opened or extracted; unsupported history-page
   and child-qualified reads refuse a supplied export explicitly.
+  Mapping inputs retain bounded graph nodes and edges beside the selected path;
+  associated reports retain bounded bodies and citation spans as artifacts,
+  including when their backing conversation is unresolved.
 
 PROBE BEFORE EXPORTING
   tapes show <id> --tail 40      A window, costing no bundle.
-  tapes show <id> --json         The same turns as tapes-session/4, with bounded read and terminal evidence.
+  tapes show <id> --json         The same turns as tapes-session/5, with bounded read, graph, artifact, and terminal evidence.
   tapes events <id> --json       Typed tool calls, results, pairs, and content parts.
   tapes usage <id> --json        Tokens, cost, quota observations, and turn counts.
   tapes stats <id> --json        The same recording, counted with its read evidence.

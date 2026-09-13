@@ -65,7 +65,9 @@ The reader
 accepts files, extracted directories, and ZIP members without extracting or
 opening referenced artifacts. It uses per-invocation scan, decoded-record,
 record, member, and serialized-output bounds; `--after-occurrence` continues a
-collection only when the source revision still matches. A partial scan reports
+collection only when the ordered supplied-input observation still matches.
+The coordinate therefore remains valid across files in one collection, while
+any changed file or ZIP member refuses continuation. A partial scan reports
 gaps and refuses to pretend an unreached record is absent. Supplied input is a
 separate source collection and never falls back to installed harness stores.
 
@@ -218,6 +220,13 @@ text guesses. A paired result can attach an
 the qualified reference matches. Otherwise the entry says
 `no-matching-consumption-observed-in-read`; neither status claims byte delivery
 or perception, and no referenced object is opened.
+
+The same `ArtifactReference` type can appear in a transcript's top-level
+`artifacts` collection. Supplied report readers retain a bounded `body` when
+the report carries readable text, a `body_availability` value when the body is
+absent or unsupported, and `citations` with recorded URI, title, kind, and span
+fields. `backing` records an association claim; it does not create a turn when
+the outer conversation is absent.
 
 OpenCode records a call and its outcome in one `tool` part. Its turn carries a
 call event with the state output, native status, and completion timestamp. The
@@ -976,11 +985,11 @@ its `notes`, with the meanings they have on a transcript.
 
 ## JSON contract
 
-A serialized transcript is a `tapes-session/4` object:
+A serialized transcript is a `tapes-session/5` object:
 
 ```json
 {
-  "schema": "tapes-session/4",
+  "schema": "tapes-session/5",
   "session": {
     "id": "session-1",
     "harness": "codex",
@@ -991,6 +1000,15 @@ A serialized transcript is a `tapes-session/4` object:
   "truncated": false
 }
 ```
+
+When a supplied mapping export carries branches, `graph` retains bounded
+nodes and parent-child edges, names the `current_node`, and records the
+`selected_path` projected into `turns`. A missing current node leaves the
+graph available while the canonical turn projection remains empty. The
+top-level `artifacts` collection retains artifact-native reports even when no
+turn can carry them; a report reference may include a bounded `body` and
+structured citation spans, and its optional `backing` remains the source's
+association rather than a fabricated turn.
 
 When the source reader supplies it, `read` records the source length and the
 configured byte bound, each physical head/tail/context/alignment range, the
@@ -1048,7 +1066,8 @@ with a `Z` suffix. The human `show` activity note compares the store's last
 activity with the newest rendered turn after both timestamps are truncated to
 whole seconds.
 
-A serialized list is a `tapes-list/2` object with `sessions`, `unavailable`,
+A serialized list is a `tapes-list/3` object with `sessions`, optional
+artifact-native `artifacts`, `unavailable`,
 `unreadable`, `unsearched`, `scanned`, and `scan_truncated`. `unsearched` names
 bounded content-search failures and supplied-input structural diagnostics; its
 entries identify the session, source member, or search stage without turning an
@@ -1067,7 +1086,7 @@ session id ascending, then harness ascending.
 
 ```json
 {
-  "schema": "tapes-list/2",
+  "schema": "tapes-list/3",
   "sort": "newest",
   "activity": {
     "since": "2026-01-01T00:00:00Z",
@@ -1077,20 +1096,21 @@ session id ascending, then harness ascending.
 }
 ```
 
-An `export` over a selection writes a `tapes-export-manifest/2` object beside
+An `export` over a selection writes a `tapes-export-manifest/3` object beside
 the bundles it produced. `selection` restates the query that chose the set:
 `scope` is `here`, `project`, or `global`, `project` names the path whose
 project was selected for the first two, `sort` and `limit` are always present,
 and `harness`, `model`, `directory`, `activity`, and `search` appear only when
 they were requested. `sessions` is in selection order and names each bundle's
-three files. A selected session whose store could not be read appears in
+three files. Supplied-input artifact-native reports appear in the manifest's
+optional `artifacts` collection. A selected session whose store could not be read appears in
 `failed` with its diagnostic instead. The listing's own `unavailable`,
 `unreadable`, `unsearched`, `scanned`, and `scan_truncated` are carried
 verbatim, so the exported set can be audited against the store it came from.
 
 ```json
 {
-  "schema": "tapes-export-manifest/2",
+  "schema": "tapes-export-manifest/3",
   "selection": {
     "scope": "global",
     "activity": { "since": "2026-01-01T00:00:00Z" },
