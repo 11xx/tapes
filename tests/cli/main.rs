@@ -385,6 +385,7 @@ fn supplied_single_conversation_reaches_list_show_and_export() {
         String::from_utf8_lossy(&listed.stderr)
     );
     let listed: Value = serde_json::from_slice(&listed.stdout).unwrap();
+    assert_eq!(listed["schema"], "tapes-list/4");
     assert_eq!(listed["sessions"].as_array().unwrap().len(), 1);
     assert_eq!(listed["sessions"][0]["id"], "supplied-1");
     assert_eq!(listed["sessions"][0]["source"]["kind"], "supplied-export");
@@ -1120,7 +1121,7 @@ fn supplied_citation_descriptors_are_bounded_in_show_and_export() {
         .write_all(&fs::read(&conversation).unwrap())
         .unwrap();
     let long_uri = format!("https://example.invalid/{}", "u".repeat(5_000));
-    let long_title = "é".repeat(5_000);
+    let long_title = "🧪".repeat(5_000);
     archive
         .start_file("descriptor-report.dat", options)
         .unwrap();
@@ -1153,6 +1154,7 @@ fn supplied_citation_descriptors_are_bounded_in_show_and_export() {
         .unwrap();
     assert!(shown.status.success());
     let shown: Value = serde_json::from_slice(&shown.stdout).unwrap();
+    assert_eq!(shown["schema"], "tapes-session/6");
     let citation = &shown["artifacts"][0]["citations"][0];
     assert_eq!(citation["uri"]["chars"], 5_024);
     assert_eq!(
@@ -1163,7 +1165,7 @@ fn supplied_citation_descriptors_are_bounded_in_show_and_export() {
     assert_eq!(citation["title"]["chars"], 5_000);
     assert_eq!(
         citation["title"]["text"].as_str().unwrap().chars().count(),
-        4_096
+        1_024
     );
     assert_eq!(citation["title"]["truncated"], true);
     assert_eq!(shown["artifacts"][0]["descriptor_truncated"], true);
@@ -1193,13 +1195,14 @@ fn supplied_citation_descriptors_are_bounded_in_show_and_export() {
         })
         .unwrap();
     let bundle_json: Value = serde_json::from_slice(&fs::read(json_path).unwrap()).unwrap();
+    assert_eq!(bundle_json["schema"], "tapes-session/6");
     assert_eq!(
         bundle_json["artifacts"][0]["citations"][0]["title"]["text"]
             .as_str()
             .unwrap()
             .chars()
             .count(),
-        4_096
+        1_024
     );
     assert_eq!(bundle_json["artifacts"][0]["descriptor_truncated"], true);
 }
@@ -4125,7 +4128,7 @@ fn export_over_an_activity_window_writes_one_bundle_per_session_and_a_manifest()
     );
     let manifest: Value =
         serde_json::from_slice(&fs::read(bundle.join("manifest.json")).unwrap()).unwrap();
-    assert_eq!(manifest["schema"], "tapes-export-manifest/3");
+    assert_eq!(manifest["schema"], "tapes-export-manifest/4");
     assert_eq!(
         manifest["selection"],
         serde_json::json!({

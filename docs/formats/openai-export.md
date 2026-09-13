@@ -63,8 +63,8 @@ recognized widget-state report shape. A report reference retains bounded
 identity, origin, backing conversation, authorship, completion state, source
 member, byte size, citation count, a bounded body when present, and native
 citation spans. Citation kind, URI, and title strings use the shared bounded
-text representation: each field is limited to 4 KiB and all citation
-descriptors share a 16 KiB cumulative bound. A truncated URI is incomplete,
+text representation: each field is limited to 4 KiB of UTF-8 bytes and all
+citation descriptors share a 16 KiB cumulative byte bound. A truncated URI is incomplete,
 not a valid altered reference. Grouped citation spans retain bounded nested
 source URLs and titles, with omission counts at each bound. Structural
 traversal bounds are exposed separately when an omitted count cannot be
@@ -94,8 +94,8 @@ native ID or title is duplicated. `--after-occurrence` resumes collection
 listing only when the ordered supplied-input observation matches the
 observation that emitted the coordinate; changed input refuses continuation.
 
-The normal output contracts remain versioned (`tapes-list/3`,
-`tapes-session/5`, `tapes-events/4`, `tapes-brief/3`, `tapes-endings/3`,
-`tapes-stats/3`, `tapes-usage/3`, and `tapes-export-manifest/3`). History-page
+The normal output contracts remain versioned (`tapes-list/4`,
+`tapes-session/6`, `tapes-events/4`, `tapes-brief/3`, `tapes-endings/3`,
+`tapes-stats/3`, `tapes-usage/3`, and `tapes-export-manifest/4`). History-page
 and child-qualified operations are installed-recording capabilities and
 refuse supplied exports rather than interpreting an export as JSONL history.

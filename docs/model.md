@@ -233,7 +233,8 @@ The same `ArtifactReference` type can appear in a transcript's top-level
 the report carries readable text, a `body_availability` value when the body is
 absent or unsupported, and `citations` with recorded URI, title, kind, and span
 fields. Citation kind, URI, and title strings use `BoundedText`: each field is
-limited to 4 KiB and all citation descriptors share a 16 KiB cumulative bound.
+limited to 4 KiB of UTF-8 bytes and all citation descriptors share a 16 KiB
+cumulative byte bound.
 A truncated URI is explicitly incomplete and must not be treated as a valid
 reference. A grouped citation keeps its span and nests bounded `sources`; both
 group and source bounds report omitted members. `backing` records an
@@ -997,11 +998,11 @@ its `notes`, with the meanings they have on a transcript.
 
 ## JSON contract
 
-A serialized transcript is a `tapes-session/5` object:
+A serialized transcript is a `tapes-session/6` object:
 
 ```json
 {
-  "schema": "tapes-session/5",
+  "schema": "tapes-session/6",
   "session": {
     "id": "session-1",
     "harness": "codex",
@@ -1078,7 +1079,7 @@ with a `Z` suffix. The human `show` activity note compares the store's last
 activity with the newest rendered turn after both timestamps are truncated to
 whole seconds.
 
-A serialized list is a `tapes-list/3` object with `sessions`, optional
+A serialized list is a `tapes-list/4` object with `sessions`, optional
 artifact-native `artifacts`, `unavailable`,
 `unreadable`, `unsearched`, `scanned`, and `scan_truncated`. `unsearched` names
 bounded content-search failures and supplied-input structural diagnostics; its
@@ -1098,7 +1099,7 @@ session id ascending, then harness ascending.
 
 ```json
 {
-  "schema": "tapes-list/3",
+  "schema": "tapes-list/4",
   "sort": "newest",
   "activity": {
     "since": "2026-01-01T00:00:00Z",
@@ -1108,7 +1109,7 @@ session id ascending, then harness ascending.
 }
 ```
 
-An `export` over a selection writes a `tapes-export-manifest/3` object beside
+An `export` over a selection writes a `tapes-export-manifest/4` object beside
 the bundles it produced. `selection` restates the query that chose the set:
 `scope` is `here`, `project`, or `global`, `project` names the path whose
 project was selected for the first two, `sort` and `limit` are always present,
@@ -1122,7 +1123,7 @@ verbatim, so the exported set can be audited against the store it came from.
 
 ```json
 {
-  "schema": "tapes-export-manifest/3",
+  "schema": "tapes-export-manifest/4",
   "selection": {
     "scope": "global",
     "activity": { "since": "2026-01-01T00:00:00Z" },

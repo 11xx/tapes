@@ -2345,24 +2345,24 @@ fn read_associated_report<R: Read>(
 }
 
 struct DescriptorBudget {
-    used: usize,
+    used_bytes: usize,
     truncated: bool,
 }
 
 impl DescriptorBudget {
     fn new() -> Self {
         Self {
-            used: 0,
+            used_bytes: 0,
             truncated: false,
         }
     }
 
     fn string(&mut self, value: &Value) -> Option<crate::model::BoundedText> {
         let text = value.as_str()?;
-        let remaining = content::MAX_DESCRIPTOR_TOTAL_CHARS.saturating_sub(self.used);
-        let bound = remaining.min(content::MAX_DESCRIPTOR_CHARS);
-        let bounded = content::bounded_text(text, bound);
-        self.used = self.used.saturating_add(bounded.text.chars().count());
+        let remaining = content::MAX_CITATION_DESCRIPTOR_BYTES.saturating_sub(self.used_bytes);
+        let bound = remaining.min(content::MAX_CITATION_FIELD_BYTES);
+        let bounded = content::bounded_text_bytes(text, bound);
+        self.used_bytes = self.used_bytes.saturating_add(bounded.text.len());
         self.truncated |= bounded.truncated;
         Some(bounded)
     }

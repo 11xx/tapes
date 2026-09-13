@@ -32,8 +32,8 @@ pub mod stats_summary;
 pub mod title;
 pub mod usage;
 
-pub const LIST_SCHEMA: &str = "tapes-list/3";
-pub const EXPORT_MANIFEST_SCHEMA: &str = "tapes-export-manifest/3";
+pub const LIST_SCHEMA: &str = "tapes-list/4";
+pub const EXPORT_MANIFEST_SCHEMA: &str = "tapes-export-manifest/4";
 pub const USAGE_SUMMARY_SCHEMA: &str = "tapes-usage-summary/3";
 /// Number of normalized turns a `list --search` query inspects per session.
 /// Keeping this fixed makes the listing's cost predictable for callers.

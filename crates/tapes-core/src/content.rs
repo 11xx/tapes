@@ -15,6 +15,8 @@ pub const MAX_CONTENT_PARTS: usize = 128;
 pub const MAX_ARTIFACT_REFERENCES: usize = 64;
 pub const MAX_DESCRIPTOR_CHARS: usize = 4 * 1024;
 pub const MAX_DESCRIPTOR_TOTAL_CHARS: usize = 16 * 1024;
+pub const MAX_CITATION_FIELD_BYTES: usize = 4 * 1024;
+pub const MAX_CITATION_DESCRIPTOR_BYTES: usize = 16 * 1024;
 pub const MAX_STRUCTURED_DEPTH: usize = 32;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -317,6 +319,26 @@ pub fn bounded_text(text: &str, max_chars: usize) -> BoundedText {
         text: text.chars().take(max_chars).collect(),
         chars,
         truncated: chars > max_chars,
+    }
+}
+
+/// Keep a text descriptor within a byte bound without splitting UTF-8, while
+/// retaining its original Unicode scalar count and shortening fact.
+pub fn bounded_text_bytes(text: &str, max_bytes: usize) -> BoundedText {
+    let mut retained_bytes = 0;
+    let mut end = 0;
+    for (index, character) in text.char_indices() {
+        let next = index + character.len_utf8();
+        if retained_bytes + character.len_utf8() > max_bytes {
+            break;
+        }
+        retained_bytes += character.len_utf8();
+        end = next;
+    }
+    BoundedText {
+        text: text[..end].to_owned(),
+        chars: text.chars().count(),
+        truncated: end < text.len(),
     }
 }
 
@@ -647,5 +669,18 @@ mod tests {
         assert!(!descriptor.text.contains("not retained"));
         assert!(descriptor.text.contains("\"text\":\"string\""));
         assert!(descriptor.text.contains("\"bytes\":[\"number\""));
+    }
+
+    #[test]
+    fn byte_bounded_text_keeps_utf8_boundaries_and_original_length() {
+        let exact = bounded_text_bytes("é🧪z", "é🧪".len());
+        assert_eq!(exact.text, "é🧪");
+        assert_eq!(exact.chars, 3);
+        assert!(exact.truncated);
+
+        let between_scalars = bounded_text_bytes("é🧪z", 5);
+        assert_eq!(between_scalars.text, "é");
+        assert_eq!(between_scalars.chars, 3);
+        assert!(between_scalars.truncated);
     }
 }
