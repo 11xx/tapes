@@ -96,6 +96,30 @@ that a command.
 A harness whose binary or store is absent reports itself unavailable; it
 never fails a listing. Listing works with any subset installed.
 
+## Supplied exports
+
+Use `--input PATH` one or more times to read an explicit file, extracted
+directory, or ZIP archive. `--input-format auto` detects the supported
+OpenAI and ChatGPT Exporter shapes; `--input-format openai` and
+`--input-format chatgpt-exporter` require the named representation and never
+fall back to another parser. `--source-scope <label>` records a caller-declared
+source namespace.
+
+Supplied inputs are isolated from installed stores. `list` enumerates each
+occurrence, while single-session views accept an ID, exact title, or the
+opaque `--occurrence` coordinate emitted by `list`; repeated native IDs remain
+ambiguous until one occurrence is named. `--after-occurrence` continues a
+collection only when the source observation is unchanged. The reader never
+extracts ZIPs or opens referenced files and reports structural gaps instead of
+claiming an unreached record is absent.
+
+The reader applies bounded per-invocation scan, decoded, record, and output
+budgets. Defaults are 512 MiB for source and decoded bytes, 8 MiB per record,
+10,000 members, and 16 MiB serialized output; the byte flags may raise those
+values only to finite ceilings of 8 GiB, 64 MiB, and 64 MiB respectively.
+History-page and child-qualified reads remain installed-recording operations;
+they refuse a supplied export explicitly.
+
 ## Output
 
 `list` merges sessions from every available harness and sorts them by last
@@ -187,7 +211,7 @@ anything but an operator's message `user/<kind>`. Every turn in `show` also carr
 zero-based `ordinal` in the session's normalized sequence, which a file-backed
 session keeps under any window while a paged OpenCode API read renumbers when
 a wider window fetches further back (see `docs/model.md`), and a `native_id`
-where the harness records one; the session carries `store`, the opaque
+where the harness records one; the session carries `source`, the opaque
 coordinate it was read from. Human timestamps are RFC
 3339 whole seconds with `Z`; JSON preserves the recorded timestamp precision.
 `--tail` bounds the turns returned and defaults to the last 100; a transcript

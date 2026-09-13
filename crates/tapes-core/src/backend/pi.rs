@@ -121,6 +121,7 @@ impl PiBackend {
             tokens,
             accounting,
             start_uncertain: recording.start_uncertain(),
+            occurrence: None,
             usage_detail: None,
         };
         // pi rewinds by appending a new branch, so the first user message in

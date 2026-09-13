@@ -6,11 +6,11 @@ knowing which harness stored them.
 
 ## Types
 
-`Session` identifies the harness and session, records its first and latest
-activity timestamps, and may carry a model, recorded title, derived title,
-working directory, present live state, cost, token counts, and their accounting
-metadata. Both timestamps are required UTC values. A record that cannot supply
-timestamps is not a session and is omitted from listings.
+`Session` identifies the native session or conversation, records optional first
+and latest activity timestamps, and may carry a model, recorded title, derived
+title, working directory, present live state, cost, token counts, and their
+accounting metadata. Missing timestamps remain absent; filesystem times are not
+substituted, and a session without activity cannot be chosen by `--latest`.
 
 `LiveState` is either `working` or `idle`. It is an optional present-tense
 annotation joined by session id from the `harness-status` command; recording
@@ -50,7 +50,17 @@ rather than inventing a model.
 `representation`, `producer`, `scope`, and `location` retain the known
 representation and opaque source/container coordinate. `id` is the native
 conversation or session identity; it is not a path, archive member, or global
-identity outside the descriptor's scope.
+identity outside the descriptor's scope. Supplied sources also carry an opaque
+`occurrence` coordinate, so repeated native IDs remain separate observations.
+
+Caller-supplied inputs use `--input PATH` one or more times with optional
+`--input-format auto|openai|chatgpt-exporter` and `--source-scope`. The reader
+accepts files, extracted directories, and ZIP members without extracting or
+opening referenced artifacts. It uses per-invocation scan, decoded-record,
+record, member, and serialized-output bounds; `--after-occurrence` continues a
+collection only when the source revision still matches. A partial scan reports
+gaps and refuses to pretend an unreached record is absent. Supplied input is a
+separate source collection and never falls back to installed harness stores.
 
 `started_at` and `last_activity_at` come from two bounded windows on a
 file-backed session. File-backed readers open the first 64 KiB, where every
@@ -281,7 +291,14 @@ or null.
   "schema": "tapes-usage/3",
   "session": {
     "id": "session-1",
-    "harness": "codex",
+    "source": {
+      "kind": "installed-recording",
+      "origin": "codex",
+      "recorded_harness": "codex",
+      "representation": "codex-recording",
+      "producer": "codex",
+      "location": { "locator": "/store/rollout.jsonl" }
+    },
     "model": { "id": "gpt-5.6-sol", "variant": "high" },
     "started_at": "2023-11-14T22:13:20Z",
     "last_activity_at": "2023-11-14T22:15:00Z"
@@ -873,8 +890,7 @@ its `notes`, with the meanings they have on a transcript.
     "model": { "id": "gpt-5.6-sol", "variant": "high" },
     "started_at": "2026-01-01T10:00:00Z",
     "last_activity_at": "2026-01-01T10:00:06Z",
-    "directory": "/projects/tapes",
-    "store": "/store/rollout-2026-01-01T10-00-00-session-1.jsonl"
+    "directory": "/projects/tapes"
   },
   "source": {
     "harness": "codex",
@@ -1003,11 +1019,11 @@ activity with the newest rendered turn after both timestamps are truncated to
 whole seconds.
 
 A serialized list is a `tapes-list/2` object with `sessions`, `unavailable`,
-`unreadable`, `unsearched`, `scanned`, and `scan_truncated`. `unsearched` is
-populated only for a requested content search when a candidate's bounded read
-fails or a search stage falls back; its entries name the session or search
-stage and diagnostic, including a failed OpenCode2 local API server start or
-candidate listing when CLI API reads continue. It is distinct from
+`unreadable`, `unsearched`, `scanned`, and `scan_truncated`. `unsearched` names
+bounded content-search failures and supplied-input structural diagnostics; its
+entries identify the session, source member, or search stage without turning an
+unreached record into a not-found claim. It also carries a failed OpenCode2
+local API stage when CLI API reads continue. It is distinct from
 `unreadable`, which describes a session that could not be normalized at all.
 `list --search` inspects the last 32 normalized turns per candidate before the
 per-harness result limit. The object always includes `sort`, either `newest` or
@@ -1099,7 +1115,7 @@ page-byte counters.
 
 `selection` records the listing query. `selected` counts its sessions, `read`
 counts successful transcript reads, and `failed` names each read failure with
-ID, harness, store and diagnostic. `sessions` holds each read session's identity,
+ID, harness, source and diagnostic. `sessions` holds each read session's identity,
 `coverage` and `tools` in the same shapes as `tapes-stats/3`. `by_harness` maps
 harness names to accumulated tool counters, including tool-name rows and
 complete-pair duration totals, maxima and contributing counts. Counters never

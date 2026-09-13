@@ -2133,6 +2133,7 @@ fn resolver_session(id: &str) -> Session {
         tokens: None,
         accounting: None,
         start_uncertain: false,
+        occurrence: None,
         usage_detail: None,
     }
 }

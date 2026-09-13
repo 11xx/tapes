@@ -23,6 +23,7 @@ pub mod content;
 pub mod endings;
 pub mod event;
 pub mod history;
+pub mod input;
 pub mod lineage;
 pub mod model;
 pub mod scope;
@@ -686,6 +687,12 @@ pub fn resolve_session(
     {
         return Ok(located.remove(0));
     }
+    if located.is_empty() && failures.iter().any(|(harness, _)| harness == "input") {
+        return Err(ResolveError::BackendFailed {
+            query: query.to_owned(),
+            failures,
+        });
+    }
     match located.len() {
         1 => return Ok(located.pop().expect("one match is present")),
         0 => {}
@@ -785,6 +792,7 @@ pub fn resolve_session(
 #[derive(Clone, Debug)]
 pub enum Selection<'a> {
     Id(&'a str),
+    Occurrence(&'a str),
     Title {
         title: &'a str,
         within: Where<'a>,
@@ -801,6 +809,35 @@ impl Selection<'_> {
     fn resolve(&self, backends: &[Box<dyn Backend>]) -> Result<ResolvedSession> {
         match self {
             Self::Id(id) => Ok(resolve_session(backends, id)?),
+            Self::Occurrence(occurrence) => {
+                let mut matches = Vec::new();
+                let mut failures = Vec::new();
+                for (backend_index, backend) in backends.iter().enumerate() {
+                    match backend.locate_occurrence(occurrence) {
+                        Ok(Some(session)) => matches.push(ResolvedSession {
+                            backend_index,
+                            session,
+                        }),
+                        Ok(None) => {}
+                        Err(error) => {
+                            failures.push((backend.harness().to_owned(), format!("{error:#}")))
+                        }
+                    }
+                }
+                match matches.len() {
+                    1 => Ok(matches.pop().expect("one occurrence match")),
+                    0 if !failures.is_empty() => Err(anyhow!(
+                        "occurrence {occurrence} could not be resolved: {}",
+                        failures
+                            .into_iter()
+                            .map(|(backend, error)| format!("{backend}: {error}"))
+                            .collect::<Vec<_>>()
+                            .join("; ")
+                    )),
+                    0 => Err(anyhow!("occurrence {occurrence} was not found")),
+                    _ => Err(anyhow!("occurrence {occurrence} is ambiguous")),
+                }
+            }
             Self::Title {
                 title,
                 within,

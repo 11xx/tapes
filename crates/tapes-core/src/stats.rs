@@ -534,6 +534,7 @@ mod tests {
             tokens: None,
             accounting: None,
             start_uncertain: false,
+            occurrence: None,
             usage_detail: None,
         }
     }

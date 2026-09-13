@@ -121,6 +121,7 @@ impl CodexBackend {
             tokens,
             accounting,
             start_uncertain: recording.start_uncertain(),
+            occurrence: None,
             usage_detail,
         };
         // The opening is the start of the file, so its first user turn is the

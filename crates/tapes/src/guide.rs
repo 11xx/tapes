@@ -111,6 +111,30 @@ FIND IT
   An unrecognized state for one thread is ignored while recognized states for
   other threads remain usable. show applies the same join to its header.
 
+READ A SUPPLIED EXPORT
+  tapes list --input <path> --json
+  tapes show <id> --input <path> --input-format openai --json
+  tapes show --occurrence <coordinate> --input <path> --json
+  tapes export <id> --input <path> --bundle <dir>
+
+  `--input` reads files, extracted directories, and ZIP archives as a separate
+  source collection. It never falls back to installed harness stores. `auto`
+  detects OpenAI and ChatGPT Exporter shapes; a declared format never hands a
+  failed record to another parser. `list` emits an opaque occurrence coordinate
+  for every supplied record. Use `--occurrence` when a native ID repeats, and
+  `--after-occurrence` to continue a collection only when the source revision
+  is unchanged. Exact titles are allowed; `--latest` is not, because supplied
+  exports do not establish a global newest session.
+
+  Source, member, pointer, and byte-span evidence stays attached to the
+  normalized result. Scan, decoded, record, member, and serialized-output
+  budgets are finite and configurable with `--scan-bytes`, `--decoded-bytes`,
+  `--record-bytes`, and `--output-bytes`. Oversized records and malformed
+  members are reported as gaps or diagnostics while synchronization remains
+  possible. A partial scan never becomes a not-found claim. Referenced files,
+  media, and ZIP members are not opened or extracted; unsupported history-page
+  and child-qualified reads refuse a supplied export explicitly.
+
 PROBE BEFORE EXPORTING
   tapes show <id> --tail 40      A window, costing no bundle.
   tapes show <id> --json         The same turns as tapes-session/4, with bounded read and terminal evidence.

@@ -5,6 +5,7 @@ use std::path::PathBuf;
 
 use anyhow::{anyhow, Result};
 use clap::{Args, Parser, Subcommand, ValueEnum};
+use serde::Serialize;
 use tapes_core::brief::{Brief, OpenCall, OpenChild, DEFAULT_BRIEF_TAIL, TAIL_TEXT_CHARS};
 use tapes_core::bundle::{Bundle, BundleFile, GitContext};
 use tapes_core::endings::{Ending, EndingsReport, DEFAULT_ENDINGS_TAIL};
@@ -24,6 +25,12 @@ use tapes_core::usage::{
     UsageView,
 };
 use tapes_core::{BulkExport, Selection, UsageSummary, Where};
+
+use tapes_core::backend::Backend;
+use tapes_core::input::{
+    InputBackend, InputFormat, InputOptions, DEFAULT_DECODED_BYTES, DEFAULT_OUTPUT_BYTES,
+    DEFAULT_RECORD_BYTES, DEFAULT_SCAN_BYTES,
+};
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
 enum SortArg {
@@ -125,6 +132,126 @@ impl ScopeArgs {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, ValueEnum)]
+enum InputFormatArg {
+    #[default]
+    Auto,
+    Openai,
+    ChatgptExporter,
+}
+
+impl From<InputFormatArg> for InputFormat {
+    fn from(format: InputFormatArg) -> Self {
+        match format {
+            InputFormatArg::Auto => Self::Auto,
+            InputFormatArg::Openai => Self::Openai,
+            InputFormatArg::ChatgptExporter => Self::ChatgptExporter,
+        }
+    }
+}
+
+/// A caller-supplied export is a separate source collection. Its budgets are
+/// enforced before decoding records and its opaque occurrence coordinate is
+/// required whenever one native id occurs more than once.
+#[derive(Args, Clone, Debug, Default)]
+struct InputArgs {
+    /// Read one or more files, directories, or ZIP archives as supplied
+    /// conversation exports. Supplying this option never consults installed
+    /// harness stores.
+    #[arg(long = "input", value_name = "PATH")]
+    input: Vec<PathBuf>,
+    /// Interpret the supplied source structurally, or require one producer's
+    /// shape when a format is named explicitly.
+    #[arg(long, value_enum, default_value_t = InputFormatArg::Auto)]
+    input_format: InputFormatArg,
+    /// Record the caller's scope label as declared source metadata.
+    #[arg(long, value_name = "SCOPE")]
+    source_scope: Option<String>,
+    /// Maximum compressed or source bytes inspected across supplied inputs.
+    #[arg(long, default_value_t = DEFAULT_SCAN_BYTES, value_name = "BYTES")]
+    scan_bytes: u64,
+    /// Maximum decoded JSON bytes retained across supplied inputs.
+    #[arg(long, default_value_t = DEFAULT_DECODED_BYTES, value_name = "BYTES")]
+    decoded_bytes: u64,
+    /// Maximum one JSON record or ZIP member decoded into memory.
+    #[arg(long, default_value_t = DEFAULT_RECORD_BYTES, value_name = "BYTES")]
+    record_bytes: u64,
+    /// Maximum serialized transcript response retained for a supplied input.
+    #[arg(long, default_value_t = DEFAULT_OUTPUT_BYTES, value_name = "BYTES")]
+    output_bytes: u64,
+    /// Select one opaque occurrence coordinate from a supplied collection.
+    #[arg(long, value_name = "COORDINATE")]
+    occurrence: Option<String>,
+    /// Continue a collection listing after this opaque occurrence coordinate.
+    #[arg(long, value_name = "COORDINATE")]
+    after_occurrence: Option<String>,
+}
+
+impl InputArgs {
+    fn supplied(&self) -> bool {
+        !self.input.is_empty()
+    }
+
+    fn options(&self) -> Result<InputOptions> {
+        let mut options = InputOptions::new(self.input.clone(), self.input_format.into());
+        options.source_scope = self.source_scope.clone();
+        options.occurrence = self.occurrence.clone();
+        options.after_occurrence = self.after_occurrence.clone();
+        options.scan_bytes = self.scan_bytes;
+        options.decoded_bytes = self.decoded_bytes;
+        options.record_bytes = self.record_bytes;
+        options.output_bytes = self.output_bytes;
+        options.validate()?;
+        Ok(options)
+    }
+
+    fn backends(&self) -> Result<Vec<Box<dyn Backend>>> {
+        if !self.supplied() {
+            return Ok(tapes_core::backend::backends());
+        }
+        Ok(vec![Box::new(InputBackend::new(self.options()?)?)])
+    }
+
+    fn validate_collection(&self) -> Result<()> {
+        if self.after_occurrence.is_some() && !self.supplied() {
+            return Err(anyhow!("--after-occurrence requires --input"));
+        }
+        if self.occurrence.is_some() && !self.supplied() {
+            return Err(anyhow!("--occurrence requires --input"));
+        }
+        if self.occurrence.is_some() && self.after_occurrence.is_some() {
+            return Err(anyhow!("--occurrence conflicts with --after-occurrence"));
+        }
+        Ok(())
+    }
+
+    fn validate_bulk(&self) -> Result<()> {
+        self.validate_collection()?;
+        if self.occurrence.is_some() {
+            return Err(anyhow!(
+                "--occurrence selects one record and is not available for collection views"
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn reject_installed_selection(
+    input: &InputArgs,
+    harness: Option<&str>,
+    scope: &ScopeArgs,
+) -> Result<()> {
+    if !input.supplied() {
+        return Ok(());
+    }
+    if harness.is_some() || scope.here || scope.project.is_some() || scope.global {
+        return Err(anyhow!(
+            "--input conflicts with installed-store selectors --harness, --here, --project, and --global"
+        ));
+    }
+    Ok(())
+}
+
 /// Select one session by ID, exact recorded title, or latest activity.
 /// ID resolution crosses stores; title and latest selection honor explicit
 /// scope and harness restrictions.
@@ -132,12 +259,12 @@ impl ScopeArgs {
 struct SelectionArgs {
     /// Session identifier, full or an unambiguous prefix.
     #[arg(
-        required_unless_present_any = ["latest", "title"],
-        conflicts_with_all = ["latest", "title", "exclude", "harness", "here", "project", "global"]
+        required_unless_present_any = ["latest", "title", "occurrence"],
+        conflicts_with_all = ["latest", "title", "occurrence", "exclude", "harness", "here", "project", "global"]
     )]
     session: Option<String>,
     /// Match the recorded title exactly in scope; incomplete or ambiguous lookup refuses.
-    #[arg(long, conflicts_with_all = ["session", "latest", "exclude"])]
+    #[arg(long, conflicts_with_all = ["session", "latest", "occurrence", "exclude"])]
     title: Option<String>,
     /// Take the most recent session in scope instead of naming one. A
     /// caller asking from inside a live session is usually itself the most
@@ -154,19 +281,50 @@ struct SelectionArgs {
     harness: Option<String>,
     #[command(flatten)]
     scope: ScopeArgs,
+    #[command(flatten)]
+    input: InputArgs,
 }
 
 impl SelectionArgs {
+    fn validate_input(&self) -> Result<()> {
+        self.input.validate_collection()?;
+        reject_installed_selection(&self.input, self.harness.as_deref(), &self.scope)?;
+        if self.input.supplied() && self.latest {
+            return Err(anyhow!(
+                "--latest is not available for caller-supplied inputs; name an id, exact title, or --occurrence"
+            ));
+        }
+        if self.input.after_occurrence.is_some() {
+            return Err(anyhow!(
+                "--after-occurrence is only available for collection selections"
+            ));
+        }
+        Ok(())
+    }
+
+    fn within_or_here(&self) -> Where<'_> {
+        if self.input.supplied() {
+            Where::Global
+        } else {
+            self.scope.within_or_here()
+        }
+    }
+
     fn selection(&self) -> Selection<'_> {
-        match (self.session.as_deref(), self.title.as_deref()) {
-            (Some(session), _) => Selection::Id(session),
-            (None, Some(title)) => Selection::Title {
+        match (
+            self.input.occurrence.as_deref(),
+            self.session.as_deref(),
+            self.title.as_deref(),
+        ) {
+            (Some(occurrence), _, _) => Selection::Occurrence(occurrence),
+            (None, Some(session), _) => Selection::Id(session),
+            (None, _, Some(title)) => Selection::Title {
                 title,
-                within: self.scope.within_or_here(),
+                within: self.within_or_here(),
                 harness: self.harness.as_deref(),
             },
-            (None, None) => Selection::Latest {
-                within: self.scope.within_or_here(),
+            (None, None, None) => Selection::Latest {
+                within: self.within_or_here(),
                 harness: self.harness.as_deref(),
                 exclude: &self.exclude,
             },
@@ -179,10 +337,10 @@ impl SelectionArgs {
 #[group(multiple = true)]
 struct SessionQueryArgs {
     /// Session identifier, full or an unambiguous prefix.
-    #[arg(conflicts_with_all = ["title", "latest", "exclude", "harness", "here", "project", "global"])]
+    #[arg(conflicts_with_all = ["title", "latest", "occurrence", "exclude", "harness", "here", "project", "global"])]
     session: Option<String>,
     /// Match the recorded title exactly in scope; incomplete or ambiguous lookup refuses.
-    #[arg(long, conflicts_with_all = ["session", "latest", "exclude", "limit", "model", "directory", "since", "until", "sort", "search"])]
+    #[arg(long, conflicts_with_all = ["session", "latest", "occurrence", "exclude", "limit", "model", "directory", "since", "until", "sort", "search"])]
     title: Option<String>,
     /// Take the most recent session in scope instead of naming one. A
     /// caller asking from inside a live session is usually itself the most
@@ -199,16 +357,18 @@ struct SessionQueryArgs {
     harness: Option<String>,
     #[command(flatten)]
     scope: ScopeArgs,
+    #[command(flatten)]
+    input: InputArgs,
     /// Take at most this many sessions from each harness [default: 20].
-    #[arg(long, conflicts_with_all = ["session", "latest", "title"])]
+    #[arg(long, conflicts_with_all = ["session", "latest", "title", "occurrence"])]
     limit: Option<usize>,
     /// Match case-insensitively against the full model identity, `id` or
     /// `id (variant)`. Sessions without a model never match.
-    #[arg(long, value_name = "SUBSTRING", conflicts_with_all = ["session", "latest", "title"])]
+    #[arg(long, value_name = "SUBSTRING", conflicts_with_all = ["session", "latest", "title", "occurrence"])]
     model: Option<String>,
     /// Match case-insensitively against the recorded directory path.
     /// Sessions without a directory never match.
-    #[arg(long, value_name = "SUBSTRING", conflicts_with_all = ["session", "latest", "title"])]
+    #[arg(long, value_name = "SUBSTRING", conflicts_with_all = ["session", "latest", "title", "occurrence"])]
     directory: Option<String>,
     /// Keep sessions whose newest recorded activity, `last_activity_at`,
     /// is at or after this timestamp. RFC 3339 timestamps with an offset
@@ -217,7 +377,7 @@ struct SessionQueryArgs {
         long,
         value_name = "TIMESTAMP",
         value_parser = tapes_core::parse_activity_timestamp,
-        conflicts_with_all = ["session", "latest", "title"]
+        conflicts_with_all = ["session", "latest", "title", "occurrence"]
     )]
     since: Option<tapes_core::ActivityTimestamp>,
     /// Keep sessions whose newest recorded activity, `last_activity_at`,
@@ -227,34 +387,74 @@ struct SessionQueryArgs {
         long,
         value_name = "TIMESTAMP",
         value_parser = tapes_core::parse_activity_timestamp,
-        conflicts_with_all = ["session", "latest", "title"]
+        conflicts_with_all = ["session", "latest", "title", "occurrence"]
     )]
     until: Option<tapes_core::ActivityTimestamp>,
     /// Order the selection by `last_activity_at` before --limit takes
     /// from it: newest first by default, or oldest first.
-    #[arg(long, value_enum, value_name = "ORDER", conflicts_with_all = ["session", "latest", "title"])]
+    #[arg(long, value_enum, value_name = "ORDER", conflicts_with_all = ["session", "latest", "title", "occurrence"])]
     sort: Option<SortArg>,
     /// Match case-insensitively against the last 32 normalized turns in
     /// each candidate session. The fixed tail keeps the selection bounded;
     /// a match outside it is not considered.
-    #[arg(long, value_name = "SUBSTRING", conflicts_with_all = ["session", "latest", "title"])]
+    #[arg(long, value_name = "SUBSTRING", conflicts_with_all = ["session", "latest", "title", "occurrence"])]
     search: Option<String>,
 }
 
 impl SessionQueryArgs {
+    fn validate_input(&self) -> Result<()> {
+        self.input.validate_collection()?;
+        reject_installed_selection(&self.input, self.harness.as_deref(), &self.scope)?;
+        if self.input.supplied() && self.latest {
+            return Err(anyhow!(
+                "--latest is not available for caller-supplied inputs; name an id, exact title, or --occurrence"
+            ));
+        }
+        if self.input.occurrence.is_some()
+            && (self.limit.is_some()
+                || self.model.is_some()
+                || self.directory.is_some()
+                || self.since.is_some()
+                || self.until.is_some()
+                || self.sort.is_some()
+                || self.search.is_some())
+        {
+            return Err(anyhow!("--occurrence conflicts with collection filters"));
+        }
+        if self.input.after_occurrence.is_some()
+            && (self.session.is_some() || self.title.is_some() || self.latest)
+        {
+            return Err(anyhow!(
+                "--after-occurrence is only available for collection selections"
+            ));
+        }
+        Ok(())
+    }
+
+    fn within_or_here(&self) -> Where<'_> {
+        if self.input.supplied() {
+            Where::Global
+        } else {
+            self.scope.within_or_here()
+        }
+    }
+
     fn single(&self) -> Option<Selection<'_>> {
+        if let Some(occurrence) = self.input.occurrence.as_deref() {
+            return Some(Selection::Occurrence(occurrence));
+        }
         if let Some(id) = self.session.as_deref() {
             return Some(Selection::Id(id));
         }
         if let Some(title) = self.title.as_deref() {
             return Some(Selection::Title {
                 title,
-                within: self.scope.within_or_here(),
+                within: self.within_or_here(),
                 harness: self.harness.as_deref(),
             });
         }
         self.latest.then_some(Selection::Latest {
-            within: self.scope.within_or_here(),
+            within: self.within_or_here(),
             harness: self.harness.as_deref(),
             exclude: &self.exclude,
         })
@@ -264,6 +464,8 @@ impl SessionQueryArgs {
         self.scope.here
             || self.scope.global
             || self.scope.project.is_some()
+            || self.input.supplied()
+            || self.input.after_occurrence.is_some()
             || self.harness.is_some()
             || self.limit.is_some()
             || self.model.is_some()
@@ -276,8 +478,16 @@ impl SessionQueryArgs {
 
     fn set(&self) -> tapes_core::SessionSelection<'_> {
         tapes_core::SessionSelection {
-            within: self.scope.within(),
-            harness: self.harness.as_deref(),
+            within: if self.input.supplied() {
+                Where::Global
+            } else {
+                self.scope.within()
+            },
+            harness: if self.input.supplied() {
+                None
+            } else {
+                self.harness.as_deref()
+            },
             limit: self.limit,
             filters: tapes_core::ListFilters {
                 model: self.model.as_deref(),
@@ -360,6 +570,8 @@ enum Command {
         /// falls back to CLI API GETs and records that stage's diagnostic.
         #[arg(long, value_name = "SUBSTRING")]
         search: Option<String>,
+        #[command(flatten)]
+        input: InputArgs,
         /// Render results as JSON. Matching sessions may include optional
         /// `live` and `accounting` fields; accounting states the basis and
         /// coverage of any recorded cost or token counters.
@@ -521,7 +733,7 @@ enum Command {
             value_enum,
             value_name = "DIMENSION",
             value_delimiter = ',',
-            conflicts_with_all = ["session", "latest", "title"]
+            conflicts_with_all = ["session", "latest", "title", "occurrence"]
         )]
         by: Vec<ByArg>,
         /// Render the versioned tapes-usage/3 object, or tapes-usage-summary/3
@@ -595,6 +807,8 @@ enum Command {
         /// a match outside it is not considered.
         #[arg(long, value_name = "SUBSTRING")]
         search: Option<String>,
+        #[command(flatten)]
+        input: InputArgs,
         /// Read this many of each session's newest turns. The window bounds
         /// the structural read and the optional text tail alike; a window that
         /// omitted turns is reported as `tail-window`.
@@ -617,7 +831,7 @@ enum Command {
     /// read is recorded in the manifest's `failed` and does not stop the run,
     /// which fails only when every selected session did.
     #[command(group(clap::ArgGroup::new("export_selection")
-        .args(["session", "latest", "title", "here", "project", "global", "harness", "model", "directory", "since", "until", "search"])
+        .args(["session", "latest", "title", "occurrence", "input", "here", "project", "global", "harness", "model", "directory", "since", "until", "search"])
         .required(true).multiple(true)))]
     Export {
         #[command(flatten)]
@@ -631,6 +845,18 @@ enum Command {
 fn main() -> Result<()> {
     reset_sigpipe();
     dispatch(Cli::parse())
+}
+
+fn print_json<T: Serialize>(value: &T, input: &InputArgs) -> Result<()> {
+    let body = serde_json::to_string(value)?;
+    if input.supplied() && body.len() as u64 > input.output_bytes {
+        return Err(anyhow!(
+            "serialized output exceeds --output-bytes limit of {} bytes",
+            input.output_bytes
+        ));
+    }
+    println!("{body}");
+    Ok(())
 }
 
 fn dispatch(cli: Cli) -> Result<()> {
@@ -649,8 +875,11 @@ fn dispatch(cli: Cli) -> Result<()> {
             until,
             sort,
             search,
+            input,
             json,
         } => {
+            input.validate_bulk()?;
+            reject_installed_selection(&input, harness.as_deref(), &scope)?;
             if since
                 .zip(until)
                 .is_some_and(|(since, until)| since >= until)
@@ -662,22 +891,36 @@ fn dispatch(cli: Cli) -> Result<()> {
                     "Searching the last 32 normalized turns of each candidate session before applying --limit."
                 );
             }
-            let mut result = tapes_core::list_with_options(
-                harness.as_deref(),
-                scope.within(),
-                limit,
-                tapes_core::ListFilters {
-                    model: model.as_deref(),
-                    directory: directory.as_deref(),
-                    since,
-                    until,
-                    search: search.as_deref(),
-                },
-                sort.into(),
-            )?;
-            liveness::annotate(&mut result.sessions);
+            let filters = tapes_core::ListFilters {
+                model: model.as_deref(),
+                directory: directory.as_deref(),
+                since,
+                until,
+                search: search.as_deref(),
+            };
+            let result = if input.supplied() {
+                let backends = input.backends()?;
+                tapes_core::list_with_backends_options(
+                    &backends,
+                    None,
+                    None,
+                    limit.unwrap_or(20),
+                    &filters,
+                    sort.into(),
+                )?
+            } else {
+                let mut result = tapes_core::list_with_options(
+                    harness.as_deref(),
+                    scope.within(),
+                    limit,
+                    filters,
+                    sort.into(),
+                )?;
+                liveness::annotate(&mut result.sessions);
+                result
+            };
             if json {
-                println!("{}", serde_json::to_string(&result)?);
+                print_json(&result, &input)?;
             } else {
                 print_session_list(&result.sessions);
                 print_availability_note(&result);
@@ -688,11 +931,22 @@ fn dispatch(cli: Cli) -> Result<()> {
             tail,
             json,
         } => {
+            selection.validate_input()?;
             let by_latest = selection.latest;
-            let mut transcript = tapes_core::show(selection.selection(), tail)?;
-            liveness::annotate(std::slice::from_mut(&mut transcript.session));
+            let transcript = if selection.input.supplied() {
+                let backends = selection.input.backends()?;
+                tapes_core::show_with_backends(
+                    &backends,
+                    selection.selection(),
+                    tail.unwrap_or(100),
+                )?
+            } else {
+                let mut transcript = tapes_core::show(selection.selection(), tail)?;
+                liveness::annotate(std::slice::from_mut(&mut transcript.session));
+                transcript
+            };
             if json {
-                println!("{}", serde_json::to_string(&transcript)?);
+                print_json(&transcript, &selection.input)?;
             } else {
                 print_transcript(&transcript, by_latest);
             }
@@ -703,6 +957,12 @@ fn dispatch(cli: Cli) -> Result<()> {
             bytes,
             json,
         } => {
+            selection.validate_input()?;
+            if selection.input.supplied() {
+                return Err(anyhow!(
+                    "--input is not supported by page; supplied exports have no installed history cursor"
+                ));
+            }
             let page = tapes_core::history::page(selection.selection(), cursor.as_deref(), bytes)?;
             if json {
                 println!("{}", serde_json::to_string(&page)?);
@@ -733,6 +993,12 @@ fn dispatch(cli: Cli) -> Result<()> {
             search,
             json,
         } => {
+            selection.validate_input()?;
+            if selection.input.supplied() {
+                return Err(anyhow!(
+                    "--input is not supported by history-search; supplied exports have no installed history cursor"
+                ));
+            }
             let report = tapes_core::history::search(
                 selection.selection(),
                 cursor.as_deref(),
@@ -771,6 +1037,12 @@ fn dispatch(cli: Cli) -> Result<()> {
             pages,
             json,
         } => {
+            selection.validate_input()?;
+            if selection.input.supplied() {
+                return Err(anyhow!(
+                    "--input is not supported by metadata; supplied exports have no installed history cursor"
+                ));
+            }
             let report = tapes_core::history::metadata(
                 selection.selection(),
                 cursor.as_deref(),
@@ -805,6 +1077,12 @@ fn dispatch(cli: Cli) -> Result<()> {
             tail,
             json,
         } => {
+            selection.validate_input()?;
+            if selection.input.supplied() {
+                return Err(anyhow!(
+                    "--input is not supported by child; supplied exports have no child store"
+                ));
+            }
             let child = tapes_core::child::read(selection.selection(), &reference, tail)?;
             if json {
                 println!("{}", serde_json::to_string(&child)?);
@@ -850,29 +1128,52 @@ fn dispatch(cli: Cli) -> Result<()> {
             call_id,
             json,
         } => {
+            selection.validate_input()?;
             let by_latest = selection.latest;
-            let mut events = tapes_core::events(selection.selection(), tail)?;
-            liveness::annotate(std::slice::from_mut(&mut events.session));
+            let mut events = if selection.input.supplied() {
+                let backends = selection.input.backends()?;
+                tapes_core::events_with_backends(
+                    &backends,
+                    selection.selection(),
+                    tail.unwrap_or(usize::MAX),
+                )?
+            } else {
+                let mut events = tapes_core::events(selection.selection(), tail)?;
+                liveness::annotate(std::slice::from_mut(&mut events.session));
+                events
+            };
             events.retain(&name, &call_id);
             if json {
-                println!("{}", serde_json::to_string(&events)?);
+                print_json(&events, &selection.input)?;
             } else {
                 print_events(&events, by_latest);
             }
         }
         Command::Lineage { selection, json } => {
-            let lineage = tapes_core::lineage(selection.selection())?;
+            selection.validate_input()?;
+            let lineage = if selection.input.supplied() {
+                let backends = selection.input.backends()?;
+                tapes_core::lineage_with_backends(&backends, selection.selection())?
+            } else {
+                tapes_core::lineage(selection.selection())?
+            };
             if json {
-                println!("{}", serde_json::to_string(&lineage)?);
+                print_json(&lineage, &selection.input)?;
             } else {
                 print!("{}", render_lineage(&lineage));
             }
         }
         Command::Stats { query, json } => {
+            query.validate_input()?;
             if let Some(one) = query.single() {
-                let stats = tapes_core::stats(one)?;
+                let stats = if query.input.supplied() {
+                    let backends = query.input.backends()?;
+                    tapes_core::stats_with_backends(&backends, one)?
+                } else {
+                    tapes_core::stats(one)?
+                };
                 if json {
-                    println!("{}", serde_json::to_string(&stats)?);
+                    print_json(&stats, &query.input)?;
                 } else {
                     print!("{}", render_stats(&stats));
                 }
@@ -880,9 +1181,14 @@ fn dispatch(cli: Cli) -> Result<()> {
                 if !query.has_set_selection() {
                     return Err(anyhow!("stats needs a session ID, --latest, or an explicit selection such as --here"));
                 }
-                let summary = tapes_core::stats_summary::summary(&query.set())?;
+                let summary = if query.input.supplied() {
+                    let backends = query.input.backends()?;
+                    tapes_core::stats_summary::with_backends(&backends, &query.set())?
+                } else {
+                    tapes_core::stats_summary::summary(&query.set())?
+                };
                 if json {
-                    println!("{}", serde_json::to_string(&summary)?);
+                    print_json(&summary, &query.input)?;
                 } else {
                     print_stats_summary(&summary);
                 }
@@ -892,10 +1198,16 @@ fn dispatch(cli: Cli) -> Result<()> {
             }
         }
         Command::Usage { query, by, json } => {
+            query.validate_input()?;
             if let Some(one) = query.single() {
-                let usage = tapes_core::usage(one)?;
+                let usage = if query.input.supplied() {
+                    let backends = query.input.backends()?;
+                    tapes_core::usage_with_backends(&backends, one)?
+                } else {
+                    tapes_core::usage(one)?
+                };
                 if json {
-                    println!("{}", serde_json::to_string(&usage)?);
+                    print_json(&usage, &query.input)?;
                 } else {
                     print!("{}", render_usage(&usage));
                 }
@@ -911,9 +1223,14 @@ fn dispatch(cli: Cli) -> Result<()> {
                 query.validate_window()?;
                 query.describe_search();
                 let by = grouping(&by);
-                let summary = tapes_core::usage_summary(&query.set(), &by)?;
+                let summary = if query.input.supplied() {
+                    let backends = query.input.backends()?;
+                    tapes_core::usage_summary_with_backends(&backends, &query.set(), &by)?
+                } else {
+                    tapes_core::usage_summary(&query.set(), &by)?
+                };
                 if json {
-                    println!("{}", serde_json::to_string(&summary)?);
+                    print_json(&summary, &query.input)?;
                 } else {
                     print!("{}", render_usage_summary(&summary, &by));
                     print_diagnostics(
@@ -931,10 +1248,17 @@ fn dispatch(cli: Cli) -> Result<()> {
             tail,
             json,
         } => {
-            let mut brief = tapes_core::brief(selection.selection(), Some(tail))?;
-            liveness::annotate_brief(&mut brief);
+            selection.validate_input()?;
+            let brief = if selection.input.supplied() {
+                let backends = selection.input.backends()?;
+                tapes_core::brief_with_backends(&backends, selection.selection(), tail)?
+            } else {
+                let mut brief = tapes_core::brief(selection.selection(), Some(tail))?;
+                liveness::annotate_brief(&mut brief);
+                brief
+            };
             if json {
-                println!("{}", serde_json::to_string(&brief)?);
+                print_json(&brief, &selection.input)?;
             } else {
                 print!("{}", render_brief(&brief));
             }
@@ -949,10 +1273,13 @@ fn dispatch(cli: Cli) -> Result<()> {
             until,
             sort,
             search,
+            input,
             tail,
             text,
             json,
         } => {
+            input.validate_bulk()?;
+            reject_installed_selection(&input, harness.as_deref(), &scope)?;
             if since
                 .zip(until)
                 .is_some_and(|(since, until)| since >= until)
@@ -964,26 +1291,37 @@ fn dispatch(cli: Cli) -> Result<()> {
                     "Searching the last 32 normalized turns of each candidate session before applying --limit."
                 );
             }
-            let mut report = tapes_core::endings::endings(
-                &tapes_core::SessionSelection {
-                    within: scope.within(),
-                    harness: harness.as_deref(),
-                    limit,
-                    filters: tapes_core::ListFilters {
-                        model: model.as_deref(),
-                        directory: directory.as_deref(),
-                        since,
-                        until,
-                        search: search.as_deref(),
-                    },
-                    sort: sort.into(),
+            let selection = tapes_core::SessionSelection {
+                within: if input.supplied() {
+                    Where::Global
+                } else {
+                    scope.within()
                 },
-                tail,
-                text,
-            )?;
-            liveness::annotate_endings(&mut report.endings);
+                harness: if input.supplied() {
+                    None
+                } else {
+                    harness.as_deref()
+                },
+                limit,
+                filters: tapes_core::ListFilters {
+                    model: model.as_deref(),
+                    directory: directory.as_deref(),
+                    since,
+                    until,
+                    search: search.as_deref(),
+                },
+                sort: sort.into(),
+            };
+            let report = if input.supplied() {
+                let backends = input.backends()?;
+                tapes_core::endings::endings_with_backends(&backends, &selection, tail, text)?
+            } else {
+                let mut report = tapes_core::endings::endings(&selection, tail, text)?;
+                liveness::annotate_endings(&mut report.endings);
+                report
+            };
             if json {
-                println!("{}", serde_json::to_string(&report)?);
+                print_json(&report, &input)?;
             } else {
                 print!("{}", render_endings(&report));
                 for session in &report.unread {
@@ -1002,12 +1340,28 @@ fn dispatch(cli: Cli) -> Result<()> {
             }
         }
         Command::Export { query, bundle } => {
+            query.validate_input()?;
             if let Some(one) = query.single() {
-                print_manifest(&tapes_core::export(one, bundle.as_deref())?);
+                let bundle = if query.input.supplied() {
+                    let backends = query.input.backends()?;
+                    tapes_core::export_with_backends(&backends, one, bundle.as_deref())?
+                } else {
+                    tapes_core::export(one, bundle.as_deref())?
+                };
+                print_manifest(&bundle);
             } else {
                 query.validate_window()?;
                 query.describe_search();
-                let export = tapes_core::export_selection(&query.set(), bundle.as_deref())?;
+                let export = if query.input.supplied() {
+                    let backends = query.input.backends()?;
+                    tapes_core::export_selection_with_backends(
+                        &backends,
+                        &query.set(),
+                        bundle.as_deref(),
+                    )?
+                } else {
+                    tapes_core::export_selection(&query.set(), bundle.as_deref())?
+                };
                 print_selection_manifest(&export);
                 if export.every_session_failed() {
                     return Err(anyhow!(
@@ -2241,6 +2595,7 @@ mod tests {
                 tokens: None,
                 accounting: None,
                 start_uncertain: false,
+                occurrence: None,
                 usage_detail: None,
             },
             turns: vec![Turn {
