@@ -113,9 +113,15 @@ Supplied inputs are isolated from installed stores. `list` enumerates each
 occurrence, while single-session views accept an ID, exact title, or the
 opaque `--occurrence` coordinate emitted by `list`; repeated native IDs remain
 ambiguous until one occurrence is named. `--after-occurrence` continues a
-collection only when the source observation is unchanged. The reader never
+collection across its ordered files and ZIP members only when the complete
+source observation is unchanged. The reader never
 extracts ZIPs or opens referenced files and reports structural gaps instead of
 claiming an unreached record is absent.
+
+Mapping-based inputs retain a bounded graph alongside the selected canonical
+turn path. Recognized associated report members retain their bounded bodies and
+citation spans as artifact evidence; a report whose backing conversation is
+unreached remains listed as an artifact with its association unresolved.
 
 The reader applies bounded per-invocation scan, decoded, record, and output
 budgets. Defaults are 512 MiB for source and decoded bytes, 8 MiB per record,
@@ -189,7 +195,7 @@ path is unknowable past the bound). A session whose header could not be read
 carries `start_uncertain: true`, and `started_at` is then a floor. A Codex row without `model` may have its
 model-bearing `turn_context` before the bounded 4 MiB file-tail read; the
 absence is preserved rather than filled with a guess. JSON output is a
-`tapes-list/2` object containing `sessions`, `unavailable`, `unreadable`,
+`tapes-list/3` object containing `sessions`, `artifacts`, `unavailable`, `unreadable`,
 `unsearched`, `scanned`, and `scan_truncated`. `unavailable` names harnesses
 that could not be read at all;
 `unreadable` names sessions a readable harness could not normalize, each with
@@ -237,9 +243,12 @@ liveness; `text_tail` explains an empty operator/assistant tail. Each turn also
 keeps ordered native content `parts` and a `coverage` summary, so an image,
 file reference, structured artifact, tool payload, or unknown part does not
 disappear merely because it has no readable text.
-JSON output uses the `tapes-session/4` transcript schema, with the optional
+JSON output uses the `tapes-session/5` transcript schema, with the optional
 `live` annotation when the authority answers. The human header marks the same
-state.
+state. Supplied mapping exports also carry bounded graph evidence with the
+selected canonical path, retained nodes, and retained parent-child edges.
+Artifact-native reports carry their bounded body and citation spans, including
+when their outer conversation association remains unresolved.
 
 `show` and `export` also take `--latest` in place of an ID, which resolves the
 most recent session in scope. `--exclude <id>` is repeatable and passes over
@@ -346,10 +355,11 @@ in one screen, in that reading order.
 
 - `.context.md` — exact operator turns and assistant-visible text, without the
   harness's own commands, notices, and attached context. Read first.
-- `.json` — the canonical `tapes-session/4` object plus turns, cost, tokens,
+- `.json` — the canonical `tapes-session/5` object plus turns, cost, tokens,
   their `accounting` basis and coverage when present, any verified
-  `trailing_record`, and the session directory's git head and branch when
-  they resolve. Query selectively with `jq`.
+  `trailing_record`, retained graph/artifact evidence, and the session
+  directory's git head and branch when they resolve. Query selectively with
+  `jq`.
 - `.trace.md` — every turn the transcript carries, reasoning and tool included,
   in order and headed as `show` heads it, for grepping. A tool turn is headed
   by the tool's name where its
@@ -376,8 +386,9 @@ Given the listing flags in place of an id — `--here`, `--project <path>`,
 `--sort`, `--limit`, `--search` — `export` takes the set `list` would return,
 in the same order, and writes one bundle per session. Bundles are never
 joined: each session keeps its own bounded three files, and a
-`tapes-export-manifest/2` `manifest.json` beside them is the only file that
+`tapes-export-manifest/3` `manifest.json` beside them is the only file that
 spans the set. It records the selection, each session's bundle paths, the
+artifact-native reports discovered in supplied inputs, the
 sessions whose store could not be read under `failed`, and the listing's own
 `unavailable`, `unreadable`, `unsearched`, `scanned`, and `scan_truncated`
 diagnostics. Stdout adds each bundle's three lines in selection order, then
@@ -429,11 +440,11 @@ rather than a resent history. `tapes usage --here --since <date> --json` answers
 <date> --json` says what each of those sessions ends on, so a scan reads the
 few endings that matter instead of every tail.
 
-**Contracts you can build on.** `tapes-list/2`, `tapes-session/4`,
+**Contracts you can build on.** `tapes-list/3`, `tapes-session/5`,
 `tapes-events/4`, `tapes-usage/3`, `tapes-usage-summary/3`, `tapes-lineage/2`,
 `tapes-endings/3`, `tapes-child/2`, `tapes-stats/3`, `tapes-stats-summary/2`, `tapes-brief/3`,
 `tapes-page/3`, `tapes-history-search/3`, `tapes-metadata-history/3`,
-and `tapes-export-manifest/2` are versioned
+and `tapes-export-manifest/3` are versioned
 JSON; a breaking shape change bumps the version. A single-session `export`
 prints
 exactly three paths and their sizes on stdout, in reading order, and writes each

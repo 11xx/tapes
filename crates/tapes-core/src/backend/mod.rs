@@ -203,6 +203,9 @@ impl<'a> Query<'a> {
 #[derive(Debug, Default)]
 pub struct Listing {
     pub sessions: Vec<Session>,
+    /// Artifact-native evidence discovered alongside supplied sessions. Most
+    /// installed backends never populate this collection.
+    pub artifacts: Vec<crate::content::ArtifactReference>,
     /// Diagnostics for individual candidates that could not be normalized.
     /// These use the same vocabulary as the public listing's `unavailable`
     /// field, while a command or store failure still names the whole harness.
@@ -219,6 +222,7 @@ impl Listing {
         Self {
             scanned: sessions.len(),
             sessions,
+            artifacts: Vec::new(),
             unavailable: Vec::new(),
             unsearched: Vec::new(),
             scan_truncated: false,

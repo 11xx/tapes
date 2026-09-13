@@ -2646,6 +2646,8 @@ mod tests {
             read: None,
             terminal: None,
             text_tail: None,
+            artifacts: Vec::new(),
+            graph: None,
             trailing_record: None,
             notes: vec!["Skipped 1 unparseable line.".to_owned()],
         }

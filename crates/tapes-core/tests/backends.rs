@@ -1946,6 +1946,8 @@ impl Backend for SearchFixture {
             read: None,
             terminal: None,
             text_tail: None,
+            artifacts: Vec::new(),
+            graph: None,
             trailing_record: None,
             notes: Vec::new(),
         })
@@ -3537,6 +3539,8 @@ impl Backend for BulkExportFixture {
             read: None,
             terminal: None,
             text_tail: None,
+            artifacts: Vec::new(),
+            graph: None,
             trailing_record: None,
             notes: Vec::new(),
         })

@@ -412,6 +412,7 @@ fn supplied_single_conversation_reaches_list_show_and_export() {
     );
     let shown: Value = serde_json::from_slice(&shown.stdout).unwrap();
     assert_eq!(shown["session"]["id"], "supplied-1");
+    assert_eq!(shown["turns"][0]["kind"], "operator");
     assert_eq!(
         shown["turns"]
             .as_array()
@@ -423,6 +424,15 @@ fn supplied_single_conversation_reaches_list_show_and_export() {
     );
     assert_eq!(shown["turns"][0]["record_ref"]["span"]["start"], 4);
     assert_eq!(shown["turns"][1]["record_ref"]["pointer"], "/messages/1");
+
+    let brief = tapes()
+        .args(["brief", "supplied-1", "--input", input, "--json"])
+        .output()
+        .unwrap();
+    assert!(brief.status.success());
+    let brief: Value = serde_json::from_slice(&brief.stdout).unwrap();
+    assert_eq!(brief["ending"]["last_operator"]["ordinal"], 0);
+    assert_eq!(brief["tail"][0]["kind"], "operator");
 
     let titled = tapes()
         .args([
@@ -468,6 +478,225 @@ fn supplied_single_conversation_reaches_list_show_and_export() {
         .any(|entry| entry.file_name().to_string_lossy().ends_with(".trace.md")));
 }
 
+/// ChatGPT Exporter keeps the mapping graph rather than flattening it into a
+/// convenience message array. The chosen path is a transcript projection;
+/// sibling messages and their edges remain source evidence.
+#[test]
+fn supplied_chatgpt_exporter_raw_graph_preserves_branches_and_auto_provenance() {
+    let root = TemporaryDirectory::new(
+        std::env::temp_dir().join(format!("tapes-input-raw-graph-{}", std::process::id())),
+    );
+    let input = root.path().join("export.data");
+    fs::write(
+        &input,
+        serde_json::to_vec(&serde_json::json!({
+            "id": "raw-graph",
+            "current_node": "answer-a",
+            "mapping": {
+                "root": {"id":"root","parent":null,"message":null},
+                "question": {"id":"question","parent":"root","message":{"id":"question-message","author":{"role":"user"},"content":{"parts":["question"]}}},
+                "answer-a": {"id":"answer-a","parent":"question","message":{"id":"answer-a-message","author":{"role":"assistant"},"content":{"parts":["selected answer"]}}},
+                "answer-b": {"id":"answer-b","parent":"question","message":{"id":"answer-b-message","author":{"role":"assistant"},"content":{"parts":["alternate answer"]}}}
+            }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let input = input.to_str().unwrap();
+
+    let listed = tapes()
+        .args(["list", "--input", input, "--json"])
+        .output()
+        .unwrap();
+    assert!(listed.status.success());
+    let listed: Value = serde_json::from_slice(&listed.stdout).unwrap();
+    assert_eq!(listed["sessions"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        listed["sessions"][0]["source"]["producer"],
+        "ChatGPT Exporter"
+    );
+
+    let shown = tapes()
+        .args(["show", "raw-graph", "--input", input, "--json"])
+        .output()
+        .unwrap();
+    assert!(shown.status.success());
+    let shown: Value = serde_json::from_slice(&shown.stdout).unwrap();
+    assert_eq!(
+        shown["turns"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|turn| turn["text"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["question", "selected answer"]
+    );
+    assert_eq!(
+        shown["graph"]["selected_path"],
+        serde_json::json!(["root", "question", "answer-a"])
+    );
+    assert_eq!(shown["graph"]["nodes"].as_array().unwrap().len(), 4);
+    assert!(shown["graph"]["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|node| node["message"]["text"] == "alternate answer"));
+    assert_eq!(shown["graph"]["edges"].as_array().unwrap().len(), 3);
+
+    let no_current = root.path().join("no-current.json");
+    fs::write(
+        &no_current,
+        serde_json::to_vec(&serde_json::json!({
+            "id": "raw-no-current",
+            "mapping": {
+                "root": {"id":"root","parent":null,"message":null},
+                "message": {"id":"message","parent":"root","message":{"id":"message-id","author":{"role":"assistant"},"content":{"parts":["retained but unselected"]}}}
+            }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let no_current = no_current.to_str().unwrap();
+    let shown = tapes()
+        .args(["show", "raw-no-current", "--input", no_current, "--json"])
+        .output()
+        .unwrap();
+    assert!(shown.status.success());
+    let shown: Value = serde_json::from_slice(&shown.stdout).unwrap();
+    assert!(shown["turns"].as_array().unwrap().is_empty());
+    assert_eq!(shown["graph"]["nodes"].as_array().unwrap().len(), 2);
+    assert!(shown["notes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|note| note == "canonical branch is unknown because current_node is absent"));
+
+    let mut mapping = serde_json::Map::new();
+    mapping.insert(
+        "root".to_owned(),
+        serde_json::json!({"id":"root","parent":null,"message":null}),
+    );
+    let mut parent = "root".to_owned();
+    for index in 0..140 {
+        let id = format!("node-{index}");
+        mapping.insert(
+            id.clone(),
+            serde_json::json!({
+                "id": id,
+                "parent": parent.clone(),
+                "message": {
+                    "id": format!("message-{index}"),
+                    "author": {"role":"assistant"},
+                    "content": {"parts": [format!("long path {index}")]}
+                }
+            }),
+        );
+        parent = id;
+    }
+    let long_path = root.path().join("long-path.json");
+    fs::write(
+        &long_path,
+        serde_json::to_vec(&serde_json::json!({
+            "id": "raw-long-path",
+            "current_node": parent,
+            "mapping": mapping
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let long_path = long_path.to_str().unwrap();
+    let shown = tapes()
+        .args([
+            "show",
+            "raw-long-path",
+            "--input",
+            long_path,
+            "--tail",
+            "200",
+            "--json",
+        ])
+        .output()
+        .unwrap();
+    assert!(shown.status.success());
+    let shown: Value = serde_json::from_slice(&shown.stdout).unwrap();
+    assert_eq!(shown["turns"].as_array().unwrap().len(), 140);
+    assert_eq!(
+        shown["graph"]["selected_path"].as_array().unwrap().len(),
+        141
+    );
+}
+
+/// A collection cursor describes the ordered supplied-input observation, not
+/// only the file that produced the row carrying it. A changed source refuses
+/// the cursor instead of returning an empty successful page.
+#[test]
+fn supplied_occurrence_continuation_crosses_files_and_rejects_changes() {
+    let root = TemporaryDirectory::new(
+        std::env::temp_dir().join(format!("tapes-input-continuation-{}", std::process::id())),
+    );
+    let first = root.path().join("a.json");
+    let second = root.path().join("b.json");
+    fs::write(
+        &first,
+        serde_json::to_vec(&serde_json::json!([{"id":"first","mapping":{"root":{"parent":null,"message":null},"first":{"parent":"root","message":{"author":{"role":"assistant"},"content":{"parts":["first"]}}}},"current_node":"first"}]))
+            .unwrap(),
+    )
+    .unwrap();
+    fs::write(
+        &second,
+        serde_json::to_vec(&serde_json::json!([{"id":"second","mapping":{"root":{"parent":null,"message":null},"second":{"parent":"root","message":{"author":{"role":"assistant"},"content":{"parts":["second"]}}}},"current_node":"second"}]))
+            .unwrap(),
+    )
+    .unwrap();
+    let first = first.to_str().unwrap();
+    let second = second.to_str().unwrap();
+
+    let listed = tapes()
+        .args([
+            "list", "--input", first, "--input", second, "--limit", "1", "--json",
+        ])
+        .output()
+        .unwrap();
+    assert!(listed.status.success());
+    let listed: Value = serde_json::from_slice(&listed.stdout).unwrap();
+    let cursor = listed["sessions"][0]["occurrence"].as_str().unwrap();
+    let continued = tapes()
+        .args([
+            "list",
+            "--input",
+            first,
+            "--input",
+            second,
+            "--after-occurrence",
+            cursor,
+            "--json",
+        ])
+        .output()
+        .unwrap();
+    assert!(continued.status.success());
+    let continued: Value = serde_json::from_slice(&continued.stdout).unwrap();
+    assert_eq!(continued["sessions"][0]["id"], "second");
+
+    fs::write(second, b"[]").unwrap();
+    let changed = tapes()
+        .args([
+            "list",
+            "--input",
+            first,
+            "--input",
+            second,
+            "--after-occurrence",
+            cursor,
+            "--json",
+        ])
+        .output()
+        .unwrap();
+    assert!(!changed.status.success());
+    assert!(
+        String::from_utf8_lossy(&changed.stderr).contains("different supplied input observation")
+    );
+}
+
 #[test]
 fn supplied_duplicate_ids_require_an_occurrence_and_never_use_installed_stores() {
     let root = TemporaryDirectory::new(
@@ -494,7 +723,7 @@ fn supplied_duplicate_ids_require_an_occurrence_and_never_use_installed_stores()
     assert!(!ambiguous.status.success());
     let error = String::from_utf8_lossy(&ambiguous.stderr);
     assert!(error.contains("occurs 2 times"), "{error}");
-    assert!(error.contains("input:v1:"), "{error}");
+    assert!(error.contains("input:v2:"), "{error}");
 
     let listed = tapes()
         .args(["list", "--input", input, "--json"])
@@ -521,7 +750,7 @@ fn supplied_duplicate_ids_require_an_occurrence_and_never_use_installed_stores()
 }
 
 #[test]
-fn supplied_zip_reads_conversations_and_bounded_associated_reports_only() {
+fn supplied_zip_reads_conversations_and_retains_associated_report_evidence() {
     let root = TemporaryDirectory::new(
         std::env::temp_dir().join(format!("tapes-input-zip-{}", std::process::id())),
     );
@@ -537,10 +766,30 @@ fn supplied_zip_reads_conversations_and_bounded_associated_reports_only() {
             br#"{"id":"associated-1","current_node":"node","mapping":{"root":{"id":"root","parent":null,"message":null},"node":{"id":"node","parent":"root","message":{"id":"message-1","author":{"role":"user"},"content":{"content_type":"text","parts":["hello"]}}}}}"#,
         )
         .unwrap();
+    archive
+        .start_file("empty-conversation.json", options)
+        .unwrap();
+    archive
+        .write_all(
+            br#"{"id":"empty-outer","mapping":{"root":{"id":"root","parent":null,"message":null}}}"#,
+        )
+        .unwrap();
     archive.start_file("file-report.dat", options).unwrap();
     archive
         .write_all(
-            br#"{"backing_conversation_id":"associated-1","widget_session_id":"report-1","widget_state":{"status":"completed","report_message":{"id":"report-message","author":{"role":"assistant"},"content":{"parts":[{"type":"text","text":"private report body"}]}}}}"#,
+            br#"{"backing_conversation_id":"associated-1","widget_session_id":"report-1","widget_state":{"status":"completed","report_message":{"id":"report-message","author":{"role":"assistant"},"content":{"parts":[{"type":"text","text":"private report body"}],"content_references":[{"type":"attribution","url":"https://example.test/source","start_idx":0,"end_idx":18}]}}}}"#,
+        )
+        .unwrap();
+    archive.start_file("empty-report.dat", options).unwrap();
+    archive
+        .write_all(
+            br#"{"backing_conversation_id":"empty-outer","widget_session_id":"empty-report","widget_state":{"status":"completed","report_message":{"content":{"parts":["body without a turn"]}}}}"#,
+        )
+        .unwrap();
+    archive.start_file("orphan-report.dat", options).unwrap();
+    archive
+        .write_all(
+            br#"{"backing_conversation_id":"missing-outer","widget_session_id":"orphan-report","widget_state":{"status":"completed","report_message":{"author":{"role":"assistant"},"content":{"parts":["orphan body"]}}}}"#,
         )
         .unwrap();
     archive.start_file("unrelated.xlsx", options).unwrap();
@@ -560,7 +809,8 @@ fn supplied_zip_reads_conversations_and_bounded_associated_reports_only() {
         String::from_utf8_lossy(&shown.stderr)
     );
     let output = String::from_utf8_lossy(&shown.stdout);
-    assert!(!output.contains("private report body"), "{output}");
+    assert!(output.contains("private report body"), "{output}");
+    assert!(output.contains("https://example.test/source"), "{output}");
     let output: Value = serde_json::from_slice(&shown.stdout).unwrap();
     assert_eq!(output["turns"].as_array().unwrap().len(), 1);
     let parts = output["turns"][0]["parts"].as_array().unwrap();
@@ -570,8 +820,63 @@ fn supplied_zip_reads_conversations_and_bounded_associated_reports_only() {
         .unwrap();
     assert_eq!(report["reference"]["identity"], "report-1");
     assert_eq!(report["reference"]["backing"], "associated-1");
-    assert_eq!(report["reference"]["citation_count"], 0);
+    assert_eq!(report["reference"]["citation_count"], 1);
+    assert_eq!(report["reference"]["body"]["text"], "private report body");
+    assert_eq!(report["reference"]["body_availability"], "retained-body");
+    assert_eq!(
+        report["reference"]["citations"][0]["uri"],
+        "https://example.test/source"
+    );
     assert_eq!(output["content"]["references"], 1);
+
+    let bundle_root = TemporaryDirectory::new(
+        std::env::temp_dir().join(format!("tapes-input-report-export-{}", std::process::id())),
+    );
+    let exported = tapes()
+        .args(["export", "associated-1", "--input", archive, "--bundle"])
+        .arg(bundle_root.path())
+        .output()
+        .unwrap();
+    assert!(exported.status.success());
+    let json_path = fs::read_dir(bundle_root.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find(|path| {
+            path.extension()
+                .is_some_and(|extension| extension == "json")
+        })
+        .unwrap();
+    let bundle_json: Value = serde_json::from_slice(&fs::read(json_path).unwrap()).unwrap();
+    assert_eq!(
+        bundle_json["artifacts"][0]["body"]["text"],
+        "private report body"
+    );
+    assert_eq!(
+        bundle_json["artifacts"][0]["citations"][0]["uri"],
+        "https://example.test/source"
+    );
+
+    let listed = tapes()
+        .args(["list", "--input", archive, "--json"])
+        .output()
+        .unwrap();
+    assert!(listed.status.success());
+    let listed: Value = serde_json::from_slice(&listed.stdout).unwrap();
+    assert_eq!(listed["artifacts"].as_array().unwrap().len(), 3);
+    assert!(listed["unsearched"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|value| value.as_str().unwrap().contains("orphan-report.dat")));
+
+    let empty = tapes()
+        .args(["show", "empty-outer", "--input", archive, "--json"])
+        .output()
+        .unwrap();
+    assert!(empty.status.success());
+    let empty: Value = serde_json::from_slice(&empty.stdout).unwrap();
+    assert!(empty["turns"].as_array().unwrap().is_empty());
+    assert_eq!(empty["artifacts"][0]["body"]["text"], "body without a turn");
 }
 
 #[test]
@@ -3495,7 +3800,7 @@ fn export_over_an_activity_window_writes_one_bundle_per_session_and_a_manifest()
     );
     let manifest: Value =
         serde_json::from_slice(&fs::read(bundle.join("manifest.json")).unwrap()).unwrap();
-    assert_eq!(manifest["schema"], "tapes-export-manifest/2");
+    assert_eq!(manifest["schema"], "tapes-export-manifest/3");
     assert_eq!(
         manifest["selection"],
         serde_json::json!({

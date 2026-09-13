@@ -9,7 +9,7 @@ use crate::content::{ContentCoverage, ContentPart};
 use crate::event::ToolEvent;
 use crate::usage::UsageDetail;
 
-pub const SESSION_SCHEMA: &str = "tapes-session/4";
+pub const SESSION_SCHEMA: &str = "tapes-session/5";
 /// Maximum length of a title derived from the first user turn.
 pub const DERIVED_TITLE_MAX_CHARS: usize = 96;
 
@@ -292,6 +292,49 @@ pub struct Turn {
     /// keeps the harness envelope in `text` as its stable wire contract.
     #[serde(skip)]
     pub tool: Option<ToolEvent>,
+}
+
+/// Bounded evidence for a source conversation graph. `selected_path` names
+/// the branch projected into `Transcript::turns`; the retained nodes and edges
+/// keep other readable branches visible without treating them as turns in the
+/// canonical transcript.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ConversationGraph {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current_node: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub selected_path: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub nodes: Vec<ConversationNode>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub edges: Vec<ConversationEdge>,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub omitted_nodes: usize,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub omitted_edges: usize,
+}
+
+/// One retained node from a source conversation graph. A node without a
+/// message is still useful: it can be a root, a branch edge, or a native
+/// message whose role/content representation was not recognized.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ConversationNode {
+    pub id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<Turn>,
+}
+
+/// A parent-child relationship retained from the source graph.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConversationEdge {
+    pub parent: String,
+    pub child: String,
+}
+
+fn is_zero(value: &usize) -> bool {
+    *value == 0
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -825,6 +868,11 @@ pub struct Transcript {
     pub read: Option<ReadEvidence>,
     pub terminal: Option<TerminalObservation>,
     pub text_tail: Option<TextTailEvidence>,
+    /// Artifact-native evidence that is not necessarily a transcript turn,
+    /// including reports whose outer conversation association was unresolved.
+    pub artifacts: Vec<crate::content::ArtifactReference>,
+    /// Source graph evidence when the input representation carries branches.
+    pub graph: Option<ConversationGraph>,
     pub trailing_record: Option<TrailingRecord>,
     pub notes: Vec<String>,
 }
@@ -867,6 +915,8 @@ impl Transcript {
             read: evidence.read,
             terminal: evidence.terminal,
             text_tail: evidence.text_tail,
+            artifacts: Vec::new(),
+            graph: None,
             trailing_record,
             notes,
         }
@@ -887,6 +937,8 @@ impl Serialize for Transcript {
             read: self.read.as_ref(),
             terminal: self.terminal.as_ref(),
             text_tail: self.text_tail.as_ref(),
+            artifacts: &self.artifacts,
+            graph: self.graph.as_ref(),
             content: crate::content::inventory(&self.turns),
             trailing_record: self.trailing_record.as_ref(),
             notes: &self.notes,
@@ -920,6 +972,8 @@ impl<'de> Deserialize<'de> for Transcript {
             read: serialized.read,
             terminal: serialized.terminal,
             text_tail: serialized.text_tail,
+            artifacts: serialized.artifacts,
+            graph: serialized.graph,
             trailing_record: serialized.trailing_record,
             notes: serialized.notes,
         })
@@ -940,6 +994,10 @@ struct TranscriptRef<'a> {
     terminal: Option<&'a TerminalObservation>,
     #[serde(skip_serializing_if = "Option::is_none")]
     text_tail: Option<&'a TextTailEvidence>,
+    #[serde(skip_serializing_if = "<[crate::content::ArtifactReference]>::is_empty")]
+    artifacts: &'a [crate::content::ArtifactReference],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    graph: Option<&'a ConversationGraph>,
     #[serde(skip_serializing_if = "Option::is_none")]
     content: Option<ContentInventory>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -962,6 +1020,10 @@ struct SerializedTranscript {
     terminal: Option<TerminalObservation>,
     #[serde(default)]
     text_tail: Option<TextTailEvidence>,
+    #[serde(default)]
+    artifacts: Vec<crate::content::ArtifactReference>,
+    #[serde(default)]
+    graph: Option<ConversationGraph>,
     #[serde(default)]
     trailing_record: Option<TrailingRecord>,
     #[serde(default)]
@@ -1066,6 +1128,8 @@ mod tests {
             read: None,
             terminal: None,
             text_tail: None,
+            artifacts: Vec::new(),
+            graph: None,
             trailing_record: Some(TrailingRecord {
                 kind: "event_msg".into(),
                 timestamp: Some(timestamp(1_700_000_060)),
@@ -1317,6 +1381,8 @@ mod tests {
             read: None,
             terminal: None,
             text_tail: None,
+            artifacts: Vec::new(),
+            graph: None,
             trailing_record: None,
             notes: Vec::new(),
         };
@@ -1448,6 +1514,8 @@ mod tests {
             read: None,
             terminal: None,
             text_tail: None,
+            artifacts: Vec::new(),
+            graph: None,
             trailing_record: Some(TrailingRecord {
                 kind: "last-prompt".into(),
                 timestamp: None,
