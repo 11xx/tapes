@@ -512,6 +512,7 @@ fn supplied_chatgpt_exporter_raw_graph_preserves_branches_and_auto_provenance() 
     let listed: Value = serde_json::from_slice(&listed.stdout).unwrap();
     assert_eq!(listed["sessions"].as_array().unwrap().len(), 1);
     assert!(listed["sessions"][0]["source"].get("producer").is_none());
+    assert_eq!(listed["sessions"][0]["source"]["origin"], "openai");
     assert_eq!(
         listed["sessions"][0]["source"]["representation"],
         "chatgpt-exporter-conversation"
@@ -545,6 +546,10 @@ fn supplied_chatgpt_exporter_raw_graph_preserves_branches_and_auto_provenance() 
         .unwrap();
     assert!(shown.status.success());
     let shown: Value = serde_json::from_slice(&shown.stdout).unwrap();
+    assert!(shown["turns"][0]["record_ref"]["domain"]
+        .as_str()
+        .unwrap()
+        .starts_with("openai:"));
     assert_eq!(
         shown["turns"]
             .as_array()
@@ -839,6 +844,89 @@ fn supplied_zip_reads_conversations_and_retains_associated_report_evidence() {
             .unwrap(),
         )
         .unwrap();
+    let mut object_sources = serde_json::Map::new();
+    object_sources.insert(
+        "holding".to_owned(),
+        serde_json::Value::Array(
+            (0..64)
+                .map(|index| {
+                    serde_json::json!({
+                        "url": format!("https://example.invalid/object-{index}"),
+                        "title": format!("Object source {index}")
+                    })
+                })
+                .collect(),
+        ),
+    );
+    object_sources.insert(
+        "z".to_owned(),
+        serde_json::json!([{
+            "url": "https://example.invalid/object-last",
+            "title": "Object last"
+        }]),
+    );
+    archive
+        .start_file("object-grouped-report.dat", options)
+        .unwrap();
+    archive
+        .write_all(
+            &serde_json::to_vec(&serde_json::json!({
+                "backing_conversation_id":"associated-1",
+                "widget_session_id":"object-grouped-report",
+                "widget_state": {
+                    "report_message": {
+                        "content": {
+                            "content_references": {
+                                "type":"grouped_webpages",
+                                "items": object_sources
+                            }
+                        }
+                    }
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    let mut object_citations = serde_json::Map::new();
+    object_citations.insert(
+        "holding".to_owned(),
+        serde_json::Value::Array(
+            (0..64)
+                .map(|index| {
+                    serde_json::json!({
+                        "url": format!("https://example.invalid/citation-{index}"),
+                        "title": format!("Citation source {index}")
+                    })
+                })
+                .collect(),
+        ),
+    );
+    object_citations.insert(
+        "z".to_owned(),
+        serde_json::json!([{
+            "url": "https://example.invalid/citation-last",
+            "title": "Citation last"
+        }]),
+    );
+    archive
+        .start_file("object-citation-report.dat", options)
+        .unwrap();
+    archive
+        .write_all(
+            &serde_json::to_vec(&serde_json::json!({
+                "backing_conversation_id":"associated-1",
+                "widget_session_id":"object-citation-report",
+                "widget_state": {
+                    "report_message": {
+                        "content": {
+                            "content_references": object_citations
+                        }
+                    }
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
     archive.start_file("empty-report.dat", options).unwrap();
     archive
         .write_all(
@@ -883,21 +971,21 @@ fn supplied_zip_reads_conversations_and_retains_associated_report_evidence() {
     assert_eq!(report["reference"]["body"]["text"], "private report body");
     assert_eq!(report["reference"]["body_availability"], "retained-body");
     assert_eq!(
-        report["reference"]["citations"][0]["uri"],
+        report["reference"]["citations"][0]["uri"]["text"],
         "https://example.test/source"
     );
-    assert_eq!(output["content"]["references"], 3);
+    assert_eq!(output["content"]["references"], 5);
 
     let grouped = parts
         .iter()
         .find(|part| part["reference"]["identity"] == "grouped-report")
         .unwrap();
     assert_eq!(
-        grouped["reference"]["citations"][0]["sources"][0]["uri"],
+        grouped["reference"]["citations"][0]["sources"][0]["uri"]["text"],
         "https://example.invalid/grouped-target"
     );
     assert_eq!(
-        grouped["reference"]["citations"][0]["sources"][0]["title"],
+        grouped["reference"]["citations"][0]["sources"][0]["title"]["text"],
         "Grouped source"
     );
     let bounded = parts
@@ -905,6 +993,27 @@ fn supplied_zip_reads_conversations_and_retains_associated_report_evidence() {
         .find(|part| part["reference"]["identity"] == "bounded-grouped-report")
         .unwrap();
     assert_eq!(bounded["reference"]["citations"][0]["omitted_sources"], 1);
+    let object_grouped = parts
+        .iter()
+        .find(|part| part["reference"]["identity"] == "object-grouped-report")
+        .unwrap();
+    assert_eq!(
+        object_grouped["reference"]["citations"][0]["sources"]
+            .as_array()
+            .unwrap()
+            .len(),
+        64
+    );
+    assert_eq!(
+        object_grouped["reference"]["citations"][0]["omitted_sources"],
+        1
+    );
+    let object_citation = parts
+        .iter()
+        .find(|part| part["reference"]["identity"] == "object-citation-report")
+        .unwrap();
+    assert_eq!(object_citation["reference"]["citation_count"], 64);
+    assert_eq!(object_citation["reference"]["omitted_citations"], 1);
 
     let bundle_root = TemporaryDirectory::new(
         std::env::temp_dir().join(format!("tapes-input-report-export-{}", std::process::id())),
@@ -929,7 +1038,7 @@ fn supplied_zip_reads_conversations_and_retains_associated_report_evidence() {
         "private report body"
     );
     assert_eq!(
-        bundle_json["artifacts"][0]["citations"][0]["uri"],
+        bundle_json["artifacts"][0]["citations"][0]["uri"]["text"],
         "https://example.test/source"
     );
     let grouped_bundle = bundle_json["artifacts"]
@@ -939,9 +1048,23 @@ fn supplied_zip_reads_conversations_and_retains_associated_report_evidence() {
         .find(|artifact| artifact["identity"] == "grouped-report")
         .unwrap();
     assert_eq!(
-        grouped_bundle["citations"][0]["sources"][0]["uri"],
+        grouped_bundle["citations"][0]["sources"][0]["uri"]["text"],
         "https://example.invalid/grouped-target"
     );
+    let object_grouped_bundle = bundle_json["artifacts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|artifact| artifact["identity"] == "object-grouped-report")
+        .unwrap();
+    assert_eq!(object_grouped_bundle["citations"][0]["omitted_sources"], 1);
+    let object_citation_bundle = bundle_json["artifacts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|artifact| artifact["identity"] == "object-citation-report")
+        .unwrap();
+    assert_eq!(object_citation_bundle["omitted_citations"], 1);
 
     let listed = tapes()
         .args(["list", "--input", archive, "--json"])
@@ -949,7 +1072,7 @@ fn supplied_zip_reads_conversations_and_retains_associated_report_evidence() {
         .unwrap();
     assert!(listed.status.success());
     let listed: Value = serde_json::from_slice(&listed.stdout).unwrap();
-    assert_eq!(listed["artifacts"].as_array().unwrap().len(), 5);
+    assert_eq!(listed["artifacts"].as_array().unwrap().len(), 7);
     assert!(listed["unsearched"]
         .as_array()
         .unwrap()
@@ -964,6 +1087,121 @@ fn supplied_zip_reads_conversations_and_retains_associated_report_evidence() {
     let empty: Value = serde_json::from_slice(&empty.stdout).unwrap();
     assert!(empty["turns"].as_array().unwrap().is_empty());
     assert_eq!(empty["artifacts"][0]["body"]["text"], "body without a turn");
+}
+
+/// Citation descriptors are bounded independently of the enclosing record and
+/// preserve their original lengths when UTF-8 strings are shortened.
+#[test]
+fn supplied_citation_descriptors_are_bounded_in_show_and_export() {
+    let root = TemporaryDirectory::new(std::env::temp_dir().join(format!(
+        "tapes-input-descriptor-bound-{}",
+        std::process::id()
+    )));
+    let conversation = root.path().join("conversation.json");
+    fs::write(
+        &conversation,
+        serde_json::to_vec(&serde_json::json!({
+            "id":"bounded-descriptor",
+            "current_node":"node",
+            "mapping": {
+                "root":{"parent":null,"message":null},
+                "node":{"parent":"root","message":{"author":{"role":"assistant"},"content":{"parts":["answer"]}}}
+            }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let archive_path = root.path().join("descriptor.zip");
+    let file = fs::File::create(&archive_path).unwrap();
+    let mut archive = zip::ZipWriter::new(file);
+    let options = zip::write::SimpleFileOptions::default();
+    archive.start_file("conversation.json", options).unwrap();
+    archive
+        .write_all(&fs::read(&conversation).unwrap())
+        .unwrap();
+    let long_uri = format!("https://example.invalid/{}", "u".repeat(5_000));
+    let long_title = "é".repeat(5_000);
+    archive
+        .start_file("descriptor-report.dat", options)
+        .unwrap();
+    archive
+        .write_all(
+            &serde_json::to_vec(&serde_json::json!({
+                "backing_conversation_id":"bounded-descriptor",
+                "widget_session_id":"descriptor-report",
+                "widget_state": {
+                    "report_message": {
+                        "content": {
+                            "content_references": [{
+                                "type":"source",
+                                "url":long_uri,
+                                "title":long_title
+                            }]
+                        }
+                    }
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    archive.finish().unwrap();
+    let archive = archive_path.to_str().unwrap();
+
+    let shown = tapes()
+        .args(["show", "bounded-descriptor", "--input", archive, "--json"])
+        .output()
+        .unwrap();
+    assert!(shown.status.success());
+    let shown: Value = serde_json::from_slice(&shown.stdout).unwrap();
+    let citation = &shown["artifacts"][0]["citations"][0];
+    assert_eq!(citation["uri"]["chars"], 5_024);
+    assert_eq!(
+        citation["uri"]["text"].as_str().unwrap().chars().count(),
+        4_096
+    );
+    assert_eq!(citation["uri"]["truncated"], true);
+    assert_eq!(citation["title"]["chars"], 5_000);
+    assert_eq!(
+        citation["title"]["text"].as_str().unwrap().chars().count(),
+        4_096
+    );
+    assert_eq!(citation["title"]["truncated"], true);
+    assert_eq!(shown["artifacts"][0]["descriptor_truncated"], true);
+
+    let bundle_root = TemporaryDirectory::new(std::env::temp_dir().join(format!(
+        "tapes-input-descriptor-export-{}",
+        std::process::id()
+    )));
+    let exported = tapes()
+        .args([
+            "export",
+            "bounded-descriptor",
+            "--input",
+            archive,
+            "--bundle",
+        ])
+        .arg(bundle_root.path())
+        .output()
+        .unwrap();
+    assert!(exported.status.success());
+    let json_path = fs::read_dir(bundle_root.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find(|path| {
+            path.extension()
+                .is_some_and(|extension| extension == "json")
+        })
+        .unwrap();
+    let bundle_json: Value = serde_json::from_slice(&fs::read(json_path).unwrap()).unwrap();
+    assert_eq!(
+        bundle_json["artifacts"][0]["citations"][0]["title"]["text"]
+            .as_str()
+            .unwrap()
+            .chars()
+            .count(),
+        4_096
+    );
+    assert_eq!(bundle_json["artifacts"][0]["descriptor_truncated"], true);
 }
 
 #[test]

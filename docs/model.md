@@ -57,6 +57,8 @@ explicitly named input format marks its producer with
 conversation or session identity; it is not a path, archive member, or global
 identity outside the descriptor's scope. Supplied sources also carry an opaque
 `occurrence` coordinate, so repeated native IDs remain separate observations.
+OpenAI and ChatGPT Exporter conversation representations use the OpenAI
+platform origin; their representation and producer fields remain separate.
 
 `Session.metadata` retains provider-specific source facts that do not identify
 the model or prove an outcome. Perplexity supplies collection, mode, engine,
@@ -230,7 +232,10 @@ The same `ArtifactReference` type can appear in a transcript's top-level
 `artifacts` collection. Supplied report readers retain a bounded `body` when
 the report carries readable text, a `body_availability` value when the body is
 absent or unsupported, and `citations` with recorded URI, title, kind, and span
-fields. A grouped citation keeps its span and nests bounded `sources`; both
+fields. Citation kind, URI, and title strings use `BoundedText`: each field is
+limited to 4 KiB and all citation descriptors share a 16 KiB cumulative bound.
+A truncated URI is explicitly incomplete and must not be treated as a valid
+reference. A grouped citation keeps its span and nests bounded `sources`; both
 group and source bounds report omitted members. `backing` records an
 association claim; it does not create a turn when the outer conversation is
 absent.

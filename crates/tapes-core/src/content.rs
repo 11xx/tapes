@@ -118,17 +118,25 @@ pub struct ArtifactReference {
     /// Citation groups or sources beyond the bounded collection.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub omitted_citations: usize,
+    /// Whether citation traversal reached a structural bound before it could
+    /// establish the omitted count.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub citation_traversal_incomplete: bool,
+    /// Whether one or more citation descriptors was shortened by its field or
+    /// cumulative descriptor budget.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub descriptor_truncated: bool,
 }
 
 /// A citation span recorded inside an artifact body.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ArtifactCitation {
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub kind: Option<String>,
+    pub kind: Option<BoundedText>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub uri: Option<String>,
+    pub uri: Option<BoundedText>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub title: Option<String>,
+    pub title: Option<BoundedText>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub start: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -139,17 +147,21 @@ pub struct ArtifactCitation {
     /// Sources omitted by the bounded group projection.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub omitted_sources: usize,
+    /// Whether source traversal reached a structural bound before it could
+    /// establish the omitted count.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub source_traversal_incomplete: bool,
 }
 
 /// A source retained under one grouped citation span.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ArtifactCitationSource {
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub kind: Option<String>,
+    pub kind: Option<BoundedText>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub uri: Option<String>,
+    pub uri: Option<BoundedText>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub title: Option<String>,
+    pub title: Option<BoundedText>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub start: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -158,6 +170,8 @@ pub struct ArtifactCitationSource {
     pub sources: Vec<ArtifactCitationSource>,
     #[serde(default, skip_serializing_if = "is_zero")]
     pub omitted_sources: usize,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub source_traversal_incomplete: bool,
 }
 
 fn is_zero(value: &usize) -> bool {
@@ -539,6 +553,8 @@ pub fn artifact_reference_object(
             body_availability: None,
             citations: Vec::new(),
             omitted_citations: 0,
+            citation_traversal_incomplete: false,
+            descriptor_truncated: false,
         },
     )
 }
