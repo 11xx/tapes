@@ -46,14 +46,19 @@ payload `turn_id` is retained separately as `request_turn_id` and is never
 invented from a neighboring record.
 
 The normalized transcript also retains a bounded `read` descriptor. It records
-the source length, the 4 MiB configured tail bound, the physical head and tail
-ranges, each decoded record's absolute byte span, separate spans for records
-used only as opening or newer provenance context, and gaps for the discarded
-partial prefix or malformed records. The head and tail are read through one
-open descriptor and the descriptor is checked again before the result is
-returned; a mutation aborts the read. Physical overlap with the head does not
-erase a malformed gap; a partial gap is removed only when a successful decode
-of that same record covers it.
+the source length, the 4 MiB configured tail bound, the physical head, tail,
+context, and alignment ranges, each decoded record's absolute byte span,
+separate spans for records used only as opening or newer provenance context,
+and gaps for the discarded partial prefix or malformed records. When the tail
+begins after byte zero, the reader reads one preceding byte as alignment
+evidence. A preceding newline proves that the tail begins at a record boundary,
+so the first tail record is retained; otherwise the bytes through the first
+newline are a `discarded-partial-record` gap. The alignment byte is physical
+I/O, not normalized coverage and does not widen the configured tail bound. The
+head and tail are read through one open descriptor and the descriptor is
+checked again before the result is returned; a mutation aborts the read.
+Physical overlap with the head does not erase a malformed gap; a partial gap is
+removed only when a successful decode of that same record covers it.
 
 Codex transcript history pages use the opening to decide whether a user-role
 message is operator-authored and use bounded newer records to corroborate that
@@ -180,6 +185,20 @@ event with `info: null`, so the newest event carrying each fact answers for
 it independently. The usage view reports them as `context_window` and
 `rate_limits`, never folded into the session's counters.
 
+## Terminal observations
+
+Terminal lifecycle records are observed without turning them into present-tense
+account state. The terminal record keeps the native `outcome`, `code`,
+`message`, and duration fields when they are present. Observed
+`task_complete` records can instead carry an `error` object whose
+`codex_error_info` is the native error code and whose `message` is the native
+error message. Those nested fields take precedence over conflicting flat
+fields; a flat field is only a fallback when its nested counterpart is absent.
+Messages use the same bounded text representation as other terminal messages.
+The observation does not infer whether the account is currently available or
+whether a later request can run. A later `token_count` event is read
+independently for recorded session accounting.
+
 ## Spawned agents
 
 A rollout can drive other agents, and each of them is an ordinary rollout in
@@ -226,13 +245,33 @@ not added to the returned transcript.
 
 ## Runtime and nested command evidence
 
-Codex `item_started` and `item_completed` records retain structured command
-argv when the native `parsed_cmd` field supplies it. The resulting invocation
-is marked `structured-runtime`; its outcome and timing remain on the outer
-event pairing. A function-call argument carrying a literal `cmd` or `argv`
-is retained as a static declaration. Literal `tools.exec_command({cmd: ...})`
-forms inside a recorded orchestration string are inspected without executing
-JavaScript. Variables, substitutions, heredocs, loops, and conditional forms
-remain qualified coverage rather than child executions. Artifact references in
-structured arguments or results are descriptors and are matched only within
-the same qualified read.
+Codex `item_started` and `item_completed` records are lifecycle mirrors for
+several native item types. The verified tool-bearing types in this reader are
+`CommandExecution` and `FileChange`; `AgentMessage`, `Reasoning`,
+`UserMessage`, and `ContextCompaction` remain ordinary lifecycle evidence and
+do not become phantom tool turns. For `CommandExecution`, the native
+`command` array is the argv carrier. Its elements must be strings and the
+array must fit the supported argument bound; otherwise the invocation is
+explicitly unsupported rather than silently filtered or truncated. The native
+`parsed_cmd` array may contain structured objects and is not treated as argv.
+The resulting invocation is marked `structured-runtime`; its outcome and
+timing remain on the outer event pairing. A function-call argument carrying a
+literal `cmd` or `argv` is retained as a static declaration.
+If the bounded first or second token is shortened, the declaration is
+unsupported rather than an apparently exact program or subcommand name; later
+arguments retain their bounded text and truncation facts.
+Static shell declarations treat spaces as word separators, newlines and
+semicolons as command separators, and `#` as a comment only at a token
+boundary. Single-quoted text and supported literal backslash escapes are
+preserved; expansions, leading assignments, reserved words, control forms,
+and unsupported escape forms remain qualified as unsupported.
+Literal `tools.exec_command({cmd: ...})` forms inside a recorded orchestration
+string are inspected by a bounded non-evaluating parser: the command property
+must be a direct top-level property whose complete value is one literal string.
+The parser decodes its supported JavaScript escapes and marks dynamic,
+interpolated, incomplete, arrow-function, short-circuit, conditional, or
+otherwise unsupported syntax as unsupported. Nested object properties do not
+override the direct command property. Wrapper results never witness an
+individual nested declaration or give it timing. Artifact
+references in structured arguments or results are descriptors and are matched
+only within the same qualified read.

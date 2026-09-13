@@ -226,8 +226,10 @@ and JavaScript forms are marked `static-declaration`. Each declaration keeps
 its program, subcommand, bounded arguments, source field/span, coverage, and
 optional intent. Variables, interpolation, heredocs, loops, and conditional
 execution remain unsupported or conditional; declarations never inherit a
-wrapper's duration or success. `events --program` selects these exact program
-names while `--name` continues to select the outer recorded tool.
+wrapper's duration or success. A wrapper result does not populate a nested
+declaration's `witnessed_result`; that field requires a separate native result
+for the same structured operation. `events --program` selects these exact
+program names while `--name` continues to select the outer recorded tool.
 
 `artifact_references` are explicit structured descriptors, never path-like
 text guesses. A paired result can attach an

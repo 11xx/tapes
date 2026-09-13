@@ -555,11 +555,19 @@ fn read_jsonl_from(file: &mut File, metadata: &std::fs::Metadata) -> Result<Json
     let truncated = source_length > configured_bound;
     let read_start = source_length.saturating_sub(configured_bound);
     let read_end = source_length;
+    let aligned = if read_start == 0 {
+        true
+    } else {
+        file.seek(SeekFrom::Start(read_start - 1))?;
+        let mut preceding = [0];
+        file.read_exact(&mut preceding)?;
+        preceding[0] == b'\n'
+    };
     file.seek(SeekFrom::Start(read_start))?;
     let mut bytes = Vec::with_capacity((read_end - read_start) as usize);
     file.take(configured_bound).read_to_end(&mut bytes)?;
 
-    let normalized_start = if truncated {
+    let normalized_start = if truncated && !aligned {
         bytes
             .iter()
             .position(|byte| *byte == b'\n')
@@ -1007,6 +1015,23 @@ pub(crate) fn read_bounds(read: &Jsonl) -> Truncation {
 }
 
 pub(crate) fn read_evidence(read: &Jsonl) -> ReadEvidence {
+    let mut ranges = Vec::with_capacity(2);
+    if read.read_start > 0 {
+        ranges.push(ReadRange {
+            kind: ReadRangeKind::Alignment,
+            span: ByteSpan {
+                start: read.read_start - 1,
+                end: read.read_start,
+            },
+        });
+    }
+    ranges.push(ReadRange {
+        kind: ReadRangeKind::Tail,
+        span: ByteSpan {
+            start: read.read_start,
+            end: read.read_end,
+        },
+    });
     ReadEvidence {
         source_length: read.source_length,
         configured_bound: read.configured_bound,
@@ -1016,13 +1041,7 @@ pub(crate) fn read_evidence(read: &Jsonl) -> ReadEvidence {
         projection: crate::model::SESSION_SCHEMA.to_owned(),
         projection_options: Vec::new(),
         observed_at: Utc::now(),
-        ranges: vec![ReadRange {
-            kind: ReadRangeKind::Tail,
-            span: ByteSpan {
-                start: read.read_start,
-                end: read.read_end,
-            },
-        }],
+        ranges,
         records: read.spans.clone(),
         context_records: Vec::new(),
         gaps: read.gaps.clone(),
@@ -1030,13 +1049,22 @@ pub(crate) fn read_evidence(read: &Jsonl) -> ReadEvidence {
 }
 
 pub(crate) fn recording_evidence(recording: &Recording) -> ReadEvidence {
-    let mut ranges = Vec::with_capacity(2);
+    let mut ranges = Vec::with_capacity(3);
     if recording.head_read_end > 0 {
         ranges.push(ReadRange {
             kind: ReadRangeKind::Head,
             span: ByteSpan {
                 start: 0,
                 end: recording.head_read_end,
+            },
+        });
+    }
+    if recording.tail.read_start > 0 {
+        ranges.push(ReadRange {
+            kind: ReadRangeKind::Alignment,
+            span: ByteSpan {
+                start: recording.tail.read_start - 1,
+                end: recording.tail.read_start,
             },
         });
     }

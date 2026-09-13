@@ -240,13 +240,16 @@ non-turn record, human output names its kind and timestamp and JSON carries an
 optional `trailing_record` object; unavailable source timestamps remain absent.
 The activity note compares the store's last activity and the newest rendered
 turn at whole-second precision, matching the timestamps shown to the reader.
-The optional `read` object records the source length, configured bound, the
-physical ranges read, decoded record spans, context-only record spans, and
-gaps; physical coverage does not erase malformed records, and a partial gap
-is discharged only when a successful decode identifies that same record. A
-`terminal` observation
-retains native stop fields reached by the read without claiming present-tense
-liveness; `text_tail` explains an empty operator/assistant tail. Each turn also
+The optional `read` object records the source length, configured bound,
+head/tail/context/alignment physical ranges, decoded record spans, context-only
+record spans, and gaps; physical coverage does not erase malformed records, and
+a partial gap is discharged only when a successful decode identifies that same
+record. A preceding newline lets an exact tail boundary retain its first
+record; a mid-record tail records the discarded partial prefix. Alignment bytes
+are physical I/O, not normalized coverage. A `terminal` observation retains
+native stop fields reached by the read, including bounded nested Codex error
+fields, without claiming present-tense liveness or account availability;
+`text_tail` explains an empty operator/assistant tail. Each turn also
 keeps ordered native content `parts` and a `coverage` summary, so an image,
 file reference, structured artifact, tool payload, or unknown part does not
 disappear merely because it has no readable text. The turn's
@@ -283,10 +286,18 @@ the read rather than an implicit display window.
 `--program` selects exact nested program declarations while preserving the
 recorded outer tool name and pairing. Literal shell and JavaScript declarations
 are qualified with their source span and parser coverage; structured runtime
-argv is preferred. Unsupported dynamic syntax stays evidence of uncertainty,
-not an executed child call. Explicit artifact references and within-read
+argv is preferred. JavaScript requires a complete direct literal command
+property, and structured argv rejects non-string or over-bound arrays instead
+of filtering or truncating them. A shortened first or second invocation token
+is unsupported rather than an exact-looking program or subcommand name; later
+arguments retain their bounded truncation facts. Unsupported dynamic, arrow, short-circuit,
+ternary, shell-assignment, or shell-control syntax stays evidence of
+uncertainty, not an executed child call; wrapper results never witness or time
+an individual nested declaration. Explicit artifact references and within-read
 consumption observations remain bounded descriptors and never open the named
-object.
+object. Codex lifecycle mirrors for messages, reasoning, user messages, and
+compaction are not projected as tools; only verified `CommandExecution` and
+`FileChange` items enter this event layer.
 
 `usage` answers where one session's quota went as `tapes-usage/4`: the
 session's recorded `tokens`, `cost`, and `accounting`, and `turns` counted by
