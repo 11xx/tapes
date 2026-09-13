@@ -455,7 +455,7 @@ enum Command {
         /// Match the recorded tool call identifier exactly. Repeatable.
         #[arg(long, value_name = "ID")]
         call_id: Vec<String>,
-        /// Render the versioned tapes-events/1 object as JSON.
+        /// Render the versioned tapes-events/2 object as JSON.
         #[arg(long)]
         json: bool,
     },
@@ -490,13 +490,13 @@ enum Command {
     Stats {
         #[command(flatten)]
         query: SessionQueryArgs,
-        /// Render the versioned tapes-stats/1 object, or tapes-stats-summary/1
+        /// Render the versioned tapes-stats/2 object, or tapes-stats-summary/1
         /// for a selection, as JSON.
         #[arg(long)]
         json: bool,
     },
     /// Where quota went. A session named by id or reached with --latest
-    /// answers that session as tapes-usage/1: its recorded tokens, cost, and
+    /// answers that session as tapes-usage/2: its recorded tokens, cost, and
     /// turn counts, plus whatever else its harness recorded — a context
     /// window, a provider quota window, wall-clock durations, a per-model
     /// split. A scope or listing filter instead answers the whole selection
@@ -521,13 +521,13 @@ enum Command {
             conflicts_with_all = ["session", "latest", "title"]
         )]
         by: Vec<ByArg>,
-        /// Render the versioned tapes-usage/1 object, or tapes-usage-summary/2
+        /// Render the versioned tapes-usage/2 object, or tapes-usage-summary/2
         /// for a selection, as JSON.
         #[arg(long)]
         json: bool,
     },
     /// What a continuation of one session needs from its recording, as
-    /// tapes-brief/1: where the work stopped, the working directory and the
+    /// tapes-brief/2: where the work stopped, the working directory and the
     /// commit it sits on, the calls the read never saw a result for, the
     /// children whose outcome the store does not record, and a bounded tail
     /// of the exchange. It reads the recording alone and judges nothing —
@@ -541,12 +541,12 @@ enum Command {
         /// out of the tail.
         #[arg(long, value_name = "N", default_value_t = DEFAULT_BRIEF_TAIL)]
         tail: usize,
-        /// Render the versioned tapes-brief/1 object as JSON.
+        /// Render the versioned tapes-brief/2 object as JSON.
         #[arg(long)]
         json: bool,
     },
     /// What each session of a selection ends on, one bounded record each, as
-    /// tapes-endings/1. The selection uses the flags `list` and `export` take,
+    /// tapes-endings/2. The selection uses the flags `list` and `export` take,
     /// applied before any transcript is opened; each selected session then
     /// costs one bounded read of its newest turns and one lineage read. Every
     /// fact rests on the normalized turn kinds and typed tool events of the
@@ -602,7 +602,7 @@ enum Command {
         /// attached context stay out of it.
         #[arg(long)]
         text: bool,
-        /// Render the versioned tapes-endings/1 object as JSON.
+        /// Render the versioned tapes-endings/2 object as JSON.
         #[arg(long)]
         json: bool,
     },
@@ -1614,10 +1614,39 @@ fn render_rate_limits(out: &mut String, limits: &RateLimits) {
     if let Some(plan) = &limits.plan {
         out.push_str(&format!("plan: {plan}\n"));
     }
+    if let Some(credits) = &limits.credits {
+        if let Some(balance) = &credits.balance {
+            out.push_str(&format!(
+                "credits balance: {}\n",
+                render_recorded_value(balance)
+            ));
+        }
+        if let Some(has_credits) = credits.has_credits {
+            out.push_str(&format!("credits available: {has_credits}\n"));
+        }
+        if let Some(unlimited) = credits.unlimited {
+            out.push_str(&format!("credits unlimited: {unlimited}\n"));
+        }
+    }
+    if let Some(reached) = limits.spend_control_reached {
+        out.push_str(&format!("spend control reached: {reached}\n"));
+    }
+    if let Some(reached) = limits.rate_limit_reached {
+        out.push_str(&format!("rate limit reached: {reached}\n"));
+    }
+    if let Some(kind) = &limits.rate_limit_reached_type {
+        out.push_str(&format!("rate limit reached type: {kind}\n"));
+    }
+    if let Some(observed_at) = limits.observed_at {
+        out.push_str(&format!(
+            "quota observed: {}\n",
+            human_timestamp(observed_at)
+        ));
+    }
 }
 
 fn render_rate_window(window: &RateWindow) -> String {
-    let mut rendered = format!("{}% used", window.used_percent);
+    let mut rendered = format!("{}% used", render_recorded_value(&window.used_percent));
     if let Some(minutes) = window.window_minutes {
         rendered.push_str(&format!(" of a {minutes}-minute window"));
     }
@@ -1625,6 +1654,12 @@ fn render_rate_window(window: &RateWindow) -> String {
         rendered.push_str(&format!(", resets {}", human_timestamp(resets_at)));
     }
     rendered
+}
+
+fn render_recorded_value(value: &serde_json::Value) -> String {
+    value
+        .as_str()
+        .map_or_else(|| value.to_string(), str::to_owned)
 }
 
 fn render_durations(durations: &Durations) -> String {
@@ -1970,8 +2005,58 @@ fn render_transcript(transcript: &Transcript, by_latest: bool) -> String {
         render_latest_note(&mut out, &transcript.session);
     }
     render_truncation_notes(&mut out, &transcript.truncation);
+    render_read_notes(&mut out, transcript);
     render_notes(&mut out, &transcript.notes);
     out
+}
+
+fn render_read_notes(out: &mut String, transcript: &Transcript) {
+    if let Some(terminal) = &transcript.terminal {
+        let label = terminal.payload_type.as_deref().map_or_else(
+            || terminal.record_type.clone(),
+            |kind| format!("{}/{}", terminal.record_type, kind),
+        );
+        out.push_str(&format!(
+            "Note: The newest terminal observation is `{label}`; recorded stop evidence does not say whether the session is stopped now.\n"
+        ));
+        if let Some(message) = &terminal.message {
+            out.push_str(&format!("Terminal message: {}\n", message.text));
+        }
+    }
+    if let Some(text_tail) = &transcript.text_tail {
+        if let Some(reason) = text_tail.empty_reason {
+            let reason = match reason {
+                tapes_core::model::EmptyTextTailReason::NoOperatorAssistantTextInRead => {
+                    "the bounded read held no operator or assistant text"
+                }
+                tapes_core::model::EmptyTextTailReason::ZeroRequestedTail => {
+                    "the requested text tail was zero"
+                }
+                tapes_core::model::EmptyTextTailReason::EmptyCompleteProjection => {
+                    "the complete projection held no operator or assistant text"
+                }
+            };
+            out.push_str(&format!("Note: The text tail is empty: {reason}.\n"));
+        }
+    }
+    if let Some(read) = &transcript.read {
+        let ranges = read
+            .ranges
+            .iter()
+            .map(|range| {
+                format!(
+                    "{:?} [{}..{})",
+                    range.kind, range.span.start, range.span.end
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        out.push_str(&format!(
+            "Read evidence: source length {} bytes; configured bound {}; ranges: {ranges}.\n",
+            read.source_length,
+            human_bytes(read.configured_bound)
+        ));
+    }
 }
 
 fn render_latest_note(out: &mut String, session: &Session) {
@@ -2131,6 +2216,7 @@ mod tests {
                 ts: None,
                 ordinal: 0,
                 native_id: None,
+                request_turn_id: None,
                 tool: None,
             }],
             truncated,
@@ -2145,6 +2231,9 @@ mod tests {
                 }),
                 source: Vec::new(),
             },
+            read: None,
+            terminal: None,
+            text_tail: None,
             trailing_record: None,
             notes: vec!["Skipped 1 unparseable line.".to_owned()],
         }

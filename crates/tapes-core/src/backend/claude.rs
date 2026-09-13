@@ -10,7 +10,7 @@ use serde_json::Value;
 use super::{
     accounting_for, head_directory, home_path, list_files, list_files_with_search,
     matching_session_file, read_bounds, read_jsonl, read_recording, timestamp, trailing_record,
-    transcript, Backend, Jsonl, Listing, ParsedFile, Query, TokenTotals,
+    transcript, transcript_from_recording, Backend, Jsonl, Listing, ParsedFile, Query, TokenTotals,
 };
 use crate::event::{Bounded, EventKind, ToolEvent};
 use crate::history::{PageProjection, ReadContext};
@@ -436,7 +436,7 @@ impl Backend for ClaudeBackend {
             .ok_or_else(|| anyhow!("claude store is unavailable"))?;
         let path = matching_session_file(session_files(root), &session.id)
             .ok_or_else(|| anyhow!("claude session {} is unavailable", session.id))?;
-        let (turns, read, trailing_record) = read_transcript(&path)?;
+        let (turns, recording, trailing_record) = read_transcript(&path)?;
         let subagents = subagent_transcript_count(&path);
         let notes = (subagents > 0)
             .then(|| {
@@ -448,11 +448,12 @@ impl Backend for ClaudeBackend {
             })
             .into_iter()
             .collect();
-        Ok(transcript(
+        Ok(transcript_from_recording(
             session.clone(),
             turns,
             tail,
-            &read,
+            &recording,
+            None,
             trailing_record,
             notes,
         ))
@@ -533,8 +534,9 @@ impl Backend for ClaudeBackend {
     }
 }
 
-fn read_transcript(path: &Path) -> Result<(Vec<Turn>, Jsonl, Option<TrailingRecord>)> {
-    let read = read_jsonl(path)?;
+fn read_transcript(path: &Path) -> Result<(Vec<Turn>, super::Recording, Option<TrailingRecord>)> {
+    let recording = read_recording(path)?;
+    let read = &recording.tail;
     let mut turns = Vec::new();
     let mut last_turn = None;
     for (index, value) in read.values.iter().enumerate() {
@@ -545,7 +547,7 @@ fn read_transcript(path: &Path) -> Result<(Vec<Turn>, Jsonl, Option<TrailingReco
         turns.extend(parsed);
     }
     let trailing_record = trailing_record(read.values.iter(), last_turn, claude_trailing_kind);
-    Ok((turns, read, trailing_record))
+    Ok((turns, recording, trailing_record))
 }
 
 /// Claude repeats the working directory on every message line.
@@ -792,6 +794,7 @@ fn turn(
         ts,
         ordinal: 0,
         native_id,
+        request_turn_id: None,
         tool,
     })
 }

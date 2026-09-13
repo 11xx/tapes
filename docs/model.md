@@ -92,16 +92,16 @@ no counter or cost is derived from another counter.
 
 A session also carries `usage_detail`: usage facts a harness records that the
 normalized model has no field for, filled by the backend holding them. Like a
-turn's tool event it is skipped by serialization, so `tapes-session/1` and
-export bundles are unaffected and the usage view is where it reaches a
-consumer.
+turn's tool event it is skipped by serialization, so the usage view is where
+it reaches a consumer; bounded read and terminal evidence remain on the
+transcript contract.
 
 `Turn` contains a role, a `kind`, text, an optional UTC timestamp, an
-`ordinal`, and an optional `native_id`. Roles are `user`, `assistant`, `tool`,
+`ordinal`, optional `native_id`, and an optional `request_turn_id`. Roles are `user`, `assistant`, `tool`,
 and `reasoning`.
 A tool turn also carries one typed `ToolEvent` inside the process for the
 `events` projection. The field is skipped by serialization, so
-`tapes-session/1` and export bundles retain the tool's harness envelope only in
+`tapes-session/2` and export bundles retain the tool's harness envelope only in
 `text`.
 In ordinary transcript views, the ordinal is the turn's zero-based position in the normalized turn
 sequence, counted from the first turn the reader reaches. For a file-backed
@@ -180,7 +180,7 @@ An unpaired event carries one `incomplete` reason:
 | `call-before-read-bound` | A `file-tail` or `record-page` source bound can hide the call for this result. |
 | `call-not-recorded` | The read reached the recording's start and contains no call for this result. |
 
-`tapes events` serializes the projection as `tapes-events/1`. The object holds
+`tapes events` serializes the projection as `tapes-events/2`. The object holds
 the same `Session` representation as `show`, the event records, complete and
 incomplete pair counts, and the transcript's truncation and notes. A
 `--tail N` window keeps events whose turn ordinals are in the final `N` turns;
@@ -196,7 +196,7 @@ fetched.
 
 ```json
 {
-  "schema": "tapes-events/1",
+  "schema": "tapes-events/2",
   "session": {
     "id": "session-1",
     "harness": "codex",
@@ -223,7 +223,7 @@ fetched.
 ## Usage view
 
 `tapes usage` answers where one session's quota went and serializes as a
-`tapes-usage/1` object. `tokens`, `cost`, and `accounting` are the session's
+`tapes-usage/2` object. `tokens`, `cost`, and `accounting` are the session's
 own fields, repeated unchanged: a `recorded-total` is cumulative and a
 `summed-requests` figure is a sum of per-request records, so either may be
 added across sessions, and `coverage` is the difference a consumer must
@@ -241,7 +241,7 @@ The remaining objects are present exactly when the harness recorded them:
 | member | source |
 |---|---|
 | `context_window` | Codex `info.model_context_window` |
-| `rate_limits` | Codex `rate_limits`: optional `primary` and `secondary` windows with `used_percent`, `window_minutes`, and an RFC 3339 `resets_at`, and the account `plan` |
+| `rate_limits` | Codex `rate_limits`: optional `primary` and `secondary` windows with native `used_percent`, `window_minutes`, and an RFC 3339 `resets_at`, the account `plan`, native `credits`, reached-limit flags, and the observation timestamp |
 | `durations_ms` | Claude `cost-state` wall clock: `api`, `api_without_retries`, `tool`, `total` |
 | `by_model` | Claude `cost-state` `modelUsage`, one entry per model with its `tokens` and `cost`, ordered by model id |
 
@@ -250,7 +250,7 @@ or null.
 
 ```json
 {
-  "schema": "tapes-usage/1",
+  "schema": "tapes-usage/2",
   "session": {
     "id": "session-1",
     "harness": "codex",
@@ -275,7 +275,10 @@ or null.
       "window_minutes": 300,
       "resets_at": "2026-01-01T14:00:00Z"
     },
-    "plan": "plus"
+    "plan": "plus",
+    "credits": { "balance": "0", "has_credits": false },
+    "spend_control_reached": false,
+    "observed_at": "2026-01-01T10:00:06.700Z"
   },
   "truncated": false
 }
@@ -414,7 +417,7 @@ recorded.
 ## Stats view
 
 `tapes stats` counts what one session's recording holds and serializes as a
-`tapes-stats/1` object. Every figure is a count of records the harness wrote:
+`tapes-stats/2` object. Every figure is a count of records the harness wrote:
 nothing here labels a call useful, attributes a reason to a latency, classifies
 why a session ended, or recommends anything.
 
@@ -478,7 +481,7 @@ order:
 
 ```json
 {
-  "schema": "tapes-stats/1",
+  "schema": "tapes-stats/2",
   "session": {
     "id": "session-1",
     "harness": "codex",
@@ -675,7 +678,7 @@ and suppresses mixed sums. Unknown accounting is its own domain.
 ## Endings report
 
 `tapes endings` answers what each session of a selection ends on and
-serializes as a `tapes-endings/1` object. The selection is stated in the terms
+serializes as a `tapes-endings/2` object. The selection is stated in the terms
 `list` uses, so the reported set is exactly the set `list` returns for the same
 flags, and the scope and metadata filters apply before any transcript is
 opened. Each selected session then costs one bounded transcript read of
@@ -739,7 +742,7 @@ verified `trailing_record`, with the meanings they have on a transcript.
 
 ```json
 {
-  "schema": "tapes-endings/1",
+  "schema": "tapes-endings/2",
   "selection": { "scope": "global", "sort": "newest", "limit": 20 },
   "endings": [
     {
@@ -755,7 +758,7 @@ verified `trailing_record`, with the meanings they have on a transcript.
         "ts": "2026-01-01T10:00:06Z",
         "turn": 41,
         "native_id": "msg_1",
-        "schema": "tapes-endings/1",
+        "schema": "tapes-endings/2",
         "coverage": "window"
       },
       "last_turn": {
@@ -786,7 +789,7 @@ verified `trailing_record`, with the meanings they have on a transcript.
 ## Continuation brief
 
 `tapes brief` answers what a continuation of one session needs from its
-recording and serializes as a `tapes-brief/1` object. The session is named by
+recording and serializes as a `tapes-brief/2` object. The session is named by
 id or reached with `--latest`, and costs one export-shaped transcript read and
 one lineage read: pairing therefore sees every call and result the reader
 reached, while `--tail` bounds the rendered exchange alone.
@@ -836,7 +839,7 @@ its `notes`, with the meanings they have on a transcript.
 
 ```json
 {
-  "schema": "tapes-brief/1",
+  "schema": "tapes-brief/2",
   "session": {
     "id": "session-1",
     "harness": "codex",
@@ -851,7 +854,7 @@ its `notes`, with the meanings they have on a transcript.
     "session": "session-1",
     "ts": "2026-01-01T10:00:06Z",
     "turn": 41,
-    "schema": "tapes-endings/1",
+    "schema": "tapes-endings/2",
     "coverage": "session"
   },
   "working_set": {
@@ -900,11 +903,11 @@ its `notes`, with the meanings they have on a transcript.
 
 ## JSON contract
 
-A serialized transcript is a `tapes-session/1` object:
+A serialized transcript is a `tapes-session/2` object:
 
 ```json
 {
-  "schema": "tapes-session/1",
+  "schema": "tapes-session/2",
   "session": {
     "id": "session-1",
     "harness": "codex",
@@ -915,6 +918,18 @@ A serialized transcript is a `tapes-session/1` object:
   "truncated": false
 }
 ```
+
+When the source reader supplies it, `read` records the source length and the
+configured byte bound, each physical head/tail/context/alignment range, the
+absolute spans of decoded records, and explicit gaps for bytes outside the
+bound, partial records, or malformed records. A range is an observation of
+this read, not a content digest or a portable source identity. A terminal
+observation is independent of normalized turns: it preserves the native record
+type, payload subtype, explicit turn identity, outcome/code/message, and
+duration only where the reached record supplies them. Its presence never says
+that the session is stopped now. `text_tail` reports the requested and
+returned text entries and explains an empty tail as a zero request, no
+operator/assistant text in the read, or an empty complete projection.
 
 A transcript that omitted anything carries `truncated: true` and a
 `truncation` object:
@@ -1048,7 +1063,7 @@ page-byte counters.
 `selection` records the listing query. `selected` counts its sessions, `read`
 counts successful transcript reads, and `failed` names each read failure with
 ID, harness, store and diagnostic. `sessions` holds each read session's identity,
-`coverage` and `tools` in the same shapes as `tapes-stats/1`. `by_harness` maps
+`coverage` and `tools` in the same shapes as `tapes-stats/2`. `by_harness` maps
 harness names to accumulated tool counters, including tool-name rows and
 complete-pair duration totals, maxima and contributing counts. Counters never
 cross-pair records from different sessions. Listing diagnostics (`unavailable`,

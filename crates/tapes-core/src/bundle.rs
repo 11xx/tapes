@@ -51,6 +51,12 @@ struct BundleJson<'a> {
     #[serde(skip_serializing_if = "truncation_is_empty")]
     truncation: &'a Truncation,
     #[serde(skip_serializing_if = "Option::is_none")]
+    read: Option<&'a crate::model::ReadEvidence>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    terminal: Option<&'a crate::model::TerminalObservation>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    text_tail: Option<&'a crate::model::TextTailEvidence>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     trailing_record: Option<&'a TrailingRecord>,
     #[serde(skip_serializing_if = "<[String]>::is_empty")]
     notes: &'a [String],
@@ -74,6 +80,9 @@ pub fn export(transcript: &Transcript, directory: &Path) -> Result<Bundle> {
         turns: &transcript.turns,
         truncated: transcript.truncated,
         truncation: &transcript.truncation,
+        read: transcript.read.as_ref(),
+        terminal: transcript.terminal.as_ref(),
+        text_tail: transcript.text_tail.as_ref(),
         trailing_record: transcript.trailing_record.as_ref(),
         notes: &transcript.notes,
         git: git.as_ref(),
@@ -281,6 +290,35 @@ fn write_header(out: &mut String, transcript: &Transcript, kind: &str) {
             ),
         };
     }
+    if let Some(read) = &transcript.read {
+        let _ = writeln!(
+            out,
+            "- source read: {} bytes observed; configured bound {}",
+            read.source_length,
+            human_bytes(read.configured_bound)
+        );
+        for range in &read.ranges {
+            let _ = writeln!(
+                out,
+                "- read range: {:?} [{}..{})",
+                range.kind, range.span.start, range.span.end
+            );
+        }
+        if !read.gaps.is_empty() {
+            let _ = writeln!(out, "- read gaps: {}", read.gaps.len());
+        }
+    }
+    if let Some(terminal) = &transcript.terminal {
+        let _ = writeln!(
+            out,
+            "- terminal: {}{}",
+            terminal.record_type,
+            terminal
+                .payload_type
+                .as_deref()
+                .map_or(String::new(), |kind| format!("/{kind}"))
+        );
+    }
     for note in &transcript.notes {
         let _ = writeln!(out, "- note: {note}");
     }
@@ -399,6 +437,7 @@ mod tests {
                     ts: Some(ts),
                     ordinal: 0,
                     native_id: None,
+                    request_turn_id: None,
                     tool: None,
                 },
                 Turn {
@@ -408,6 +447,7 @@ mod tests {
                     ts: Some(ts),
                     ordinal: 0,
                     native_id: None,
+                    request_turn_id: None,
                     tool: None,
                 },
                 Turn {
@@ -417,6 +457,7 @@ mod tests {
                     ts: Some(ts),
                     ordinal: 0,
                     native_id: None,
+                    request_turn_id: None,
                     tool: None,
                 },
                 Turn {
@@ -426,11 +467,15 @@ mod tests {
                     ts: Some(ts),
                     ordinal: 0,
                     native_id: None,
+                    request_turn_id: None,
                     tool: None,
                 },
             ],
             truncated: false,
             truncation: Truncation::default(),
+            read: None,
+            terminal: None,
+            text_tail: None,
             trailing_record: None,
             notes: vec!["1 entry belongs to an abandoned branch.".into()],
         }
@@ -628,6 +673,7 @@ mod tests {
             ts: None,
             ordinal: 0,
             native_id: None,
+            request_turn_id: None,
             tool: None,
         };
         assert_eq!(tool_label(&turn(r#"{"name":"shell"}"#)), "shell");

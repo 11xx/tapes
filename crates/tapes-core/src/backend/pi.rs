@@ -6,8 +6,8 @@ use serde_json::Value;
 
 use super::{
     accounting_for, head_directory, home_path, jsonl_files, list_files, list_files_with_search,
-    read_bounds, read_jsonl, read_recording, session_file, timestamp, trailing_record, transcript,
-    Backend, Jsonl, Listing, ParsedFile, Query, TokenTotals,
+    read_bounds, read_recording, session_file, timestamp, trailing_record,
+    transcript_from_recording, Backend, Jsonl, Listing, ParsedFile, Query, TokenTotals,
 };
 use crate::event::{Bounded, EventKind, ToolEvent};
 use crate::lineage::{Lineage, ParentRef};
@@ -224,7 +224,7 @@ impl Backend for PiBackend {
             .ok_or_else(|| anyhow!("pi store is unavailable"))?;
         let path = session_file(root, &session.id)
             .ok_or_else(|| anyhow!("pi session {} is unavailable", session.id))?;
-        let (turns, read, abandoned, trailing_record) = read_transcript(&path)?;
+        let (turns, recording, abandoned, trailing_record) = read_transcript(&path)?;
         let notes = (abandoned > 0)
             .then(|| {
                 if abandoned == 1 {
@@ -235,11 +235,12 @@ impl Backend for PiBackend {
             })
             .into_iter()
             .collect();
-        Ok(transcript(
+        Ok(transcript_from_recording(
             session.clone(),
             turns,
             tail,
-            &read,
+            &recording,
+            None,
             trailing_record,
             notes,
         ))
@@ -274,8 +275,11 @@ impl Backend for PiBackend {
     }
 }
 
-fn read_transcript(path: &Path) -> Result<(Vec<Turn>, Jsonl, usize, Option<TrailingRecord>)> {
-    let read = read_jsonl(path)?;
+fn read_transcript(
+    path: &Path,
+) -> Result<(Vec<Turn>, super::Recording, usize, Option<TrailingRecord>)> {
+    let recording = read_recording(path)?;
+    let read = &recording.tail;
     let entries = read
         .values
         .iter()
@@ -305,7 +309,7 @@ fn read_transcript(path: &Path) -> Result<(Vec<Turn>, Jsonl, usize, Option<Trail
     }
     let trailing_record = trailing_record(active.iter().copied(), last_turn, pi_trailing_kind);
 
-    Ok((turns, read, abandoned, trailing_record))
+    Ok((turns, recording, abandoned, trailing_record))
 }
 
 /// pi records the working directory once, on the `session` header line.
@@ -420,6 +424,7 @@ fn parse_turns(value: &Value) -> Vec<Turn> {
                 ts,
                 ordinal: 0,
                 native_id,
+                request_turn_id: None,
                 tool: Some(pi_result_event(message)),
             }];
         }
@@ -435,6 +440,7 @@ fn parse_turns(value: &Value) -> Vec<Turn> {
                 ts,
                 ordinal: 0,
                 native_id,
+                request_turn_id: None,
                 tool: None,
             })
             .into_iter()
@@ -463,6 +469,7 @@ fn parse_turns(value: &Value) -> Vec<Turn> {
                 ts,
                 ordinal: 0,
                 native_id: native_id.clone(),
+                request_turn_id: None,
                 tool,
             })
         })

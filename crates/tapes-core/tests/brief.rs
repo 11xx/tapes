@@ -110,8 +110,18 @@ fn a_brief_states_where_the_session_stopped_and_what_it_left_open() {
     let (_store, backends) = codex_store("whole", id, "/fixtures/project", records);
 
     let value = serde_json::to_value(brief(&backends, id, 12)).unwrap();
+    let mut comparable = value.clone();
+    let read = comparable.as_object_mut().unwrap().remove("read").unwrap();
+    let text_tail = comparable
+        .as_object_mut()
+        .unwrap()
+        .remove("text_tail")
+        .unwrap();
+    assert_eq!(read["ranges"].as_array().unwrap().len(), 1);
+    assert!(read["records"].as_array().unwrap().len() >= 8);
+    assert_eq!(text_tail["returned"], 2);
     assert_eq!(
-        value,
+        comparable,
         json!({
             "schema": BRIEF_SCHEMA,
             "session": {
@@ -131,7 +141,7 @@ fn a_brief_states_where_the_session_stopped_and_what_it_left_open() {
                 "session": id,
                 "ts": "2026-01-01T10:00:06Z",
                 "turn": 4,
-                "schema": "tapes-endings/1",
+                "schema": "tapes-endings/2",
                 "coverage": "session",
             },
             "working_set": {

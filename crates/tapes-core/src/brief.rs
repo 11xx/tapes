@@ -25,11 +25,12 @@ use crate::endings::{self, Ending, EndingSource, Fact, Incomplete, TailEntry, Tu
 use crate::event::{self, Bounded, EventKind};
 use crate::lineage::{ChildRef, Lineage};
 use crate::model::{
-    Accounting, Cost, LiveState, Model, Tokens, TrailingRecord, Transcript, Truncation, TurnKind,
+    Accounting, Cost, LiveState, Model, ReadEvidence, TerminalObservation, TextTailEvidence,
+    Tokens, TrailingRecord, Transcript, Truncation, TurnKind,
 };
 use crate::usage;
 
-pub const BRIEF_SCHEMA: &str = "tapes-brief/1";
+pub const BRIEF_SCHEMA: &str = "tapes-brief/2";
 /// Newest operator and assistant turns rendered when the caller names no
 /// window. Wide enough to hold the exchange that ended the session, narrow
 /// enough that the brief stays one screen.
@@ -164,6 +165,12 @@ pub struct Brief {
     /// projection emits it, its own schema name included.
     pub source: EndingSource,
     pub working_set: WorkingSet,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub read: Option<ReadEvidence>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub terminal: Option<TerminalObservation>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text_tail: Option<TextTailEvidence>,
     pub ending: BriefEnding,
     pub in_flight: InFlight,
     /// The newest operator and assistant turns of the read, oldest first.
@@ -182,6 +189,9 @@ pub struct Brief {
 /// The read is the whole one the reader can reach, so pairing sees every call
 /// and its result; `tail` bounds the rendered exchange alone.
 pub fn brief(transcript: Transcript, lineage: Result<Lineage>, tail: usize) -> Brief {
+    let read = transcript.read.clone();
+    let terminal = transcript.terminal.clone();
+    let text_tail_evidence = transcript.text_tail.clone();
     let events = event::project(transcript.clone(), usize::MAX);
     let mut calls_without_result = events
         .events
@@ -268,6 +278,9 @@ pub fn brief(transcript: Transcript, lineage: Result<Lineage>, tail: usize) -> B
         session,
         source,
         working_set,
+        read,
+        terminal,
+        text_tail: text_tail_evidence,
         ending: BriefEnding {
             last_turn,
             last_operator,

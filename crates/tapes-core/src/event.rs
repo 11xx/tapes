@@ -4,9 +4,12 @@ use chrono::{DateTime, Utc};
 use serde::Serialize;
 use serde_json::Value;
 
-use crate::model::{Session, SourceBound, Transcript, Truncation};
+use crate::model::{
+    ReadEvidence, Session, SourceBound, TerminalObservation, TextTailEvidence, Transcript,
+    Truncation,
+};
 
-pub const EVENTS_SCHEMA: &str = "tapes-events/1";
+pub const EVENTS_SCHEMA: &str = "tapes-events/2";
 const PREVIEW_CHARS: usize = 200;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -105,6 +108,12 @@ pub struct EventTranscript {
     pub session: Session,
     pub events: Vec<EventRecord>,
     pub pairs: PairCounts,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub read: Option<ReadEvidence>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub terminal: Option<TerminalObservation>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text_tail: Option<TextTailEvidence>,
     pub truncated: bool,
     #[serde(skip_serializing_if = "truncation_is_empty")]
     pub truncation: Truncation,
@@ -195,6 +204,9 @@ pub fn project(transcript: Transcript, tail: usize) -> EventTranscript {
         session: transcript.session,
         events: records,
         pairs,
+        read: transcript.read,
+        terminal: transcript.terminal,
+        text_tail: transcript.text_tail,
         truncated: !truncation.is_empty(),
         truncation,
         notes: transcript.notes,
@@ -318,6 +330,7 @@ mod tests {
             ts: Some(Utc.timestamp_opt(seconds, 0).unwrap()),
             ordinal,
             native_id: Some(format!("native-{ordinal}")),
+            request_turn_id: None,
             tool: Some(event),
         }
     }

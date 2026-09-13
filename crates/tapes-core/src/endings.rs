@@ -23,11 +23,12 @@ use crate::backend::Backend;
 use crate::event::{self, EventKind, EventRecord};
 use crate::lineage::{Lineage, ParentRef};
 use crate::model::{
-    LiveState, Model, Role, SourceBound, TrailingRecord, Transcript, Truncation, Turn, TurnKind,
+    LiveState, Model, ReadEvidence, Role, SourceBound, TerminalObservation, TextTailEvidence,
+    TrailingRecord, Transcript, Truncation, Turn, TurnKind,
 };
 use crate::{list_scoped, selection_record, SelectionRecord, SessionSelection, DEFAULT_LIST_LIMIT};
 
-pub const ENDINGS_SCHEMA: &str = "tapes-endings/1";
+pub const ENDINGS_SCHEMA: &str = "tapes-endings/2";
 /// Newest turns read per session when the caller names no window. Wide enough
 /// to hold a tool call and the exchange around it, narrow enough that a
 /// selection of hundreds stays a survey.
@@ -221,6 +222,12 @@ pub struct Ending {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_assistant: Option<TurnMark>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub read: Option<ReadEvidence>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub terminal: Option<TerminalObservation>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text_tail_evidence: Option<TextTailEvidence>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub trailing_record: Option<TrailingRecord>,
     pub facts: Vec<Fact>,
     pub incomplete: Vec<Incomplete>,
@@ -350,6 +357,9 @@ pub fn ending(transcript: Transcript, lineage: Result<Lineage>, tail: usize, tex
 
     let last_turn = turns.last();
     let session = &transcript.session;
+    let read = transcript.read.clone();
+    let terminal = transcript.terminal.clone();
+    let text_tail_evidence = transcript.text_tail.clone();
     let mut notes = transcript.notes.clone();
     let lineage = match lineage {
         Ok(lineage) => Some(summarize_lineage(lineage)).filter(|summary| !summary.is_empty()),
@@ -393,6 +403,9 @@ pub fn ending(transcript: Transcript, lineage: Result<Lineage>, tail: usize, tex
         }),
         last_operator: mark(newest(turns, TurnKind::Operator)),
         last_assistant: mark(newest(turns, TurnKind::Assistant)),
+        read,
+        terminal,
+        text_tail_evidence,
         trailing_record: transcript.trailing_record.clone(),
         facts,
         incomplete,

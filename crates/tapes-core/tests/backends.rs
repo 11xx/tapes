@@ -1924,6 +1924,7 @@ impl Backend for SearchFixture {
                 ts: None,
                 ordinal: 0,
                 native_id: None,
+                request_turn_id: None,
                 tool: None,
             }],
             truncated: self.bounded,
@@ -1937,6 +1938,9 @@ impl Backend for SearchFixture {
                     Vec::new()
                 },
             },
+            read: None,
+            terminal: None,
+            text_tail: None,
             trailing_record: None,
             notes: Vec::new(),
         })
@@ -3299,7 +3303,7 @@ fn codex_usage_reports_the_context_window_and_the_newest_quota_windows() {
     assert_eq!(
         limits.primary,
         Some(RateWindow {
-            used_percent: 12.0,
+            used_percent: serde_json::json!(12),
             window_minutes: Some(300),
             resets_at: Some("2026-01-01T14:00:00Z".parse().unwrap()),
         })
@@ -3307,12 +3311,33 @@ fn codex_usage_reports_the_context_window_and_the_newest_quota_windows() {
     assert_eq!(
         limits.secondary,
         Some(RateWindow {
-            used_percent: 92.0,
+            used_percent: serde_json::json!(92),
             window_minutes: Some(10_080),
             resets_at: Some("2026-01-05T10:00:00Z".parse().unwrap()),
         })
     );
     assert_eq!(limits.plan.as_deref(), Some("fixture"));
+    assert_eq!(
+        limits
+            .credits
+            .as_ref()
+            .and_then(|credits| credits.balance.as_ref()),
+        Some(&serde_json::json!("0"))
+    );
+    assert_eq!(
+        limits
+            .credits
+            .as_ref()
+            .and_then(|credits| credits.has_credits),
+        Some(false)
+    );
+    assert_eq!(limits.spend_control_reached, Some(false));
+    assert_eq!(limits.rate_limit_reached, Some(false));
+    assert_eq!(limits.rate_limit_reached_type.as_deref(), Some("primary"));
+    assert_eq!(
+        limits.observed_at,
+        Some("2026-01-01T10:00:06.700Z".parse().unwrap())
+    );
     assert_eq!(view.tokens, session.tokens);
     assert_eq!(view.turns.total, 6);
     assert_eq!(view.turns.coverage, TurnCoverage::Session);
@@ -3491,10 +3516,14 @@ impl Backend for BulkExportFixture {
                 ts: None,
                 ordinal: 0,
                 native_id: None,
+                request_turn_id: None,
                 tool: None,
             }],
             truncated: false,
             truncation: Truncation::default(),
+            read: None,
+            terminal: None,
+            text_tail: None,
             trailing_record: None,
             notes: Vec::new(),
         })

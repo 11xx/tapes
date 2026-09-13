@@ -7,22 +7,29 @@ use serde_json::Value;
 use super::{
     accounting_for, head_directory, head_jsonl, home_path, jsonl_files, list_files,
     list_files_with_search, matching_session_file, read_bounds, read_recording, session_file,
-    timestamp, trailing_record, transcript, Backend, Jsonl, Listing, ParsedFile, Query,
-    TokenTotals,
+    terminal_from_values, timestamp, trailing_record, transcript_from_recording, Backend, Jsonl,
+    Listing, ParsedFile, Query, TokenTotals,
 };
 use crate::event::{Bounded, EventKind, ToolEvent};
 use crate::history::{PageProjection, ReadContext};
 use crate::lineage::{ChildRef, Lineage, ParentRef, SourceRef};
 use crate::model::{
     is_known_envelope, without_known_envelopes, AccountingBasis, AccountingCoverage, Model, Role,
-    Session, Tokens, TrailingRecord, Transcript, Turn, TurnKind,
+    Session, TerminalObservation, Tokens, TrailingRecord, Transcript, Turn, TurnKind,
 };
-use crate::usage::{RateLimits, RateWindow, UsageDetail};
+use crate::usage::{Credits, RateLimits, RateWindow, UsageDetail};
 
 #[derive(Clone, Debug)]
 pub struct CodexBackend {
     root: Option<PathBuf>,
 }
+
+type CodexTranscriptRead = (
+    Vec<Turn>,
+    super::Recording,
+    Option<TrailingRecord>,
+    Option<TerminalObservation>,
+);
 
 impl CodexBackend {
     pub fn new(root: impl Into<PathBuf>) -> Self {
@@ -287,12 +294,13 @@ impl Backend for CodexBackend {
             .ok_or_else(|| anyhow!("codex store is unavailable"))?;
         let path = session_file(root, &session.id)
             .ok_or_else(|| anyhow!("codex session {} is unavailable", session.id))?;
-        let (turns, read, trailing_record) = read_transcript(&path)?;
-        Ok(transcript(
+        let (turns, recording, trailing_record, terminal) = read_transcript(&path)?;
+        Ok(transcript_from_recording(
             session.clone(),
             turns,
             tail,
-            &read,
+            &recording,
+            terminal,
             trailing_record,
             Vec::new(),
         ))
@@ -373,7 +381,7 @@ impl Backend for CodexBackend {
     }
 }
 
-fn read_transcript(path: &Path) -> Result<(Vec<Turn>, Jsonl, Option<TrailingRecord>)> {
+fn read_transcript(path: &Path) -> Result<CodexTranscriptRead> {
     let recording = read_recording(path)?;
     let read = &recording.tail;
     let evidence = user_message_evidence(&read.values, recording.opening());
@@ -387,7 +395,8 @@ fn read_transcript(path: &Path) -> Result<(Vec<Turn>, Jsonl, Option<TrailingReco
         turns.extend(parsed);
     }
     let trailing_record = trailing_record(read.values.iter(), last_turn, codex_trailing_kind);
-    Ok((turns, recording.tail, trailing_record))
+    let terminal = terminal_from_values(&read.values, codex_terminal);
+    Ok((turns, recording, trailing_record, terminal))
 }
 
 /// Codex records the working directory in its `session_meta` header and
@@ -443,18 +452,40 @@ fn codex_rate_limits(value: &Value) -> Option<RateLimits> {
     let window = |name: &str| {
         let window = &limits[name];
         window["used_percent"]
-            .as_f64()
-            .map(|used_percent| RateWindow {
-                used_percent,
+            .is_number()
+            .then(|| RateWindow {
+                used_percent: window["used_percent"].clone(),
                 window_minutes: window["window_minutes"].as_u64(),
                 resets_at: window["resets_at"].as_i64().and_then(epoch_seconds),
             })
+            .or_else(|| {
+                window["used_percent"].as_str().map(|_| RateWindow {
+                    used_percent: window["used_percent"].clone(),
+                    window_minutes: window["window_minutes"].as_u64(),
+                    resets_at: window["resets_at"].as_i64().and_then(epoch_seconds),
+                })
+            })
     };
-    let limits = RateLimits {
+    let credits = limits["credits"].as_object().map(|credits| Credits {
+        balance: credits.get("balance").cloned(),
+        has_credits: credits.get("has_credits").and_then(Value::as_bool),
+        unlimited: credits.get("unlimited").and_then(Value::as_bool),
+    });
+    let mut limits = RateLimits {
         primary: window("primary"),
         secondary: window("secondary"),
         plan: limits["plan_type"].as_str().map(str::to_owned),
+        credits: credits.filter(|credits| !credits.is_empty()),
+        spend_control_reached: limits["spend_control_reached"].as_bool(),
+        rate_limit_reached: limits["rate_limit_reached"].as_bool(),
+        rate_limit_reached_type: limits["rate_limit_reached_type"]
+            .as_str()
+            .map(str::to_owned),
+        observed_at: None,
     };
+    if !limits.is_empty() {
+        limits.observed_at = timestamp(&value["timestamp"]);
+    }
     (!limits.is_empty()).then_some(limits)
 }
 
@@ -464,6 +495,60 @@ fn epoch_seconds(seconds: i64) -> Option<chrono::DateTime<chrono::Utc>> {
 
 fn is_token_count(value: &Value) -> bool {
     value["type"] == "event_msg" && value["payload"]["type"] == "token_count"
+}
+
+fn codex_terminal(value: &Value) -> Option<TerminalObservation> {
+    if value["type"] != "event_msg" {
+        return None;
+    }
+    let payload = &value["payload"];
+    let payload_type = payload["type"].as_str()?;
+    let explicitly_terminal = matches!(
+        payload_type,
+        "task_complete" | "turn_aborted" | "turn_complete" | "error"
+    ) || payload["terminal"].as_bool() == Some(true)
+        || payload.get("outcome").is_some()
+        || payload.get("code").is_some();
+    if !explicitly_terminal {
+        return None;
+    }
+    let message = payload
+        .get("message")
+        .and_then(Value::as_str)
+        .map(bounded_terminal_text);
+    Some(TerminalObservation {
+        record_type: value["type"].as_str()?.to_owned(),
+        payload_type: Some(payload_type.to_owned()),
+        timestamp: timestamp(&value["timestamp"]),
+        native_id: payload["id"]
+            .as_str()
+            .or_else(|| payload["event_id"].as_str())
+            .map(str::to_owned),
+        turn_id: payload["turn_id"]
+            .as_str()
+            .or_else(|| payload["context"]["turn_id"].as_str())
+            .map(str::to_owned),
+        outcome: payload["outcome"]
+            .as_str()
+            .or_else(|| payload["status"].as_str())
+            .map(str::to_owned),
+        code: payload
+            .get("code")
+            .filter(|value| !value.is_null())
+            .cloned(),
+        message,
+        duration_ms: payload["duration_ms"].as_i64(),
+    })
+}
+
+fn bounded_terminal_text(text: &str) -> crate::model::BoundedText {
+    const MAX_TERMINAL_MESSAGE_CHARS: usize = 2_048;
+    let chars = text.chars().count();
+    crate::model::BoundedText {
+        text: text.chars().take(MAX_TERMINAL_MESSAGE_CHARS).collect(),
+        chars,
+        truncated: chars > MAX_TERMINAL_MESSAGE_CHARS,
+    }
 }
 
 fn codex_trailing_kind(value: &Value) -> Option<&'static str> {
@@ -605,6 +690,10 @@ fn parse_turns(value: &Value, messages: &UserMessages) -> Vec<Turn> {
             ts,
             ordinal: 0,
             native_id,
+            request_turn_id: payload["turn_id"]
+                .as_str()
+                .or_else(|| payload["context"]["turn_id"].as_str())
+                .map(str::to_owned),
             tool,
         })
         .into_iter()
