@@ -29,7 +29,7 @@ use tapes_core::{BulkExport, Selection, UsageSummary, Where};
 use tapes_core::backend::Backend;
 use tapes_core::input::{
     InputBackend, InputFormat, InputOptions, DEFAULT_DECODED_BYTES, DEFAULT_OUTPUT_BYTES,
-    DEFAULT_RECORD_BYTES, DEFAULT_SCAN_BYTES,
+    DEFAULT_RECORD_BYTES, DEFAULT_RESIDENT_BYTES, DEFAULT_SCAN_BYTES,
 };
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -173,7 +173,7 @@ struct InputArgs {
     /// Maximum compressed or source bytes inspected across supplied inputs.
     #[arg(long, default_value_t = DEFAULT_SCAN_BYTES, value_name = "BYTES")]
     scan_bytes: u64,
-    /// Maximum decoded JSON bytes retained across supplied inputs.
+    /// Maximum uncompressed JSON bytes inspected across supplied inputs.
     #[arg(long, default_value_t = DEFAULT_DECODED_BYTES, value_name = "BYTES")]
     decoded_bytes: u64,
     /// Maximum one JSON record or ZIP member decoded into memory.
@@ -182,6 +182,11 @@ struct InputArgs {
     /// Maximum serialized transcript response retained for a supplied input.
     #[arg(long, default_value_t = DEFAULT_OUTPUT_BYTES, value_name = "BYTES")]
     output_bytes: u64,
+    /// Maximum aggregate bytes reserved for normalized supplied-input data.
+    /// This is independent of result limits and prevents a collection read
+    /// from retaining an unbounded set of normalized records.
+    #[arg(long, default_value_t = DEFAULT_RESIDENT_BYTES, value_name = "BYTES")]
+    resident_bytes: u64,
     /// Select one opaque occurrence coordinate from a supplied collection.
     #[arg(long, value_name = "COORDINATE")]
     occurrence: Option<String>,
@@ -204,6 +209,7 @@ impl InputArgs {
         options.decoded_bytes = self.decoded_bytes;
         options.record_bytes = self.record_bytes;
         options.output_bytes = self.output_bytes;
+        options.resident_bytes = self.resident_bytes;
         options.validate()?;
         Ok(options)
     }
@@ -680,7 +686,7 @@ enum Command {
         /// this never aliases the recorded outer tool name.
         #[arg(long, value_name = "PROGRAM")]
         program: Vec<String>,
-        /// Render the versioned tapes-events/5 object as JSON.
+        /// Render the versioned tapes-events/6 object as JSON.
         #[arg(long)]
         json: bool,
     },
@@ -709,19 +715,19 @@ enum Command {
     /// complete pairs only, and a cache ratio is a share of recorded token
     /// counts rather than of cost. Nothing is judged, ranked, or explained.
     /// A scope or listing filter selects multiple sessions and returns
-    /// tapes-stats-summary/2: recorded tools grouped by harness and name,
+    /// tapes-stats-summary/3: recorded tools grouped by harness and name,
     /// with per-session read coverage, pairing counts and failures. Children
     /// are not read through their parents.
     Stats {
         #[command(flatten)]
         query: SessionQueryArgs,
-        /// Render the versioned tapes-stats/4 object, or tapes-stats-summary/2
+        /// Render the versioned tapes-stats/5 object, or tapes-stats-summary/3
         /// for a selection, as JSON.
         #[arg(long)]
         json: bool,
     },
     /// Where quota went. A session named by id or reached with --latest
-    /// answers that session as tapes-usage/4: its recorded tokens, cost, and
+    /// answers that session as tapes-usage/5: its recorded tokens, cost, and
     /// turn counts, plus whatever else its harness recorded — a context
     /// window, a provider quota window, wall-clock durations, a per-model
     /// split. A scope or listing filter instead answers the whole selection
@@ -746,13 +752,13 @@ enum Command {
             conflicts_with_all = ["session", "latest", "title", "occurrence"]
         )]
         by: Vec<ByArg>,
-        /// Render the versioned tapes-usage/4 object, or tapes-usage-summary/3
+        /// Render the versioned tapes-usage/5 object, or tapes-usage-summary/3
         /// for a selection, as JSON.
         #[arg(long)]
         json: bool,
     },
     /// What a continuation of one session needs from its recording, as
-    /// tapes-brief/5: where the work stopped, the working directory and the
+    /// tapes-brief/6: where the work stopped, the working directory and the
     /// commit it sits on, the calls the read never saw a result for, the
     /// children whose outcome the store does not record, and a bounded tail
     /// of the exchange. It reads the recording alone and judges nothing —
@@ -766,12 +772,12 @@ enum Command {
         /// out of the tail.
         #[arg(long, value_name = "N", default_value_t = DEFAULT_BRIEF_TAIL)]
         tail: usize,
-        /// Render the versioned tapes-brief/5 object as JSON.
+        /// Render the versioned tapes-brief/6 object as JSON.
         #[arg(long)]
         json: bool,
     },
     /// What each session of a selection ends on, one bounded record each, as
-    /// tapes-endings/5. The selection uses the flags `list` and `export` take,
+    /// tapes-endings/6. The selection uses the flags `list` and `export` take,
     /// applied before any transcript is opened; each selected session then
     /// costs one bounded read of its newest turns and one lineage read. Every
     /// fact rests on the normalized turn kinds and typed tool events of the
@@ -829,7 +835,7 @@ enum Command {
         /// attached context stay out of it.
         #[arg(long)]
         text: bool,
-        /// Render the versioned tapes-endings/5 object as JSON.
+        /// Render the versioned tapes-endings/6 object as JSON.
         #[arg(long)]
         json: bool,
     },
@@ -2520,6 +2526,9 @@ fn render_truncation_notes(out: &mut String, truncation: &Truncation) {
                     "Note: {turns} {noun} {verb} text cut at {chars} characters by the store read.\n"
                 ));
             }
+            SourceBound::InputCoverage { gaps } => out.push_str(&format!(
+                "Note: The supplied input has {gaps} explicit coverage gap(s); this transcript is a known projection, not a complete collection.\n"
+            )),
         }
     }
 }
@@ -2628,6 +2637,7 @@ mod tests {
                 ordinal: 0,
                 native_id: None,
                 request_turn_id: None,
+                metadata: None,
                 record_ref: None,
                 parts: Vec::new(),
                 coverage: None,

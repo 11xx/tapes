@@ -906,6 +906,7 @@ fn turn(
         ordinal: 0,
         native_id,
         request_turn_id: None,
+        metadata: None,
         record_ref: None,
         channel: None,
         recipient: None,

@@ -19,7 +19,7 @@ use crate::model::{
 };
 use crate::usage::{self, TurnCoverage, UsageSession};
 
-pub const STATS_SCHEMA: &str = "tapes-stats/4";
+pub const STATS_SCHEMA: &str = "tapes-stats/5";
 
 /// One session's counted facts, in the order a reader takes them: what the
 /// figures cover, the turns, the tool calls behind them, the recorded clock,
@@ -554,6 +554,7 @@ mod tests {
             ordinal,
             native_id: Some(format!("native-{ordinal}")),
             request_turn_id: None,
+            metadata: None,
             record_ref: None,
             parts: Vec::new(),
             coverage: None,

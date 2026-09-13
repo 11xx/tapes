@@ -7,12 +7,22 @@ to discover another source and it is never modified.
 
 ## Supported containers
 
-The reader accepts a single JSON or JSONL file, a directory containing JSON
-members, and a ZIP archive. ZIP members are read directly; no member is
-extracted. Absolute names, parent traversal, duplicate normalized names, and
-symlink members are rejected. Only JSON, JSONL, and recognized JSON `.dat`
-report members are inspected, so HTML, workbooks, media, and account assets
-are not parsed as conversations.
+The reader accepts a single JSON or JSONL file, an extracted directory, and a
+ZIP archive. ZIP members are read directly; no member is extracted. Absolute
+names, parent traversal, duplicate normalized names, and symlink members are
+rejected before a selected body is read. A native container with a root
+`export_manifest.json` selects only the declared `conversations.json` shards,
+`library_files.json`, and manifest-declared `.dat` library members. Nested
+`sites/export_manifest.json`, account/settings JSON, HTML, workbooks, and
+unselected JSON are not conversation inputs. A directory without the native
+manifest and an explicitly supplied file keep structural source-shape
+recognition, including recognized JSON `.dat` reports in a directory or ZIP.
+
+The native manifest's version, logical member names, duplicate normalized paths,
+and `export_files.size_bytes` values are validated before selected bodies are
+read. Missing, malformed, corrupt, or size-mismatched selected members remain
+explicit coverage gaps; they never become an empty successful collection or an
+assertion that an unreached ID is absent.
 
 The official OpenAI export stores conversation shards as top-level arrays.
 Each conversation has a native `conversation_id`, a `mapping` graph, and a
@@ -78,14 +88,22 @@ a fabricated message or turn.
 
 ## Bounds and continuation
 
-Each invocation has independent limits for source bytes, decoded bytes, one
-record, members, structural depth, and serialized output. The defaults are
-512 MiB source and decoded bytes, 8 MiB per record, 10,000 members, depth 128,
-and 16 MiB output. The byte flags can raise the bounded values only to their
-documented finite ceilings. Oversized records are skipped structurally when
-possible, with a `read.gaps` entry and a diagnostic. If synchronization or a
-budget stops the scan, the result is partial and an unreached occurrence is
-not reported as absent.
+Each invocation has independent limits for compressed/source bytes, decoded
+bytes, one record, aggregate resident normalized data, members, structural
+depth, and serialized output. The defaults are 512 MiB source and decoded
+bytes, 8 MiB per record, 512 MiB resident data, 10,000 members, depth 128, and
+16 MiB output. The byte flags can raise the bounded values only to their
+documented finite ceilings. Reader I/O and ZIP central-directory inspection
+consume the source budget; uncompressed bytes consumed by scanners and report
+readers consume the decoded budget, including skipped oversized records. A
+record is retained only when its bounded bytes fit the remaining resident
+budget. Oversized records are skipped structurally when possible, with a
+`read.gaps` entry and a diagnostic. If synchronization or a budget stops the
+scan, the result is partial and an unreached occurrence is not reported as
+absent. ID and title selection refuses incomplete discovery; an exact
+`--occurrence` may return the known evidence with its gaps. Its `read.gaps`
+contains only that member's byte coordinates; collection-wide limitations
+remain in the `input-coverage` bound and bounded diagnostic notes.
 
 `list` emits an opaque `occurrence` coordinate for every supplied record. The
 coordinate binds the ordered set of supplied files and ZIP members, not just
@@ -97,7 +115,7 @@ listing only when the ordered supplied-input observation matches the
 observation that emitted the coordinate; changed input refuses continuation.
 
 The normal output contracts remain versioned (`tapes-list/5`,
-`tapes-session/7`, `tapes-events/5`, `tapes-brief/5`, `tapes-endings/5`,
-`tapes-stats/4`, `tapes-usage/4`, and `tapes-export-manifest/5`). History-page
+`tapes-session/8`, `tapes-events/6`, `tapes-brief/6`, `tapes-endings/6`,
+`tapes-stats/5`, `tapes-usage/5`, and `tapes-export-manifest/5`). History-page
 and child-qualified operations are installed-recording capabilities and
 refuse supplied exports rather than interpreting an export as JSONL history.

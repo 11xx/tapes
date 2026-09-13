@@ -32,7 +32,7 @@ use crate::model::{
 };
 use crate::usage;
 
-pub const BRIEF_SCHEMA: &str = "tapes-brief/5";
+pub const BRIEF_SCHEMA: &str = "tapes-brief/6";
 /// Newest operator and assistant turns rendered when the caller names no
 /// window. Wide enough to hold the exchange that ended the session, narrow
 /// enough that the brief stays one screen.
@@ -364,6 +364,7 @@ fn text_tail(transcript: &Transcript, tail: usize) -> Vec<TailEntry> {
                 role: turn.role.clone(),
                 ts: turn.ts,
                 record_ref: turn.record_ref.clone(),
+                metadata: turn.metadata.clone(),
                 parts: turn.parts.clone(),
                 coverage: turn.coverage.clone(),
                 truncated: characters.next().is_some(),

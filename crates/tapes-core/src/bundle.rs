@@ -335,6 +335,10 @@ fn write_header(out: &mut String, transcript: &Transcript, kind: &str) {
                 out,
                 "- truncated: {turns} turn(s) carry text cut at {chars} characters by the store read"
             ),
+            SourceBound::InputCoverage { gaps } => writeln!(
+                out,
+                "- truncated: supplied input has {gaps} explicit coverage gap(s)"
+            ),
         };
     }
     if let Some(read) = &transcript.read {
@@ -486,6 +490,7 @@ mod tests {
                     ordinal: 0,
                     native_id: None,
                     request_turn_id: None,
+                    metadata: None,
                     record_ref: None,
                     parts: Vec::new(),
                     coverage: None,
@@ -501,6 +506,7 @@ mod tests {
                     ordinal: 0,
                     native_id: None,
                     request_turn_id: None,
+                    metadata: None,
                     record_ref: None,
                     parts: Vec::new(),
                     coverage: None,
@@ -516,6 +522,7 @@ mod tests {
                     ordinal: 0,
                     native_id: None,
                     request_turn_id: None,
+                    metadata: None,
                     record_ref: None,
                     parts: Vec::new(),
                     coverage: None,
@@ -531,6 +538,7 @@ mod tests {
                     ordinal: 0,
                     native_id: None,
                     request_turn_id: None,
+                    metadata: None,
                     record_ref: None,
                     parts: Vec::new(),
                     coverage: None,
@@ -744,6 +752,7 @@ mod tests {
             ordinal: 0,
             native_id: None,
             request_turn_id: None,
+            metadata: None,
             record_ref: None,
             parts: Vec::new(),
             coverage: None,

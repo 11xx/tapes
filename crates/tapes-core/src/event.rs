@@ -10,7 +10,7 @@ use crate::model::{
     TextTailEvidence, Transcript, Truncation,
 };
 
-pub const EVENTS_SCHEMA: &str = "tapes-events/5";
+pub const EVENTS_SCHEMA: &str = "tapes-events/6";
 const PREVIEW_CHARS: usize = 200;
 pub const MAX_INVOCATION_TEXT_CHARS: usize = 64 * 1024;
 pub const MAX_INVOCATIONS: usize = 32;
@@ -269,7 +269,9 @@ pub fn project(transcript: Transcript, tail: usize) -> EventTranscript {
     let read_was_bounded = transcript.truncation.source.iter().any(|bound| {
         matches!(
             bound,
-            SourceBound::FileTail { .. } | SourceBound::RecordPage { .. }
+            SourceBound::FileTail { .. }
+                | SourceBound::RecordPage { .. }
+                | SourceBound::InputCoverage { .. }
         )
     });
     let mut records = transcript
@@ -1667,6 +1669,7 @@ mod tests {
             ordinal,
             native_id: Some(format!("native-{ordinal}")),
             request_turn_id: None,
+            metadata: None,
             record_ref: None,
             parts: Vec::new(),
             coverage: None,

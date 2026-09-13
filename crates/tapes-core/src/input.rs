@@ -5,12 +5,13 @@
 //! never extracts an archive, creates an index, opens referenced artifacts, or
 //! falls back to installed stores.
 
-use std::collections::HashSet;
+use std::cell::Cell;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::{self, File, Metadata};
 use std::hash::{Hash, Hasher};
-use std::io::{self, Read};
+use std::io::{self, Read, Seek, SeekFrom};
 use std::os::unix::fs::MetadataExt;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -24,23 +25,30 @@ use crate::content::{
 };
 use crate::lineage::Lineage;
 use crate::model::{
-    ByteSpan, ConversationEdge, ConversationGraph, ConversationNode, EmptyTextTailReason, Model,
-    ReadEvidence, ReadRange, ReadRangeKind, RecordRef, Role, ScopeAuthority, Session,
-    SessionMetadata, SourceDescriptor, SourceLocation, SourceScope, TerminalObservation,
-    TextTailEvidence, Transcript, TranscriptEvidence, Truncation, Turn, TurnKind,
+    ByteSpan, ConversationEdge, ConversationGraph, ConversationNode, EmptyTextTailReason,
+    EntryMetadata, Model, ReadEvidence, ReadRange, ReadRangeKind, RecordRef, Role, ScopeAuthority,
+    Session, SessionMetadata, SourceBound, SourceDescriptor, SourceLocation, SourceScope,
+    TerminalObservation, TextTailEvidence, Transcript, TranscriptEvidence, Truncation, Turn,
+    TurnKind,
 };
 
 pub const DEFAULT_SCAN_BYTES: u64 = 512 * 1024 * 1024;
 pub const DEFAULT_DECODED_BYTES: u64 = 512 * 1024 * 1024;
 pub const DEFAULT_RECORD_BYTES: u64 = 8 * 1024 * 1024;
 pub const DEFAULT_OUTPUT_BYTES: u64 = 16 * 1024 * 1024;
+pub const DEFAULT_RESIDENT_BYTES: u64 = 512 * 1024 * 1024;
 pub const MAX_SCAN_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 pub const MAX_DECODED_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 pub const MAX_RECORD_BYTES: u64 = 64 * 1024 * 1024;
 pub const MAX_OUTPUT_BYTES: u64 = 64 * 1024 * 1024;
+pub const MAX_RESIDENT_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 pub const MAX_MEMBERS: usize = 10_000;
 pub const MAX_DEPTH: usize = 128;
 pub const MAX_ARTIFACT_BODY_CHARS: usize = 64 * 1024;
+const MAX_ZIP_CENTRAL_DIRECTORY_BYTES: u64 = 16 * 1024 * 1024;
+const MAX_ZIP_EOCD_SEARCH_BYTES: u64 = 65_557;
+const MAX_MEMBER_NAME_BYTES: usize = 4 * 1024;
+const MAX_MANIFEST_BYTES: u64 = 4 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum InputFormat {
@@ -82,6 +90,7 @@ pub struct InputOptions {
     pub decoded_bytes: u64,
     pub record_bytes: u64,
     pub output_bytes: u64,
+    pub resident_bytes: u64,
 }
 
 impl InputOptions {
@@ -96,6 +105,7 @@ impl InputOptions {
             decoded_bytes: DEFAULT_DECODED_BYTES,
             record_bytes: DEFAULT_RECORD_BYTES,
             output_bytes: DEFAULT_OUTPUT_BYTES,
+            resident_bytes: DEFAULT_RESIDENT_BYTES,
         }
     }
 
@@ -108,6 +118,7 @@ impl InputOptions {
             ("decoded bytes", self.decoded_bytes, MAX_DECODED_BYTES),
             ("record bytes", self.record_bytes, MAX_RECORD_BYTES),
             ("output bytes", self.output_bytes, MAX_OUTPUT_BYTES),
+            ("resident bytes", self.resident_bytes, MAX_RESIDENT_BYTES),
         ] {
             if value == 0 || value > maximum {
                 bail!("input {name} must be between 1 and {maximum}");
@@ -191,6 +202,20 @@ impl Backend for InputBackend {
                 bail!("--after-occurrence belongs to a different supplied input observation");
             }
         }
+        if self.options.after_occurrence.is_some() {
+            let coordinate = self
+                .options
+                .after_occurrence
+                .as_deref()
+                .expect("parsed after occurrence has an input coordinate");
+            if !dataset
+                .occurrences
+                .iter()
+                .any(|occurrence| occurrence.session.occurrence.as_deref() == Some(coordinate))
+            {
+                bail!("--after-occurrence is not a reached occurrence in this supplied input observation");
+            }
+        }
         for occurrence in &dataset.occurrences {
             if let Some((_, ordinal)) = after.as_ref() {
                 if occurrence.ordinal <= *ordinal {
@@ -228,6 +253,11 @@ impl Backend for InputBackend {
                 matches.len()
             );
         }
+        if matches.len() == 1 && dataset.discovery_incomplete {
+            bail!(
+                "supplied input discovery is incomplete; cannot prove that session {id} is unique; pass --occurrence from a complete list row"
+            );
+        }
         Ok(matches.first().map(|occurrence| occurrence.session.clone()))
     }
 
@@ -251,7 +281,20 @@ impl Backend for InputBackend {
             .iter()
             .find(|candidate| candidate.session.occurrence.as_deref() == Some(occurrence))
             .ok_or_else(|| anyhow!("supplied session occurrence was not reached in this input"))?;
-        let transcript = input_transcript(occurrence, tail)?;
+        let mut transcript = input_transcript(occurrence, tail)?;
+        if occurrence.collection_gaps > 0 {
+            for diagnostic in dataset.diagnostics.iter().take(16) {
+                if !transcript.notes.contains(diagnostic) {
+                    transcript.notes.push(diagnostic.clone());
+                }
+            }
+            if dataset.diagnostics.len() > 16 {
+                transcript.notes.push(format!(
+                    "{} additional collection diagnostics are available through list",
+                    dataset.diagnostics.len() - 16
+                ));
+            }
+        }
         let output_bytes = serde_json::to_vec(&transcript)?.len() as u64;
         if output_bytes > self.options.output_bytes {
             bail!(
@@ -280,6 +323,7 @@ struct InputOccurrence {
     format: String,
     member: String,
     ordinal: usize,
+    collection_gaps: usize,
 }
 
 struct InputDataset {
@@ -289,14 +333,50 @@ struct InputDataset {
     diagnostics: Vec<String>,
     scanned: usize,
     scan_truncated: bool,
+    discovery_incomplete: bool,
 }
 
 #[derive(Clone)]
 struct AssociatedReport {
     member: String,
     backing: Option<String>,
+    origin_message: Option<String>,
     reference: ArtifactReference,
     part: ContentPart,
+}
+
+#[derive(Clone, Debug)]
+struct DirectoryMember {
+    name: String,
+    path: PathBuf,
+    size: u64,
+    revision: String,
+}
+
+#[derive(Clone, Debug)]
+struct ZipMemberMetadata {
+    name: String,
+    index: usize,
+    compressed_size: u64,
+    size: u64,
+    crc32: u32,
+    is_dir: bool,
+    is_symlink: bool,
+}
+
+#[derive(Clone, Debug, Default)]
+struct ManifestSelection {
+    conversation_members: Vec<String>,
+    library_metadata_members: Vec<String>,
+    library_content_members: Vec<String>,
+    expected_sizes: HashMap<String, u64>,
+}
+
+#[derive(Clone, Debug, Default)]
+struct LibraryAssociation {
+    file_id: Option<String>,
+    backing: Option<String>,
+    origin_message: Option<String>,
 }
 
 fn input_transcript(occurrence: &InputOccurrence, tail: usize) -> Result<Transcript> {
@@ -321,10 +401,25 @@ fn input_transcript(occurrence: &InputOccurrence, tail: usize) -> Result<Transcr
     } else {
         Some(EmptyTextTailReason::NoOperatorAssistantTextInRead)
     };
+    let gap_count = occurrence
+        .evidence
+        .gaps
+        .len()
+        .max(occurrence.collection_gaps);
     let truncation = Truncation {
         window: Truncation::window(turns.len(), total, tail),
-        source: Vec::new(),
+        source: (gap_count > 0)
+            .then_some(SourceBound::InputCoverage { gaps: gap_count })
+            .into_iter()
+            .collect(),
     };
+    let mut notes = occurrence.notes.clone();
+    if gap_count > 0 && !notes.iter().any(|note| note.contains("coverage gap")) {
+        notes.push(format!(
+            "the supplied input has {} explicit coverage gap(s); this transcript is a known projection, not a complete collection",
+            gap_count
+        ));
+    }
     let mut transcript = Transcript::with_evidence(
         occurrence.session.clone(),
         turns,
@@ -339,7 +434,7 @@ fn input_transcript(occurrence: &InputOccurrence, tail: usize) -> Result<Transcr
             }),
         },
         occurrence.trailing_record.clone(),
-        occurrence.notes.clone(),
+        notes,
     );
     transcript.artifacts = occurrence.artifacts.clone();
     transcript.graph = occurrence.graph.clone();
@@ -347,11 +442,13 @@ fn input_transcript(occurrence: &InputOccurrence, tail: usize) -> Result<Transcr
 }
 
 fn load_dataset(options: &InputOptions) -> Result<InputDataset> {
-    let mut budget = Budget::new(options);
+    let budget = Budget::new(options);
     let mut occurrences = Vec::new();
     let mut diagnostics = Vec::new();
     let mut associated_reports = Vec::new();
     let mut observation_parts = Vec::new();
+    let mut collection_gaps = Vec::new();
+    let mut discovery_incomplete = false;
     let mut scanned = 0;
     let mut scan_truncated = false;
     for path in &options.paths {
@@ -362,46 +459,35 @@ fn load_dataset(options: &InputOptions) -> Result<InputDataset> {
             bail!("supplied input path is a symlink: {}", path.display());
         }
         if path.is_dir() {
-            let mut files = Vec::new();
-            collect_json_files(path, &mut files)?;
-            files.sort();
-            for file in files {
-                if budget.members >= MAX_MEMBERS {
-                    scan_truncated = true;
-                    diagnostics.push("input member limit reached".to_owned());
-                    break;
-                }
-                budget.members += 1;
-                observation_parts.push(format!(
-                    "file:{}:{}",
-                    file.display(),
-                    metadata_revision(&fs::metadata(&file)?)
-                ));
-                scan_file(
-                    &file,
-                    None,
-                    options,
-                    &mut budget,
-                    &mut occurrences,
-                    &mut diagnostics,
-                    &mut scanned,
-                    &mut scan_truncated,
-                )?;
-            }
-        } else if is_zip_path(path)? {
-            scan_zip(
+            scan_directory(
                 path,
                 options,
-                &mut budget,
+                &budget,
                 &mut occurrences,
                 &mut diagnostics,
                 &mut associated_reports,
                 &mut observation_parts,
+                &mut collection_gaps,
                 &mut scanned,
                 &mut scan_truncated,
+                &mut discovery_incomplete,
+            )?;
+        } else if is_zip_path(path, &budget)? {
+            scan_zip(
+                path,
+                options,
+                &budget,
+                &mut occurrences,
+                &mut diagnostics,
+                &mut associated_reports,
+                &mut observation_parts,
+                &mut collection_gaps,
+                &mut scanned,
+                &mut scan_truncated,
+                &mut discovery_incomplete,
             )?;
         } else {
-            budget.members += 1;
+            budget.add_members(1)?;
             let metadata = fs::metadata(path)?;
             observation_parts.push(format!(
                 "file:{}:{}",
@@ -412,11 +498,13 @@ fn load_dataset(options: &InputOptions) -> Result<InputDataset> {
                 path,
                 None,
                 options,
-                &mut budget,
+                &budget,
                 &mut occurrences,
                 &mut diagnostics,
                 &mut scanned,
                 &mut scan_truncated,
+                &mut discovery_incomplete,
+                &mut collection_gaps,
             )?;
         }
         if budget.exhausted() {
@@ -431,7 +519,38 @@ fn load_dataset(options: &InputOptions) -> Result<InputDataset> {
             options.format.name()
         ));
     }
-    attach_associated_reports(&mut occurrences, &associated_reports, &mut diagnostics);
+    if occurrences.is_empty() && scanned == 0 && diagnostics.is_empty() {
+        diagnostics.push(format!(
+            "no {} conversation records were recognized",
+            options.format.name()
+        ));
+    }
+    if !collection_gaps.is_empty() {
+        discovery_incomplete = true;
+        scan_truncated |= collection_gaps.iter().any(gap_stops_discovery);
+        for occurrence in &mut occurrences {
+            occurrence.collection_gaps = collection_gaps.len();
+            occurrence.notes.push(format!(
+                "the supplied input collection has {} member coverage gap(s)",
+                collection_gaps.len()
+            ));
+        }
+    }
+    attach_associated_reports(&mut occurrences, &mut associated_reports, &mut diagnostics);
+    if occurrences.is_empty() && discovery_incomplete {
+        bail!(
+            "supplied input discovery is incomplete and produced no complete {} conversation records; {}",
+            options.format.name(),
+            diagnostics.join("; ")
+        );
+    }
+    if occurrences.is_empty() {
+        bail!(
+            "supplied input contained no recognized {} conversation records; {}",
+            options.format.name(),
+            diagnostics.join("; ")
+        );
+    }
     let observation = observation_revision(&observation_parts);
     for (ordinal, occurrence) in occurrences.iter_mut().enumerate() {
         occurrence.ordinal = ordinal;
@@ -453,36 +572,150 @@ fn load_dataset(options: &InputOptions) -> Result<InputDataset> {
         diagnostics,
         scanned,
         scan_truncated,
+        discovery_incomplete,
     })
 }
 
+fn gap_stops_discovery(gap: &crate::model::ReadGap) -> bool {
+    !matches!(
+        gap.reason.as_str(),
+        "record-bytes-bound" | "resident-byte-bound" | "member-size-bound"
+    )
+}
+
 struct Budget {
-    scan_used: u64,
-    decoded_used: u64,
-    members: usize,
+    scan_used: Cell<u64>,
+    decoded_used: Cell<u64>,
+    resident_used: Cell<u64>,
+    members: Cell<usize>,
+    scan_blocked: Cell<bool>,
+    decoded_blocked: Cell<bool>,
     scan_limit: u64,
     decoded_limit: u64,
+    resident_limit: u64,
 }
 
 impl Budget {
     fn new(options: &InputOptions) -> Self {
         Self {
-            scan_used: 0,
-            decoded_used: 0,
-            members: 0,
+            scan_used: Cell::new(0),
+            decoded_used: Cell::new(0),
+            resident_used: Cell::new(0),
+            members: Cell::new(0),
+            scan_blocked: Cell::new(false),
+            decoded_blocked: Cell::new(false),
             scan_limit: options.scan_bytes,
             decoded_limit: options.decoded_bytes,
+            resident_limit: options.resident_bytes,
         }
     }
 
+    fn remaining_scan(&self) -> u64 {
+        self.scan_limit.saturating_sub(self.scan_used.get())
+    }
+
+    fn remaining_decoded(&self) -> u64 {
+        self.decoded_limit.saturating_sub(self.decoded_used.get())
+    }
+
+    fn charge_scan(&self, amount: u64) -> io::Result<()> {
+        let next = self
+            .scan_used
+            .get()
+            .checked_add(amount)
+            .ok_or_else(|| io::Error::other("input scan budget overflowed"))?;
+        if next > self.scan_limit {
+            self.scan_blocked.set(true);
+            return Err(io::Error::other("input scan budget exhausted"));
+        }
+        self.scan_used.set(next);
+        Ok(())
+    }
+
+    fn charge_decoded(&self, amount: u64) -> io::Result<()> {
+        let next = self
+            .decoded_used
+            .get()
+            .checked_add(amount)
+            .ok_or_else(|| io::Error::other("input decoded-byte budget overflowed"))?;
+        if next > self.decoded_limit {
+            self.decoded_blocked.set(true);
+            return Err(io::Error::other("input decoded-byte budget exhausted"));
+        }
+        self.decoded_used.set(next);
+        Ok(())
+    }
+
+    fn reserve_resident(&self, amount: u64) -> bool {
+        let Some(next) = self.resident_used.get().checked_add(amount) else {
+            return false;
+        };
+        if next > self.resident_limit {
+            return false;
+        }
+        self.resident_used.set(next);
+        true
+    }
+
+    fn add_members(&self, amount: usize) -> Result<()> {
+        let next = self
+            .members
+            .get()
+            .checked_add(amount)
+            .ok_or_else(|| anyhow!("supplied input member count overflowed"))?;
+        if next > MAX_MEMBERS {
+            bail!("supplied input has more than {MAX_MEMBERS} members");
+        }
+        self.members.set(next);
+        Ok(())
+    }
+
     fn exhausted(&self) -> bool {
-        self.scan_used >= self.scan_limit || self.decoded_used >= self.decoded_limit
+        self.scan_blocked.get() || self.decoded_blocked.get()
+    }
+}
+
+/// Charges bytes read from a physical source. ZIP decompression reads are
+/// charged here as compressed bytes; `Scanner` charges the resulting decoded
+/// bytes when its buffer receives them.
+struct BudgetedSourceReader<'a, R> {
+    reader: R,
+    budget: &'a Budget,
+}
+
+impl<'a, R> BudgetedSourceReader<'a, R> {
+    fn new(reader: R, budget: &'a Budget) -> Self {
+        Self { reader, budget }
+    }
+}
+
+impl<R: Read> Read for BudgetedSourceReader<'_, R> {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        if buffer.is_empty() {
+            return Ok(0);
+        }
+        let allowed = buffer
+            .len()
+            .min(self.budget.remaining_scan().min(usize::MAX as u64) as usize);
+        if allowed == 0 {
+            self.budget.scan_blocked.set(true);
+            return Err(io::Error::other("input scan budget exhausted"));
+        }
+        let read = self.reader.read(&mut buffer[..allowed])?;
+        self.budget.charge_scan(read as u64)?;
+        Ok(read)
+    }
+}
+
+impl<R: Seek> Seek for BudgetedSourceReader<'_, R> {
+    fn seek(&mut self, position: SeekFrom) -> io::Result<u64> {
+        self.reader.seek(position)
     }
 }
 
 struct Scanner<'a, R> {
     reader: R,
-    budget: &'a mut Budget,
+    budget: &'a Budget,
     buffer: [u8; 64 * 1024],
     position: usize,
     length: usize,
@@ -491,7 +724,7 @@ struct Scanner<'a, R> {
 }
 
 impl<'a, R: Read> Scanner<'a, R> {
-    fn new(reader: R, budget: &'a mut Budget) -> Self {
+    fn new(reader: R, budget: &'a Budget) -> Self {
         Self {
             reader,
             budget,
@@ -504,26 +737,31 @@ impl<'a, R: Read> Scanner<'a, R> {
     }
 
     fn byte(&mut self) -> io::Result<Option<u8>> {
-        if self.budget.scan_used >= self.budget.scan_limit {
-            return Err(io::Error::other("input scan budget exhausted"));
-        }
         if let Some(byte) = self.pending.take() {
             self.offset += 1;
-            self.budget.scan_used += 1;
             return Ok(Some(byte));
         }
         if self.position == self.length {
-            let read = self.reader.read(&mut self.buffer)?;
+            let remaining = self.budget.remaining_decoded();
+            if remaining == 0 {
+                self.budget.decoded_blocked.set(true);
+                return Err(io::Error::other("input decoded-byte budget exhausted"));
+            }
+            let read_size = self
+                .buffer
+                .len()
+                .min(remaining.min(usize::MAX as u64) as usize);
+            let read = self.reader.read(&mut self.buffer[..read_size])?;
             if read == 0 {
                 return Ok(None);
             }
+            self.budget.charge_decoded(read as u64)?;
             self.position = 0;
             self.length = read;
         }
         let byte = self.buffer[self.position];
         self.position += 1;
         self.offset += 1;
-        self.budget.scan_used += 1;
         Ok(Some(byte))
     }
 
@@ -539,7 +777,13 @@ impl<'a, R: Read> Scanner<'a, R> {
         }
     }
 
-    fn value(&mut self, first: u8, start: u64, max: u64) -> io::Result<Frame> {
+    fn value(
+        &mut self,
+        first: u8,
+        start: u64,
+        max: u64,
+        reason: &'static str,
+    ) -> io::Result<Frame> {
         let mut depth = match first {
             b'{' | b'[' => 1usize,
             _ => 0,
@@ -547,14 +791,27 @@ impl<'a, R: Read> Scanner<'a, R> {
         let mut in_string = false;
         let mut escaped = false;
         let mut bytes = Vec::new();
-        bytes.push(first);
-        let mut oversized = false;
+        let mut oversized = max == 0;
+        let mut oversized_reason = reason;
+        if !oversized {
+            bytes.push(first);
+        }
         if depth == 0 {
-            return Ok(Frame::Invalid);
+            return Ok(Frame::Invalid {
+                span: ByteSpan {
+                    start,
+                    end: self.offset,
+                },
+            });
         }
         while depth > 0 {
             let Some(byte) = self.byte()? else {
-                return Ok(Frame::Incomplete);
+                return Ok(Frame::Incomplete {
+                    span: ByteSpan {
+                        start,
+                        end: self.offset,
+                    },
+                });
             };
             if !oversized {
                 if bytes.len() as u64 >= max {
@@ -576,41 +833,56 @@ impl<'a, R: Read> Scanner<'a, R> {
             }
             match byte {
                 b'"' => in_string = true,
-                b'{' | b'[' => depth += 1,
+                b'{' | b'[' => {
+                    depth += 1;
+                    if depth > MAX_DEPTH {
+                        oversized = true;
+                        oversized_reason = "structural-depth-bound";
+                        bytes.clear();
+                    }
+                }
                 b'}' | b']' => depth = depth.saturating_sub(1),
                 _ => {}
             }
         }
-        let end = self.offset;
+        let span = ByteSpan {
+            start,
+            end: self.offset,
+        };
         if oversized {
             Ok(Frame::Oversized {
-                span: ByteSpan { start, end },
+                span,
+                reason: oversized_reason,
             })
         } else {
-            Ok(Frame::Record {
-                bytes,
-                span: ByteSpan { start, end },
-            })
+            Ok(Frame::Record { bytes, span })
         }
     }
 
-    fn scalar(&mut self, first: u8, start: u64, max: u64) -> io::Result<Frame> {
-        let mut bytes = vec![first];
+    fn scalar(
+        &mut self,
+        first: u8,
+        start: u64,
+        max: u64,
+        reason: &'static str,
+    ) -> io::Result<Frame> {
+        let mut bytes = Vec::new();
         let mut in_string = first == b'"';
         let mut escaped = false;
-        let mut oversized = false;
+        let mut oversized = max == 0;
+        if !oversized {
+            bytes.push(first);
+        }
         loop {
             let Some(byte) = self.byte()? else {
-                let end = self.offset;
+                let span = ByteSpan {
+                    start,
+                    end: self.offset,
+                };
                 return if oversized {
-                    Ok(Frame::Oversized {
-                        span: ByteSpan { start, end },
-                    })
+                    Ok(Frame::Oversized { span, reason })
                 } else {
-                    Ok(Frame::Record {
-                        bytes,
-                        span: ByteSpan { start, end },
-                    })
+                    Ok(Frame::Record { bytes, span })
                 };
             };
             if in_string {
@@ -633,18 +905,15 @@ impl<'a, R: Read> Scanner<'a, R> {
             }
             if byte.is_ascii_whitespace() || matches!(byte, b',' | b'}' | b']') {
                 self.offset = self.offset.saturating_sub(1);
-                self.budget.scan_used = self.budget.scan_used.saturating_sub(1);
                 self.pending = Some(byte);
-                let end = self.offset;
+                let span = ByteSpan {
+                    start,
+                    end: self.offset,
+                };
                 return if oversized {
-                    Ok(Frame::Oversized {
-                        span: ByteSpan { start, end },
-                    })
+                    Ok(Frame::Oversized { span, reason })
                 } else {
-                    Ok(Frame::Record {
-                        bytes,
-                        span: ByteSpan { start, end },
-                    })
+                    Ok(Frame::Record { bytes, span })
                 };
             }
             if !oversized {
@@ -659,7 +928,8 @@ impl<'a, R: Read> Scanner<'a, R> {
     }
 
     fn string(&mut self, _start: u64, max: usize) -> io::Result<String> {
-        let mut value = Vec::new();
+        let mut raw = Vec::with_capacity(max.saturating_add(2));
+        raw.push(b'"');
         let mut escaped = false;
         loop {
             let Some(byte) = self.byte()? else {
@@ -668,37 +938,53 @@ impl<'a, R: Read> Scanner<'a, R> {
                     "unterminated JSON object key",
                 ));
             };
-            if escaped {
-                escaped = false;
-                if value.len() < max {
-                    value.push(byte);
-                }
-                continue;
-            }
-            match byte {
-                b'\\' => escaped = true,
-                b'"' => {
-                    return String::from_utf8(value).map_err(|_| {
-                        io::Error::new(io::ErrorKind::InvalidData, "JSON object key is not UTF-8")
-                    })
-                }
-                _ if value.len() < max => value.push(byte),
-                _ => {}
-            }
-            if value.len() >= max {
+            if raw.len() >= max.saturating_add(2) {
                 return Err(io::Error::other(
                     "JSON object key exceeds the structural bound",
                 ));
+            }
+            raw.push(byte);
+            if escaped {
+                escaped = false;
+                continue;
+            }
+            if byte == b'\\' {
+                escaped = true;
+                continue;
+            }
+            if byte == b'"' {
+                let value = serde_json::from_slice::<String>(&raw).map_err(|error| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("invalid JSON object key: {error}"),
+                    )
+                })?;
+                if value.len() > max {
+                    return Err(io::Error::other(
+                        "decoded JSON object key exceeds the structural bound",
+                    ));
+                }
+                return Ok(value);
             }
         }
     }
 }
 
 enum Frame {
-    Record { bytes: Vec<u8>, span: ByteSpan },
-    Oversized { span: ByteSpan },
-    Invalid,
-    Incomplete,
+    Record {
+        bytes: Vec<u8>,
+        span: ByteSpan,
+    },
+    Oversized {
+        span: ByteSpan,
+        reason: &'static str,
+    },
+    Invalid {
+        span: ByteSpan,
+    },
+    Incomplete {
+        span: ByteSpan,
+    },
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -709,14 +995,14 @@ fn scan_reader<R: Read>(
     source_length: u64,
     revision: String,
     options: &InputOptions,
-    budget: &mut Budget,
+    budget: &Budget,
     occurrences: &mut Vec<InputOccurrence>,
     diagnostics: &mut Vec<String>,
     scanned: &mut usize,
+    gaps: &mut Vec<crate::model::ReadGap>,
+    stopped: &mut bool,
 ) -> Result<()> {
     let mut scanner = Scanner::new(reader, budget);
-    let first_occurrence = occurrences.len();
-    let mut gaps = Vec::new();
     let Some((first, start)) = scanner.non_whitespace()? else {
         return Ok(());
     };
@@ -724,55 +1010,81 @@ fn scan_reader<R: Read>(
         b'[' => loop {
             let Some((byte, item_start)) = scanner.non_whitespace()? else {
                 diagnostics.push(format!("{locator}: incomplete top-level array"));
+                gaps.push(crate::model::ReadGap {
+                    span: ByteSpan {
+                        start: scanner.offset,
+                        end: source_length,
+                    },
+                    reason: "incomplete-top-level-array".to_owned(),
+                });
+                *stopped = true;
                 break;
             };
             if byte == b']' {
                 break;
             }
-            let frame = scanner.value(byte, item_start, options.record_bytes)?;
+            let (record_limit, record_reason) = retention_limit(options, budget);
+            let frame = scanner.value(byte, item_start, record_limit, record_reason)?;
             match frame {
                 Frame::Record { bytes, span } => {
                     *scanned += 1;
-                    scanner.budget.decoded_used = scanner
-                        .budget
-                        .decoded_used
-                        .saturating_add(bytes.len() as u64);
-                    if scanner.budget.decoded_used > scanner.budget.decoded_limit {
-                        diagnostics.push(format!("{locator}: decoded-byte budget exhausted"));
-                        break;
+                    if !budget.reserve_resident(bytes.len() as u64) {
+                        gaps.push(crate::model::ReadGap {
+                            span,
+                            reason: "resident-byte-bound".to_owned(),
+                        });
+                        diagnostics.push(format!(
+                            "{locator}: skipped record at {}..{} because the aggregate resident-byte budget is exhausted",
+                            span.start, span.end
+                        ));
+                    } else {
+                        parse_record(
+                            &bytes,
+                            span,
+                            locator,
+                            member,
+                            source_length,
+                            revision.clone(),
+                            options,
+                            occurrences,
+                            diagnostics,
+                            gaps,
+                        )?;
                     }
-                    parse_record(
-                        &bytes,
-                        span,
-                        locator,
-                        member,
-                        source_length,
-                        revision.clone(),
-                        options,
-                        occurrences,
-                        diagnostics,
-                    )?;
                 }
-                Frame::Oversized { span } => {
+                Frame::Oversized { span, reason } => {
                     *scanned += 1;
                     gaps.push(crate::model::ReadGap {
                         span,
-                        reason: "record-bytes-bound".to_owned(),
+                        reason: reason.to_owned(),
                     });
                     diagnostics.push(format!(
                         "{locator}: skipped oversized record at {}..{}",
                         span.start, span.end
                     ));
                 }
-                Frame::Invalid | Frame::Incomplete => {
+                Frame::Invalid { span } | Frame::Incomplete { span } => {
                     diagnostics.push(format!(
                         "{locator}: top-level array lost structural synchronization"
                     ));
+                    gaps.push(crate::model::ReadGap {
+                        span,
+                        reason: "structural-synchronization".to_owned(),
+                    });
+                    *stopped = true;
                     break;
                 }
             }
             let Some((separator, _)) = scanner.non_whitespace()? else {
                 diagnostics.push(format!("{locator}: incomplete top-level array"));
+                gaps.push(crate::model::ReadGap {
+                    span: ByteSpan {
+                        start: scanner.offset,
+                        end: source_length,
+                    },
+                    reason: "incomplete-top-level-array".to_owned(),
+                });
+                *stopped = true;
                 break;
             };
             if separator == b']' {
@@ -782,11 +1094,19 @@ fn scan_reader<R: Read>(
                 diagnostics.push(format!(
                     "{locator}: top-level array has an unexpected separator"
                 ));
+                gaps.push(crate::model::ReadGap {
+                    span: ByteSpan {
+                        start: scanner.offset.saturating_sub(1),
+                        end: scanner.offset,
+                    },
+                    reason: "unexpected-array-separator".to_owned(),
+                });
+                *stopped = true;
                 break;
             }
         },
         b'{' => {
-            scan_root_object(
+            let complete = scan_root_object(
                 &mut scanner,
                 start,
                 locator,
@@ -797,36 +1117,64 @@ fn scan_reader<R: Read>(
                 occurrences,
                 diagnostics,
                 scanned,
-                &mut gaps,
+                gaps,
+                stopped,
             )?;
-            while let Some((next, next_start)) = scanner.non_whitespace()? {
-                if next != b'{' {
-                    diagnostics.push(format!(
-                        "{locator}: unexpected trailing byte {next:?} at {next_start}"
-                    ));
-                    break;
+            if complete {
+                if scanner.offset >= source_length {
+                    return Ok(());
                 }
-                scan_root_object(
-                    &mut scanner,
-                    next_start,
-                    locator,
-                    member,
-                    source_length,
-                    &revision,
-                    options,
-                    occurrences,
-                    diagnostics,
-                    scanned,
-                    &mut gaps,
-                )?;
+                while let Some((next, next_start)) = scanner.non_whitespace()? {
+                    if next != b'{' {
+                        diagnostics.push(format!(
+                            "{locator}: unexpected trailing byte {next:?} at {next_start}"
+                        ));
+                        gaps.push(crate::model::ReadGap {
+                            span: ByteSpan {
+                                start: next_start,
+                                end: scanner.offset,
+                            },
+                            reason: "unexpected-trailing-byte".to_owned(),
+                        });
+                        *stopped = true;
+                        break;
+                    }
+                    if !scan_root_object(
+                        &mut scanner,
+                        next_start,
+                        locator,
+                        member,
+                        source_length,
+                        &revision,
+                        options,
+                        occurrences,
+                        diagnostics,
+                        scanned,
+                        gaps,
+                        stopped,
+                    )? {
+                        break;
+                    }
+                }
             }
         }
-        _ => diagnostics.push(format!("{locator}: root must be a JSON array or object")),
-    }
-    for occurrence in occurrences.iter_mut().skip(first_occurrence) {
-        occurrence.evidence.gaps.extend(gaps.iter().cloned());
+        _ => {
+            diagnostics.push(format!("{locator}: root must be a JSON array or object"));
+            gaps.push(crate::model::ReadGap {
+                span: ByteSpan {
+                    start,
+                    end: scanner.offset,
+                },
+                reason: "unsupported-root".to_owned(),
+            });
+            *stopped = true;
+        }
     }
     Ok(())
+}
+
+fn retention_limit(options: &InputOptions, _budget: &Budget) -> (u64, &'static str) {
+    (options.record_bytes, "record-bytes-bound")
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -842,38 +1190,80 @@ fn scan_root_object<R: Read>(
     diagnostics: &mut Vec<String>,
     scanned: &mut usize,
     gaps: &mut Vec<crate::model::ReadGap>,
-) -> Result<()> {
+    stopped: &mut bool,
+) -> Result<bool> {
     let mut fields = serde_json::Map::new();
     let mut has_conversations = false;
     let mut field_bytes = 0u64;
+    let mut field_gap = false;
     loop {
         let Some((first, key_start)) = scanner.non_whitespace()? else {
             diagnostics.push(format!("{locator}: incomplete top-level object"));
-            return Ok(());
+            gaps.push(crate::model::ReadGap {
+                span: ByteSpan {
+                    start: scanner.offset,
+                    end: source_length,
+                },
+                reason: "incomplete-top-level-object".to_owned(),
+            });
+            *stopped = true;
+            return Ok(false);
         };
         if first == b'}' {
             break;
         }
         if first != b'"' {
             diagnostics.push(format!("{locator}: top-level object expected a quoted key"));
-            return Ok(());
+            gaps.push(crate::model::ReadGap {
+                span: ByteSpan {
+                    start: key_start,
+                    end: scanner.offset,
+                },
+                reason: "invalid-top-level-object-key".to_owned(),
+            });
+            *stopped = true;
+            return Ok(false);
         }
         let key = scanner.string(key_start, 64 * 1024)?;
         let Some((colon, _)) = scanner.non_whitespace()? else {
             diagnostics.push(format!("{locator}: object key has no value"));
-            return Ok(());
+            gaps.push(crate::model::ReadGap {
+                span: ByteSpan {
+                    start: key_start,
+                    end: scanner.offset,
+                },
+                reason: "incomplete-object-member".to_owned(),
+            });
+            *stopped = true;
+            return Ok(false);
         };
         if colon != b':' {
             diagnostics.push(format!("{locator}: top-level object expected a colon"));
-            return Ok(());
+            gaps.push(crate::model::ReadGap {
+                span: ByteSpan {
+                    start: key_start,
+                    end: scanner.offset,
+                },
+                reason: "invalid-object-colon".to_owned(),
+            });
+            *stopped = true;
+            return Ok(false);
         }
         let Some((value_first, value_start)) = scanner.non_whitespace()? else {
             diagnostics.push(format!("{locator}: object key has no value"));
-            return Ok(());
+            gaps.push(crate::model::ReadGap {
+                span: ByteSpan {
+                    start: key_start,
+                    end: scanner.offset,
+                },
+                reason: "incomplete-object-member".to_owned(),
+            });
+            *stopped = true;
+            return Ok(false);
         };
         if key == "conversations" && value_first == b'[' {
             has_conversations = true;
-            scan_array_items(
+            if !scan_array_items(
                 scanner,
                 value_start,
                 locator,
@@ -885,56 +1275,86 @@ fn scan_root_object<R: Read>(
                 diagnostics,
                 scanned,
                 gaps,
-            )?;
+                stopped,
+            )? {
+                return Ok(false);
+            }
         } else {
+            let (record_limit, record_reason) = retention_limit(options, scanner.budget);
             let frame = if matches!(value_first, b'{' | b'[') {
-                scanner.value(value_first, value_start, options.record_bytes)?
+                scanner.value(value_first, value_start, record_limit, record_reason)?
             } else {
-                scanner.scalar(value_first, value_start, options.record_bytes)?
+                scanner.scalar(value_first, value_start, record_limit, record_reason)?
             };
             match frame {
-                Frame::Record { bytes, .. } => {
+                Frame::Record { bytes, span } => {
                     field_bytes = field_bytes.saturating_add(bytes.len() as u64);
                     if field_bytes <= options.record_bytes {
-                        scanner.budget.decoded_used = scanner
-                            .budget
-                            .decoded_used
-                            .saturating_add(bytes.len() as u64);
-                        if scanner.budget.decoded_used <= scanner.budget.decoded_limit {
+                        if scanner.budget.reserve_resident(bytes.len() as u64) {
                             if let Ok(value) = serde_json::from_slice(&bytes) {
                                 fields.insert(key, value);
                             } else {
                                 diagnostics.push(format!("{locator}: malformed object member"));
+                                field_gap = true;
+                                gaps.push(crate::model::ReadGap {
+                                    span,
+                                    reason: "malformed-object-member".to_owned(),
+                                });
                             }
                         } else {
-                            diagnostics.push(format!("{locator}: decoded-byte budget exhausted"));
-                            break;
+                            diagnostics.push(format!(
+                                "{locator}: aggregate resident-byte budget exhausted while retaining object member"
+                            ));
+                            field_gap = true;
+                            gaps.push(crate::model::ReadGap {
+                                span,
+                                reason: "resident-byte-bound".to_owned(),
+                            });
                         }
                     } else {
                         diagnostics.push(format!(
                             "{locator}: top-level object fields exceed --record-bytes"
                         ));
+                        field_gap = true;
+                        gaps.push(crate::model::ReadGap {
+                            span,
+                            reason: "record-bytes-bound".to_owned(),
+                        });
                     }
                 }
-                Frame::Oversized { span } => {
+                Frame::Oversized { span, reason } => {
+                    field_gap = true;
                     gaps.push(crate::model::ReadGap {
                         span,
-                        reason: "record-bytes-bound".to_owned(),
+                        reason: reason.to_owned(),
                     });
                     diagnostics.push(format!(
                         "{locator}: skipped oversized object member at {}..{}",
                         span.start, span.end
                     ));
                 }
-                Frame::Invalid | Frame::Incomplete => {
+                Frame::Invalid { span } | Frame::Incomplete { span } => {
                     diagnostics.push(format!("{locator}: incomplete top-level object member"));
-                    return Ok(());
+                    gaps.push(crate::model::ReadGap {
+                        span,
+                        reason: "structural-synchronization".to_owned(),
+                    });
+                    *stopped = true;
+                    return Ok(false);
                 }
             }
         }
         let Some((separator, _)) = scanner.non_whitespace()? else {
             diagnostics.push(format!("{locator}: incomplete top-level object"));
-            return Ok(());
+            gaps.push(crate::model::ReadGap {
+                span: ByteSpan {
+                    start: scanner.offset,
+                    end: source_length,
+                },
+                reason: "incomplete-top-level-object".to_owned(),
+            });
+            *stopped = true;
+            return Ok(false);
         };
         if separator == b'}' {
             break;
@@ -943,11 +1363,23 @@ fn scan_root_object<R: Read>(
             diagnostics.push(format!(
                 "{locator}: top-level object has an unexpected separator"
             ));
-            return Ok(());
+            gaps.push(crate::model::ReadGap {
+                span: ByteSpan {
+                    start: scanner.offset.saturating_sub(1),
+                    end: scanner.offset,
+                },
+                reason: "unexpected-object-separator".to_owned(),
+            });
+            *stopped = true;
+            return Ok(false);
         }
     }
     if has_conversations {
-        return Ok(());
+        return Ok(true);
+    }
+    if field_gap {
+        *scanned += 1;
+        return Ok(true);
     }
     let bytes = serde_json::to_vec(&Value::Object(fields))?;
     *scanned += 1;
@@ -956,7 +1388,27 @@ fn scan_root_object<R: Read>(
             "{locator}: top-level object exceeds --record-bytes at {}..{}",
             start, scanner.offset
         ));
-        return Ok(());
+        gaps.push(crate::model::ReadGap {
+            span: ByteSpan {
+                start,
+                end: scanner.offset,
+            },
+            reason: "record-bytes-bound".to_owned(),
+        });
+        return Ok(true);
+    }
+    if !scanner.budget.reserve_resident(bytes.len() as u64) {
+        diagnostics.push(format!(
+            "{locator}: skipped top-level object because the aggregate resident-byte budget is exhausted"
+        ));
+        gaps.push(crate::model::ReadGap {
+            span: ByteSpan {
+                start,
+                end: scanner.offset,
+            },
+            reason: "resident-byte-bound".to_owned(),
+        });
+        return Ok(true);
     }
     parse_record(
         &bytes,
@@ -971,7 +1423,9 @@ fn scan_root_object<R: Read>(
         options,
         occurrences,
         diagnostics,
-    )
+        gaps,
+    )?;
+    Ok(true)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -987,69 +1441,104 @@ fn scan_array_items<R: Read>(
     diagnostics: &mut Vec<String>,
     scanned: &mut usize,
     gaps: &mut Vec<crate::model::ReadGap>,
-) -> Result<()> {
+    stopped: &mut bool,
+) -> Result<bool> {
     loop {
         let Some((first, item_start)) = scanner.non_whitespace()? else {
             diagnostics.push(format!("{locator}: incomplete top-level array"));
-            return Ok(());
+            gaps.push(crate::model::ReadGap {
+                span: ByteSpan {
+                    start: scanner.offset,
+                    end: source_length,
+                },
+                reason: "incomplete-top-level-array".to_owned(),
+            });
+            *stopped = true;
+            return Ok(false);
         };
         if first == b']' {
-            return Ok(());
+            return Ok(true);
         }
-        let frame = scanner.value(first, item_start, options.record_bytes)?;
+        let (record_limit, record_reason) = retention_limit(options, scanner.budget);
+        let frame = scanner.value(first, item_start, record_limit, record_reason)?;
         match frame {
             Frame::Record { bytes, span } => {
                 *scanned += 1;
-                scanner.budget.decoded_used = scanner
-                    .budget
-                    .decoded_used
-                    .saturating_add(bytes.len() as u64);
-                if scanner.budget.decoded_used > scanner.budget.decoded_limit {
-                    diagnostics.push(format!("{locator}: decoded-byte budget exhausted"));
-                    return Ok(());
+                if !scanner.budget.reserve_resident(bytes.len() as u64) {
+                    gaps.push(crate::model::ReadGap {
+                        span,
+                        reason: "resident-byte-bound".to_owned(),
+                    });
+                    diagnostics.push(format!(
+                        "{locator}: skipped record at {}..{} because the aggregate resident-byte budget is exhausted",
+                        span.start, span.end
+                    ));
+                } else {
+                    parse_record(
+                        &bytes,
+                        span,
+                        locator,
+                        member,
+                        source_length,
+                        revision.to_owned(),
+                        options,
+                        occurrences,
+                        diagnostics,
+                        gaps,
+                    )?;
                 }
-                parse_record(
-                    &bytes,
-                    span,
-                    locator,
-                    member,
-                    source_length,
-                    revision.to_owned(),
-                    options,
-                    occurrences,
-                    diagnostics,
-                )?;
             }
-            Frame::Oversized { span } => {
+            Frame::Oversized { span, reason } => {
                 *scanned += 1;
                 gaps.push(crate::model::ReadGap {
                     span,
-                    reason: "record-bytes-bound".to_owned(),
+                    reason: reason.to_owned(),
                 });
                 diagnostics.push(format!(
                     "{locator}: skipped oversized record at {}..{}",
                     span.start, span.end
                 ));
             }
-            Frame::Invalid | Frame::Incomplete => {
+            Frame::Invalid { span } | Frame::Incomplete { span } => {
                 diagnostics.push(format!(
                     "{locator}: top-level array lost structural synchronization"
                 ));
-                return Ok(());
+                gaps.push(crate::model::ReadGap {
+                    span,
+                    reason: "structural-synchronization".to_owned(),
+                });
+                *stopped = true;
+                return Ok(false);
             }
         }
         let Some((separator, _)) = scanner.non_whitespace()? else {
             diagnostics.push(format!("{locator}: incomplete top-level array"));
-            return Ok(());
+            gaps.push(crate::model::ReadGap {
+                span: ByteSpan {
+                    start: scanner.offset,
+                    end: source_length,
+                },
+                reason: "incomplete-top-level-array".to_owned(),
+            });
+            *stopped = true;
+            return Ok(false);
         };
         if separator == b']' {
-            return Ok(());
+            return Ok(true);
         }
         if separator != b',' {
             diagnostics.push(format!(
                 "{locator}: top-level array has an unexpected separator"
             ));
-            return Ok(());
+            gaps.push(crate::model::ReadGap {
+                span: ByteSpan {
+                    start: scanner.offset.saturating_sub(1),
+                    end: scanner.offset,
+                },
+                reason: "unexpected-array-separator".to_owned(),
+            });
+            *stopped = true;
+            return Ok(false);
         }
     }
 }
@@ -1065,6 +1554,7 @@ fn parse_record(
     options: &InputOptions,
     occurrences: &mut Vec<InputOccurrence>,
     diagnostics: &mut Vec<String>,
+    gaps: &mut Vec<crate::model::ReadGap>,
 ) -> Result<()> {
     let value: Value = match serde_json::from_slice(bytes) {
         Ok(value) => value,
@@ -1073,6 +1563,10 @@ fn parse_record(
                 "{locator}: malformed record at {}..{}: {error}",
                 span.start, span.end
             ));
+            gaps.push(crate::model::ReadGap {
+                span,
+                reason: "malformed-record".to_owned(),
+            });
             return Ok(());
         }
     };
@@ -1090,18 +1584,23 @@ fn parse_record(
                 options,
                 occurrences,
                 diagnostics,
+                gaps,
             )?;
         }
         return Ok(());
     }
     let format = match options.format {
-        InputFormat::Auto => detect_format(&value),
+        InputFormat::Auto => detect_format(&value)?,
         declared => Some(declared),
     };
     let Some(format) = format else {
         diagnostics.push(format!(
             "{locator}: record shape is not a supported conversation export"
         ));
+        gaps.push(crate::model::ReadGap {
+            span,
+            reason: "unsupported-record-shape".to_owned(),
+        });
         return Ok(());
     };
     let ordinal = occurrences.len();
@@ -1118,6 +1617,10 @@ fn parse_record(
         mut notes,
     )) = normalize_value(&value, format, ordinal)?
     else {
+        gaps.push(crate::model::ReadGap {
+            span,
+            reason: "unsupported-record-shape".to_owned(),
+        });
         return Ok(());
     };
     let (source_origin, representation, identified_producer) = match format {
@@ -1250,6 +1753,7 @@ fn parse_record(
         format: format.name().to_owned(),
         member: member.unwrap_or("root").to_owned(),
         ordinal,
+        collection_gaps: 0,
     });
     Ok(())
 }
@@ -1499,6 +2003,7 @@ fn mapping_message(
             .and_then(Value::as_str)
             .or_else(|| message.get("turn_id").and_then(Value::as_str))
             .map(str::to_owned),
+        metadata: None,
         record_ref: Some(RecordRef {
             domain: "input-pending".to_owned(),
             revision: None,
@@ -1606,6 +2111,7 @@ fn normalize_chatgpt_exporter(value: &Value, ordinal: usize) -> Result<Normalize
         });
     let mut turns = Vec::new();
     let mut notes = Vec::new();
+    let mut recognized_message = false;
     for (index, message) in messages.iter().enumerate() {
         let role = role_from_str(
             message["role"]
@@ -1616,6 +2122,7 @@ fn normalize_chatgpt_exporter(value: &Value, ordinal: usize) -> Result<Normalize
             notes.push(format!("message {index} has an unknown role"));
             continue;
         };
+        recognized_message = true;
         let (parts, coverage) = message_parts(message);
         let text = content::project_text(&parts);
         if text.is_empty() && parts.is_empty() {
@@ -1636,6 +2143,7 @@ fn normalize_chatgpt_exporter(value: &Value, ordinal: usize) -> Result<Normalize
             ordinal: index,
             native_id: native_id.clone(),
             request_turn_id: message["turn_id"].as_str().map(str::to_owned),
+            metadata: None,
             record_ref: Some(RecordRef {
                 domain: "input-pending".to_owned(),
                 revision: None,
@@ -1651,6 +2159,9 @@ fn normalize_chatgpt_exporter(value: &Value, ordinal: usize) -> Result<Normalize
             coverage: Some(coverage),
             tool: None,
         });
+    }
+    if !recognized_message && !messages.is_empty() {
+        return Ok(None);
     }
     Ok(Some((
         id,
@@ -1682,24 +2193,9 @@ fn normalize_perplexity(value: &Value, _ordinal: usize) -> Result<NormalizedConv
     let metadata = SessionMetadata {
         collection: string_field(object.get("collection_uuid")),
         mode: string_field(object.get("mode")),
-        engine: string_field(object.get("engine_mode")).or_else(|| {
-            entries
-                .iter()
-                .find_map(|entry| entry.get("engine_mode").and_then(Value::as_str))
-                .map(str::to_owned)
-        }),
-        status: string_field(object.get("query_status")).or_else(|| {
-            entries
-                .iter()
-                .find_map(|entry| entry.get("query_status").and_then(Value::as_str))
-                .map(str::to_owned)
-        }),
-        label: string_field(object.get("label")).or_else(|| {
-            entries
-                .iter()
-                .find_map(|entry| entry.get("label").and_then(Value::as_str))
-                .map(str::to_owned)
-        }),
+        engine: string_field(object.get("engine_mode")),
+        status: string_field(object.get("query_status")),
+        label: string_field(object.get("label")),
     };
     let metadata = [
         metadata.collection.is_some(),
@@ -1721,6 +2217,7 @@ fn normalize_perplexity(value: &Value, _ordinal: usize) -> Result<NormalizedConv
             .get("entry_uuid")
             .and_then(Value::as_str)
             .map(str::to_owned);
+        let entry_metadata = perplexity_entry_metadata(entry, index);
         let created_at =
             timestamp_with_note(entry.get("created_at"), "entry.created_at", &mut notes);
         if let Some(query) = entry.get("query") {
@@ -1732,6 +2229,7 @@ fn normalize_perplexity(value: &Value, _ordinal: usize) -> Result<NormalizedConv
                 native_id.clone(),
                 created_at,
                 format!("/entries/{index}/query"),
+                entry_metadata.clone(),
             ));
         }
         if let Some(answer) = entry.get("answer") {
@@ -1743,6 +2241,7 @@ fn normalize_perplexity(value: &Value, _ordinal: usize) -> Result<NormalizedConv
                 native_id,
                 None,
                 format!("/entries/{index}/answer"),
+                entry_metadata,
             ));
         }
     }
@@ -1764,6 +2263,7 @@ fn normalize_perplexity(value: &Value, _ordinal: usize) -> Result<NormalizedConv
     )))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn perplexity_turn(
     value: &Value,
     role: Role,
@@ -1772,6 +2272,7 @@ fn perplexity_turn(
     native_id: Option<String>,
     ts: Option<DateTime<Utc>>,
     pointer: String,
+    metadata: Option<EntryMetadata>,
 ) -> Turn {
     let (parts, coverage) = match value {
         Value::String(text) => (
@@ -1824,6 +2325,7 @@ fn perplexity_turn(
         ordinal: 0,
         native_id: native_id.clone(),
         request_turn_id: None,
+        metadata,
         record_ref: Some(RecordRef {
             domain: "input-pending".to_owned(),
             revision: None,
@@ -1843,6 +2345,38 @@ fn perplexity_turn(
 
 fn string_field(value: Option<&Value>) -> Option<String> {
     value.and_then(Value::as_str).map(str::to_owned)
+}
+
+fn perplexity_entry_metadata(
+    entry: &serde_json::Map<String, Value>,
+    index: usize,
+) -> Option<EntryMetadata> {
+    let mut metadata = EntryMetadata {
+        engine: None,
+        status: None,
+        label: None,
+        source_fields: BTreeMap::new(),
+    };
+    for (normalized, native) in [
+        ("engine", "engine_mode"),
+        ("status", "query_status"),
+        ("label", "label"),
+    ] {
+        let Some(value) = entry.get(native).and_then(Value::as_str) else {
+            continue;
+        };
+        metadata
+            .source_fields
+            .insert(normalized.to_owned(), format!("/entries/{index}/{native}"));
+        match normalized {
+            "engine" => metadata.engine = Some(value.to_owned()),
+            "status" => metadata.status = Some(value.to_owned()),
+            "label" => metadata.label = Some(value.to_owned()),
+            _ => unreachable!(),
+        }
+    }
+    (metadata.engine.is_some() || metadata.status.is_some() || metadata.label.is_some())
+        .then_some(metadata)
 }
 
 fn timestamp_with_note(
@@ -1879,25 +2413,7 @@ fn message_parts(message: &Value) -> (Vec<ContentPart>, ContentCoverage) {
         .get("parts")
         .or_else(|| message.get("parts"))
         .unwrap_or(content_value);
-    if let Some(parts) = parts_value.as_array() {
-        if parts.iter().all(Value::is_string) {
-            let parts = parts
-                .iter()
-                .filter_map(Value::as_str)
-                .map(|text| content::text_part(text, "message.content.parts", "text"))
-                .collect::<Vec<_>>();
-            let count = parts.len();
-            return (
-                parts,
-                ContentCoverage {
-                    carrier: ContentCarrier::DirectPart,
-                    availability: ContentAvailability::RetainedBody,
-                    retained_parts: count,
-                    omitted_parts: 0,
-                    omitted_reason: None,
-                },
-            );
-        }
+    if parts_value.is_array() {
         return content::parts_from_array(parts_value, "message.content.parts");
     }
     (
@@ -1944,33 +2460,58 @@ fn timestamp_value(value: &Value) -> Option<DateTime<Utc>> {
         .map(|value| value.with_timezone(&Utc))
 }
 
-fn detect_format(value: &Value) -> Option<InputFormat> {
-    if value["conversations"].is_array()
-        || (value["context_uuid"].is_string() && value["entries"].is_array())
-    {
-        Some(InputFormat::Perplexity)
-    } else if value["mapping"].is_object() && value["conversation_id"].is_string() {
-        Some(InputFormat::Openai)
-    } else if value["mapping"].is_object()
-        && (value["id"].is_string() || value["current_node"].is_string())
-    {
-        Some(InputFormat::ChatgptExporter)
-    } else if value["mapping"].is_object() {
-        Some(InputFormat::Openai)
+fn detect_format(value: &Value) -> Result<Option<InputFormat>> {
+    let perplexity = value["conversations"].is_array()
+        || (value["context_uuid"].is_string() && value["entries"].is_array());
+    let mapping = value["mapping"].is_object();
+    let openai_mapping = mapping && value["conversation_id"].is_string();
+    let chatgpt_mapping = mapping
+        && !openai_mapping
+        && (value["id"].is_string() || value["current_node"].is_string());
+    if perplexity && mapping {
+        bail!("supplied record matches both Perplexity and mapping conversation shapes");
+    }
+    if openai_mapping {
+        Ok(Some(InputFormat::Openai))
+    } else if chatgpt_mapping {
+        Ok(Some(InputFormat::ChatgptExporter))
+    } else if mapping {
+        Ok(Some(InputFormat::Openai))
+    } else if perplexity {
+        Ok(Some(InputFormat::Perplexity))
     } else if value["messages"].is_array()
         || value["entries"].is_array()
         || value["prompt"].is_string()
+        || value["response"].is_string()
+        || value["answer"].is_string()
         || value.as_array().is_some()
     {
-        Some(InputFormat::ChatgptExporter)
+        Ok(Some(InputFormat::ChatgptExporter))
     } else {
-        None
+        Ok(None)
     }
 }
 
-fn collect_json_files(root: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
-    for entry in
-        fs::read_dir(root).with_context(|| format!("read input directory {}", root.display()))?
+fn discover_directory(root: &Path) -> Result<Vec<DirectoryMember>> {
+    let mut members = Vec::new();
+    let mut names = HashSet::new();
+    discover_directory_inner(root, root, 0, &mut members, &mut names)?;
+    members.sort_by(|left, right| left.name.cmp(&right.name));
+    Ok(members)
+}
+
+fn discover_directory_inner(
+    root: &Path,
+    directory: &Path,
+    depth: usize,
+    members: &mut Vec<DirectoryMember>,
+    names: &mut HashSet<String>,
+) -> Result<()> {
+    if depth > MAX_DEPTH {
+        bail!("supplied input directory exceeds the structural depth bound of {MAX_DEPTH}");
+    }
+    for entry in fs::read_dir(directory)
+        .with_context(|| format!("read input directory {}", directory.display()))?
     {
         let entry = entry?;
         let path = entry.path();
@@ -1982,19 +2523,154 @@ fn collect_json_files(root: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
             );
         }
         if kind.is_dir() {
-            collect_json_files(&path, files)?;
-        } else if kind.is_file()
-            && path
-                .extension()
-                .is_some_and(|extension| extension == "json" || extension == "jsonl")
-        {
-            files.push(path);
+            discover_directory_inner(root, &path, depth + 1, members, names)?;
+            continue;
         }
+        if !kind.is_file() {
+            bail!(
+                "supplied input directory contains a non-regular member: {}",
+                path.display()
+            );
+        }
+        let relative = path
+            .strip_prefix(root)
+            .with_context(|| format!("locate directory member {}", path.display()))?;
+        let relative = relative.to_str().ok_or_else(|| {
+            anyhow!(
+                "supplied input directory member is not valid UTF-8: {}",
+                path.display()
+            )
+        })?;
+        let name = normalize_member_name(relative)?;
+        if !names.insert(name.clone()) {
+            bail!("supplied input directory has duplicate normalized member {name}");
+        }
+        if members.len() >= MAX_MEMBERS {
+            bail!(
+                "supplied input directory has more than {MAX_MEMBERS} members; discovery stopped before reading bodies"
+            );
+        }
+        let metadata = fs::metadata(&path)?;
+        members.push(DirectoryMember {
+            name,
+            path,
+            size: metadata.len(),
+            revision: metadata_revision(&metadata),
+        });
     }
     Ok(())
 }
 
-fn is_zip_path(path: &Path) -> Result<bool> {
+#[allow(clippy::too_many_arguments)]
+fn scan_directory(
+    path: &Path,
+    options: &InputOptions,
+    budget: &Budget,
+    occurrences: &mut Vec<InputOccurrence>,
+    diagnostics: &mut Vec<String>,
+    associated_reports: &mut Vec<AssociatedReport>,
+    observation_parts: &mut Vec<String>,
+    collection_gaps: &mut Vec<crate::model::ReadGap>,
+    scanned: &mut usize,
+    scan_truncated: &mut bool,
+    discovery_incomplete: &mut bool,
+) -> Result<()> {
+    let members = discover_directory(path)?;
+    budget.add_members(members.len())?;
+    for member in &members {
+        if !budget.reserve_resident(
+            member.name.len() as u64 + member.path.to_string_lossy().len() as u64 + 64,
+        ) {
+            bail!("supplied input directory member index exceeds the resident-byte budget");
+        }
+        observation_parts.push(format!(
+            "file:{}:{}:{}:{}",
+            member.name,
+            member.path.display(),
+            member.size,
+            member.revision
+        ));
+    }
+    let manifest = members
+        .iter()
+        .find(|member| member.name == "export_manifest.json");
+    let Some(manifest_member) = manifest else {
+        for member in members {
+            if is_json_name(&member.name) {
+                scan_file(
+                    &member.path,
+                    None,
+                    options,
+                    budget,
+                    occurrences,
+                    diagnostics,
+                    scanned,
+                    scan_truncated,
+                    discovery_incomplete,
+                    collection_gaps,
+                )?;
+            } else if is_report_name(&member.name) {
+                scan_directory_report(
+                    &member,
+                    options,
+                    budget,
+                    associated_reports,
+                    diagnostics,
+                    collection_gaps,
+                    scan_truncated,
+                    discovery_incomplete,
+                    None,
+                )?;
+            }
+            if budget.exhausted() {
+                *scan_truncated = true;
+                diagnostics.push("input scan or decoded-byte budget exhausted".to_owned());
+                break;
+            }
+        }
+        return Ok(());
+    };
+
+    let manifest_value = read_directory_json(
+        manifest_member,
+        options,
+        budget,
+        diagnostics,
+        collection_gaps,
+    )?
+    .ok_or_else(|| anyhow!("native OpenAI export manifest could not be read"))?;
+    let selection = parse_manifest(&manifest_value)?;
+    scan_manifest_directory(
+        path,
+        &members,
+        &selection,
+        options,
+        budget,
+        occurrences,
+        diagnostics,
+        associated_reports,
+        collection_gaps,
+        scanned,
+        scan_truncated,
+        discovery_incomplete,
+    )
+}
+
+fn is_json_name(name: &str) -> bool {
+    Path::new(name)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension == "json" || extension == "jsonl")
+}
+
+fn is_report_name(name: &str) -> bool {
+    Path::new(name)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension == "dat")
+}
+
+fn is_zip_path(path: &Path, budget: &Budget) -> Result<bool> {
     if path
         .extension()
         .is_some_and(|extension| extension.eq_ignore_ascii_case("zip"))
@@ -2004,6 +2680,7 @@ fn is_zip_path(path: &Path) -> Result<bool> {
     let mut file = File::open(path).with_context(|| format!("open input {}", path.display()))?;
     let mut magic = [0; 4];
     let read = file.read(&mut magic)?;
+    budget.charge_scan(read as u64)?;
     Ok(
         read == 4
             && (magic == *b"PK\x03\x04" || magic == *b"PK\x05\x06" || magic == *b"PK\x07\x08"),
@@ -2015,18 +2692,24 @@ fn scan_file(
     path: &Path,
     member: Option<&str>,
     options: &InputOptions,
-    budget: &mut Budget,
+    budget: &Budget,
     occurrences: &mut Vec<InputOccurrence>,
     diagnostics: &mut Vec<String>,
     scanned: &mut usize,
     scan_truncated: &mut bool,
+    discovery_incomplete: &mut bool,
+    collection_gaps: &mut Vec<crate::model::ReadGap>,
 ) -> Result<()> {
     let file = File::open(path).with_context(|| format!("open input {}", path.display()))?;
     let metadata = file.metadata()?;
     let revision = metadata_revision(&metadata);
     let locator = path.display().to_string();
+    let first_occurrence = occurrences.len();
+    let diagnostic_start = diagnostics.len();
+    let mut gaps = Vec::new();
+    let mut stopped = false;
     let result = scan_reader(
-        file,
+        BudgetedSourceReader::new(file, budget),
         &locator,
         member,
         metadata.len(),
@@ -2036,141 +2719,1146 @@ fn scan_file(
         occurrences,
         diagnostics,
         scanned,
+        &mut gaps,
+        &mut stopped,
     );
     match result {
         Err(error) if budget.exhausted() => {
             *scan_truncated = true;
             diagnostics.push(format!("{locator}: input scan budget exhausted: {error}"));
-            Ok(())
+            gaps.push(crate::model::ReadGap {
+                span: ByteSpan {
+                    start: 0,
+                    end: metadata.len(),
+                },
+                reason: "input-budget".to_owned(),
+            });
         }
-        result => result,
+        Err(error) => return Err(error),
+        Ok(()) => {}
     }
+    if stopped {
+        *scan_truncated = true;
+    }
+    if !gaps.is_empty() || stopped {
+        *discovery_incomplete = true;
+    }
+    for gap in &gaps {
+        if !collection_gaps.contains(gap) {
+            collection_gaps.push(gap.clone());
+        }
+    }
+    for occurrence in occurrences.iter_mut().skip(first_occurrence) {
+        occurrence.evidence.gaps.extend(gaps.iter().cloned());
+        occurrence
+            .notes
+            .extend(diagnostics[diagnostic_start..].iter().cloned());
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn scan_directory_report(
+    member: &DirectoryMember,
+    options: &InputOptions,
+    budget: &Budget,
+    associated_reports: &mut Vec<AssociatedReport>,
+    diagnostics: &mut Vec<String>,
+    collection_gaps: &mut Vec<crate::model::ReadGap>,
+    scan_truncated: &mut bool,
+    discovery_incomplete: &mut bool,
+    association: Option<&LibraryAssociation>,
+) -> Result<()> {
+    let file = File::open(&member.path)
+        .with_context(|| format!("open associated report {}", member.path.display()))?;
+    let mut reader = BudgetedSourceReader::new(file, budget);
+    let report = read_associated_report(
+        &mut reader,
+        &member.name,
+        member.size,
+        options,
+        budget,
+        diagnostics,
+        association,
+        collection_gaps,
+    );
+    match report {
+        Ok(Some(report)) => associated_reports.push(report),
+        Ok(None) => {}
+        Err(error) if budget.exhausted() => {
+            *scan_truncated = true;
+            *discovery_incomplete = true;
+            diagnostics.push(format!(
+                "{}: input scan or decoded-byte budget exhausted: {error}",
+                member.name
+            ));
+            collection_gaps.push(crate::model::ReadGap {
+                span: ByteSpan {
+                    start: 0,
+                    end: member.size,
+                },
+                reason: format!("{}: input budget", member.name),
+            });
+        }
+        Err(error) => {
+            *discovery_incomplete = true;
+            diagnostics.push(format!("{}: unreadable member: {error:#}", member.name));
+            collection_gaps.push(crate::model::ReadGap {
+                span: ByteSpan {
+                    start: 0,
+                    end: member.size,
+                },
+                reason: format!("{}: unreadable member", member.name),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn read_directory_json(
+    member: &DirectoryMember,
+    options: &InputOptions,
+    budget: &Budget,
+    diagnostics: &mut Vec<String>,
+    collection_gaps: &mut Vec<crate::model::ReadGap>,
+) -> Result<Option<Value>> {
+    let file = File::open(&member.path)
+        .with_context(|| format!("open native export manifest {}", member.path.display()))?;
+    let mut reader = BudgetedSourceReader::new(file, budget);
+    let Some(bytes) = read_member_bytes(
+        &mut reader,
+        &member.name,
+        member.size,
+        options,
+        budget,
+        diagnostics,
+        collection_gaps,
+        MAX_MANIFEST_BYTES,
+        false,
+    )?
+    else {
+        return Ok(None);
+    };
+    match serde_json::from_slice(&bytes) {
+        Ok(value) => Ok(Some(value)),
+        Err(error) => bail!("native OpenAI export manifest is malformed: {error}"),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn scan_manifest_directory(
+    _root: &Path,
+    members: &[DirectoryMember],
+    selection: &ManifestSelection,
+    options: &InputOptions,
+    budget: &Budget,
+    occurrences: &mut Vec<InputOccurrence>,
+    diagnostics: &mut Vec<String>,
+    associated_reports: &mut Vec<AssociatedReport>,
+    collection_gaps: &mut Vec<crate::model::ReadGap>,
+    scanned: &mut usize,
+    scan_truncated: &mut bool,
+    discovery_incomplete: &mut bool,
+) -> Result<()> {
+    let mut associations = HashMap::new();
+    for name in &selection.library_metadata_members {
+        let Some(member) = members.iter().find(|member| member.name == *name) else {
+            manifest_gap(
+                name,
+                "declared library metadata member is missing",
+                diagnostics,
+                collection_gaps,
+                scan_truncated,
+                discovery_incomplete,
+            );
+            continue;
+        };
+        if !manifest_member_is_readable(member.size, selection, name, diagnostics, collection_gaps)
+        {
+            *discovery_incomplete = true;
+            *scan_truncated = true;
+            continue;
+        }
+        let Some(value) =
+            read_directory_value(member, options, budget, diagnostics, collection_gaps)?
+        else {
+            *discovery_incomplete = true;
+            *scan_truncated = true;
+            continue;
+        };
+        associations.extend(parse_library_associations(
+            &value,
+            name,
+            diagnostics,
+            collection_gaps,
+        ));
+    }
+    for name in &selection.conversation_members {
+        let Some(member) = members.iter().find(|member| member.name == *name) else {
+            manifest_gap(
+                name,
+                "declared conversation member is missing",
+                diagnostics,
+                collection_gaps,
+                scan_truncated,
+                discovery_incomplete,
+            );
+            continue;
+        };
+        if !manifest_member_is_readable(member.size, selection, name, diagnostics, collection_gaps)
+        {
+            *discovery_incomplete = true;
+            *scan_truncated = true;
+            continue;
+        }
+        scan_file(
+            &member.path,
+            Some(&member.name),
+            options,
+            budget,
+            occurrences,
+            diagnostics,
+            scanned,
+            scan_truncated,
+            discovery_incomplete,
+            collection_gaps,
+        )?;
+        if budget.exhausted() {
+            *scan_truncated = true;
+            break;
+        }
+    }
+    for name in &selection.library_content_members {
+        let Some(member) = members.iter().find(|member| member.name == *name) else {
+            manifest_gap(
+                name,
+                "declared associated-library member is missing",
+                diagnostics,
+                collection_gaps,
+                scan_truncated,
+                discovery_incomplete,
+            );
+            continue;
+        };
+        if !manifest_member_is_readable(member.size, selection, name, diagnostics, collection_gaps)
+        {
+            *discovery_incomplete = true;
+            *scan_truncated = true;
+            continue;
+        }
+        let association = library_association_for(&associations, name);
+        scan_directory_report(
+            member,
+            options,
+            budget,
+            associated_reports,
+            diagnostics,
+            collection_gaps,
+            scan_truncated,
+            discovery_incomplete,
+            association.as_ref(),
+        )?;
+        if budget.exhausted() {
+            *scan_truncated = true;
+            break;
+        }
+    }
+    Ok(())
+}
+
+fn read_directory_value(
+    member: &DirectoryMember,
+    options: &InputOptions,
+    budget: &Budget,
+    diagnostics: &mut Vec<String>,
+    collection_gaps: &mut Vec<crate::model::ReadGap>,
+) -> Result<Option<Value>> {
+    let file = File::open(&member.path)
+        .with_context(|| format!("open library metadata {}", member.path.display()))?;
+    let mut reader = BudgetedSourceReader::new(file, budget);
+    let Some(bytes) = read_member_bytes(
+        &mut reader,
+        &member.name,
+        member.size,
+        options,
+        budget,
+        diagnostics,
+        collection_gaps,
+        options.record_bytes,
+        false,
+    )?
+    else {
+        return Ok(None);
+    };
+    match serde_json::from_slice(&bytes) {
+        Ok(value) => Ok(Some(value)),
+        Err(error) => {
+            diagnostics.push(format!(
+                "{}: malformed library metadata: {error}",
+                member.name
+            ));
+            collection_gaps.push(crate::model::ReadGap {
+                span: ByteSpan {
+                    start: 0,
+                    end: member.size,
+                },
+                reason: format!("{}: malformed library metadata", member.name),
+            });
+            Ok(None)
+        }
+    }
+}
+
+fn manifest_member_is_readable(
+    actual_size: u64,
+    selection: &ManifestSelection,
+    name: &str,
+    diagnostics: &mut Vec<String>,
+    collection_gaps: &mut Vec<crate::model::ReadGap>,
+) -> bool {
+    let Some(expected_size) = selection.expected_sizes.get(name) else {
+        manifest_gap_without_flags(
+            name,
+            "declared member has no export_files size",
+            diagnostics,
+            collection_gaps,
+        );
+        return false;
+    };
+    if *expected_size != actual_size {
+        manifest_gap_without_flags(
+            name,
+            &format!("size mismatch: manifest={expected_size}, actual={actual_size}"),
+            diagnostics,
+            collection_gaps,
+        );
+        return false;
+    }
+    true
+}
+
+fn manifest_gap(
+    name: &str,
+    detail: &str,
+    diagnostics: &mut Vec<String>,
+    collection_gaps: &mut Vec<crate::model::ReadGap>,
+    scan_truncated: &mut bool,
+    discovery_incomplete: &mut bool,
+) {
+    manifest_gap_without_flags(name, detail, diagnostics, collection_gaps);
+    *scan_truncated = true;
+    *discovery_incomplete = true;
+}
+
+fn manifest_gap_without_flags(
+    name: &str,
+    detail: &str,
+    diagnostics: &mut Vec<String>,
+    collection_gaps: &mut Vec<crate::model::ReadGap>,
+) {
+    diagnostics.push(format!("manifest member {name}: {detail}"));
+    collection_gaps.push(crate::model::ReadGap {
+        span: ByteSpan { start: 0, end: 0 },
+        reason: format!("manifest member {name}: {detail}"),
+    });
+}
+
+#[allow(clippy::too_many_arguments)]
+fn read_member_bytes<R: Read>(
+    reader: &mut R,
+    name: &str,
+    size: u64,
+    options: &InputOptions,
+    budget: &Budget,
+    diagnostics: &mut Vec<String>,
+    gaps: &mut Vec<crate::model::ReadGap>,
+    maximum: u64,
+    verify_end: bool,
+) -> Result<Option<Vec<u8>>> {
+    if size > maximum {
+        diagnostics.push(format!(
+            "{name}: member size {size} is above the bounded read size {maximum}"
+        ));
+        gaps.push(crate::model::ReadGap {
+            span: ByteSpan {
+                start: 0,
+                end: size,
+            },
+            reason: "member-size-bound".to_owned(),
+        });
+        return Ok(None);
+    }
+    if size > options.record_bytes {
+        diagnostics.push(format!("{name}: member exceeds --record-bytes"));
+        gaps.push(crate::model::ReadGap {
+            span: ByteSpan {
+                start: 0,
+                end: size,
+            },
+            reason: "record-bytes-bound".to_owned(),
+        });
+        return Ok(None);
+    }
+    if size > budget.remaining_decoded() {
+        diagnostics.push(format!(
+            "{name}: member exceeds remaining decoded-byte budget"
+        ));
+        gaps.push(crate::model::ReadGap {
+            span: ByteSpan {
+                start: 0,
+                end: size,
+            },
+            reason: "decoded-byte-bound".to_owned(),
+        });
+        return Ok(None);
+    }
+    if !budget.reserve_resident(size) {
+        diagnostics.push(format!(
+            "{name}: member exceeds remaining resident-byte budget"
+        ));
+        gaps.push(crate::model::ReadGap {
+            span: ByteSpan {
+                start: 0,
+                end: size,
+            },
+            reason: "resident-byte-bound".to_owned(),
+        });
+        return Ok(None);
+    }
+    let mut bytes = Vec::with_capacity(size as usize);
+    let mut buffer = [0; 64 * 1024];
+    while bytes.len() < size as usize {
+        let remaining = size as usize - bytes.len();
+        let read_size = remaining.min(buffer.len());
+        let read = reader.read(&mut buffer[..read_size])?;
+        if read == 0 {
+            diagnostics.push(format!(
+                "{name}: member ended before its declared uncompressed size"
+            ));
+            gaps.push(crate::model::ReadGap {
+                span: ByteSpan {
+                    start: bytes.len() as u64,
+                    end: size,
+                },
+                reason: "member-ended-early".to_owned(),
+            });
+            return Ok(None);
+        }
+        budget.charge_decoded(read as u64)?;
+        bytes.extend_from_slice(&buffer[..read]);
+    }
+    if verify_end {
+        let mut end = [0; 1];
+        let read = reader.read(&mut end)?;
+        if read > 0 {
+            budget.charge_decoded(read as u64)?;
+        }
+    }
+    Ok(Some(bytes))
+}
+
+fn parse_manifest(value: &Value) -> Result<ManifestSelection> {
+    let object = value
+        .as_object()
+        .ok_or_else(|| anyhow!("native OpenAI export manifest must be an object"))?;
+    if object.get("version").and_then(Value::as_u64) != Some(1) {
+        bail!("native OpenAI export manifest version is unsupported");
+    }
+    let logical_files = object
+        .get("logical_files")
+        .and_then(Value::as_object)
+        .ok_or_else(|| anyhow!("native OpenAI export manifest has no logical_files object"))?;
+    let conversation_members = logical_members(logical_files, "conversations.json", true)?;
+    let library_metadata_members = logical_members(logical_files, "library_files.json", false)?;
+    let mut library_content_members = Vec::new();
+    for (logical_name, entry) in logical_files {
+        if logical_name.ends_with(".dat") {
+            library_content_members.extend(logical_entry_members(entry, logical_name)?);
+        }
+    }
+    let mut selected = HashSet::new();
+    for name in conversation_members
+        .iter()
+        .chain(library_metadata_members.iter())
+        .chain(library_content_members.iter())
+    {
+        if !selected.insert(name.clone()) {
+            bail!("native OpenAI export manifest selects duplicate member {name}");
+        }
+    }
+    let export_files = object
+        .get("export_files")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow!("native OpenAI export manifest has no export_files array"))?;
+    let mut expected_sizes = HashMap::new();
+    for entry in export_files {
+        let entry = entry.as_object().ok_or_else(|| {
+            anyhow!("native OpenAI export manifest has a non-object export_files entry")
+        })?;
+        let path = entry.get("path").and_then(Value::as_str).ok_or_else(|| {
+            anyhow!("native OpenAI export manifest export_files entry has no path")
+        })?;
+        let path = normalize_member_name(path)?;
+        let size = entry
+            .get("size_bytes")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| {
+                anyhow!("native OpenAI export manifest size_bytes is not an unsigned integer")
+            })?;
+        if expected_sizes.insert(path.clone(), size).is_some() {
+            bail!("native OpenAI export manifest has duplicate export_files path {path}");
+        }
+    }
+    Ok(ManifestSelection {
+        conversation_members,
+        library_metadata_members,
+        library_content_members,
+        expected_sizes,
+    })
+}
+
+fn logical_members(
+    logical_files: &serde_json::Map<String, Value>,
+    logical_name: &str,
+    required: bool,
+) -> Result<Vec<String>> {
+    let Some(entry) = logical_files.get(logical_name) else {
+        if required {
+            bail!("native OpenAI export manifest has no {logical_name} logical file");
+        }
+        return Ok(Vec::new());
+    };
+    logical_entry_members(entry, logical_name)
+}
+
+fn logical_entry_members(value: &Value, logical_name: &str) -> Result<Vec<String>> {
+    let object = value.as_object().ok_or_else(|| {
+        anyhow!("native OpenAI manifest logical file {logical_name} is not an object")
+    })?;
+    let files = object
+        .get("files")
+        .and_then(Value::as_array)
+        .ok_or_else(|| {
+            anyhow!("native OpenAI manifest logical file {logical_name} has no files array")
+        })?;
+    let mut names = Vec::with_capacity(files.len());
+    let mut seen = HashSet::new();
+    for file in files {
+        let file = file.as_str().ok_or_else(|| {
+            anyhow!("native OpenAI manifest logical file {logical_name} has a non-string member")
+        })?;
+        let file = normalize_member_name(file)?;
+        if !seen.insert(file.clone()) {
+            bail!("native OpenAI manifest logical file {logical_name} selects duplicate member {file}");
+        }
+        names.push(file);
+    }
+    let sharded = object.get("sharded").and_then(Value::as_bool);
+    if let Some(sharded) = sharded {
+        if sharded != (names.len() > 1) {
+            bail!("native OpenAI manifest logical file {logical_name} has inconsistent sharded metadata");
+        }
+    }
+    if let Some(shard_count) = object.get("shard_count").and_then(Value::as_u64) {
+        if shard_count != names.len() as u64 {
+            bail!(
+                "native OpenAI manifest logical file {logical_name} has inconsistent shard_count"
+            );
+        }
+    }
+    if names.is_empty() {
+        bail!("native OpenAI manifest logical file {logical_name} selects no members");
+    }
+    Ok(names)
+}
+
+fn normalize_member_name(name: &str) -> Result<String> {
+    if name.is_empty() || name.contains('\0') || name.contains('\\') || name.starts_with('/') {
+        bail!("supplied archive member name is not a relative path: {name:?}");
+    }
+    let mut components = Vec::new();
+    for component in name.split('/') {
+        match component {
+            "" | "." => {}
+            ".." => bail!("supplied archive member escapes its container: {name}"),
+            component => components.push(component),
+        }
+    }
+    if components.is_empty() {
+        bail!("supplied archive member name is empty after normalization");
+    }
+    let normalized = components.join("/");
+    if normalized.len() > MAX_MEMBER_NAME_BYTES {
+        bail!("supplied archive member name exceeds {MAX_MEMBER_NAME_BYTES} bytes");
+    }
+    Ok(normalized)
+}
+
+fn parse_library_associations(
+    value: &Value,
+    member: &str,
+    diagnostics: &mut Vec<String>,
+    gaps: &mut Vec<crate::model::ReadGap>,
+) -> HashMap<String, LibraryAssociation> {
+    let Some(entries) = value.as_array() else {
+        diagnostics.push(format!("{member}: library metadata is not an array"));
+        gaps.push(crate::model::ReadGap {
+            span: ByteSpan { start: 0, end: 0 },
+            reason: format!("{member}: library metadata is not an array"),
+        });
+        return HashMap::new();
+    };
+    let mut associations = HashMap::new();
+    for entry in entries {
+        let Some(entry) = entry.as_object() else {
+            diagnostics.push(format!(
+                "{member}: library metadata contains a non-object entry"
+            ));
+            gaps.push(crate::model::ReadGap {
+                span: ByteSpan { start: 0, end: 0 },
+                reason: format!("{member}: non-object library metadata entry"),
+            });
+            continue;
+        };
+        let file_id = entry
+            .get("file_id")
+            .and_then(Value::as_str)
+            .or_else(|| entry["id"]["id"].as_str())
+            .or_else(|| entry.get("artifact_id").and_then(Value::as_str))
+            .map(str::to_owned);
+        let Some(file_id) = file_id else {
+            continue;
+        };
+        let backing = [
+            "backing_conversation_id",
+            "initiating_conversation_id",
+            "origination_thread_id",
+        ]
+        .into_iter()
+        .find_map(|field| entry.get(field).and_then(Value::as_str))
+        .map(str::to_owned);
+        let origin_message = entry
+            .get("origination_message_id")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        let association = LibraryAssociation {
+            file_id: Some(file_id.clone()),
+            backing,
+            origin_message,
+        };
+        associations.insert(file_id, association);
+    }
+    associations
+}
+
+fn library_association_for(
+    associations: &HashMap<String, LibraryAssociation>,
+    member: &str,
+) -> Option<LibraryAssociation> {
+    let basename = member.rsplit('/').next().unwrap_or(member);
+    associations
+        .get(member)
+        .or_else(|| associations.get(basename))
+        .cloned()
 }
 
 #[allow(clippy::too_many_arguments)]
 fn scan_zip(
     path: &Path,
     options: &InputOptions,
-    budget: &mut Budget,
+    budget: &Budget,
     occurrences: &mut Vec<InputOccurrence>,
     diagnostics: &mut Vec<String>,
     associated_reports: &mut Vec<AssociatedReport>,
     observation_parts: &mut Vec<String>,
+    collection_gaps: &mut Vec<crate::model::ReadGap>,
     scanned: &mut usize,
     scan_truncated: &mut bool,
+    discovery_incomplete: &mut bool,
 ) -> Result<()> {
+    let metadata = fs::metadata(path)?;
+    let members = preflight_zip(path, budget)?;
+    budget.add_members(members.len())?;
+    for member in &members {
+        if !budget.reserve_resident(member.name.len() as u64 + 64) {
+            bail!("supplied ZIP member index exceeds the resident-byte budget");
+        }
+        observation_parts.push(format!(
+            "zip:{}:{}:{}:{}:{}:{}",
+            path.display(),
+            metadata_revision(&metadata),
+            member.name,
+            member.compressed_size,
+            member.size,
+            member.crc32
+        ));
+    }
+    let file =
+        File::open(path).with_context(|| format!("open input archive {}", path.display()))?;
+    let mut archive = ZipArchive::new(BudgetedSourceReader::new(file, budget))
+        .context("read supplied ZIP central directory")?;
+    if archive.len() != members.len() {
+        bail!("supplied ZIP central directory changed during inspection");
+    }
+    for (expected, actual) in members.iter().zip(archive.file_names()) {
+        if normalize_member_name(actual)? != expected.name {
+            bail!("supplied ZIP member names changed during inspection");
+        }
+    }
+    let manifest_index = members
+        .iter()
+        .find(|member| member.name == "export_manifest.json" && !member.is_dir)
+        .map(|member| member.index);
+    if let Some(index) = manifest_index {
+        let manifest_meta = &members[index];
+        let value = read_zip_value(
+            &mut archive,
+            manifest_meta,
+            options,
+            budget,
+            diagnostics,
+            collection_gaps,
+            MAX_MANIFEST_BYTES,
+        )?
+        .ok_or_else(|| anyhow!("native OpenAI export manifest could not be read"))?;
+        let selection = parse_manifest(&value)?;
+        scan_manifest_zip(
+            path,
+            &members,
+            &mut archive,
+            &selection,
+            options,
+            budget,
+            occurrences,
+            diagnostics,
+            associated_reports,
+            collection_gaps,
+            scanned,
+            scan_truncated,
+            discovery_incomplete,
+        )?;
+    } else {
+        scan_raw_zip(
+            path,
+            &members,
+            &mut archive,
+            options,
+            budget,
+            occurrences,
+            diagnostics,
+            associated_reports,
+            collection_gaps,
+            scanned,
+            scan_truncated,
+            discovery_incomplete,
+        )?;
+    }
+    Ok(())
+}
+
+fn preflight_zip(path: &Path, budget: &Budget) -> Result<Vec<ZipMemberMetadata>> {
     let file =
         File::open(path).with_context(|| format!("open input archive {}", path.display()))?;
     let metadata = file.metadata()?;
-    let mut archive = ZipArchive::new(file).context("read supplied ZIP central directory")?;
-    if archive.len() > MAX_MEMBERS {
+    let file_length = metadata.len();
+    let mut reader = BudgetedSourceReader::new(file, budget);
+    let tail_length = file_length.min(MAX_ZIP_EOCD_SEARCH_BYTES) as usize;
+    if tail_length < 22 {
+        bail!("supplied ZIP is too small to contain an end-of-central-directory record");
+    }
+    reader.seek(SeekFrom::Start(file_length - tail_length as u64))?;
+    let mut tail = vec![0; tail_length];
+    reader.read_exact(&mut tail)?;
+    let eocd_offset = (0..=tail_length - 22)
+        .rev()
+        .find_map(|offset| {
+            if &tail[offset..offset + 4] != b"PK\x05\x06" {
+                return None;
+            }
+            let comment_length = le_u16(&tail[offset + 20..offset + 22])? as usize;
+            (offset.checked_add(22)?.checked_add(comment_length)? == tail_length).then_some(offset)
+        })
+        .ok_or_else(|| anyhow!("supplied ZIP has no valid end-of-central-directory record"))?;
+    let eocd_absolute = file_length - tail_length as u64 + eocd_offset as u64;
+    let disk = le_u16(&tail[eocd_offset + 4..eocd_offset + 6]).unwrap_or_default();
+    let central_disk = le_u16(&tail[eocd_offset + 6..eocd_offset + 8]).unwrap_or_default();
+    let entries_on_disk = le_u16(&tail[eocd_offset + 8..eocd_offset + 10]).unwrap_or_default();
+    let entries_total = le_u16(&tail[eocd_offset + 10..eocd_offset + 12]).unwrap_or_default();
+    let central_size_32 = le_u32(&tail[eocd_offset + 12..eocd_offset + 16]).unwrap_or_default();
+    let central_offset_32 = le_u32(&tail[eocd_offset + 16..eocd_offset + 20]).unwrap_or_default();
+    if disk != 0 || central_disk != 0 || entries_on_disk != entries_total {
+        bail!("multi-disk supplied ZIP archives are unsupported");
+    }
+    let needs_zip64 =
+        entries_total == u16::MAX || central_size_32 == u32::MAX || central_offset_32 == u32::MAX;
+    let (entry_count, central_size, central_end) = if needs_zip64 {
+        if eocd_absolute < 20 {
+            bail!("supplied ZIP has ZIP64 markers without a ZIP64 locator");
+        }
+        reader.seek(SeekFrom::Start(eocd_absolute - 20))?;
+        let mut locator = [0; 20];
+        reader.read_exact(&mut locator)?;
+        if &locator[..4] != b"PK\x06\x07" {
+            bail!("supplied ZIP has ZIP64 markers without a ZIP64 locator");
+        }
+        let zip64_offset = le_u64(&locator[8..16])
+            .ok_or_else(|| anyhow!("supplied ZIP has an invalid ZIP64 locator"))?;
+        reader.seek(SeekFrom::Start(zip64_offset))?;
+        let mut header = [0; 56];
+        reader.read_exact(&mut header)?;
+        if &header[..4] != b"PK\x06\x06" {
+            bail!("supplied ZIP has an invalid ZIP64 end-of-central-directory record");
+        }
+        let record_size = le_u64(&header[4..12]).unwrap_or_default();
+        if record_size < 44 {
+            bail!("supplied ZIP has a short ZIP64 end-of-central-directory record");
+        }
+        let disk = le_u32(&header[16..20]).unwrap_or_default();
+        let central_disk = le_u32(&header[20..24]).unwrap_or_default();
+        let entries_on_disk = le_u64(&header[24..32]).unwrap_or_default();
+        let entries_total = le_u64(&header[32..40]).unwrap_or_default();
+        if disk != 0 || central_disk != 0 || entries_on_disk != entries_total {
+            bail!("multi-disk supplied ZIP archives are unsupported");
+        }
+        (
+            entries_total,
+            le_u64(&header[40..48]).unwrap_or_default(),
+            zip64_offset,
+        )
+    } else {
+        (entries_total as u64, central_size_32 as u64, eocd_absolute)
+    };
+    if entry_count > MAX_MEMBERS as u64 {
+        bail!("supplied ZIP has {entry_count} members, above the {MAX_MEMBERS} limit");
+    }
+    if central_size > MAX_ZIP_CENTRAL_DIRECTORY_BYTES {
         bail!(
-            "supplied ZIP has {} members, above the {MAX_MEMBERS} limit",
-            archive.len()
+            "supplied ZIP central directory is {central_size} bytes, above the {MAX_ZIP_CENTRAL_DIRECTORY_BYTES} limit"
         );
     }
+    let central_start = central_end
+        .checked_sub(central_size)
+        .ok_or_else(|| anyhow!("supplied ZIP central directory precedes the archive"))?;
+    if central_end > file_length || central_start > file_length {
+        bail!("supplied ZIP central directory lies outside the archive");
+    }
+    reader.seek(SeekFrom::Start(central_start))?;
+    let mut members = Vec::with_capacity(entry_count as usize);
     let mut names = HashSet::new();
-    for index in 0..archive.len() {
-        budget.members += 1;
-        if budget.members > MAX_MEMBERS {
-            *scan_truncated = true;
-            diagnostics.push("input member limit reached".to_owned());
-            break;
+    for index in 0..entry_count as usize {
+        let mut header = [0; 46];
+        reader.read_exact(&mut header)?;
+        if &header[..4] != b"PK\x01\x02" {
+            bail!("supplied ZIP central directory has an invalid member header");
         }
-        let mut member_file = archive.by_index(index)?;
-        let name = member_file.name().to_owned();
-        validate_member_name(&name)?;
+        let version_made = le_u16(&header[4..6]).unwrap_or_default();
+        let compressed_size = le_u32(&header[20..24]).unwrap_or_default();
+        let size = le_u32(&header[24..28]).unwrap_or_default();
+        let name_length = le_u16(&header[28..30]).unwrap_or_default() as usize;
+        let extra_length = le_u16(&header[30..32]).unwrap_or_default() as usize;
+        let comment_length = le_u16(&header[32..34]).unwrap_or_default() as usize;
+        let crc32 = le_u32(&header[16..20]).unwrap_or_default();
+        let external_attributes = le_u32(&header[38..42]).unwrap_or_default();
+        if name_length > MAX_MEMBER_NAME_BYTES {
+            bail!("supplied ZIP member name exceeds {MAX_MEMBER_NAME_BYTES} bytes");
+        }
+        if compressed_size == u32::MAX || size == u32::MAX {
+            bail!("ZIP64 member size metadata is unsupported by bounded input reading");
+        }
+        let mut raw_name = vec![0; name_length];
+        reader.read_exact(&mut raw_name)?;
+        let raw_name =
+            String::from_utf8(raw_name).context("supplied ZIP member name is not valid UTF-8")?;
+        let name = normalize_member_name(&raw_name)?;
         if !names.insert(name.clone()) {
             bail!("supplied ZIP has duplicate normalized member {name}");
         }
-        observation_parts.push(format!(
-            "zip:{}:{}:{}:{}:{}",
-            path.display(),
-            metadata_revision(&metadata),
-            name,
-            member_file.size(),
-            member_file.crc32()
-        ));
-        if member_file.is_dir() {
-            continue;
-        }
-        if member_file
-            .unix_mode()
-            .is_some_and(|mode| mode & 0o170000 == 0o120000)
-        {
+        discard_bytes(&mut reader, extra_length.saturating_add(comment_length))?;
+        let mode = if version_made >> 8 == 3 {
+            external_attributes >> 16
+        } else {
+            0
+        };
+        let is_symlink = mode & 0o170000 == 0o120000;
+        if is_symlink {
             bail!("supplied ZIP contains symlink member {name}");
         }
-        let extension = Path::new(&name)
-            .extension()
-            .and_then(|extension| extension.to_str());
-        let is_json =
-            extension.is_some_and(|extension| extension == "json" || extension == "jsonl");
-        let is_report = extension.is_some_and(|extension| extension == "dat");
-        if !is_json && !is_report {
-            continue;
+        let is_dir = raw_name.ends_with('/') || mode & 0o170000 == 0o040000;
+        let entry_end = reader.stream_position()?;
+        if entry_end > central_end {
+            bail!("supplied ZIP central directory member exceeds its declared size");
         }
-        let member_size = member_file.size();
-        if member_size > options.decoded_bytes {
-            diagnostics.push(format!("{name}: member exceeds decoded-byte budget"));
-            continue;
-        }
-        if is_report {
-            *scanned += 1;
-            let report = read_associated_report(
-                &mut member_file,
-                &name,
-                member_size,
-                options,
-                budget,
-                diagnostics,
-            );
-            match report {
-                Ok(Some(report)) => associated_reports.push(report),
-                Ok(None) => {}
-                Err(error) if budget.exhausted() => {
-                    *scan_truncated = true;
-                    diagnostics.push(format!("{name}: input scan budget exhausted: {error}"));
-                    break;
-                }
-                Err(error) => diagnostics.push(format!("{name}: unreadable member: {error:#}")),
-            }
-            if budget.exhausted() {
-                *scan_truncated = true;
-                break;
-            }
-            continue;
-        }
-        let revision = format!(
-            "{}:member:{}:{}:{}",
-            metadata_revision(&metadata),
+        members.push(ZipMemberMetadata {
             name,
-            member_size,
-            member_file.crc32()
-        );
-        let locator = path.display().to_string();
-        let result = scan_reader(
-            &mut member_file,
-            &locator,
-            Some(&name),
-            member_size,
-            revision,
+            index,
+            compressed_size: compressed_size as u64,
+            size: size as u64,
+            crc32,
+            is_dir,
+            is_symlink,
+        });
+    }
+    if reader.stream_position()? != central_end {
+        bail!("supplied ZIP central directory size does not match its member headers");
+    }
+    Ok(members)
+}
+
+fn discard_bytes<R: Read>(reader: &mut R, mut bytes: usize) -> io::Result<()> {
+    let mut buffer = [0; 64 * 1024];
+    while bytes > 0 {
+        let read_size = bytes.min(buffer.len());
+        let read = reader.read(&mut buffer[..read_size])?;
+        if read == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "ZIP central directory ended before its declared member fields",
+            ));
+        }
+        bytes -= read;
+    }
+    Ok(())
+}
+
+fn le_u16(value: &[u8]) -> Option<u16> {
+    (value.len() >= 2).then(|| u16::from_le_bytes([value[0], value[1]]))
+}
+
+fn le_u32(value: &[u8]) -> Option<u32> {
+    (value.len() >= 4).then(|| u32::from_le_bytes([value[0], value[1], value[2], value[3]]))
+}
+
+fn le_u64(value: &[u8]) -> Option<u64> {
+    (value.len() >= 8).then(|| {
+        u64::from_le_bytes([
+            value[0], value[1], value[2], value[3], value[4], value[5], value[6], value[7],
+        ])
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn scan_manifest_zip<R: Read + Seek>(
+    path: &Path,
+    members: &[ZipMemberMetadata],
+    archive: &mut ZipArchive<BudgetedSourceReader<'_, R>>,
+    selection: &ManifestSelection,
+    options: &InputOptions,
+    budget: &Budget,
+    occurrences: &mut Vec<InputOccurrence>,
+    diagnostics: &mut Vec<String>,
+    associated_reports: &mut Vec<AssociatedReport>,
+    collection_gaps: &mut Vec<crate::model::ReadGap>,
+    scanned: &mut usize,
+    scan_truncated: &mut bool,
+    discovery_incomplete: &mut bool,
+) -> Result<()> {
+    let mut associations = HashMap::new();
+    for name in &selection.library_metadata_members {
+        let Some(member) = members.iter().find(|member| member.name == *name) else {
+            manifest_gap(
+                name,
+                "declared library metadata member is missing",
+                diagnostics,
+                collection_gaps,
+                scan_truncated,
+                discovery_incomplete,
+            );
+            continue;
+        };
+        if member.is_dir || member.is_symlink {
+            manifest_gap(
+                name,
+                "declared library metadata member is not a regular file",
+                diagnostics,
+                collection_gaps,
+                scan_truncated,
+                discovery_incomplete,
+            );
+            continue;
+        }
+        if !manifest_member_is_readable(member.size, selection, name, diagnostics, collection_gaps)
+        {
+            *discovery_incomplete = true;
+            *scan_truncated = true;
+            continue;
+        }
+        let value = match read_zip_value(
+            archive,
+            member,
+            options,
+            budget,
+            diagnostics,
+            collection_gaps,
+            options.record_bytes,
+        ) {
+            Ok(Some(value)) => value,
+            Ok(None) => {
+                *discovery_incomplete = true;
+                *scan_truncated = true;
+                continue;
+            }
+            Err(error) => {
+                manifest_gap(
+                    name,
+                    &format!("library metadata is unreadable: {error:#}"),
+                    diagnostics,
+                    collection_gaps,
+                    scan_truncated,
+                    discovery_incomplete,
+                );
+                continue;
+            }
+        };
+        associations.extend(parse_library_associations(
+            &value,
+            name,
+            diagnostics,
+            collection_gaps,
+        ));
+    }
+    for name in &selection.conversation_members {
+        let Some(member) = members.iter().find(|member| member.name == *name) else {
+            manifest_gap(
+                name,
+                "declared conversation member is missing",
+                diagnostics,
+                collection_gaps,
+                scan_truncated,
+                discovery_incomplete,
+            );
+            continue;
+        };
+        if member.is_dir || member.is_symlink {
+            manifest_gap(
+                name,
+                "declared conversation member is not a regular file",
+                diagnostics,
+                collection_gaps,
+                scan_truncated,
+                discovery_incomplete,
+            );
+            continue;
+        }
+        if !manifest_member_is_readable(member.size, selection, name, diagnostics, collection_gaps)
+        {
+            *discovery_incomplete = true;
+            *scan_truncated = true;
+            continue;
+        }
+        scan_zip_conversation(
+            path,
+            member,
+            archive,
             options,
             budget,
             occurrences,
             diagnostics,
             scanned,
-        );
-        match result {
-            Ok(()) => {}
-            Err(error) if budget.exhausted() => {
-                *scan_truncated = true;
-                diagnostics.push(format!("{name}: input scan budget exhausted: {error}"));
-                break;
-            }
-            Err(error) => {
-                diagnostics.push(format!("{name}: unreadable member: {error:#}"));
-                continue;
-            }
+            scan_truncated,
+            discovery_incomplete,
+            collection_gaps,
+        )?;
+        if budget.exhausted() {
+            *scan_truncated = true;
+            break;
+        }
+    }
+    for name in &selection.library_content_members {
+        let Some(member) = members.iter().find(|member| member.name == *name) else {
+            manifest_gap(
+                name,
+                "declared associated-library member is missing",
+                diagnostics,
+                collection_gaps,
+                scan_truncated,
+                discovery_incomplete,
+            );
+            continue;
+        };
+        if member.is_dir || member.is_symlink {
+            manifest_gap(
+                name,
+                "declared associated-library member is not a regular file",
+                diagnostics,
+                collection_gaps,
+                scan_truncated,
+                discovery_incomplete,
+            );
+            continue;
+        }
+        if !manifest_member_is_readable(member.size, selection, name, diagnostics, collection_gaps)
+        {
+            *discovery_incomplete = true;
+            *scan_truncated = true;
+            continue;
+        }
+        let association = library_association_for(&associations, name);
+        scan_zip_report(
+            member,
+            archive,
+            options,
+            budget,
+            associated_reports,
+            diagnostics,
+            collection_gaps,
+            scan_truncated,
+            discovery_incomplete,
+            association.as_ref(),
+        )?;
+        if budget.exhausted() {
+            *scan_truncated = true;
+            break;
+        }
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn scan_raw_zip<R: Read + Seek>(
+    path: &Path,
+    members: &[ZipMemberMetadata],
+    archive: &mut ZipArchive<BudgetedSourceReader<'_, R>>,
+    options: &InputOptions,
+    budget: &Budget,
+    occurrences: &mut Vec<InputOccurrence>,
+    diagnostics: &mut Vec<String>,
+    associated_reports: &mut Vec<AssociatedReport>,
+    collection_gaps: &mut Vec<crate::model::ReadGap>,
+    scanned: &mut usize,
+    scan_truncated: &mut bool,
+    discovery_incomplete: &mut bool,
+) -> Result<()> {
+    for member in members {
+        if member.is_dir || member.is_symlink {
+            continue;
+        }
+        if is_json_name(&member.name) {
+            scan_zip_conversation(
+                path,
+                member,
+                archive,
+                options,
+                budget,
+                occurrences,
+                diagnostics,
+                scanned,
+                scan_truncated,
+                discovery_incomplete,
+                collection_gaps,
+            )?;
+        } else if is_report_name(&member.name) {
+            scan_zip_report(
+                member,
+                archive,
+                options,
+                budget,
+                associated_reports,
+                diagnostics,
+                collection_gaps,
+                scan_truncated,
+                discovery_incomplete,
+                None,
+            )?;
         }
         if budget.exhausted() {
             *scan_truncated = true;
@@ -2180,62 +3868,281 @@ fn scan_zip(
     Ok(())
 }
 
-fn validate_member_name(name: &str) -> Result<()> {
-    let path = Path::new(name);
-    if path.is_absolute()
-        || path
-            .components()
-            .any(|component| matches!(component, Component::ParentDir))
-    {
-        bail!("supplied ZIP member escapes its container: {name}");
+#[allow(clippy::too_many_arguments)]
+fn scan_zip_conversation<R: Read + Seek>(
+    path: &Path,
+    member: &ZipMemberMetadata,
+    archive: &mut ZipArchive<BudgetedSourceReader<'_, R>>,
+    options: &InputOptions,
+    budget: &Budget,
+    occurrences: &mut Vec<InputOccurrence>,
+    diagnostics: &mut Vec<String>,
+    scanned: &mut usize,
+    scan_truncated: &mut bool,
+    discovery_incomplete: &mut bool,
+    collection_gaps: &mut Vec<crate::model::ReadGap>,
+) -> Result<()> {
+    let first_occurrence = occurrences.len();
+    let diagnostic_start = diagnostics.len();
+    let mut gaps = Vec::new();
+    let mut stopped = false;
+    let revision = format!(
+        "zip-member:{}:{}:{}:{}",
+        member.name, member.size, member.compressed_size, member.crc32
+    );
+    let mut member_file = match archive.by_index(member.index) {
+        Ok(member_file) => member_file,
+        Err(error) => {
+            diagnostics.push(format!("{}: unreadable member: {error:#}", member.name));
+            let gap = crate::model::ReadGap {
+                span: ByteSpan {
+                    start: 0,
+                    end: member.size,
+                },
+                reason: format!("{}: unreadable member", member.name),
+            };
+            if !collection_gaps.contains(&gap) {
+                collection_gaps.push(gap);
+            }
+            *discovery_incomplete = true;
+            *scan_truncated = true;
+            return Ok(());
+        }
+    };
+    let result = scan_reader(
+        &mut member_file,
+        &path.display().to_string(),
+        Some(&member.name),
+        member.size,
+        revision,
+        options,
+        budget,
+        occurrences,
+        diagnostics,
+        scanned,
+        &mut gaps,
+        &mut stopped,
+    );
+    if let Err(error) = result {
+        if budget.exhausted() {
+            *scan_truncated = true;
+            diagnostics.push(format!(
+                "{}: input byte budget exhausted: {error}",
+                member.name
+            ));
+            gaps.push(crate::model::ReadGap {
+                span: ByteSpan {
+                    start: 0,
+                    end: member.size,
+                },
+                reason: "input-budget".to_owned(),
+            });
+        } else {
+            diagnostics.push(format!("{}: unreadable member: {error:#}", member.name));
+            gaps.push(crate::model::ReadGap {
+                span: ByteSpan {
+                    start: 0,
+                    end: member.size,
+                },
+                reason: format!("{}: unreadable member", member.name),
+            });
+        }
+    }
+    if let Err(error) = drain_zip_member(&mut member_file, budget) {
+        diagnostics.push(format!("{}: unreadable member tail: {error}", member.name));
+        gaps.push(crate::model::ReadGap {
+            span: ByteSpan {
+                start: 0,
+                end: member.size,
+            },
+            reason: format!("{}: corrupt member", member.name),
+        });
+    }
+    if stopped {
+        *scan_truncated = true;
+    }
+    if !gaps.is_empty() || stopped {
+        *discovery_incomplete = true;
+    }
+    for gap in &gaps {
+        if !collection_gaps.contains(gap) {
+            collection_gaps.push(gap.clone());
+        }
+    }
+    for occurrence in occurrences.iter_mut().skip(first_occurrence) {
+        occurrence.evidence.gaps.extend(gaps.iter().cloned());
+        occurrence
+            .notes
+            .extend(diagnostics[diagnostic_start..].iter().cloned());
     }
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
+fn scan_zip_report<R: Read + Seek>(
+    member: &ZipMemberMetadata,
+    archive: &mut ZipArchive<BudgetedSourceReader<'_, R>>,
+    options: &InputOptions,
+    budget: &Budget,
+    associated_reports: &mut Vec<AssociatedReport>,
+    diagnostics: &mut Vec<String>,
+    collection_gaps: &mut Vec<crate::model::ReadGap>,
+    scan_truncated: &mut bool,
+    discovery_incomplete: &mut bool,
+    association: Option<&LibraryAssociation>,
+) -> Result<()> {
+    let mut member_file = match archive.by_index(member.index) {
+        Ok(member_file) => member_file,
+        Err(error) => {
+            *discovery_incomplete = true;
+            *scan_truncated = true;
+            diagnostics.push(format!("{}: unreadable member: {error:#}", member.name));
+            collection_gaps.push(crate::model::ReadGap {
+                span: ByteSpan {
+                    start: 0,
+                    end: member.size,
+                },
+                reason: format!("{}: unreadable member", member.name),
+            });
+            return Ok(());
+        }
+    };
+    let report = read_associated_report(
+        &mut member_file,
+        &member.name,
+        member.size,
+        options,
+        budget,
+        diagnostics,
+        association,
+        collection_gaps,
+    );
+    match report {
+        Ok(Some(report)) => associated_reports.push(report),
+        Ok(None) => {}
+        Err(error) if budget.exhausted() => {
+            *scan_truncated = true;
+            *discovery_incomplete = true;
+            diagnostics.push(format!(
+                "{}: input byte budget exhausted: {error}",
+                member.name
+            ));
+            collection_gaps.push(crate::model::ReadGap {
+                span: ByteSpan {
+                    start: 0,
+                    end: member.size,
+                },
+                reason: format!("{}: input budget", member.name),
+            });
+        }
+        Err(error) => {
+            *discovery_incomplete = true;
+            diagnostics.push(format!("{}: unreadable member: {error:#}", member.name));
+            collection_gaps.push(crate::model::ReadGap {
+                span: ByteSpan {
+                    start: 0,
+                    end: member.size,
+                },
+                reason: format!("{}: unreadable member", member.name),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn read_zip_value<R: Read + Seek>(
+    archive: &mut ZipArchive<BudgetedSourceReader<'_, R>>,
+    member: &ZipMemberMetadata,
+    options: &InputOptions,
+    budget: &Budget,
+    diagnostics: &mut Vec<String>,
+    gaps: &mut Vec<crate::model::ReadGap>,
+    maximum: u64,
+) -> Result<Option<Value>> {
+    let mut member_file = archive
+        .by_index(member.index)
+        .with_context(|| format!("open ZIP member {}", member.name))?;
+    let Some(bytes) = read_member_bytes(
+        &mut member_file,
+        &member.name,
+        member.size,
+        options,
+        budget,
+        diagnostics,
+        gaps,
+        maximum,
+        true,
+    )?
+    else {
+        return Ok(None);
+    };
+    match serde_json::from_slice(&bytes) {
+        Ok(value) => Ok(Some(value)),
+        Err(error) => {
+            diagnostics.push(format!("{}: malformed JSON member: {error}", member.name));
+            gaps.push(crate::model::ReadGap {
+                span: ByteSpan {
+                    start: 0,
+                    end: member.size,
+                },
+                reason: format!("{}: malformed JSON member", member.name),
+            });
+            Ok(None)
+        }
+    }
+}
+
+fn drain_zip_member<R: Read>(reader: &mut R, budget: &Budget) -> io::Result<()> {
+    let mut buffer = [0; 64 * 1024];
+    loop {
+        let read = reader.read(&mut buffer)?;
+        if read == 0 {
+            return Ok(());
+        }
+        budget.charge_decoded(read as u64)?;
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn read_associated_report<R: Read>(
     reader: &mut R,
     member: &str,
     member_size: u64,
     options: &InputOptions,
-    budget: &mut Budget,
+    budget: &Budget,
     diagnostics: &mut Vec<String>,
+    association: Option<&LibraryAssociation>,
+    gaps: &mut Vec<crate::model::ReadGap>,
 ) -> Result<Option<AssociatedReport>> {
-    if member_size > options.record_bytes {
-        diagnostics.push(format!(
-            "{member}: skipped associated report above --record-bytes"
-        ));
+    let Some(bytes) = read_member_bytes(
+        reader,
+        member,
+        member_size,
+        options,
+        budget,
+        diagnostics,
+        gaps,
+        options.record_bytes,
+        true,
+    )?
+    else {
         return Ok(None);
-    }
-    let allowed_scan = options.scan_bytes.saturating_sub(budget.scan_used);
-    let allowed_decoded = options.decoded_bytes.saturating_sub(budget.decoded_used);
-    let allowed = member_size.min(allowed_scan).min(allowed_decoded);
-    if allowed < member_size {
-        diagnostics.push(format!(
-            "{member}: associated report stopped at the input byte budget"
-        ));
-        budget.scan_used = budget.scan_used.saturating_add(allowed);
-        budget.decoded_used = budget.decoded_used.saturating_add(allowed);
-        return Ok(None);
-    }
-    let mut bytes = Vec::with_capacity(member_size as usize);
-    let mut buffer = [0; 64 * 1024];
-    while bytes.len() < member_size as usize {
-        let remaining = member_size as usize - bytes.len();
-        let read_size = remaining.min(buffer.len());
-        let read = reader.read(&mut buffer[..read_size])?;
-        if read == 0 {
-            diagnostics.push(format!(
-                "{member}: associated report ended before its header size"
-            ));
-            return Ok(None);
-        }
-        budget.scan_used = budget.scan_used.saturating_add(read as u64);
-        budget.decoded_used = budget.decoded_used.saturating_add(read as u64);
-        bytes.extend_from_slice(&buffer[..read]);
-    }
+    };
     let value: Value = match serde_json::from_slice(&bytes) {
         Ok(value) => value,
-        Err(_) => return Ok(None),
+        Err(error) => {
+            if bytes.iter().find(|byte| !byte.is_ascii_whitespace()) == Some(&b'{') {
+                diagnostics.push(format!("{member}: malformed report JSON: {error}"));
+                gaps.push(crate::model::ReadGap {
+                    span: ByteSpan {
+                        start: 0,
+                        end: member_size,
+                    },
+                    reason: format!("{member}: malformed report JSON"),
+                });
+            }
+            return Ok(None);
+        }
     };
     let Some(object) = value.as_object() else {
         return Ok(None);
@@ -2249,11 +4156,14 @@ fn read_associated_report<R: Read>(
     let backing = object
         .get("backing_conversation_id")
         .and_then(Value::as_str)
-        .map(str::to_owned);
+        .map(str::to_owned)
+        .or_else(|| association.and_then(|association| association.backing.clone()));
+    let origin_message = association.and_then(|association| association.origin_message.clone());
     let identity = object
         .get("widget_session_id")
         .and_then(Value::as_str)
-        .map(str::to_owned);
+        .map(str::to_owned)
+        .or_else(|| association.and_then(|association| association.file_id.clone()));
     let author = report_message
         .and_then(|message| message["author"]["role"].as_str())
         .map(str::to_owned);
@@ -2340,6 +4250,7 @@ fn read_associated_report<R: Read>(
     Ok(Some(AssociatedReport {
         member: member.to_owned(),
         backing,
+        origin_message,
         reference: reference.clone(),
         part: ContentPart::StructuredArtifact {
             descriptor: content::bounded_shape(&value),
@@ -2734,40 +4645,67 @@ fn sum_citation_source_candidates<'a>(
 
 fn attach_associated_reports(
     occurrences: &mut [InputOccurrence],
-    reports: &[AssociatedReport],
+    reports: &mut [AssociatedReport],
     diagnostics: &mut Vec<String>,
 ) {
     for report in reports {
-        let Some(backing) = report.backing.as_deref() else {
-            diagnostics.push(format!(
-                "associated report {} has no backing conversation and remains unjoined",
-                report.member
-            ));
-            continue;
-        };
-        let matching = occurrences
+        let backing = report.backing.as_deref();
+        let origin_message = report.origin_message.as_deref();
+        let matching_indices = occurrences
             .iter()
-            .filter(|occurrence| occurrence.session.id == backing)
-            .count();
+            .enumerate()
+            .filter_map(|(index, occurrence)| {
+                let by_backing = backing.is_some_and(|backing| occurrence.session.id == backing);
+                let by_message = origin_message.is_some_and(|message| {
+                    occurrence
+                        .turns
+                        .iter()
+                        .any(|turn| turn.native_id.as_deref() == Some(message))
+                        || occurrence.graph.as_ref().is_some_and(|graph| {
+                            graph.nodes.iter().any(|node| {
+                                node.message
+                                    .as_ref()
+                                    .and_then(|turn| turn.native_id.as_deref())
+                                    == Some(message)
+                            })
+                        })
+                });
+                (by_backing || by_message).then_some(index)
+            })
+            .collect::<Vec<_>>();
+        let matching = matching_indices.len();
         if matching == 0 {
             diagnostics.push(format!(
-                "associated report {} names an unreached backing conversation",
+                "associated report {} names an unreached library association",
                 report.member
             ));
             continue;
         }
         if matching > 1 {
+            let association = backing.or(origin_message).unwrap_or("unknown");
             diagnostics.push(format!(
-                "associated report {} names an ambiguous backing conversation {backing} and remains unjoined",
-                report.member
+                "associated report {} names an ambiguous library association {association} and remains unjoined",
+                report.member,
             ));
             continue;
         }
         let occurrence = occurrences
-            .iter_mut()
-            .find(|occurrence| occurrence.session.id == backing)
+            .get_mut(matching_indices[0])
             .expect("matching associated report occurrence");
+        if report.reference.backing.is_none() {
+            report.reference.backing = Some(occurrence.session.id.clone());
+            if let ContentPart::StructuredArtifact {
+                reference: Some(reference),
+                ..
+            } = &mut report.part
+            {
+                reference.backing = report.reference.backing.clone();
+            }
+        }
         let mut artifact = report.reference.clone();
+        if artifact.backing.is_none() {
+            artifact.backing = Some(occurrence.session.id.clone());
+        }
         let artifact_reference = RecordRef {
             domain: format!("{}:associated", occurrence.session.source.origin),
             revision: occurrence.evidence.source_revision.clone(),

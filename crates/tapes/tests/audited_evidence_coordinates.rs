@@ -102,7 +102,7 @@ fn claude_coordinates_survive_show_export_and_page() {
     );
 
     let show = json_command(root.path(), &["show".into(), id.into(), "--json".into()]);
-    assert_eq!(show["schema"], "tapes-session/7");
+    assert_eq!(show["schema"], "tapes-session/8");
     let turns = show["turns"].as_array().unwrap();
     assert_eq!(turns.len(), 2);
     for (index, turn) in turns.iter().enumerate() {
@@ -143,7 +143,7 @@ fn claude_coordinates_survive_show_export_and_page() {
         })
         .unwrap();
     let bundle: Value = serde_json::from_slice(&fs::read(bundle_json_path).unwrap()).unwrap();
-    assert_eq!(bundle["schema"], "tapes-session/7");
+    assert_eq!(bundle["schema"], "tapes-session/8");
     assert_content_reference(&bundle["turns"][1]["parts"][0]["record_ref"], 1, 0, None);
 
     let page = json_command(
@@ -212,7 +212,7 @@ fn supplied_graph_coordinates_keep_source_pointers_and_part_levels() {
             "--json".into(),
         ],
     );
-    assert_eq!(shown["schema"], "tapes-session/7");
+    assert_eq!(shown["schema"], "tapes-session/8");
     assert_eq!(shown["turns"].as_array().unwrap().len(), 2);
     let a = shown["turns"]
         .as_array()
@@ -415,7 +415,7 @@ fn codex_history_events_and_metadata_report_their_actual_reads() {
     assert!(metadata["reads"][0].get("context_records").is_none());
 
     let events = json_command(root.path(), &["events".into(), id.into(), "--json".into()]);
-    assert_eq!(events["schema"], "tapes-events/5");
+    assert_eq!(events["schema"], "tapes-events/6");
     let event_records = events["events"].as_array().unwrap();
     assert_eq!(event_records.len(), 2);
     for event in event_records {
@@ -429,7 +429,7 @@ fn codex_history_events_and_metadata_report_their_actual_reads() {
     );
 
     let shown = json_command(root.path(), &["show".into(), id.into(), "--json".into()]);
-    assert_eq!(shown["schema"], "tapes-session/7");
+    assert_eq!(shown["schema"], "tapes-session/8");
     assert_eq!(shown["session"]["accounting"]["coverage"], "session");
     assert_eq!(shown["session"]["tokens"]["input"], 7);
 

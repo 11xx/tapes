@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use chrono::{DateTime, SecondsFormat, Utc};
@@ -9,7 +10,7 @@ use crate::content::{ContentCoverage, ContentPart};
 use crate::event::ToolEvent;
 use crate::usage::UsageDetail;
 
-pub const SESSION_SCHEMA: &str = "tapes-session/7";
+pub const SESSION_SCHEMA: &str = "tapes-session/8";
 /// Maximum length of a title derived from the first user turn.
 pub const DERIVED_TITLE_MAX_CHARS: usize = 96;
 
@@ -281,6 +282,11 @@ pub struct Turn {
     /// the message or item identity that carries the content.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request_turn_id: Option<String>,
+    /// Provider metadata recorded for this native entry. Conversation-level
+    /// metadata belongs on `Session`; entry metadata stays beside the turns it
+    /// describes and names the native fields that supplied it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<EntryMetadata>,
     /// A qualified source coordinate for the record and normalized part this
     /// turn represents. Presentation ordinals are intentionally separate.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -299,6 +305,22 @@ pub struct Turn {
     /// keeps the harness envelope in `text` as its stable wire contract.
     #[serde(skip)]
     pub tool: Option<ToolEvent>,
+}
+
+/// Metadata attached to one native provider entry rather than promoted to the
+/// conversation. Empty strings remain present, while null and absent fields
+/// remain absent. `source_fields` maps normalized names to native JSON
+/// pointers so a consumer can distinguish recorded metadata from inference.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EntryMetadata {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub engine: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub source_fields: BTreeMap<String, String>,
 }
 
 /// Bounded evidence for a source conversation graph. `selected_path` names
@@ -605,6 +627,10 @@ pub enum SourceBound {
     RecordPage { records: usize, of: String },
     /// `turns` turns carry text the store read cut at `chars` characters.
     TurnText { turns: usize, chars: usize },
+    /// A supplied-input scan reached a structural, member, or aggregate
+    /// coverage gap. Selected-member byte spans remain in `ReadEvidence.gaps`;
+    /// collection diagnostics identify gaps in other members separately.
+    InputCoverage { gaps: usize },
 }
 
 /// Format a byte count for human output without false precision.
@@ -1130,6 +1156,7 @@ mod tests {
             ordinal: 0,
             native_id: None,
             request_turn_id: None,
+            metadata: None,
             record_ref: None,
             parts: Vec::new(),
             coverage: None,
@@ -1245,6 +1272,7 @@ mod tests {
                 ordinal: 0,
                 native_id: None,
                 request_turn_id: None,
+                metadata: None,
                 record_ref: None,
                 parts: Vec::new(),
                 coverage: None,
@@ -1260,6 +1288,7 @@ mod tests {
                 ordinal: 0,
                 native_id: None,
                 request_turn_id: None,
+                metadata: None,
                 record_ref: None,
                 parts: Vec::new(),
                 coverage: None,
@@ -1296,6 +1325,7 @@ mod tests {
             ordinal: 0,
             native_id: None,
             request_turn_id: None,
+            metadata: None,
             record_ref: None,
             parts: Vec::new(),
             coverage: None,
@@ -1317,6 +1347,7 @@ mod tests {
             ordinal: 0,
             native_id: None,
             request_turn_id: None,
+            metadata: None,
             record_ref: None,
             parts: Vec::new(),
             coverage: None,
@@ -1344,6 +1375,7 @@ mod tests {
             ordinal: 0,
             native_id: None,
             request_turn_id: None,
+            metadata: None,
             record_ref: None,
             parts: Vec::new(),
             coverage: None,
@@ -1369,6 +1401,7 @@ mod tests {
             ordinal: 0,
             native_id: None,
             request_turn_id: None,
+            metadata: None,
             record_ref: None,
             parts: Vec::new(),
             coverage: None,
@@ -1476,6 +1509,7 @@ mod tests {
             ordinal: 12,
             native_id: None,
             request_turn_id: None,
+            metadata: None,
             record_ref: None,
             parts: Vec::new(),
             coverage: None,

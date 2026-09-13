@@ -24,13 +24,13 @@ use crate::content::{self, ContentCoverage, ContentInventory, ContentPart};
 use crate::event::{self, EventKind, EventRecord};
 use crate::lineage::{Lineage, ParentRef};
 use crate::model::{
-    LiveState, Model, ReadEvidence, RecordRef, Role, SessionMetadata, SourceBound,
+    EntryMetadata, LiveState, Model, ReadEvidence, RecordRef, Role, SessionMetadata, SourceBound,
     SourceDescriptor, TerminalObservation, TextTailEvidence, TrailingRecord, Transcript,
     Truncation, Turn, TurnKind,
 };
 use crate::{list_scoped, selection_record, SelectionRecord, SessionSelection, DEFAULT_LIST_LIMIT};
 
-pub const ENDINGS_SCHEMA: &str = "tapes-endings/5";
+pub const ENDINGS_SCHEMA: &str = "tapes-endings/6";
 /// Newest turns read per session when the caller names no window. Wide enough
 /// to hold a tool call and the exchange around it, narrow enough that a
 /// selection of hundreds stays a survey.
@@ -173,6 +173,8 @@ pub struct TurnRef {
     pub ts: Option<DateTime<Utc>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub record_ref: Option<RecordRef>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<EntryMetadata>,
 }
 
 /// Where a turn sits, for a turn whose role and kind the field name already
@@ -184,6 +186,8 @@ pub struct TurnMark {
     pub ts: Option<DateTime<Utc>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub record_ref: Option<RecordRef>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<EntryMetadata>,
 }
 
 /// The relatives a session's store records, counted. Children are referred to
@@ -218,6 +222,8 @@ pub struct TailEntry {
     pub ts: Option<DateTime<Utc>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub record_ref: Option<RecordRef>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<EntryMetadata>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub parts: Vec<ContentPart>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -424,6 +430,7 @@ pub fn ending(transcript: Transcript, lineage: Result<Lineage>, tail: usize, tex
             ordinal: turn.ordinal,
             ts: turn.ts,
             record_ref: turn.record_ref.clone(),
+            metadata: turn.metadata.clone(),
         }),
         last_operator: mark(newest(turns, TurnKind::Operator)),
         last_assistant: mark(newest(turns, TurnKind::Assistant)),
@@ -507,6 +514,7 @@ fn mark(turn: Option<&Turn>) -> Option<TurnMark> {
         ordinal: turn.ordinal,
         ts: turn.ts,
         record_ref: turn.record_ref.clone(),
+        metadata: turn.metadata.clone(),
     })
 }
 
@@ -529,7 +537,9 @@ fn withheld_turns(truncation: &Truncation) -> bool {
     truncation.source.iter().any(|bound| {
         matches!(
             bound,
-            SourceBound::FileTail { .. } | SourceBound::RecordPage { .. }
+            SourceBound::FileTail { .. }
+                | SourceBound::RecordPage { .. }
+                | SourceBound::InputCoverage { .. }
         )
     })
 }
@@ -574,6 +584,7 @@ fn text_tail(turns: &[Turn], tail: usize) -> Vec<TailEntry> {
                 role: turn.role.clone(),
                 ts: turn.ts,
                 record_ref: turn.record_ref.clone(),
+                metadata: turn.metadata.clone(),
                 parts: turn.parts.clone(),
                 coverage: turn.coverage.clone(),
                 truncated: characters.next().is_some(),

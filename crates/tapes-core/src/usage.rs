@@ -19,7 +19,7 @@ use crate::model::{
     Transcript, Truncation,
 };
 
-pub const USAGE_SCHEMA: &str = "tapes-usage/4";
+pub const USAGE_SCHEMA: &str = "tapes-usage/5";
 
 /// Usage facts a harness records that the normalized session model has no
 /// field for. Each member is present exactly when the harness recorded it.
@@ -293,7 +293,9 @@ fn turn_coverage(truncation: &Truncation) -> TurnCoverage {
     let withheld_turns = truncation.source.iter().any(|bound| {
         matches!(
             bound,
-            SourceBound::FileTail { .. } | SourceBound::RecordPage { .. }
+            SourceBound::FileTail { .. }
+                | SourceBound::RecordPage { .. }
+                | SourceBound::InputCoverage { .. }
         )
     });
     if withheld_turns {
@@ -587,6 +589,7 @@ mod tests {
             ordinal: 0,
             native_id: None,
             request_turn_id: None,
+            metadata: None,
             record_ref: None,
             parts: Vec::new(),
             coverage: None,
