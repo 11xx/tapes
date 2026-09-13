@@ -110,6 +110,12 @@ serialized as compact JSON for bounded metadata. Calls and results occupy
 separate entries, so `completed_ts` is absent. Only events on the active path
 enter the normalized transcript.
 
+Literal command or argv fields in a pi tool call can carry the same bounded
+nested invocation evidence as other backends. The declaration is not a
+separate executed call, and a result does not inherit the wrapper's duration.
+Explicit artifact references remain unopened descriptors matched only within
+the bounded active-path read.
+
 ## Assistant usage
 
 Assistant `message` entries carry per-request `usage` when the provider reports

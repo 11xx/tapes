@@ -64,6 +64,8 @@ struct BundleJson<'a> {
     notes: &'a [String],
     #[serde(skip_serializing_if = "Option::is_none")]
     git: Option<&'a GitContext>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    events: Vec<crate::event::EventRecord>,
 }
 
 fn truncation_is_empty(truncation: &&Truncation) -> bool {
@@ -75,6 +77,7 @@ pub fn export(transcript: &Transcript, directory: &Path) -> Result<Bundle> {
     let mut session = transcript.session.clone();
     session.live = None;
     let git = git_context(session.directory.as_deref());
+    let events = crate::event::project(transcript.clone(), usize::MAX).events;
 
     let json = serde_json::to_string_pretty(&BundleJson {
         schema: SESSION_SCHEMA,
@@ -89,6 +92,7 @@ pub fn export(transcript: &Transcript, directory: &Path) -> Result<Bundle> {
         trailing_record: transcript.trailing_record.as_ref(),
         notes: &transcript.notes,
         git: git.as_ref(),
+        events,
     })
     .context("failed to serialize the bundle JSON")?;
 
@@ -204,6 +208,22 @@ fn render_trace(transcript: &Transcript) -> String {
                     out,
                     "content-part: {}",
                     serde_json::to_string(part).unwrap_or_default()
+                );
+            }
+        }
+        if let Some(tool) = &turn.tool {
+            for invocation in &tool.invocations {
+                let _ = writeln!(
+                    out,
+                    "invocation: {}",
+                    serde_json::to_string(invocation).unwrap_or_default()
+                );
+            }
+            for consumption in &tool.artifact_consumptions {
+                let _ = writeln!(
+                    out,
+                    "artifact-consumption: {}",
+                    serde_json::to_string(consumption).unwrap_or_default()
                 );
             }
         }

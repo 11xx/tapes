@@ -248,7 +248,7 @@ newest one there. `--project <path>` scopes elsewhere and `--global` drops the
 scope.
 
 `events` projects tool calls and results into the harness-neutral
-`tapes-events/3` schema. Each record keeps the turn ordinal and native id,
+`tapes-events/4` schema. Each record keeps the turn ordinal and native id,
 bounded argument or output metadata, and an exact call/result pair when both
 halves occur in the bounded read. Unpaired calls report `no-result-in-read`;
 an unpaired result reports `call-before-read-bound` when a file-tail or
@@ -257,6 +257,13 @@ reached the recording's start. `--tail` uses the same turn-ordinal window as
 `show`, while `--name` and `--call-id` apply after pairing. With no `--tail`,
 the command returns every event the bounded reader reaches so counts describe
 the read rather than an implicit display window.
+`--program` selects exact nested program declarations while preserving the
+recorded outer tool name and pairing. Literal shell and JavaScript declarations
+are qualified with their source span and parser coverage; structured runtime
+argv is preferred. Unsupported dynamic syntax stays evidence of uncertainty,
+not an executed child call. Explicit artifact references and within-read
+consumption observations remain bounded descriptors and never open the named
+object.
 
 `usage` answers where one session's quota went as `tapes-usage/3`: the
 session's recorded `tokens`, `cost`, and `accounting`, and `turns` counted by
@@ -423,7 +430,7 @@ rather than a resent history. `tapes usage --here --since <date> --json` answers
 few endings that matter instead of every tail.
 
 **Contracts you can build on.** `tapes-list/2`, `tapes-session/4`,
-`tapes-events/3`, `tapes-usage/3`, `tapes-usage-summary/3`, `tapes-lineage/2`,
+`tapes-events/4`, `tapes-usage/3`, `tapes-usage-summary/3`, `tapes-lineage/2`,
 `tapes-endings/3`, `tapes-child/2`, `tapes-stats/3`, `tapes-stats-summary/2`, `tapes-brief/3`,
 `tapes-page/3`, `tapes-history-search/3`, `tapes-metadata-history/3`,
 and `tapes-export-manifest/2` are versioned

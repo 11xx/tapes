@@ -655,6 +655,35 @@ fn codex_user_kind(payload: &Value, text: &str, messages: &UserMessages) -> Turn
 }
 
 fn parse_turns(value: &Value, messages: &UserMessages) -> Vec<Turn> {
+    if value["type"] == "event_msg"
+        && matches!(
+            value["payload"]["type"].as_str(),
+            Some("item_started" | "item_completed")
+        )
+    {
+        let payload = &value["payload"];
+        let item = &payload["item"];
+        let completed = payload["type"] == "item_completed";
+        let event = codex_runtime_tool_event(item, completed);
+        return vec![Turn {
+            role: Role::Tool,
+            kind: TurnKind::Tool,
+            text: item.to_string(),
+            ts: timestamp(&value["timestamp"]),
+            ordinal: 0,
+            native_id: item["id"]
+                .as_str()
+                .or_else(|| payload["id"].as_str())
+                .map(str::to_owned),
+            request_turn_id: payload["turn_id"].as_str().map(str::to_owned),
+            record_ref: None,
+            channel: None,
+            recipient: None,
+            parts: vec![tool_part(item, "payload.item", "codex-item")],
+            coverage: Some(tool_coverage()),
+            tool: Some(event),
+        }];
+    }
     if value["type"] != "response_item" {
         return Vec::new();
     }
@@ -764,6 +793,11 @@ fn codex_tool_event(payload: &Value, subtype: &str) -> ToolEvent {
         "custom_tool_call" => Bounded::from_value(&payload["input"]),
         _ => None,
     };
+    let argument_value = match subtype {
+        "function_call" => payload_json(&payload["arguments"]),
+        "custom_tool_call" => payload_json(&payload["input"]),
+        _ => Value::Null,
+    };
     ToolEvent {
         kind: if call {
             EventKind::ToolCall
@@ -785,6 +819,63 @@ fn codex_tool_event(payload: &Value, subtype: &str) -> ToolEvent {
             .then(|| Bounded::from_value(&payload["output"]))
             .flatten(),
         completed_ts: None,
+        invocations: if call {
+            crate::event::invocations_from_tool(
+                payload["name"].as_str(),
+                match subtype {
+                    "function_call" => &payload["arguments"],
+                    "custom_tool_call" => &payload["input"],
+                    _ => &argument_value,
+                },
+                "payload.arguments",
+            )
+        } else {
+            Vec::new()
+        },
+        artifact_references: if call {
+            crate::event::artifact_references(&argument_value)
+        } else {
+            crate::event::artifact_references(&payload_json(&payload["output"]))
+        },
+        artifact_consumptions: Vec::new(),
+    }
+}
+
+fn codex_runtime_tool_event(item: &Value, completed: bool) -> ToolEvent {
+    let command = item
+        .get("parsed_cmd")
+        .filter(|value| !value.is_null())
+        .or_else(|| item.get("command"));
+    ToolEvent {
+        kind: if completed {
+            EventKind::ToolResult
+        } else {
+            EventKind::ToolCall
+        },
+        subtype: item["type"].as_str().unwrap_or("codex-item").to_owned(),
+        name: item["type"].as_str().map(str::to_owned),
+        call_id: item["id"].as_str().map(str::to_owned),
+        status: item["status"].as_str().map(str::to_owned),
+        arguments: (!completed)
+            .then(|| command.and_then(Bounded::from_value))
+            .flatten(),
+        output: completed
+            .then(|| {
+                ["stdout", "stderr", "formatted_output", "aggregated_output"]
+                    .into_iter()
+                    .find_map(|key| Bounded::from_value(&item[key]))
+            })
+            .flatten(),
+        completed_ts: completed
+            .then(|| timestamp(&item["completed_at"]))
+            .flatten(),
+        invocations: crate::event::structured_runtime_invocations(item, "payload.item.parsed_cmd"),
+        artifact_references: if completed {
+            crate::event::artifact_references(item)
+        } else {
+            Vec::new()
+        },
+        artifact_consumptions: Vec::new(),
     }
 }
 
