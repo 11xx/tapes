@@ -79,6 +79,18 @@ impl ContentInventory {
 pub struct ArtifactReference {
     pub kind: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub identity: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub origin: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub backing: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub author: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub completion: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub citation_count: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub uri: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
@@ -130,6 +142,8 @@ pub enum ContentPart {
         source_field: String,
         native_kind: String,
         #[serde(skip_serializing_if = "Option::is_none")]
+        reference: Option<ArtifactReference>,
+        #[serde(skip_serializing_if = "Option::is_none")]
         record_ref: Option<RecordRef>,
     },
     ToolPayload {
@@ -172,9 +186,18 @@ impl ContentPart {
         match self {
             Self::Text { record_ref, .. }
             | Self::Transcription { record_ref, .. }
-            | Self::StructuredArtifact { record_ref, .. }
             | Self::ToolPayload { record_ref, .. }
             | Self::Unknown { record_ref, .. } => *record_ref = Some(reference),
+            Self::StructuredArtifact {
+                reference: artifact,
+                record_ref,
+                ..
+            } => {
+                if let Some(artifact) = artifact {
+                    artifact.source = Some(reference.clone());
+                }
+                *record_ref = Some(reference);
+            }
             Self::MediaReference {
                 reference: artifact,
                 record_ref,
@@ -259,7 +282,12 @@ pub fn inventory(turns: &[crate::model::Turn]) -> Option<ContentInventory> {
             .filter(|part| {
                 matches!(
                     part,
-                    ContentPart::MediaReference { .. } | ContentPart::FileReference { .. }
+                    ContentPart::MediaReference { .. }
+                        | ContentPart::FileReference { .. }
+                        | ContentPart::StructuredArtifact {
+                            reference: Some(_),
+                            ..
+                        }
                 )
             })
             .count();
@@ -320,6 +348,7 @@ pub fn parts_from_array(value: &Value, source_field: &str) -> (Vec<ContentPart>,
                     descriptor: bounded_shape(part),
                     source_field: field.clone(),
                     native_kind: native_kind.to_owned(),
+                    reference: None,
                     record_ref: None,
                 })
             }
@@ -415,6 +444,12 @@ pub fn artifact_reference(value: &Value, kind: &str) -> Option<ArtifactReference
     (uri.is_some() || path.is_some() || digest.is_some() || bytes.is_some()).then_some(
         ArtifactReference {
             kind: kind.to_owned(),
+            identity: None,
+            origin: None,
+            backing: None,
+            author: None,
+            completion: None,
+            citation_count: None,
             uri,
             path,
             digest,

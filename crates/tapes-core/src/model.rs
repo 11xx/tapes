@@ -16,6 +16,10 @@ pub const DERIVED_TITLE_MAX_CHARS: usize = 96;
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Session {
     pub id: String,
+    /// Opaque occurrence within a supplied source. It disambiguates repeated
+    /// native ids without changing the native conversation identity.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub occurrence: Option<String>,
     pub source: SourceDescriptor,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<Model>,
@@ -357,6 +361,8 @@ pub struct RecordRef {
     pub span: Option<ByteSpan>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub native_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pointer: Option<String>,
     pub part_index: usize,
 }
 
@@ -995,6 +1001,7 @@ mod tests {
                 coverage: AccountingCoverage::Session,
             }),
             start_uncertain: false,
+            occurrence: None,
             usage_detail: None,
         }
     }

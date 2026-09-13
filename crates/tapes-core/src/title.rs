@@ -64,11 +64,19 @@ pub fn resolve(
     let candidates = matches
         .iter()
         .map(|found| {
+            let coordinate = found
+                .session
+                .occurrence
+                .as_deref()
+                .map_or_else(String::new, |occurrence| {
+                    format!("; occurrence {occurrence}")
+                });
             format!(
-                "  {} ({}) [{}]",
+                "  {} ({}) [{}{}]",
                 found.session.id,
                 found.session.harness(),
-                found.session.locator().unwrap_or("origin unavailable")
+                found.session.locator().unwrap_or("origin unavailable"),
+                coordinate
             )
         })
         .collect::<Vec<_>>()

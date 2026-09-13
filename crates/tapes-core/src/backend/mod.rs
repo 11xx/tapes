@@ -275,6 +275,11 @@ pub trait Backend {
     /// `Ok(None)` means this backend does not hold it. Resolution calls this
     /// before it calls `list`, so an exact id never pays for a listing.
     fn locate(&self, id: &str) -> Result<Option<Session>>;
+    /// Locate one supplied-source occurrence without treating its native id
+    /// as globally unique. Installed stores have no occurrence coordinate.
+    fn locate_occurrence(&self, _occurrence: &str) -> Result<Option<Session>> {
+        Ok(None)
+    }
     /// Read a transcript for a session already resolved by this backend.
     /// Implementations must use the supplied normalized session rather than
     /// locating it again; the transcript read may still need to open the
@@ -1064,6 +1069,7 @@ pub(crate) fn attach_record_refs(
             revision: revision.map(str::to_owned),
             span,
             native_id: turn.native_id.clone(),
+            pointer: None,
             part_index,
         };
         turn.record_ref = Some(reference.clone());

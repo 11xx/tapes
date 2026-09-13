@@ -1,4 +1,5 @@
 use std::fs;
+use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -223,6 +224,12 @@ fn fixture_command(name: &str, args: &[&str]) -> std::process::Output {
     command.output().unwrap()
 }
 
+fn supplied_fixture(name: &str) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/fixtures/input")
+        .join(name)
+}
+
 struct TemporaryDirectory {
     path: PathBuf,
 }
@@ -324,6 +331,364 @@ fn list_help_exits_successfully() {
     );
     assert!(help.contains("last 32 normalized turns"), "{help}");
     assert!(help.contains("unsearched"), "{help}");
+    assert!(help.contains("--input <PATH>"), "{help}");
+    assert!(help.contains("chatgpt-exporter"), "{help}");
+}
+
+#[test]
+fn supplied_single_conversation_reaches_list_show_and_export() {
+    let input = supplied_fixture("chatgpt-export.json");
+    let input = input.to_str().unwrap();
+    let listed = tapes()
+        .args([
+            "list",
+            "--input",
+            input,
+            "--input-format",
+            "chatgpt-exporter",
+            "--source-scope",
+            "fixture-account",
+            "--json",
+        ])
+        .env("HOME", "/definitely/missing")
+        .env("PATH", "/definitely/missing")
+        .output()
+        .unwrap();
+    assert!(
+        listed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&listed.stderr)
+    );
+    let listed: Value = serde_json::from_slice(&listed.stdout).unwrap();
+    assert_eq!(listed["sessions"].as_array().unwrap().len(), 1);
+    assert_eq!(listed["sessions"][0]["id"], "supplied-1");
+    assert_eq!(listed["sessions"][0]["source"]["kind"], "supplied-export");
+    assert_eq!(
+        listed["sessions"][0]["source"]["scope"],
+        serde_json::json!({"value":"fixture-account","authority":"declared"})
+    );
+    let occurrence = listed["sessions"][0]["occurrence"].as_str().unwrap();
+
+    let shown = tapes()
+        .args([
+            "show",
+            "--occurrence",
+            occurrence,
+            "--input",
+            input,
+            "--json",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        shown.status.success(),
+        "{}",
+        String::from_utf8_lossy(&shown.stderr)
+    );
+    let shown: Value = serde_json::from_slice(&shown.stdout).unwrap();
+    assert_eq!(shown["session"]["id"], "supplied-1");
+    assert_eq!(
+        shown["turns"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|turn| turn["text"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["question", "answer"]
+    );
+    assert_eq!(shown["turns"][0]["record_ref"]["span"]["start"], 4);
+    assert_eq!(shown["turns"][1]["record_ref"]["pointer"], "/messages/1");
+
+    let titled = tapes()
+        .args([
+            "show",
+            "--title",
+            "Bounded input",
+            "--input",
+            input,
+            "--json",
+        ])
+        .output()
+        .unwrap();
+    assert!(titled.status.success());
+    let titled: Value = serde_json::from_slice(&titled.stdout).unwrap();
+    assert_eq!(titled["session"]["id"], "supplied-1");
+
+    let bundle_root = TemporaryDirectory::new(
+        std::env::temp_dir().join(format!("tapes-input-export-{}", std::process::id())),
+    );
+    let exported = tapes()
+        .args(["export", "supplied-1", "--input", input, "--bundle"])
+        .arg(bundle_root.path())
+        .output()
+        .unwrap();
+    assert!(
+        exported.status.success(),
+        "{}",
+        String::from_utf8_lossy(&exported.stderr)
+    );
+    let entries = fs::read_dir(bundle_root.path())
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(entries.len(), 3, "{entries:?}");
+    assert!(entries
+        .iter()
+        .any(|entry| entry.file_name().to_string_lossy().ends_with(".context.md")));
+    assert!(entries
+        .iter()
+        .any(|entry| entry.file_name().to_string_lossy().ends_with(".json")));
+    assert!(entries
+        .iter()
+        .any(|entry| entry.file_name().to_string_lossy().ends_with(".trace.md")));
+}
+
+#[test]
+fn supplied_duplicate_ids_require_an_occurrence_and_never_use_installed_stores() {
+    let root = TemporaryDirectory::new(
+        std::env::temp_dir().join(format!("tapes-input-duplicate-{}", std::process::id())),
+    );
+    let input = root.path().join("renamed.data");
+    fs::write(
+        &input,
+        serde_json::to_vec(&serde_json::json!([
+            {"id":"duplicate","title":"one","messages":[{"role":"user","content":"first"}]},
+            {"id":"duplicate","title":"two","messages":[{"role":"user","content":"second"}]}
+        ]))
+        .unwrap(),
+    )
+    .unwrap();
+    let input = input.to_str().unwrap();
+
+    let ambiguous = tapes()
+        .args(["show", "duplicate", "--input", input, "--json"])
+        .env("HOME", "/definitely/missing")
+        .env("PATH", "/definitely/missing")
+        .output()
+        .unwrap();
+    assert!(!ambiguous.status.success());
+    let error = String::from_utf8_lossy(&ambiguous.stderr);
+    assert!(error.contains("occurs 2 times"), "{error}");
+    assert!(error.contains("input:v1:"), "{error}");
+
+    let listed = tapes()
+        .args(["list", "--input", input, "--json"])
+        .output()
+        .unwrap();
+    let listed: Value = serde_json::from_slice(&listed.stdout).unwrap();
+    let occurrences = listed["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|session| session["occurrence"].as_str().unwrap().to_owned())
+        .collect::<Vec<_>>();
+    assert_eq!(occurrences.len(), 2);
+
+    let selected = tapes()
+        .args(["show", "--occurrence"])
+        .arg(&occurrences[1])
+        .args(["--input", input, "--json"])
+        .output()
+        .unwrap();
+    assert!(selected.status.success());
+    let selected: Value = serde_json::from_slice(&selected.stdout).unwrap();
+    assert_eq!(selected["turns"][0]["text"], "second");
+}
+
+#[test]
+fn supplied_zip_reads_conversations_and_bounded_associated_reports_only() {
+    let root = TemporaryDirectory::new(
+        std::env::temp_dir().join(format!("tapes-input-zip-{}", std::process::id())),
+    );
+    let archive_path = root.path().join("renamed-container.data");
+    let file = fs::File::create(&archive_path).unwrap();
+    let mut archive = zip::ZipWriter::new(file);
+    let options = zip::write::SimpleFileOptions::default();
+    archive
+        .start_file("renamed-conversation.json", options)
+        .unwrap();
+    archive
+        .write_all(
+            br#"{"id":"associated-1","current_node":"node","mapping":{"root":{"id":"root","parent":null,"message":null},"node":{"id":"node","parent":"root","message":{"id":"message-1","author":{"role":"user"},"content":{"content_type":"text","parts":["hello"]}}}}}"#,
+        )
+        .unwrap();
+    archive.start_file("file-report.dat", options).unwrap();
+    archive
+        .write_all(
+            br#"{"backing_conversation_id":"associated-1","widget_session_id":"report-1","widget_state":{"status":"completed","report_message":{"id":"report-message","author":{"role":"assistant"},"content":{"parts":[{"type":"text","text":"private report body"}]}}}}"#,
+        )
+        .unwrap();
+    archive.start_file("unrelated.xlsx", options).unwrap();
+    archive
+        .write_all(b"not-json-and-not-a-conversation")
+        .unwrap();
+    archive.finish().unwrap();
+
+    let archive = archive_path.to_str().unwrap();
+    let shown = tapes()
+        .args(["show", "associated-1", "--input", archive, "--json"])
+        .output()
+        .unwrap();
+    assert!(
+        shown.status.success(),
+        "{}",
+        String::from_utf8_lossy(&shown.stderr)
+    );
+    let output = String::from_utf8_lossy(&shown.stdout);
+    assert!(!output.contains("private report body"), "{output}");
+    let output: Value = serde_json::from_slice(&shown.stdout).unwrap();
+    assert_eq!(output["turns"].as_array().unwrap().len(), 1);
+    let parts = output["turns"][0]["parts"].as_array().unwrap();
+    let report = parts
+        .iter()
+        .find(|part| part["native_kind"] == "openai-library-report")
+        .unwrap();
+    assert_eq!(report["reference"]["identity"], "report-1");
+    assert_eq!(report["reference"]["backing"], "associated-1");
+    assert_eq!(report["reference"]["citation_count"], 0);
+    assert_eq!(output["content"]["references"], 1);
+}
+
+#[test]
+fn supplied_input_routes_every_nonhistorical_view_and_keeps_history_explicit() {
+    let input = supplied_fixture("chatgpt-export.json");
+    let input = input.to_str().unwrap();
+    for (command, args) in [
+        ("events", vec!["supplied-1"]),
+        ("lineage", vec!["supplied-1"]),
+        ("stats", vec!["supplied-1"]),
+        ("usage", vec!["supplied-1"]),
+        ("brief", vec!["supplied-1"]),
+    ] {
+        let output = tapes()
+            .arg(command)
+            .args(args)
+            .args(["--input", input, "--json"])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{command}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let _: Value = serde_json::from_slice(&output.stdout).unwrap();
+    }
+
+    let endings = tapes()
+        .args(["endings", "--input", input, "--json"])
+        .output()
+        .unwrap();
+    assert!(endings.status.success());
+    let endings: Value = serde_json::from_slice(&endings.stdout).unwrap();
+    assert_eq!(endings["endings"].as_array().unwrap().len(), 1);
+
+    let bulk_root = TemporaryDirectory::new(
+        std::env::temp_dir().join(format!("tapes-input-bulk-{}", std::process::id())),
+    );
+    let bulk = tapes()
+        .args(["export", "--input", input, "--bundle"])
+        .arg(bulk_root.path())
+        .output()
+        .unwrap();
+    assert!(
+        bulk.status.success(),
+        "{}",
+        String::from_utf8_lossy(&bulk.stderr)
+    );
+    assert!(bulk_root.path().join("manifest.json").is_file());
+    let manifest: Value =
+        serde_json::from_slice(&fs::read(bulk_root.path().join("manifest.json")).unwrap()).unwrap();
+    assert_eq!(manifest["sessions"].as_array().unwrap().len(), 1);
+
+    let latest = tapes()
+        .args(["show", "--latest", "--input", input, "--json"])
+        .output()
+        .unwrap();
+    assert!(!latest.status.success());
+    assert!(String::from_utf8_lossy(&latest.stderr).contains("--latest"));
+
+    let mixed_scope = tapes()
+        .args(["list", "--input", input, "--global", "--json"])
+        .output()
+        .unwrap();
+    assert!(!mixed_scope.status.success());
+    assert!(String::from_utf8_lossy(&mixed_scope.stderr).contains("conflicts"));
+
+    let page = tapes()
+        .args(["page", "supplied-1", "--input", input, "--json"])
+        .output()
+        .unwrap();
+    assert!(!page.status.success());
+    assert!(String::from_utf8_lossy(&page.stderr).contains("not supported by page"));
+
+    let capped = tapes()
+        .args([
+            "show",
+            "supplied-1",
+            "--input",
+            input,
+            "--output-bytes",
+            "1024",
+            "--json",
+        ])
+        .output()
+        .unwrap();
+    assert!(!capped.status.success());
+    assert!(String::from_utf8_lossy(&capped.stderr).contains("output-bytes"));
+}
+
+#[test]
+fn supplied_jsonl_keeps_structural_gaps_and_reaches_a_later_record() {
+    let root = TemporaryDirectory::new(
+        std::env::temp_dir().join(format!("tapes-input-budget-{}", std::process::id())),
+    );
+    let input = root.path().join("renamed-records.data");
+    let oversized = "x".repeat(5_000);
+    let first = serde_json::json!({
+        "id": "oversized",
+        "messages": [{"role":"user","content": oversized}]
+    });
+    let second = serde_json::json!({
+        "id": "reachable",
+        "messages": [{"role":"assistant","content":"after the gap"}]
+    });
+    fs::write(
+        &input,
+        format!(
+            "{}\n{}\n",
+            serde_json::to_string(&first).unwrap(),
+            serde_json::to_string(&second).unwrap()
+        ),
+    )
+    .unwrap();
+    let input = input.to_str().unwrap();
+    let listed = tapes()
+        .args(["list", "--input", input, "--record-bytes", "1024", "--json"])
+        .output()
+        .unwrap();
+    assert!(listed.status.success());
+    let listed: Value = serde_json::from_slice(&listed.stdout).unwrap();
+    assert_eq!(listed["scanned"], 2);
+    assert!(!listed["scan_truncated"].as_bool().unwrap());
+    assert_eq!(listed["sessions"].as_array().unwrap().len(), 1);
+    assert_eq!(listed["sessions"][0]["id"], "reachable");
+    assert!(listed["unsearched"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|diagnostic| diagnostic.as_str().unwrap().contains("oversized")));
+    let occurrence = listed["sessions"][0]["occurrence"].as_str().unwrap();
+
+    let shown = tapes()
+        .args(["show", "--occurrence"])
+        .arg(occurrence)
+        .args(["--input", input, "--record-bytes", "1024", "--json"])
+        .output()
+        .unwrap();
+    assert!(shown.status.success());
+    let shown: Value = serde_json::from_slice(&shown.stdout).unwrap();
+    assert_eq!(shown["turns"][0]["text"], "after the gap");
+    assert_eq!(shown["read"]["gaps"].as_array().unwrap().len(), 1);
 }
 
 #[test]

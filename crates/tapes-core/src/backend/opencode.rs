@@ -1365,6 +1365,7 @@ fn parse_database_session(value: &Value) -> Result<Session> {
         tokens,
         accounting,
         start_uncertain: false,
+        occurrence: None,
         usage_detail: None,
     })
 }
@@ -1437,6 +1438,7 @@ fn parse_session(value: &Value) -> Result<Session> {
         tokens,
         accounting,
         start_uncertain: false,
+        occurrence: None,
         usage_detail: None,
     })
 }
