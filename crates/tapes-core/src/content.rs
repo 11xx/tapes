@@ -115,6 +115,9 @@ pub struct ArtifactReference {
     /// Native citation metadata retained from the artifact body.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub citations: Vec<ArtifactCitation>,
+    /// Citation groups or sources beyond the bounded collection.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub omitted_citations: usize,
 }
 
 /// A citation span recorded inside an artifact body.
@@ -130,6 +133,35 @@ pub struct ArtifactCitation {
     pub start: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub end: Option<usize>,
+    /// Source pages associated with a grouped citation span.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sources: Vec<ArtifactCitationSource>,
+    /// Sources omitted by the bounded group projection.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub omitted_sources: usize,
+}
+
+/// A source retained under one grouped citation span.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArtifactCitationSource {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub uri: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub start: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub end: Option<usize>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sources: Vec<ArtifactCitationSource>,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub omitted_sources: usize,
+}
+
+fn is_zero(value: &usize) -> bool {
+    *value == 0
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -506,6 +538,7 @@ pub fn artifact_reference_object(
             body: None,
             body_availability: None,
             citations: Vec::new(),
+            omitted_citations: 0,
         },
     )
 }

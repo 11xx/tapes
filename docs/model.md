@@ -47,8 +47,13 @@ rather than inventing a model.
 `source` describes where the normalized session came from. Its `kind` is
 `installed-recording` or `supplied-export`; `origin` names the platform,
 `recorded_harness` is present only when that platform supplied one, and
-`representation`, `producer`, `scope`, and `location` retain the known
-representation and opaque source/container coordinate. `id` is the native
+`representation`, `producer`, `producer_authority`, `scope`, and `location`
+retain the known representation, provenance authority, and opaque
+source/container coordinate. `producer` is omitted when auto-detection cannot
+establish a producer for a structurally overlapping representation. An
+explicitly named input format marks its producer with
+`producer_authority: "declared"`; it is not an observation from the bytes.
+`id` is the native
 conversation or session identity; it is not a path, archive member, or global
 identity outside the descriptor's scope. Supplied sources also carry an opaque
 `occurrence` coordinate, so repeated native IDs remain separate observations.
@@ -225,8 +230,10 @@ The same `ArtifactReference` type can appear in a transcript's top-level
 `artifacts` collection. Supplied report readers retain a bounded `body` when
 the report carries readable text, a `body_availability` value when the body is
 absent or unsupported, and `citations` with recorded URI, title, kind, and span
-fields. `backing` records an association claim; it does not create a turn when
-the outer conversation is absent.
+fields. A grouped citation keeps its span and nests bounded `sources`; both
+group and source bounds report omitted members. `backing` records an
+association claim; it does not create a turn when the outer conversation is
+absent.
 
 OpenCode records a call and its outcome in one `tool` part. Its turn carries a
 call event with the state output, native status, and completion timestamp. The
