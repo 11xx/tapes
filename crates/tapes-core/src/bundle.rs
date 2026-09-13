@@ -432,6 +432,7 @@ mod tests {
             session: Session {
                 id: "ses_abc".into(),
                 source: SourceDescriptor::installed("opencode", "opencode-database"),
+                metadata: None,
                 model: Some(Model {
                     id: "kimi-k3".into(),
                     variant: Some("max".into()),

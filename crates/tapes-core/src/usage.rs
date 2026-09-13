@@ -15,8 +15,8 @@ use serde_json::Value;
 use crate::content::{self, ContentInventory};
 use crate::model::{
     Accounting, AccountingBasis, AccountingCoverage, Cost, Model, ReadEvidence, Role, Session,
-    SourceBound, SourceDescriptor, TerminalObservation, TextTailEvidence, Tokens, Transcript,
-    Truncation,
+    SessionMetadata, SourceBound, SourceDescriptor, TerminalObservation, TextTailEvidence, Tokens,
+    Transcript, Truncation,
 };
 
 pub const USAGE_SCHEMA: &str = "tapes-usage/3";
@@ -178,6 +178,8 @@ pub struct UsageSession {
     pub id: String,
     pub source: SourceDescriptor,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<SessionMetadata>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<Model>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub started_at: Option<DateTime<Utc>>,
@@ -238,6 +240,7 @@ pub fn usage(transcript: &Transcript) -> UsageView {
         session: UsageSession {
             id: session.id.clone(),
             source: session.source.clone(),
+            metadata: session.metadata.clone(),
             model: session.model.clone(),
             started_at: session.started_at,
             last_activity_at: session.last_activity_at,
@@ -557,6 +560,7 @@ mod tests {
         Session {
             id: "fixture-session".to_owned(),
             source: SourceDescriptor::installed("fixture", "fixture-recording"),
+            metadata: None,
             model: None,
             title: None,
             derived_title: None,

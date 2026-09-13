@@ -138,6 +138,7 @@ enum InputFormatArg {
     Auto,
     Openai,
     ChatgptExporter,
+    Perplexity,
 }
 
 impl From<InputFormatArg> for InputFormat {
@@ -146,6 +147,7 @@ impl From<InputFormatArg> for InputFormat {
             InputFormatArg::Auto => Self::Auto,
             InputFormatArg::Openai => Self::Openai,
             InputFormatArg::ChatgptExporter => Self::ChatgptExporter,
+            InputFormatArg::Perplexity => Self::Perplexity,
         }
     }
 }
@@ -2583,6 +2585,7 @@ mod tests {
             session: Session {
                 id: "s1".to_owned(),
                 source: SourceDescriptor::installed("claude", "fixture-recording"),
+                metadata: None,
                 model: None,
                 title: None,
                 derived_title: None,

@@ -24,8 +24,9 @@ use crate::content::{self, ContentCoverage, ContentInventory, ContentPart};
 use crate::event::{self, EventKind, EventRecord};
 use crate::lineage::{Lineage, ParentRef};
 use crate::model::{
-    LiveState, Model, ReadEvidence, RecordRef, Role, SourceBound, SourceDescriptor,
-    TerminalObservation, TextTailEvidence, TrailingRecord, Transcript, Truncation, Turn, TurnKind,
+    LiveState, Model, ReadEvidence, RecordRef, Role, SessionMetadata, SourceBound,
+    SourceDescriptor, TerminalObservation, TextTailEvidence, TrailingRecord, Transcript,
+    Truncation, Turn, TurnKind,
 };
 use crate::{list_scoped, selection_record, SelectionRecord, SessionSelection, DEFAULT_LIST_LIMIT};
 
@@ -124,6 +125,8 @@ pub enum Coverage {
 pub struct EndingSession {
     pub id: String,
     pub source: SourceDescriptor,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<SessionMetadata>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<Model>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -391,6 +394,7 @@ pub fn ending(transcript: Transcript, lineage: Result<Lineage>, tail: usize, tex
         session: EndingSession {
             id: session.id.clone(),
             source: session.source.clone(),
+            metadata: session.metadata.clone(),
             model: session.model.clone(),
             title: session.title.clone(),
             derived_title: session.derived_title.clone(),

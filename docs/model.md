@@ -54,13 +54,21 @@ identity outside the descriptor's scope. Supplied sources also carry an opaque
 `occurrence` coordinate, so repeated native IDs remain separate observations.
 
 Caller-supplied inputs use `--input PATH` one or more times with optional
-`--input-format auto|openai|chatgpt-exporter` and `--source-scope`. The reader
+`--input-format auto|openai|chatgpt-exporter|perplexity` and `--source-scope`.
+The reader
 accepts files, extracted directories, and ZIP members without extracting or
 opening referenced artifacts. It uses per-invocation scan, decoded-record,
 record, member, and serialized-output bounds; `--after-occurrence` continues a
 collection only when the source revision still matches. A partial scan reports
 gaps and refuses to pretend an unreached record is absent. Supplied input is a
 separate source collection and never falls back to installed harness stores.
+
+Perplexity conversations retain collection, mode, engine, status, and label
+metadata when those fields are recorded. Entry queries and answers are
+separate content records with the entry reference; an entry timestamp belongs
+to the query record, while a response does not receive a copied timestamp.
+Null and non-string fields remain explicit unknown coverage rather than empty
+text or invented values.
 
 `started_at` and `last_activity_at` come from two bounded windows on a
 file-backed session. File-backed readers open the first 64 KiB, where every

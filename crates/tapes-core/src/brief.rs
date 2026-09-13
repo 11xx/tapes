@@ -26,7 +26,7 @@ use crate::endings::{self, Ending, EndingSource, Fact, Incomplete, TailEntry, Tu
 use crate::event::{self, Bounded, EventKind};
 use crate::lineage::{ChildRef, Lineage};
 use crate::model::{
-    Accounting, Cost, LiveState, Model, ReadEvidence, RecordRef, SourceDescriptor,
+    Accounting, Cost, LiveState, Model, ReadEvidence, RecordRef, SessionMetadata, SourceDescriptor,
     TerminalObservation, TextTailEvidence, Tokens, TrailingRecord, Transcript, Truncation,
     TurnKind,
 };
@@ -49,6 +49,8 @@ const IN_FLIGHT_LIMIT: usize = 20;
 pub struct BriefSession {
     pub id: String,
     pub source: SourceDescriptor,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<SessionMetadata>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<Model>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -239,6 +241,7 @@ pub fn brief(transcript: Transcript, lineage: Result<Lineage>, tail: usize) -> B
     let session = BriefSession {
         id: transcript.session.id.clone(),
         source: transcript.session.source.clone(),
+        metadata: transcript.session.metadata.clone(),
         model: transcript.session.model.clone(),
         title: transcript.session.title.clone(),
         derived_title: transcript.session.derived_title.clone(),

@@ -114,12 +114,13 @@ FIND IT
 READ A SUPPLIED EXPORT
   tapes list --input <path> --json
   tapes show <id> --input <path> --input-format openai --json
+  tapes list --input <path> --input-format perplexity --json
   tapes show --occurrence <coordinate> --input <path> --json
   tapes export <id> --input <path> --bundle <dir>
 
   `--input` reads files, extracted directories, and ZIP archives as a separate
   source collection. It never falls back to installed harness stores. `auto`
-  detects OpenAI and ChatGPT Exporter shapes; a declared format never hands a
+  detects OpenAI, ChatGPT Exporter, and Perplexity shapes; a declared format never hands a
   failed record to another parser. `list` emits an opaque occurrence coordinate
   for every supplied record. Use `--occurrence` when a native ID repeats, and
   `--after-occurrence` to continue a collection only when the source revision

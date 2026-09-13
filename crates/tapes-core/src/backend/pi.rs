@@ -109,6 +109,7 @@ impl PiBackend {
         let session = Session {
             id,
             source: SourceDescriptor::installed("pi", path.display().to_string()),
+            metadata: None,
             model,
             title: None,
             derived_title: None,
