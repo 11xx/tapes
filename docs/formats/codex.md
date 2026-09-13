@@ -75,6 +75,13 @@ or `output_text` (assistant). Tool payloads have no text field; `tapes` keeps
 the whole payload as the turn's text so nothing is lost, and the trace file
 heads each one with its `name` or marks it a result via `call_id`.
 
+The normalized turn retains the content array in native order. Text blocks are
+`text` parts; verified image, audio, and file carriers become reference-only
+parts with their URI/path/digest fields; structured carriers and unknown kinds
+become bounded key/type descriptors. A malformed or oversized part remains
+coverage evidence rather than disappearing. `encrypted_content` produces a
+qualified reasoning placeholder and is not treated as readable narration.
+
 The same payload supplies the typed tool event:
 
 | event field | Codex source |

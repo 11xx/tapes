@@ -76,6 +76,10 @@ role, not a content block, which is where pi differs most from the others. The
 commands and its state changes in entries of their own, so a session ending on
 a user message ends on an unanswered request.
 
+Message content parts remain ordered. Text and thinking are readable parts;
+tool calls and results retain bounded payload descriptors; unrecognized parts
+remain qualified unknown evidence. References are never dereferenced.
+
 Assistant content blocks:
 
 | block `type` | Normalized as |

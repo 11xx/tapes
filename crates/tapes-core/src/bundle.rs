@@ -57,6 +57,8 @@ struct BundleJson<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     text_tail: Option<&'a crate::model::TextTailEvidence>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    content: Option<crate::content::ContentInventory>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     trailing_record: Option<&'a TrailingRecord>,
     #[serde(skip_serializing_if = "<[String]>::is_empty")]
     notes: &'a [String],
@@ -83,6 +85,7 @@ pub fn export(transcript: &Transcript, directory: &Path) -> Result<Bundle> {
         read: transcript.read.as_ref(),
         terminal: transcript.terminal.as_ref(),
         text_tail: transcript.text_tail.as_ref(),
+        content: crate::content::inventory(&transcript.turns),
         trailing_record: transcript.trailing_record.as_ref(),
         notes: &transcript.notes,
         git: git.as_ref(),
@@ -168,6 +171,15 @@ fn render_context(transcript: &Transcript) -> String {
         write_turn_heading(&mut out, &human_speaker(turn), turn);
         out.push_str(turn.text.trim_end());
         out.push_str("\n\n");
+        for part in &turn.parts {
+            if part.text().is_none() {
+                let _ = writeln!(
+                    out,
+                    "content-part: {}",
+                    serde_json::to_string(part).unwrap_or_default()
+                );
+            }
+        }
     }
     out
 }
@@ -186,6 +198,15 @@ fn render_trace(transcript: &Transcript) -> String {
         }
         out.push_str(turn.text.trim_end());
         out.push_str("\n\n");
+        for part in &turn.parts {
+            if part.text().is_none() {
+                let _ = writeln!(
+                    out,
+                    "content-part: {}",
+                    serde_json::to_string(part).unwrap_or_default()
+                );
+            }
+        }
     }
     out
 }
@@ -438,6 +459,10 @@ mod tests {
                     native_id: None,
                     request_turn_id: None,
                     record_ref: None,
+                    parts: Vec::new(),
+                    coverage: None,
+                    channel: None,
+                    recipient: None,
                     tool: None,
                 },
                 Turn {
@@ -449,6 +474,10 @@ mod tests {
                     native_id: None,
                     request_turn_id: None,
                     record_ref: None,
+                    parts: Vec::new(),
+                    coverage: None,
+                    channel: None,
+                    recipient: None,
                     tool: None,
                 },
                 Turn {
@@ -460,6 +489,10 @@ mod tests {
                     native_id: None,
                     request_turn_id: None,
                     record_ref: None,
+                    parts: Vec::new(),
+                    coverage: None,
+                    channel: None,
+                    recipient: None,
                     tool: None,
                 },
                 Turn {
@@ -471,6 +504,10 @@ mod tests {
                     native_id: None,
                     request_turn_id: None,
                     record_ref: None,
+                    parts: Vec::new(),
+                    coverage: None,
+                    channel: None,
+                    recipient: None,
                     tool: None,
                 },
             ],
@@ -678,6 +715,10 @@ mod tests {
             native_id: None,
             request_turn_id: None,
             record_ref: None,
+            parts: Vec::new(),
+            coverage: None,
+            channel: None,
+            recipient: None,
             tool: None,
         };
         assert_eq!(tool_label(&turn(r#"{"name":"shell"}"#)), "shell");

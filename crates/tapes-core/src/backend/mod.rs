@@ -1059,13 +1059,17 @@ pub(crate) fn attach_record_refs(
     span: Option<ByteSpan>,
 ) {
     for (part_index, turn) in turns.iter_mut().enumerate() {
-        turn.record_ref = Some(RecordRef {
+        let reference = RecordRef {
             domain: domain.to_owned(),
             revision: revision.map(str::to_owned),
             span,
             native_id: turn.native_id.clone(),
             part_index,
-        });
+        };
+        turn.record_ref = Some(reference.clone());
+        for (part_index, part) in turn.parts.iter_mut().enumerate() {
+            part.set_record_ref_part(reference.clone(), part_index);
+        }
     }
 }
 

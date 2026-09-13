@@ -9,6 +9,10 @@ use super::{
     read_bounds, read_recording, session_file, timestamp, trailing_record,
     transcript_from_recording, Backend, Jsonl, Listing, ParsedFile, Query, TokenTotals,
 };
+use crate::content::{
+    bounded_shape, text_part, tool_coverage, tool_part, ContentAvailability, ContentCarrier,
+    ContentCoverage, ContentPart,
+};
 use crate::event::{Bounded, EventKind, ToolEvent};
 use crate::lineage::{Lineage, ParentRef};
 use crate::model::{
@@ -428,6 +432,8 @@ fn parse_turns(value: &Value) -> Vec<Turn> {
     let role = match message_role {
         "user" => Role::User,
         "assistant" => Role::Assistant,
+        "system" => Role::System,
+        "developer" => Role::Developer,
         "toolResult" => {
             return vec![Turn {
                 role: Role::Tool,
@@ -438,6 +444,10 @@ fn parse_turns(value: &Value) -> Vec<Turn> {
                 native_id,
                 request_turn_id: None,
                 record_ref: None,
+                channel: None,
+                recipient: None,
+                parts: vec![tool_part(message, "message", "toolResult")],
+                coverage: Some(tool_coverage()),
                 tool: Some(pi_result_event(message)),
             }];
         }
@@ -455,6 +465,16 @@ fn parse_turns(value: &Value) -> Vec<Turn> {
                 native_id,
                 request_turn_id: None,
                 record_ref: None,
+                channel: None,
+                recipient: None,
+                parts: vec![text_part(text, "message.content", "text")],
+                coverage: Some(ContentCoverage {
+                    carrier: ContentCarrier::DirectPart,
+                    availability: ContentAvailability::RetainedBody,
+                    retained_parts: 1,
+                    omitted_parts: 0,
+                    omitted_reason: None,
+                }),
                 tool: None,
             })
             .into_iter()
@@ -466,17 +486,69 @@ fn parse_turns(value: &Value) -> Vec<Turn> {
         .into_iter()
         .flatten()
         .filter_map(|block| {
-            let (role, text, tool) = match block["type"].as_str()? {
-                "text" => (role.clone(), block["text"].as_str()?.to_owned(), None),
+            let native_kind = block["type"].as_str()?;
+            let (role, text, tool, parts, coverage) = match native_kind {
+                "text" => (
+                    role.clone(),
+                    block["text"].as_str()?.to_owned(),
+                    None,
+                    vec![text_part(
+                        block["text"].as_str()?,
+                        "message.content",
+                        native_kind,
+                    )],
+                    ContentCoverage {
+                        carrier: ContentCarrier::DirectPart,
+                        availability: ContentAvailability::RetainedBody,
+                        retained_parts: 1,
+                        omitted_parts: 0,
+                        omitted_reason: None,
+                    },
+                ),
                 "thinking" => (
                     Role::Reasoning,
                     block["thinking"].as_str()?.to_owned(),
                     None,
+                    vec![text_part(
+                        block["thinking"].as_str()?,
+                        "message.content",
+                        native_kind,
+                    )],
+                    ContentCoverage {
+                        carrier: ContentCarrier::DirectPart,
+                        availability: ContentAvailability::RetainedBody,
+                        retained_parts: 1,
+                        omitted_parts: 0,
+                        omitted_reason: None,
+                    },
                 ),
-                "toolCall" => (Role::Tool, block.to_string(), Some(pi_call_event(block))),
-                _ => return None,
+                "toolCall" => (
+                    Role::Tool,
+                    block.to_string(),
+                    Some(pi_call_event(block)),
+                    vec![tool_part(block, "message.content", native_kind)],
+                    tool_coverage(),
+                ),
+                _ => (
+                    role.clone(),
+                    String::new(),
+                    None,
+                    vec![ContentPart::Unknown {
+                        native_kind: native_kind.to_owned(),
+                        descriptor: bounded_shape(block),
+                        source_field: "message.content".to_owned(),
+                        record_ref: None,
+                    }],
+                    ContentCoverage {
+                        carrier: ContentCarrier::DirectPart,
+                        availability: ContentAvailability::Unknown,
+                        retained_parts: 1,
+                        omitted_parts: 0,
+                        omitted_reason: None,
+                    },
+                ),
             };
-            (!text.is_empty()).then_some(Turn {
+            ((!text.is_empty()) || !parts.is_empty()).then_some(Turn {
                 kind: user_kind(&role),
                 role,
                 text,
@@ -485,6 +557,10 @@ fn parse_turns(value: &Value) -> Vec<Turn> {
                 native_id: native_id.clone(),
                 request_turn_id: None,
                 record_ref: None,
+                channel: None,
+                recipient: None,
+                parts,
+                coverage: Some(coverage),
                 tool,
             })
         })

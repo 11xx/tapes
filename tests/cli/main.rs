@@ -346,7 +346,7 @@ fn events_help_explains_pairing_filters_and_the_default_bound() {
     );
     assert!(help.contains("--name <NAME>"), "{help}");
     assert!(help.contains("--call-id <ID>"), "{help}");
-    assert!(help.contains("tapes-events/2"), "{help}");
+    assert!(help.contains("tapes-events/3"), "{help}");
 }
 
 #[test]
@@ -399,7 +399,7 @@ fn events_json_answers_call_counts_and_incomplete_calls_without_raw_text() {
     );
     let value: Value = serde_json::from_slice(&output.stdout).unwrap();
 
-    assert_eq!(value["schema"], "tapes-events/2");
+    assert_eq!(value["schema"], "tapes-events/3");
     assert_eq!(value["session"]["id"], id);
     assert!(value.get("truncation").is_none(), "{value}");
     assert_eq!(
@@ -917,6 +917,55 @@ fn missing_recorded_activity_is_preserved_and_blocks_latest_selection() {
         "{}",
         String::from_utf8_lossy(&latest.stderr)
     );
+}
+
+#[test]
+fn non_text_message_remains_as_content_evidence() {
+    let root = TemporaryDirectory::new(
+        std::env::temp_dir().join(format!("tapes-content-parts-{}", std::process::id())),
+    );
+    let codex = root.path().join("codex");
+    let sessions = codex.join("sessions/2026/01/01");
+    fs::create_dir_all(&sessions).unwrap();
+    let id = "61000000-0000-0000-0000-000000000001";
+    let body = format!(
+        "{{\"type\":\"session_meta\",\"timestamp\":\"2026-01-01T10:00:00Z\",\"payload\":{{\"id\":\"{id}\",\"cwd\":\"/fixture\"}}}}\n{{\"type\":\"response_item\",\"timestamp\":\"2026-01-01T10:00:01Z\",\"payload\":{{\"type\":\"message\",\"role\":\"user\",\"content\":[{{\"type\":\"image\",\"uri\":\"/unreadable-canary\"}}]}}}}\n"
+    );
+    fs::write(
+        sessions.join(format!("rollout-2026-01-01T10-00-00-{id}.jsonl")),
+        body,
+    )
+    .unwrap();
+    let mut command = tapes();
+    command.args(["show", id, "--json"]);
+    with_fixture_env(&mut command, &codex, &root.path().join("home"), root.path());
+    let output = command.output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["turns"].as_array().unwrap().len(), 1);
+    assert_eq!(value["turns"][0]["parts"][0]["kind"], "media-reference");
+    assert_eq!(
+        value["turns"][0]["parts"][0]["reference"]["uri"],
+        "/unreadable-canary"
+    );
+    assert_eq!(value["content"]["references"], 1);
+    assert_eq!(
+        value["turns"][0]["parts"][0]["reference"]["source"]["part_index"],
+        0
+    );
+    assert!(value["turns"][0]["parts"][0]["reference"]["source"]["span"].is_object());
+
+    let mut brief = tapes();
+    brief.args(["brief", id, "--json"]);
+    with_fixture_env(&mut brief, &codex, &root.path().join("home"), root.path());
+    let brief = brief.output().unwrap();
+    assert!(brief.status.success());
+    let brief: Value = serde_json::from_slice(&brief.stdout).unwrap();
+    assert_eq!(brief["content"]["references"], 1);
 }
 
 #[test]
@@ -2358,7 +2407,7 @@ fn lineage_help_names_the_schema_and_the_rule_it_follows() {
     let output = tapes().args(["lineage", "--help"]).output().unwrap();
     assert!(output.status.success());
     let help = String::from_utf8_lossy(&output.stdout);
-    assert!(help.contains("tapes-lineage/1"), "{help}");
+    assert!(help.contains("tapes-lineage/2"), "{help}");
     assert!(
         help.contains("A relationship exists only where a record states it"),
         "{help}"
@@ -2414,7 +2463,7 @@ fn lineage_reports_a_subagent_reference_and_an_unresolved_parent() {
 
     let value: Value =
         serde_json::from_slice(&run(&["lineage", "session-claude", "--json"])).unwrap();
-    assert_eq!(value["schema"], "tapes-lineage/1");
+    assert_eq!(value["schema"], "tapes-lineage/2");
     assert_eq!(value["session"]["id"], "session-claude");
     let children = value["lineage"]["children"].as_array().unwrap();
     assert_eq!(children.len(), 1, "{value}");
@@ -2450,13 +2499,13 @@ fn usage_help_names_the_schema_and_what_the_figures_mean() {
     let output = tapes().args(["usage", "--help"]).output().unwrap();
     assert!(output.status.success());
     let help = String::from_utf8_lossy(&output.stdout);
-    assert!(help.contains("tapes-usage/2"), "{help}");
+    assert!(help.contains("tapes-usage/3"), "{help}");
     assert!(
         help.contains("basis and coverage decide whether figures may be summed"),
         "{help}"
     );
     assert!(help.contains("quota is a separate fact"), "{help}");
-    assert!(help.contains("tapes-usage-summary/2"), "{help}");
+    assert!(help.contains("tapes-usage-summary/3"), "{help}");
     assert!(help.contains("--by"), "{help}");
 }
 
@@ -2483,7 +2532,7 @@ fn usage_json_reports_recorded_facts_and_turn_counts_show_agrees_with() {
     );
     let value: Value = serde_json::from_slice(&output.stdout).unwrap();
 
-    assert_eq!(value["schema"], "tapes-usage/2");
+    assert_eq!(value["schema"], "tapes-usage/3");
     assert_eq!(value["session"]["id"], id);
     assert_eq!(value["session"]["source"]["recorded_harness"], "codex");
     assert_eq!(
@@ -2612,7 +2661,7 @@ fn usage_summary_sums_the_listings_own_counters_and_counts_the_sessions_behind_t
     );
     let value: Value = serde_json::from_slice(&output.stdout).unwrap();
 
-    assert_eq!(value["schema"], "tapes-usage-summary/2");
+    assert_eq!(value["schema"], "tapes-usage-summary/3");
     assert_eq!(value["selection"]["scope"], "global");
     assert_eq!(value["selection"]["harness"], "codex");
     assert_eq!(value["scanned"], 4);
@@ -2787,7 +2836,7 @@ fn export_over_an_activity_window_writes_one_bundle_per_session_and_a_manifest()
     );
     let manifest: Value =
         serde_json::from_slice(&fs::read(bundle.join("manifest.json")).unwrap()).unwrap();
-    assert_eq!(manifest["schema"], "tapes-export-manifest/1");
+    assert_eq!(manifest["schema"], "tapes-export-manifest/2");
     assert_eq!(
         manifest["selection"],
         serde_json::json!({
@@ -2913,7 +2962,7 @@ fn endings_help_names_the_schema_and_what_it_does_not_do() {
     assert!(output.status.success());
     let help = String::from_utf8_lossy(&output.stdout);
 
-    assert!(help.contains("tapes-endings/2"), "{help}");
+    assert!(help.contains("tapes-endings/3"), "{help}");
     assert!(help.contains("never on their text"), "{help}");
     assert!(help.contains("labels no session complete"), "{help}");
     assert!(help.contains("--tail <N>"), "{help}");
@@ -2950,7 +2999,7 @@ fn endings_applies_the_activity_window_before_reading_any_transcript() {
     );
     let value: Value = serde_json::from_slice(&output.stdout).unwrap();
 
-    assert_eq!(value["schema"], "tapes-endings/2");
+    assert_eq!(value["schema"], "tapes-endings/3");
     assert_eq!(
         value["selection"]["activity"],
         serde_json::json!({ "since": "2026-01-01T12:00:00Z" })
@@ -2967,7 +3016,7 @@ fn endings_applies_the_activity_window_before_reading_any_transcript() {
         ]
     );
     for ending in endings {
-        assert_eq!(ending["source"]["schema"], "tapes-endings/2");
+        assert_eq!(ending["source"]["schema"], "tapes-endings/3");
         assert_eq!(ending["source"]["source"]["recorded_harness"], "codex");
         assert_eq!(ending["facts"], serde_json::json!(["assistant-close"]));
         // The structural report carries no transcript text of its own.
@@ -3153,7 +3202,7 @@ fn stats_help_names_the_schema_and_what_the_figures_cover() {
     let output = tapes().args(["stats", "--help"]).output().unwrap();
     assert!(output.status.success());
     let help = String::from_utf8_lossy(&output.stdout);
-    assert!(help.contains("tapes-stats/2"), "{help}");
+    assert!(help.contains("tapes-stats/3"), "{help}");
     assert!(help.contains("complete pairs only"), "{help}");
     assert!(
         help.contains("share of recorded token counts rather than of cost"),
@@ -3177,6 +3226,7 @@ fn stats_json_counts_a_chosen_recording_exactly() {
         .unwrap()
         .remove("text_tail")
         .unwrap();
+    comparable.as_object_mut().unwrap().remove("content");
     assert_eq!(read["source_length"], 2722);
     assert_eq!(read["configured_bound"], 4 * 1024 * 1024);
     assert_eq!(read["ranges"][0]["kind"], "tail");
@@ -3190,7 +3240,7 @@ fn stats_json_counts_a_chosen_recording_exactly() {
     assert_eq!(
         comparable,
         serde_json::json!({
-            "schema": "tapes-stats/2",
+            "schema": "tapes-stats/3",
             "session": {
                 "id": id,
                 "source": {
@@ -3484,7 +3534,7 @@ fn brief_help_names_the_schema_and_the_half_it_reads() {
     assert!(output.status.success());
     let help = String::from_utf8_lossy(&output.stdout);
 
-    assert!(help.contains("tapes-brief/2"), "{help}");
+    assert!(help.contains("tapes-brief/3"), "{help}");
     assert!(help.contains("reads the recording alone"), "{help}");
     assert!(help.contains("--tail <N>"), "{help}");
     assert!(help.contains("[default: 12]"), "{help}");
@@ -3543,7 +3593,7 @@ fn brief_renders_the_continuation_in_reading_order() {
     assert!(narrow.contains("[assistant #4"), "{narrow}");
 
     let value: Value = serde_json::from_slice(&run(&["brief", id, "--json"])).unwrap();
-    assert_eq!(value["schema"], "tapes-brief/2");
+    assert_eq!(value["schema"], "tapes-brief/3");
     assert_eq!(value["session"]["id"], id);
     assert_eq!(value["working_set"]["directory_exists"], false);
     assert!(value["working_set"].get("git").is_none(), "{value}");
@@ -3578,7 +3628,7 @@ fn selection_stats_agree_with_individual_reads() {
         serde_json::from_slice::<Value>(&output.stdout).unwrap()
     };
     let summary = run(&["stats", "--global", "--harness", "codex", "--json"]);
-    assert_eq!(summary["schema"], "tapes-stats-summary/1");
+    assert_eq!(summary["schema"], "tapes-stats-summary/2");
     assert_eq!(summary["selected"], 2);
     assert_eq!(summary["read"], 2);
     let mut totals = [0_u64; 4];
@@ -4141,7 +4191,7 @@ fn child_reads_are_qualified_and_never_become_parent_activity() {
         String::from_utf8_lossy(&output.stderr)
     );
     let view: Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(view["schema"], "tapes-child/1");
+    assert_eq!(view["schema"], "tapes-child/2");
     assert_eq!(view["parent"]["id"], "session-claude");
     assert_eq!(
         view["transcript"]["session"]["id"],

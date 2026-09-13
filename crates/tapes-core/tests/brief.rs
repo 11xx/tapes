@@ -111,6 +111,27 @@ fn strip_record_refs(value: &mut Value) {
     }
 }
 
+fn strip_content_fields(value: &mut Value) {
+    match value {
+        Value::Object(object) => {
+            let had_parts = object.remove("parts").is_some();
+            object.remove("content");
+            if had_parts {
+                object.remove("coverage");
+            }
+            for value in object.values_mut() {
+                strip_content_fields(value);
+            }
+        }
+        Value::Array(values) => {
+            for value in values {
+                strip_content_fields(value);
+            }
+        }
+        _ => {}
+    }
+}
+
 /// The whole object, so every member a continuation reads is pinned: the
 /// coordinate, the working set, the ending, both kinds of handle, and the
 /// bounded tail.
@@ -135,6 +156,7 @@ fn a_brief_states_where_the_session_stopped_and_what_it_left_open() {
         .remove("text_tail")
         .unwrap();
     strip_record_refs(&mut comparable);
+    strip_content_fields(&mut comparable);
     assert_eq!(read["ranges"].as_array().unwrap().len(), 1);
     assert!(read["records"].as_array().unwrap().len() >= 8);
     assert_eq!(text_tail["returned"], 2);
@@ -168,7 +190,7 @@ fn a_brief_states_where_the_session_stopped_and_what_it_left_open() {
                 "session": id,
                 "ts": "2026-01-01T10:00:06Z",
                 "turn": 4,
-                "schema": "tapes-endings/2",
+                "schema": "tapes-endings/3",
                 "coverage": "session",
             },
             "working_set": {

@@ -19,6 +19,7 @@ pub mod backend;
 pub mod brief;
 pub mod bundle;
 pub mod child;
+pub mod content;
 pub mod endings;
 pub mod event;
 pub mod history;
@@ -30,9 +31,9 @@ pub mod stats_summary;
 pub mod title;
 pub mod usage;
 
-pub const LIST_SCHEMA: &str = "tapes-list/1";
-pub const EXPORT_MANIFEST_SCHEMA: &str = "tapes-export-manifest/1";
-pub const USAGE_SUMMARY_SCHEMA: &str = "tapes-usage-summary/2";
+pub const LIST_SCHEMA: &str = "tapes-list/2";
+pub const EXPORT_MANIFEST_SCHEMA: &str = "tapes-export-manifest/2";
+pub const USAGE_SUMMARY_SCHEMA: &str = "tapes-usage-summary/3";
 /// Number of normalized turns a `list --search` query inspects per session.
 /// Keeping this fixed makes the listing's cost predictable for callers.
 pub const LIST_SEARCH_TAIL: usize = 32;

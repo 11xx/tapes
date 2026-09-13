@@ -64,6 +64,12 @@ source observation and is not a portable content digest.
 
 `message.content` is *either* a string (real prompt) *or* an array (tool result envelope).
 
+The normalized content inventory preserves strings and recognized blocks in
+order. Text and thinking blocks retain readable text, tool blocks retain a
+bounded tool payload descriptor, and other blocks remain unknown evidence with
+bounded key/type shape. File or media references are descriptors only; the
+backend never opens or downloads the named object.
+
 ### Real prompt (string content)
 
 ```json

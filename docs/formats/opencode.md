@@ -82,6 +82,12 @@ Quirks a reader must handle:
 A `tool` part supplies one tool turn and one typed call event. Completed and
 failed states also project a result event without creating a second turn:
 
+Each message part also remains in the normalized content inventory. Text and
+reasoning retain their bodies, tool parts retain bounded structured descriptors,
+and unsupported parts remain unknown evidence. A path, URL, or file id is a
+reference only when it occurs in a recognized native carrier; Tapes never opens
+the referenced artifact.
+
 | event field | API part source | stable-database projection source |
 |---|---|---|
 | `kind` | `tool-call`; `completed` and `error` also project `tool-result` | same |

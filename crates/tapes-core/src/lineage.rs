@@ -15,7 +15,7 @@ use serde::Serialize;
 
 use crate::model::{Model, Session, SourceDescriptor, Truncation};
 
-pub const LINEAGE_SCHEMA: &str = "tapes-lineage/1";
+pub const LINEAGE_SCHEMA: &str = "tapes-lineage/2";
 
 /// One session's relatives, as its harness recorded them.
 #[derive(Clone, Debug, Default, PartialEq, Serialize)]

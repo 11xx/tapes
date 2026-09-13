@@ -21,6 +21,7 @@ use chrono::{DateTime, Utc};
 use serde::Serialize;
 
 use crate::bundle::{git_context, GitContext};
+use crate::content::{self, ContentInventory};
 use crate::endings::{self, Ending, EndingSource, Fact, Incomplete, TailEntry, TurnMark, TurnRef};
 use crate::event::{self, Bounded, EventKind};
 use crate::lineage::{ChildRef, Lineage};
@@ -31,7 +32,7 @@ use crate::model::{
 };
 use crate::usage;
 
-pub const BRIEF_SCHEMA: &str = "tapes-brief/2";
+pub const BRIEF_SCHEMA: &str = "tapes-brief/3";
 /// Newest operator and assistant turns rendered when the caller names no
 /// window. Wide enough to hold the exchange that ended the session, narrow
 /// enough that the brief stays one screen.
@@ -174,6 +175,8 @@ pub struct Brief {
     pub terminal: Option<TerminalObservation>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub text_tail: Option<TextTailEvidence>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content: Option<ContentInventory>,
     pub ending: BriefEnding,
     pub in_flight: InFlight,
     /// The newest operator and assistant turns of the read, oldest first.
@@ -195,6 +198,7 @@ pub fn brief(transcript: Transcript, lineage: Result<Lineage>, tail: usize) -> B
     let read = transcript.read.clone();
     let terminal = transcript.terminal.clone();
     let text_tail_evidence = transcript.text_tail.clone();
+    let content = content::inventory(&transcript.turns);
     let events = event::project(transcript.clone(), usize::MAX);
     let mut calls_without_result = events
         .events
@@ -284,6 +288,7 @@ pub fn brief(transcript: Transcript, lineage: Result<Lineage>, tail: usize) -> B
         read,
         terminal,
         text_tail: text_tail_evidence,
+        content,
         ending: BriefEnding {
             last_turn,
             last_operator,
@@ -356,6 +361,8 @@ fn text_tail(transcript: &Transcript, tail: usize) -> Vec<TailEntry> {
                 role: turn.role.clone(),
                 ts: turn.ts,
                 record_ref: turn.record_ref.clone(),
+                parts: turn.parts.clone(),
+                coverage: turn.coverage.clone(),
                 truncated: characters.next().is_some(),
                 text,
             }

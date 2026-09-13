@@ -12,6 +12,10 @@ use super::{
     matching_session_file, read_bounds, read_jsonl, read_recording, timestamp, trailing_record,
     transcript, transcript_from_recording, Backend, Jsonl, Listing, ParsedFile, Query, TokenTotals,
 };
+use crate::content::{
+    bounded_shape, text_part, tool_coverage, tool_part, ContentAvailability, ContentCarrier,
+    ContentCoverage, ContentPart,
+};
 use crate::event::{Bounded, EventKind, ToolEvent};
 use crate::history::{PageProjection, ReadContext};
 use crate::lineage::{ChildRef, Lineage, SourceRef};
@@ -771,6 +775,8 @@ fn parse_turns(value: &Value) -> Vec<Turn> {
     let role = match message_role {
         "user" => Role::User,
         "assistant" => Role::Assistant,
+        "system" => Role::System,
+        "developer" => Role::Developer,
         _ => return Vec::new(),
     };
     let ts = timestamp(&value["timestamp"]);
@@ -778,9 +784,26 @@ fn parse_turns(value: &Value) -> Vec<Turn> {
     let content = &message["content"];
     let user_kind = claude_user_kind(value, content.as_str());
     if let Some(text) = content.as_str() {
-        return turn(role, user_kind, text.to_owned(), ts, native_id, None)
-            .into_iter()
-            .collect();
+        return turn(
+            role,
+            user_kind,
+            text.to_owned(),
+            ts,
+            native_id,
+            None,
+            TurnContent {
+                parts: vec![text_part(text, "message.content", "text")],
+                coverage: ContentCoverage {
+                    carrier: ContentCarrier::DirectPart,
+                    availability: ContentAvailability::RetainedBody,
+                    retained_parts: 1,
+                    omitted_parts: 0,
+                    omitted_reason: None,
+                },
+            },
+        )
+        .into_iter()
+        .collect();
     }
 
     content
@@ -788,21 +811,77 @@ fn parse_turns(value: &Value) -> Vec<Turn> {
         .into_iter()
         .flatten()
         .filter_map(|block| {
-            let (role, text, tool) = match block["type"].as_str()? {
-                "text" => (role.clone(), block["text"].as_str()?.to_owned(), None),
+            let native_kind = block["type"].as_str()?;
+            let (role, text, tool, parts, coverage) = match native_kind {
+                "text" => (
+                    role.clone(),
+                    block["text"].as_str()?.to_owned(),
+                    None,
+                    vec![text_part(
+                        block["text"].as_str()?,
+                        "message.content",
+                        native_kind,
+                    )],
+                    ContentCoverage {
+                        carrier: ContentCarrier::DirectPart,
+                        availability: ContentAvailability::RetainedBody,
+                        retained_parts: 1,
+                        omitted_parts: 0,
+                        omitted_reason: None,
+                    },
+                ),
                 "thinking" => (
                     Role::Reasoning,
                     block["thinking"].as_str()?.to_owned(),
                     None,
+                    vec![text_part(
+                        block["thinking"].as_str()?,
+                        "message.content",
+                        native_kind,
+                    )],
+                    ContentCoverage {
+                        carrier: ContentCarrier::DirectPart,
+                        availability: ContentAvailability::RetainedBody,
+                        retained_parts: 1,
+                        omitted_parts: 0,
+                        omitted_reason: None,
+                    },
                 ),
                 subtype @ ("tool_use" | "tool_result") => (
                     Role::Tool,
                     block.to_string(),
                     Some(claude_tool_event(block, subtype)),
+                    vec![tool_part(block, "message.content", subtype)],
+                    tool_coverage(),
                 ),
-                _ => return None,
+                _ => (
+                    role.clone(),
+                    String::new(),
+                    None,
+                    vec![ContentPart::Unknown {
+                        native_kind: native_kind.to_owned(),
+                        descriptor: bounded_shape(block),
+                        source_field: "message.content".to_owned(),
+                        record_ref: None,
+                    }],
+                    ContentCoverage {
+                        carrier: ContentCarrier::DirectPart,
+                        availability: ContentAvailability::Unknown,
+                        retained_parts: 1,
+                        omitted_parts: 0,
+                        omitted_reason: None,
+                    },
+                ),
             };
-            turn(role, user_kind, text, ts, native_id.clone(), tool)
+            turn(
+                role,
+                user_kind,
+                text,
+                ts,
+                native_id.clone(),
+                tool,
+                TurnContent { parts, coverage },
+            )
         })
         .collect()
 }
@@ -814,8 +893,9 @@ fn turn(
     ts: Option<chrono::DateTime<chrono::Utc>>,
     native_id: Option<String>,
     tool: Option<ToolEvent>,
+    content: TurnContent,
 ) -> Option<Turn> {
-    (!text.is_empty()).then_some(Turn {
+    ((!text.is_empty()) || !content.parts.is_empty()).then_some(Turn {
         kind: role.kind().unwrap_or(user_kind),
         role,
         text,
@@ -824,8 +904,17 @@ fn turn(
         native_id,
         request_turn_id: None,
         record_ref: None,
+        channel: None,
+        recipient: None,
+        parts: content.parts,
+        coverage: Some(content.coverage),
         tool,
     })
+}
+
+struct TurnContent {
+    parts: Vec<ContentPart>,
+    coverage: ContentCoverage,
 }
 
 /// Claude writes what a user record is beside its content. `origin.kind` and

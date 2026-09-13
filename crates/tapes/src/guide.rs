@@ -113,8 +113,8 @@ FIND IT
 
 PROBE BEFORE EXPORTING
   tapes show <id> --tail 40      A window, costing no bundle.
-  tapes show <id> --json         The same turns as tapes-session/3, with bounded read and terminal evidence.
-  tapes events <id> --json       Typed tool calls, results, pairs, and read boundaries.
+  tapes show <id> --json         The same turns as tapes-session/4, with bounded read and terminal evidence.
+  tapes events <id> --json       Typed tool calls, results, pairs, and content parts.
   tapes usage <id> --json        Tokens, cost, quota observations, and turn counts.
   tapes stats <id> --json        The same recording, counted with its read evidence.
   tapes lineage <id> --json      The sessions this one names as relatives.
@@ -138,13 +138,13 @@ PROBE BEFORE EXPORTING
   Human output says the same in its closing notes, recommending only the
   recovery that works.
 
-  events projects harness-neutral tool records as tapes-events/2. Pairing is
+  events projects harness-neutral tool records as tapes-events/3. Pairing is
   exact within the bounded read; an incomplete call or result says whether its
   counterpart was not reached or not recorded. Event ordinals are the same
   turn coordinates show prints. With no --tail, every event the bounded reader
   reaches is returned; --name and --call-id filter only after pairing.
 
-  usage answers where a session's quota went as tapes-usage/2: its recorded
+  usage answers where a session's quota went as tapes-usage/3: its recorded
   tokens, cost, and accounting, and its turns counted by role. Read accounting
   before adding anything up — basis says whether a figure is a recorded total
   or a sum of per-request records, and coverage says how much of the session it
@@ -157,7 +157,7 @@ PROBE BEFORE EXPORTING
   reached-limit flags exactly as recorded, including false and string zero;
   absent fields remain unknown.
 
-  stats counts what one recording holds as tapes-stats/2: turns by kind, tool
+  stats counts what one recording holds as tapes-stats/3: turns by kind, tool
   calls by name with their paired durations and error counts, unpaired calls
   by the boundary that left them unpaired, the recorded clock, the session's
   token counters with the share of input plus cache read plus cache write its
@@ -172,7 +172,7 @@ PROBE BEFORE EXPORTING
   why a session ended.
 
   lineage answers which sessions a recording names as relatives, as
-  tapes-lineage/1: the session it was spawned or forked from, and the children
+  tapes-lineage/2: the session it was spawned or forked from, and the children
   its own store records, each with the role, model, spawn and completion
   stamps, and outcome its harness wrote. A relationship exists only where a
   record states it — a child header naming a parent, a spawn or completion
@@ -190,7 +190,7 @@ PROBE BEFORE EXPORTING
   child alone.
 
   Given a scope or a listing filter instead of a session, usage answers that
-  whole selection as tapes-usage-summary/2, using the flags list and export
+  whole selection as tapes-usage-summary/3, using the flags list and export
   take and grouping by --by (harness and model unless told otherwise). It sums
   the counters the listing already carries, so nothing is re-read. Read
   counted before a sum: it says how many of a group's sessions recorded that
@@ -267,7 +267,7 @@ READ MANY ENDINGS
   tapes endings --global --harness codex --limit 50 --text
 
   endings answers what each session of a selection ends on, as
-  tapes-endings/2, so choosing which few endings deserve reading costs one
+  tapes-endings/3, so choosing which few endings deserve reading costs one
   bounded read each instead of a transcript apiece. The selection is the one
   list and export take, and the scope and filters apply before any transcript
   is opened. --tail sets how many of each session's newest turns are read (12
@@ -349,7 +349,7 @@ CONTINUE A COLD SESSION
   tapes brief <id> --tail 20 --json
 
   A continuation has two halves. brief is the transcript's half, as
-  tapes-brief/2: where the session stopped, the directory it worked in and the
+  tapes-brief/3: where the session stopped, the directory it worked in and the
   commit that directory sits on, the tool calls the read never saw a result
   for, the children whose outcome its store does not record, and the last few
   operator and assistant turns, each cut at 600 characters. --tail sets how
