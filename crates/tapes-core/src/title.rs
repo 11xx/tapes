@@ -67,12 +67,8 @@ pub fn resolve(
             format!(
                 "  {} ({}) [{}]",
                 found.session.id,
-                found.session.harness,
-                found
-                    .session
-                    .store
-                    .as_deref()
-                    .unwrap_or("origin unavailable")
+                found.session.harness(),
+                found.session.locator().unwrap_or("origin unavailable")
             )
         })
         .collect::<Vec<_>>()

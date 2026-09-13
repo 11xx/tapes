@@ -9,7 +9,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::backend::{self, Backend};
-use crate::model::{Model, Session, Turn};
+use chrono::Utc;
+
+use crate::model::{
+    ByteSpan, Model, ReadEvidence, ReadGap, ReadRange, ReadRangeKind, Session, Turn,
+};
 use crate::Selection;
 
 pub const DEFAULT_BYTES: usize = 64 * 1024;
@@ -110,6 +114,7 @@ pub struct Page {
     pub context_bytes: usize,
     pub skipped_records: usize,
     pub skipped_fragment_bytes: usize,
+    pub read: ReadEvidence,
     pub turns: Vec<Turn>,
     pub models: Vec<ModelObservation>,
     pub next_cursor: Option<String>,
@@ -127,7 +132,13 @@ pub(crate) fn read_file(
     cursor: Option<&str>,
     bytes: usize,
     context: ReadContext,
-    normalize: impl FnOnce(&[Value], &[Value], &[Value]) -> (Vec<Turn>, Vec<ModelObservation>),
+    normalize: impl FnOnce(
+        &[Value],
+        &[ByteSpan],
+        &[Value],
+        &[Value],
+        &str,
+    ) -> (Vec<Turn>, Vec<ModelObservation>),
 ) -> Result<Page> {
     if !(1024..=MAX_BYTES).contains(&bytes) {
         bail!("page bytes must be between 1024 and {MAX_BYTES}");
@@ -176,14 +187,36 @@ pub(crate) fn read_file(
         state.discard_suffix = true;
         start = window_start;
     }
-    let (values, skipped_records) = parse_records(&data[start_index..finish]);
+    let (values, spans, skipped_records, mut gaps) = parse_records(
+        &data[start_index..finish],
+        window_start + start_index as u64,
+    );
+    if start_index > 0 {
+        gaps.push(ReadGap {
+            span: ByteSpan {
+                start: window_start,
+                end: window_start + start_index as u64,
+            },
+            reason: "discarded-partial-record".to_owned(),
+        });
+    }
+    if finish < data.len() {
+        gaps.push(ReadGap {
+            span: ByteSpan {
+                start: window_start + finish as u64,
+                end,
+            },
+            reason: "discarded-partial-suffix".to_owned(),
+        });
+    }
     let (newer_records, context_bytes) = read_context(&mut file, end, state.size, context)?;
     let opening = if context == ReadContext::OperatorProvenance {
         backend::head_jsonl(path)
     } else {
         Vec::new()
     };
-    let (mut turns, models) = normalize(&values, &opening, &newer_records);
+    let revision = cursor_revision(&state);
+    let (mut turns, models) = normalize(&values, &spans, &opening, &newer_records, &revision);
     for (ordinal, turn) in turns.iter_mut().enumerate() {
         turn.ordinal = ordinal;
     }
@@ -195,8 +228,51 @@ pub(crate) fn read_file(
     let next_cursor = (start > 0)
         .then(|| serde_json::to_string(&state))
         .transpose()?;
+    let mut ranges = Vec::with_capacity(3);
+    if window_start > 0 {
+        ranges.push(ReadRange {
+            kind: ReadRangeKind::Alignment,
+            span: ByteSpan {
+                start: window_start - 1,
+                end: window_start,
+            },
+        });
+    }
+    ranges.push(ReadRange {
+        kind: ReadRangeKind::Tail,
+        span: ByteSpan {
+            start: window_start,
+            end,
+        },
+    });
+    if context_bytes > 0 {
+        ranges.push(ReadRange {
+            kind: ReadRangeKind::Context,
+            span: ByteSpan {
+                start: end,
+                end: end + context_bytes as u64,
+            },
+        });
+    }
+    let read = ReadEvidence {
+        source_length: state.size,
+        configured_bound: bytes as u64,
+        coordinate_domain: "file-byte-range".to_owned(),
+        source_revision: Some(cursor_revision(&state)),
+        producer: session.source.producer.clone(),
+        projection: "tapes-page/2".to_owned(),
+        projection_options: if context != ReadContext::None {
+            vec!["opening-and-newer-provenance".to_owned()]
+        } else {
+            Vec::new()
+        },
+        observed_at: Utc::now(),
+        records: spans,
+        ranges,
+        gaps,
+    };
     Ok(Page {
-        schema: "tapes-page/1",
+        schema: "tapes-page/2",
         session: session.clone(),
         start,
         end,
@@ -206,25 +282,57 @@ pub(crate) fn read_file(
         context_bytes,
         skipped_records,
         skipped_fragment_bytes,
+        read,
         turns,
         models,
         next_cursor,
     })
 }
 
-fn parse_records(bytes: &[u8]) -> (Vec<Value>, usize) {
+fn parse_records(bytes: &[u8], base: u64) -> (Vec<Value>, Vec<ByteSpan>, usize, Vec<ReadGap>) {
     let mut values = Vec::new();
+    let mut spans = Vec::new();
+    let mut gaps = Vec::new();
     let mut skipped = 0;
-    for line in bytes
-        .split(|byte| *byte == b'\n')
-        .filter(|line| !line.iter().all(u8::is_ascii_whitespace))
-    {
+    let mut offset = 0;
+    for line in bytes.split_inclusive(|byte| *byte == b'\n') {
+        let span = ByteSpan {
+            start: base + offset,
+            end: base + offset + line.len() as u64,
+        };
+        offset += line.len() as u64;
+        let line = line.strip_suffix(b"\n").unwrap_or(line);
+        if line.iter().all(u8::is_ascii_whitespace) {
+            continue;
+        }
         match serde_json::from_slice(line) {
-            Ok(value) => values.push(value),
-            Err(_) => skipped += 1,
+            Ok(value) => {
+                values.push(value);
+                spans.push(span);
+            }
+            Err(_) => {
+                skipped += 1;
+                gaps.push(ReadGap {
+                    span,
+                    reason: "malformed-record".to_owned(),
+                });
+            }
         }
     }
-    (values, skipped)
+    (values, spans, skipped, gaps)
+}
+
+fn cursor_revision(cursor: &Cursor) -> String {
+    format!(
+        "stat:{}:{}:{}:{}:{}:{}:{}",
+        cursor.device,
+        cursor.inode,
+        cursor.size,
+        cursor.modified,
+        cursor.nanos,
+        cursor.changed,
+        cursor.changed_nanos
+    )
 }
 
 fn read_context(
@@ -248,7 +356,7 @@ fn read_context(
             .rposition(|byte| *byte == b'\n')
             .map_or(0, |i| i + 1)
     };
-    Ok((parse_records(&newer[..complete]).0, bytes))
+    Ok((parse_records(&newer[..complete], end).0, bytes))
 }
 
 #[derive(Default)]
@@ -259,6 +367,7 @@ struct ReadProgress {
     context_bytes: usize,
     skipped_records: usize,
     skipped_fragment_bytes: usize,
+    reads: Vec<ReadEvidence>,
     next_cursor: Option<String>,
 }
 
@@ -287,6 +396,7 @@ fn visit_pages(
         progress.context_bytes += page.context_bytes;
         progress.skipped_records += page.skipped_records;
         progress.skipped_fragment_bytes += page.skipped_fragment_bytes;
+        progress.reads.push(page.read.clone());
         progress.next_cursor = page.next_cursor.clone();
         visit(page);
         if progress.next_cursor.is_none() {
@@ -315,6 +425,7 @@ pub struct Search {
     pub context_bytes: usize,
     pub skipped_records: usize,
     pub skipped_fragment_bytes: usize,
+    pub reads: Vec<ReadEvidence>,
     pub matches: Vec<SearchMatch>,
     pub matches_truncated: bool,
     pub next_cursor: Option<String>,
@@ -365,7 +476,7 @@ pub fn search(
         },
     )?;
     Ok(Search {
-        schema: "tapes-history-search/1",
+        schema: "tapes-history-search/2",
         session: resolved.session,
         pages_read: progress.pages_read,
         bytes_read: progress.bytes_read,
@@ -373,6 +484,7 @@ pub fn search(
         context_bytes: progress.context_bytes,
         skipped_records: progress.skipped_records,
         skipped_fragment_bytes: progress.skipped_fragment_bytes,
+        reads: progress.reads,
         matches,
         matches_truncated,
         next_cursor: progress.next_cursor,
@@ -389,6 +501,7 @@ pub struct MetadataHistory {
     pub context_bytes: usize,
     pub skipped_records: usize,
     pub skipped_fragment_bytes: usize,
+    pub reads: Vec<ReadEvidence>,
     pub observations: Vec<ModelObservation>,
     pub observations_truncated: bool,
     pub next_cursor: Option<String>,
@@ -427,7 +540,7 @@ pub fn metadata(
         },
     )?;
     Ok(MetadataHistory {
-        schema: "tapes-metadata-history/1",
+        schema: "tapes-metadata-history/2",
         session: resolved.session,
         pages_read: progress.pages_read,
         bytes_read: progress.bytes_read,
@@ -435,6 +548,7 @@ pub fn metadata(
         context_bytes: progress.context_bytes,
         skipped_records: progress.skipped_records,
         skipped_fragment_bytes: progress.skipped_fragment_bytes,
+        reads: progress.reads,
         observations,
         observations_truncated,
         next_cursor: progress.next_cursor,

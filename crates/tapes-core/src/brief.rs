@@ -25,8 +25,9 @@ use crate::endings::{self, Ending, EndingSource, Fact, Incomplete, TailEntry, Tu
 use crate::event::{self, Bounded, EventKind};
 use crate::lineage::{ChildRef, Lineage};
 use crate::model::{
-    Accounting, Cost, LiveState, Model, ReadEvidence, TerminalObservation, TextTailEvidence,
-    Tokens, TrailingRecord, Transcript, Truncation, TurnKind,
+    Accounting, Cost, LiveState, Model, ReadEvidence, RecordRef, SourceDescriptor,
+    TerminalObservation, TextTailEvidence, Tokens, TrailingRecord, Transcript, Truncation,
+    TurnKind,
 };
 use crate::usage;
 
@@ -46,19 +47,19 @@ const IN_FLIGHT_LIMIT: usize = 20;
 #[derive(Clone, Debug, Serialize)]
 pub struct BriefSession {
     pub id: String,
-    pub harness: String,
+    pub source: SourceDescriptor,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<Model>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub derived_title: Option<String>,
-    pub started_at: DateTime<Utc>,
-    pub last_activity_at: DateTime<Utc>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<DateTime<Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_activity_at: Option<DateTime<Utc>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub directory: Option<PathBuf>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub store: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub live: Option<LiveState>,
 }
@@ -100,6 +101,8 @@ pub struct BriefEnding {
 #[derive(Clone, Debug, Serialize)]
 pub struct OpenCall {
     pub ordinal: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub record_ref: Option<RecordRef>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -203,6 +206,7 @@ pub fn brief(transcript: Transcript, lineage: Result<Lineage>, tail: usize) -> B
         })
         .map(|record| OpenCall {
             ordinal: record.ordinal,
+            record_ref: record.record_ref.clone(),
             name: record.event.name.clone(),
             call_id: record.event.call_id.clone(),
             ts: record.ts,
@@ -230,14 +234,13 @@ pub fn brief(transcript: Transcript, lineage: Result<Lineage>, tail: usize) -> B
     let directory = transcript.session.directory.clone();
     let session = BriefSession {
         id: transcript.session.id.clone(),
-        harness: transcript.session.harness.clone(),
+        source: transcript.session.source.clone(),
         model: transcript.session.model.clone(),
         title: transcript.session.title.clone(),
         derived_title: transcript.session.derived_title.clone(),
         started_at: transcript.session.started_at,
         last_activity_at: transcript.session.last_activity_at,
         directory: directory.clone(),
-        store: transcript.session.store.clone(),
         live: transcript.session.live.clone(),
     };
     let working_set = WorkingSet {
@@ -352,6 +355,7 @@ fn text_tail(transcript: &Transcript, tail: usize) -> Vec<TailEntry> {
                 kind: turn.kind,
                 role: turn.role.clone(),
                 ts: turn.ts,
+                record_ref: turn.record_ref.clone(),
                 truncated: characters.next().is_some(),
                 text,
             }

@@ -519,7 +519,7 @@ pub(crate) fn list_scoped(
     let (sessions, origins) = found
         .into_iter()
         .filter_map(|(session, origin)| {
-            let count = returned.entry(session.harness.clone()).or_default();
+            let count = returned.entry(session.harness().to_owned()).or_default();
             if *count >= limit {
                 return None;
             }
@@ -546,13 +546,26 @@ pub(crate) fn list_scoped(
 }
 
 fn compare_sessions(left: &Session, right: &Session, sort: ListSort) -> Ordering {
-    let activity = match sort {
-        ListSort::Newest => right.last_activity_at.cmp(&left.last_activity_at),
-        ListSort::Oldest => left.last_activity_at.cmp(&right.last_activity_at),
-    };
+    let activity = compare_activity(left.last_activity_at, right.last_activity_at, sort);
     activity
         .then_with(|| left.id.cmp(&right.id))
-        .then_with(|| left.harness.cmp(&right.harness))
+        .then_with(|| left.harness().cmp(right.harness()))
+}
+
+fn compare_activity(
+    left: Option<DateTime<Utc>>,
+    right: Option<DateTime<Utc>>,
+    sort: ListSort,
+) -> Ordering {
+    match (left, right, sort) {
+        (Some(left), Some(right), ListSort::Newest) => right.cmp(&left),
+        (Some(left), Some(right), ListSort::Oldest) => left.cmp(&right),
+        (Some(_), None, ListSort::Newest) => Ordering::Less,
+        (None, Some(_), ListSort::Newest) => Ordering::Greater,
+        (Some(_), None, ListSort::Oldest) => Ordering::Less,
+        (None, Some(_), ListSort::Oldest) => Ordering::Greater,
+        (None, None, _) => Ordering::Equal,
+    }
 }
 
 /// The most recent session in scope, with the sessions named in `exclude`
@@ -600,12 +613,28 @@ pub fn latest_with_backends(
     } else {
         "on this machine"
     };
+    if listed
+        .sessions
+        .iter()
+        .any(|session| session.last_activity_at.is_none())
+    {
+        anyhow::bail!(
+            "--latest cannot choose the newest session {scoped}: at least one candidate has no recorded activity timestamp"
+        );
+    }
     listed
         .sessions
         .into_iter()
         .zip(listed.origins)
         .filter(|(session, _)| !exclude.contains(&session.id))
-        .max_by_key(|(session, _)| session.last_activity_at)
+        .max_by(
+            |(left, _), (right, _)| match (left.last_activity_at, right.last_activity_at) {
+                (Some(left), Some(right)) => left.cmp(&right),
+                (Some(_), None) => Ordering::Greater,
+                (None, Some(_)) => Ordering::Less,
+                (None, None) => Ordering::Equal,
+            },
+        )
         .map(|(session, backend_index)| ResolvedSession {
             backend_index,
             session,
@@ -663,8 +692,8 @@ pub fn resolve_session(
             let mut candidates = located
                 .into_iter()
                 .map(|resolved| SessionCandidate {
-                    id: resolved.session.id,
-                    harness: resolved.session.harness,
+                    id: resolved.session.id.clone(),
+                    harness: resolved.session.harness().to_owned(),
                 })
                 .collect::<Vec<_>>();
             candidates.sort_by(|left, right| {
@@ -734,8 +763,8 @@ pub fn resolve_session(
             let mut candidates = matches
                 .into_iter()
                 .map(|resolved| SessionCandidate {
-                    id: resolved.session.id,
-                    harness: resolved.session.harness,
+                    id: resolved.session.id.clone(),
+                    harness: resolved.session.harness().to_owned(),
                 })
                 .collect::<Vec<_>>();
             candidates.sort_by(|left, right| {
@@ -959,7 +988,7 @@ pub struct ExportedFiles {
 pub struct ExportedSession {
     pub id: String,
     pub harness: String,
-    pub last_activity_at: DateTime<Utc>,
+    pub last_activity_at: Option<DateTime<Utc>>,
     pub files: ExportedFiles,
 }
 
@@ -1046,8 +1075,8 @@ pub fn export_selection_with_backends(
         {
             Ok(bundle) => {
                 sessions.push(ExportedSession {
-                    id: session.id,
-                    harness: session.harness,
+                    id: session.id.clone(),
+                    harness: session.harness().to_owned(),
                     last_activity_at: session.last_activity_at,
                     files: ExportedFiles {
                         context: bundle.context.path.clone(),
@@ -1058,8 +1087,8 @@ pub fn export_selection_with_backends(
                 bundles.push(bundle);
             }
             Err(error) => failed.push(FailedExport {
-                id: session.id,
-                harness: session.harness,
+                id: session.id.clone(),
+                harness: session.harness().to_owned(),
                 error: format!("{error:#}"),
             }),
         }

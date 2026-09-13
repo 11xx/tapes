@@ -206,7 +206,7 @@ The optional `read` object records the source length, configured bound, the
 physical ranges read, decoded record spans, and gaps. A `terminal` observation
 retains native stop fields reached by the read without claiming present-tense
 liveness; `text_tail` explains an empty operator/assistant tail.
-JSON output uses the `tapes-session/2` transcript schema, with the optional
+JSON output uses the `tapes-session/3` transcript schema, with the optional
 `live` annotation when the authority answers. The human header marks the same
 state.
 
@@ -308,7 +308,7 @@ in one screen, in that reading order.
 
 - `.context.md` — exact operator turns and assistant-visible text, without the
   harness's own commands, notices, and attached context. Read first.
-- `.json` — the canonical `tapes-session/2` object plus turns, cost, tokens,
+- `.json` — the canonical `tapes-session/3` object plus turns, cost, tokens,
   their `accounting` basis and coverage when present, any verified
   `trailing_record`, and the session directory's git head and branch when
   they resolve. Query selectively with `jq`.
@@ -391,10 +391,10 @@ rather than a resent history. `tapes usage --here --since <date> --json` answers
 <date> --json` says what each of those sessions ends on, so a scan reads the
 few endings that matter instead of every tail.
 
-**Contracts you can build on.** `tapes-list/1`, `tapes-session/2`,
+**Contracts you can build on.** `tapes-list/1`, `tapes-session/3`,
 `tapes-events/2`, `tapes-usage/2`, `tapes-usage-summary/2`, `tapes-lineage/1`,
 `tapes-endings/2`, `tapes-child/1`, `tapes-stats/2`, `tapes-stats-summary/1`, `tapes-brief/2`,
-`tapes-page/1`, `tapes-history-search/1`, `tapes-metadata-history/1`,
+`tapes-page/2`, `tapes-history-search/2`, `tapes-metadata-history/2`,
 and `tapes-export-manifest/1` are versioned
 JSON; a breaking shape change bumps the version. A single-session `export`
 prints

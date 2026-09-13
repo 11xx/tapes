@@ -52,6 +52,14 @@ turns, the last activity, the `aiTitle`, and the final model. A turn's
 `native_id` is the `uuid` of the line it came from; the text, thinking, and
 tool blocks of one assistant message share it.
 
+The normalized source descriptor identifies this as an installed Claude
+recording and keeps the file path as an opaque location. The optional
+`started_at` and `last_activity_at` fields remain absent when no reached record
+supplies valid timestamps; filesystem times are not substituted. Every decoded
+turn carries an absolute file `record_ref` span and the read object records the
+source revision, physical ranges, and gaps. The reference is local to that
+source observation and is not a portable content digest.
+
 ## `type: "user"` — the user role
 
 `message.content` is *either* a string (real prompt) *or* an array (tool result envelope).

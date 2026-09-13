@@ -19,7 +19,7 @@ use crate::event::{self, Bounded, EventKind, EventTranscript, ToolEvent};
 use crate::lineage::{ChildRef, Lineage, ParentRef, SourceRef};
 use crate::model::{
     human_bytes, AccountingBasis, AccountingCoverage, Cost, Model, Role, Session, SourceBound,
-    Tokens, Transcript, Truncation, Turn, TurnKind, TurnWindow,
+    SourceDescriptor, SourceLocation, Tokens, Transcript, Truncation, Turn, TurnKind, TurnWindow,
 };
 
 const MAX_COMMAND_BYTES: u64 = 8 * 1024 * 1024;
@@ -590,7 +590,10 @@ impl OpenCodeBackend {
         for row in rows.values {
             match parse_database_session(&row) {
                 Ok(mut session) => {
-                    session.store = Some(self.store_coordinate(&session.id));
+                    session.source.location = Some(SourceLocation {
+                        locator: self.store_coordinate(&session.id),
+                        member: None,
+                    });
                     listing.sessions.push(session);
                 }
                 Err(error) => listing
@@ -623,7 +626,10 @@ impl OpenCodeBackend {
         ))?;
         let mut session = rows.first().map(parse_database_session).transpose()?;
         if let Some(session) = session.as_mut() {
-            session.store = Some(self.store_coordinate(&session.id));
+            session.source.location = Some(SourceLocation {
+                locator: self.store_coordinate(&session.id),
+                member: None,
+            });
         }
         Ok(session)
     }
@@ -930,7 +936,10 @@ impl OpenCodeBackend {
         let sessions = sessions
             .into_iter()
             .map(|mut session| {
-                session.store = Some(self.store_coordinate(&session.id));
+                session.source.location = Some(SourceLocation {
+                    locator: self.store_coordinate(&session.id),
+                    member: None,
+                });
                 session
             })
             .filter(|session| {
@@ -1110,7 +1119,10 @@ impl Backend for OpenCodeBackend {
             return Ok(None);
         }
         let mut session = parse_session(data)?;
-        session.store = Some(self.store_coordinate(&session.id));
+        session.source.location = Some(SourceLocation {
+            locator: self.store_coordinate(&session.id),
+            member: None,
+        });
         Ok(Some(session))
     }
 
@@ -1319,10 +1331,8 @@ fn database_message(row: &Value, parts: Vec<Value>) -> Option<Result<Value>> {
 
 fn parse_database_session(value: &Value) -> Result<Session> {
     let id = required_string(value, "id")?;
-    let started_at = epoch_millis(&value["time_created"])
-        .ok_or_else(|| anyhow!("opencode session {id} has no creation time"))?;
-    let last_activity_at = epoch_millis(&value["time_updated"])
-        .ok_or_else(|| anyhow!("opencode session {id} has no update time"))?;
+    let started_at = epoch_millis(&value["time_created"]);
+    let last_activity_at = epoch_millis(&value["time_updated"]);
     let model = database_model(&value["model"]);
     let tokens = database_tokens(value);
     let cost = value["cost"].as_f64().map(|usd| Cost { usd });
@@ -1335,7 +1345,7 @@ fn parse_database_session(value: &Value) -> Result<Session> {
 
     Ok(Session {
         id,
-        harness: "opencode".into(),
+        source: SourceDescriptor::installed("opencode", "opencode-database"),
         model,
         title: value["title"]
             .as_str()
@@ -1350,7 +1360,6 @@ fn parse_database_session(value: &Value) -> Result<Session> {
         cost,
         tokens,
         accounting,
-        store: None,
         start_uncertain: false,
         usage_detail: None,
     })
@@ -1394,10 +1403,8 @@ fn parse_sessions(response: &Value) -> Result<Vec<Session>> {
 
 fn parse_session(value: &Value) -> Result<Session> {
     let id = required_string(value, "id")?;
-    let started_at = epoch_millis(&value["time"]["created"])
-        .ok_or_else(|| anyhow!("opencode session {id} has no creation time"))?;
-    let last_activity_at = epoch_millis(&value["time"]["updated"])
-        .ok_or_else(|| anyhow!("opencode session {id} has no update time"))?;
+    let started_at = epoch_millis(&value["time"]["created"]);
+    let last_activity_at = epoch_millis(&value["time"]["updated"]);
     let model = value["model"]["id"].as_str().map(|id| Model {
         id: id.to_owned(),
         variant: value["model"]["variant"].as_str().map(str::to_owned),
@@ -1413,7 +1420,7 @@ fn parse_session(value: &Value) -> Result<Session> {
 
     Ok(Session {
         id,
-        harness: "opencode".into(),
+        source: SourceDescriptor::installed("opencode", "opencode-api"),
         model,
         title: value["title"].as_str().map(str::to_owned),
         derived_title: None,
@@ -1425,7 +1432,6 @@ fn parse_session(value: &Value) -> Result<Session> {
         cost,
         tokens,
         accounting,
-        store: None,
         start_uncertain: false,
         usage_detail: None,
     })
@@ -1664,6 +1670,7 @@ fn parse_message(message: &Value) -> Vec<Turn> {
                 ordinal: 0,
                 native_id: message_id,
                 request_turn_id: None,
+                record_ref: None,
                 tool: None,
             })
             .into_iter()
@@ -1700,6 +1707,7 @@ fn parse_message(message: &Value) -> Vec<Turn> {
                 ordinal: 0,
                 native_id,
                 request_turn_id: None,
+                record_ref: None,
                 tool,
             })
         })

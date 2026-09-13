@@ -128,7 +128,10 @@ fn a_closing_assistant_turn_is_named_beside_the_record_the_store_ends_on() {
     assert!(ending.incomplete.is_empty(), "{:#?}", ending.incomplete);
     assert_eq!(ending.session.id, id);
     assert_eq!(ending.source.session, id);
-    assert_eq!(ending.source.harness, "codex");
+    assert_eq!(
+        ending.source.source.recorded_harness.as_deref(),
+        Some("codex")
+    );
     assert_eq!(ending.source.coverage, Coverage::Session);
     assert_eq!(ending.source.turn, Some(1));
     let last = ending.last_turn.as_ref().unwrap();
@@ -232,7 +235,10 @@ fn a_request_with_no_answer_after_it_is_named() {
     let report = report(&backends, 12, false);
     assert_eq!(facts(&report), vec![Fact::OperatorTurnAfterAssistant]);
     let ending = &report.endings[0];
-    assert_eq!(ending.session.harness, "pi");
+    assert_eq!(
+        ending.session.source.recorded_harness.as_deref(),
+        Some("pi")
+    );
     assert_eq!(ending.last_turn.as_ref().unwrap().kind, TurnKind::Operator);
     assert!(ending.last_assistant.is_none());
 }

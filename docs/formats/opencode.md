@@ -5,6 +5,13 @@ the v2 SQLite store; every other form (live API, plain JSON export, Markdown
 export) is a projection of that log. `tapes` reduces them to one normalized model, so
 nothing downstream needs to know which projection it came from.
 
+OpenCode sessions use an installed-recording source descriptor. Database and
+API locations are opaque source coordinates, while native message and part
+ids remain separate from those locations. Creation or update time is optional
+when the source omits or malforms it; filesystem timestamps are never used as
+conversation activity. Paged reads carry a source revision, physical ranges,
+and `record_ref` coordinates for the native records they retain.
+
 ```
                  ┌─────────────────────────────┐
                  │ opencode-next.db (event     │  ← canonical, WAL, safe to read

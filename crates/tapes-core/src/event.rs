@@ -5,8 +5,8 @@ use serde::Serialize;
 use serde_json::Value;
 
 use crate::model::{
-    ReadEvidence, Session, SourceBound, TerminalObservation, TextTailEvidence, Transcript,
-    Truncation,
+    ReadEvidence, RecordRef, Session, SourceBound, TerminalObservation, TextTailEvidence,
+    Transcript, Truncation,
 };
 
 pub const EVENTS_SCHEMA: &str = "tapes-events/2";
@@ -69,6 +69,8 @@ pub struct PairRef {
     pub ordinal: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub native_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub record_ref: Option<RecordRef>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -84,6 +86,8 @@ pub struct EventRecord {
     pub ordinal: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub native_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub record_ref: Option<RecordRef>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ts: Option<DateTime<Utc>>,
     #[serde(flatten)]
@@ -163,6 +167,7 @@ pub fn project(transcript: Transcript, tail: usize) -> EventTranscript {
             turn.tool.clone().map(|event| EventRecord {
                 ordinal: turn.ordinal,
                 native_id: turn.native_id.clone(),
+                record_ref: turn.record_ref.clone(),
                 ts: turn.ts,
                 event,
                 pair: None,
@@ -256,6 +261,7 @@ fn reference(record: &EventRecord) -> PairRef {
     PairRef {
         ordinal: record.ordinal,
         native_id: record.native_id.clone(),
+        record_ref: record.record_ref.clone(),
     }
 }
 
@@ -285,25 +291,24 @@ mod tests {
     use chrono::TimeZone;
 
     use super::*;
-    use crate::model::{Role, Turn, TurnKind};
+    use crate::model::{Role, SourceDescriptor, Turn, TurnKind};
 
     fn session() -> Session {
         let ts = Utc.timestamp_opt(1_700_000_000, 0).unwrap();
         Session {
             id: "fixture-session".to_owned(),
-            harness: "fixture".to_owned(),
+            source: SourceDescriptor::installed("fixture", "fixture-recording"),
             model: None,
             title: None,
             derived_title: None,
             derived_title_truncated: None,
             directory: None,
-            started_at: ts,
-            last_activity_at: ts,
+            started_at: Some(ts),
+            last_activity_at: Some(ts),
             live: None,
             cost: None,
             tokens: None,
             accounting: None,
-            store: None,
             start_uncertain: false,
             usage_detail: None,
         }
@@ -331,6 +336,7 @@ mod tests {
             ordinal,
             native_id: Some(format!("native-{ordinal}")),
             request_turn_id: None,
+            record_ref: None,
             tool: Some(event),
         }
     }

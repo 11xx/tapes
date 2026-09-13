@@ -14,7 +14,8 @@ use serde_json::Value;
 
 use crate::model::{
     Accounting, AccountingBasis, AccountingCoverage, Cost, Model, ReadEvidence, Role, Session,
-    SourceBound, TerminalObservation, TextTailEvidence, Tokens, Transcript, Truncation,
+    SourceBound, SourceDescriptor, TerminalObservation, TextTailEvidence, Tokens, Transcript,
+    Truncation,
 };
 
 pub const USAGE_SCHEMA: &str = "tapes-usage/2";
@@ -170,15 +171,15 @@ pub enum TurnCoverage {
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct UsageSession {
     pub id: String,
-    pub harness: String,
+    pub source: SourceDescriptor,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<Model>,
-    pub started_at: DateTime<Utc>,
-    pub last_activity_at: DateTime<Utc>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<DateTime<Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_activity_at: Option<DateTime<Utc>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub directory: Option<std::path::PathBuf>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub store: Option<String>,
 }
 
 /// One session's usage. `tokens`, `cost`, and `accounting` are the session's
@@ -229,12 +230,11 @@ pub fn usage(transcript: &Transcript) -> UsageView {
         schema: USAGE_SCHEMA,
         session: UsageSession {
             id: session.id.clone(),
-            harness: session.harness.clone(),
+            source: session.source.clone(),
             model: session.model.clone(),
             started_at: session.started_at,
             last_activity_at: session.last_activity_at,
             directory: session.directory.clone(),
-            store: session.store.clone(),
         },
         accounting: session.accounting.clone(),
         tokens: session.tokens.clone(),
@@ -303,7 +303,7 @@ impl GroupBy {
     /// carries no such fact.
     fn of(self, session: &Session) -> Option<String> {
         match self {
-            Self::Harness => Some(session.harness.clone()),
+            Self::Harness => Some(session.harness().to_owned()),
             Self::Model => session.model.as_ref().map(|model| model.id.clone()),
             Self::Variant => session
                 .model
@@ -534,25 +534,26 @@ mod tests {
     use serde_json::{json, Value};
 
     use super::*;
-    use crate::model::{AccountingBasis, AccountingCoverage, Session, Turn, TurnKind};
+    use crate::model::{
+        AccountingBasis, AccountingCoverage, Session, SourceDescriptor, Turn, TurnKind,
+    };
 
     fn session() -> Session {
         let ts = Utc.timestamp_opt(1_700_000_000, 0).unwrap();
         Session {
             id: "fixture-session".to_owned(),
-            harness: "fixture".to_owned(),
+            source: SourceDescriptor::installed("fixture", "fixture-recording"),
             model: None,
             title: None,
             derived_title: None,
             derived_title_truncated: None,
             directory: None,
-            started_at: ts,
-            last_activity_at: ts,
+            started_at: Some(ts),
+            last_activity_at: Some(ts),
             live: None,
             cost: None,
             tokens: None,
             accounting: None,
-            store: None,
             start_uncertain: false,
             usage_detail: None,
         }
@@ -567,6 +568,7 @@ mod tests {
             ordinal: 0,
             native_id: None,
             request_turn_id: None,
+            record_ref: None,
             tool: None,
         }
     }
@@ -744,7 +746,7 @@ mod tests {
         accounting: Option<(AccountingBasis, AccountingCoverage)>,
     ) -> Session {
         Session {
-            harness: harness.to_owned(),
+            source: SourceDescriptor::installed(harness, "fixture-recording"),
             model: model.map(|(id, variant)| Model {
                 id: id.to_owned(),
                 variant: variant.map(str::to_owned),
@@ -932,7 +934,10 @@ pub fn partitioned_aggregate(
         BTreeMap::new();
     let mut all = std::collections::BTreeSet::new();
     for session in sessions {
-        let key = (session.harness.clone(), format!("{:?}", session.accounting));
+        let key = (
+            session.harness().to_owned(),
+            format!("{:?}", session.accounting),
+        );
         partitions
             .entry(key.clone())
             .or_insert_with(|| (session.accounting.clone(), Tally::default()))

@@ -23,8 +23,8 @@ use crate::backend::Backend;
 use crate::event::{self, EventKind, EventRecord};
 use crate::lineage::{Lineage, ParentRef};
 use crate::model::{
-    LiveState, Model, ReadEvidence, Role, SourceBound, TerminalObservation, TextTailEvidence,
-    TrailingRecord, Transcript, Truncation, Turn, TurnKind,
+    LiveState, Model, ReadEvidence, RecordRef, Role, SourceBound, SourceDescriptor,
+    TerminalObservation, TextTailEvidence, TrailingRecord, Transcript, Truncation, Turn, TurnKind,
 };
 use crate::{list_scoped, selection_record, SelectionRecord, SessionSelection, DEFAULT_LIST_LIMIT};
 
@@ -122,7 +122,7 @@ pub enum Coverage {
 #[derive(Clone, Debug, Serialize)]
 pub struct EndingSession {
     pub id: String,
-    pub harness: String,
+    pub source: SourceDescriptor,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<Model>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -131,7 +131,8 @@ pub struct EndingSession {
     pub derived_title: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub directory: Option<PathBuf>,
-    pub last_activity_at: DateTime<Utc>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_activity_at: Option<DateTime<Utc>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub live: Option<LiveState>,
 }
@@ -141,16 +142,19 @@ pub struct EndingSession {
 /// It carries no transcript text.
 #[derive(Clone, Debug, Serialize)]
 pub struct EndingSource {
-    pub harness: String,
+    pub source: SourceDescriptor,
     pub session: String,
     /// The last read turn's timestamp, or the session's newest recorded
     /// activity when that turn carries none.
-    pub ts: DateTime<Utc>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ts: Option<DateTime<Utc>>,
     /// The last read turn's ordinal, the same coordinate `show` prints.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub turn: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub native_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub record_ref: Option<RecordRef>,
     pub schema: &'static str,
     pub coverage: Coverage,
 }
@@ -163,6 +167,8 @@ pub struct TurnRef {
     pub ordinal: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ts: Option<DateTime<Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub record_ref: Option<RecordRef>,
 }
 
 /// Where a turn sits, for a turn whose role and kind the field name already
@@ -172,6 +178,8 @@ pub struct TurnMark {
     pub ordinal: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ts: Option<DateTime<Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub record_ref: Option<RecordRef>,
 }
 
 /// The relatives a session's store records, counted. Children are referred to
@@ -204,6 +212,8 @@ pub struct TailEntry {
     pub role: Role,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ts: Option<DateTime<Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub record_ref: Option<RecordRef>,
     pub text: String,
     /// Whether the entry's text was cut at the entry bound.
     pub truncated: bool,
@@ -308,8 +318,8 @@ pub fn endings_with_backends(
                 endings.push(ending(transcript, lineage, tail, text));
             }
             Err(error) => unread.push(UnreadSession {
-                id: session.id,
-                harness: session.harness,
+                id: session.id.clone(),
+                harness: session.harness().to_owned(),
                 error: format!("{error:#}"),
             }),
         }
@@ -372,7 +382,7 @@ pub fn ending(transcript: Transcript, lineage: Result<Lineage>, tail: usize, tex
     Ending {
         session: EndingSession {
             id: session.id.clone(),
-            harness: session.harness.clone(),
+            source: session.source.clone(),
             model: session.model.clone(),
             title: session.title.clone(),
             derived_title: session.derived_title.clone(),
@@ -381,13 +391,14 @@ pub fn ending(transcript: Transcript, lineage: Result<Lineage>, tail: usize, tex
             live: session.live.clone(),
         },
         source: EndingSource {
-            harness: session.harness.clone(),
+            source: session.source.clone(),
             session: session.id.clone(),
             ts: last_turn
                 .and_then(|turn| turn.ts)
-                .unwrap_or(session.last_activity_at),
+                .or(session.last_activity_at),
             turn: last_turn.map(|turn| turn.ordinal),
             native_id: last_turn.and_then(|turn| turn.native_id.clone()),
+            record_ref: last_turn.and_then(|turn| turn.record_ref.clone()),
             schema: ENDINGS_SCHEMA,
             coverage: match (withheld_turns, windowed) {
                 (true, _) => Coverage::ReadWindow,
@@ -400,6 +411,7 @@ pub fn ending(transcript: Transcript, lineage: Result<Lineage>, tail: usize, tex
             kind: turn.kind,
             ordinal: turn.ordinal,
             ts: turn.ts,
+            record_ref: turn.record_ref.clone(),
         }),
         last_operator: mark(newest(turns, TurnKind::Operator)),
         last_assistant: mark(newest(turns, TurnKind::Assistant)),
@@ -481,6 +493,7 @@ fn mark(turn: Option<&Turn>) -> Option<TurnMark> {
     turn.map(|turn| TurnMark {
         ordinal: turn.ordinal,
         ts: turn.ts,
+        record_ref: turn.record_ref.clone(),
     })
 }
 
@@ -547,6 +560,7 @@ fn text_tail(turns: &[Turn], tail: usize) -> Vec<TailEntry> {
                 kind: turn.kind,
                 role: turn.role.clone(),
                 ts: turn.ts,
+                record_ref: turn.record_ref.clone(),
                 truncated: characters.next().is_some(),
                 text,
             }

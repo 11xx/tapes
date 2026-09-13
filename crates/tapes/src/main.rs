@@ -12,7 +12,8 @@ use tapes_core::event::{EventKind, EventRecord, EventTranscript, Incomplete};
 use tapes_core::lineage::{ChildRef, LineageView};
 use tapes_core::model::{
     human_bytes, human_speaker, human_timestamp, human_title, speaker, Accounting, AccountingBasis,
-    AccountingCoverage, Cost, LiveState, Session, SourceBound, Tokens, Transcript, Truncation,
+    AccountingCoverage, Cost, LiveState, Session, SourceBound, SourceDescriptor, Tokens,
+    Transcript, Truncation,
 };
 use tapes_core::stats::{
     Coverage, LineageStats, StatsView, TimeStats, ToolNameStats, ToolStats, TurnKindCounts,
@@ -365,7 +366,8 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Show one session. Every turn carries a `kind` naming what the harness
+    /// Show one session. The session carries a source descriptor and optional
+    /// activity timestamps; every turn carries a `kind` naming what the harness
     /// recorded it as, and a user turn holding a harness command, notice, or
     /// attached context is headed `user/<kind>` rather than `user`. The human
     /// header marks a matching live session when harness-status is reachable,
@@ -384,7 +386,8 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Read one bounded page of older Claude or Codex history. Resume with the returned cursor.
+    /// Read one bounded page of older Claude or Codex history as tapes-page/2,
+    /// including absolute record references and read evidence. Resume with the returned cursor.
     Page {
         #[command(flatten)]
         selection: SelectionArgs,
@@ -707,7 +710,7 @@ fn dispatch(cli: Cli) -> Result<()> {
                 println!(
                     "{} ({}): bytes {}..{} of {}; {} malformed records, {} skipped fragment bytes",
                     page.session.id,
-                    page.session.harness,
+                    page.session.harness(),
                     page.start,
                     page.end,
                     page.source_bytes,
@@ -808,7 +811,9 @@ fn dispatch(cli: Cli) -> Result<()> {
             } else {
                 println!(
                     "Child {} of {} ({})",
-                    child.reference, child.parent.id, child.parent.harness
+                    child.reference,
+                    child.parent.id,
+                    child.parent.harness()
                 );
                 print_transcript(&child.transcript, false);
                 print!("{}", render_usage(&child.usage));
@@ -1050,7 +1055,7 @@ fn print_stats_summary(summary: &tapes_core::stats_summary::StatsSummary) {
         println!(
             "  {} ({}): {} coverage",
             session.session.id,
-            session.session.harness,
+            source_harness(&session.session.source),
             coverage_name(session.coverage.turns)
         );
     }
@@ -1074,7 +1079,11 @@ fn print_stats_summary(summary: &tapes_core::stats_summary::StatsSummary) {
 /// the recording does not carry has no line, so what is printed is what the
 /// read established.
 fn render_brief(brief: &Brief) -> String {
-    let mut out = format!("session: {} {}", brief.session.harness, brief.session.id);
+    let mut out = format!(
+        "session: {} {}",
+        source_harness(&brief.session.source),
+        brief.session.id
+    );
     match (&brief.session.title, &brief.session.derived_title) {
         (Some(title), _) => out.push_str(&format!(" {title}")),
         (None, Some(hint)) => out.push_str(&format!(" ~{hint}")),
@@ -1218,8 +1227,11 @@ fn render_ending(ending: &Ending) -> String {
     let mut out = format!(
         "{} {} {} {}",
         ending.session.id,
-        ending.session.harness,
-        human_timestamp(ending.session.last_activity_at),
+        source_harness(&ending.session.source),
+        ending
+            .session
+            .last_activity_at
+            .map_or_else(|| "unavailable".to_owned(), human_timestamp),
         ending
             .last_turn
             .as_ref()
@@ -1281,7 +1293,8 @@ fn render_ending(ending: &Ending) -> String {
 fn render_lineage(lineage: &LineageView) -> String {
     let mut out = format!(
         "session: {} {}",
-        lineage.session.harness, lineage.session.id
+        source_harness(&lineage.session.source),
+        lineage.session.id
     );
     if let Some(model) = &lineage.session.model {
         out.push_str(&format!(" {}", model.identity()));
@@ -1341,7 +1354,11 @@ fn render_child(child: &ChildRef) -> String {
 /// read holds nothing for has no line at all. The tool table is the only
 /// multi-line group.
 fn render_stats(stats: &StatsView) -> String {
-    let mut out = format!("session: {} {}", stats.session.harness, stats.session.id);
+    let mut out = format!(
+        "session: {} {}",
+        source_harness(&stats.session.source),
+        stats.session.id
+    );
     if let Some(model) = &stats.session.model {
         out.push_str(&format!(" {}", model.identity()));
     }
@@ -1523,7 +1540,11 @@ fn warning_label(warning: Warning) -> &'static str {
 /// One line per fact, and a fact the harness did not record has no line.
 /// The closing notes are `show`'s, because the read behind them is the same.
 fn render_usage(usage: &UsageView) -> String {
-    let mut out = format!("session: {} {}", usage.session.harness, usage.session.id);
+    let mut out = format!(
+        "session: {} {}",
+        source_harness(&usage.session.source),
+        usage.session.id
+    );
     if let Some(model) = &usage.session.model {
         out.push_str(&format!(" {}", model.identity()));
     }
@@ -1818,7 +1839,7 @@ fn print_events(events: &EventTranscript, by_latest: bool) {
     if events.session.live.is_some() || by_latest {
         out.push_str(&format!(
             "# {} {}{}\n",
-            events.session.harness,
+            events.session.harness(),
             events.session.id,
             live_marker(&events.session)
         ));
@@ -1880,16 +1901,22 @@ fn print_session_list(sessions: &[Session]) {
             "{}\t{}\t{}\t{}\t{}\t{}\t{}",
             session.id,
             live_label(session),
-            session.harness,
+            session.harness(),
             model,
             human_title(session),
             session
                 .directory
                 .as_deref()
                 .map_or_else(String::new, |path| path.display().to_string()),
-            human_timestamp(session.last_activity_at)
+            session
+                .last_activity_at
+                .map_or_else(|| "unavailable".to_owned(), human_timestamp)
         );
     }
+}
+
+fn source_harness(source: &SourceDescriptor) -> &str {
+    source.recorded_harness.as_deref().unwrap_or(&source.origin)
 }
 
 fn live_label(session: &Session) -> &'static str {
@@ -1975,7 +2002,7 @@ fn render_transcript(transcript: &Transcript, by_latest: bool) -> String {
     if transcript.session.live.is_some() || by_latest {
         out.push_str(&format!(
             "# {} {}{}\n",
-            transcript.session.harness,
+            transcript.session.harness(),
             transcript.session.id,
             live_marker(&transcript.session)
         ));
@@ -1997,7 +2024,10 @@ fn render_transcript(transcript: &Transcript, by_latest: bool) -> String {
         out.push_str(&format!(
             "Note: The recorded start could not be read; {} is the earliest record reached, and the \
              session began at or before it.\n",
-            human_timestamp(transcript.session.started_at)
+            transcript
+                .session
+                .started_at
+                .map_or_else(|| "unavailable".to_owned(), human_timestamp)
         ));
     }
     render_activity_note(&mut out, transcript);
@@ -2121,16 +2151,19 @@ fn render_truncation_notes(out: &mut String, truncation: &Truncation) {
 
 fn render_activity_note(out: &mut String, transcript: &Transcript) {
     let newest_turn = transcript.turns.iter().rev().find_map(|turn| turn.ts);
-    let activity_after_newest_turn = newest_turn.as_ref().is_some_and(|newest_turn| {
-        transcript.session.last_activity_at.timestamp() > newest_turn.timestamp()
-    });
+    let activity_after_newest_turn = transcript
+        .session
+        .last_activity_at
+        .as_ref()
+        .zip(newest_turn.as_ref())
+        .is_some_and(|(activity, newest_turn)| activity.timestamp() > newest_turn.timestamp());
     let Some(trailing_record) = transcript.trailing_record.as_ref() else {
         if activity_after_newest_turn {
             if let Some(newest_turn) = newest_turn {
                 out.push_str(&format!(
                     "Note: The store records activity at {}, after the newest turn rendered here ({}). \
                      What came later is a record `show` does not render as a turn.\n",
-                    human_timestamp(transcript.session.last_activity_at),
+                    human_timestamp(transcript.session.last_activity_at.expect("activity was checked")),
                     human_timestamp(newest_turn)
                 ));
             }
@@ -2151,7 +2184,7 @@ fn render_activity_note(out: &mut String, transcript: &Transcript) {
             out.push_str(&format!(
                 "Note: The store records activity at {}, after the newest turn rendered here ({}). \
                  The newest trailing record is {label}; `show` does not render it as a turn.\n",
-                human_timestamp(transcript.session.last_activity_at),
+                human_timestamp(transcript.session.last_activity_at.expect("activity was checked")),
                 human_timestamp(newest_turn)
             ));
             return;
@@ -2187,25 +2220,26 @@ fn reset_sigpipe() {
 mod tests {
     use super::*;
     use chrono::{DateTime, Utc};
-    use tapes_core::model::{End, OrdinalRange, Role, TrailingRecord, Turn, TurnKind, TurnWindow};
+    use tapes_core::model::{
+        End, OrdinalRange, Role, SourceDescriptor, TrailingRecord, Turn, TurnKind, TurnWindow,
+    };
 
     fn transcript(truncated: bool) -> Transcript {
         Transcript {
             session: Session {
                 id: "s1".to_owned(),
-                harness: "claude".to_owned(),
+                source: SourceDescriptor::installed("claude", "fixture-recording"),
                 model: None,
                 title: None,
                 derived_title: None,
                 derived_title_truncated: None,
                 directory: None,
-                started_at: Utc::now(),
-                last_activity_at: Utc::now(),
+                started_at: Some(Utc::now()),
+                last_activity_at: Some(Utc::now()),
                 live: None,
                 cost: None,
                 tokens: None,
                 accounting: None,
-                store: None,
                 start_uncertain: false,
                 usage_detail: None,
             },
@@ -2217,6 +2251,7 @@ mod tests {
                 ordinal: 0,
                 native_id: None,
                 request_turn_id: None,
+                record_ref: None,
                 tool: None,
             }],
             truncated,
@@ -2314,13 +2349,13 @@ mod tests {
         let newest_turn = "2026-08-23T23:24:52Z".parse::<DateTime<Utc>>().unwrap();
         let mut session = transcript(false);
         session.turns[0].ts = Some(newest_turn);
-        session.session.last_activity_at = "2026-08-23T23:27:56Z".parse().unwrap();
+        session.session.last_activity_at = Some("2026-08-23T23:27:56Z".parse().unwrap());
         let rendered = render_transcript(&session, false);
         assert!(rendered.contains("does not render as a turn"), "{rendered}");
         assert!(rendered.contains("23:27:56"), "{rendered}");
         assert!(rendered.contains("23:24:52"), "{rendered}");
 
-        session.session.last_activity_at = newest_turn;
+        session.session.last_activity_at = Some(newest_turn);
         let agreeing = render_transcript(&session, false);
         assert!(
             !agreeing.contains("does not render as a turn"),
@@ -2334,7 +2369,7 @@ mod tests {
         let mut transcript = transcript(false);
         transcript.turns[0].ts = Some(newest_turn);
         transcript.session.last_activity_at =
-            "2026-08-23T23:24:52.400Z".parse::<DateTime<Utc>>().unwrap();
+            Some("2026-08-23T23:24:52.400Z".parse::<DateTime<Utc>>().unwrap());
 
         let same_second = render_transcript(&transcript, false);
         assert!(
@@ -2343,7 +2378,7 @@ mod tests {
         );
 
         transcript.session.last_activity_at =
-            "2026-08-23T23:24:53Z".parse::<DateTime<Utc>>().unwrap();
+            Some("2026-08-23T23:24:53Z".parse::<DateTime<Utc>>().unwrap());
         let next_second = render_transcript(&transcript, false);
         assert!(
             next_second.contains("The store records activity"),
@@ -2357,7 +2392,7 @@ mod tests {
         let trailing_timestamp = "2026-08-23T23:27:56Z".parse::<DateTime<Utc>>().unwrap();
         let mut transcript = transcript(false);
         transcript.turns[0].ts = Some(newest_turn);
-        transcript.session.last_activity_at = trailing_timestamp;
+        transcript.session.last_activity_at = Some(trailing_timestamp);
         transcript.trailing_record = Some(TrailingRecord {
             kind: "event_msg".to_owned(),
             timestamp: Some(trailing_timestamp),

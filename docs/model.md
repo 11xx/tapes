@@ -44,6 +44,14 @@ Codex, an absent `model` can mean that the model-bearing `turn_context` was
 before the bounded 4 MiB file-tail read; the reader preserves that absence
 rather than inventing a model.
 
+`source` describes where the normalized session came from. Its `kind` is
+`installed-recording` or `supplied-export`; `origin` names the platform,
+`recorded_harness` is present only when that platform supplied one, and
+`representation`, `producer`, `scope`, and `location` retain the known
+representation and opaque source/container coordinate. `id` is the native
+conversation or session identity; it is not a path, archive member, or global
+identity outside the descriptor's scope.
+
 `started_at` and `last_activity_at` come from two bounded windows on a
 file-backed session. File-backed readers open the first 64 KiB, where every
 harness writes its session header, and the last 4 MiB, where the newest
@@ -57,7 +65,11 @@ falls back to the tail's earliest record and the session carries
 The flag is omitted when the start is the recorded one. `last_activity_at` is the newest timestamp in the tail, which is the
 end of the file. The session id and directory are likewise read from the
 opening first. A header without a timestamp falls back to the tail's earliest,
-and a file with no timestamp anywhere in either window is not a session.
+and a file with no timestamp anywhere in either window remains a session with
+both timestamps absent. Missing activity is ordered after timestamped activity
+and cannot satisfy a date predicate. `--latest` refuses when a candidate lacks
+the activity evidence needed to prove the winner; filesystem modification time
+is never substituted.
 
 `Model` contains the model identifier and an optional variant. The variant
 also carries an effort level when the harness records one. Its identity is the
@@ -101,7 +113,7 @@ transcript contract.
 and `reasoning`.
 A tool turn also carries one typed `ToolEvent` inside the process for the
 `events` projection. The field is skipped by serialization, so
-`tapes-session/2` and export bundles retain the tool's harness envelope only in
+the session wire object and export bundles retain the tool's harness envelope only in
 `text`.
 In ordinary transcript views, the ordinal is the turn's zero-based position in the normalized turn
 sequence, counted from the first turn the reader reaches. For a file-backed
@@ -199,7 +211,14 @@ fetched.
   "schema": "tapes-events/2",
   "session": {
     "id": "session-1",
-    "harness": "codex",
+    "source": {
+      "kind": "installed-recording",
+      "origin": "codex",
+      "recorded_harness": "codex",
+      "representation": "codex-recording",
+      "producer": "codex",
+      "location": { "locator": "/store/rollout.jsonl" }
+    },
     "started_at": "2023-11-14T22:13:20Z",
     "last_activity_at": "2023-11-14T22:15:00Z"
   },
@@ -368,11 +387,10 @@ and its `notes`, with the same meaning they have on a transcript: a bounded
 read can leave a spawn record unread, and a store larger than the read's own
 probe says so in a note.
 
-`Session.store` is where `tapes` read the session from, as an opaque string: a
-recording file's path for the file-backed harnesses, the database file for
-OpenCode's stable store, and the program and endpoint for the OpenCode API.
-Together with the harness and the native session id it is the coordinate a
-consumer writes down; none of the three carries transcript text.
+`Session.source.location` is where `tapes` read the session from, as an opaque
+locator and optional container member. It is separate from the native session
+id and from the source revision in `read`; none of those fields carries
+transcript text or proves that a relocated source is identical.
 
 `TrailingRecord` identifies a verified final record after the newest rendered
 turn when that record does not become a turn. It carries the source `kind` and
@@ -692,9 +710,9 @@ carried verbatim.
 
 Each ending carries the session identity, the coordinate to write down for it,
 the turns the report names, the facts the read establishes, and what it left
-unestablished. `source` is that coordinate: the harness, the session id, the
-last read turn's `ts` — or the session's `last_activity_at` where that turn
-carries none — its `turn` ordinal and `native_id`, this schema, and
+unestablished. `source` is that coordinate: the source descriptor, the session
+id, the last read turn's `ts` — or the session's `last_activity_at` where that
+turn carries none — its `turn` ordinal, `native_id`, and `record_ref`, this schema, and
 `coverage`, which is `read-window` when a source bound withheld turns,
 `window` when only the turn window omitted any, and `session` otherwise. It
 holds no transcript text.
@@ -798,8 +816,8 @@ The brief reads the recording and nothing else. It opens no journal, asks no
 project tool, judges no ending, and resumes nothing; joining it with whatever a
 project records about the same work is the caller's.
 
-`session` carries the identity the usage view carries — `id`, `harness`,
-`model`, `started_at`, `last_activity_at`, `directory`, `store` — plus the
+`session` carries the identity the usage view carries — `id`, `source`,
+`model`, optional `started_at`, optional `last_activity_at`, and `directory` — plus the
 recorded `title` or the derived `derived_title` hint, and `live` when a status
 authority answered. `source` is the coordinate to write down for this reading,
 emitted as the endings report emits it, `schema` included.
@@ -903,11 +921,11 @@ its `notes`, with the meanings they have on a transcript.
 
 ## JSON contract
 
-A serialized transcript is a `tapes-session/2` object:
+A serialized transcript is a `tapes-session/3` object:
 
 ```json
 {
-  "schema": "tapes-session/2",
+  "schema": "tapes-session/3",
   "session": {
     "id": "session-1",
     "harness": "codex",
@@ -952,8 +970,16 @@ The window names the ordinals it holds (`"ordinals": { "first": 47, "last":
 146 }` for the case above), and every turn carries its own:
 
 ```json
-{ "role": "user", "kind": "operator", "text": "…", "ts": "2023-11-14T22:13:20Z", "ordinal": 47, "native_id": "msg_1" }
+{ "role": "user", "kind": "operator", "text": "…", "ts": "2023-11-14T22:13:20Z", "ordinal": 47, "native_id": "msg_1", "record_ref": { "domain": "file:/store/rollout.jsonl", "revision": "stat:…", "span": { "start": 120, "end": 260 }, "native_id": "msg_1", "part_index": 0 } }
 ```
+
+`record_ref` is the shared source coordinate used by turns, tool events,
+pair references, endings, and bundle traces. JSONL spans are absolute file
+offsets and remain stable across overlapping page sizes while the source
+revision is unchanged. A native identifier without a source domain is not a
+portable identity; a display ordinal is never promoted to one. Git context in
+an export is observed working-directory context and does not alter these
+record references.
 
 An optional field means that the source harness does not record that fact.
 Absent values are omitted from JSON rather than emitted as `null`, empty
@@ -1041,17 +1067,19 @@ verbatim, so the exported set can be audited against the store it came from.
 
 ## Historical evidence
 
-`tapes-page/1` carries a normalized session, chronological `turns` with page-local
+`tapes-page/2` carries a normalized session, chronological `turns` with page-local
 ordinals, recorded `models`, source `start`/`end` byte offsets, `source_bytes`,
 `bytes_read`, separately counted `alignment_bytes` and `context_bytes`, malformed
 `skipped_records`, `skipped_fragment_bytes`, and an
+`read` evidence with absolute record spans, and an
 optional `next_cursor`. A missing cursor means the source beginning was reached,
 not that malformed or oversized records were decoded. The cursor is opaque;
 it binds the session and file snapshot and must be passed back unchanged.
 
-`tapes-history-search/1` carries session identity, accumulated pages/bytes/gaps,
+`tapes-history-search/2` carries session identity, accumulated pages/bytes/gaps
+and one `read` descriptor per page,
 matching text excerpts identified by page start, end and ordinal, an output-truncation
-flag, and a continuation cursor. `tapes-metadata-history/1` carries the same
+flag, and a continuation cursor. `tapes-metadata-history/2` carries the same
 coverage facts with up to 100 reverse-record-ordered model observations and
 an observation-truncation flag. Neither schema infers facts outside its reads.
 Metadata traversal does not

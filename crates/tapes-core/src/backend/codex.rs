@@ -15,7 +15,8 @@ use crate::history::{PageProjection, ReadContext};
 use crate::lineage::{ChildRef, Lineage, ParentRef, SourceRef};
 use crate::model::{
     is_known_envelope, without_known_envelopes, AccountingBasis, AccountingCoverage, Model, Role,
-    Session, TerminalObservation, Tokens, TrailingRecord, Transcript, Turn, TurnKind,
+    Session, SourceDescriptor, TerminalObservation, Tokens, TrailingRecord, Transcript, Turn,
+    TurnKind,
 };
 use crate::usage::{Credits, RateLimits, RateWindow, UsageDetail};
 
@@ -42,7 +43,9 @@ impl CodexBackend {
         let recording = read_recording(path)?;
         let (started_at, last_activity_at) = recording
             .time_range()
-            .ok_or_else(|| anyhow!("{} has no valid timestamps", path.display()))?;
+            .map_or((None, None), |(started, activity)| {
+                (Some(started), Some(activity))
+            });
         // `session_meta` is the file's first line, so the opening is where the
         // id and the recorded working directory live whatever the file's size.
         let opening = recording.opening();
@@ -104,7 +107,7 @@ impl CodexBackend {
 
         let session = Session {
             id,
-            harness: "codex".into(),
+            source: SourceDescriptor::installed("codex", path.display().to_string()),
             model,
             title: None,
             derived_title: None,
@@ -116,7 +119,6 @@ impl CodexBackend {
             cost: None,
             tokens,
             accounting,
-            store: Some(path.display().to_string()),
             start_uncertain: recording.start_uncertain(),
             usage_detail,
         };
@@ -143,8 +145,7 @@ impl CodexBackend {
         projection: PageProjection,
     ) -> Result<crate::history::Page> {
         let path = session
-            .store
-            .as_deref()
+            .locator()
             .ok_or_else(|| anyhow!("session has no source file"))?;
         crate::history::read_file(
             session,
@@ -156,7 +157,7 @@ impl CodexBackend {
             } else {
                 ReadContext::None
             },
-            |values, opening, context| {
+            |values, spans, opening, context, revision| {
                 let turns = if projection == PageProjection::Transcript {
                     let mut evidence = user_message_evidence(values, opening);
                     evidence
@@ -164,7 +165,17 @@ impl CodexBackend {
                         .extend(context.iter().filter_map(codex_user_message));
                     values
                         .iter()
-                        .flat_map(|value| parse_turns(value, &evidence))
+                        .zip(spans)
+                        .flat_map(|(value, span)| {
+                            let mut turns = parse_turns(value, &evidence);
+                            super::attach_record_refs(
+                                &mut turns,
+                                &format!("file:{}", path),
+                                Some(revision),
+                                Some(*span),
+                            );
+                            turns
+                        })
                         .collect()
                 } else {
                     Vec::new()
@@ -388,7 +399,13 @@ fn read_transcript(path: &Path) -> Result<CodexTranscriptRead> {
     let mut turns = Vec::new();
     let mut last_turn = None;
     for (index, value) in read.values.iter().enumerate() {
-        let parsed = parse_turns(value, &evidence);
+        let mut parsed = parse_turns(value, &evidence);
+        super::attach_record_refs(
+            &mut parsed,
+            &format!("file:{}", path.display()),
+            Some(&recording.tail.source_revision),
+            read.spans.get(index).copied(),
+        );
         if !parsed.is_empty() {
             last_turn = Some(index);
         }
@@ -694,6 +711,7 @@ fn parse_turns(value: &Value, messages: &UserMessages) -> Vec<Turn> {
                 .as_str()
                 .or_else(|| payload["context"]["turn_id"].as_str())
                 .map(str::to_owned),
+            record_ref: None,
             tool,
         })
         .into_iter()

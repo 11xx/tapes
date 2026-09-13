@@ -16,8 +16,8 @@ use crate::event::{Bounded, EventKind, ToolEvent};
 use crate::history::{PageProjection, ReadContext};
 use crate::lineage::{ChildRef, Lineage, SourceRef};
 use crate::model::{
-    AccountingBasis, AccountingCoverage, Cost, Model, Role, Session, Tokens, TrailingRecord,
-    Transcript, Turn, TurnKind,
+    AccountingBasis, AccountingCoverage, Cost, Model, Role, Session, SourceDescriptor, Tokens,
+    TrailingRecord, Transcript, Turn, TurnKind,
 };
 use crate::usage::{Durations, ModelUsage, UsageDetail};
 
@@ -61,7 +61,9 @@ impl ClaudeBackend {
         }
         let (started_at, last_activity_at) = recording
             .time_range()
-            .ok_or_else(|| anyhow!("{} has no valid timestamps", path.display()))?;
+            .map_or((None, None), |(started, activity)| {
+                (Some(started), Some(activity))
+            });
         // Claude repeats the session id and working directory on every message
         // line. The opening is consulted first; it also covers a transcript
         // past the bounded read whose remaining tail is all tool output and
@@ -100,7 +102,17 @@ impl ClaudeBackend {
                     variant: None,
                 })
         });
-        let turns = read.values.iter().flat_map(parse_turns).collect::<Vec<_>>();
+        let mut turns = Vec::new();
+        for (index, value) in read.values.iter().enumerate() {
+            let mut parsed = parse_turns(value);
+            super::attach_record_refs(
+                &mut parsed,
+                &format!("file:{}", path.display()),
+                Some(&read.source_revision),
+                read.spans.get(index).copied(),
+            );
+            turns.extend(parsed);
+        }
         let (tokens, cost, basis) = claude_accounting(&read.values);
         // A cost-state record is cumulative for the whole session wherever the
         // read reached it; only a sum over the read's requests is bounded by
@@ -117,7 +129,7 @@ impl ClaudeBackend {
 
         let session = Session {
             id,
-            harness: "claude".into(),
+            source: SourceDescriptor::installed("claude", path.display().to_string()),
             model,
             title,
             derived_title: None,
@@ -129,7 +141,6 @@ impl ClaudeBackend {
             cost,
             tokens,
             accounting,
-            store: Some(path.display().to_string()),
             start_uncertain: recording.start_uncertain(),
             usage_detail,
         };
@@ -152,8 +163,7 @@ impl ClaudeBackend {
         projection: PageProjection,
     ) -> Result<crate::history::Page> {
         let path = session
-            .store
-            .as_deref()
+            .locator()
             .ok_or_else(|| anyhow!("session has no source file"))?;
         crate::history::read_file(
             session,
@@ -161,10 +171,23 @@ impl ClaudeBackend {
             cursor,
             bytes,
             ReadContext::None,
-            |values, opening, context| {
+            |values, spans, opening, context, revision| {
                 let _ = (opening, context);
                 let turns = if projection == PageProjection::Transcript {
-                    values.iter().flat_map(parse_turns).collect()
+                    values
+                        .iter()
+                        .zip(spans)
+                        .flat_map(|(value, span)| {
+                            let mut turns = parse_turns(value);
+                            super::attach_record_refs(
+                                &mut turns,
+                                &format!("file:{}", path),
+                                Some(revision),
+                                Some(*span),
+                            );
+                            turns
+                        })
+                        .collect()
                 } else {
                     Vec::new()
                 };
@@ -211,8 +234,7 @@ impl Backend for ClaudeBackend {
         }
         let parent_path = Path::new(
             parent
-                .store
-                .as_deref()
+                .locator()
                 .ok_or_else(|| anyhow!("parent source unavailable"))?,
         );
         let directory = parent_path.with_extension("").join("subagents");
@@ -540,7 +562,13 @@ fn read_transcript(path: &Path) -> Result<(Vec<Turn>, super::Recording, Option<T
     let mut turns = Vec::new();
     let mut last_turn = None;
     for (index, value) in read.values.iter().enumerate() {
-        let parsed = parse_turns(value);
+        let mut parsed = parse_turns(value);
+        super::attach_record_refs(
+            &mut parsed,
+            &format!("file:{}", path.display()),
+            Some(&read.source_revision),
+            read.spans.get(index).copied(),
+        );
         if !parsed.is_empty() {
             last_turn = Some(index);
         }
@@ -795,6 +823,7 @@ fn turn(
         ordinal: 0,
         native_id,
         request_turn_id: None,
+        record_ref: None,
         tool,
     })
 }

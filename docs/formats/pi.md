@@ -51,7 +51,10 @@ not read from the opening: pi rewinds by appending a new
 branch, so the first user message in the file may sit on a root the active path
 never reaches, and past the bound the reader cannot tell. A transcript larger
 than the tail therefore leaves `derived_title` absent. A turn's `native_id` is
-its entry's `id`.
+its entry's `id`. The normalized source descriptor marks this as an installed
+pi recording, and each retained turn carries an absolute file `record_ref`
+when the JSONL read supplies a span. Missing entry timestamps remain absent;
+filesystem times do not fill them.
 
 The header also carries `parentSession` on a session started from another
 one: the id of the session it came from, in pi's own terms. It is the only
