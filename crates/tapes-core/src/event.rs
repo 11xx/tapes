@@ -59,6 +59,8 @@ pub struct InvocationEvidence {
     pub conditional: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub record_ref: Option<RecordRef>,
+    /// A separate native result for this operation; an outer wrapper result
+    /// does not establish an individual nested execution.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub witnessed_result: Option<RecordRef>,
 }
@@ -296,6 +298,7 @@ pub fn project(transcript: Transcript, tail: usize) -> EventTranscript {
                 result.ts = result.event.completed_ts;
                 result.event.kind = EventKind::ToolResult;
                 result.event.arguments = None;
+                result.event.invocations.clear();
                 result.event.artifact_references.clear();
                 result.event.artifact_consumptions.clear();
                 result
@@ -362,8 +365,19 @@ fn pair(records: &mut [EventRecord], read_was_bounded: bool) {
                     &records[index].event.artifact_references,
                     records[index].record_ref.clone(),
                 );
+                let separate_native_record = matches!(
+                    (
+                        records[call_index].record_ref.as_ref(),
+                        records[index].record_ref.as_ref()
+                    ),
+                    (Some(call), Some(result)) if call != result
+                );
                 for invocation in &mut records[call_index].event.invocations {
-                    invocation.witnessed_result = records[index].record_ref.clone();
+                    if separate_native_record
+                        && invocation.coverage == InvocationCoverage::StructuredRuntime
+                    {
+                        invocation.witnessed_result = records[index].record_ref.clone();
+                    }
                 }
                 records[call_index].duration_ms = match (records[call_index].ts, records[index].ts)
                 {
@@ -455,28 +469,21 @@ pub fn invocations_from_tool(
         .map(|text| bounded_text(text, MAX_INVOCATION_STRING_CHARS));
     if let Some(object) = argument_value.as_object() {
         if let Some(argv) = object.get("argv").and_then(Value::as_array) {
-            let values = argv
-                .iter()
-                .filter_map(Value::as_str)
-                .map(|value| bounded_text(value, MAX_INVOCATION_STRING_CHARS))
-                .collect::<Vec<_>>();
-            if !values.is_empty() && values.len() <= MAX_INVOCATION_ARGUMENTS {
-                return vec![literal_invocation(
-                    &values,
-                    source_field,
-                    intent,
-                    InvocationCoverage::StaticLiteral,
-                    None,
-                    false,
-                )];
-            }
-            if values.len() > MAX_INVOCATION_ARGUMENTS {
-                return vec![unsupported_invocation(
-                    source_field,
-                    intent,
-                    "argv argument count exceeded the supported bound",
-                    None,
-                )];
+            match bounded_argv(argv) {
+                Ok(values) if !values.is_empty() => {
+                    return vec![literal_invocation(
+                        &values,
+                        source_field,
+                        intent,
+                        InvocationCoverage::StaticLiteral,
+                        None,
+                        false,
+                    )];
+                }
+                Ok(_) => {}
+                Err(reason) => {
+                    return vec![unsupported_invocation(source_field, intent, reason, None)];
+                }
             }
         }
         if let Some(command) = object.get("cmd").and_then(Value::as_str) {
@@ -504,27 +511,43 @@ pub fn invocations_from_tool(
     Vec::new()
 }
 
-/// Project a command argv that a runtime record supplied as structured data.
-/// The runtime's argv is stronger evidence than a preview but still describes
-/// only the recorded outer execution; nested shell text is not reinterpreted.
+/// Project the native `command` argv that a runtime record supplied as
+/// structured data. The runtime's argv is stronger evidence than a preview but
+/// still describes only the recorded outer execution; nested shell text is not
+/// reinterpreted.
 pub fn structured_runtime_invocations(item: &Value, source_field: &str) -> Vec<InvocationEvidence> {
-    let Some(argv) = item.get("parsed_cmd").and_then(Value::as_array) else {
-        return Vec::new();
-    };
-    let values = argv
-        .iter()
-        .filter_map(Value::as_str)
-        .take(MAX_INVOCATION_ARGUMENTS)
-        .map(|value| bounded_text(value, MAX_INVOCATION_STRING_CHARS))
-        .collect::<Vec<_>>();
-    if values.is_empty() {
-        return Vec::new();
-    }
     let intent = item
         .get("intent")
         .or_else(|| item.get("description"))
         .and_then(Value::as_str)
         .map(|value| bounded_text(value, MAX_INVOCATION_STRING_CHARS));
+    let Some(command) = item.get("command").filter(|value| !value.is_null()) else {
+        return Vec::new();
+    };
+    let Some(argv) = command.as_array() else {
+        return vec![unsupported_invocation_from(
+            InvocationOrigin::StructuredRuntime,
+            source_field,
+            intent,
+            "runtime command was not an argv array",
+            None,
+        )];
+    };
+    let values = match bounded_argv(argv) {
+        Ok(values) => values,
+        Err(reason) => {
+            return vec![unsupported_invocation_from(
+                InvocationOrigin::StructuredRuntime,
+                source_field,
+                intent,
+                reason,
+                None,
+            )];
+        }
+    };
+    if values.is_empty() {
+        return Vec::new();
+    }
     let mut invocation = literal_invocation(
         &values,
         source_field,
@@ -535,6 +558,26 @@ pub fn structured_runtime_invocations(item: &Value, source_field: &str) -> Vec<I
     );
     invocation.origin = InvocationOrigin::StructuredRuntime;
     vec![invocation]
+}
+
+fn bounded_argv(argv: &[Value]) -> Result<Vec<BoundedText>, &'static str> {
+    if argv.len() > MAX_INVOCATION_ARGUMENTS {
+        return Err("argv argument count exceeded the supported bound; no arguments were retained");
+    }
+    if argv.iter().any(|value| !value.is_string()) {
+        return Err("argv contained a non-string argument; no arguments were retained");
+    }
+    Ok(argv
+        .iter()
+        .map(|value| {
+            bounded_text(
+                value
+                    .as_str()
+                    .expect("argv string validation precedes projection"),
+                MAX_INVOCATION_STRING_CHARS,
+            )
+        })
+        .collect())
 }
 
 fn declarations_from_text(
@@ -594,8 +637,24 @@ fn unsupported_invocation(
     reason: &str,
     span: Option<ByteSpan>,
 ) -> InvocationEvidence {
+    unsupported_invocation_from(
+        InvocationOrigin::StaticDeclaration,
+        source_field,
+        intent,
+        reason,
+        span,
+    )
+}
+
+fn unsupported_invocation_from(
+    origin: InvocationOrigin,
+    source_field: &str,
+    intent: Option<BoundedText>,
+    reason: &str,
+    span: Option<ByteSpan>,
+) -> InvocationEvidence {
     InvocationEvidence {
-        origin: InvocationOrigin::StaticDeclaration,
+        origin,
         program: None,
         subcommand: None,
         arguments: Vec::new(),
@@ -619,52 +678,112 @@ fn shell_declarations(
     let mut current = Vec::<BoundedText>::new();
     let mut token = String::new();
     let mut quote = None;
-    let mut escaped = false;
+    let mut word_started = false;
     let mut conditional = false;
     let mut unsupported = None;
     let mut token_start = 0usize;
     let mut index = 0usize;
-    let flush_token = |current: &mut Vec<BoundedText>, token: &mut String| {
-        if !token.is_empty() {
-            current.push(bounded_text(token, MAX_INVOCATION_STRING_CHARS));
-            token.clear();
-        }
-    };
     let chars = text.char_indices().collect::<Vec<_>>();
     while index < chars.len() {
         let (offset, character) = chars[index];
         if let Some(active_quote) = quote {
-            if escaped {
-                escaped = false;
-                token.push(character);
-            } else if character == '\\' && active_quote == '"' {
-                escaped = true;
-            } else if character == active_quote {
-                quote = None;
-            } else {
-                token.push(character);
+            match active_quote {
+                '\'' => {
+                    if character == active_quote {
+                        quote = None;
+                    } else {
+                        token.push(character);
+                    }
+                    index += 1;
+                }
+                '"' => {
+                    if character == active_quote {
+                        quote = None;
+                        index += 1;
+                    } else if matches!(character, '$' | '`') {
+                        unsupported = Some(format!(
+                            "shell expansion at character {offset} requires evaluation"
+                        ));
+                        break;
+                    } else if character == '\\' {
+                        let Some(next) = chars.get(index + 1).map(|(_, next)| *next) else {
+                            unsupported = Some("shell escape was not complete".to_owned());
+                            break;
+                        };
+                        match next {
+                            '\\' | '"' | '$' | '`' => {
+                                token.push(next);
+                                index += 2;
+                            }
+                            '\n' => index += 2,
+                            '\r' => {
+                                index += 2;
+                                if chars.get(index).is_some_and(|(_, next)| *next == '\n') {
+                                    index += 1;
+                                }
+                            }
+                            _ => {
+                                unsupported = Some(format!(
+                                    "shell escape at character {offset} requires evaluation"
+                                ));
+                                break;
+                            }
+                        }
+                    } else {
+                        token.push(character);
+                        index += 1;
+                    }
+                }
+                _ => unreachable!("shell quote is either single or double"),
             }
-            index += 1;
+            word_started = true;
             continue;
         }
         match character {
             '\'' | '"' => {
-                quote = Some(character);
-                if token.is_empty() {
+                if !word_started {
                     token_start = offset;
                 }
+                quote = Some(character);
+                word_started = true;
+                index += 1;
             }
-            character if character.is_ascii_whitespace() => {
-                flush_token(&mut current, &mut token);
+            '\\' => {
+                let Some(next) = chars.get(index + 1).map(|(_, next)| *next) else {
+                    unsupported = Some("shell escape was not complete".to_owned());
+                    break;
+                };
+                if next == '\n' {
+                    index += 2;
+                    continue;
+                }
+                if next == '\r' {
+                    index += 2;
+                    if chars.get(index).is_some_and(|(_, next)| *next == '\n') {
+                        index += 1;
+                    }
+                    continue;
+                }
+                if !word_started {
+                    token_start = offset;
+                }
+                word_started = true;
+                token.push(next);
+                index += 2;
             }
             ';' | '\n' => {
-                flush_token(&mut current, &mut token);
+                flush_shell_word(&mut current, &mut token, &mut word_started);
                 if !current.is_empty() {
                     segments.push(std::mem::take(&mut current));
                 }
+                index += 1;
+            }
+            character if character.is_ascii_whitespace() => {
+                flush_shell_word(&mut current, &mut token, &mut word_started);
+                index += 1;
             }
             '&' | '|' => {
-                flush_token(&mut current, &mut token);
+                flush_shell_word(&mut current, &mut token, &mut word_started);
                 if !current.is_empty() {
                     segments.push(std::mem::take(&mut current));
                 }
@@ -675,14 +794,14 @@ fn shell_declarations(
                 {
                     index += 1;
                 }
+                index += 1;
             }
-            '#' if token.is_empty() && current.is_empty() => {
+            '#' if !word_started => {
                 while index < chars.len() && chars[index].1 != '\n' {
                     index += 1;
                 }
-                continue;
             }
-            '$' | '`' | '<' | '>' | '(' | ')' | '{' | '}' | '*' | '?' => {
+            '$' | '`' | '<' | '>' | '(' | ')' | '{' | '}' | '*' | '?' | '[' | ']' => {
                 unsupported = Some(format!(
                     "shell syntax at character {} requires evaluation",
                     token_start.max(offset)
@@ -690,18 +809,19 @@ fn shell_declarations(
                 break;
             }
             _ => {
-                if token.is_empty() {
+                if !word_started {
                     token_start = offset;
                 }
                 token.push(character);
+                word_started = true;
+                index += 1;
             }
         }
-        index += 1;
     }
-    if quote.is_some() {
+    if quote.is_some() && unsupported.is_none() {
         unsupported = Some("unterminated shell quote".to_owned());
     }
-    flush_token(&mut current, &mut token);
+    flush_shell_word(&mut current, &mut token, &mut word_started);
     if !current.is_empty() {
         segments.push(current);
     }
@@ -715,6 +835,26 @@ fn shell_declarations(
             "command candidate count exceeded the supported bound",
             None,
         )];
+    }
+    if let Some(count) = segments
+        .iter()
+        .map(Vec::len)
+        .find(|count| *count > MAX_INVOCATION_ARGUMENTS)
+    {
+        return vec![unsupported_invocation(
+            source_field,
+            intent,
+            &format!(
+                "shell argument count {count} exceeded the supported bound; no arguments were retained"
+            ),
+            None,
+        )];
+    }
+    if let Some(reason) = segments
+        .iter()
+        .find_map(|values| shell_segment_unsupported_reason(values))
+    {
+        return vec![unsupported_invocation(source_field, intent, reason, None)];
     }
     segments
         .into_iter()
@@ -736,6 +876,52 @@ fn shell_declarations(
         .collect()
 }
 
+fn flush_shell_word(current: &mut Vec<BoundedText>, token: &mut String, word_started: &mut bool) {
+    if *word_started {
+        current.push(bounded_text(token, MAX_INVOCATION_STRING_CHARS));
+        token.clear();
+        *word_started = false;
+    }
+}
+
+fn shell_segment_unsupported_reason(values: &[BoundedText]) -> Option<&'static str> {
+    let first = values.first()?.text.as_str();
+    if is_shell_assignment(first) {
+        return Some("leading shell assignments are unsupported");
+    }
+    matches!(
+        first,
+        "case"
+            | "do"
+            | "done"
+            | "elif"
+            | "else"
+            | "esac"
+            | "fi"
+            | "for"
+            | "function"
+            | "if"
+            | "in"
+            | "select"
+            | "then"
+            | "until"
+            | "while"
+    )
+    .then_some("shell control or reserved syntax is unsupported")
+}
+
+fn is_shell_assignment(value: &str) -> bool {
+    let Some((name, _)) = value.split_once('=') else {
+        return false;
+    };
+    let mut characters = name.chars();
+    let Some(first) = characters.next() else {
+        return false;
+    };
+    (first == '_' || first.is_ascii_alphabetic())
+        && characters.all(|character| character == '_' || character.is_ascii_alphanumeric())
+}
+
 #[derive(Clone, Debug)]
 enum JsTokenKind {
     Identifier(String),
@@ -755,14 +941,15 @@ fn javascript_declarations(
     source_field: &str,
     intent: Option<BoundedText>,
 ) -> Vec<InvocationEvidence> {
-    let Ok(tokens) = javascript_tokens(text) else {
-        return vec![unsupported_invocation(
-            source_field,
-            intent,
-            "JavaScript text was not lexically complete",
-            None,
-        )];
+    let tokens = match javascript_tokens(text) {
+        Ok(tokens) => tokens,
+        Err(reason) => {
+            return vec![unsupported_invocation(source_field, intent, reason, None)];
+        }
     };
+    if let Some(reason) = javascript_control_context(&tokens) {
+        return vec![unsupported_invocation(source_field, intent, reason, None)];
+    }
     let conditional = tokens.iter().any(|token| {
         matches!(
             &token.kind,
@@ -815,48 +1002,76 @@ fn javascript_declarations(
                 span,
             )];
         };
+        if object_end + 1 != close {
+            results.push(unsupported_invocation(
+                source_field,
+                intent.clone(),
+                "JavaScript exec_command takes one literal object argument",
+                span,
+            ));
+            index = close + 1;
+            continue;
+        }
+        let Some(fields) = javascript_object_fields(&tokens, object_start, object_end) else {
+            results.push(unsupported_invocation(
+                source_field,
+                intent.clone(),
+                "JavaScript object properties were not complete",
+                span,
+            ));
+            index = close + 1;
+            continue;
+        };
         let mut command = None;
+        let mut command_error = None;
         let mut declaration_intent = intent.clone();
-        let mut cursor = object_start + 1;
-        while cursor < object_end {
-            let Some(key) = tokens.get(cursor) else { break };
-            let key_name = match &key.kind {
-                JsTokenKind::Identifier(value) | JsTokenKind::String(value) => value,
-                _ => {
-                    cursor += 1;
-                    continue;
-                }
-            };
-            if !matches!(
-                tokens.get(cursor + 1).map(|token| &token.kind),
-                Some(JsTokenKind::Punctuation(':'))
-            ) {
-                cursor += 1;
+        for (field_start, field_end) in fields {
+            let field = &tokens[field_start..field_end];
+            if field.is_empty() {
                 continue;
             }
-            let Some(value) = tokens.get(cursor + 2) else {
-                break;
+            let Some(colon) = top_level_colon(field) else {
+                command_error.get_or_insert("JavaScript object property form is unsupported");
+                continue;
             };
-            match (&value.kind, key_name.as_str()) {
-                (JsTokenKind::String(value), "cmd" | "command") => {
-                    command = Some(value.clone());
+            let Some(key) = (colon == 1).then(|| javascript_key(&field[0])).flatten() else {
+                command_error.get_or_insert("JavaScript computed object property is unsupported");
+                continue;
+            };
+            let value = &field[colon + 1..];
+            if is_command_property(key) {
+                let Some(literal) = (value.len() == 1)
+                    .then(|| match &value[0].kind {
+                        JsTokenKind::String(value) => Some(value.clone()),
+                        _ => None,
+                    })
+                    .flatten()
+                else {
+                    command_error = Some("JavaScript command property is not a literal string");
+                    continue;
+                };
+                match command.as_deref() {
+                    None => command = Some(literal),
+                    Some(existing) if existing == literal => {}
+                    Some(_) => {
+                        command_error =
+                            Some("JavaScript object has conflicting literal command properties");
+                    }
                 }
-                (JsTokenKind::String(value), "why") => {
+            } else if key == "why" && value.len() == 1 {
+                if let JsTokenKind::String(value) = &value[0].kind {
                     declaration_intent = Some(bounded_text(value, MAX_INVOCATION_STRING_CHARS));
                 }
-                (_, "cmd" | "command") => {
-                    results.push(unsupported_invocation(
-                        source_field,
-                        declaration_intent.clone(),
-                        "JavaScript command property is not a literal string",
-                        span,
-                    ));
-                }
-                _ => {}
             }
-            cursor += 3;
         }
-        if let Some(command) = command {
+        if let Some(reason) = command_error {
+            results.push(unsupported_invocation(
+                source_field,
+                declaration_intent,
+                reason,
+                span,
+            ));
+        } else if let Some(command) = command {
             let mut declarations =
                 shell_declarations(&command, source_field, declaration_intent.clone());
             if declarations.is_empty() {
@@ -885,11 +1100,102 @@ fn javascript_declarations(
         }
         index = close + 1;
     }
-    results.truncate(MAX_INVOCATIONS);
+    if results.len() > MAX_INVOCATIONS {
+        return vec![unsupported_invocation(
+            source_field,
+            intent,
+            "JavaScript invocation count exceeded the supported bound",
+            None,
+        )];
+    }
     results
 }
 
-fn javascript_tokens(text: &str) -> Result<Vec<JsToken>, ()> {
+fn javascript_control_context(tokens: &[JsToken]) -> Option<&'static str> {
+    for pair in tokens.windows(2) {
+        if matches!(
+            (&pair[0].kind, &pair[1].kind),
+            (JsTokenKind::Punctuation('='), JsTokenKind::Punctuation('>'))
+        ) {
+            return Some("JavaScript arrow function bodies are unsupported");
+        }
+        if matches!(
+            (&pair[0].kind, &pair[1].kind),
+            (JsTokenKind::Punctuation('&'), JsTokenKind::Punctuation('&'))
+                | (JsTokenKind::Punctuation('|'), JsTokenKind::Punctuation('|'))
+        ) {
+            return Some("JavaScript short-circuit expressions are unsupported");
+        }
+    }
+    tokens
+        .iter()
+        .any(|token| matches!(&token.kind, JsTokenKind::Punctuation('?')))
+        .then_some("JavaScript conditional expressions are unsupported")
+}
+
+fn javascript_key(token: &JsToken) -> Option<&str> {
+    match &token.kind {
+        JsTokenKind::Identifier(value) | JsTokenKind::String(value) => Some(value),
+        JsTokenKind::Punctuation(_) => None,
+    }
+}
+
+fn is_command_property(key: &str) -> bool {
+    matches!(key, "cmd" | "command")
+}
+
+fn javascript_object_fields(
+    tokens: &[JsToken],
+    object_start: usize,
+    object_end: usize,
+) -> Option<Vec<(usize, usize)>> {
+    let mut fields = Vec::new();
+    let mut field_start = object_start + 1;
+    let mut depth: usize = 0;
+    for (index, token) in tokens
+        .iter()
+        .enumerate()
+        .take(object_end)
+        .skip(object_start + 1)
+    {
+        match &token.kind {
+            JsTokenKind::Punctuation('(')
+            | JsTokenKind::Punctuation('[')
+            | JsTokenKind::Punctuation('{') => depth += 1,
+            JsTokenKind::Punctuation(')')
+            | JsTokenKind::Punctuation(']')
+            | JsTokenKind::Punctuation('}') => depth = depth.checked_sub(1)?,
+            JsTokenKind::Punctuation(',') if depth == 0 => {
+                fields.push((field_start, index));
+                field_start = index + 1;
+            }
+            _ => {}
+        }
+    }
+    (depth == 0).then_some(()).map(|_| {
+        fields.push((field_start, object_end));
+        fields
+    })
+}
+
+fn top_level_colon(field: &[JsToken]) -> Option<usize> {
+    let mut depth: usize = 0;
+    for (index, token) in field.iter().enumerate() {
+        match &token.kind {
+            JsTokenKind::Punctuation('(')
+            | JsTokenKind::Punctuation('[')
+            | JsTokenKind::Punctuation('{') => depth += 1,
+            JsTokenKind::Punctuation(')')
+            | JsTokenKind::Punctuation(']')
+            | JsTokenKind::Punctuation('}') => depth = depth.saturating_sub(1),
+            JsTokenKind::Punctuation(':') if depth == 0 => return Some(index),
+            _ => {}
+        }
+    }
+    None
+}
+
+fn javascript_tokens(text: &str) -> Result<Vec<JsToken>, &'static str> {
     let chars = text.char_indices().collect::<Vec<_>>();
     let mut tokens = Vec::new();
     let mut index = 0;
@@ -918,44 +1224,16 @@ fn javascript_tokens(text: &str) -> Result<Vec<JsToken>, ()> {
                 index += 1;
             }
             if !closed {
-                return Err(());
+                return Err("JavaScript block comment was not closed");
             }
             continue;
         }
+        if character == '/' {
+            return Err("JavaScript slash syntax is unsupported");
+        }
         if matches!(character, '\'' | '"' | '`') {
             let quote = character;
-            let mut value = String::new();
-            let mut escaped = false;
-            let mut cursor = index + 1;
-            let mut closed = false;
-            while cursor < chars.len() {
-                let (_, character) = chars[cursor];
-                if quote == '`'
-                    && character == '$'
-                    && chars.get(cursor + 1).is_some_and(|(_, next)| *next == '{')
-                {
-                    return Err(());
-                }
-                if escaped {
-                    if character == '{' && quote == '`' {
-                        return Err(());
-                    }
-                    escaped = false;
-                    value.push(character);
-                } else if character == '\\' {
-                    escaped = true;
-                } else if character == quote {
-                    closed = true;
-                    cursor += 1;
-                    break;
-                } else {
-                    value.push(character);
-                }
-                cursor += 1;
-            }
-            if !closed {
-                return Err(());
-            }
+            let (value, cursor) = javascript_string(&chars, index, quote)?;
             tokens.push(JsToken {
                 kind: JsTokenKind::String(value),
                 start,
@@ -991,7 +1269,216 @@ fn javascript_tokens(text: &str) -> Result<Vec<JsToken>, ()> {
         });
         index += 1;
     }
+    javascript_punctuation_balance(&tokens)?;
+    if tokens
+        .last()
+        .is_some_and(javascript_expression_is_incomplete)
+    {
+        return Err("JavaScript expression was incomplete");
+    }
     Ok(tokens)
+}
+
+fn javascript_string(
+    chars: &[(usize, char)],
+    start: usize,
+    quote: char,
+) -> Result<(String, usize), &'static str> {
+    let mut value = String::new();
+    let mut cursor = start + 1;
+    while cursor < chars.len() {
+        let character = chars[cursor].1;
+        if character == quote {
+            return Ok((value, cursor + 1));
+        }
+        if quote != '`' && matches!(character, '\n' | '\r') {
+            return Err("JavaScript string literal contains an unescaped line break");
+        }
+        if quote == '`'
+            && character == '$'
+            && chars.get(cursor + 1).is_some_and(|(_, next)| *next == '{')
+        {
+            return Err("JavaScript template interpolation is unsupported");
+        }
+        if character != '\\' {
+            value.push(character);
+            cursor += 1;
+            continue;
+        }
+
+        let Some(escaped) = chars.get(cursor + 1).map(|(_, character)| *character) else {
+            return Err("JavaScript string literal was not closed");
+        };
+        match escaped {
+            '\\' | '/' | '\'' | '"' | '`' => {
+                value.push(escaped);
+                cursor += 2;
+            }
+            'b' => {
+                value.push('\u{0008}');
+                cursor += 2;
+            }
+            'f' => {
+                value.push('\u{000c}');
+                cursor += 2;
+            }
+            'n' => {
+                value.push('\n');
+                cursor += 2;
+            }
+            'r' => {
+                value.push('\r');
+                cursor += 2;
+            }
+            't' => {
+                value.push('\t');
+                cursor += 2;
+            }
+            'v' => {
+                value.push('\u{000b}');
+                cursor += 2;
+            }
+            '0' => {
+                if chars
+                    .get(cursor + 2)
+                    .is_some_and(|(_, character)| character.is_ascii_digit())
+                {
+                    return Err("JavaScript legacy octal escapes are unsupported");
+                }
+                value.push('\0');
+                cursor += 2;
+            }
+            'x' => {
+                let Some((character, next)) = javascript_hex_escape(chars, cursor + 2, 2) else {
+                    return Err("JavaScript hexadecimal escape was invalid");
+                };
+                value.push(character);
+                cursor = next;
+            }
+            'u' => {
+                if chars
+                    .get(cursor + 2)
+                    .is_some_and(|(_, character)| *character == '{')
+                {
+                    return Err("JavaScript Unicode code-point escapes are unsupported");
+                }
+                let Some((character, next)) = javascript_hex_escape(chars, cursor + 2, 4) else {
+                    return Err("JavaScript Unicode escape was invalid");
+                };
+                value.push(character);
+                cursor = next;
+            }
+            '\n' => cursor += 2,
+            '\r' => {
+                cursor += 2;
+                if chars
+                    .get(cursor)
+                    .is_some_and(|(_, character)| *character == '\n')
+                {
+                    cursor += 1;
+                }
+            }
+            _ => return Err("JavaScript string escape is unsupported"),
+        }
+    }
+    Err("JavaScript string literal was not closed")
+}
+
+fn javascript_hex_escape(
+    chars: &[(usize, char)],
+    start: usize,
+    digits: usize,
+) -> Option<(char, usize)> {
+    let mut value = 0u32;
+    for offset in 0..digits {
+        value = value.checked_mul(16)?;
+        value += chars.get(start + offset)?.1.to_digit(16)?;
+    }
+    Some((char::from_u32(value)?, start + digits))
+}
+
+fn javascript_punctuation_balance(tokens: &[JsToken]) -> Result<(), &'static str> {
+    let mut stack = Vec::new();
+    for token in tokens {
+        let JsTokenKind::Punctuation(character) = &token.kind else {
+            continue;
+        };
+        if matches!(*character, '(' | '[' | '{') {
+            stack.push(*character);
+            if stack.len() > MAX_INVOCATION_DEPTH {
+                return Err("JavaScript nesting exceeded the supported bound");
+            }
+            continue;
+        }
+        if !matches!(*character, ')' | ']' | '}') {
+            continue;
+        }
+        let Some(opening) = stack.pop() else {
+            return Err("JavaScript punctuation was unbalanced");
+        };
+        if matching_delimiter(opening) != Some(*character) {
+            return Err("JavaScript punctuation was unbalanced");
+        }
+    }
+    stack
+        .is_empty()
+        .then_some(())
+        .ok_or("JavaScript punctuation was unbalanced")
+}
+
+fn javascript_expression_is_incomplete(token: &JsToken) -> bool {
+    match &token.kind {
+        JsTokenKind::Punctuation(character) => {
+            matches!(
+                character,
+                '=' | '+'
+                    | '-'
+                    | '*'
+                    | '/'
+                    | '%'
+                    | '&'
+                    | '|'
+                    | '!'
+                    | '?'
+                    | ':'
+                    | '.'
+                    | ','
+                    | '<'
+                    | '>'
+                    | '^'
+                    | '~'
+            )
+        }
+        JsTokenKind::Identifier(identifier) => matches!(
+            identifier.as_str(),
+            "await"
+                | "case"
+                | "class"
+                | "const"
+                | "default"
+                | "delete"
+                | "else"
+                | "extends"
+                | "export"
+                | "for"
+                | "function"
+                | "if"
+                | "import"
+                | "instanceof"
+                | "in"
+                | "let"
+                | "new"
+                | "of"
+                | "return"
+                | "throw"
+                | "typeof"
+                | "var"
+                | "void"
+                | "while"
+                | "yield"
+        ),
+        JsTokenKind::String(_) => false,
+    }
 }
 
 fn matching_punctuation(
@@ -1000,23 +1487,41 @@ fn matching_punctuation(
     opening: char,
     closing: char,
 ) -> Option<usize> {
-    let mut depth = 0;
-    for (index, token) in tokens.iter().enumerate().skip(start) {
-        match &token.kind {
-            JsTokenKind::Punctuation(character) if *character == opening => depth += 1,
-            JsTokenKind::Punctuation(character) if *character == closing => {
-                depth -= 1;
-                if depth == 0 {
-                    return Some(index);
-                }
+    if !matches!(
+        tokens.get(start).map(|token| &token.kind),
+        Some(JsTokenKind::Punctuation(character)) if *character == opening
+    ) {
+        return None;
+    }
+    let mut stack = vec![opening];
+    for (index, token) in tokens.iter().enumerate().skip(start + 1) {
+        let JsTokenKind::Punctuation(character) = &token.kind else {
+            continue;
+        };
+        if matches!(*character, '(' | '[' | '{') {
+            stack.push(*character);
+            if stack.len() > MAX_INVOCATION_DEPTH {
+                return None;
             }
-            _ => {}
-        }
-        if depth > MAX_INVOCATION_DEPTH {
-            return None;
+        } else if matches!(*character, ')' | ']' | '}') {
+            if matching_delimiter(stack.pop()?) != Some(*character) {
+                return None;
+            }
+            if stack.is_empty() {
+                return (*character == closing).then_some(index);
+            }
         }
     }
     None
+}
+
+fn matching_delimiter(opening: char) -> Option<char> {
+    match opening {
+        '(' => Some(')'),
+        '[' => Some(']'),
+        '{' => Some('}'),
+        _ => None,
+    }
 }
 
 fn bounded_text(text: &str, max: usize) -> BoundedText {
@@ -1335,6 +1840,362 @@ mod tests {
             "payload.arguments",
         );
         assert!(comment.is_empty());
+    }
+
+    #[test]
+    fn shell_parser_preserves_boundaries_literals_comments_and_empty_words() {
+        let separated = invocations_from_tool(
+            Some("exec"),
+            &serde_json::json!({"cmd": "echo one\necho two"}),
+            "payload.arguments",
+        );
+        assert_eq!(separated.len(), 2);
+        assert_eq!(separated[0].program.as_deref(), Some("echo"));
+        assert_eq!(separated[0].subcommand.as_deref(), Some("one"));
+        assert_eq!(separated[1].subcommand.as_deref(), Some("two"));
+
+        let expanded = invocations_from_tool(
+            Some("exec"),
+            &serde_json::json!({"cmd": "echo \"$VALUE\""}),
+            "payload.arguments",
+        );
+        assert_eq!(expanded[0].coverage, InvocationCoverage::Unsupported);
+        assert!(expanded[0]
+            .unsupported_reason
+            .as_ref()
+            .unwrap()
+            .text
+            .contains("expansion"));
+
+        let escaped = invocations_from_tool(
+            Some("exec"),
+            &serde_json::json!({"cmd": r"echo a\ b"}),
+            "payload.arguments",
+        );
+        assert_eq!(escaped.len(), 1);
+        assert_eq!(escaped[0].subcommand.as_deref(), Some("a b"));
+
+        let quoted_dollar = invocations_from_tool(
+            Some("exec"),
+            &serde_json::json!({"cmd": "echo '$VALUE'"}),
+            "payload.arguments",
+        );
+        assert_eq!(quoted_dollar[0].subcommand.as_deref(), Some("$VALUE"));
+
+        let comment = invocations_from_tool(
+            Some("exec"),
+            &serde_json::json!({"cmd": "echo a # trailing comment"}),
+            "payload.arguments",
+        );
+        assert_eq!(comment.len(), 1);
+        assert_eq!(comment[0].subcommand.as_deref(), Some("a"));
+        assert!(comment[0].arguments.is_empty());
+
+        let embedded_hash = invocations_from_tool(
+            Some("exec"),
+            &serde_json::json!({"cmd": "echo a#literal"}),
+            "payload.arguments",
+        );
+        assert_eq!(embedded_hash[0].subcommand.as_deref(), Some("a#literal"));
+
+        let empty_argument = invocations_from_tool(
+            Some("exec"),
+            &serde_json::json!({"cmd": "printf '%s' ''"}),
+            "payload.arguments",
+        );
+        assert_eq!(empty_argument.len(), 1);
+        assert_eq!(empty_argument[0].program.as_deref(), Some("printf"));
+        assert_eq!(empty_argument[0].subcommand.as_deref(), Some("%s"));
+        assert_eq!(empty_argument[0].arguments.len(), 1);
+        assert_eq!(empty_argument[0].arguments[0].text, "");
+        assert_eq!(empty_argument[0].arguments[0].chars, 0);
+
+        let regex = invocations_from_tool(
+            Some("exec"),
+            &serde_json::Value::String(
+                r#"const pattern = /tools.exec_command({cmd:"echo fake"})/;"#.to_owned(),
+            ),
+            "payload.arguments",
+        );
+        assert_eq!(regex.len(), 1);
+        assert_eq!(regex[0].coverage, InvocationCoverage::Unsupported);
+        assert!(regex[0]
+            .unsupported_reason
+            .as_ref()
+            .unwrap()
+            .text
+            .contains("slash"));
+
+        let too_many = (0..MAX_INVOCATION_ARGUMENTS)
+            .map(|index| format!("arg-{index}"))
+            .collect::<Vec<_>>();
+        let too_many = invocations_from_tool(
+            Some("exec"),
+            &serde_json::json!({"cmd": format!("echo {}", too_many.join(" "))}),
+            "payload.arguments",
+        );
+        assert_eq!(too_many.len(), 1);
+        assert_eq!(too_many[0].coverage, InvocationCoverage::Unsupported);
+        assert!(too_many[0]
+            .unsupported_reason
+            .as_ref()
+            .unwrap()
+            .text
+            .contains("shell argument count"));
+    }
+
+    #[test]
+    fn invocation_context_parser_rejects_assignments_control_and_deferred_calls() {
+        let continuation = invocations_from_tool(
+            Some("exec"),
+            &serde_json::Value::String("echo \\\n next".to_owned()),
+            "input",
+        );
+        assert_eq!(continuation.len(), 1);
+        assert_eq!(continuation[0].program.as_deref(), Some("echo"));
+        assert_eq!(continuation[0].subcommand.as_deref(), Some("next"));
+        assert!(continuation[0].arguments.is_empty());
+
+        for (script, reason) in [
+            (
+                "FLAG=1 echo next",
+                "leading shell assignments are unsupported",
+            ),
+            (
+                "if false; then echo next; fi",
+                "shell control or reserved syntax is unsupported",
+            ),
+            (
+                "const f = () => tools.exec_command({cmd:'echo next'});",
+                "JavaScript arrow function bodies are unsupported",
+            ),
+            (
+                "false && tools.exec_command({cmd:'echo next'});",
+                "JavaScript short-circuit expressions are unsupported",
+            ),
+        ] {
+            let declarations = invocations_from_tool(
+                Some("exec"),
+                &serde_json::Value::String(script.to_owned()),
+                "input",
+            );
+            assert_eq!(declarations.len(), 1, "{script}");
+            assert_eq!(declarations[0].coverage, InvocationCoverage::Unsupported);
+            assert_eq!(
+                declarations[0].unsupported_reason.as_ref().unwrap().text,
+                reason,
+                "{script}"
+            );
+        }
+    }
+
+    #[test]
+    fn invocation_parser_accepts_only_complete_top_level_literal_javascript_properties() {
+        let concatenated = invocations_from_tool(
+            Some("orchestrator"),
+            &serde_json::Value::String(
+                "await tools.exec_command({cmd: \"echo \" + variable});".to_owned(),
+            ),
+            "payload.arguments",
+        );
+        assert_eq!(concatenated[0].coverage, InvocationCoverage::Unsupported);
+        assert!(concatenated[0]
+            .unsupported_reason
+            .as_ref()
+            .unwrap()
+            .text
+            .contains("not a literal string"));
+
+        let nested = invocations_from_tool(
+            Some("orchestrator"),
+            &serde_json::Value::String(
+                "await tools.exec_command({cmd: \"echo actual\", metadata: {cmd: \"touch imaginary\"}});"
+                    .to_owned(),
+            ),
+            "payload.arguments",
+        );
+        assert_eq!(nested.len(), 1);
+        assert_eq!(nested[0].program.as_deref(), Some("echo"));
+        assert_eq!(nested[0].subcommand.as_deref(), Some("actual"));
+
+        for script in [
+            "await tools.exec_command({cmd: \"echo actual\", ...metadata});",
+            "await tools.exec_command({cmd: \"echo actual\", [key]: \"touch imaginary\"});",
+        ] {
+            let dynamic_property = invocations_from_tool(
+                Some("orchestrator"),
+                &serde_json::Value::String(script.to_owned()),
+                "payload.arguments",
+            );
+            assert_eq!(dynamic_property.len(), 1);
+            assert_eq!(
+                dynamic_property[0].coverage,
+                InvocationCoverage::Unsupported
+            );
+            assert!(dynamic_property[0]
+                .unsupported_reason
+                .as_ref()
+                .unwrap()
+                .text
+                .contains("property"));
+        }
+
+        let escaped = invocations_from_tool(
+            Some("orchestrator"),
+            &serde_json::Value::String(
+                "await tools.exec_command({cmd: \"echo \\u0041\"});".to_owned(),
+            ),
+            "payload.arguments",
+        );
+        assert_eq!(escaped.len(), 1);
+        assert_eq!(escaped[0].subcommand.as_deref(), Some("A"));
+
+        let unsupported_escape = invocations_from_tool(
+            Some("orchestrator"),
+            &serde_json::Value::String("await tools.exec_command({cmd: \"echo \\q\"});".to_owned()),
+            "payload.arguments",
+        );
+        assert_eq!(
+            unsupported_escape[0].coverage,
+            InvocationCoverage::Unsupported
+        );
+        assert!(unsupported_escape[0]
+            .unsupported_reason
+            .as_ref()
+            .unwrap()
+            .text
+            .contains("escape"));
+
+        let incomplete = invocations_from_tool(
+            Some("orchestrator"),
+            &serde_json::Value::String(
+                "await tools.exec_command({cmd: \"echo complete\"}); const unfinished =".to_owned(),
+            ),
+            "payload.arguments",
+        );
+        assert_eq!(incomplete.len(), 1);
+        assert_eq!(incomplete[0].coverage, InvocationCoverage::Unsupported);
+        assert!(incomplete[0]
+            .unsupported_reason
+            .as_ref()
+            .unwrap()
+            .text
+            .contains("incomplete"));
+    }
+
+    #[test]
+    fn invocation_parser_reports_malformed_and_truncated_argv_without_filtering_it() {
+        let non_string = invocations_from_tool(
+            Some("exec"),
+            &serde_json::json!({"argv":["echo", 7, "not silently dropped"]}),
+            "payload.arguments",
+        );
+        assert_eq!(non_string.len(), 1);
+        assert_eq!(non_string[0].coverage, InvocationCoverage::Unsupported);
+        assert!(non_string[0]
+            .unsupported_reason
+            .as_ref()
+            .unwrap()
+            .text
+            .contains("non-string"));
+
+        let too_many = (0..=MAX_INVOCATION_ARGUMENTS)
+            .map(|index| Value::String(format!("arg-{index}")))
+            .collect::<Vec<_>>();
+        let too_many = invocations_from_tool(
+            Some("exec"),
+            &serde_json::json!({"argv": too_many}),
+            "payload.arguments",
+        );
+        assert_eq!(too_many.len(), 1);
+        assert_eq!(too_many[0].coverage, InvocationCoverage::Unsupported);
+        assert!(too_many[0]
+            .unsupported_reason
+            .as_ref()
+            .unwrap()
+            .text
+            .contains("exceeded"));
+
+        let runtime = structured_runtime_invocations(
+            &serde_json::json!({
+                "command": ["echo", 7, "not silently dropped"],
+                "intent": "run the recorded command"
+            }),
+            "payload.item.command",
+        );
+        assert_eq!(runtime.len(), 1);
+        assert_eq!(runtime[0].origin, InvocationOrigin::StructuredRuntime);
+        assert_eq!(runtime[0].coverage, InvocationCoverage::Unsupported);
+        assert!(runtime[0]
+            .unsupported_reason
+            .as_ref()
+            .unwrap()
+            .text
+            .contains("non-string"));
+
+        let preferred = structured_runtime_invocations(
+            &serde_json::json!({
+                "command": ["echo", "actual"],
+                "parsed_cmd": [{"kind": "structured-token"}]
+            }),
+            "payload.item.command",
+        );
+        assert_eq!(preferred.len(), 1);
+        assert_eq!(preferred[0].program.as_deref(), Some("echo"));
+        assert_eq!(preferred[0].subcommand.as_deref(), Some("actual"));
+
+        let malformed = structured_runtime_invocations(
+            &serde_json::json!({"command": "echo actual"}),
+            "payload.item.command",
+        );
+        assert_eq!(malformed.len(), 1);
+        assert_eq!(malformed[0].coverage, InvocationCoverage::Unsupported);
+        assert!(malformed[0]
+            .unsupported_reason
+            .as_ref()
+            .unwrap()
+            .text
+            .contains("argv array"));
+
+        let runtime_too_many = (0..=MAX_INVOCATION_ARGUMENTS)
+            .map(|index| Value::String(format!("arg-{index}")))
+            .collect::<Vec<_>>();
+        let runtime_too_many = structured_runtime_invocations(
+            &serde_json::json!({"command": runtime_too_many}),
+            "payload.item.command",
+        );
+        assert_eq!(runtime_too_many.len(), 1);
+        assert_eq!(
+            runtime_too_many[0].coverage,
+            InvocationCoverage::Unsupported
+        );
+        assert!(runtime_too_many[0]
+            .unsupported_reason
+            .as_ref()
+            .unwrap()
+            .text
+            .contains("exceeded"));
+    }
+
+    #[test]
+    fn wrapper_results_do_not_witness_nested_static_declarations() {
+        let mut call = event(EventKind::ToolCall, "wrapper");
+        call.subtype = "tool".to_owned();
+        call.status = Some("completed".to_owned());
+        call.invocations = invocations_from_tool(
+            Some("exec"),
+            &serde_json::json!({"cmd":"echo nested"}),
+            "payload.arguments",
+        );
+        let projected = project(transcript(vec![turn(0, 10, call)], Vec::new()), usize::MAX);
+
+        assert_eq!(projected.events.len(), 2);
+        assert!(projected.events[0].event.invocations[0]
+            .witnessed_result
+            .is_none());
+        assert!(projected.events[1].event.invocations.is_empty());
+        assert!(projected.events[0].duration_ms.is_none());
+        assert!(projected.events[1].duration_ms.is_none());
     }
 
     #[test]

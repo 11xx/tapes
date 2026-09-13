@@ -161,11 +161,15 @@ PROBE BEFORE EXPORTING
   recovers; `source` lists bounds the reader itself reached (a file tail, a
   store page, cut turn text). Wider turn windows retain source bounds; use
   explicit page reads to reach older Claude or Codex file history. `read`
-  records the source length, configured bound, physical head/tail ranges,
-  decoded record spans, and gaps; alignment bytes are not normalized
-  coverage. A terminal observation records only native stop fields reached by
-  the read, and never says that the session is stopped now. An empty text tail
-  carries the reason it has no operator or assistant text.
+  records the source length, configured bound, physical head/alignment/tail
+  ranges, decoded record spans, and gaps. A preceding newline lets an exact
+  tail boundary retain its first record; a mid-record boundary records the
+  discarded partial prefix. Alignment bytes are not normalized coverage. A
+  terminal observation records only native stop fields reached by the read,
+  including bounded nested Codex error fields, and never says that the session
+  is stopped now or that the account is currently available. A later recorded
+  token total remains independent. An empty text tail carries the reason it
+  has no operator or assistant text.
   Human output says the same in its closing notes, recommending only the
   recovery that works.
 
@@ -175,10 +179,19 @@ PROBE BEFORE EXPORTING
   turn coordinates show prints. With no --tail, every event the bounded reader
   reaches is returned; --name and --call-id filter only after pairing. `--program`
   filters exact nested literal or structured-runtime declarations while
-  `--name` continues to mean the recorded outer tool. Dynamic syntax remains
-  qualified evidence and never becomes an executed child call. Explicit
-  artifact references and within-read consumption observations are descriptors;
-  tapes never opens the named object.
+  `--name` continues to mean the recorded outer tool. JavaScript declarations
+  require a complete direct literal `cmd`/`command` property; supported string
+  escapes are decoded and dynamic, nested, incomplete, arrow, short-circuit,
+  ternary, or unsupported forms remain qualified evidence. Shell assignments
+  and reserved/control forms are also unsupported. Structured argv with
+  non-string elements or too many arguments is reported unsupported rather
+  than filtered or truncated.
+  Wrapper results never witness an individual nested declaration or give it
+  timing. Explicit artifact references and within-read consumption
+  observations are descriptors; tapes never opens the named object. Codex
+  lifecycle mirrors for messages, reasoning, user messages, and compaction
+  are not projected as tools; only the verified `CommandExecution` and
+  `FileChange` variants enter this event layer.
 
   usage answers where a session's quota went as tapes-usage/3: its recorded
   tokens, cost, and accounting, and its turns counted by role. Read accounting

@@ -445,7 +445,8 @@ pub struct BoundedText {
 
 /// A terminal record observed in the reached source window. The reader only
 /// fills outcome, code, message, and duration when the native record supplied
-/// them; an unknown subtype never becomes an invented success or failure.
+/// them; Codex nested error fields remain native evidence with a bounded
+/// message; an unknown subtype never becomes an invented success or failure.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct TerminalObservation {
     pub record_type: String,
