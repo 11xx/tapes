@@ -1123,7 +1123,7 @@ fn parse_record(
     let (source_origin, representation, identified_producer) = match format {
         InputFormat::Openai => ("openai", "openai-conversation", Some("OpenAI export")),
         InputFormat::ChatgptExporter => (
-            "chatgpt-exporter",
+            "openai",
             "chatgpt-exporter-conversation",
             Some("ChatGPT Exporter"),
         ),
@@ -2256,16 +2256,28 @@ fn read_associated_report<R: Read>(
         .and_then(Value::as_str)
         .or_else(|| report_message.and_then(|message| message["status"].as_str()))
         .map(str::to_owned);
-    let (body, citations, omitted_citations) = report_message
-        .map(|message| {
-            let (parts, _) = message_parts(message);
-            let body = parts.iter().any(|part| part.text().is_some()).then(|| {
-                content::bounded_text(&content::project_text(&parts), MAX_ARTIFACT_BODY_CHARS)
-            });
-            let (citations, omitted_citations) = collect_citations(message);
-            (body, citations, omitted_citations)
-        })
-        .unwrap_or((None, Vec::new(), 0));
+    let (body, citations, omitted_citations, citation_traversal_incomplete, descriptor_truncated) =
+        report_message
+            .map(|message| {
+                let (parts, _) = message_parts(message);
+                let body = parts.iter().any(|part| part.text().is_some()).then(|| {
+                    content::bounded_text(&content::project_text(&parts), MAX_ARTIFACT_BODY_CHARS)
+                });
+                let (
+                    citations,
+                    omitted_citations,
+                    citation_traversal_incomplete,
+                    descriptor_truncated,
+                ) = collect_citations(message);
+                (
+                    body,
+                    citations,
+                    omitted_citations,
+                    citation_traversal_incomplete,
+                    descriptor_truncated,
+                )
+            })
+            .unwrap_or((None, Vec::new(), 0, false, false));
     let mut reference = content::artifact_reference(&value, "openai-library-report")
         .unwrap_or_else(|| crate::content::ArtifactReference {
             kind: "openai-library-report".to_owned(),
@@ -2286,6 +2298,8 @@ fn read_associated_report<R: Read>(
             body_availability: None,
             citations: Vec::new(),
             omitted_citations: 0,
+            citation_traversal_incomplete: false,
+            descriptor_truncated: false,
         });
     reference.identity = identity;
     reference.origin = Some("openai-widget-state".to_owned());
@@ -2314,6 +2328,8 @@ fn read_associated_report<R: Read>(
     });
     reference.citations = citations;
     reference.omitted_citations = omitted_citations;
+    reference.citation_traversal_incomplete = citation_traversal_incomplete;
+    reference.descriptor_truncated = descriptor_truncated;
     Ok(Some(AssociatedReport {
         member: member.to_owned(),
         backing,
@@ -2328,11 +2344,44 @@ fn read_associated_report<R: Read>(
     }))
 }
 
-fn collect_citations(value: &Value) -> (Vec<content::ArtifactCitation>, usize) {
+struct DescriptorBudget {
+    used: usize,
+    truncated: bool,
+}
+
+impl DescriptorBudget {
+    fn new() -> Self {
+        Self {
+            used: 0,
+            truncated: false,
+        }
+    }
+
+    fn string(&mut self, value: &Value) -> Option<crate::model::BoundedText> {
+        let text = value.as_str()?;
+        let remaining = content::MAX_DESCRIPTOR_TOTAL_CHARS.saturating_sub(self.used);
+        let bound = remaining.min(content::MAX_DESCRIPTOR_CHARS);
+        let bounded = content::bounded_text(text, bound);
+        self.used = self.used.saturating_add(bounded.text.chars().count());
+        self.truncated |= bounded.truncated;
+        Some(bounded)
+    }
+}
+
+fn collect_citations(value: &Value) -> (Vec<content::ArtifactCitation>, usize, bool, bool) {
     let mut citations = Vec::new();
     let mut omitted = 0;
-    collect_citations_inner(value, 0, &mut citations, &mut omitted);
-    (citations, omitted)
+    let mut incomplete = false;
+    let mut descriptors = DescriptorBudget::new();
+    collect_citations_inner(
+        value,
+        0,
+        &mut citations,
+        &mut omitted,
+        &mut incomplete,
+        &mut descriptors,
+    );
+    (citations, omitted, incomplete, descriptors.truncated)
 }
 
 fn collect_citations_inner(
@@ -2340,9 +2389,11 @@ fn collect_citations_inner(
     depth: usize,
     citations: &mut Vec<content::ArtifactCitation>,
     omitted: &mut usize,
+    incomplete: &mut bool,
+    descriptors: &mut DescriptorBudget,
 ) {
     if depth >= content::MAX_STRUCTURED_DEPTH {
-        *omitted = omitted.saturating_add(1);
+        *incomplete = true;
         return;
     }
     let Some(object) = value.as_object() else {
@@ -2350,9 +2401,23 @@ fn collect_citations_inner(
     };
     for (key, value) in object {
         if key == "content_references" {
-            collect_citation_values(value, depth + 1, citations, omitted);
+            collect_citation_values(
+                value,
+                depth + 1,
+                citations,
+                omitted,
+                incomplete,
+                descriptors,
+            );
         } else {
-            collect_citations_inner(value, depth + 1, citations, omitted);
+            collect_citations_inner(
+                value,
+                depth + 1,
+                citations,
+                omitted,
+                incomplete,
+                descriptors,
+            );
         }
     }
 }
@@ -2362,28 +2427,43 @@ fn collect_citation_values(
     depth: usize,
     citations: &mut Vec<content::ArtifactCitation>,
     omitted: &mut usize,
+    incomplete: &mut bool,
+    descriptors: &mut DescriptorBudget,
 ) {
     if depth >= content::MAX_STRUCTURED_DEPTH {
-        *omitted = omitted.saturating_add(1);
+        *incomplete = true;
         return;
     }
     if citations.len() >= content::MAX_ARTIFACT_REFERENCES {
-        *omitted = omitted.saturating_add(1);
+        let (count, complete) = count_citation_candidates(value, depth);
+        *omitted = omitted.saturating_add(count);
+        *incomplete |= !complete;
         return;
     }
     match value {
         Value::Array(values) => {
             for (index, value) in values.iter().enumerate() {
                 if citations.len() >= content::MAX_ARTIFACT_REFERENCES {
-                    *omitted = omitted.saturating_add(values.len().saturating_sub(index));
+                    let (count, complete) =
+                        sum_citation_candidates(values[index..].iter(), depth + 1);
+                    *omitted = omitted.saturating_add(count);
+                    *incomplete |= !complete;
                     break;
                 }
-                collect_citation_values(value, depth + 1, citations, omitted);
+                collect_citation_values(
+                    value,
+                    depth + 1,
+                    citations,
+                    omitted,
+                    incomplete,
+                    descriptors,
+                );
             }
         }
         Value::Object(object) => {
-            if let Some(mut citation) = citation_from_value(object) {
+            if let Some(mut citation) = citation_from_value(object, descriptors) {
                 let mut omitted_sources = 0;
+                let mut sources_incomplete = false;
                 for key in ["items", "sources", "source"] {
                     if let Some(value) = object.get(key) {
                         collect_citation_sources(
@@ -2391,17 +2471,31 @@ fn collect_citation_values(
                             depth + 1,
                             &mut citation.sources,
                             &mut omitted_sources,
+                            &mut sources_incomplete,
+                            descriptors,
                         );
                     }
                 }
                 citation.omitted_sources = omitted_sources;
+                citation.source_traversal_incomplete = sources_incomplete;
                 citations.push(citation);
             } else {
-                for value in object.values() {
-                    collect_citation_values(value, depth + 1, citations, omitted);
+                for (index, value) in object.values().enumerate() {
                     if citations.len() >= content::MAX_ARTIFACT_REFERENCES {
+                        let (count, complete) =
+                            sum_citation_candidates(object.values().skip(index), depth + 1);
+                        *omitted = omitted.saturating_add(count);
+                        *incomplete |= !complete;
                         break;
                     }
+                    collect_citation_values(
+                        value,
+                        depth + 1,
+                        citations,
+                        omitted,
+                        incomplete,
+                        descriptors,
+                    );
                 }
             }
         }
@@ -2414,28 +2508,43 @@ fn collect_citation_sources(
     depth: usize,
     sources: &mut Vec<content::ArtifactCitationSource>,
     omitted: &mut usize,
+    incomplete: &mut bool,
+    descriptors: &mut DescriptorBudget,
 ) {
     if depth >= content::MAX_STRUCTURED_DEPTH {
-        *omitted = omitted.saturating_add(1);
+        *incomplete = true;
         return;
     }
     if sources.len() >= content::MAX_ARTIFACT_REFERENCES {
-        *omitted = omitted.saturating_add(1);
+        let (count, complete) = count_citation_source_candidates(value, depth);
+        *omitted = omitted.saturating_add(count);
+        *incomplete |= !complete;
         return;
     }
     match value {
         Value::Array(values) => {
             for (index, value) in values.iter().enumerate() {
                 if sources.len() >= content::MAX_ARTIFACT_REFERENCES {
-                    *omitted = omitted.saturating_add(values.len().saturating_sub(index));
+                    let (count, complete) =
+                        sum_citation_source_candidates(values[index..].iter(), depth + 1);
+                    *omitted = omitted.saturating_add(count);
+                    *incomplete |= !complete;
                     break;
                 }
-                collect_citation_sources(value, depth + 1, sources, omitted);
+                collect_citation_sources(
+                    value,
+                    depth + 1,
+                    sources,
+                    omitted,
+                    incomplete,
+                    descriptors,
+                );
             }
         }
         Value::Object(object) => {
-            if let Some(mut source) = citation_source_from_value(object) {
+            if let Some(mut source) = citation_source_from_value(object, descriptors) {
                 let mut nested_omitted = 0;
+                let mut nested_incomplete = false;
                 for key in ["items", "sources", "source"] {
                     if let Some(value) = object.get(key) {
                         collect_citation_sources(
@@ -2443,17 +2552,31 @@ fn collect_citation_sources(
                             depth + 1,
                             &mut source.sources,
                             &mut nested_omitted,
+                            &mut nested_incomplete,
+                            descriptors,
                         );
                     }
                 }
                 source.omitted_sources = nested_omitted;
+                source.source_traversal_incomplete = nested_incomplete;
                 sources.push(source);
             } else {
-                for value in object.values() {
-                    collect_citation_sources(value, depth + 1, sources, omitted);
+                for (index, value) in object.values().enumerate() {
                     if sources.len() >= content::MAX_ARTIFACT_REFERENCES {
+                        let (count, complete) =
+                            sum_citation_source_candidates(object.values().skip(index), depth + 1);
+                        *omitted = omitted.saturating_add(count);
+                        *incomplete |= !complete;
                         break;
                     }
+                    collect_citation_sources(
+                        value,
+                        depth + 1,
+                        sources,
+                        omitted,
+                        incomplete,
+                        descriptors,
+                    );
                 }
             }
         }
@@ -2463,8 +2586,9 @@ fn collect_citation_sources(
 
 fn citation_from_value(
     value: &serde_json::Map<String, Value>,
+    descriptors: &mut DescriptorBudget,
 ) -> Option<content::ArtifactCitation> {
-    let (kind, uri, title, start, end) = citation_fields(value)?;
+    let (kind, uri, title, start, end) = citation_fields(value, descriptors)?;
     Some(content::ArtifactCitation {
         kind,
         uri,
@@ -2473,13 +2597,15 @@ fn citation_from_value(
         end,
         sources: Vec::new(),
         omitted_sources: 0,
+        source_traversal_incomplete: false,
     })
 }
 
 fn citation_source_from_value(
     value: &serde_json::Map<String, Value>,
+    descriptors: &mut DescriptorBudget,
 ) -> Option<content::ArtifactCitationSource> {
-    let (kind, uri, title, start, end) = citation_fields(value)?;
+    let (kind, uri, title, start, end) = citation_fields(value, descriptors)?;
     Some(content::ArtifactCitationSource {
         kind,
         uri,
@@ -2488,26 +2614,34 @@ fn citation_source_from_value(
         end,
         sources: Vec::new(),
         omitted_sources: 0,
+        source_traversal_incomplete: false,
     })
 }
 
 type CitationFields = (
-    Option<String>,
-    Option<String>,
-    Option<String>,
+    Option<crate::model::BoundedText>,
+    Option<crate::model::BoundedText>,
+    Option<crate::model::BoundedText>,
     Option<usize>,
     Option<usize>,
 );
 
-fn citation_fields(value: &serde_json::Map<String, Value>) -> Option<CitationFields> {
-    let kind = value.get("type").and_then(Value::as_str).map(str::to_owned);
+fn citation_fields(
+    value: &serde_json::Map<String, Value>,
+    descriptors: &mut DescriptorBudget,
+) -> Option<CitationFields> {
+    if !citation_shape_present(value) {
+        return None;
+    }
+    let kind = value
+        .get("type")
+        .and_then(|value| descriptors.string(value));
     let uri = ["uri", "url", "href"]
         .into_iter()
-        .find_map(|key| value.get(key).and_then(Value::as_str).map(str::to_owned));
+        .find_map(|key| value.get(key).and_then(|value| descriptors.string(value)));
     let title = value
         .get("title")
-        .and_then(Value::as_str)
-        .map(str::to_owned);
+        .and_then(|value| descriptors.string(value));
     let start = ["start_idx", "start_index", "start"]
         .into_iter()
         .find_map(|key| value.get(key).and_then(Value::as_u64))
@@ -2518,6 +2652,77 @@ fn citation_fields(value: &serde_json::Map<String, Value>) -> Option<CitationFie
         .and_then(|value| usize::try_from(value).ok());
     (kind.is_some() || uri.is_some() || title.is_some() || start.is_some() || end.is_some())
         .then_some((kind, uri, title, start, end))
+}
+
+fn citation_shape_present(value: &serde_json::Map<String, Value>) -> bool {
+    ["type", "uri", "url", "href", "title"]
+        .into_iter()
+        .any(|key| value.get(key).is_some_and(Value::is_string))
+        || [
+            "start_idx",
+            "start_index",
+            "start",
+            "end_idx",
+            "end_index",
+            "end",
+        ]
+        .into_iter()
+        .any(|key| value.get(key).is_some_and(Value::is_u64))
+}
+
+fn count_citation_candidates(value: &Value, depth: usize) -> (usize, bool) {
+    if depth >= content::MAX_STRUCTURED_DEPTH {
+        return (0, false);
+    }
+    match value {
+        Value::Array(values) => sum_citation_candidates(values.iter(), depth + 1),
+        Value::Object(object) if citation_shape_present(object) => (1, true),
+        Value::Object(object) => sum_citation_candidates(object.values(), depth + 1),
+        _ => (0, true),
+    }
+}
+
+fn sum_citation_candidates<'a>(
+    values: impl Iterator<Item = &'a Value>,
+    depth: usize,
+) -> (usize, bool) {
+    values.fold((0, true), |(count, complete), value| {
+        let (more, more_complete) = count_citation_candidates(value, depth);
+        (count.saturating_add(more), complete && more_complete)
+    })
+}
+
+fn count_citation_source_candidates(value: &Value, depth: usize) -> (usize, bool) {
+    if depth >= content::MAX_STRUCTURED_DEPTH {
+        return (0, false);
+    }
+    match value {
+        Value::Array(values) => sum_citation_source_candidates(values.iter(), depth + 1),
+        Value::Object(object) if citation_shape_present(object) => {
+            let mut count: usize = 1;
+            let mut complete = true;
+            for key in ["items", "sources", "source"] {
+                if let Some(value) = object.get(key) {
+                    let (more, more_complete) = count_citation_source_candidates(value, depth + 1);
+                    count = count.saturating_add(more);
+                    complete &= more_complete;
+                }
+            }
+            (count, complete)
+        }
+        Value::Object(object) => sum_citation_source_candidates(object.values(), depth + 1),
+        _ => (0, true),
+    }
+}
+
+fn sum_citation_source_candidates<'a>(
+    values: impl Iterator<Item = &'a Value>,
+    depth: usize,
+) -> (usize, bool) {
+    values.fold((0, true), |(count, complete), value| {
+        let (more, more_complete) = count_citation_source_candidates(value, depth);
+        (count.saturating_add(more), complete && more_complete)
+    })
 }
 
 fn attach_associated_reports(

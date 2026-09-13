@@ -26,6 +26,11 @@ not choose a producer. A declared `--input-format` records its producer as a
 caller declaration and, when it does not recognize a record, reports the
 bounded diagnostic without trying another adapter.
 
+Both OpenAI and ChatGPT Exporter mapping representations use `source.origin`
+with value `"openai"`; `source.representation` identifies the detected or declared
+representation, and `source.producer` is the acquisition label only when an
+explicit input format supplies it or the source establishes it independently.
+
 ## Mapping graph
 
 The canonical transcript follows `current_node` through `parent` links and
@@ -57,8 +62,13 @@ OpenAI library/report `.dat` members are decoded only when they contain the
 recognized widget-state report shape. A report reference retains bounded
 identity, origin, backing conversation, authorship, completion state, source
 member, byte size, citation count, a bounded body when present, and native
-citation spans. Grouped citation spans retain bounded nested source URLs and
-titles, with omission counts at each bound. When a report names a uniquely reached conversation it is
+citation spans. Citation kind, URI, and title strings use the shared bounded
+text representation: each field is limited to 4 KiB and all citation
+descriptors share a 16 KiB cumulative bound. A truncated URI is incomplete,
+not a valid altered reference. Grouped citation spans retain bounded nested
+source URLs and titles, with omission counts at each bound. Structural
+traversal bounds are exposed separately when an omitted count cannot be
+established. When a report names a uniquely reached conversation it is
 attached as a structured artifact part of an existing turn and also remains
 in the artifact collection. A report without a reached outer conversation
 remains an explicit artifact with its unresolved association; it never becomes
