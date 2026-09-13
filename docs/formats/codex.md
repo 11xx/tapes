@@ -47,10 +47,20 @@ invented from a neighboring record.
 
 The normalized transcript also retains a bounded `read` descriptor. It records
 the source length, the 4 MiB configured tail bound, the physical head and tail
-ranges, each decoded record's absolute byte span, and gaps for the discarded
+ranges, each decoded record's absolute byte span, separate spans for records
+used only as opening or newer provenance context, and gaps for the discarded
 partial prefix or malformed records. The head and tail are read through one
 open descriptor and the descriptor is checked again before the result is
-returned; a mutation aborts the read.
+returned; a mutation aborts the read. Physical overlap with the head does not
+erase a malformed gap; a partial gap is removed only when a successful decode
+of that same record covers it.
+
+Codex transcript history pages use the opening to decide whether a user-role
+message is operator-authored and use bounded newer records to corroborate that
+classification across page boundaries. The page records the bounded head range
+and those context-only record spans in `read`; it never inserts the opening
+records into `turns`. Metadata pages use the same page envelope with the
+`models-only` option and do not perform this provenance read.
 
 The normalized reader retains only a bounded 4 MiB tail for transcript reads,
 plus the first 64 KiB of the file. `session_meta` is the first line, so the

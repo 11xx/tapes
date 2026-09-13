@@ -176,6 +176,7 @@ impl ClaudeBackend {
             Path::new(path),
             cursor,
             bytes,
+            projection,
             ReadContext::None,
             |values, spans, opening, context, revision| {
                 let _ = (opening, context);
