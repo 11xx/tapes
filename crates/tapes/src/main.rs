@@ -749,7 +749,7 @@ enum Command {
         json: bool,
     },
     /// What a continuation of one session needs from its recording, as
-    /// tapes-brief/3: where the work stopped, the working directory and the
+    /// tapes-brief/4: where the work stopped, the working directory and the
     /// commit it sits on, the calls the read never saw a result for, the
     /// children whose outcome the store does not record, and a bounded tail
     /// of the exchange. It reads the recording alone and judges nothing —
@@ -763,12 +763,12 @@ enum Command {
         /// out of the tail.
         #[arg(long, value_name = "N", default_value_t = DEFAULT_BRIEF_TAIL)]
         tail: usize,
-        /// Render the versioned tapes-brief/3 object as JSON.
+        /// Render the versioned tapes-brief/4 object as JSON.
         #[arg(long)]
         json: bool,
     },
     /// What each session of a selection ends on, one bounded record each, as
-    /// tapes-endings/3. The selection uses the flags `list` and `export` take,
+    /// tapes-endings/4. The selection uses the flags `list` and `export` take,
     /// applied before any transcript is opened; each selected session then
     /// costs one bounded read of its newest turns and one lineage read. Every
     /// fact rests on the normalized turn kinds and typed tool events of the
@@ -826,7 +826,7 @@ enum Command {
         /// attached context stay out of it.
         #[arg(long)]
         text: bool,
-        /// Render the versioned tapes-endings/3 object as JSON.
+        /// Render the versioned tapes-endings/4 object as JSON.
         #[arg(long)]
         json: bool,
     },

@@ -303,7 +303,7 @@ READ MANY ENDINGS
   tapes endings --global --harness codex --limit 50 --text
 
   endings answers what each session of a selection ends on, as
-  tapes-endings/3, so choosing which few endings deserve reading costs one
+  tapes-endings/4, so choosing which few endings deserve reading costs one
   bounded read each instead of a transcript apiece. The selection is the one
   list and export take, and the scope and filters apply before any transcript
   is opened. --tail sets how many of each session's newest turns are read (12
@@ -385,7 +385,7 @@ CONTINUE A COLD SESSION
   tapes brief <id> --tail 20 --json
 
   A continuation has two halves. brief is the transcript's half, as
-  tapes-brief/3: where the session stopped, the directory it worked in and the
+  tapes-brief/4: where the session stopped, the directory it worked in and the
   commit that directory sits on, the tool calls the read never saw a result
   for, the children whose outcome its store does not record, and the last few
   operator and assistant turns, each cut at 600 characters. --tail sets how

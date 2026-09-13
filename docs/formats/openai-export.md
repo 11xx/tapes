@@ -95,7 +95,7 @@ listing only when the ordered supplied-input observation matches the
 observation that emitted the coordinate; changed input refuses continuation.
 
 The normal output contracts remain versioned (`tapes-list/4`,
-`tapes-session/6`, `tapes-events/4`, `tapes-brief/3`, `tapes-endings/3`,
+`tapes-session/6`, `tapes-events/4`, `tapes-brief/4`, `tapes-endings/4`,
 `tapes-stats/3`, `tapes-usage/3`, and `tapes-export-manifest/4`). History-page
 and child-qualified operations are installed-recording capabilities and
 refuse supplied exports rather than interpreting an export as JSONL history.

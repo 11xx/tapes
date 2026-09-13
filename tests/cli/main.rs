@@ -1080,6 +1080,45 @@ fn supplied_zip_reads_conversations_and_retains_associated_report_evidence() {
         .iter()
         .any(|value| value.as_str().unwrap().contains("orphan-report.dat")));
 
+    let brief = tapes()
+        .args(["brief", "associated-1", "--input", archive, "--json"])
+        .output()
+        .unwrap();
+    assert!(brief.status.success());
+    let brief: Value = serde_json::from_slice(&brief.stdout).unwrap();
+    assert_eq!(brief["schema"], "tapes-brief/4");
+    let grouped_brief_part = brief["tail"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|entry| entry["parts"].as_array().into_iter().flatten())
+        .find(|part| part["reference"]["identity"] == "grouped-report")
+        .unwrap();
+    assert_eq!(
+        grouped_brief_part["reference"]["citations"][0]["sources"][0]["uri"]["text"],
+        "https://example.invalid/grouped-target"
+    );
+
+    let endings = tapes()
+        .args(["endings", "--input", archive, "--text", "--json"])
+        .output()
+        .unwrap();
+    assert!(endings.status.success());
+    let endings: Value = serde_json::from_slice(&endings.stdout).unwrap();
+    assert_eq!(endings["schema"], "tapes-endings/4");
+    let grouped_ending_part = endings["endings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|ending| ending["tail"].as_array().into_iter().flatten())
+        .flat_map(|entry| entry["parts"].as_array().into_iter().flatten())
+        .find(|part| part["reference"]["identity"] == "grouped-report")
+        .unwrap();
+    assert_eq!(
+        grouped_ending_part["reference"]["citations"][0]["sources"][0]["uri"]["text"],
+        "https://example.invalid/grouped-target"
+    );
+
     let empty = tapes()
         .args(["show", "empty-outer", "--input", archive, "--json"])
         .output()
@@ -4254,7 +4293,7 @@ fn endings_help_names_the_schema_and_what_it_does_not_do() {
     assert!(output.status.success());
     let help = String::from_utf8_lossy(&output.stdout);
 
-    assert!(help.contains("tapes-endings/3"), "{help}");
+    assert!(help.contains("tapes-endings/4"), "{help}");
     assert!(help.contains("never on their text"), "{help}");
     assert!(help.contains("labels no session complete"), "{help}");
     assert!(help.contains("--tail <N>"), "{help}");
@@ -4291,7 +4330,7 @@ fn endings_applies_the_activity_window_before_reading_any_transcript() {
     );
     let value: Value = serde_json::from_slice(&output.stdout).unwrap();
 
-    assert_eq!(value["schema"], "tapes-endings/3");
+    assert_eq!(value["schema"], "tapes-endings/4");
     assert_eq!(
         value["selection"]["activity"],
         serde_json::json!({ "since": "2026-01-01T12:00:00Z" })
@@ -4308,7 +4347,7 @@ fn endings_applies_the_activity_window_before_reading_any_transcript() {
         ]
     );
     for ending in endings {
-        assert_eq!(ending["source"]["schema"], "tapes-endings/3");
+        assert_eq!(ending["source"]["schema"], "tapes-endings/4");
         assert_eq!(ending["source"]["source"]["recorded_harness"], "codex");
         assert_eq!(ending["facts"], serde_json::json!(["assistant-close"]));
         // The structural report carries no transcript text of its own.
@@ -4826,7 +4865,7 @@ fn brief_help_names_the_schema_and_the_half_it_reads() {
     assert!(output.status.success());
     let help = String::from_utf8_lossy(&output.stdout);
 
-    assert!(help.contains("tapes-brief/3"), "{help}");
+    assert!(help.contains("tapes-brief/4"), "{help}");
     assert!(help.contains("reads the recording alone"), "{help}");
     assert!(help.contains("--tail <N>"), "{help}");
     assert!(help.contains("[default: 12]"), "{help}");
@@ -4885,7 +4924,7 @@ fn brief_renders_the_continuation_in_reading_order() {
     assert!(narrow.contains("[assistant #4"), "{narrow}");
 
     let value: Value = serde_json::from_slice(&run(&["brief", id, "--json"])).unwrap();
-    assert_eq!(value["schema"], "tapes-brief/3");
+    assert_eq!(value["schema"], "tapes-brief/4");
     assert_eq!(value["session"]["id"], id);
     assert_eq!(value["working_set"]["directory_exists"], false);
     assert!(value["working_set"].get("git").is_none(), "{value}");

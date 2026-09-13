@@ -307,7 +307,7 @@ inferred from tokens. Human output includes group and total rows, compatible acc
 a mixed-accounting explanation when sums are omitted, and listing diagnostics.
 
 `endings` answers what each session of a selection ends on as
-`tapes-endings/3`, so deciding which endings deserve reading costs one bounded
+`tapes-endings/4`, so deciding which endings deserve reading costs one bounded
 read each rather than a transcript apiece. It takes the same selection flags
 `list` and `export` do, applied before any transcript is opened, plus `--tail`
 for how many of each session's newest turns are read (12 by default) and
@@ -344,7 +344,7 @@ judged, ranked, or explained. Human output prints one line per group and no
 line for a group the recording holds nothing for.
 
 `brief` answers what a continuation of one session needs from its recording as
-`tapes-brief/3`, for the case where resuming the session itself has gone too
+`tapes-brief/4`, for the case where resuming the session itself has gone too
 expensive: where it stopped, the directory it worked in and the commit that
 directory sits on, the tool calls the read never saw a result for, the children
 whose outcome its store does not record, and the last `--tail` operator and
@@ -449,7 +449,7 @@ few endings that matter instead of every tail.
 
 **Contracts you can build on.** `tapes-list/4`, `tapes-session/6`,
 `tapes-events/4`, `tapes-usage/3`, `tapes-usage-summary/3`, `tapes-lineage/2`,
-`tapes-endings/3`, `tapes-child/2`, `tapes-stats/3`, `tapes-stats-summary/2`, `tapes-brief/3`,
+`tapes-endings/4`, `tapes-child/2`, `tapes-stats/3`, `tapes-stats-summary/2`, `tapes-brief/4`,
 `tapes-page/3`, `tapes-history-search/3`, `tapes-metadata-history/3`,
 and `tapes-export-manifest/4` are versioned
 JSON; a breaking shape change bumps the version. A single-session `export`
