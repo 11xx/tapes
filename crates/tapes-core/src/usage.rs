@@ -12,13 +12,14 @@ use chrono::{DateTime, Utc};
 use serde::Serialize;
 use serde_json::Value;
 
+use crate::content::{self, ContentInventory};
 use crate::model::{
     Accounting, AccountingBasis, AccountingCoverage, Cost, Model, ReadEvidence, Role, Session,
     SourceBound, SourceDescriptor, TerminalObservation, TextTailEvidence, Tokens, Transcript,
     Truncation,
 };
 
-pub const USAGE_SCHEMA: &str = "tapes-usage/2";
+pub const USAGE_SCHEMA: &str = "tapes-usage/3";
 
 /// Usage facts a harness records that the normalized session model has no
 /// field for. Each member is present exactly when the harness recorded it.
@@ -153,6 +154,10 @@ pub struct TurnCounts {
     pub assistant: usize,
     pub tool: usize,
     pub reasoning: usize,
+    #[serde(skip_serializing_if = "is_zero")]
+    pub system: usize,
+    #[serde(skip_serializing_if = "is_zero")]
+    pub developer: usize,
     pub total: usize,
     pub coverage: TurnCoverage,
 }
@@ -213,6 +218,8 @@ pub struct UsageView {
     pub terminal: Option<TerminalObservation>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub text_tail: Option<TextTailEvidence>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content: Option<ContentInventory>,
     pub truncated: bool,
     #[serde(skip_serializing_if = "Truncation::is_empty")]
     pub truncation: Truncation,
@@ -247,6 +254,7 @@ pub fn usage(transcript: &Transcript) -> UsageView {
         read: transcript.read.clone(),
         terminal: transcript.terminal.clone(),
         text_tail: transcript.text_tail.clone(),
+        content: content::inventory(&transcript.turns),
         truncated: transcript.truncated,
         truncation: transcript.truncation.clone(),
         notes: transcript.notes.clone(),
@@ -264,10 +272,16 @@ fn turn_counts(transcript: &Transcript) -> TurnCounts {
             Role::Assistant => counts.assistant += 1,
             Role::Tool => counts.tool += 1,
             Role::Reasoning => counts.reasoning += 1,
+            Role::System => counts.system += 1,
+            Role::Developer => counts.developer += 1,
         }
         counts.total += 1;
     }
     counts
+}
+
+fn is_zero(value: &usize) -> bool {
+    *value == 0
 }
 
 /// Only a bound that withheld whole turns can shorten the count. Text cut
@@ -569,6 +583,10 @@ mod tests {
             native_id: None,
             request_turn_id: None,
             record_ref: None,
+            parts: Vec::new(),
+            coverage: None,
+            channel: None,
+            recipient: None,
             tool: None,
         }
     }

@@ -4,12 +4,13 @@ use chrono::{DateTime, Utc};
 use serde::Serialize;
 use serde_json::Value;
 
+use crate::content::{self, ContentCoverage, ContentInventory, ContentPart};
 use crate::model::{
     ReadEvidence, RecordRef, Session, SourceBound, TerminalObservation, TextTailEvidence,
     Transcript, Truncation,
 };
 
-pub const EVENTS_SCHEMA: &str = "tapes-events/2";
+pub const EVENTS_SCHEMA: &str = "tapes-events/3";
 const PREVIEW_CHARS: usize = 200;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -88,6 +89,10 @@ pub struct EventRecord {
     pub native_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub record_ref: Option<RecordRef>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub parts: Vec<ContentPart>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub coverage: Option<ContentCoverage>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ts: Option<DateTime<Utc>>,
     #[serde(flatten)]
@@ -118,6 +123,8 @@ pub struct EventTranscript {
     pub terminal: Option<TerminalObservation>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub text_tail: Option<TextTailEvidence>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content: Option<ContentInventory>,
     pub truncated: bool,
     #[serde(skip_serializing_if = "truncation_is_empty")]
     pub truncation: Truncation,
@@ -168,6 +175,8 @@ pub fn project(transcript: Transcript, tail: usize) -> EventTranscript {
                 ordinal: turn.ordinal,
                 native_id: turn.native_id.clone(),
                 record_ref: turn.record_ref.clone(),
+                parts: turn.parts.clone(),
+                coverage: turn.coverage.clone(),
                 ts: turn.ts,
                 event,
                 pair: None,
@@ -212,6 +221,7 @@ pub fn project(transcript: Transcript, tail: usize) -> EventTranscript {
         read: transcript.read,
         terminal: transcript.terminal,
         text_tail: transcript.text_tail,
+        content: content::inventory(&transcript.turns),
         truncated: !truncation.is_empty(),
         truncation,
         notes: transcript.notes,
@@ -337,6 +347,10 @@ mod tests {
             native_id: Some(format!("native-{ordinal}")),
             request_turn_id: None,
             record_ref: None,
+            parts: Vec::new(),
+            coverage: None,
+            channel: None,
+            recipient: None,
             tool: Some(event),
         }
     }

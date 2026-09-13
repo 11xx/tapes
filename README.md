@@ -161,7 +161,7 @@ path is unknowable past the bound). A session whose header could not be read
 carries `start_uncertain: true`, and `started_at` is then a floor. A Codex row without `model` may have its
 model-bearing `turn_context` before the bounded 4 MiB file-tail read; the
 absence is preserved rather than filled with a guess. JSON output is a
-`tapes-list/1` object containing `sessions`, `unavailable`, `unreadable`,
+`tapes-list/2` object containing `sessions`, `unavailable`, `unreadable`,
 `unsearched`, `scanned`, and `scan_truncated`. `unavailable` names harnesses
 that could not be read at all;
 `unreadable` names sessions a readable harness could not normalize, each with
@@ -205,8 +205,11 @@ turn at whole-second precision, matching the timestamps shown to the reader.
 The optional `read` object records the source length, configured bound, the
 physical ranges read, decoded record spans, and gaps. A `terminal` observation
 retains native stop fields reached by the read without claiming present-tense
-liveness; `text_tail` explains an empty operator/assistant tail.
-JSON output uses the `tapes-session/3` transcript schema, with the optional
+liveness; `text_tail` explains an empty operator/assistant tail. Each turn also
+keeps ordered native content `parts` and a `coverage` summary, so an image,
+file reference, structured artifact, tool payload, or unknown part does not
+disappear merely because it has no readable text.
+JSON output uses the `tapes-session/4` transcript schema, with the optional
 `live` annotation when the authority answers. The human header marks the same
 state.
 
@@ -217,7 +220,7 @@ newest one there. `--project <path>` scopes elsewhere and `--global` drops the
 scope.
 
 `events` projects tool calls and results into the harness-neutral
-`tapes-events/2` schema. Each record keeps the turn ordinal and native id,
+`tapes-events/3` schema. Each record keeps the turn ordinal and native id,
 bounded argument or output metadata, and an exact call/result pair when both
 halves occur in the bounded read. Unpaired calls report `no-result-in-read`;
 an unpaired result reports `call-before-read-bound` when a file-tail or
@@ -227,7 +230,7 @@ reached the recording's start. `--tail` uses the same turn-ordinal window as
 the command returns every event the bounded reader reaches so counts describe
 the read rather than an implicit display window.
 
-`usage` answers where one session's quota went as `tapes-usage/2`: the
+`usage` answers where one session's quota went as `tapes-usage/3`: the
 session's recorded `tokens`, `cost`, and `accounting`, and `turns` counted by
 role. The accounting `basis` and `coverage` decide whether figures may be
 summed — a recorded total and a sum of per-request records are both safe to
@@ -241,7 +244,7 @@ Human output prints one line per recorded fact and closes with the same
 truncation notes `show` prints.
 
 Given a scope or a listing filter instead of a session, `usage` answers the
-whole selection as `tapes-usage-summary/2`: the same flags `list` and `export`
+whole selection as `tapes-usage-summary/3`: the same flags `list` and `export`
 take, grouped by `--by harness,model,variant,directory` and defaulting to
 harness and model. It sums the counters the listing already carries, so no
 transcript is read. Each sum covers the sessions that recorded that counter
@@ -253,7 +256,7 @@ inferred from tokens. Human output includes group and total rows, compatible acc
 a mixed-accounting explanation when sums are omitted, and listing diagnostics.
 
 `endings` answers what each session of a selection ends on as
-`tapes-endings/2`, so deciding which endings deserve reading costs one bounded
+`tapes-endings/3`, so deciding which endings deserve reading costs one bounded
 read each rather than a transcript apiece. It takes the same selection flags
 `list` and `export` do, applied before any transcript is opened, plus `--tail`
 for how many of each session's newest turns are read (12 by default) and
@@ -270,7 +273,7 @@ session whose read fails is named in `unread` with its diagnostic and does not
 stop the run. Human output is one line per session, the text tail indented
 beneath it when asked for, and the listing's own diagnostics.
 
-`stats` counts what one recording holds as `tapes-stats/2`: `turns` by the
+`stats` counts what one recording holds as `tapes-stats/3`: `turns` by the
 `kind` the harness recorded them as, `tools` — calls, results, complete pairs,
 unpaired events by the boundary that left them unpaired, errors, and a
 `by_name` row per tool with its paired durations — the recorded clock in
@@ -290,7 +293,7 @@ judged, ranked, or explained. Human output prints one line per group and no
 line for a group the recording holds nothing for.
 
 `brief` answers what a continuation of one session needs from its recording as
-`tapes-brief/2`, for the case where resuming the session itself has gone too
+`tapes-brief/3`, for the case where resuming the session itself has gone too
 expensive: where it stopped, the directory it worked in and the commit that
 directory sits on, the tool calls the read never saw a result for, the children
 whose outcome its store does not record, and the last `--tail` operator and
@@ -308,7 +311,7 @@ in one screen, in that reading order.
 
 - `.context.md` — exact operator turns and assistant-visible text, without the
   harness's own commands, notices, and attached context. Read first.
-- `.json` — the canonical `tapes-session/3` object plus turns, cost, tokens,
+- `.json` — the canonical `tapes-session/4` object plus turns, cost, tokens,
   their `accounting` basis and coverage when present, any verified
   `trailing_record`, and the session directory's git head and branch when
   they resolve. Query selectively with `jq`.
@@ -338,7 +341,7 @@ Given the listing flags in place of an id — `--here`, `--project <path>`,
 `--sort`, `--limit`, `--search` — `export` takes the set `list` would return,
 in the same order, and writes one bundle per session. Bundles are never
 joined: each session keeps its own bounded three files, and a
-`tapes-export-manifest/1` `manifest.json` beside them is the only file that
+`tapes-export-manifest/2` `manifest.json` beside them is the only file that
 spans the set. It records the selection, each session's bundle paths, the
 sessions whose store could not be read under `failed`, and the listing's own
 `unavailable`, `unreadable`, `unsearched`, `scanned`, and `scan_truncated`
@@ -391,11 +394,11 @@ rather than a resent history. `tapes usage --here --since <date> --json` answers
 <date> --json` says what each of those sessions ends on, so a scan reads the
 few endings that matter instead of every tail.
 
-**Contracts you can build on.** `tapes-list/1`, `tapes-session/3`,
-`tapes-events/2`, `tapes-usage/2`, `tapes-usage-summary/2`, `tapes-lineage/1`,
-`tapes-endings/2`, `tapes-child/1`, `tapes-stats/2`, `tapes-stats-summary/1`, `tapes-brief/2`,
-`tapes-page/2`, `tapes-history-search/2`, `tapes-metadata-history/2`,
-and `tapes-export-manifest/1` are versioned
+**Contracts you can build on.** `tapes-list/2`, `tapes-session/4`,
+`tapes-events/3`, `tapes-usage/3`, `tapes-usage-summary/3`, `tapes-lineage/2`,
+`tapes-endings/3`, `tapes-child/2`, `tapes-stats/3`, `tapes-stats-summary/2`, `tapes-brief/3`,
+`tapes-page/3`, `tapes-history-search/3`, `tapes-metadata-history/3`,
+and `tapes-export-manifest/2` are versioned
 JSON; a breaking shape change bumps the version. A single-session `export`
 prints
 exactly three paths and their sizes on stdout, in reading order, and writes each
@@ -473,7 +476,7 @@ metadata read; page counters describe the subsequent history traversal.
 ## Tool usage across sessions
 
 `tapes stats --here --since 2026-01-01 --json` returns
-`tapes-stats-summary/1`. Listing filters select the sessions; each costs one
+`tapes-stats-summary/2`. Listing filters select the sessions; each costs one
 bounded transcript read through its listed backend origin. The report includes
 selected/read/failed counts, per-session coverage and tool statistics, and
 aggregates by harness and tool name. Pair durations cover complete timestamped
@@ -501,7 +504,7 @@ currently supply derived display hints rather than recorded titles.
 
 `tapes child PARENT --reference CHILD --json` reads the child's own transcript,
 usage and ending evidence. Find `CHILD` in the parent's `lineage` output. The
-`tapes-child/1` report retains parent identity and child reference; its transcript
+`tapes-child/2` report retains parent identity and child reference; its transcript
 uses the qualified ID `PARENT::CHILD`. This ID does not become an ordinary
 listed session: use the child command to read it. Missing references refuse.
 
@@ -518,5 +521,5 @@ and contributing-counter counts, sets `mixed_accounting: true`, and omits token
 and cost sums. `partitions` retains each compatible sum, including explicitly
 missing accounting. Recorded totals, full-session request sums and read-window
 request sums are never presented as one comparable total. This contract is
-`tapes-usage-summary/2`; single-session `tapes-usage/2` carries the same
+`tapes-usage-summary/3`; single-session `tapes-usage/3` carries the same
 accounting plus bounded read and terminal evidence.

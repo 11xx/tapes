@@ -10,6 +10,7 @@ use super::{
     terminal_from_values, timestamp, trailing_record, transcript_from_recording, Backend, Jsonl,
     Listing, ParsedFile, Query, TokenTotals,
 };
+use crate::content::{parts_from_array, project_text, tool_coverage, tool_part};
 use crate::event::{Bounded, EventKind, ToolEvent};
 use crate::history::{PageProjection, ReadContext};
 use crate::lineage::{ChildRef, Lineage, ParentRef, SourceRef};
@@ -658,34 +659,64 @@ fn parse_turns(value: &Value, messages: &UserMessages) -> Vec<Turn> {
     let payload = &value["payload"];
     let ts = timestamp(&value["timestamp"]);
     let native_id = payload["id"].as_str().map(str::to_owned);
-    let (role, kind, text, tool) = match payload["type"].as_str() {
+    let (role, kind, text, tool, parts, coverage) = match payload["type"].as_str() {
         Some("message") => {
             let role = match payload["role"].as_str() {
                 Some("user") => Role::User,
                 Some("assistant") => Role::Assistant,
+                Some("system") => Role::System,
+                Some("developer") => Role::Developer,
                 _ => return Vec::new(),
             };
-            let text = payload["content"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .filter(|block| {
-                    matches!(block["type"].as_str(), Some("input_text" | "output_text"))
-                })
-                .filter_map(|block| block["text"].as_str())
-                .collect::<Vec<_>>()
-                .join("\n");
+            let (parts, coverage) = parts_from_array(&payload["content"], "payload.content");
+            let text = project_text(&parts);
             let kind = role
                 .kind()
                 .unwrap_or_else(|| codex_user_kind(payload, &text, messages));
-            (role, kind, text, None)
+            (role, kind, text, None, parts, coverage)
         }
-        Some("reasoning") => (
-            Role::Reasoning,
-            TurnKind::Reasoning,
-            reasoning_text(payload),
-            None,
-        ),
+        Some("reasoning") => {
+            let text = reasoning_text(payload);
+            let parts = if text == "[encrypted reasoning]" {
+                vec![crate::content::ContentPart::Unknown {
+                    native_kind: "encrypted".to_owned(),
+                    descriptor: crate::content::bounded_shape(payload),
+                    source_field: "payload.encrypted_content".to_owned(),
+                    record_ref: None,
+                }]
+            } else {
+                vec![crate::content::text_part(
+                    text.as_str(),
+                    "payload.summary",
+                    "reasoning",
+                )]
+            };
+            let coverage = if text == "[encrypted reasoning]" {
+                crate::content::ContentCoverage {
+                    carrier: crate::content::ContentCarrier::DirectPart,
+                    availability: crate::content::ContentAvailability::Unknown,
+                    retained_parts: 1,
+                    omitted_parts: 0,
+                    omitted_reason: Some("encrypted-reasoning-placeholder".to_owned()),
+                }
+            } else {
+                crate::content::ContentCoverage {
+                    carrier: crate::content::ContentCarrier::DirectPart,
+                    availability: crate::content::ContentAvailability::RetainedBody,
+                    retained_parts: 1,
+                    omitted_parts: 0,
+                    omitted_reason: None,
+                }
+            };
+            (
+                Role::Reasoning,
+                TurnKind::Reasoning,
+                text,
+                None,
+                parts,
+                coverage,
+            )
+        }
         Some(
             subtype @ ("function_call"
             | "function_call_output"
@@ -696,10 +727,12 @@ fn parse_turns(value: &Value, messages: &UserMessages) -> Vec<Turn> {
             TurnKind::Tool,
             payload.to_string(),
             Some(codex_tool_event(payload, subtype)),
+            vec![tool_part(payload, "payload", subtype)],
+            tool_coverage(),
         ),
         _ => return Vec::new(),
     };
-    (!text.is_empty())
+    ((!text.is_empty()) || !parts.is_empty())
         .then_some(Turn {
             role,
             kind,
@@ -712,6 +745,10 @@ fn parse_turns(value: &Value, messages: &UserMessages) -> Vec<Turn> {
                 .or_else(|| payload["context"]["turn_id"].as_str())
                 .map(str::to_owned),
             record_ref: None,
+            channel: payload["channel"].as_str().map(str::to_owned),
+            recipient: payload["recipient"].as_str().map(str::to_owned),
+            parts,
+            coverage: Some(coverage),
             tool,
         })
         .into_iter()

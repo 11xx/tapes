@@ -10,6 +10,7 @@ use std::collections::{BTreeMap, HashMap};
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 
+use crate::content::{self, ContentInventory};
 use crate::event::{self, EventKind, EventRecord, Incomplete, PairRef};
 use crate::lineage::Lineage;
 use crate::model::{
@@ -18,7 +19,7 @@ use crate::model::{
 };
 use crate::usage::{self, TurnCoverage, UsageSession};
 
-pub const STATS_SCHEMA: &str = "tapes-stats/2";
+pub const STATS_SCHEMA: &str = "tapes-stats/3";
 
 /// One session's counted facts, in the order a reader takes them: what the
 /// figures cover, the turns, the tool calls behind them, the recorded clock,
@@ -34,6 +35,8 @@ pub struct StatsView {
     pub terminal: Option<TerminalObservation>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub text_tail: Option<TextTailEvidence>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content: Option<ContentInventory>,
     pub coverage: Coverage,
     pub turns: TurnKindCounts,
     pub tools: ToolStats,
@@ -210,6 +213,7 @@ pub fn stats(transcript: Transcript, lineage: &Lineage) -> StatsView {
     let read = transcript.read.clone();
     let terminal = transcript.terminal.clone();
     let text_tail = transcript.text_tail.clone();
+    let content = content::inventory(&transcript.turns);
     let usage = usage::usage(&transcript);
     let turns = turn_kinds(&transcript);
     let clock = clock(&transcript);
@@ -228,6 +232,7 @@ pub fn stats(transcript: Transcript, lineage: &Lineage) -> StatsView {
         read,
         terminal,
         text_tail,
+        content,
         coverage,
         turns,
         tools: tools.stats,
@@ -548,6 +553,10 @@ mod tests {
             native_id: Some(format!("native-{ordinal}")),
             request_turn_id: None,
             record_ref: None,
+            parts: Vec::new(),
+            coverage: None,
+            channel: None,
+            recipient: None,
             tool: None,
         }
     }

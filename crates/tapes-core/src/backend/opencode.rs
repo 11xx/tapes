@@ -15,6 +15,10 @@ use super::{
     accounting_for, filter_listing_search, filter_listing_search_parallel, search_turns, Backend,
     Listing, Query, TokenTotals,
 };
+use crate::content::{
+    bounded_shape, text_part, tool_coverage, tool_part, ContentAvailability, ContentCarrier,
+    ContentCoverage, ContentPart,
+};
 use crate::event::{self, Bounded, EventKind, EventTranscript, ToolEvent};
 use crate::lineage::{ChildRef, Lineage, ParentRef, SourceRef};
 use crate::model::{
@@ -1654,6 +1658,8 @@ fn parse_message(message: &Value) -> Vec<Turn> {
     let role = match message_role {
         "user" => Role::User,
         "assistant" => Role::Assistant,
+        "system" => Role::System,
+        "developer" => Role::Developer,
         _ => return Vec::new(),
     };
     let message_ts = epoch_millis(&message["time"]["created"]);
@@ -1671,6 +1677,16 @@ fn parse_message(message: &Value) -> Vec<Turn> {
                 native_id: message_id,
                 request_turn_id: None,
                 record_ref: None,
+                channel: None,
+                recipient: None,
+                parts: vec![text_part(text, "message.text", "text")],
+                coverage: Some(ContentCoverage {
+                    carrier: ContentCarrier::DirectPart,
+                    availability: ContentAvailability::RetainedBody,
+                    retained_parts: 1,
+                    omitted_parts: 0,
+                    omitted_reason: None,
+                }),
                 tool: None,
             })
             .into_iter()
@@ -1683,15 +1699,67 @@ fn parse_message(message: &Value) -> Vec<Turn> {
         .flatten()
         .filter_map(|part| {
             let ts = epoch_millis(&part["time"]["created"]).or(message_ts);
-            let (role, text, tool) = match part["type"].as_str()? {
-                "text" => (role.clone(), part["text"].as_str()?.to_owned(), None),
-                "reasoning" => (Role::Reasoning, part["text"].as_str()?.to_owned(), None),
+            let native_kind = part["type"].as_str()?;
+            let (role, text, tool, parts, coverage) = match native_kind {
+                "text" => (
+                    role.clone(),
+                    part["text"].as_str()?.to_owned(),
+                    None,
+                    vec![text_part(
+                        part["text"].as_str()?,
+                        "message.content",
+                        native_kind,
+                    )],
+                    ContentCoverage {
+                        carrier: ContentCarrier::DirectPart,
+                        availability: ContentAvailability::RetainedBody,
+                        retained_parts: 1,
+                        omitted_parts: 0,
+                        omitted_reason: None,
+                    },
+                ),
+                "reasoning" => (
+                    Role::Reasoning,
+                    part["text"].as_str()?.to_owned(),
+                    None,
+                    vec![text_part(
+                        part["text"].as_str()?,
+                        "message.content",
+                        native_kind,
+                    )],
+                    ContentCoverage {
+                        carrier: ContentCarrier::DirectPart,
+                        availability: ContentAvailability::RetainedBody,
+                        retained_parts: 1,
+                        omitted_parts: 0,
+                        omitted_reason: None,
+                    },
+                ),
                 "tool" => (
                     Role::Tool,
                     part.to_string(),
                     Some(opencode_tool_event(part)),
+                    vec![tool_part(part, "message.content", native_kind)],
+                    tool_coverage(),
                 ),
-                _ => return None,
+                _ => (
+                    role.clone(),
+                    String::new(),
+                    None,
+                    vec![ContentPart::Unknown {
+                        native_kind: native_kind.to_owned(),
+                        descriptor: bounded_shape(part),
+                        source_field: "message.content".to_owned(),
+                        record_ref: None,
+                    }],
+                    ContentCoverage {
+                        carrier: ContentCarrier::DirectPart,
+                        availability: ContentAvailability::Unknown,
+                        retained_parts: 1,
+                        omitted_parts: 0,
+                        omitted_reason: None,
+                    },
+                ),
             };
             // A part names itself where the store keeps part ids; the
             // message id stands in where the projection carries none.
@@ -1699,7 +1767,7 @@ fn parse_message(message: &Value) -> Vec<Turn> {
                 .as_str()
                 .map(str::to_owned)
                 .or_else(|| message_id.clone());
-            (!text.is_empty()).then_some(Turn {
+            ((!text.is_empty()) || !parts.is_empty()).then_some(Turn {
                 kind: user_kind(&role),
                 role,
                 text,
@@ -1708,6 +1776,10 @@ fn parse_message(message: &Value) -> Vec<Turn> {
                 native_id,
                 request_turn_id: None,
                 record_ref: None,
+                channel: None,
+                recipient: None,
+                parts,
+                coverage: Some(coverage),
                 tool,
             })
         })

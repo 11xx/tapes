@@ -4,10 +4,12 @@ use chrono::{DateTime, SecondsFormat, Utc};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
 
+use crate::content::ContentInventory;
+use crate::content::{ContentCoverage, ContentPart};
 use crate::event::ToolEvent;
 use crate::usage::UsageDetail;
 
-pub const SESSION_SCHEMA: &str = "tapes-session/3";
+pub const SESSION_SCHEMA: &str = "tapes-session/4";
 /// Maximum length of a title derived from the first user turn.
 pub const DERIVED_TITLE_MAX_CHARS: usize = 96;
 
@@ -254,6 +256,16 @@ pub struct Turn {
     /// turn represents. Presentation ordinals are intentionally separate.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub record_ref: Option<RecordRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channel: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recipient: Option<String>,
+    /// Ordered native content evidence. `text` is the normalized readable
+    /// projection of text-bearing parts, never a second source of truth.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub parts: Vec<ContentPart>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub coverage: Option<ContentCoverage>,
     /// Harness-neutral tool data used by in-process projections. Session JSON
     /// keeps the harness envelope in `text` as its stable wire contract.
     #[serde(skip)]
@@ -536,6 +548,8 @@ pub enum Role {
     Assistant,
     Tool,
     Reasoning,
+    System,
+    Developer,
 }
 
 impl Role {
@@ -549,6 +563,7 @@ impl Role {
             Role::Assistant => Some(TurnKind::Assistant),
             Role::Tool => Some(TurnKind::Tool),
             Role::Reasoning => Some(TurnKind::Reasoning),
+            Role::System | Role::Developer => Some(TurnKind::Ambient),
         }
     }
 }
@@ -756,6 +771,8 @@ pub fn speaker(role: &Role, kind: TurnKind) -> String {
         Role::Assistant => "assistant",
         Role::Tool => "tool",
         Role::Reasoning => "reasoning",
+        Role::System => "system",
+        Role::Developer => "developer",
     };
     if *role == Role::User && kind != TurnKind::Operator {
         return format!("{name}/{}", kind.label());
@@ -846,6 +863,7 @@ impl Serialize for Transcript {
             read: self.read.as_ref(),
             terminal: self.terminal.as_ref(),
             text_tail: self.text_tail.as_ref(),
+            content: crate::content::inventory(&self.turns),
             trailing_record: self.trailing_record.as_ref(),
             notes: &self.notes,
         }
@@ -898,6 +916,8 @@ struct TranscriptRef<'a> {
     terminal: Option<&'a TerminalObservation>,
     #[serde(skip_serializing_if = "Option::is_none")]
     text_tail: Option<&'a TextTailEvidence>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    content: Option<ContentInventory>,
     #[serde(skip_serializing_if = "Option::is_none")]
     trailing_record: Option<&'a TrailingRecord>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -1006,6 +1026,10 @@ mod tests {
             native_id: None,
             request_turn_id: None,
             record_ref: None,
+            parts: Vec::new(),
+            coverage: None,
+            channel: None,
+            recipient: None,
             tool: None,
         };
         let transcript = Transcript {
@@ -1115,6 +1139,10 @@ mod tests {
                 native_id: None,
                 request_turn_id: None,
                 record_ref: None,
+                parts: Vec::new(),
+                coverage: None,
+                channel: None,
+                recipient: None,
                 tool: None,
             },
             Turn {
@@ -1126,6 +1154,10 @@ mod tests {
                 native_id: None,
                 request_turn_id: None,
                 record_ref: None,
+                parts: Vec::new(),
+                coverage: None,
+                channel: None,
+                recipient: None,
                 tool: None,
             },
         ]);
@@ -1158,6 +1190,10 @@ mod tests {
             native_id: None,
             request_turn_id: None,
             record_ref: None,
+            parts: Vec::new(),
+            coverage: None,
+            channel: None,
+            recipient: None,
             tool: None,
         }]);
         let complete_json = serde_json::to_value(complete).unwrap();
@@ -1175,6 +1211,10 @@ mod tests {
             native_id: None,
             request_turn_id: None,
             record_ref: None,
+            parts: Vec::new(),
+            coverage: None,
+            channel: None,
+            recipient: None,
             tool: None,
         }]);
         let shortened_json = serde_json::to_value(shortened).unwrap();
@@ -1198,6 +1238,10 @@ mod tests {
             native_id: None,
             request_turn_id: None,
             record_ref: None,
+            parts: Vec::new(),
+            coverage: None,
+            channel: None,
+            recipient: None,
             tool: None,
         }]);
 
@@ -1219,6 +1263,10 @@ mod tests {
             native_id: None,
             request_turn_id: None,
             record_ref: None,
+            parts: Vec::new(),
+            coverage: None,
+            channel: None,
+            recipient: None,
             tool: None,
         }]);
 
@@ -1320,6 +1368,10 @@ mod tests {
             native_id: None,
             request_turn_id: None,
             record_ref: None,
+            parts: Vec::new(),
+            coverage: None,
+            channel: None,
+            recipient: None,
             tool: None,
         };
         let value = serde_json::to_value(&turn).unwrap();

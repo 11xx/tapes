@@ -39,7 +39,7 @@ pub fn read(selection: Selection<'_>, reference: &str, tail: usize) -> Result<Ch
         transcript.truncated = true;
     }
     Ok(ChildView {
-        schema: "tapes-child/1",
+        schema: "tapes-child/2",
         parent: parent.session,
         reference: reference.to_owned(),
         transcript,

@@ -20,6 +20,7 @@ use chrono::{DateTime, Utc};
 use serde::Serialize;
 
 use crate::backend::Backend;
+use crate::content::{self, ContentCoverage, ContentInventory, ContentPart};
 use crate::event::{self, EventKind, EventRecord};
 use crate::lineage::{Lineage, ParentRef};
 use crate::model::{
@@ -28,7 +29,7 @@ use crate::model::{
 };
 use crate::{list_scoped, selection_record, SelectionRecord, SessionSelection, DEFAULT_LIST_LIMIT};
 
-pub const ENDINGS_SCHEMA: &str = "tapes-endings/2";
+pub const ENDINGS_SCHEMA: &str = "tapes-endings/3";
 /// Newest turns read per session when the caller names no window. Wide enough
 /// to hold a tool call and the exchange around it, narrow enough that a
 /// selection of hundreds stays a survey.
@@ -214,6 +215,10 @@ pub struct TailEntry {
     pub ts: Option<DateTime<Utc>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub record_ref: Option<RecordRef>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub parts: Vec<ContentPart>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub coverage: Option<ContentCoverage>,
     pub text: String,
     /// Whether the entry's text was cut at the entry bound.
     pub truncated: bool,
@@ -237,6 +242,8 @@ pub struct Ending {
     pub terminal: Option<TerminalObservation>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub text_tail_evidence: Option<TextTailEvidence>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content: Option<ContentInventory>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub trailing_record: Option<TrailingRecord>,
     pub facts: Vec<Fact>,
@@ -370,6 +377,7 @@ pub fn ending(transcript: Transcript, lineage: Result<Lineage>, tail: usize, tex
     let read = transcript.read.clone();
     let terminal = transcript.terminal.clone();
     let text_tail_evidence = transcript.text_tail.clone();
+    let content = content::inventory(&transcript.turns);
     let mut notes = transcript.notes.clone();
     let lineage = match lineage {
         Ok(lineage) => Some(summarize_lineage(lineage)).filter(|summary| !summary.is_empty()),
@@ -418,6 +426,7 @@ pub fn ending(transcript: Transcript, lineage: Result<Lineage>, tail: usize, tex
         read,
         terminal,
         text_tail_evidence,
+        content,
         trailing_record: transcript.trailing_record.clone(),
         facts,
         incomplete,
@@ -561,6 +570,8 @@ fn text_tail(turns: &[Turn], tail: usize) -> Vec<TailEntry> {
                 role: turn.role.clone(),
                 ts: turn.ts,
                 record_ref: turn.record_ref.clone(),
+                parts: turn.parts.clone(),
+                coverage: turn.coverage.clone(),
                 truncated: characters.next().is_some(),
                 text,
             }

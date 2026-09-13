@@ -11,6 +11,7 @@ use serde_json::Value;
 use crate::backend::{self, Backend};
 use chrono::Utc;
 
+use crate::content::{self, ContentInventory};
 use crate::model::{
     ByteSpan, Model, ReadEvidence, ReadGap, ReadRange, ReadRangeKind, Session, Turn,
 };
@@ -115,6 +116,8 @@ pub struct Page {
     pub skipped_records: usize,
     pub skipped_fragment_bytes: usize,
     pub read: ReadEvidence,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content: Option<ContentInventory>,
     pub turns: Vec<Turn>,
     pub models: Vec<ModelObservation>,
     pub next_cursor: Option<String>,
@@ -272,7 +275,7 @@ pub(crate) fn read_file(
         gaps,
     };
     Ok(Page {
-        schema: "tapes-page/2",
+        schema: "tapes-page/3",
         session: session.clone(),
         start,
         end,
@@ -283,6 +286,7 @@ pub(crate) fn read_file(
         skipped_records,
         skipped_fragment_bytes,
         read,
+        content: content::inventory(&turns),
         turns,
         models,
         next_cursor,
@@ -368,6 +372,7 @@ struct ReadProgress {
     skipped_records: usize,
     skipped_fragment_bytes: usize,
     reads: Vec<ReadEvidence>,
+    content: ContentInventory,
     next_cursor: Option<String>,
 }
 
@@ -397,6 +402,9 @@ fn visit_pages(
         progress.skipped_records += page.skipped_records;
         progress.skipped_fragment_bytes += page.skipped_fragment_bytes;
         progress.reads.push(page.read.clone());
+        if let Some(content) = page.content.as_ref() {
+            progress.content.merge(content);
+        }
         progress.next_cursor = page.next_cursor.clone();
         visit(page);
         if progress.next_cursor.is_none() {
@@ -426,6 +434,8 @@ pub struct Search {
     pub skipped_records: usize,
     pub skipped_fragment_bytes: usize,
     pub reads: Vec<ReadEvidence>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content: Option<ContentInventory>,
     pub matches: Vec<SearchMatch>,
     pub matches_truncated: bool,
     pub next_cursor: Option<String>,
@@ -476,7 +486,7 @@ pub fn search(
         },
     )?;
     Ok(Search {
-        schema: "tapes-history-search/2",
+        schema: "tapes-history-search/3",
         session: resolved.session,
         pages_read: progress.pages_read,
         bytes_read: progress.bytes_read,
@@ -485,6 +495,7 @@ pub fn search(
         skipped_records: progress.skipped_records,
         skipped_fragment_bytes: progress.skipped_fragment_bytes,
         reads: progress.reads,
+        content: (!progress.content.is_empty()).then_some(progress.content),
         matches,
         matches_truncated,
         next_cursor: progress.next_cursor,
@@ -502,6 +513,8 @@ pub struct MetadataHistory {
     pub skipped_records: usize,
     pub skipped_fragment_bytes: usize,
     pub reads: Vec<ReadEvidence>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content: Option<ContentInventory>,
     pub observations: Vec<ModelObservation>,
     pub observations_truncated: bool,
     pub next_cursor: Option<String>,
@@ -540,7 +553,7 @@ pub fn metadata(
         },
     )?;
     Ok(MetadataHistory {
-        schema: "tapes-metadata-history/2",
+        schema: "tapes-metadata-history/3",
         session: resolved.session,
         pages_read: progress.pages_read,
         bytes_read: progress.bytes_read,
@@ -549,6 +562,7 @@ pub fn metadata(
         skipped_records: progress.skipped_records,
         skipped_fragment_bytes: progress.skipped_fragment_bytes,
         reads: progress.reads,
+        content: (!progress.content.is_empty()).then_some(progress.content),
         observations,
         observations_truncated,
         next_cursor: progress.next_cursor,
