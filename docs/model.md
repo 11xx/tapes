@@ -774,7 +774,7 @@ and suppresses mixed sums. Unknown accounting is its own domain.
 ## Endings report
 
 `tapes endings` answers what each session of a selection ends on and
-serializes as a `tapes-endings/3` object. The selection is stated in the terms
+serializes as a `tapes-endings/4` object. The selection is stated in the terms
 `list` uses, so the reported set is exactly the set `list` returns for the same
 flags, and the scope and metadata filters apply before any transcript is
 opened. Each selected session then costs one bounded transcript read of
@@ -838,7 +838,7 @@ verified `trailing_record`, with the meanings they have on a transcript.
 
 ```json
 {
-  "schema": "tapes-endings/3",
+  "schema": "tapes-endings/4",
   "selection": { "scope": "global", "sort": "newest", "limit": 20 },
   "endings": [
     {
@@ -854,7 +854,7 @@ verified `trailing_record`, with the meanings they have on a transcript.
         "ts": "2026-01-01T10:00:06Z",
         "turn": 41,
         "native_id": "msg_1",
-        "schema": "tapes-endings/3",
+        "schema": "tapes-endings/4",
         "coverage": "window"
       },
       "last_turn": {
@@ -885,7 +885,7 @@ verified `trailing_record`, with the meanings they have on a transcript.
 ## Continuation brief
 
 `tapes brief` answers what a continuation of one session needs from its
-recording and serializes as a `tapes-brief/3` object. The session is named by
+recording and serializes as a `tapes-brief/4` object. The session is named by
 id or reached with `--latest`, and costs one export-shaped transcript read and
 one lineage read: pairing therefore sees every call and result the reader
 reached, while `--tail` bounds the rendered exchange alone.
@@ -935,7 +935,7 @@ its `notes`, with the meanings they have on a transcript.
 
 ```json
 {
-  "schema": "tapes-brief/3",
+  "schema": "tapes-brief/4",
   "session": {
     "id": "session-1",
     "harness": "codex",
@@ -949,7 +949,7 @@ its `notes`, with the meanings they have on a transcript.
     "session": "session-1",
     "ts": "2026-01-01T10:00:06Z",
     "turn": 41,
-    "schema": "tapes-endings/3",
+    "schema": "tapes-endings/4",
     "coverage": "session"
   },
   "working_set": {
