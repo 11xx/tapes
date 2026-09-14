@@ -3934,6 +3934,7 @@ fn scan_zip_conversation<R: Read + Seek>(
         &mut gaps,
         &mut stopped,
     );
+    let mut failed_verification = false;
     if let Err(error) = result {
         if budget.exhausted() {
             *scan_truncated = true;
@@ -3949,6 +3950,7 @@ fn scan_zip_conversation<R: Read + Seek>(
                 reason: "input-budget".to_owned(),
             });
         } else {
+            failed_verification = true;
             diagnostics.push(format!("{}: unreadable member: {error:#}", member.name));
             gaps.push(crate::model::ReadGap {
                 span: ByteSpan {
@@ -3960,6 +3962,7 @@ fn scan_zip_conversation<R: Read + Seek>(
         }
     }
     if let Err(error) = drain_zip_member(&mut member_file, budget) {
+        failed_verification |= !budget.exhausted();
         diagnostics.push(format!("{}: unreadable member tail: {error}", member.name));
         gaps.push(crate::model::ReadGap {
             span: ByteSpan {
@@ -3968,6 +3971,17 @@ fn scan_zip_conversation<R: Read + Seek>(
             },
             reason: format!("{}: corrupt member", member.name),
         });
+    }
+    // Decompression and checksum errors mean the bytes already parsed are not
+    // the archived bytes, so nothing parsed from them is evidence.
+    if failed_verification && occurrences.len() > first_occurrence {
+        diagnostics.push(format!(
+            "{}: withheld {} record(s) because the member failed verification",
+            member.name,
+            occurrences.len() - first_occurrence
+        ));
+        occurrences.truncate(first_occurrence);
+        *scan_truncated = true;
     }
     if stopped {
         *scan_truncated = true;

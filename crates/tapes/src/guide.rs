@@ -138,7 +138,8 @@ READ A SUPPLIED EXPORT
   members. Nested site/account/settings JSON is not scanned. Missing,
   corrupt, or mismatched members remain explicit gaps; ID and title selection
   refuses incomplete discovery, while an exact `--occurrence` can return the
-  known projection with its gaps.
+  known projection with its gaps. Records parsed from a ZIP member that fails
+  decompression or checksum verification are withheld rather than listed.
 
   Source, member, pointer, and byte-span evidence stays attached to the
   normalized result. Scan, decoded, record, member, resident, and

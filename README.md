@@ -131,7 +131,8 @@ the declared conversation shards, library metadata, and manifest-declared
 library `.dat` members. Nested site/account/settings JSON is ignored. Missing,
 corrupt, or size-mismatched declared members are explicit input gaps; an exact
 occurrence can return known evidence with those gaps, while ID and title
-selection refuses incomplete discovery.
+selection refuses incomplete discovery. Records parsed from a ZIP member that
+fails decompression or checksum verification are withheld, not listed.
 
 The reader applies bounded per-invocation scan, decoded, record, resident, and
 output budgets. Defaults are 512 MiB for source and decoded bytes, 8 MiB per

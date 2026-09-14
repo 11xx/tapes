@@ -22,7 +22,10 @@ The native manifest's version, logical member names, duplicate normalized paths,
 and `export_files.size_bytes` values are validated before selected bodies are
 read. Missing, malformed, corrupt, or size-mismatched selected members remain
 explicit coverage gaps; they never become an empty successful collection or an
-assertion that an unreached ID is absent.
+assertion that an unreached ID is absent. A ZIP member whose decompression or
+checksum verification fails contributes no records: bytes already parsed from
+it are not the archived bytes, so its records are withheld with a diagnostic.
+A member cut short by an input budget keeps the records it reached, with gaps.
 
 The official OpenAI export stores conversation shards as top-level arrays.
 Each conversation has a native `conversation_id`, a `mapping` graph, and a
