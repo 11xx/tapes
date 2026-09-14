@@ -704,3 +704,43 @@ fn empty_and_null_perplexity_fields_neither_request_nor_close() {
         json!(["operator-turn-after-assistant"])
     );
 }
+
+#[test]
+fn records_from_a_member_that_fails_verification_are_withheld() {
+    let root = TempRoot::new("checksum");
+    let zip_path = root.path().join("corrupt.zip");
+    let mut writer = zip::ZipWriter::new(fs::File::create(&zip_path).unwrap());
+    let stored =
+        zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+    writer.start_file("kept.json", stored).unwrap();
+    writer
+        .write_all(&conversation("kept", "intact member"))
+        .unwrap();
+    let damaged = serde_json::to_vec(&json!([
+        {"id": "first-damaged", "messages": [{"role": "assistant", "content": "one"}]},
+        {"id": "second-damaged", "messages": [{"role": "assistant", "content": "two"}]}
+    ]))
+    .unwrap();
+    writer.start_file("damaged.json", stored).unwrap();
+    writer.write_all(&damaged).unwrap();
+    writer.finish().unwrap();
+
+    // Alter one stored byte without breaking the JSON, so only the checksum
+    // can tell the parsed records are not the archived ones.
+    let mut bytes = fs::read(&zip_path).unwrap();
+    let at = bytes
+        .windows(b"second-damaged".len())
+        .position(|window| window == b"second-damaged")
+        .unwrap();
+    bytes[at] = b'S';
+    fs::write(&zip_path, bytes).unwrap();
+
+    let listed = successful_json(run(&input_args("list", &zip_path)));
+    assert_eq!(listed_ids(&listed), ["kept"]);
+    assert_eq!(listed["scan_truncated"], true);
+    assert!(listed["unsearched"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|entry| entry.as_str().unwrap().contains("failed verification")));
+}
