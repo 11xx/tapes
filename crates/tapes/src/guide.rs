@@ -127,6 +127,9 @@ READ A SUPPLIED EXPORT
   for every supplied record. Use `--occurrence` when a native ID repeats, and
   `--after-occurrence` to continue a collection only when the ordered supplied
   input observation is unchanged; the cursor can cross files and ZIP members.
+  Rows are ordered by --sort before --limit, and a continuation resumes in that
+  same order. A named input path that does not exist is an error, and a
+  conversation without a native ID is a gap rather than an invented identity.
   Exact titles are allowed; `--latest` is not, because supplied
   exports do not establish a global newest session.
 

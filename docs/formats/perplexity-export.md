@@ -21,12 +21,16 @@ source pointer. Entry values are not promoted to conversation facts.
 
 Entries remain in source order. `entry_uuid` is the native entry identity and
 is shared by its query and answer records. A query becomes an operator content
-record under `entry.answer`. `entry.created_at` belongs to the query record.
+record under `entry.query`, and an answer an assistant record under
+`entry.answer`. `entry.created_at` belongs to the query record.
 The answer does not receive a copied or fabricated timestamp. Empty metadata
 strings remain present, while null and absent metadata fields remain absent.
 Empty strings are retained as empty text parts, nulls remain explicit unknown
 coverage, and non-string values retain a bounded shape descriptor rather than
-being coerced to text.
+being coerced to text. Only a non-empty string is an operator request or an
+assistant answer: an empty, null, or non-string field keeps its part and
+coverage on a turn of kind `unknown`, so it never stands as a request or closes
+an exchange.
 
 Answers remain text evidence, including Markdown, Mermaid fences, numeric
 markers, and progress prose. Numeric citation-like syntax does not create a

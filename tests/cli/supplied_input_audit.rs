@@ -532,3 +532,175 @@ fn source_and_decoded_budgets_cover_archive_metadata_and_reader_io() {
         .iter()
         .any(|entry| entry.as_str().unwrap().contains("decoded")));
 }
+
+fn dated_conversation(id: &str, update_time: u64) -> Value {
+    json!({
+        "id": id,
+        "title": id,
+        "update_time": update_time,
+        "current_node": "message",
+        "mapping": {
+            "message": {
+                "parent": null,
+                "message": {
+                    "id": format!("{id}-message"),
+                    "author": {"role": "assistant"},
+                    "content": {"parts": [id]}
+                }
+            }
+        }
+    })
+}
+
+fn listed_ids(listing: &Value) -> Vec<&str> {
+    listing["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|session| session["id"].as_str().unwrap())
+        .collect()
+}
+
+fn with(mut arguments: Vec<String>, extra: &[&str]) -> Vec<String> {
+    arguments.extend(extra.iter().map(|argument| (*argument).to_owned()));
+    arguments
+}
+
+#[test]
+fn supplied_listing_orders_before_its_limit_and_continues_in_that_order() {
+    let root = TempRoot::new("ordering");
+    let input = root.path().join("ordered.json");
+    let records = json!([
+        dated_conversation("older", 1_000),
+        dated_conversation("newer", 3_000),
+        dated_conversation("middle", 2_000),
+    ]);
+    fs::write(&input, serde_json::to_vec(&records).unwrap()).unwrap();
+
+    let all = successful_json(run(&input_args("list", &input)));
+    assert_eq!(listed_ids(&all), ["newer", "middle", "older"]);
+
+    let first = successful_json(run(&with(input_args("list", &input), &["--limit", "1"])));
+    assert_eq!(listed_ids(&first), ["newer"]);
+    let cursor = first["sessions"][0]["occurrence"].as_str().unwrap();
+    let next = successful_json(run(&with(
+        input_args("list", &input),
+        &["--limit", "1", "--after-occurrence", cursor],
+    )));
+    assert_eq!(listed_ids(&next), ["middle"]);
+
+    let oldest = successful_json(run(&with(
+        input_args("list", &input),
+        &["--sort", "oldest", "--limit", "1"],
+    )));
+    assert_eq!(listed_ids(&oldest), ["older"]);
+    let cursor = oldest["sessions"][0]["occurrence"].as_str().unwrap();
+    let rest = successful_json(run(&with(
+        input_args("list", &input),
+        &["--sort", "oldest", "--after-occurrence", cursor],
+    )));
+    assert_eq!(listed_ids(&rest), ["middle", "newer"]);
+}
+
+#[test]
+fn a_conversation_without_a_native_id_is_a_gap_rather_than_an_invented_identity() {
+    let root = TempRoot::new("missing-id");
+    let input = root.path().join("missing-id.json");
+    let mut anonymous = dated_conversation("anonymous", 1_000);
+    anonymous.as_object_mut().unwrap().remove("id");
+    let records = json!([anonymous, dated_conversation("named", 2_000)]);
+    fs::write(&input, serde_json::to_vec(&records).unwrap()).unwrap();
+    let listed = successful_json(run(&input_args("list", &input)));
+    assert_eq!(listed_ids(&listed), ["named"]);
+    assert!(listed["unsearched"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|entry| entry
+            .as_str()
+            .unwrap()
+            .contains("no native conversation id")));
+
+    let exporter = root.path().join("exporter.json");
+    let body = json!({"messages": [{"role": "assistant", "content": "body"}]});
+    fs::write(&exporter, serde_json::to_vec(&body).unwrap()).unwrap();
+    let rejected = run(&input_args("list", &exporter));
+    assert!(!rejected.status.success());
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("no native conversation id"));
+}
+
+#[test]
+fn a_named_input_that_does_not_exist_is_an_error() {
+    let root = TempRoot::new("missing-path");
+    let missing = root.path().join("absent.json");
+    let mut show = input_args("show", &missing);
+    show.splice(1..1, ["absent".to_owned()]);
+    for arguments in [input_args("list", &missing), show] {
+        let output = run(&arguments);
+        assert!(!output.status.success(), "{arguments:?}");
+        let error = String::from_utf8_lossy(&output.stderr);
+        assert!(error.contains("does not exist"), "{error}");
+    }
+}
+
+#[test]
+fn an_unreached_id_under_incomplete_discovery_is_not_reported_absent() {
+    let root = TempRoot::new("resident-unreached");
+    let input = root.path().join("many.json");
+    let records = (0..50_u64)
+        .map(|index| {
+            let mut record = dated_conversation(&format!("c{index:03}"), 1_000 + index);
+            record["mapping"]["message"]["message"]["content"]["parts"] = json!(["x".repeat(200)]);
+            record
+        })
+        .collect::<Vec<_>>();
+    fs::write(&input, serde_json::to_vec(&records).unwrap()).unwrap();
+
+    let listed = successful_json(run(&with(
+        input_args("list", &input),
+        &["--resident-bytes", "4096", "--limit", "100"],
+    )));
+    let ids = listed_ids(&listed);
+    assert!(!ids.is_empty());
+    assert!(!ids.contains(&"c049"));
+
+    let mut show = with(input_args("show", &input), &["--resident-bytes", "4096"]);
+    show.splice(1..1, ["c049".to_owned()]);
+    let output = run(&show);
+    assert!(!output.status.success());
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert!(error.contains("incomplete"), "{error}");
+    assert!(!error.contains("was not found"), "{error}");
+}
+
+#[test]
+fn empty_and_null_perplexity_fields_neither_request_nor_close() {
+    let root = TempRoot::new("perplexity-null");
+    let input = root.path().join("unanswered.json");
+    let body = json!({"conversations": [{
+        "context_uuid": "unanswered",
+        "entries": [
+            {"entry_uuid": "e1", "query": "asked", "answer": null},
+            {"entry_uuid": "e2", "query": "", "answer": ""}
+        ]
+    }]});
+    fs::write(&input, serde_json::to_vec(&body).unwrap()).unwrap();
+
+    let mut show = input_args("show", &input);
+    show.splice(1..1, ["unanswered".to_owned()]);
+    let shown = successful_json(run(&show));
+    let turns = shown["turns"].as_array().unwrap();
+    let kinds = turns
+        .iter()
+        .map(|turn| turn["kind"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(kinds, ["operator", "unknown", "unknown", "unknown"]);
+    assert_eq!(turns[1]["parts"][0]["native_kind"], "null");
+    assert_eq!(turns[2]["parts"][0]["kind"], "text");
+
+    let endings = successful_json(run(&input_args("endings", &input)));
+    assert_eq!(
+        endings["endings"][0]["facts"],
+        json!(["operator-turn-after-assistant"])
+    );
+}

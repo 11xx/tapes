@@ -400,7 +400,7 @@ pub(crate) fn list_scoped(
     } else {
         limit
     };
-    let query = Query::scoped_with_filters(
+    let mut query = Query::scoped_with_filters(
         scope,
         candidate_limit,
         if scope.is_some() {
@@ -413,6 +413,7 @@ pub(crate) fn list_scoped(
         filters.since,
         filters.until,
     );
+    query.sort = sort;
     let mut found: Vec<(Session, usize)> = Vec::new();
     let mut available_harnesses = HashSet::new();
     let mut unavailable_harnesses = Vec::new();
@@ -558,7 +559,7 @@ pub(crate) fn list_scoped(
     })
 }
 
-fn compare_sessions(left: &Session, right: &Session, sort: ListSort) -> Ordering {
+pub(crate) fn compare_sessions(left: &Session, right: &Session, sort: ListSort) -> Ordering {
     let activity = compare_activity(left.last_activity_at, right.last_activity_at, sort);
     activity
         .then_with(|| left.id.cmp(&right.id))
