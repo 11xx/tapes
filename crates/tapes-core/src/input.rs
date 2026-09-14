@@ -6,6 +6,7 @@
 //! falls back to installed stores.
 
 use std::cell::Cell;
+use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::{self, File, Metadata};
 use std::hash::{Hash, Hasher};
@@ -175,8 +176,10 @@ impl Backend for InputBackend {
         "input"
     }
 
+    /// A named input is never an optional store that happens to be absent; a
+    /// missing path fails when the collection is read.
     fn available(&self) -> bool {
-        self.options.paths.iter().all(|path| path.exists())
+        true
     }
 
     fn list(&self, query: &Query) -> Result<Listing> {
@@ -188,54 +191,48 @@ impl Backend for InputBackend {
             scan_truncated: dataset.scan_truncated,
             ..Listing::default()
         };
-        let after = self
-            .options
-            .after_occurrence
-            .as_deref()
-            .map(parse_occurrence);
-        let after = after
-            .as_ref()
-            .map(|after| after.as_ref().map_err(|error| anyhow!("{error}")))
-            .transpose()?;
-        if let Some((observation, _)) = after.as_ref() {
-            if observation != &dataset.observation {
-                bail!("--after-occurrence belongs to a different supplied input observation");
-            }
-        }
-        if self.options.after_occurrence.is_some() {
-            let coordinate = self
-                .options
-                .after_occurrence
-                .as_deref()
-                .expect("parsed after occurrence has an input coordinate");
-            if !dataset
-                .occurrences
-                .iter()
-                .any(|occurrence| occurrence.session.occurrence.as_deref() == Some(coordinate))
-            {
-                bail!("--after-occurrence is not a reached occurrence in this supplied input observation");
-            }
-        }
-        for occurrence in &dataset.occurrences {
-            if let Some((_, ordinal)) = after.as_ref() {
-                if occurrence.ordinal <= *ordinal {
-                    continue;
+        let order = |left: &InputOccurrence, right: &InputOccurrence| {
+            crate::compare_sessions(&left.session, &right.session, query.sort)
+                .then(left.ordinal.cmp(&right.ordinal))
+        };
+        let after = match self.options.after_occurrence.as_deref() {
+            None => None,
+            Some(coordinate) => {
+                let (observation, _) = parse_occurrence(coordinate)?;
+                if observation != dataset.observation {
+                    bail!("--after-occurrence belongs to a different supplied input observation");
                 }
+                let occurrence = dataset
+                    .occurrences
+                    .iter()
+                    .find(|occurrence| occurrence.session.occurrence.as_deref() == Some(coordinate))
+                    .ok_or_else(|| {
+                        anyhow!("--after-occurrence is not a reached occurrence in this supplied input observation")
+                    })?;
+                Some(occurrence)
             }
-            let session = &occurrence.session;
-            let placed = query.scope.is_none_or(|scope| {
-                session
-                    .directory
-                    .as_deref()
-                    .is_some_and(|directory| scope.contains(directory))
-            });
-            if placed && query.matches(session) {
-                listing.sessions.push(session.clone());
-                if listing.sessions.len() >= query.limit {
-                    break;
-                }
-            }
-        }
+        };
+        let mut rows = dataset
+            .occurrences
+            .iter()
+            .filter(|&occurrence| {
+                let session = &occurrence.session;
+                after.is_none_or(|after| order(occurrence, after) == Ordering::Greater)
+                    && query.scope.is_none_or(|scope| {
+                        session
+                            .directory
+                            .as_deref()
+                            .is_some_and(|directory| scope.contains(directory))
+                    })
+                    && query.matches(session)
+            })
+            .collect::<Vec<_>>();
+        rows.sort_by(|left, right| order(left, right));
+        listing.sessions = rows
+            .into_iter()
+            .take(query.limit)
+            .map(|occurrence| occurrence.session.clone())
+            .collect();
         Ok(listing)
     }
 
@@ -253,7 +250,12 @@ impl Backend for InputBackend {
                 matches.len()
             );
         }
-        if matches.len() == 1 && dataset.discovery_incomplete {
+        if dataset.discovery_incomplete {
+            if matches.is_empty() {
+                bail!(
+                    "supplied input discovery is incomplete; session {id} was not reached, which does not establish that it is absent"
+                );
+            }
             bail!(
                 "supplied input discovery is incomplete; cannot prove that session {id} is unique; pass --occurrence from a complete list row"
             );
@@ -579,7 +581,7 @@ fn load_dataset(options: &InputOptions) -> Result<InputDataset> {
 fn gap_stops_discovery(gap: &crate::model::ReadGap) -> bool {
     !matches!(
         gap.reason.as_str(),
-        "record-bytes-bound" | "resident-byte-bound" | "member-size-bound"
+        "record-bytes-bound" | "resident-byte-bound" | "member-size-bound" | "missing-native-id"
     )
 }
 
@@ -1615,11 +1617,22 @@ fn parse_record(
         turns,
         graph,
         mut notes,
-    )) = normalize_value(&value, format, ordinal)?
+    )) = normalize_value(&value, format)?
     else {
         gaps.push(crate::model::ReadGap {
             span,
             reason: "unsupported-record-shape".to_owned(),
+        });
+        return Ok(());
+    };
+    let Some(id) = id else {
+        diagnostics.push(format!(
+            "{locator}: conversation record at {}..{} has no native conversation id",
+            span.start, span.end
+        ));
+        gaps.push(crate::model::ReadGap {
+            span,
+            reason: "missing-native-id".to_owned(),
         });
         return Ok(());
     };
@@ -1759,7 +1772,7 @@ fn parse_record(
 }
 
 type NormalizedConversation = Option<(
-    String,
+    Option<String>,
     Option<String>,
     Option<DateTime<Utc>>,
     Option<DateTime<Utc>>,
@@ -1771,32 +1784,27 @@ type NormalizedConversation = Option<(
     Vec<String>,
 )>;
 
-fn normalize_value(
-    value: &Value,
-    format: InputFormat,
-    ordinal: usize,
-) -> Result<NormalizedConversation> {
+fn normalize_value(value: &Value, format: InputFormat) -> Result<NormalizedConversation> {
     match format {
-        InputFormat::Openai => normalize_openai(value, ordinal),
-        InputFormat::ChatgptExporter => normalize_chatgpt_exporter(value, ordinal),
-        InputFormat::Perplexity => normalize_perplexity(value, ordinal),
+        InputFormat::Openai => normalize_openai(value),
+        InputFormat::ChatgptExporter => normalize_chatgpt_exporter(value),
+        InputFormat::Perplexity => normalize_perplexity(value),
         InputFormat::Auto => unreachable!(),
     }
 }
 
-fn normalize_openai(value: &Value, ordinal: usize) -> Result<NormalizedConversation> {
-    normalize_mapping(value, ordinal)
+fn normalize_openai(value: &Value) -> Result<NormalizedConversation> {
+    normalize_mapping(value)
 }
 
-fn normalize_mapping(value: &Value, ordinal: usize) -> Result<NormalizedConversation> {
+fn normalize_mapping(value: &Value) -> Result<NormalizedConversation> {
     if !value.is_object() {
         return Ok(None);
     }
     let id = value["conversation_id"]
         .as_str()
         .or_else(|| value["id"].as_str())
-        .map(str::to_owned)
-        .unwrap_or_else(|| format!("openai-occurrence-{ordinal}"));
+        .map(str::to_owned);
     let title = value["title"]
         .as_str()
         .filter(|title| !title.is_empty())
@@ -2035,9 +2043,9 @@ fn imported_kind(role: &Role) -> TurnKind {
     }
 }
 
-fn normalize_chatgpt_exporter(value: &Value, ordinal: usize) -> Result<NormalizedConversation> {
+fn normalize_chatgpt_exporter(value: &Value) -> Result<NormalizedConversation> {
     if value["mapping"].is_object() {
-        return normalize_mapping(value, ordinal);
+        return normalize_mapping(value);
     }
     let object = value.as_object();
     let explicit_messages = object
@@ -2076,8 +2084,7 @@ fn normalize_chatgpt_exporter(value: &Value, ordinal: usize) -> Result<Normalize
                 .into_iter()
                 .find_map(|key| object.get(key).and_then(Value::as_str))
         })
-        .map(str::to_owned)
-        .unwrap_or_else(|| format!("chatgpt-exporter-occurrence-{ordinal}"));
+        .map(str::to_owned);
     let title = object
         .and_then(|object| object.get("title").and_then(Value::as_str))
         .filter(|title| !title.is_empty())
@@ -2177,7 +2184,7 @@ fn normalize_chatgpt_exporter(value: &Value, ordinal: usize) -> Result<Normalize
     )))
 }
 
-fn normalize_perplexity(value: &Value, _ordinal: usize) -> Result<NormalizedConversation> {
+fn normalize_perplexity(value: &Value) -> Result<NormalizedConversation> {
     let Some(object) = value.as_object() else {
         return Ok(None);
     };
@@ -2246,7 +2253,7 @@ fn normalize_perplexity(value: &Value, _ordinal: usize) -> Result<NormalizedConv
         }
     }
     Ok(Some((
-        id.to_owned(),
+        Some(id.to_owned()),
         object
             .get("context_title")
             .and_then(Value::as_str)
@@ -2315,6 +2322,10 @@ fn perplexity_turn(
                 omitted_reason: Some("source field was not a string".to_owned()),
             },
         ),
+    };
+    let kind = match value {
+        Value::String(text) if !text.is_empty() => kind,
+        _ => TurnKind::Unknown,
     };
     let text = content::project_text(&parts);
     Turn {

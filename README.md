@@ -112,9 +112,12 @@ For example, a Perplexity export can be surveyed with
 Supplied inputs are isolated from installed stores. `list` enumerates each
 occurrence, while single-session views accept an ID, exact title, or the
 opaque `--occurrence` coordinate emitted by `list`; repeated native IDs remain
-ambiguous until one occurrence is named. `--after-occurrence` continues a
-collection across its ordered files and ZIP members only when the complete
-source observation is unchanged. The reader never
+ambiguous until one occurrence is named. `list` orders supplied rows by
+`--sort` before `--limit`, and `--after-occurrence` continues after the named
+row in that order, across files and ZIP members, only when the complete source
+observation is unchanged. A named input path that does not exist is an error,
+and a conversation without a native ID is reported as a gap rather than given
+an invented one. The reader never
 extracts ZIPs or opens referenced files and reports structural gaps instead of
 claiming an unreached record is absent.
 

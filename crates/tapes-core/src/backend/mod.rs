@@ -113,6 +113,9 @@ pub struct Query<'a> {
     pub since: Option<DateTime<Utc>>,
     /// Upper bound for the session's newest recorded activity, exclusive.
     pub until: Option<DateTime<Utc>>,
+    /// The order the caller presents. A backend holding its whole candidate
+    /// set applies it before `limit` and continuation.
+    pub sort: crate::ListSort,
 }
 
 impl<'a> Query<'a> {
@@ -125,6 +128,7 @@ impl<'a> Query<'a> {
             directory: None,
             since: None,
             until: None,
+            sort: crate::ListSort::Newest,
         }
     }
 
@@ -161,6 +165,7 @@ impl<'a> Query<'a> {
             directory: directory.map(str::to_lowercase),
             since,
             until,
+            sort: crate::ListSort::Newest,
         }
     }
 

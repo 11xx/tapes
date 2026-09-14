@@ -34,7 +34,9 @@ the representation but does not infer producer provenance from overlapping
 mapping fields; ambiguous auto reads omit `source.producer`. A filename does
 not choose a producer. A declared `--input-format` records its producer as a
 caller declaration and, when it does not recognize a record, reports the
-bounded diagnostic without trying another adapter.
+bounded diagnostic without trying another adapter. A conversation record
+without its native `conversation_id` or `id` is a `missing-native-id` gap with
+a diagnostic; the reader never invents an identity for it.
 
 Both OpenAI and ChatGPT Exporter mapping representations use `source.origin`
 with value `"openai"`; `source.representation` identifies the detected or declared
@@ -110,9 +112,13 @@ coordinate binds the ordered set of supplied files and ZIP members, not just
 the source that produced one row, so continuation can cross input files while
 changed input refuses the cursor.
 Single-session commands accept that coordinate through `--occurrence` when a
-native ID or title is duplicated. `--after-occurrence` resumes collection
-listing only when the ordered supplied-input observation matches the
+native ID or title is duplicated. `list` orders supplied rows by `--sort`
+(recorded activity, then native ID, then source order) before applying
+`--limit`, and `--after-occurrence` resumes after the named row in that same
+order, only when the ordered supplied-input observation matches the
 observation that emitted the coordinate; changed input refuses continuation.
+A named `--input` path that does not exist is an error, not an unavailable
+store.
 
 The normal output contracts remain versioned (`tapes-list/5`,
 `tapes-session/8`, `tapes-events/6`, `tapes-brief/6`, `tapes-endings/6`,
