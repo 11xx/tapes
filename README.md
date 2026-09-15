@@ -299,6 +299,15 @@ A file-backed transcript read takes the last 4 MiB of a recording.
 window is held in memory whole, and `read.configured_bound` records the bound
 in force.
 
+`show --full` reads the whole recording instead of its tail, writing each turn
+as it is read, so memory follows one record rather than the file. Every turn
+is shown unless `--tail` keeps the newest, and `--exchange` applies as it does
+to a bounded read. It reads installed Claude recordings; another harness
+refuses it by name, and `--json` and `--read-bytes` are not available with it.
+A record that is malformed or longer than 64 MiB is skipped and counted. A
+recording replaced or shortened during the read refuses; one appended to is
+read to the length it had when the read opened.
+
 `show` and `export` also take `--latest` in place of an ID, which resolves the
 most recent session in scope. `--exclude <id>` is repeatable and passes over
 sessions the caller already holds — including its own, which is otherwise the

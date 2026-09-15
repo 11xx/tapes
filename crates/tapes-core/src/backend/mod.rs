@@ -1,5 +1,5 @@
 use std::fs::{self, File};
-use std::io::{Read, Seek, SeekFrom};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -40,6 +40,10 @@ const HEAD_PROBE_BYTES: u64 = 64 * 1024;
 /// the probe, as a Claude record carrying a large pasted prompt can be. A
 /// first line longer than this leaves the opening empty.
 const HEAD_PROBE_MAX_BYTES: u64 = 1024 * 1024;
+/// The longest single record a whole-recording read decodes. A longer record
+/// is skipped to its end and reported as a gap, so one runaway line cannot
+/// hold the file in memory.
+pub const FULL_RECORD_BYTES: u64 = 64 * 1024 * 1024;
 
 /// Accumulates only counters the source actually wrote. A zero is retained as
 /// a present value, while a missing field remains absent in the result.
@@ -301,6 +305,21 @@ pub trait Backend {
     /// locating it again; the transcript read may still need to open the
     /// underlying record to collect turns.
     fn transcript(&self, session: &Session, tail: usize) -> Result<Transcript>;
+    /// Read the whole recording in order, handing each normalized turn to
+    /// `turn` as it is produced, so memory follows one record rather than the
+    /// file. The default refuses: a backend without a streamed reader must not
+    /// answer with a bounded one.
+    fn stream_transcript(
+        &self,
+        session: &Session,
+        turn: &mut dyn FnMut(Turn) -> Result<()>,
+    ) -> Result<StreamedTranscript> {
+        let _ = (session, turn);
+        anyhow::bail!(
+            "{} sessions cannot be read whole; their reader keeps a bounded tail",
+            self.harness()
+        )
+    }
     /// Project tool events after parsing the whole source read but before its
     /// turn window is applied. Paged backends override this so the supplied
     /// tail also bounds how many source pages are fetched.
@@ -580,6 +599,147 @@ pub(crate) fn read_jsonl(path: &Path, read_bytes: u64) -> Result<Jsonl> {
         anyhow::bail!("recording source changed during the read; restart without a cursor");
     }
     Ok(read)
+}
+
+/// What a whole-recording read established beside the turns it streamed.
+pub struct StreamedTranscript {
+    /// The source length observed when the read opened. The read stops there;
+    /// anything appended later belongs to the next read.
+    pub source_length: u64,
+    /// Records that could not be decoded: malformed, or longer than
+    /// [`FULL_RECORD_BYTES`]. Each is also a gap.
+    pub skipped: usize,
+    pub gaps: Vec<ReadGap>,
+    pub trailing_record: Option<TrailingRecord>,
+    pub notes: Vec<String>,
+}
+
+pub(crate) struct StreamedJsonl {
+    pub source_length: u64,
+    pub skipped: usize,
+    pub gaps: Vec<ReadGap>,
+    /// The final decoded record and whether it produced turns, which is all a
+    /// trailing-record judgment needs from a stream.
+    pub last: Option<(Value, bool)>,
+}
+
+/// Decode every record of a JSONL recording in order, up to the length the
+/// file had when it was opened, handing each to `record` with its absolute
+/// span and the source revision. `record` answers whether the record produced
+/// turns. A file replaced or shortened during the read refuses; one appended
+/// to is read to the length observed at open.
+pub(crate) fn stream_jsonl(
+    path: &Path,
+    record: impl FnMut(&Value, ByteSpan, &str) -> Result<bool>,
+) -> Result<StreamedJsonl> {
+    stream_jsonl_bounded(path, FULL_RECORD_BYTES, record)
+}
+
+fn stream_jsonl_bounded(
+    path: &Path,
+    record_bytes: u64,
+    mut record: impl FnMut(&Value, ByteSpan, &str) -> Result<bool>,
+) -> Result<StreamedJsonl> {
+    let file = File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
+    let metadata = file
+        .metadata()
+        .with_context(|| format!("failed to inspect {}", path.display()))?;
+    let source_length = metadata.len();
+    let revision = stat_revision(&metadata);
+    let mut reader = BufReader::with_capacity(256 * 1024, file.take(source_length));
+    let mut streamed = StreamedJsonl {
+        source_length,
+        skipped: 0,
+        gaps: Vec::new(),
+        last: None,
+    };
+    let mut line = Vec::new();
+    let mut offset = 0;
+    loop {
+        line.clear();
+        let read = (&mut reader)
+            .take(record_bytes + 1)
+            .read_until(b'\n', &mut line)? as u64;
+        if read == 0 {
+            break;
+        }
+        let mut span = ByteSpan {
+            start: offset,
+            end: offset + read,
+        };
+        if read > record_bytes && line.last() != Some(&b'\n') {
+            span.end += skip_line(&mut reader)?;
+            streamed.skipped += 1;
+            streamed.gaps.push(ReadGap {
+                span,
+                reason: "oversized-record".to_owned(),
+            });
+        } else {
+            let content = line[..].strip_suffix(b"\n").unwrap_or(&line[..]);
+            if !content.iter().all(u8::is_ascii_whitespace) {
+                match serde_json::from_slice::<Value>(content) {
+                    Ok(value) => {
+                        let produced = record(&value, span, &revision)?;
+                        streamed.last = Some((value, produced));
+                    }
+                    Err(_) => {
+                        streamed.skipped += 1;
+                        streamed.gaps.push(ReadGap {
+                            span,
+                            reason: "malformed-record".to_owned(),
+                        });
+                    }
+                }
+            }
+        }
+        offset = span.end;
+        // A long record grows the line buffer; give that memory back rather
+        // than carry the largest record's size through the rest of the file.
+        if line.capacity() as u64 > HEAD_PROBE_MAX_BYTES {
+            line = Vec::new();
+        }
+    }
+    let after = reader.get_ref().get_ref().metadata()?;
+    if after.dev() != metadata.dev() || after.ino() != metadata.ino() || after.len() < source_length
+    {
+        anyhow::bail!("recording source was replaced or shortened during the read");
+    }
+    Ok(streamed)
+}
+
+/// Consume through the next newline, or to the end, returning the bytes
+/// consumed.
+fn skip_line(reader: &mut impl BufRead) -> Result<u64> {
+    let mut consumed = 0;
+    loop {
+        let buffer = reader.fill_buf()?;
+        if buffer.is_empty() {
+            return Ok(consumed);
+        }
+        if let Some(newline) = buffer.iter().position(|byte| *byte == b'\n') {
+            reader.consume(newline + 1);
+            return Ok(consumed + newline as u64 + 1);
+        }
+        let length = buffer.len();
+        reader.consume(length);
+        consumed += length as u64;
+    }
+}
+
+/// The trailing record of a streamed read: the final record, when it produced
+/// no turn and its kind is one the harness names.
+pub(crate) fn streamed_trailing_record(
+    last: Option<&(Value, bool)>,
+    known_kind: impl Fn(&Value) -> Option<&'static str>,
+) -> Option<TrailingRecord> {
+    let (value, produced) = last?;
+    if *produced {
+        return None;
+    }
+    Some(TrailingRecord {
+        kind: known_kind(value)?.to_owned(),
+        timestamp: timestamp(&value["timestamp"]),
+    })
 }
 
 fn read_jsonl_from(
@@ -1435,6 +1595,41 @@ mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
 
     use super::*;
+
+    #[test]
+    fn a_streamed_read_reports_malformed_and_oversized_records_and_keeps_the_rest() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(format!(
+            "../../target/stream-jsonl-{}.jsonl",
+            std::process::id()
+        ));
+        let long = format!("{{\"text\":\"{}\"}}", "x".repeat(64));
+        fs::write(
+            &path,
+            format!("{{\"n\":1}}\nnot json\n{long}\n\n{{\"n\":2}}"),
+        )
+        .unwrap();
+        let mut seen = Vec::new();
+        let read = stream_jsonl_bounded(&path, 32, |value, span, _| {
+            seen.push((value["n"].as_u64(), span));
+            Ok(value["n"] == 2)
+        })
+        .unwrap();
+        fs::remove_file(&path).unwrap();
+        assert_eq!(
+            seen.iter().map(|(n, _)| *n).collect::<Vec<_>>(),
+            [Some(1), Some(2)]
+        );
+        assert_eq!(seen[1].1.end, read.source_length);
+        assert_eq!(read.skipped, 2);
+        assert_eq!(
+            read.gaps
+                .iter()
+                .map(|gap| (gap.reason.as_str(), gap.span.start, gap.span.end))
+                .collect::<Vec<_>>(),
+            [("malformed-record", 8, 17), ("oversized-record", 17, 93)]
+        );
+        assert!(read.last.is_some_and(|(_, produced)| produced));
+    }
 
     #[test]
     fn raw_prefilter_skips_a_definite_miss_but_not_a_hit() {

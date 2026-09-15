@@ -1023,6 +1023,30 @@ pub fn show_with_backends(
     backends[resolved.backend_index].transcript(&resolved.session, tail)
 }
 
+/// Receives a whole-recording read as it streams: the resolved session first,
+/// then each turn in recording order.
+pub trait TurnSink {
+    fn session(&mut self, session: &Session) -> Result<()>;
+    fn turn(&mut self, turn: model::Turn) -> Result<()>;
+}
+
+/// Read one session's whole recording, streaming its turns to `sink` with
+/// ordinals counted from the recording's first turn.
+pub fn show_full_with_backends(
+    backends: &[Box<dyn Backend>],
+    selection: Selection,
+    sink: &mut dyn TurnSink,
+) -> Result<backend::StreamedTranscript> {
+    let resolved = selection.resolve(backends)?;
+    sink.session(&resolved.session)?;
+    let mut ordinal = 0;
+    backends[resolved.backend_index].stream_transcript(&resolved.session, &mut |mut turn| {
+        turn.ordinal = ordinal;
+        ordinal += 1;
+        sink.turn(turn)
+    })
+}
+
 pub fn export(
     selection: Selection,
     bundle: Option<&Path>,

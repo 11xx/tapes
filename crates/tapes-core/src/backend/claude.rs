@@ -9,8 +9,9 @@ use serde_json::Value;
 
 use super::{
     accounting_for, head_directory, home_path, list_files, list_files_with_search,
-    matching_session_file, read_bounds, read_jsonl, read_recording, timestamp, trailing_record,
-    transcript, transcript_from_recording, Backend, Jsonl, Listing, ParsedFile, Query, TokenTotals,
+    matching_session_file, read_bounds, read_jsonl, read_recording, stream_jsonl,
+    streamed_trailing_record, timestamp, trailing_record, transcript, transcript_from_recording,
+    Backend, Jsonl, Listing, ParsedFile, Query, StreamedTranscript, TokenTotals,
 };
 use crate::content::{
     bounded_shape, text_part, tool_coverage, tool_part, ContentAvailability, ContentCarrier,
@@ -476,17 +477,7 @@ impl Backend for ClaudeBackend {
         let path = matching_session_file(session_files(root), &session.id)
             .ok_or_else(|| anyhow!("claude session {} is unavailable", session.id))?;
         let (turns, recording, trailing_record) = read_transcript(&path, self.read_bytes)?;
-        let subagents = subagent_transcript_count(&path);
-        let notes = (subagents > 0)
-            .then(|| {
-                if subagents == 1 {
-                    "1 subagent transcript belongs to this session.".to_owned()
-                } else {
-                    format!("{subagents} subagent transcripts belong to this session.")
-                }
-            })
-            .into_iter()
-            .collect();
+        let notes = subagent_notes(&path);
         Ok(transcript_from_recording(
             session.clone(),
             turns,
@@ -496,6 +487,36 @@ impl Backend for ClaudeBackend {
             trailing_record,
             notes,
         ))
+    }
+
+    fn stream_transcript(
+        &self,
+        session: &Session,
+        turn: &mut dyn FnMut(Turn) -> Result<()>,
+    ) -> Result<StreamedTranscript> {
+        let root = self
+            .root
+            .as_deref()
+            .ok_or_else(|| anyhow!("claude store is unavailable"))?;
+        let path = matching_session_file(session_files(root), &session.id)
+            .ok_or_else(|| anyhow!("claude session {} is unavailable", session.id))?;
+        let domain = format!("file:{}", path.display());
+        let read = stream_jsonl(&path, |value, span, revision| {
+            let mut parsed = parse_turns(value);
+            super::attach_record_refs(&mut parsed, &domain, Some(revision), Some(span));
+            let produced = !parsed.is_empty();
+            for parsed_turn in parsed {
+                turn(parsed_turn)?;
+            }
+            Ok(produced)
+        })?;
+        Ok(StreamedTranscript {
+            source_length: read.source_length,
+            skipped: read.skipped,
+            trailing_record: streamed_trailing_record(read.last.as_ref(), claude_trailing_kind),
+            gaps: read.gaps,
+            notes: subagent_notes(&path),
+        })
     }
 
     /// A Claude session's children are the subagent transcripts under its own
@@ -596,6 +617,18 @@ fn read_transcript(
     }
     let trailing_record = trailing_record(read.values.iter(), last_turn, claude_trailing_kind);
     Ok((turns, recording, trailing_record))
+}
+
+/// Subagent transcripts are recordings of their own; a parent read names how
+/// many belong to it.
+fn subagent_notes(path: &Path) -> Vec<String> {
+    match subagent_transcript_count(path) {
+        0 => Vec::new(),
+        1 => vec!["1 subagent transcript belongs to this session.".to_owned()],
+        count => vec![format!(
+            "{count} subagent transcripts belong to this session."
+        )],
+    }
 }
 
 /// Claude repeats the working directory on every message line.

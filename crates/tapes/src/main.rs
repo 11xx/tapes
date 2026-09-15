@@ -14,7 +14,7 @@ use tapes_core::lineage::{ChildRef, LineageView};
 use tapes_core::model::{
     human_bytes, human_speaker, human_timestamp, human_title, speaker, Accounting, AccountingBasis,
     AccountingCoverage, Cost, LiveState, Session, SourceBound, SourceDescriptor, Tokens,
-    Transcript, Truncation,
+    Transcript, Truncation, Turn,
 };
 use tapes_core::stats::{
     Coverage, LineageStats, StatsView, TimeStats, ToolNameStats, ToolStats, TurnKindCounts,
@@ -640,6 +640,12 @@ enum Command {
         /// exchange turns.
         #[arg(long)]
         exchange: bool,
+        /// Read the whole recording instead of its bounded tail, writing each
+        /// turn as it is read so memory follows one record rather than the
+        /// file. Every turn is shown unless --tail is given. Installed Claude
+        /// recordings; other harnesses refuse it by name.
+        #[arg(long, conflicts_with_all = ["json", "read_bytes"])]
+        full: bool,
         /// Render the session as JSON. The session may include optional
         /// `live`, `accounting`, and `trailing_record` fields supplied by its
         /// authorities.
@@ -1007,11 +1013,21 @@ fn dispatch(cli: Cli) -> Result<()> {
             read,
             tail,
             exchange,
+            full,
             json,
         } => {
             selection.validate_input()?;
             read.refuse_supplied(&selection.input)?;
             let by_latest = selection.latest;
+            if full {
+                if selection.input.supplied() {
+                    return Err(anyhow!(
+                        "--full reads installed recordings; a supplied input is bounded by \
+                         --scan-bytes, --decoded-bytes, and --record-bytes"
+                    ));
+                }
+                return show_full(&selection, tail, exchange, by_latest);
+            }
             // The exchange is cut from every turn the read reached, so its
             // window counts exchange turns rather than turns of every kind.
             let read_tail = if exchange { Some(usize::MAX) } else { tail };
@@ -2535,34 +2551,182 @@ fn print_transcript(transcript: &Transcript, by_latest: bool) {
     print!("{}", render_transcript(transcript, by_latest));
 }
 
+/// `show --full` writes each turn as the reader produces it, so the whole
+/// recording is never held. `--tail` keeps only a ring of the newest turns.
+fn show_full(
+    selection: &SelectionArgs,
+    tail: Option<usize>,
+    exchange: bool,
+    by_latest: bool,
+) -> Result<()> {
+    let stdout = std::io::stdout();
+    let mut sink = FullShow {
+        out: std::io::BufWriter::new(stdout.lock()),
+        by_latest,
+        tail,
+        exchange,
+        session: None,
+        window: std::collections::VecDeque::new(),
+        last: None,
+        total: 0,
+        omitted: std::collections::BTreeMap::new(),
+    };
+    let read = tapes_core::show_full_with_backends(
+        &tapes_core::backend::backends(),
+        selection.selection(),
+        &mut sink,
+    )?;
+    sink.finish(read)
+}
+
+struct FullShow<W: std::io::Write> {
+    out: W,
+    by_latest: bool,
+    tail: Option<usize>,
+    exchange: bool,
+    session: Option<Session>,
+    /// The newest turns, under `--tail`.
+    window: std::collections::VecDeque<Turn>,
+    /// The newest turn written, which the activity note compares against.
+    last: Option<Turn>,
+    total: usize,
+    omitted: std::collections::BTreeMap<tapes_core::model::TurnKind, usize>,
+}
+
+impl<W: std::io::Write> tapes_core::TurnSink for FullShow<W> {
+    fn session(&mut self, session: &Session) -> Result<()> {
+        let mut session = session.clone();
+        liveness::annotate(std::slice::from_mut(&mut session));
+        self.out
+            .write_all(render_header(&session, self.by_latest).as_bytes())?;
+        self.session = Some(session);
+        Ok(())
+    }
+
+    fn turn(&mut self, turn: Turn) -> Result<()> {
+        if self.exchange && !turn.kind.in_exchange() {
+            *self.omitted.entry(turn.kind).or_insert(0) += 1;
+            return Ok(());
+        }
+        self.total += 1;
+        match self.tail {
+            Some(0) => {}
+            Some(bound) => {
+                if self.window.len() == bound {
+                    self.window.pop_front();
+                }
+                self.window.push_back(turn);
+            }
+            None => {
+                self.out.write_all(render_turn(&turn).as_bytes())?;
+                self.last = Some(turn);
+            }
+        }
+        Ok(())
+    }
+}
+
+impl<W: std::io::Write> FullShow<W> {
+    fn finish(mut self, read: tapes_core::backend::StreamedTranscript) -> Result<()> {
+        let session = self
+            .session
+            .take()
+            .ok_or_else(|| anyhow!("the whole-recording read resolved no session"))?;
+        let (turns, window) = match self.tail {
+            Some(bound) => {
+                let turns = self.window.drain(..).collect::<Vec<_>>();
+                for turn in &turns {
+                    self.out.write_all(render_turn(turn).as_bytes())?;
+                }
+                let window = Truncation::window(turns.len(), self.total, bound);
+                (turns, window)
+            }
+            None => (self.last.take().into_iter().collect(), None),
+        };
+        let mut notes = Vec::new();
+        if read.skipped > 0 {
+            let noun = if read.skipped == 1 {
+                "record"
+            } else {
+                "records"
+            };
+            notes.push(format!(
+                "Skipped {} unreadable {noun}: malformed, or longer than the {} record bound.",
+                read.skipped,
+                human_bytes(tapes_core::backend::FULL_RECORD_BYTES)
+            ));
+        }
+        notes.extend(read.notes);
+        let mut transcript = Transcript::new(
+            session,
+            turns,
+            Truncation {
+                window,
+                source: Vec::new(),
+            },
+            read.trailing_record,
+            notes,
+        );
+        if self.exchange {
+            transcript.projection = Some(tapes_core::model::Projection {
+                kind: tapes_core::model::ProjectionKind::Exchange,
+                omitted: std::mem::take(&mut self.omitted),
+            });
+        }
+        let mut footer = String::new();
+        render_footer(&mut footer, &transcript, self.by_latest);
+        footer.push_str(&format!(
+            "Read evidence: the whole recording was streamed; source length {} bytes.\n",
+            read.source_length
+        ));
+        self.out.write_all(footer.as_bytes())?;
+        self.out.flush()?;
+        Ok(())
+    }
+}
+
 /// The human render carries the same two partiality signals the JSON does.
 /// `--tail` is the recommended first probe, so a window that does not say it
 /// is one would be read as the whole session. A session reached by `--latest`
 /// names itself, because the caller did not name it and may have been handed
 /// its own session.
 fn render_transcript(transcript: &Transcript, by_latest: bool) -> String {
-    let mut out = String::new();
-    if transcript.session.live.is_some() || by_latest {
-        out.push_str(&format!(
-            "# {} {}{}\n",
-            transcript.session.harness(),
-            transcript.session.id,
-            live_marker(&transcript.session)
-        ));
-    }
+    let mut out = render_header(&transcript.session, by_latest);
     for turn in &transcript.turns {
-        let role = human_speaker(turn);
-        if let Some(ts) = turn.ts {
-            out.push_str(&format!(
-                "[{role} #{} {}]\n{}\n",
-                turn.ordinal,
-                human_timestamp(ts),
-                turn.text
-            ));
-        } else {
-            out.push_str(&format!("[{role} #{}]\n{}\n", turn.ordinal, turn.text));
-        }
+        out.push_str(&render_turn(turn));
     }
+    render_footer(&mut out, transcript, by_latest);
+    out
+}
+
+fn render_header(session: &Session, by_latest: bool) -> String {
+    if session.live.is_some() || by_latest {
+        format!(
+            "# {} {}{}\n",
+            session.harness(),
+            session.id,
+            live_marker(session)
+        )
+    } else {
+        String::new()
+    }
+}
+
+fn render_turn(turn: &Turn) -> String {
+    let role = human_speaker(turn);
+    match turn.ts {
+        Some(ts) => format!(
+            "[{role} #{} {}]\n{}\n",
+            turn.ordinal,
+            human_timestamp(ts),
+            turn.text
+        ),
+        None => format!("[{role} #{}]\n{}\n", turn.ordinal, turn.text),
+    }
+}
+
+/// Everything a transcript's human render says after its turns.
+fn render_footer(out: &mut String, transcript: &Transcript, by_latest: bool) {
     if transcript.session.start_uncertain {
         out.push_str(&format!(
             "Note: The recorded start could not be read; {} is the earliest record reached, and the \
@@ -2573,11 +2737,11 @@ fn render_transcript(transcript: &Transcript, by_latest: bool) -> String {
                 .map_or_else(|| "unavailable".to_owned(), human_timestamp)
         ));
     }
-    render_activity_note(&mut out, transcript);
+    render_activity_note(out, transcript);
     if by_latest {
-        render_latest_note(&mut out, &transcript.session);
+        render_latest_note(out, &transcript.session);
     }
-    render_truncation_notes(&mut out, &transcript.truncation);
+    render_truncation_notes(out, &transcript.truncation);
     if let Some(projection) = &transcript.projection {
         out.push_str(&format!(
             "Note: Only the {} is shown; turns omitted by kind: {}. Drop --exchange to see them.\n",
@@ -2585,9 +2749,8 @@ fn render_transcript(transcript: &Transcript, by_latest: bool) -> String {
             projection.omitted_summary()
         ));
     }
-    render_read_notes(&mut out, transcript);
-    render_notes(&mut out, &transcript.notes);
-    out
+    render_read_notes(out, transcript);
+    render_notes(out, &transcript.notes);
 }
 
 fn render_read_notes(out: &mut String, transcript: &Transcript) {

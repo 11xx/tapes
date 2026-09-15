@@ -4596,6 +4596,103 @@ const CLAUDE_SUBAGENT: &str =
 const CLAUDE_SUBAGENT_META: &str =
     include_str!("../fixtures/claude/project/session-claude/subagents/agent-fixture.meta.json");
 
+/// `show --full` reads a Claude recording past the bounded tail and writes
+/// every turn from the recording's first; the flags it cannot honor, and a
+/// harness without a streamed reader, refuse.
+#[test]
+fn show_full_streams_a_claude_recording_past_the_read_bound() {
+    let root = TemporaryDirectory::new(
+        std::env::temp_dir().join(format!("tapes-cli-full-read-{}", std::process::id())),
+    );
+    let home = root.path().join("home");
+    let project = home.join(".claude/projects/-fixtures-project");
+    fs::create_dir_all(&project).unwrap();
+    let record = |uuid: &str, role: &str, content: Value| {
+        serde_json::json!({
+            "type": role,
+            "sessionId": "full-claude",
+            "uuid": uuid,
+            "timestamp": "2026-01-01T10:00:00Z",
+            "cwd": "/fixtures/project",
+            "message": {"role": role, "content": content}
+        })
+        .to_string()
+    };
+    let filler = "x".repeat(100 * 1024);
+    let mut body = record("first", "user", Value::from("opening request")) + "\n";
+    for index in 0..48 {
+        body += &record(
+            &format!("filler-{index}"),
+            "assistant",
+            serde_json::json!([{"type": "text", "text": filler}]),
+        );
+        body.push('\n');
+    }
+    body += &record("last", "user", Value::from("closing request"));
+    body.push('\n');
+    fs::write(project.join("full-claude.jsonl"), &body).unwrap();
+    let codex_home = root.path().join("codex");
+    let codex_sessions = codex_home.join("sessions/2026/01/01");
+    fs::create_dir_all(&codex_sessions).unwrap();
+    fs::write(
+        codex_sessions
+            .join("rollout-2026-01-01T10-00-00-00000000-0000-0000-0000-000000000001.jsonl"),
+        CODEX_SESSION_ONE,
+    )
+    .unwrap();
+    let run = |arguments: &[&str]| {
+        tapes()
+            .args(arguments)
+            .env("HOME", &home)
+            .env("CODEX_HOME", &codex_home)
+            .env("PATH", "/definitely/missing")
+            .output()
+            .unwrap()
+    };
+    let stdout = |arguments: &[&str]| {
+        let output = run(arguments);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap()
+    };
+
+    let bounded = stdout(&["show", "full-claude"]);
+    assert!(!bounded.contains("opening request"));
+    assert!(bounded.contains("closing request"));
+
+    let full = stdout(&["show", "full-claude", "--full"]);
+    assert!(full.contains(" #0 2026-01-01T10:00:00Z]\nopening request"));
+    assert!(full.contains(" #49 2026-01-01T10:00:00Z]\nclosing request"));
+    assert!(full.contains("closing request"));
+    assert!(full.contains("the whole recording was streamed"));
+    assert!(!full.contains("Showing the last"));
+
+    let tailed = stdout(&["show", "full-claude", "--full", "--tail", "1"]);
+    assert!(tailed.contains("closing request"), "{tailed}");
+    assert!(!tailed.contains("opening request"));
+    assert!(
+        tailed.contains("Showing the last 1 of 50 turns"),
+        "{tailed}"
+    );
+
+    for refused in [
+        vec!["show", "full-claude", "--full", "--json"],
+        vec!["show", "full-claude", "--full", "--read-bytes", "1m"],
+    ] {
+        assert!(!run(&refused).status.success(), "{refused:?}");
+    }
+    let codex = run(&["show", "00000000-0000-0000-0000-000000000001", "--full"]);
+    assert!(!codex.status.success());
+    assert!(
+        String::from_utf8_lossy(&codex.stderr).contains("cannot be read whole"),
+        "{}",
+        String::from_utf8_lossy(&codex.stderr)
+    );
+}
+
 /// Every turn says what it is, and a user turn the harness recorded its own
 /// command in says so in the heading a reader judges an ending by.
 #[test]
