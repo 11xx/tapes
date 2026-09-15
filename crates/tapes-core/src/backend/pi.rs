@@ -6,9 +6,9 @@ use serde_json::Value;
 
 use super::{
     accounting_for, head_directory, home_path, jsonl_files, list_files, list_files_with_search,
-    read_bounds, read_recording, session_file, stream_jsonl, stream_jsonl_to, timestamp,
-    trailing_record, transcript_from_recording, Backend, Jsonl, Listing, ParsedFile, Query,
-    StreamedTranscript, TokenTotals,
+    read_bounds, read_recording, session_file, skipped_records_note, stream_jsonl, stream_jsonl_to,
+    timestamp, trailing_record, transcript_from_recording, ActivityRange, Backend, Jsonl, Listing,
+    ParsedFile, Query, StreamedTranscript, TokenTotals,
 };
 use crate::content::{
     bounded_shape, text_part, tool_coverage, tool_part, ContentAvailability, ContentCarrier,
@@ -83,21 +83,15 @@ impl PiBackend {
             })
             .ok_or_else(|| anyhow!("{} has no session id", path.display()))?;
         let directory = opening.iter().find_map(pi_cwd).map(PathBuf::from);
-        let variant = active.iter().rev().find_map(|value| {
-            (value["type"] == "thinking_level_change")
-                .then(|| value["thinkingLevel"].as_str())
-                .flatten()
-        });
-        let model = active.iter().rev().find_map(|value| {
-            let message = value.get("message")?;
-            (message["role"] == "assistant")
-                .then(|| message["model"].as_str())
-                .flatten()
-                .map(|id| Model {
-                    id: id.to_owned(),
-                    variant: variant.map(str::to_owned),
-                })
-        });
+        let variant = active.iter().rev().find_map(|value| pi_thinking(value));
+        let model = active
+            .iter()
+            .rev()
+            .find_map(|value| pi_model(value))
+            .map(|id| Model {
+                id: id.to_owned(),
+                variant: variant.map(str::to_owned),
+            });
         let turns = active
             .iter()
             .flat_map(|value| parse_turns(value))
@@ -352,29 +346,143 @@ impl Backend for PiBackend {
     /// names the session it came from. A recording names no children of its
     /// own, so a parent's list of them stays empty.
     fn lineage(&self, session: &Session) -> Result<Lineage> {
-        let root = self
-            .root
-            .as_deref()
-            .ok_or_else(|| anyhow!("pi store is unavailable"))?;
-        let path = session_file(root, &session.id)
-            .ok_or_else(|| anyhow!("pi session {} is unavailable", session.id))?;
+        let (root, path) = self.recording(session)?;
         let recording = read_recording(&path, self.read_bytes)?;
         let parent = recording
             .opening()
             .iter()
             .find(|value| value["type"] == "session")
             .and_then(|value| value["parentSession"].as_str())
-            .map(|native_id| ParentRef {
-                resolved: session_file(root, native_id).is_some(),
-                native_id: native_id.to_owned(),
-                source: "session.parentSession".to_owned(),
-            });
+            .map(|native_id| parent_ref(root, native_id));
         Ok(Lineage {
             parent,
             truncation: read_bounds(&recording.tail),
             ..Lineage::default()
         })
     }
+
+    fn stream_lineage(&self, session: &Session) -> Result<Lineage> {
+        let (root, path) = self.recording(session)?;
+        let mut header = None;
+        let read = stream_jsonl(&path, |value, _, _| {
+            if header.is_none() && value["type"] == "session" {
+                header = Some(value["parentSession"].as_str().map(str::to_owned));
+            }
+            Ok(false)
+        })?;
+        Ok(Lineage {
+            parent: header
+                .flatten()
+                .map(|native_id| parent_ref(root, &native_id)),
+            notes: skipped_records_note(read.skipped).into_iter().collect(),
+            ..Lineage::default()
+        })
+    }
+
+    /// pi sums per-request usage along the active branch, which is the last
+    /// entry's ancestry. One pass keeps each entry's place in the tree and the
+    /// facts it carries; the branch is walked once the last entry is known.
+    fn stream_session(&self, session: &Session, length: u64) -> Result<Session> {
+        let (_, path) = self.recording(session)?;
+        let mut entries = Vec::<PiEntry>::new();
+        let mut positions = HashMap::<String, usize>::new();
+        let mut activity = ActivityRange::default();
+        stream_jsonl_to(&path, length, |value, _, _| {
+            activity.observe(value);
+            if value["type"] == "session" {
+                return Ok(false);
+            }
+            let id = value["id"].as_str().map(str::to_owned);
+            if let Some(id) = &id {
+                positions.insert(id.clone(), entries.len());
+            }
+            entries.push(PiEntry {
+                id,
+                parent: value["parentId"].as_str().map(str::to_owned),
+                request: pi_request(value),
+                model: pi_model(value).map(str::to_owned),
+                thinking: pi_thinking(value).map(str::to_owned),
+            });
+            Ok(false)
+        })?;
+        let mut active = Vec::new();
+        let mut seen = HashSet::new();
+        let mut current = entries.len().checked_sub(1);
+        while let Some(position) = current {
+            let entry = &entries[position];
+            let Some(id) = entry.id.as_deref() else {
+                break;
+            };
+            if !seen.insert(id) {
+                break;
+            }
+            active.push(position);
+            current = entry
+                .parent
+                .as_deref()
+                .and_then(|parent| positions.get(parent).copied());
+        }
+        active.reverse();
+
+        let mut usage = PiUsage::new();
+        let mut model = None;
+        let mut variant = None;
+        for entry in active.iter().map(|position| &entries[*position]) {
+            if let Some(request) = &entry.request {
+                usage.add(request);
+            }
+            if entry.model.is_some() {
+                model.clone_from(&entry.model);
+            }
+            if entry.thinking.is_some() {
+                variant.clone_from(&entry.thinking);
+            }
+        }
+        let (tokens, cost) = usage.finish();
+        let mut whole = session.clone();
+        whole.accounting = accounting_for(
+            tokens.as_ref(),
+            cost.as_ref(),
+            AccountingBasis::SummedRequests,
+            AccountingCoverage::Session,
+        );
+        whole.tokens = tokens;
+        whole.cost = cost;
+        whole.model = model.map(|id| Model { id, variant });
+        activity.apply(&mut whole);
+        Ok(whole)
+    }
+}
+
+impl PiBackend {
+    fn recording<'a>(&'a self, session: &Session) -> Result<(&'a Path, PathBuf)> {
+        let root = self
+            .root
+            .as_deref()
+            .ok_or_else(|| anyhow!("pi store is unavailable"))?;
+        let path = session_file(root, &session.id)
+            .ok_or_else(|| anyhow!("pi session {} is unavailable", session.id))?;
+        Ok((root, path))
+    }
+}
+
+/// pi records a relationship on the session that has one: its header names
+/// the session it came from.
+fn parent_ref(root: &Path, native_id: &str) -> ParentRef {
+    ParentRef {
+        resolved: session_file(root, native_id).is_some(),
+        native_id: native_id.to_owned(),
+        source: "session.parentSession".to_owned(),
+    }
+}
+
+/// One entry's place in pi's branch tree and the session facts it carries.
+struct PiEntry {
+    id: Option<String>,
+    parent: Option<String>,
+    request: Option<PiRequest>,
+    model: Option<String>,
+    thinking: Option<String>,
 }
 
 fn read_transcript(
@@ -442,49 +550,101 @@ fn pi_cwd(value: &Value) -> Option<&str> {
 }
 
 fn pi_usage(entries: &[&Value]) -> (Option<Tokens>, Option<Cost>) {
-    let mut totals = TokenTotals::default();
-    let mut usage_count = 0;
-    let mut cost_total = Some(0.0);
+    let mut usage = PiUsage::new();
+    for request in entries.iter().filter_map(|entry| pi_request(entry)) {
+        usage.add(&request);
+    }
+    usage.finish()
+}
 
-    for entry in entries {
-        if entry["type"] != "message" {
-            continue;
-        }
-        let Some(message) = entry.get("message") else {
-            continue;
-        };
-        if message.get("role").and_then(Value::as_str) != Some("assistant") {
-            continue;
-        }
-        let Some(usage) = message.get("usage").and_then(Value::as_object) else {
-            continue;
-        };
-        usage_count += 1;
-        totals.add(
-            usage.get("input").and_then(Value::as_u64),
-            usage.get("output").and_then(Value::as_u64),
-            usage.get("reasoning").and_then(Value::as_u64),
-            usage.get("cacheRead").and_then(Value::as_u64),
-            usage.get("cacheWrite").and_then(Value::as_u64),
-        );
-        let Some(cost) = usage.get("cost").and_then(Value::as_object) else {
-            cost_total = None;
-            continue;
-        };
-        let Some(total) = cost.get("total").and_then(Value::as_f64) else {
-            cost_total = None;
-            continue;
-        };
-        if let Some(sum) = cost_total.as_mut() {
-            *sum += total;
+/// The usage one assistant message recorded for its request.
+struct PiRequest {
+    input: Option<u64>,
+    output: Option<u64>,
+    reasoning: Option<u64>,
+    cache_read: Option<u64>,
+    cache_write: Option<u64>,
+    cost: Option<f64>,
+}
+
+fn pi_request(entry: &Value) -> Option<PiRequest> {
+    if entry["type"] != "message" {
+        return None;
+    }
+    let message = entry.get("message")?;
+    if message.get("role").and_then(Value::as_str) != Some("assistant") {
+        return None;
+    }
+    let usage = message.get("usage").and_then(Value::as_object)?;
+    let counter = |name: &str| usage.get(name).and_then(Value::as_u64);
+    Some(PiRequest {
+        input: counter("input"),
+        output: counter("output"),
+        reasoning: counter("reasoning"),
+        cache_read: counter("cacheRead"),
+        cache_write: counter("cacheWrite"),
+        cost: usage
+            .get("cost")
+            .and_then(Value::as_object)
+            .and_then(|cost| cost.get("total"))
+            .and_then(Value::as_f64),
+    })
+}
+
+/// Requests summed in order. A request without a recorded cost leaves the
+/// sum's cost unknown rather than understated.
+struct PiUsage {
+    totals: TokenTotals,
+    requests: usize,
+    cost: Option<f64>,
+}
+
+impl PiUsage {
+    fn new() -> Self {
+        Self {
+            totals: TokenTotals::default(),
+            requests: 0,
+            cost: Some(0.0),
         }
     }
 
-    let cost = (usage_count > 0)
-        .then_some(cost_total)
+    fn add(&mut self, request: &PiRequest) {
+        self.requests += 1;
+        self.totals.add(
+            request.input,
+            request.output,
+            request.reasoning,
+            request.cache_read,
+            request.cache_write,
+        );
+        match (self.cost.as_mut(), request.cost) {
+            (Some(sum), Some(cost)) => *sum += cost,
+            _ => self.cost = None,
+        }
+    }
+
+    fn finish(self) -> (Option<Tokens>, Option<Cost>) {
+        let cost = (self.requests > 0)
+            .then_some(self.cost)
+            .flatten()
+            .map(|usd| Cost { usd });
+        (self.totals.finish(), cost)
+    }
+}
+
+/// The model an assistant message names.
+fn pi_model(value: &Value) -> Option<&str> {
+    let message = value.get("message")?;
+    (message["role"] == "assistant")
+        .then(|| message["model"].as_str())
         .flatten()
-        .map(|usd| Cost { usd });
-    (totals.finish(), cost)
+}
+
+/// The reasoning level a `thinking_level_change` entry sets.
+fn pi_thinking(value: &Value) -> Option<&str> {
+    (value["type"] == "thinking_level_change")
+        .then(|| value["thinkingLevel"].as_str())
+        .flatten()
 }
 
 fn pi_trailing_kind(value: &Value) -> Option<&'static str> {

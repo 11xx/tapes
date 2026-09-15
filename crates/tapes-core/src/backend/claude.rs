@@ -9,9 +9,10 @@ use serde_json::Value;
 
 use super::{
     accounting_for, head_directory, home_path, list_files, list_files_with_search,
-    matching_session_file, read_bounds, read_jsonl, read_recording, stream_jsonl,
-    streamed_trailing_record, timestamp, trailing_record, transcript, transcript_from_recording,
-    Backend, Jsonl, Listing, ParsedFile, Query, StreamedTranscript, TokenTotals,
+    matching_session_file, read_bounds, read_jsonl, read_recording, skipped_records_note,
+    stream_jsonl, stream_jsonl_to, streamed_trailing_record, timestamp, trailing_record,
+    transcript, transcript_from_recording, ActivityRange, Backend, Jsonl, Listing, ParsedFile,
+    Query, StreamedChild, StreamedTranscript, TokenTotals,
 };
 use crate::content::{
     bounded_shape, text_part, tool_coverage, tool_part, ContentAvailability, ContentCarrier,
@@ -21,8 +22,8 @@ use crate::event::{Bounded, EventKind, ToolEvent};
 use crate::history::{PageProjection, ReadContext};
 use crate::lineage::{ChildRef, Lineage, SourceRef};
 use crate::model::{
-    AccountingBasis, AccountingCoverage, Cost, Model, Role, Session, SourceDescriptor, Tokens,
-    TrailingRecord, Transcript, Turn, TurnKind,
+    derive_title, AccountingBasis, AccountingCoverage, Cost, Model, Role, Session,
+    SourceDescriptor, Tokens, TrailingRecord, Transcript, Turn, TurnKind,
 };
 use crate::usage::{Durations, ModelUsage, UsageDetail};
 
@@ -105,16 +106,7 @@ impl ClaudeBackend {
             .rev()
             .find_map(|value| value["aiTitle"].as_str())
             .map(str::to_owned);
-        let model = read.values.iter().rev().find_map(|value| {
-            let message = value.get("message")?;
-            (message["role"].as_str()? == "assistant")
-                .then(|| message["model"].as_str())
-                .flatten()
-                .map(|id| Model {
-                    id: id.to_owned(),
-                    variant: None,
-                })
-        });
+        let model = read.values.iter().rev().find_map(claude_model);
         let mut turns = Vec::new();
         for (index, value) in read.values.iter().enumerate() {
             let mut parsed = parse_turns(value);
@@ -240,22 +232,7 @@ impl Default for ClaudeBackend {
 
 impl Backend for ClaudeBackend {
     fn child_transcript(&self, parent: &Session, reference: &str) -> Result<Transcript> {
-        if reference.is_empty()
-            || !reference
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
-        {
-            anyhow::bail!(
-                "child reference must contain only letters, digits, hyphens or underscores"
-            );
-        }
-        let parent_path = Path::new(
-            parent
-                .locator()
-                .ok_or_else(|| anyhow!("parent source unavailable"))?,
-        );
-        let directory = parent_path.with_extension("").join("subagents");
-        let path = directory.join(format!("agent-{reference}.jsonl"));
+        let path = child_recording(parent, reference)?;
         let (mut session, turns, read) = self.parse_with_parent(&path, Some(&parent.id))?;
         if session.id != parent.id {
             anyhow::bail!("child recording does not name the selected parent");
@@ -526,18 +503,135 @@ impl Backend for ClaudeBackend {
     /// directory and the `Agent` calls its records hold. The parent names
     /// them; a child's own turns are never read here.
     fn lineage(&self, session: &Session) -> Result<Lineage> {
+        let path = self.recording(session)?;
+        let read = read_jsonl(&path, self.read_bytes)?;
+        let mut calls = AgentCalls::default();
+        for value in &read.values {
+            calls.observe(value);
+        }
+        Ok(Lineage {
+            truncation: read_bounds(&read),
+            ..self.relatives(&path, calls)
+        })
+    }
+
+    fn stream_lineage(&self, session: &Session) -> Result<Lineage> {
+        let path = self.recording(session)?;
+        let mut calls = AgentCalls::default();
+        let read = stream_jsonl(&path, |value, _, _| {
+            calls.observe(value);
+            Ok(false)
+        })?;
+        let mut lineage = self.relatives(&path, calls);
+        lineage.notes.extend(skipped_records_note(read.skipped));
+        Ok(lineage)
+    }
+
+    fn stream_session(&self, session: &Session, length: u64) -> Result<Session> {
+        let path = self.recording(session)?;
+        let mut records = ClaudeRecords::default();
+        stream_jsonl_to(&path, length, |value, _, _| {
+            records.observe(value);
+            Ok(false)
+        })?;
+        let mut whole = session.clone();
+        records.apply(&mut whole);
+        Ok(whole)
+    }
+
+    fn stream_child_transcript(
+        &self,
+        parent: &Session,
+        reference: &str,
+        turn: &mut dyn FnMut(Turn) -> Result<()>,
+    ) -> Result<StreamedChild> {
+        let path = child_recording(parent, reference)?;
+        let domain = format!("file:{}", path.display());
+        let mut identified = false;
+        let mut records = ClaudeRecords::default();
+        // The first user turn that yields a title, which is all a derived
+        // title needs from the turns streamed past.
+        let mut title_turn = None::<Turn>;
+        let read = stream_jsonl(&path, |value, span, revision| {
+            if let Some(id) = value.get("sessionId") {
+                if id.as_str() != Some(parent.id.as_str()) {
+                    anyhow::bail!(
+                        "child recording contains a different or invalid native parent ID"
+                    );
+                }
+                identified = true;
+            }
+            records.observe(value);
+            let mut parsed = parse_turns(value);
+            super::attach_record_refs(&mut parsed, &domain, Some(revision), Some(span));
+            let produced = !parsed.is_empty();
+            for parsed_turn in parsed {
+                if title_turn.is_none()
+                    && parsed_turn.role == Role::User
+                    && derive_title(&parsed_turn.text).is_some()
+                {
+                    title_turn = Some(parsed_turn.clone());
+                }
+                turn(parsed_turn)?;
+            }
+            Ok(produced)
+        })?;
+        if !identified {
+            anyhow::bail!("child recording has no native parent identity evidence");
+        }
+        let mut session = Session {
+            id: format!("{}::{reference}", parent.id),
+            source: SourceDescriptor::installed("claude", path.display().to_string()),
+            metadata: None,
+            model: None,
+            title: records.title.take(),
+            derived_title: None,
+            derived_title_truncated: None,
+            directory: records.directory.take().map(PathBuf::from),
+            started_at: None,
+            last_activity_at: None,
+            live: None,
+            cost: None,
+            tokens: None,
+            accounting: None,
+            start_uncertain: false,
+            occurrence: None,
+            usage_detail: None,
+        };
+        records.apply(&mut session);
+        Ok(StreamedChild {
+            session: session.with_derived_title(title_turn.as_slice()),
+            read: StreamedTranscript {
+                coordinates: super::StreamCoordinates::FileBytes,
+                source_length: read.source_length,
+                source_bounds: Vec::new(),
+                skipped: read.skipped,
+                trailing_record: streamed_trailing_record(read.last.as_ref(), claude_trailing_kind),
+                gaps: read.gaps,
+                terminal: None,
+                notes: Vec::new(),
+            },
+        })
+    }
+}
+
+impl ClaudeBackend {
+    fn recording(&self, session: &Session) -> Result<PathBuf> {
         let root = self
             .root
             .as_deref()
             .ok_or_else(|| anyhow!("claude store is unavailable"))?;
-        let path = matching_session_file(session_files(root), &session.id)
-            .ok_or_else(|| anyhow!("claude session {} is unavailable", session.id))?;
-        let read = read_jsonl(&path, self.read_bytes)?;
-        let mut calls = agent_calls(&read.values);
+        matching_session_file(session_files(root), &session.id)
+            .ok_or_else(|| anyhow!("claude session {} is unavailable", session.id))
+    }
 
+    /// A Claude session's children: the subagent transcripts under its own
+    /// directory, joined to the `Agent` calls its records hold.
+    fn relatives(&self, path: &Path, calls: AgentCalls) -> Lineage {
+        let AgentCalls(mut calls) = calls;
         let mut children = Vec::new();
         let mut notes = Vec::new();
-        for file in subagent_files(&path) {
+        for file in subagent_files(path) {
             if let Some(note) = file.metadata_note {
                 notes.push(note);
             }
@@ -588,13 +682,96 @@ impl Backend for ClaudeBackend {
             });
         }
 
-        Ok(Lineage {
+        Lineage {
             children,
-            truncation: read_bounds(&read),
             notes,
             ..Lineage::default()
-        })
+        }
     }
+}
+
+/// The subagent recording a parent-qualified reference names.
+fn child_recording(parent: &Session, reference: &str) -> Result<PathBuf> {
+    if reference.is_empty()
+        || !reference
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+    {
+        anyhow::bail!("child reference must contain only letters, digits, hyphens or underscores");
+    }
+    let parent_path = Path::new(
+        parent
+            .locator()
+            .ok_or_else(|| anyhow!("parent source unavailable"))?,
+    );
+    let directory = parent_path.with_extension("").join("subagents");
+    Ok(directory.join(format!("agent-{reference}.jsonl")))
+}
+
+/// The session facts a Claude recording's records carry beside its turns,
+/// folded one record at a time.
+#[derive(Default)]
+struct ClaudeRecords {
+    cost_state: Option<Value>,
+    requests: RequestTokens,
+    model: Option<Model>,
+    title: Option<String>,
+    directory: Option<String>,
+    activity: ActivityRange,
+}
+
+impl ClaudeRecords {
+    fn observe(&mut self, value: &Value) {
+        if value["type"] == "cost-state" {
+            self.cost_state = Some(value.clone());
+        }
+        self.requests.add(value);
+        if let Some(model) = claude_model(value) {
+            self.model = Some(model);
+        }
+        if let Some(title) = value["aiTitle"].as_str() {
+            self.title = Some(title.to_owned());
+        }
+        if self.directory.is_none() {
+            self.directory = claude_cwd(value).map(str::to_owned);
+        }
+        self.activity.observe(value);
+    }
+
+    /// Set the session's counters, accounting, usage detail, model, and
+    /// activity range to what every folded record states.
+    fn apply(self, session: &mut Session) {
+        let requests = self.requests;
+        let (tokens, cost, basis) =
+            recorded_accounting(self.cost_state.as_ref(), || requests.finish());
+        session.accounting = accounting_for(
+            tokens.as_ref(),
+            cost.as_ref(),
+            basis,
+            AccountingCoverage::Session,
+        );
+        session.usage_detail = self
+            .cost_state
+            .as_ref()
+            .map(cost_state_detail)
+            .and_then(UsageDetail::into_option);
+        session.tokens = tokens;
+        session.cost = cost;
+        session.model = self.model;
+        self.activity.apply(session);
+    }
+}
+
+/// The model an assistant record names.
+fn claude_model(value: &Value) -> Option<Model> {
+    let message = value.get("message")?;
+    (message["role"].as_str()? == "assistant")
+        .then(|| message["model"].as_str())
+        .flatten()
+        .map(|id| Model {
+            id: id.to_owned(),
+            variant: None,
+        })
 }
 
 fn read_transcript(
@@ -647,17 +824,23 @@ fn newest_cost_state(values: &[Value]) -> Option<&Value> {
 }
 
 fn claude_accounting(values: &[Value]) -> (Option<Tokens>, Option<Cost>, AccountingBasis) {
-    if let Some(cost_state) = newest_cost_state(values) {
-        let tokens = cost_state_tokens(cost_state);
-        let cost = cost_state["totalCostUSD"].as_f64().map(|usd| Cost { usd });
-        return (tokens, cost, AccountingBasis::RecordedTotal);
-    }
+    recorded_accounting(newest_cost_state(values), || claude_request_tokens(values))
+}
 
-    (
-        claude_request_tokens(values),
-        None,
-        AccountingBasis::SummedRequests,
-    )
+/// A `cost-state` record is the session's cumulative total wherever the read
+/// reached it. Without one, the counters are a sum over the requests read.
+fn recorded_accounting(
+    cost_state: Option<&Value>,
+    requests: impl FnOnce() -> Option<Tokens>,
+) -> (Option<Tokens>, Option<Cost>, AccountingBasis) {
+    match cost_state {
+        Some(cost_state) => (
+            cost_state_tokens(cost_state),
+            cost_state["totalCostUSD"].as_f64().map(|usd| Cost { usd }),
+            AccountingBasis::RecordedTotal,
+        ),
+        None => (requests(), None, AccountingBasis::SummedRequests),
+    }
 }
 
 /// The durations and the per-model split a `cost-state` records beside its
@@ -723,27 +906,45 @@ fn cost_state_tokens(value: &Value) -> Option<Tokens> {
 }
 
 fn claude_request_tokens(values: &[Value]) -> Option<Tokens> {
-    let mut request_ids = HashSet::new();
-    let mut totals = TokenTotals::default();
+    let mut requests = RequestTokens::default();
     for value in values {
+        requests.add(value);
+    }
+    requests.finish()
+}
+
+/// Per-request usage summed once per request id, since Claude repeats a
+/// request's usage on every record the response spans.
+#[derive(Default)]
+struct RequestTokens {
+    seen: HashSet<String>,
+    totals: TokenTotals,
+}
+
+impl RequestTokens {
+    fn finish(self) -> Option<Tokens> {
+        self.totals.finish()
+    }
+
+    fn add(&mut self, value: &Value) {
         if value["type"] != "assistant" {
-            continue;
+            return;
         }
         let Some(message) = value.get("message") else {
-            continue;
+            return;
         };
         if message.get("role").and_then(Value::as_str) != Some("assistant") {
-            continue;
+            return;
         }
         let Some(usage) = message.get("usage").and_then(Value::as_object) else {
-            continue;
+            return;
         };
         if let Some(request_id) = value["requestId"].as_str() {
-            if !request_ids.insert(request_id) {
-                continue;
+            if !self.seen.insert(request_id.to_owned()) {
+                return;
             }
         }
-        totals.add(
+        self.totals.add(
             usage.get("input_tokens").and_then(Value::as_u64),
             usage.get("output_tokens").and_then(Value::as_u64),
             usage
@@ -756,7 +957,6 @@ fn claude_request_tokens(values: &[Value]) -> Option<Tokens> {
                 .and_then(Value::as_u64),
         );
     }
-    totals.finish()
 }
 
 fn claude_trailing_kind(value: &Value) -> Option<&'static str> {
@@ -1134,9 +1334,13 @@ struct SubagentFile {
     model: Option<String>,
 }
 
-fn agent_calls(values: &[Value]) -> HashMap<String, AgentCall> {
-    let mut calls = HashMap::<String, AgentCall>::new();
-    for value in values {
+/// The agent calls a Claude recording holds, keyed by tool-use id and folded
+/// one record at a time.
+#[derive(Default)]
+struct AgentCalls(HashMap<String, AgentCall>);
+
+impl AgentCalls {
+    fn observe(&mut self, value: &Value) {
         let ts = timestamp(&value["timestamp"]);
         let record = value["uuid"].as_str().map(str::to_owned);
         for block in value["message"]["content"].as_array().into_iter().flatten() {
@@ -1145,7 +1349,7 @@ fn agent_calls(values: &[Value]) -> HashMap<String, AgentCall> {
                     let Some(call_id) = block["id"].as_str() else {
                         continue;
                     };
-                    let call = calls.entry(call_id.to_owned()).or_default();
+                    let call = self.0.entry(call_id.to_owned()).or_default();
                     call.role = block["input"]["subagent_type"]
                         .as_str()
                         .map(str::to_owned)
@@ -1165,10 +1369,10 @@ fn agent_calls(values: &[Value]) -> HashMap<String, AgentCall> {
                     // call was an `Agent` or the payload names an agent
                     // itself — which is how a spawn behind the read bound is
                     // still recognized.
-                    if !calls.contains_key(call_id) && outcome["agentId"].as_str().is_none() {
+                    if !self.0.contains_key(call_id) && outcome["agentId"].as_str().is_none() {
                         continue;
                     }
-                    let call = calls.entry(call_id.to_owned()).or_default();
+                    let call = self.0.entry(call_id.to_owned()).or_default();
                     let status = outcome["status"].as_str();
                     call.agent_id = outcome["agentId"]
                         .as_str()
@@ -1192,7 +1396,6 @@ fn agent_calls(values: &[Value]) -> HashMap<String, AgentCall> {
             }
         }
     }
-    calls
 }
 
 /// Claude writes the tool result's own payload beside the record, as an

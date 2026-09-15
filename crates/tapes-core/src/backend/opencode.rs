@@ -1231,6 +1231,18 @@ impl Backend for OpenCodeBackend {
         self.api_lineage(session)
     }
 
+    /// OpenCode keeps a session's counters on its own row as a recorded total
+    /// for the whole session, so the resolved session already states them.
+    fn stream_session(&self, session: &Session, _length: u64) -> Result<Session> {
+        Ok(session.clone())
+    }
+
+    /// OpenCode records relationships on session rows rather than in the
+    /// messages, so its lineage read reaches no transcript bound.
+    fn stream_lineage(&self, session: &Session) -> Result<Lineage> {
+        self.lineage(session)
+    }
+
     fn events(&self, session: &Session, tail: usize) -> Result<EventTranscript> {
         if self.uses_database() {
             return Ok(event::project(

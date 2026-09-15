@@ -370,6 +370,18 @@ when the recording holds a `cost-state`, and pi and OpenCode add neither.
 Human output prints one line per recorded fact and closes with the same
 truncation notes `show` prints.
 
+`usage --full` streams one session's whole recording instead of its tail.
+Turns are counted and inventoried as they arrive, never held, and tokens, cost,
+context window, quota, and model are folded from every record the turn read
+reached, so `turns.coverage` and `accounting.coverage` are `session` and `read`
+carries `projection_options: ["full"]`. OpenCode keeps a session's counters on
+its own row as a whole-session total. `lineage --full` likewise reads every
+record, so a spawn or completion recorded before the tail window is named,
+with memory following the references kept rather than the file; OpenCode
+records relationships on session rows, which no transcript bound reaches.
+Both refuse `--read-bytes` and supplied inputs, and `usage --full` refuses a
+selection.
+
 Given a scope or a listing filter instead of a session, `usage` answers the
 whole selection as `tapes-usage-summary/3`: the same flags `list` and `export`
 take, grouped by `--by harness,model,variant,directory` and defaulting to
@@ -642,6 +654,10 @@ listed session: use the child command to read it. Missing references refuse.
 
 `--tail` bounds rendered transcript turns (default 40). Usage and ending facts
 cover the child's own bounded source read, with source coverage retained.
+`child --full` streams the child's whole recording: usage counts every turn and
+folds its counters from every record, every record naming a native session is
+checked against the parent, and the transcript and ending keep only the newest
+`--tail` turns, so an ending over a longer recording has `window` coverage.
 Nested child lineage is explicitly uninspected; no child activity is absorbed
 into its parent. Other harnesses' ordinary child sessions remain addressable
 by their recorded session IDs.

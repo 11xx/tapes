@@ -7,9 +7,9 @@ use serde_json::Value;
 use super::{
     accounting_for, head_directory, head_jsonl, home_path, jsonl_files, list_files,
     list_files_with_search, matching_session_file, read_bounds, read_recording, session_file,
-    stream_jsonl, streamed_trailing_record, terminal_from_values, timestamp, trailing_record,
-    transcript_from_recording, Backend, Jsonl, Listing, ParsedFile, Query, StreamedTranscript,
-    TokenTotals,
+    skipped_records_note, stream_jsonl, stream_jsonl_to, streamed_trailing_record,
+    terminal_from_values, timestamp, trailing_record, transcript_from_recording, ActivityRange,
+    Backend, Jsonl, Listing, ParsedFile, Query, StreamedTranscript, TokenTotals,
 };
 use crate::content::{parts_from_array, project_text, tool_coverage, tool_part};
 use crate::event::{Bounded, EventKind, ToolEvent};
@@ -87,13 +87,7 @@ impl CodexBackend {
             .iter()
             .rev()
             .find(|value| value["type"] == "turn_context")
-            .and_then(|value| {
-                let payload = &value["payload"];
-                payload["model"].as_str().map(|id| Model {
-                    id: id.to_owned(),
-                    variant: payload["effort"].as_str().map(str::to_owned),
-                })
-            });
+            .and_then(turn_context_model);
         let turns = read.values.iter().flat_map(parse_turns).collect::<Vec<_>>();
         let tokens = read.values.iter().rev().find_map(codex_tokens);
         let accounting = accounting_for(
@@ -363,13 +357,7 @@ impl Backend for CodexBackend {
     /// parent, keyed by the agent path they name, and the headers of the
     /// store's own recordings. Only headers are read; no child's turns are.
     fn lineage(&self, session: &Session) -> Result<Lineage> {
-        let root = self
-            .root
-            .as_deref()
-            .ok_or_else(|| anyhow!("codex store is unavailable"))?;
-        let files = jsonl_files(root);
-        let path = matching_session_file(files.clone(), &session.id)
-            .ok_or_else(|| anyhow!("codex session {} is unavailable", session.id))?;
+        let (files, path) = self.recording(session)?;
         let recording = read_recording(&path, self.read_bytes)?;
         let header = recording
             .opening()
@@ -377,17 +365,79 @@ impl Backend for CodexBackend {
             .find(|value| value["type"] == "session_meta")
             .map(|value| value["payload"].clone())
             .unwrap_or(Value::Null);
+        let mut agents = SpawnedAgents::default();
+        for value in &recording.tail.values {
+            agents.observe(value);
+        }
+        Ok(Lineage {
+            truncation: read_bounds(&recording.tail),
+            ..self.relatives(&files, &path, session, &header, agents)
+        })
+    }
 
+    fn stream_lineage(&self, session: &Session) -> Result<Lineage> {
+        let (files, path) = self.recording(session)?;
+        let mut header = None;
+        let mut agents = SpawnedAgents::default();
+        let read = stream_jsonl(&path, |value, _, _| {
+            if header.is_none() && value["type"] == "session_meta" {
+                header = Some(value["payload"].clone());
+            }
+            agents.observe(value);
+            Ok(false)
+        })?;
+        let header = header.unwrap_or(Value::Null);
+        let mut lineage = self.relatives(&files, &path, session, &header, agents);
+        lineage.notes.extend(skipped_records_note(read.skipped));
+        Ok(lineage)
+    }
+
+    fn stream_session(&self, session: &Session, length: u64) -> Result<Session> {
+        let (_, path) = self.recording(session)?;
+        let mut records = CodexRecords::default();
+        stream_jsonl_to(&path, length, |value, _, _| {
+            records.observe(value);
+            Ok(false)
+        })?;
+        let mut whole = session.clone();
+        records.apply(&mut whole);
+        Ok(whole)
+    }
+}
+
+impl CodexBackend {
+    /// The store's recordings, newest first, and this session's among them.
+    fn recording(&self, session: &Session) -> Result<(Vec<PathBuf>, PathBuf)> {
+        let root = self
+            .root
+            .as_deref()
+            .ok_or_else(|| anyhow!("codex store is unavailable"))?;
+        let files = jsonl_files(root);
+        let path = matching_session_file(files.iter().cloned(), &session.id)
+            .ok_or_else(|| anyhow!("codex session {} is unavailable", session.id))?;
+        Ok((files, path))
+    }
+
+    /// The relatives a rollout's header and spawned agents name, joined to the
+    /// store's child rollout headers.
+    fn relatives(
+        &self,
+        files: &[PathBuf],
+        path: &Path,
+        session: &Session,
+        header: &Value,
+        agents: SpawnedAgents,
+    ) -> Lineage {
         let parent = header["parent_thread_id"]
             .as_str()
             .map(|native_id| ParentRef {
-                resolved: matching_session_file(files.clone(), native_id).is_some(),
+                resolved: matching_session_file(files.iter().cloned(), native_id).is_some(),
                 native_id: native_id.to_owned(),
                 source: "session_meta.parent_thread_id".to_owned(),
             });
 
-        let mut agents = spawned_agents(&recording.tail.values);
-        let (probed, probe_bound) = child_headers(&files, &path, &session.id);
+        let mut agents = agents.agents;
+        let (probed, probe_bound) = child_headers(files, path, &session.id);
         for child in probed {
             let entry = agents.entry(child.agent_path.clone()).or_default();
             entry.session_id = Some(child.thread_id);
@@ -424,12 +474,12 @@ impl Backend for CodexBackend {
             parent,
             children,
             forked_from: header["forked_from_id"].as_str().map(str::to_owned),
-            truncation: read_bounds(&recording.tail),
             notes,
+            ..Lineage::default()
         };
         // The agents are gathered by path rather than in record order.
         lineage.sort_children();
-        Ok(lineage)
+        lineage
     }
 }
 
@@ -462,6 +512,62 @@ fn codex_cwd(value: &Value) -> Option<&str> {
     match value["type"].as_str() {
         Some("session_meta") | Some("turn_context") => value["payload"]["cwd"].as_str(),
         _ => None,
+    }
+}
+
+/// The model a `turn_context` record names, qualified by its effort.
+fn turn_context_model(value: &Value) -> Option<Model> {
+    let payload = &value["payload"];
+    payload["model"].as_str().map(|id| Model {
+        id: id.to_owned(),
+        variant: payload["effort"].as_str().map(str::to_owned),
+    })
+}
+
+/// The session facts a Codex rollout's records carry beside its turns, folded
+/// one record at a time: each is the newest record stating it.
+#[derive(Default)]
+struct CodexRecords {
+    tokens: Option<Tokens>,
+    context_window: Option<u64>,
+    rate_limits: Option<RateLimits>,
+    model: Option<Model>,
+    activity: ActivityRange,
+}
+
+impl CodexRecords {
+    fn observe(&mut self, value: &Value) {
+        if let Some(tokens) = codex_tokens(value) {
+            self.tokens = Some(tokens);
+        }
+        if let Some(window) = codex_context_window(value) {
+            self.context_window = Some(window);
+        }
+        if let Some(limits) = codex_rate_limits(value) {
+            self.rate_limits = Some(limits);
+        }
+        if value["type"] == "turn_context" {
+            self.model = turn_context_model(value);
+        }
+        self.activity.observe(value);
+    }
+
+    fn apply(self, session: &mut Session) {
+        session.accounting = accounting_for(
+            self.tokens.as_ref(),
+            None,
+            AccountingBasis::RecordedTotal,
+            AccountingCoverage::Session,
+        );
+        session.tokens = self.tokens;
+        session.usage_detail = UsageDetail {
+            context_window: self.context_window,
+            rate_limits: self.rate_limits,
+            ..UsageDetail::default()
+        }
+        .into_option();
+        session.model = self.model;
+        self.activity.apply(session);
     }
 }
 
@@ -941,12 +1047,17 @@ struct ChildHeader {
 /// every call that reports on agents answers with their statuses under those
 /// same paths, so an agent whose spawn is behind the read bound is still
 /// named by the report that mentions it.
-fn spawned_agents(values: &[Value]) -> HashMap<String, SpawnedAgent> {
-    let mut agents = HashMap::<String, SpawnedAgent>::new();
-    let mut spawns = HashMap::<String, SpawnedAgent>::new();
-    for value in values {
+#[derive(Default)]
+struct SpawnedAgents {
+    agents: HashMap<String, SpawnedAgent>,
+    /// Spawn calls whose output has not been read yet.
+    spawns: HashMap<String, SpawnedAgent>,
+}
+
+impl SpawnedAgents {
+    fn observe(&mut self, value: &Value) {
         if value["type"] != "response_item" {
-            continue;
+            return;
         }
         let payload = &value["payload"];
         let ts = timestamp(&value["timestamp"]);
@@ -954,7 +1065,7 @@ fn spawned_agents(values: &[Value]) -> HashMap<String, SpawnedAgent> {
         match payload["type"].as_str() {
             Some("function_call") if payload["name"] == SPAWN_AGENT => {
                 let arguments = payload_json(&payload["arguments"]);
-                spawns.insert(
+                self.spawns.insert(
                     call_id.clone(),
                     SpawnedAgent {
                         task_name: arguments["task_name"].as_str().map(str::to_owned),
@@ -967,11 +1078,11 @@ fn spawned_agents(values: &[Value]) -> HashMap<String, SpawnedAgent> {
             }
             Some("function_call_output") => {
                 let output = payload_json(&payload["output"]);
-                if let Some(spawn) = spawns.remove(&call_id) {
+                if let Some(spawn) = self.spawns.remove(&call_id) {
                     let Some(path) = output["task_name"].as_str() else {
-                        continue;
+                        return;
                     };
-                    let agent = agents.entry(path.to_owned()).or_default();
+                    let agent = self.agents.entry(path.to_owned()).or_default();
                     agent.task_name = spawn.task_name;
                     agent.model = spawn.model;
                     agent.spawned_at = spawn.spawned_at;
@@ -987,7 +1098,7 @@ fn spawned_agents(values: &[Value]) -> HashMap<String, SpawnedAgent> {
                     let Some(status) = reported["agent_status"].as_str() else {
                         continue;
                     };
-                    let agent = agents.entry(name.to_owned()).or_default();
+                    let agent = self.agents.entry(name.to_owned()).or_default();
                     agent.disposition = Some(status.to_owned());
                     if status == AGENT_COMPLETED && agent.completed_at.is_none() {
                         agent.completed_at = ts;
@@ -1000,7 +1111,6 @@ fn spawned_agents(values: &[Value]) -> HashMap<String, SpawnedAgent> {
             _ => {}
         }
     }
-    agents
 }
 
 /// A Codex payload field that carries JSON as text, or as the value itself.

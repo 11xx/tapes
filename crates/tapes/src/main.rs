@@ -246,6 +246,16 @@ impl InputArgs {
     }
 }
 
+fn refuse_full_supplied(input: &InputArgs) -> Result<()> {
+    if input.supplied() {
+        return Err(anyhow!(
+            "--full reads installed recordings; a supplied input is bounded by \
+             --scan-bytes, --decoded-bytes, and --record-bytes"
+        ));
+    }
+    Ok(())
+}
+
 fn reject_installed_selection(
     input: &InputArgs,
     harness: Option<&str>,
@@ -748,6 +758,12 @@ enum Command {
         /// Maximum transcript turns to render; usage and ending cover the bounded source read.
         #[arg(long, default_value_t = 40)]
         tail: usize,
+        /// Stream the child's whole recording instead of its bounded tail.
+        /// Usage counts every turn and folds its counters from every record,
+        /// and every record's native parent identity is checked; the
+        /// transcript and ending keep only the newest --tail turns.
+        #[arg(long, conflicts_with = "read_bytes")]
+        full: bool,
         #[arg(long)]
         json: bool,
     },
@@ -790,6 +806,12 @@ enum Command {
         selection: SelectionArgs,
         #[command(flatten)]
         read: ReadArgs,
+        /// Stream the whole recording record by record instead of its bounded
+        /// tail, naming every child reference and parent fact it holds, with
+        /// memory following the references kept rather than the file.
+        /// Installed Claude, Codex, Pi, and OpenCode sessions.
+        #[arg(long, conflicts_with = "read_bytes")]
+        full: bool,
         /// Render the versioned tapes-lineage/2 object as JSON.
         #[arg(long)]
         json: bool,
@@ -845,6 +867,13 @@ enum Command {
             conflicts_with_all = ["session", "latest", "title", "occurrence"]
         )]
         by: Vec<ByArg>,
+        /// Stream one session's whole recording instead of its bounded tail:
+        /// turns are counted as they stream, and tokens, cost, context window,
+        /// quota, and model are folded from every record, so turn and
+        /// accounting coverage are `session`. Installed Claude, Codex, Pi, and
+        /// OpenCode sessions; a selection refuses it.
+        #[arg(long, conflicts_with_all = ["read_bytes", "by"])]
+        full: bool,
         /// Render the versioned tapes-usage/5 object, or tapes-usage-summary/3
         /// for a selection, as JSON.
         #[arg(long)]
@@ -1236,20 +1265,33 @@ fn dispatch(cli: Cli) -> Result<()> {
             read,
             reference,
             tail,
+            full,
             json,
         } => {
             selection.validate_input()?;
+            if full {
+                refuse_full_supplied(&selection.input)?;
+            }
             if selection.input.supplied() {
                 return Err(anyhow!(
                     "--input is not supported by child; supplied exports have no child store"
                 ));
             }
-            let child = tapes_core::child::read_with_backends(
-                &read.backends()?,
-                selection.selection(),
-                &reference,
-                tail,
-            )?;
+            let child = if full {
+                tapes_core::child::read_full_with_backends(
+                    &tapes_core::backend::backends(),
+                    selection.selection(),
+                    &reference,
+                    tail,
+                )?
+            } else {
+                tapes_core::child::read_with_backends(
+                    &read.backends()?,
+                    selection.selection(),
+                    &reference,
+                    tail,
+                )?
+            };
             if json {
                 println!("{}", serde_json::to_string(&child)?);
             } else {
@@ -1325,11 +1367,18 @@ fn dispatch(cli: Cli) -> Result<()> {
         Command::Lineage {
             selection,
             read,
+            full,
             json,
         } => {
             selection.validate_input()?;
             read.refuse_supplied(&selection.input)?;
-            let lineage = if selection.input.supplied() {
+            let lineage = if full {
+                refuse_full_supplied(&selection.input)?;
+                tapes_core::lineage_full_with_backends(
+                    &tapes_core::backend::backends(),
+                    selection.selection(),
+                )?
+            } else if selection.input.supplied() {
                 let backends = selection.input.backends()?;
                 tapes_core::lineage_with_backends(&backends, selection.selection())?
             } else {
@@ -1380,12 +1429,18 @@ fn dispatch(cli: Cli) -> Result<()> {
             query,
             read,
             by,
+            full,
             json,
         } => {
             query.validate_input()?;
             read.refuse_supplied(&query.input)?;
+            if full {
+                refuse_full_supplied(&query.input)?;
+            }
             if let Some(one) = query.single() {
-                let usage = if query.input.supplied() {
+                let usage = if full {
+                    tapes_core::usage_full_with_backends(&tapes_core::backend::backends(), one)?
+                } else if query.input.supplied() {
                     let backends = query.input.backends()?;
                     tapes_core::usage_with_backends(&backends, one)?
                 } else {
@@ -1397,6 +1452,12 @@ fn dispatch(cli: Cli) -> Result<()> {
                     print!("{}", render_usage(&usage));
                 }
             } else {
+                if full {
+                    return Err(anyhow!(
+                        "--full reads one session's whole recording: name a session id or pass \
+                         --latest"
+                    ));
+                }
                 let selected = query.has_set_selection() || !by.is_empty();
                 if !selected {
                     return Err(anyhow!(
@@ -2155,6 +2216,19 @@ fn render_usage(usage: &UsageView) -> String {
     }
     render_truncation_notes(&mut out, &usage.truncation);
     render_notes(&mut out, &usage.notes);
+    if let Some(read) = usage.read.as_ref().filter(|read| {
+        read.projection_options
+            .iter()
+            .any(|option| option == "full")
+    }) {
+        let length = match read.coordinate_domain.as_str() {
+            "opencode-message" => format!("{} messages", read.source_length),
+            _ => format!("source length {} bytes", read.source_length),
+        };
+        out.push_str(&format!(
+            "Read evidence: the whole recording was streamed; {length}.\n"
+        ));
+    }
     out
 }
 

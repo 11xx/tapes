@@ -935,6 +935,35 @@ pub fn usage_with_backends(
     )?))
 }
 
+/// One session's usage over its whole recording. Turn counts and the content
+/// inventory fold each turn as it streams, and the session's counters are
+/// folded from every record up to the length the turn read observed, so both
+/// cover the same recording.
+pub fn usage_full_with_backends(
+    backends: &[Box<dyn Backend>],
+    selection: Selection,
+) -> Result<usage::UsageView> {
+    let resolved = selection.resolve(backends)?;
+    let backend = &backends[resolved.backend_index];
+    let mut turns = usage::TurnTally::default();
+    let read = backend.stream_transcript(&resolved.session, &mut |turn| {
+        turns.add(&turn);
+        Ok(())
+    })?;
+    let session = backend.stream_session(&resolved.session, read.source_length)?;
+    Ok(usage::streamed(&session, turns, &read))
+}
+
+/// Every relative one session's whole recording names, read record by record.
+pub fn lineage_full_with_backends(
+    backends: &[Box<dyn Backend>],
+    selection: Selection,
+) -> Result<lineage::LineageView> {
+    let resolved = selection.resolve(backends)?;
+    let read = backends[resolved.backend_index].stream_lineage(&resolved.session)?;
+    Ok(lineage::view(&resolved.session, read))
+}
+
 /// One session's recorded relatives. The read never opens a child's turns:
 /// ordinary child sessions are read under their own IDs, while Claude
 /// subagent evidence is read through the parent-qualified child API.

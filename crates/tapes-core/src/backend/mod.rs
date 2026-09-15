@@ -320,6 +320,43 @@ pub trait Backend {
             self.harness()
         )
     }
+    /// The session as every record of its recording up to `length` bytes
+    /// states it: counters, accounting, recorded usage detail, model, and
+    /// activity range folded from the whole recording rather than its bounded
+    /// tail. The default refuses, as `stream_transcript` does.
+    fn stream_session(&self, session: &Session, length: u64) -> Result<Session> {
+        let _ = (session, length);
+        anyhow::bail!(
+            "{} sessions cannot be read whole; their reader keeps a bounded tail",
+            self.harness()
+        )
+    }
+    /// Every relationship the whole recording names, read record by record so
+    /// memory follows the references kept rather than the file. The default
+    /// refuses: a bounded lineage read is not an answer to a whole one.
+    fn stream_lineage(&self, session: &Session) -> Result<Lineage> {
+        let _ = session;
+        anyhow::bail!(
+            "{} sessions cannot be read whole; their reader keeps a bounded tail",
+            self.harness()
+        )
+    }
+    /// Read a parent-qualified child's whole recording in order, handing each
+    /// turn to `turn` as it is produced, and answer with the child session its
+    /// records state. Every record carrying a native parent identity is
+    /// checked against `parent`.
+    fn stream_child_transcript(
+        &self,
+        parent: &Session,
+        reference: &str,
+        turn: &mut dyn FnMut(Turn) -> Result<()>,
+    ) -> Result<StreamedChild> {
+        let _ = (parent, reference, turn);
+        anyhow::bail!(
+            "{} does not support whole child-qualified transcript reads",
+            self.harness()
+        )
+    }
     /// Project tool events after parsing the whole source read but before its
     /// turn window is applied. Paged backends override this so the supplied
     /// tail also bounds how many source pages are fetched.
@@ -673,6 +710,48 @@ impl StreamedTranscript {
             context_records: Vec::new(),
             gaps: self.gaps.clone(),
         }
+    }
+}
+
+/// A child's whole-recording read: the child session its records state, and
+/// what the read established beside the turns it streamed.
+pub struct StreamedChild {
+    pub session: Session,
+    pub read: StreamedTranscript,
+}
+
+/// The note a whole-recording read carries for the records it could not
+/// decode, or nothing when it decoded every one.
+pub fn skipped_records_note(skipped: usize) -> Option<String> {
+    let noun = if skipped == 1 { "record" } else { "records" };
+    (skipped > 0).then(|| {
+        format!(
+            "Skipped {skipped} unreadable {noun}: malformed, or longer than the {} record bound.",
+            crate::byte_size::ByteSize::new(FULL_RECORD_BYTES)
+        )
+    })
+}
+
+/// The earliest and latest `timestamp` a stream of records carries.
+#[derive(Default)]
+pub(crate) struct ActivityRange(Option<(DateTime<Utc>, DateTime<Utc>)>);
+
+impl ActivityRange {
+    pub(crate) fn observe(&mut self, value: &Value) {
+        if let Some(stamp) = timestamp(&value["timestamp"]) {
+            self.0 = Some(match self.0 {
+                Some((earliest, latest)) => (earliest.min(stamp), latest.max(stamp)),
+                None => (stamp, stamp),
+            });
+        }
+    }
+
+    /// Set the session's start and newest activity to the range observed. A
+    /// whole read reaches the first record, so the start is never uncertain.
+    pub(crate) fn apply(self, session: &mut Session) {
+        session.started_at = self.0.map(|(earliest, _)| earliest);
+        session.last_activity_at = self.0.map(|(_, latest)| latest);
+        session.start_uncertain = false;
     }
 }
 
