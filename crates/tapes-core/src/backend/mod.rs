@@ -611,6 +611,9 @@ pub struct StreamedTranscript {
     pub skipped: usize,
     pub gaps: Vec<ReadGap>,
     pub trailing_record: Option<TrailingRecord>,
+    /// The newest terminal observation the recording holds, where the harness
+    /// records one.
+    pub terminal: Option<TerminalObservation>,
     pub notes: Vec<String>,
 }
 
@@ -632,19 +635,46 @@ pub(crate) fn stream_jsonl(
     path: &Path,
     record: impl FnMut(&Value, ByteSpan, &str) -> Result<bool>,
 ) -> Result<StreamedJsonl> {
-    stream_jsonl_bounded(path, FULL_RECORD_BYTES, record)
+    stream_jsonl_within(path, FULL_RECORD_BYTES, None, record)
 }
 
+/// A later pass over a recording an earlier pass already read: it stops at
+/// the length that pass observed, so both passes see the same records, and a
+/// file shorter than that refuses.
+pub(crate) fn stream_jsonl_to(
+    path: &Path,
+    length: u64,
+    record: impl FnMut(&Value, ByteSpan, &str) -> Result<bool>,
+) -> Result<StreamedJsonl> {
+    stream_jsonl_within(path, FULL_RECORD_BYTES, Some(length), record)
+}
+
+#[cfg(test)]
 fn stream_jsonl_bounded(
     path: &Path,
     record_bytes: u64,
+    record: impl FnMut(&Value, ByteSpan, &str) -> Result<bool>,
+) -> Result<StreamedJsonl> {
+    stream_jsonl_within(path, record_bytes, None, record)
+}
+
+fn stream_jsonl_within(
+    path: &Path,
+    record_bytes: u64,
+    length: Option<u64>,
     mut record: impl FnMut(&Value, ByteSpan, &str) -> Result<bool>,
 ) -> Result<StreamedJsonl> {
     let file = File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
     let metadata = file
         .metadata()
         .with_context(|| format!("failed to inspect {}", path.display()))?;
-    let source_length = metadata.len();
+    let source_length = match length {
+        Some(length) if metadata.len() < length => {
+            anyhow::bail!("recording source was replaced or shortened between reads")
+        }
+        Some(length) => length,
+        None => metadata.len(),
+    };
     let revision = stat_revision(&metadata);
     let mut reader = BufReader::with_capacity(256 * 1024, file.take(source_length));
     let mut streamed = StreamedJsonl {

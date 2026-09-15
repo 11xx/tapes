@@ -302,8 +302,13 @@ in force.
 `show --full` reads the whole recording instead of its tail, writing each turn
 as it is read, so memory follows one record rather than the file. Every turn
 is shown unless `--tail` keeps the newest, and `--exchange` applies as it does
-to a bounded read. It reads installed Claude recordings; another harness
-refuses it by name, and `--json` and `--read-bytes` are not available with it.
+to a bounded read. It reads installed Claude, Codex, and Pi recordings;
+OpenCode refuses it by name, and `--json` and `--read-bytes` are not available
+with it. Codex and Pi recordings are read twice: the first pass keeps only
+what projecting a turn needs from elsewhere in the file — the messages the
+operator sent, for Codex, and each entry's id and parent, for Pi's active
+branch — and the second pass, stopping at the length the first observed,
+writes the turns.
 A record that is malformed or longer than 64 MiB is skipped and counted. A
 recording replaced or shortened during the read refuses; one appended to is
 read to the length it had when the read opened.

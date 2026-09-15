@@ -6,8 +6,9 @@ use serde_json::Value;
 
 use super::{
     accounting_for, head_directory, home_path, jsonl_files, list_files, list_files_with_search,
-    read_bounds, read_recording, session_file, timestamp, trailing_record,
-    transcript_from_recording, Backend, Jsonl, Listing, ParsedFile, Query, TokenTotals,
+    read_bounds, read_recording, session_file, stream_jsonl, stream_jsonl_to, timestamp,
+    trailing_record, transcript_from_recording, Backend, Jsonl, Listing, ParsedFile, Query,
+    StreamedTranscript, TokenTotals,
 };
 use crate::content::{
     bounded_shape, text_part, tool_coverage, tool_part, ContentAvailability, ContentCarrier,
@@ -245,16 +246,6 @@ impl Backend for PiBackend {
             .ok_or_else(|| anyhow!("pi session {} is unavailable", session.id))?;
         let (turns, recording, abandoned, trailing_record) =
             read_transcript(&path, self.read_bytes)?;
-        let notes = (abandoned > 0)
-            .then(|| {
-                if abandoned == 1 {
-                    "1 entry belongs to an abandoned branch.".to_owned()
-                } else {
-                    format!("{abandoned} entries belong to abandoned branches.")
-                }
-            })
-            .into_iter()
-            .collect();
         Ok(transcript_from_recording(
             session.clone(),
             turns,
@@ -262,8 +253,97 @@ impl Backend for PiBackend {
             &recording,
             None,
             trailing_record,
-            notes,
+            abandoned_notes(abandoned),
         ))
+    }
+
+    fn stream_transcript(
+        &self,
+        session: &Session,
+        turn: &mut dyn FnMut(Turn) -> Result<()>,
+    ) -> Result<StreamedTranscript> {
+        let root = self
+            .root
+            .as_deref()
+            .ok_or_else(|| anyhow!("pi store is unavailable"))?;
+        let path = session_file(root, &session.id)
+            .ok_or_else(|| anyhow!("pi session {} is unavailable", session.id))?;
+        // The active branch is the last entry's ancestry. The first pass keeps
+        // only each entry's position, id, and parent; the second emits the
+        // active entries' turns in recording order.
+        let mut positions = HashMap::<String, (usize, Option<String>)>::new();
+        let mut last = None;
+        let mut entries = 0;
+        let first = stream_jsonl(&path, |value, _, _| {
+            if value["type"] == "session" {
+                return Ok(false);
+            }
+            let id = value["id"].as_str().map(str::to_owned);
+            let parent = value["parentId"].as_str().map(str::to_owned);
+            if let Some(id) = &id {
+                positions.insert(id.clone(), (entries, parent.clone()));
+            }
+            last = Some((entries, id, parent));
+            entries += 1;
+            Ok(false)
+        })?;
+        let mut active = HashSet::new();
+        let mut active_ids = HashSet::new();
+        let mut current = last;
+        while let Some((position, Some(id), parent)) = current.take() {
+            if !active_ids.insert(id) {
+                break;
+            }
+            active.insert(position);
+            current = parent.and_then(|parent| {
+                let (position, grandparent) = positions.get(&parent)?;
+                Some((*position, Some(parent), grandparent.clone()))
+            });
+        }
+        drop(positions);
+
+        let domain = format!("file:{}", path.display());
+        let mut position = 0;
+        let mut abandoned = 0;
+        let mut trailing_record = None;
+        let read = stream_jsonl_to(&path, first.source_length, |value, span, revision| {
+            if value["type"] == "session" {
+                return Ok(false);
+            }
+            let entry = position;
+            position += 1;
+            if value["id"]
+                .as_str()
+                .is_some_and(|id| !active_ids.contains(id))
+            {
+                abandoned += 1;
+            }
+            if !active.contains(&entry) {
+                return Ok(false);
+            }
+            let mut parsed = parse_turns(value);
+            super::attach_record_refs(&mut parsed, &domain, Some(revision), Some(span));
+            let produced = !parsed.is_empty();
+            trailing_record = (!produced)
+                .then(|| pi_trailing_kind(value))
+                .flatten()
+                .map(|kind| TrailingRecord {
+                    kind: kind.to_owned(),
+                    timestamp: timestamp(&value["timestamp"]),
+                });
+            for parsed_turn in parsed {
+                turn(parsed_turn)?;
+            }
+            Ok(produced)
+        })?;
+        Ok(StreamedTranscript {
+            source_length: read.source_length,
+            skipped: read.skipped,
+            gaps: read.gaps,
+            trailing_record,
+            terminal: None,
+            notes: abandoned_notes(abandoned),
+        })
     }
 
     /// pi records a relationship on the session that has one: its header
@@ -342,6 +422,14 @@ fn read_transcript(
     let trailing_record = trailing_record(active.iter().copied(), last_turn, pi_trailing_kind);
 
     Ok((turns, recording, abandoned, trailing_record))
+}
+
+fn abandoned_notes(abandoned: usize) -> Vec<String> {
+    match abandoned {
+        0 => Vec::new(),
+        1 => vec!["1 entry belongs to an abandoned branch.".to_owned()],
+        count => vec![format!("{count} entries belong to abandoned branches.")],
+    }
 }
 
 /// pi records the working directory once, on the `session` header line.

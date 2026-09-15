@@ -4684,12 +4684,114 @@ fn show_full_streams_a_claude_recording_past_the_read_bound() {
     ] {
         assert!(!run(&refused).status.success(), "{refused:?}");
     }
-    let codex = run(&["show", "00000000-0000-0000-0000-000000000001", "--full"]);
-    assert!(!codex.status.success());
+    let _opencode = opencode_program(root.path(), "opencode2");
+    let mut opencode = tapes();
+    opencode.args(["show", "ses_000000fixtureSharedSession", "--full"]);
+    with_fixture_env(&mut opencode, &codex_home, &home, root.path());
+    let opencode = opencode.output().unwrap();
+    assert!(!opencode.status.success());
     assert!(
-        String::from_utf8_lossy(&codex.stderr).contains("cannot be read whole"),
+        String::from_utf8_lossy(&opencode.stderr).contains("cannot be read whole"),
         "{}",
-        String::from_utf8_lossy(&codex.stderr)
+        String::from_utf8_lossy(&opencode.stderr)
+    );
+}
+
+/// Codex and Pi need facts from across the file to project a turn: Codex
+/// classifies a user turn against every message the operator sent, and Pi
+/// keeps only the last entry's branch. A whole read past the bound gets both
+/// right while it streams.
+#[test]
+fn show_full_streams_codex_and_pi_recordings_past_the_read_bound() {
+    let root = TemporaryDirectory::new(
+        std::env::temp_dir().join(format!("tapes-cli-full-codex-pi-{}", std::process::id())),
+    );
+    let home = root.path().join("home");
+    let codex_home = root.path().join("codex");
+    let filler = "x".repeat(100 * 1024);
+    let timestamp = "2026-01-01T10:00:00Z";
+
+    let codex_id = "00000000-0000-0000-0000-0000000000f1";
+    let codex_sessions = codex_home.join("sessions/2026/01/01");
+    fs::create_dir_all(&codex_sessions).unwrap();
+    let codex_user = |text: &str| {
+        format!(
+            "{}\n{}\n",
+            serde_json::json!({"timestamp": timestamp, "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": text}]}}),
+            serde_json::json!({"timestamp": timestamp, "type": "event_msg", "payload": {"type": "user_message", "message": text}})
+        )
+    };
+    let mut codex = serde_json::json!({"timestamp": timestamp, "type": "session_meta", "payload": {"id": codex_id, "session_id": codex_id, "timestamp": timestamp, "cwd": "/fixtures/project", "source": "cli", "model_provider": "openai"}}).to_string() + "\n";
+    codex += &codex_user("opening request");
+    for _ in 0..48 {
+        codex += &serde_json::json!({"timestamp": timestamp, "type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": filler}]}}).to_string();
+        codex.push('\n');
+    }
+    codex += &codex_user("closing request");
+    fs::write(
+        codex_sessions.join(format!("rollout-2026-01-01T10-00-00-{codex_id}.jsonl")),
+        codex,
+    )
+    .unwrap();
+
+    let pi_sessions = home.join(".pi/agent/sessions/--fixtures-project--");
+    fs::create_dir_all(&pi_sessions).unwrap();
+    let pi_message = |id: &str, parent: Option<&str>, role: &str, text: &str| {
+        serde_json::json!({"type": "message", "id": id, "parentId": parent, "timestamp": timestamp, "message": {"role": role, "timestamp": 1767261600000u64, "content": [{"type": "text", "text": text}]}}).to_string() + "\n"
+    };
+    let mut pi = serde_json::json!({"type": "session", "version": 3, "id": "pi-full", "timestamp": timestamp, "cwd": "/fixtures/project"}).to_string() + "\n";
+    pi += &pi_message("m0", None, "user", "opening request");
+    pi += &pi_message("abandoned", Some("m0"), "assistant", "abandoned answer");
+    let mut parent = "m0".to_owned();
+    for index in 1..=48 {
+        let id = format!("m{index}");
+        pi += &pi_message(&id, Some(&parent), "assistant", &filler);
+        parent = id;
+    }
+    pi += &pi_message("last", Some(&parent), "user", "closing request");
+    fs::write(
+        pi_sessions.join("2026-01-01T10-00-00-000Z_pi-full.jsonl"),
+        pi,
+    )
+    .unwrap();
+
+    let show = |arguments: &[&str]| {
+        let output = tapes()
+            .args(arguments)
+            .env("HOME", &home)
+            .env("CODEX_HOME", &codex_home)
+            .env("PATH", "/definitely/missing")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap()
+    };
+
+    let bounded = show(&["show", codex_id]);
+    assert!(!bounded.contains("opening request"));
+    let full = show(&["show", codex_id, "--full"]);
+    assert!(
+        full.contains("[user #0 2026-01-01T10:00:00Z]\nopening request"),
+        "{}",
+        &full[..full.len().min(300)]
+    );
+    assert!(full.contains("[user #49 2026-01-01T10:00:00Z]\nclosing request"));
+    assert!(full.contains("the whole recording was streamed"));
+
+    let bounded = show(&["show", "pi-full"]);
+    assert!(!bounded.contains("opening request"));
+    let full = show(&["show", "pi-full", "--full"]);
+    assert!(full.contains("opening request"));
+    assert!(full.contains("closing request"));
+    assert!(!full.contains("abandoned answer"));
+    assert!(
+        full.contains("1 entry belongs to an abandoned branch."),
+        "{}",
+        &full[full.len().saturating_sub(600)..]
     );
 }
 

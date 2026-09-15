@@ -511,6 +511,7 @@ impl Backend for ClaudeBackend {
             Ok(produced)
         })?;
         Ok(StreamedTranscript {
+            terminal: None,
             source_length: read.source_length,
             skipped: read.skipped,
             trailing_record: streamed_trailing_record(read.last.as_ref(), claude_trailing_kind),
