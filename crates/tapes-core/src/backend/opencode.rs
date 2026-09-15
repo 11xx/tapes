@@ -41,7 +41,7 @@ const MIN_MESSAGE_PAGE: usize = 8;
 const MAX_DB_PARTS: usize = 5_000;
 const MAX_DB_TEXT_CHARS: usize = 4_000;
 const MAX_DB_TOOL_CHARS: usize = 2_000;
-/// Parts per page of a whole database read. A projected part holds at most
+/// Parts per page of a database part read. A projected part holds at most
 /// 6,000 characters, so this many fit the transport bound even when every
 /// character is written as a six-byte JSON escape.
 const MAX_DB_PART_PAGE: usize = 128;
@@ -393,9 +393,13 @@ impl OpenCodeBackend {
                 let database = database
                     .to_str()
                     .ok_or_else(|| anyhow!("opencode database path is not UTF-8"))?;
+                // List mode prints the one `json_object` column byte for
+                // byte, and `json_object` escapes every control character,
+                // so each row is one line. Tab mode is not verbatim: sqlite3
+                // 3.53.4 quotes a value that contains `"`.
                 let bytes = self.command_bytes_with(
                     OsStr::new("sqlite3"),
-                    &["-readonly", "-batch", "-tabs", "-header", database, query],
+                    &["-readonly", "-batch", "-list", "-header", database, query],
                     "opencode database",
                 )?;
                 let text = String::from_utf8(bytes)
@@ -799,12 +803,12 @@ impl OpenCodeBackend {
             });
         }
 
-        let mut part_rows = self.database(&format!(
-            "SELECT {} FROM part WHERE session_id = {id} \
-             ORDER BY time_created DESC, id DESC LIMIT {}",
-            database_part_row(),
-            MAX_DB_PARTS + 1
-        ))?;
+        let mut part_rows = self.database_message_parts(
+            &id,
+            &message_rows,
+            RowOrder::NewestFirst,
+            MAX_DB_PARTS + 1,
+        )?;
         if part_rows.len() > MAX_DB_PARTS {
             part_rows.truncate(MAX_DB_PARTS);
             source.push(SourceBound::RecordPage {
@@ -864,7 +868,12 @@ impl OpenCodeBackend {
                     break;
                 };
                 after = Some(RowKey::from_row(last)?);
-                let parts = self.database_message_parts(&id, &rows)?;
+                let parts = group_parts(self.database_message_parts(
+                    &id,
+                    &rows,
+                    RowOrder::OldestFirst,
+                    usize::MAX,
+                )?)?;
                 cuts.count(&rows, &parts);
                 read += rows.len() as u64;
                 let whole_page = rows.len() == MESSAGE_PAGE;
@@ -891,39 +900,43 @@ impl OpenCodeBackend {
         })
     }
 
-    /// Every part of these messages in the order a transcript reads them,
-    /// grouped by message and fetched in pages the transport always carries.
+    /// The first `most` parts of these messages in `order`, fetched in pages
+    /// the transport always carries.
     fn database_message_parts(
         &self,
         session: &str,
         messages: &[Value],
-    ) -> Result<HashMap<String, Vec<Value>>> {
+        order: RowOrder,
+        most: usize,
+    ) -> Result<Vec<Value>> {
+        if messages.is_empty() {
+            return Ok(Vec::new());
+        }
         let ids = messages
             .iter()
             .map(|row| required_string(row, "id"))
             .collect::<Result<Vec<_>>>()?;
         let ids = sql_id_list(&ids);
-        let mut rows = Vec::new();
-        let mut after: Option<RowKey> = None;
-        loop {
+        let mut rows: Vec<Value> = Vec::new();
+        while rows.len() < most {
+            let limit = MAX_DB_PART_PAGE.min(most - rows.len());
+            let past = match rows.last() {
+                Some(last) => format!(" AND {}", order.past(&RowKey::from_row(last)?)),
+                None => String::new(),
+            };
             let page = self.database(&format!(
-                "SELECT {} FROM part WHERE session_id = {session} AND message_id IN ({ids}){} \
-                 ORDER BY time_created, id LIMIT {MAX_DB_PART_PAGE}",
+                "SELECT {} FROM part WHERE session_id = {session} AND message_id IN ({ids}){past} \
+                 ORDER BY {} LIMIT {limit}",
                 database_part_row(),
-                after
-                    .as_ref()
-                    .map_or_else(String::new, |key| format!(" AND {}", key.after())),
+                order.sql(),
             ))?;
-            let whole_page = page.len() == MAX_DB_PART_PAGE;
-            if let Some(last) = page.last() {
-                after = Some(RowKey::from_row(last)?);
-            }
+            let whole_page = page.len() == limit;
             rows.extend(page);
             if !whole_page {
                 break;
             }
         }
-        group_parts(rows)
+        Ok(rows)
     }
 
     /// Every message the API projects, oldest first, a page at a time. The
@@ -1399,8 +1412,32 @@ fn database_part_row() -> String {
     )
 }
 
-/// A row's position in `time_created, id` order, the order a whole database
-/// read pages in.
+/// The direction a database read pages rows in: `time_created, id`, the
+/// order a transcript reads, or its reverse for a read that keeps the newest.
+#[derive(Clone, Copy)]
+enum RowOrder {
+    OldestFirst,
+    NewestFirst,
+}
+
+impl RowOrder {
+    fn sql(self) -> &'static str {
+        match self {
+            Self::OldestFirst => "time_created, id",
+            Self::NewestFirst => "time_created DESC, id DESC",
+        }
+    }
+
+    /// The rows a page in this order reaches once it has passed `key`.
+    fn past(self, key: &RowKey) -> String {
+        match self {
+            Self::OldestFirst => key.after(),
+            Self::NewestFirst => key.before(),
+        }
+    }
+}
+
+/// A row's position in `time_created, id` order.
 struct RowKey {
     time_created: i64,
     id: String,
@@ -1419,6 +1456,11 @@ impl RowKey {
     fn after(&self) -> String {
         let (time, id) = (self.time_created, sql_literal(&self.id));
         format!("(time_created > {time} OR (time_created = {time} AND id > {id}))")
+    }
+
+    fn before(&self) -> String {
+        let (time, id) = (self.time_created, sql_literal(&self.id));
+        format!("(time_created < {time} OR (time_created = {time} AND id < {id}))")
     }
 
     fn at_or_before(&self) -> String {

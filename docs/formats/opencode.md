@@ -247,7 +247,13 @@ projection is retained rather than reporting the shared record as ambiguous.
 Search applies that rule to candidates before accepting matches, so a later
 v2 projection cannot turn a stable projection's non-match into a match.
 The database command emits a `row` header followed by one JSON object per
-session row. Listing parses those rows independently: a row that cannot be
+session row. Every query selects a single `json_object(...) AS row` column, and
+`sqlite3` runs in list mode (`-list -header`): list mode prints that column
+byte for byte, and `json_object` escapes every control character, newline
+included, so each row is exactly one line. Tab mode (`-tabs`) is not
+verbatim: sqlite3 3.53.4 quotes a value containing `"` CSV-style
+(`"{""a"":1}"`) where 3.50.6 prints it bare. JSON mode (`-json`) is verbatim
+on both but escapes the row a second time, one extra byte per `"` and `\`. Listing parses those rows independently: a row that cannot be
 parsed is reported in the listing's `unreadable` field with its session id and
 parse diagnostic, while an exact lookup of that id preserves the parse error.
 
@@ -265,10 +271,15 @@ cap. A reader must project only the message fields it consumes (`role` and
 
 The database transcript read is bounded in three places, and each bound it
 reaches is reported under the transcript's `truncation.source`: the newest
-1,000 messages (`record-page` of `messages`), the newest 5,000 parts
-(`record-page` of `parts`), and text cut in the projection itself, at 4,000
-characters for text and reasoning parts and 2,000 for tool input, output, and
-error (`turn-text`, one entry per bound with the count of parts it cut).
+1,000 messages (`record-page` of `messages`), the newest 5,000 parts of those
+messages (`record-page` of `parts`), and text cut in the projection itself, at
+4,000 characters for text and reasoning parts and 2,000 for tool input, output,
+and error (`turn-text`, one entry per bound with the count of parts it cut).
+The parts are selected by message id newest first, in `time_created DESC, id
+DESC` order, 128 rows at a time, each page starting before the last row of the
+one before, until 5,001 rows are in hand or a page comes back short. One query
+for all 5,001 would not fit: 5,001 projected parts of 2,000 characters each are
+about 10.4 MiB, past the 8 MiB transport bound.
 
 The API transcript read pages `GET /api/session/{id}/message` newest first
 rather than fetching the whole projection: the first page asks for
