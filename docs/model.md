@@ -1065,6 +1065,14 @@ that the session is stopped now. `text_tail` reports the requested and
 returned text entries and explains an empty tail as a zero request, no
 operator/assistant text in the read, or an empty complete projection.
 
+`show --full --json` streams a whole Claude, Codex, or Pi recording, and its
+`read` says so: one `tail` range from byte 0 to the length observed when the
+read opened, `configured_bound` equal to that length, `projection_options`
+holding `full`, and gaps for malformed records or records longer than 64 MiB.
+Record spans are not listed under `read.records`; each turn's `record_ref`
+carries its own span and the source revision it was read at. No `text_tail`
+is reported, and `truncation` holds only a `--tail` window.
+
 `projection` is present when a caller kept only some of the read's turns.
 `show --exchange` and `export --exchange` write
 `{"kind": "exchange", "omitted": {"tool": 3, "reasoning": 1}}`: only
