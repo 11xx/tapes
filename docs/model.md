@@ -154,7 +154,8 @@ the session wire object and export bundles retain the tool's harness envelope on
 `text`.
 In ordinary transcript views, the ordinal is the turn's zero-based position in the normalized turn
 sequence, counted from the first turn the reader reaches. For a file-backed
-session the reader's reach is the file's last 4 MiB whatever the window, so
+session the reader's reach is the file's last `--read-bytes` (4 MiB by
+default) whatever the window, so
 the ordinal does not change with `--tail`: `show --tail 1` returns the turn
 whose ordinal is the sequence's last, the window under `truncation` names the
 ordinals it holds, and a consumer holding a session id and an ordinal re-finds

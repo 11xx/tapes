@@ -175,6 +175,88 @@ fn exchange_keeps_operator_and_assistant_turns_and_counts_the_rest() {
     let _ = fs::remove_dir_all(&codex_home);
 }
 
+/// The file tail is the reader's own bound, so a caller can set it; the read
+/// evidence and the truncation report name the bound that was in force.
+#[test]
+fn read_bytes_sets_the_file_tail_a_transcript_read_takes() {
+    let root = std::env::temp_dir().join(format!("tapes-cli-read-bytes-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&root);
+    let sessions = root.join("sessions/2026/01/01");
+    fs::create_dir_all(&sessions).unwrap();
+    let id = "00000000-0000-0000-0000-00000000dddd";
+    let mut body = format!(
+        "{{\"timestamp\":\"2026-01-01T10:00:00Z\",\"type\":\"session_meta\",\"payload\":{{\"id\":\"{id}\",\"cwd\":\"/fixtures/project\"}}}}\n"
+    );
+    let padding = "x".repeat(400);
+    for index in 0..400 {
+        body.push_str(&format!(
+            "{{\"timestamp\":\"2026-01-01T10:{:02}:{:02}Z\",\"type\":\"response_item\",\"payload\":{{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{{\"type\":\"output_text\",\"text\":\"turn {index} {padding}\"}}]}}}}\n",
+            index / 60,
+            index % 60
+        ));
+    }
+    assert!(body.len() > 128 * 1024);
+    fs::write(
+        sessions.join(format!("rollout-2026-01-01T10-00-00-{id}.jsonl")),
+        &body,
+    )
+    .unwrap();
+    let run = |args: &[&str]| {
+        tapes()
+            .args(args)
+            .env("HOME", root.join("home"))
+            .env("CODEX_HOME", &root)
+            .env("PATH", "/definitely/missing")
+            .output()
+            .unwrap()
+    };
+    let json = |args: &[&str]| -> Value {
+        let output = run(args);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice(&output.stdout).unwrap()
+    };
+
+    let whole = json(&["show", id, "--tail", "1000", "--json"]);
+    assert_eq!(whole["turns"].as_array().unwrap().len(), 400);
+    assert_eq!(whole["read"]["configured_bound"], 4 * 1024 * 1024);
+
+    let narrow = json(&[
+        "show",
+        id,
+        "--tail",
+        "1000",
+        "--read-bytes",
+        "64k",
+        "--json",
+    ]);
+    assert_eq!(narrow["read"]["configured_bound"], 64 * 1024);
+    assert_eq!(
+        narrow["truncation"]["source"],
+        serde_json::json!([{"kind": "file-tail", "bytes": 64 * 1024}])
+    );
+    let kept = narrow["turns"].as_array().unwrap().len();
+    assert!(kept > 0 && kept < 400, "{kept}");
+
+    let refused = run(&["show", id, "--read-bytes", "1KiB"]);
+    assert!(!refused.status.success());
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert!(
+        stderr.contains("read bytes must be between 64KiB and 1GiB"),
+        "{stderr}"
+    );
+
+    let unparsed = run(&["show", id, "--read-bytes", "64 furlongs"]);
+    assert!(!unparsed.status.success());
+    let stderr = String::from_utf8_lossy(&unparsed.stderr);
+    assert!(stderr.contains("unknown size unit"), "{stderr}");
+
+    let _ = fs::remove_dir_all(&root);
+}
+
 fn terminal_only_fixture_store(name: &str) -> (PathBuf, PathBuf) {
     let root = std::env::temp_dir().join(format!(
         "tapes-cli-terminal-only-{name}-{}",

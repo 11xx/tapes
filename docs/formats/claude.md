@@ -45,7 +45,8 @@ inside the transcript is the only authoritative answer.
 | `origin`, `promptSource`, `isMeta` | object, string, bool | On a `user` record, what the record is; see below |
 
 The reader keeps two bounded windows on a transcript: the first 64 KiB and the
-last 4 MiB. `sessionId`, `cwd`, the recorded start timestamp, and the first
+last 4 MiB unless `--read-bytes` sets another bound. `sessionId`, `cwd`, the
+recorded start timestamp, and the first
 user turn come from the opening, so a transcript larger than the tail still
 reports the start and first prompt its opening recorded. The tail supplies the
 turns, the last activity, the `aiTitle`, and the final model. A turn's

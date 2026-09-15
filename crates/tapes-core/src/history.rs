@@ -164,7 +164,10 @@ pub(crate) fn read_file(
     ) -> (Vec<Turn>, Vec<ModelObservation>),
 ) -> Result<Page> {
     if !(1024..=MAX_BYTES).contains(&bytes) {
-        bail!("page bytes must be between 1024 and {MAX_BYTES}");
+        bail!(
+            "page bytes must be between 1KiB and {}",
+            crate::byte_size::ByteSize::new(MAX_BYTES as u64)
+        );
     }
     let mut file = File::open(path).with_context(|| format!("open {}", path.display()))?;
     let metadata = file.metadata()?;

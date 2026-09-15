@@ -141,7 +141,9 @@ output budgets. Defaults are 512 MiB for source and decoded bytes, 8 MiB per
 record, 512 MiB aggregate resident data, 10,000 members, and 16 MiB serialized
 output; the byte flags may raise those values only to finite ceilings of 8 GiB,
 64 MiB, 8 GiB, and 64 MiB respectively. A result limit never acts as a parser
-budget.
+budget. Every byte flag takes a count or a size such as `512MiB`, `8m`, or
+`64KB`: a bare or `iB` unit is binary and a `B` unit is decimal, whatever the
+case.
 History-page and child-qualified reads remain installed-recording operations;
 they refuse a supplied export explicitly.
 
@@ -287,6 +289,12 @@ and assistant-visible text, each with its timestamps, native ids, and original
 ordinal. Reasoning, tool calls and results, harness commands, notices, and
 attached context are left out and counted by kind under `projection`, and
 `--tail` counts exchange turns.
+
+A file-backed transcript read takes the last 4 MiB of a recording.
+`--read-bytes` on `show`, `export`, `events`, `lineage`, `stats`, `usage`,
+`brief`, `endings`, and `child` sets that bound between 64 KiB and 1 GiB; the
+window is held in memory whole, and `read.configured_bound` records the bound
+in force.
 
 `show` and `export` also take `--latest` in place of an ID, which resolves the
 most recent session in scope. `--exclude <id>` is repeatable and passes over

@@ -21,8 +21,16 @@ pub struct ChildView {
 }
 
 pub fn read(selection: Selection<'_>, reference: &str, tail: usize) -> Result<ChildView> {
-    let backends = backend::backends();
-    let parent = selection.resolve(&backends)?;
+    read_with_backends(&backend::backends(), selection, reference, tail)
+}
+
+pub fn read_with_backends(
+    backends: &[Box<dyn backend::Backend>],
+    selection: Selection<'_>,
+    reference: &str,
+    tail: usize,
+) -> Result<ChildView> {
+    let parent = selection.resolve(backends)?;
     let mut transcript =
         backends[parent.backend_index].child_transcript(&parent.session, reference)?;
     let usage = usage::usage(&transcript);

@@ -27,6 +27,7 @@ use tapes_core::usage::{
 use tapes_core::{BulkExport, Selection, UsageSummary, Where};
 
 use tapes_core::backend::Backend;
+use tapes_core::byte_size::ByteSize;
 use tapes_core::input::{
     InputBackend, InputFormat, InputOptions, DEFAULT_DECODED_BYTES, DEFAULT_OUTPUT_BYTES,
     DEFAULT_RECORD_BYTES, DEFAULT_RESIDENT_BYTES, DEFAULT_SCAN_BYTES,
@@ -171,22 +172,22 @@ struct InputArgs {
     #[arg(long, value_name = "SCOPE")]
     source_scope: Option<String>,
     /// Maximum compressed or source bytes inspected across supplied inputs.
-    #[arg(long, default_value_t = DEFAULT_SCAN_BYTES, value_name = "BYTES")]
-    scan_bytes: u64,
+    #[arg(long, default_value_t = ByteSize::new(DEFAULT_SCAN_BYTES), value_name = "BYTES")]
+    scan_bytes: ByteSize,
     /// Maximum uncompressed JSON bytes inspected across supplied inputs.
-    #[arg(long, default_value_t = DEFAULT_DECODED_BYTES, value_name = "BYTES")]
-    decoded_bytes: u64,
+    #[arg(long, default_value_t = ByteSize::new(DEFAULT_DECODED_BYTES), value_name = "BYTES")]
+    decoded_bytes: ByteSize,
     /// Maximum one JSON record or ZIP member decoded into memory.
-    #[arg(long, default_value_t = DEFAULT_RECORD_BYTES, value_name = "BYTES")]
-    record_bytes: u64,
+    #[arg(long, default_value_t = ByteSize::new(DEFAULT_RECORD_BYTES), value_name = "BYTES")]
+    record_bytes: ByteSize,
     /// Maximum serialized transcript response retained for a supplied input.
-    #[arg(long, default_value_t = DEFAULT_OUTPUT_BYTES, value_name = "BYTES")]
-    output_bytes: u64,
+    #[arg(long, default_value_t = ByteSize::new(DEFAULT_OUTPUT_BYTES), value_name = "BYTES")]
+    output_bytes: ByteSize,
     /// Maximum aggregate bytes reserved for normalized supplied-input data.
     /// This is independent of result limits and prevents a collection read
     /// from retaining an unbounded set of normalized records.
-    #[arg(long, default_value_t = DEFAULT_RESIDENT_BYTES, value_name = "BYTES")]
-    resident_bytes: u64,
+    #[arg(long, default_value_t = ByteSize::new(DEFAULT_RESIDENT_BYTES), value_name = "BYTES")]
+    resident_bytes: ByteSize,
     /// Select one opaque occurrence coordinate from a supplied collection.
     #[arg(long, value_name = "COORDINATE")]
     occurrence: Option<String>,
@@ -205,11 +206,11 @@ impl InputArgs {
         options.source_scope = self.source_scope.clone();
         options.occurrence = self.occurrence.clone();
         options.after_occurrence = self.after_occurrence.clone();
-        options.scan_bytes = self.scan_bytes;
-        options.decoded_bytes = self.decoded_bytes;
-        options.record_bytes = self.record_bytes;
-        options.output_bytes = self.output_bytes;
-        options.resident_bytes = self.resident_bytes;
+        options.scan_bytes = self.scan_bytes.get();
+        options.decoded_bytes = self.decoded_bytes.get();
+        options.record_bytes = self.record_bytes.get();
+        options.output_bytes = self.output_bytes.get();
+        options.resident_bytes = self.resident_bytes.get();
         options.validate()?;
         Ok(options)
     }
@@ -259,6 +260,35 @@ fn reject_installed_selection(
         ));
     }
     Ok(())
+}
+
+/// How much of each installed recording a transcript read takes.
+#[derive(Args, Clone, Copy, Debug, Default)]
+struct ReadArgs {
+    /// Read at most this much from the end of each installed Claude, Codex,
+    /// or Pi recording [default: 4MiB], between 64KiB and 1GiB. The window is
+    /// held in memory whole. Supplied inputs keep their own byte budgets.
+    #[arg(long, value_name = "BYTES")]
+    read_bytes: Option<ByteSize>,
+}
+
+impl ReadArgs {
+    fn refuse_supplied(&self, input: &InputArgs) -> Result<()> {
+        if self.read_bytes.is_some() && input.supplied() {
+            return Err(anyhow!(
+                "--read-bytes bounds installed recordings; a supplied input is bounded by \
+                 --scan-bytes, --decoded-bytes, and --record-bytes"
+            ));
+        }
+        Ok(())
+    }
+
+    fn backends(&self) -> Result<Vec<Box<dyn Backend>>> {
+        match self.read_bytes {
+            Some(bytes) => tapes_core::backend::backends_with_read_bytes(bytes.get()),
+            None => Ok(tapes_core::backend::backends()),
+        }
+    }
 }
 
 /// Select one session by ID, exact recorded title, or latest activity.
@@ -598,6 +628,8 @@ enum Command {
     Show {
         #[command(flatten)]
         selection: SelectionArgs,
+        #[command(flatten)]
+        read: ReadArgs,
         /// Show only the final number of messages.
         #[arg(long)]
         tail: Option<usize>,
@@ -623,10 +655,10 @@ enum Command {
         selection: SelectionArgs,
         #[arg(long)]
         cursor: Option<String>,
-        /// Maximum payload bytes per page, between 1024 and 4194304.
+        /// Maximum payload bytes per page, between 1KiB and 4MiB.
         /// Bounded header, alignment and provenance context reads are separate.
-        #[arg(long, default_value_t = tapes_core::history::DEFAULT_BYTES)]
-        bytes: usize,
+        #[arg(long, default_value_t = ByteSize::new(tapes_core::history::DEFAULT_BYTES as u64))]
+        bytes: ByteSize,
         #[arg(long)]
         json: bool,
     },
@@ -636,8 +668,8 @@ enum Command {
         selection: SelectionArgs,
         #[arg(long)]
         cursor: Option<String>,
-        #[arg(long, default_value_t = tapes_core::history::DEFAULT_BYTES)]
-        bytes: usize,
+        #[arg(long, default_value_t = ByteSize::new(tapes_core::history::DEFAULT_BYTES as u64))]
+        bytes: ByteSize,
         /// Maximum pages to read, between 1 and 32.
         #[arg(long, default_value_t = 1)]
         pages: usize,
@@ -653,8 +685,8 @@ enum Command {
         selection: SelectionArgs,
         #[arg(long)]
         cursor: Option<String>,
-        #[arg(long, default_value_t = tapes_core::history::DEFAULT_BYTES)]
-        bytes: usize,
+        #[arg(long, default_value_t = ByteSize::new(tapes_core::history::DEFAULT_BYTES as u64))]
+        bytes: ByteSize,
         #[arg(long, default_value_t = 1)]
         pages: usize,
         #[arg(long)]
@@ -664,6 +696,8 @@ enum Command {
     Child {
         #[command(flatten)]
         selection: SelectionArgs,
+        #[command(flatten)]
+        read: ReadArgs,
         /// The exact child reference reported by lineage.
         #[arg(long)]
         reference: String,
@@ -679,6 +713,8 @@ enum Command {
     Events {
         #[command(flatten)]
         selection: SelectionArgs,
+        #[command(flatten)]
+        read: ReadArgs,
         /// Return events on turns within the final N-turn ordinal window. The
         /// default is every turn the bounded reader reaches.
         #[arg(long)]
@@ -708,6 +744,8 @@ enum Command {
     Lineage {
         #[command(flatten)]
         selection: SelectionArgs,
+        #[command(flatten)]
+        read: ReadArgs,
         /// Render the versioned tapes-lineage/2 object as JSON.
         #[arg(long)]
         json: bool,
@@ -728,6 +766,8 @@ enum Command {
     Stats {
         #[command(flatten)]
         query: SessionQueryArgs,
+        #[command(flatten)]
+        read: ReadArgs,
         /// Render the versioned tapes-stats/5 object, or tapes-stats-summary/3
         /// for a selection, as JSON.
         #[arg(long)]
@@ -746,6 +786,8 @@ enum Command {
     Usage {
         #[command(flatten)]
         query: SessionQueryArgs,
+        #[command(flatten)]
+        read: ReadArgs,
         /// Group the summed sessions by this dimension. Repeatable and
         /// comma-separated; groups are keyed in the order given
         /// [default: harness,model]. `model` is the model id and `variant`
@@ -774,6 +816,8 @@ enum Command {
     Brief {
         #[command(flatten)]
         selection: SelectionArgs,
+        #[command(flatten)]
+        read: ReadArgs,
         /// Render this many of the session's newest operator and assistant
         /// turns, each cut at 600 characters. Every other kind of turn stays
         /// out of the tail.
@@ -832,6 +876,8 @@ enum Command {
         search: Option<String>,
         #[command(flatten)]
         input: InputArgs,
+        #[command(flatten)]
+        read: ReadArgs,
         /// Read this many of each session's newest turns. The window bounds
         /// the structural read and the optional text tail alike; a window that
         /// omitted turns is reported as `tail-window`.
@@ -859,6 +905,8 @@ enum Command {
     Export {
         #[command(flatten)]
         query: SessionQueryArgs,
+        #[command(flatten)]
+        read: ReadArgs,
         /// Directory for the exported bundles and their manifest.
         #[arg(long)]
         bundle: Option<PathBuf>,
@@ -877,10 +925,10 @@ fn main() -> Result<()> {
 
 fn print_json<T: Serialize>(value: &T, input: &InputArgs) -> Result<()> {
     let body = serde_json::to_string(value)?;
-    if input.supplied() && body.len() as u64 > input.output_bytes {
+    if input.supplied() && body.len() as u64 > input.output_bytes.get() {
         return Err(anyhow!(
             "serialized output exceeds --output-bytes limit of {} bytes",
-            input.output_bytes
+            input.output_bytes.get()
         ));
     }
     println!("{body}");
@@ -956,11 +1004,13 @@ fn dispatch(cli: Cli) -> Result<()> {
         }
         Command::Show {
             selection,
+            read,
             tail,
             exchange,
             json,
         } => {
             selection.validate_input()?;
+            read.refuse_supplied(&selection.input)?;
             let by_latest = selection.latest;
             // The exchange is cut from every turn the read reached, so its
             // window counts exchange turns rather than turns of every kind.
@@ -973,7 +1023,11 @@ fn dispatch(cli: Cli) -> Result<()> {
                     read_tail.unwrap_or(100),
                 )?
             } else {
-                let mut transcript = tapes_core::show(selection.selection(), read_tail)?;
+                let mut transcript = tapes_core::show_with_backends(
+                    &read.backends()?,
+                    selection.selection(),
+                    read_tail.unwrap_or(100),
+                )?;
                 liveness::annotate(std::slice::from_mut(&mut transcript.session));
                 transcript
             };
@@ -1000,7 +1054,11 @@ fn dispatch(cli: Cli) -> Result<()> {
                     "--input is not supported by page; supplied exports have no installed history cursor"
                 ));
             }
-            let page = tapes_core::history::page(selection.selection(), cursor.as_deref(), bytes)?;
+            let page = tapes_core::history::page(
+                selection.selection(),
+                cursor.as_deref(),
+                bytes.get_usize(),
+            )?;
             if json {
                 println!("{}", serde_json::to_string(&page)?);
             } else {
@@ -1039,7 +1097,7 @@ fn dispatch(cli: Cli) -> Result<()> {
             let report = tapes_core::history::search(
                 selection.selection(),
                 cursor.as_deref(),
-                bytes,
+                bytes.get_usize(),
                 pages,
                 &search,
             )?;
@@ -1083,7 +1141,7 @@ fn dispatch(cli: Cli) -> Result<()> {
             let report = tapes_core::history::metadata(
                 selection.selection(),
                 cursor.as_deref(),
-                bytes,
+                bytes.get_usize(),
                 pages,
             )?;
             if json {
@@ -1110,6 +1168,7 @@ fn dispatch(cli: Cli) -> Result<()> {
         }
         Command::Child {
             selection,
+            read,
             reference,
             tail,
             json,
@@ -1120,7 +1179,12 @@ fn dispatch(cli: Cli) -> Result<()> {
                     "--input is not supported by child; supplied exports have no child store"
                 ));
             }
-            let child = tapes_core::child::read(selection.selection(), &reference, tail)?;
+            let child = tapes_core::child::read_with_backends(
+                &read.backends()?,
+                selection.selection(),
+                &reference,
+                tail,
+            )?;
             if json {
                 println!("{}", serde_json::to_string(&child)?);
             } else {
@@ -1160,6 +1224,7 @@ fn dispatch(cli: Cli) -> Result<()> {
         }
         Command::Events {
             selection,
+            read,
             tail,
             name,
             call_id,
@@ -1167,6 +1232,7 @@ fn dispatch(cli: Cli) -> Result<()> {
             json,
         } => {
             selection.validate_input()?;
+            read.refuse_supplied(&selection.input)?;
             let by_latest = selection.latest;
             let mut events = if selection.input.supplied() {
                 let backends = selection.input.backends()?;
@@ -1176,7 +1242,11 @@ fn dispatch(cli: Cli) -> Result<()> {
                     tail.unwrap_or(usize::MAX),
                 )?
             } else {
-                let mut events = tapes_core::events(selection.selection(), tail)?;
+                let mut events = tapes_core::events_with_backends(
+                    &read.backends()?,
+                    selection.selection(),
+                    tail.unwrap_or(usize::MAX),
+                )?;
                 liveness::annotate(std::slice::from_mut(&mut events.session));
                 events
             };
@@ -1187,13 +1257,18 @@ fn dispatch(cli: Cli) -> Result<()> {
                 print_events(&events, by_latest);
             }
         }
-        Command::Lineage { selection, json } => {
+        Command::Lineage {
+            selection,
+            read,
+            json,
+        } => {
             selection.validate_input()?;
+            read.refuse_supplied(&selection.input)?;
             let lineage = if selection.input.supplied() {
                 let backends = selection.input.backends()?;
                 tapes_core::lineage_with_backends(&backends, selection.selection())?
             } else {
-                tapes_core::lineage(selection.selection())?
+                tapes_core::lineage_with_backends(&read.backends()?, selection.selection())?
             };
             if json {
                 print_json(&lineage, &selection.input)?;
@@ -1201,14 +1276,15 @@ fn dispatch(cli: Cli) -> Result<()> {
                 print!("{}", render_lineage(&lineage));
             }
         }
-        Command::Stats { query, json } => {
+        Command::Stats { query, read, json } => {
             query.validate_input()?;
+            read.refuse_supplied(&query.input)?;
             if let Some(one) = query.single() {
                 let stats = if query.input.supplied() {
                     let backends = query.input.backends()?;
                     tapes_core::stats_with_backends(&backends, one)?
                 } else {
-                    tapes_core::stats(one)?
+                    tapes_core::stats_with_backends(&read.backends()?, one)?
                 };
                 if json {
                     print_json(&stats, &query.input)?;
@@ -1223,7 +1299,7 @@ fn dispatch(cli: Cli) -> Result<()> {
                     let backends = query.input.backends()?;
                     tapes_core::stats_summary::with_backends(&backends, &query.set())?
                 } else {
-                    tapes_core::stats_summary::summary(&query.set())?
+                    tapes_core::stats_summary::with_backends(&read.backends()?, &query.set())?
                 };
                 if json {
                     print_json(&summary, &query.input)?;
@@ -1235,14 +1311,20 @@ fn dispatch(cli: Cli) -> Result<()> {
                 }
             }
         }
-        Command::Usage { query, by, json } => {
+        Command::Usage {
+            query,
+            read,
+            by,
+            json,
+        } => {
             query.validate_input()?;
+            read.refuse_supplied(&query.input)?;
             if let Some(one) = query.single() {
                 let usage = if query.input.supplied() {
                     let backends = query.input.backends()?;
                     tapes_core::usage_with_backends(&backends, one)?
                 } else {
-                    tapes_core::usage(one)?
+                    tapes_core::usage_with_backends(&read.backends()?, one)?
                 };
                 if json {
                     print_json(&usage, &query.input)?;
@@ -1265,7 +1347,7 @@ fn dispatch(cli: Cli) -> Result<()> {
                     let backends = query.input.backends()?;
                     tapes_core::usage_summary_with_backends(&backends, &query.set(), &by)?
                 } else {
-                    tapes_core::usage_summary(&query.set(), &by)?
+                    tapes_core::usage_summary_with_backends(&read.backends()?, &query.set(), &by)?
                 };
                 if json {
                     print_json(&summary, &query.input)?;
@@ -1283,15 +1365,21 @@ fn dispatch(cli: Cli) -> Result<()> {
         }
         Command::Brief {
             selection,
+            read,
             tail,
             json,
         } => {
             selection.validate_input()?;
+            read.refuse_supplied(&selection.input)?;
             let brief = if selection.input.supplied() {
                 let backends = selection.input.backends()?;
                 tapes_core::brief_with_backends(&backends, selection.selection(), tail)?
             } else {
-                let mut brief = tapes_core::brief(selection.selection(), Some(tail))?;
+                let mut brief = tapes_core::brief_with_backends(
+                    &read.backends()?,
+                    selection.selection(),
+                    tail,
+                )?;
                 liveness::annotate_brief(&mut brief);
                 brief
             };
@@ -1312,11 +1400,13 @@ fn dispatch(cli: Cli) -> Result<()> {
             sort,
             search,
             input,
+            read,
             tail,
             text,
             json,
         } => {
             input.validate_bulk()?;
+            read.refuse_supplied(&input)?;
             reject_installed_selection(&input, harness.as_deref(), &scope)?;
             if since
                 .zip(until)
@@ -1354,7 +1444,12 @@ fn dispatch(cli: Cli) -> Result<()> {
                 let backends = input.backends()?;
                 tapes_core::endings::endings_with_backends(&backends, &selection, tail, text)?
             } else {
-                let mut report = tapes_core::endings::endings(&selection, tail, text)?;
+                let mut report = tapes_core::endings::endings_with_backends(
+                    &read.backends()?,
+                    &selection,
+                    tail,
+                    text,
+                )?;
                 liveness::annotate_endings(&mut report.endings);
                 report
             };
@@ -1379,10 +1474,12 @@ fn dispatch(cli: Cli) -> Result<()> {
         }
         Command::Export {
             query,
+            read,
             bundle,
             exchange,
         } => {
             query.validate_input()?;
+            read.refuse_supplied(&query.input)?;
             let view = if exchange {
                 tapes_core::TurnView::Exchange
             } else {
@@ -1393,7 +1490,12 @@ fn dispatch(cli: Cli) -> Result<()> {
                     let backends = query.input.backends()?;
                     tapes_core::export_with_backends(&backends, one, bundle.as_deref(), view)?
                 } else {
-                    tapes_core::export(one, bundle.as_deref(), view)?
+                    tapes_core::export_with_backends(
+                        &read.backends()?,
+                        one,
+                        bundle.as_deref(),
+                        view,
+                    )?
                 };
                 print_manifest(&bundle);
             } else {
@@ -1408,7 +1510,12 @@ fn dispatch(cli: Cli) -> Result<()> {
                         view,
                     )?
                 } else {
-                    tapes_core::export_selection(&query.set(), bundle.as_deref(), view)?
+                    tapes_core::export_selection_with_backends(
+                        &read.backends()?,
+                        &query.set(),
+                        bundle.as_deref(),
+                        view,
+                    )?
                 };
                 print_selection_manifest(&export);
                 if export.every_session_failed() {
@@ -2547,7 +2654,7 @@ fn render_truncation_notes(out: &mut String, truncation: &Truncation) {
         match bound {
             SourceBound::FileTail { bytes } => out.push_str(&format!(
                 "Note: Only the final {} of the recording was read; earlier records are beyond \
-                 what --tail or `tapes export` can reach.\n",
+                 what --tail or `tapes export` can reach, and a larger --read-bytes reaches them.\n",
                 human_bytes(*bytes)
             )),
             SourceBound::RecordPage { records, of } => out.push_str(&format!(

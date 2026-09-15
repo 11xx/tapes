@@ -22,7 +22,14 @@ pub mod codex;
 pub mod opencode;
 pub mod pi;
 
-const MAX_TRANSCRIPT_BYTES: u64 = 4 * 1024 * 1024;
+/// How much of a recording's end a transcript read takes unless the caller
+/// sets another bound.
+pub const DEFAULT_READ_BYTES: u64 = 4 * 1024 * 1024;
+/// The narrowest read bound a caller may set: the opening probe's own size.
+pub const MIN_READ_BYTES: u64 = HEAD_PROBE_BYTES;
+/// The widest read bound a caller may set. The window is held in memory
+/// whole, so it stays finite.
+pub const MAX_READ_BYTES: u64 = 1024 * 1024 * 1024;
 /// Keep a content search from monopolizing a large machine while still
 /// allowing independent file reads to overlap.
 const MAX_SEARCH_WORKERS: usize = 8;
@@ -416,16 +423,35 @@ pub(crate) fn filter_listing_search_parallel<B: Backend + Sync + ?Sized>(
 }
 
 pub fn backends() -> Vec<Box<dyn Backend>> {
+    backends_reading(DEFAULT_READ_BYTES)
+}
+
+/// The installed backends, each reading at most `read_bytes` from the end of a
+/// file-backed recording.
+pub fn backends_with_read_bytes(read_bytes: u64) -> Result<Vec<Box<dyn Backend>>> {
+    if !(MIN_READ_BYTES..=MAX_READ_BYTES).contains(&read_bytes) {
+        anyhow::bail!(
+            "read bytes must be between {} and {}",
+            crate::byte_size::ByteSize::new(MIN_READ_BYTES),
+            crate::byte_size::ByteSize::new(MAX_READ_BYTES)
+        );
+    }
+    Ok(backends_reading(read_bytes))
+}
+
+fn backends_reading(read_bytes: u64) -> Vec<Box<dyn Backend>> {
     let mut backends: Vec<Box<dyn Backend>> = vec![
-        Box::new(claude::ClaudeBackend::default()),
-        Box::new(codex::CodexBackend::default()),
+        Box::new(claude::ClaudeBackend::default().with_read_bytes(read_bytes)),
+        Box::new(codex::CodexBackend::default().with_read_bytes(read_bytes)),
     ];
     backends.extend(
         opencode::OpenCodeBackend::defaults()
             .into_iter()
             .map(|backend| Box::new(backend) as Box<dyn Backend>),
     );
-    backends.push(Box::new(pi::PiBackend::default()));
+    backends.push(Box::new(
+        pi::PiBackend::default().with_read_bytes(read_bytes),
+    ));
     backends
 }
 
@@ -519,11 +545,11 @@ impl Recording {
     }
 }
 
-pub(crate) fn read_recording(path: &Path) -> Result<Recording> {
+pub(crate) fn read_recording(path: &Path, read_bytes: u64) -> Result<Recording> {
     let mut file =
         File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
     let metadata = file.metadata()?;
-    let tail = read_jsonl_from(&mut file, &metadata)?;
+    let tail = read_jsonl_from(&mut file, &metadata, read_bytes)?;
     let head = if tail.truncated {
         head_jsonl_from(&mut file, tail.source_length)?
     } else {
@@ -542,13 +568,13 @@ pub(crate) fn read_recording(path: &Path) -> Result<Recording> {
     })
 }
 
-pub(crate) fn read_jsonl(path: &Path) -> Result<Jsonl> {
+pub(crate) fn read_jsonl(path: &Path, read_bytes: u64) -> Result<Jsonl> {
     let mut file =
         File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
     let metadata = file
         .metadata()
         .with_context(|| format!("failed to inspect {}", path.display()))?;
-    let read = read_jsonl_from(&mut file, &metadata)?;
+    let read = read_jsonl_from(&mut file, &metadata, read_bytes)?;
     let after = file.metadata()?;
     if !same_source(&metadata, &after) {
         anyhow::bail!("recording source changed during the read; restart without a cursor");
@@ -556,9 +582,12 @@ pub(crate) fn read_jsonl(path: &Path) -> Result<Jsonl> {
     Ok(read)
 }
 
-fn read_jsonl_from(file: &mut File, metadata: &std::fs::Metadata) -> Result<Jsonl> {
+fn read_jsonl_from(
+    file: &mut File,
+    metadata: &std::fs::Metadata,
+    configured_bound: u64,
+) -> Result<Jsonl> {
     let source_length = metadata.len();
-    let configured_bound = MAX_TRANSCRIPT_BYTES;
     let truncated = source_length > configured_bound;
     let read_start = source_length.saturating_sub(configured_bound);
     let read_end = source_length;
@@ -683,7 +712,7 @@ fn stat_revision(metadata: &std::fs::Metadata) -> String {
 /// character to be written as a `\u` escape, and non-ASCII case folding can
 /// change the characters a search sees, so those inputs stay candidates for
 /// the normal parser. A raw hit is only a reason to parse; it is not a match.
-fn raw_tail_may_contain(path: &Path, needle: &str) -> bool {
+fn raw_tail_may_contain(path: &Path, needle: &str, read_bytes: u64) -> bool {
     if needle.is_empty() || !needle.bytes().all(|byte| byte.is_ascii_alphanumeric()) {
         return true;
     }
@@ -693,16 +722,12 @@ fn raw_tail_may_contain(path: &Path, needle: &str) -> bool {
     let Ok(len) = file.metadata().map(|metadata| metadata.len()) else {
         return true;
     };
-    let start = len.saturating_sub(MAX_TRANSCRIPT_BYTES);
+    let start = len.saturating_sub(read_bytes);
     if file.seek(SeekFrom::Start(start)).is_err() {
         return true;
     }
     let mut bytes = Vec::new();
-    if file
-        .take(MAX_TRANSCRIPT_BYTES)
-        .read_to_end(&mut bytes)
-        .is_err()
-    {
+    if file.take(read_bytes).read_to_end(&mut bytes).is_err() {
         return true;
     }
     if bytes.iter().any(|byte| *byte >= 0x80) || bytes.windows(2).any(|window| window == b"\\u") {
@@ -817,6 +842,7 @@ pub(crate) fn list_files_with_search(
     query: &Query,
     needle: &str,
     tail: usize,
+    read_bytes: u64,
     probe: impl Fn(&Path) -> Option<PathBuf>,
     parse: impl Fn(&Path) -> Option<ParsedFile> + Sync,
 ) -> Listing {
@@ -856,8 +882,8 @@ pub(crate) fn list_files_with_search(
                         .iter()
                         .map(|path| {
                             let oversized = fs::metadata(path)
-                                .map_or(true, |metadata| metadata.len() > MAX_TRANSCRIPT_BYTES);
-                            if !oversized && !raw_tail_may_contain(path, &needle) {
+                                .map_or(true, |metadata| metadata.len() > read_bytes);
+                            if !oversized && !raw_tail_may_contain(path, &needle, read_bytes) {
                                 return SearchOutcome::Miss;
                             }
                             let Some(parsed) = parse(path) else {
@@ -1415,13 +1441,13 @@ mod tests {
         let path = std::env::temp_dir().join(format!("tapes-raw-prefilter-{}", std::process::id()));
         let _ = fs::remove_file(&path);
         fs::write(&path, br#"{"text":"other"}"#).unwrap();
-        assert!(!raw_tail_may_contain(&path, "needle"));
+        assert!(!raw_tail_may_contain(&path, "needle", DEFAULT_READ_BYTES));
 
         fs::write(&path, br#"{"text":"NEEDLE"}"#).unwrap();
-        assert!(raw_tail_may_contain(&path, "needle"));
+        assert!(raw_tail_may_contain(&path, "needle", DEFAULT_READ_BYTES));
 
         fs::write(&path, br#"{"text":"\u006e\u0065\u0065\u0064\u006c\u0065"}"#).unwrap();
-        assert!(raw_tail_may_contain(&path, "needle"));
+        assert!(raw_tail_may_contain(&path, "needle", DEFAULT_READ_BYTES));
 
         fs::remove_file(path).unwrap();
     }
@@ -1438,6 +1464,7 @@ mod tests {
             &Query::unscoped(10),
             "needle",
             32,
+            DEFAULT_READ_BYTES,
             |_| None,
             |_| {
                 parsed.store(true, Ordering::Relaxed);

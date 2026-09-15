@@ -122,7 +122,10 @@ impl InputOptions {
             ("resident bytes", self.resident_bytes, MAX_RESIDENT_BYTES),
         ] {
             if value == 0 || value > maximum {
-                bail!("input {name} must be between 1 and {maximum}");
+                bail!(
+                    "input {name} must be between 1 and {}",
+                    crate::byte_size::ByteSize::new(maximum)
+                );
             }
         }
         if self.occurrence.is_some() && self.after_occurrence.is_some() {
