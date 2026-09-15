@@ -28,13 +28,21 @@ use crate::usage::{Durations, ModelUsage, UsageDetail};
 #[derive(Clone, Debug)]
 pub struct ClaudeBackend {
     root: Option<PathBuf>,
+    /// How much of a recording's end a transcript read takes.
+    read_bytes: u64,
 }
 
 impl ClaudeBackend {
     pub fn new(root: impl Into<PathBuf>) -> Self {
         Self {
             root: Some(root.into()),
+            read_bytes: super::DEFAULT_READ_BYTES,
         }
+    }
+
+    /// Read at most `read_bytes` from the end of each recording.
+    pub fn with_read_bytes(self, read_bytes: u64) -> Self {
+        Self { read_bytes, ..self }
     }
 
     fn parse(&self, path: &Path) -> Result<(Session, Vec<Turn>, Jsonl)> {
@@ -46,7 +54,7 @@ impl ClaudeBackend {
         path: &Path,
         parent: Option<&str>,
     ) -> Result<(Session, Vec<Turn>, Jsonl)> {
-        let recording = read_recording(path)?;
+        let recording = read_recording(path, self.read_bytes)?;
         if let Some(parent) = parent {
             let mut seen = false;
             for value in recording.opening().iter().chain(&recording.tail.values) {
@@ -224,6 +232,7 @@ impl Default for ClaudeBackend {
     fn default() -> Self {
         Self {
             root: home_path(&[".claude", "projects"]),
+            read_bytes: super::DEFAULT_READ_BYTES,
         }
     }
 }
@@ -428,6 +437,7 @@ impl Backend for ClaudeBackend {
             query,
             needle,
             tail,
+            self.read_bytes,
             |path| head_directory(path, claude_cwd),
             |path| {
                 self.parse(path)
@@ -465,7 +475,7 @@ impl Backend for ClaudeBackend {
             .ok_or_else(|| anyhow!("claude store is unavailable"))?;
         let path = matching_session_file(session_files(root), &session.id)
             .ok_or_else(|| anyhow!("claude session {} is unavailable", session.id))?;
-        let (turns, recording, trailing_record) = read_transcript(&path)?;
+        let (turns, recording, trailing_record) = read_transcript(&path, self.read_bytes)?;
         let subagents = subagent_transcript_count(&path);
         let notes = (subagents > 0)
             .then(|| {
@@ -498,7 +508,7 @@ impl Backend for ClaudeBackend {
             .ok_or_else(|| anyhow!("claude store is unavailable"))?;
         let path = matching_session_file(session_files(root), &session.id)
             .ok_or_else(|| anyhow!("claude session {} is unavailable", session.id))?;
-        let read = read_jsonl(&path)?;
+        let read = read_jsonl(&path, self.read_bytes)?;
         let mut calls = agent_calls(&read.values);
 
         let mut children = Vec::new();
@@ -563,8 +573,11 @@ impl Backend for ClaudeBackend {
     }
 }
 
-fn read_transcript(path: &Path) -> Result<(Vec<Turn>, super::Recording, Option<TrailingRecord>)> {
-    let recording = read_recording(path)?;
+fn read_transcript(
+    path: &Path,
+    read_bytes: u64,
+) -> Result<(Vec<Turn>, super::Recording, Option<TrailingRecord>)> {
+    let recording = read_recording(path, read_bytes)?;
     let read = &recording.tail;
     let mut turns = Vec::new();
     let mut last_turn = None;

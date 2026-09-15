@@ -23,17 +23,25 @@ use crate::model::{
 #[derive(Clone, Debug)]
 pub struct PiBackend {
     root: Option<PathBuf>,
+    /// How much of a recording's end a transcript read takes.
+    read_bytes: u64,
 }
 
 impl PiBackend {
     pub fn new(root: impl Into<PathBuf>) -> Self {
         Self {
             root: Some(root.into()),
+            read_bytes: super::DEFAULT_READ_BYTES,
         }
     }
 
+    /// Read at most `read_bytes` from the end of each recording.
+    pub fn with_read_bytes(self, read_bytes: u64) -> Self {
+        Self { read_bytes, ..self }
+    }
+
     fn parse(&self, path: &Path) -> Result<(Session, Vec<Turn>, Jsonl, usize)> {
-        let recording = read_recording(path)?;
+        let recording = read_recording(path, self.read_bytes)?;
         let (started_at, last_activity_at) = recording
             .time_range()
             .map_or((None, None), |(started, activity)| {
@@ -150,7 +158,10 @@ impl Default for PiBackend {
                     .map(|path| path.join("sessions"))
             })
             .or_else(|| home_path(&[".pi", "agent", "sessions"]));
-        Self { root }
+        Self {
+            root,
+            read_bytes: super::DEFAULT_READ_BYTES,
+        }
     }
 }
 
@@ -194,6 +205,7 @@ impl Backend for PiBackend {
             query,
             needle,
             tail,
+            self.read_bytes,
             |path| head_directory(path, pi_cwd),
             |path| {
                 self.parse(path)
@@ -231,7 +243,8 @@ impl Backend for PiBackend {
             .ok_or_else(|| anyhow!("pi store is unavailable"))?;
         let path = session_file(root, &session.id)
             .ok_or_else(|| anyhow!("pi session {} is unavailable", session.id))?;
-        let (turns, recording, abandoned, trailing_record) = read_transcript(&path)?;
+        let (turns, recording, abandoned, trailing_record) =
+            read_transcript(&path, self.read_bytes)?;
         let notes = (abandoned > 0)
             .then(|| {
                 if abandoned == 1 {
@@ -263,7 +276,7 @@ impl Backend for PiBackend {
             .ok_or_else(|| anyhow!("pi store is unavailable"))?;
         let path = session_file(root, &session.id)
             .ok_or_else(|| anyhow!("pi session {} is unavailable", session.id))?;
-        let recording = read_recording(&path)?;
+        let recording = read_recording(&path, self.read_bytes)?;
         let parent = recording
             .opening()
             .iter()
@@ -284,8 +297,9 @@ impl Backend for PiBackend {
 
 fn read_transcript(
     path: &Path,
+    read_bytes: u64,
 ) -> Result<(Vec<Turn>, super::Recording, usize, Option<TrailingRecord>)> {
-    let recording = read_recording(path)?;
+    let recording = read_recording(path, read_bytes)?;
     let read = &recording.tail;
     let entries = read
         .values

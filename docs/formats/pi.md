@@ -43,7 +43,7 @@ needs and the normalized model has no field for it.
 | `message` | the conversation, under `message.role` |
 
 Because the header is never repeated, the reader takes it from the file's
-first 64 KiB rather than from the bounded 4 MiB tail: the session id, the
+first 64 KiB rather than from the bounded tail (4 MiB by default): the session id, the
 recorded start timestamp, and the working directory come from that opening
 whatever the file's size. The tail supplies the active path, the turns, the
 last activity, and the final model and thinking level. The first-turn hint is

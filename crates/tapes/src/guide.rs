@@ -146,6 +146,8 @@ READ A SUPPLIED EXPORT
   normalized result. Scan, decoded, record, member, resident, and
   serialized-output budgets are finite and configurable with `--scan-bytes`,
   `--decoded-bytes`, `--record-bytes`, `--resident-bytes`, and `--output-bytes`.
+  Every byte flag takes a count or a size: a bare or `iB` unit is binary
+  (`64k` and `64KiB` are 65536 bytes) and a `B` unit is decimal (`64KB` is 64000).
   Oversized records and malformed
   members are reported as gaps or diagnostics while synchronization remains
   possible. A partial scan never becomes a not-found claim. Referenced files,
@@ -173,8 +175,9 @@ PROBE BEFORE EXPORTING
   `truncation`: a `window` names how many turns were returned and how many
   earlier ones the --tail bound omitted, which a larger --tail or export
   recovers; `source` lists bounds the reader itself reached (a file tail, a
-  store page, cut turn text). Wider turn windows retain source bounds; use
-  explicit page reads to reach older Claude or Codex file history. `read`
+  store page, cut turn text). Wider turn windows retain source bounds;
+  `--read-bytes` widens the file tail (4MiB by default, at most 1GiB), and
+  explicit page reads reach older Claude or Codex file history. `read`
   records the source length, configured bound, physical head/tail/context/
   alignment ranges, decoded record spans, context-only record spans, and gaps;
   physical coverage does not erase malformed records, and a partial gap is

@@ -46,7 +46,8 @@ payload `turn_id` is retained separately as `request_turn_id` and is never
 invented from a neighboring record.
 
 The normalized transcript also retains a bounded `read` descriptor. It records
-the source length, the 4 MiB configured tail bound, the physical head, tail,
+the source length, the configured tail bound (4 MiB unless `--read-bytes` sets
+another), the physical head, tail,
 context, and alignment ranges, each decoded record's absolute byte span,
 separate spans for records used only as opening or newer provenance context,
 and gaps for the discarded partial prefix or malformed records. When the tail
@@ -67,7 +68,7 @@ and those context-only record spans in `read`; it never inserts the opening
 records into `turns`. Metadata pages use the same page envelope with the
 `models-only` option and do not perform this provenance read.
 
-The normalized reader retains only a bounded 4 MiB tail for transcript reads,
+The normalized reader retains only a bounded tail (4 MiB by default) for transcript reads,
 plus the first 64 KiB of the file. `session_meta` is the first line, so the
 session id, the recorded start timestamp, the working directory, and the first
 user turn come from that opening whatever the file's size; the tail supplies
