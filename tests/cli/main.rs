@@ -4678,12 +4678,31 @@ fn show_full_streams_a_claude_recording_past_the_read_bound() {
         "{tailed}"
     );
 
-    for refused in [
-        vec!["show", "full-claude", "--full", "--json"],
-        vec!["show", "full-claude", "--full", "--read-bytes", "1m"],
-    ] {
-        assert!(!run(&refused).status.success(), "{refused:?}");
-    }
+    let json: Value =
+        serde_json::from_str(&stdout(&["show", "full-claude", "--full", "--json"])).unwrap();
+    assert_eq!(json["schema"], "tapes-session/8");
+    assert_eq!(json["turns"].as_array().unwrap().len(), 50);
+    assert_eq!(json["turns"][0]["text"], "opening request");
+    assert_eq!(json["turns"][49]["ordinal"], 49);
+    assert_eq!(json["read"]["source_length"], body.len() as u64);
+    assert_eq!(json["read"]["projection_options"][0], "full");
+    assert!(json.get("truncation").is_none(), "{}", json["truncation"]);
+    let tailed: Value = serde_json::from_str(&stdout(&[
+        "show",
+        "full-claude",
+        "--full",
+        "--json",
+        "--tail",
+        "2",
+    ]))
+    .unwrap();
+    assert_eq!(tailed["turns"].as_array().unwrap().len(), 2);
+    assert_eq!(tailed["truncation"]["window"]["omitted"], 48);
+    assert!(
+        !run(&["show", "full-claude", "--full", "--read-bytes", "1m"])
+            .status
+            .success()
+    );
     let _opencode = opencode_program(root.path(), "opencode2");
     let mut opencode = tapes();
     opencode.args(["show", "ses_000000fixtureSharedSession", "--full"]);
