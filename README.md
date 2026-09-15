@@ -277,7 +277,7 @@ disappear merely because it has no readable text. The turn's
 record. A part reference repeats that parent coordinate and adds
 `content_part_index` for its position within the turn; a source-native
 `pointer` remains the source pointer at both levels.
-JSON output uses the `tapes-session/8` transcript schema, with the optional
+JSON output uses the `tapes-session/9` transcript schema, with the optional
 `live` annotation when the authority answers. The human header marks the same
 state. Supplied mapping exports also carry bounded graph evidence with the
 selected canonical path, retained nodes, and retained parent-child edges.
@@ -287,11 +287,13 @@ Citation kind, URI, and title descriptors use 4 KiB per-field and 16 KiB
 cumulative UTF-8 byte bounds; shortened values retain their original lengths
 and explicit truncation facts.
 
-`--exchange` on `show` or `export` keeps only the exchange: operator requests
-and assistant-visible text, each with its timestamps, native ids, and original
-ordinal. Reasoning, tool calls and results, harness commands, notices, and
-attached context are left out and counted by kind under `projection`, and
-`--tail` counts exchange turns.
+`--only <KIND>` and `--omit <KIND>` on `show` or `export` keep turns by kind:
+repeatable or comma-separated, with the kind labels `operator`, `assistant`,
+`reasoning`, `tool`, `control`, `ambient`, `notice`, and `unknown`, and never
+together. Kept turns carry their timestamps, native ids, and original
+ordinals; every other turn is counted by kind under `projection`, and `--tail`
+counts kept turns. `show --exchange` is the name for `--only
+operator,assistant`: operator requests and assistant-visible text.
 
 A file-backed transcript read takes the last 4 MiB of a recording.
 `--read-bytes` on `show`, `export`, `events`, `lineage`, `stats`, `usage`,
@@ -301,10 +303,10 @@ in force.
 
 `show --full` reads the whole recording instead of its tail, writing each turn
 as it is read, so memory follows one record rather than the file. Every turn
-is shown unless `--tail` keeps the newest, and `--exchange` applies as it does
-to a bounded read. It reads installed Claude, Codex, and Pi recordings;
+is shown unless `--tail` keeps the newest, and `--exchange`, `--only`, and
+`--omit` apply as they do to a bounded read. It reads installed Claude, Codex, and Pi recordings;
 OpenCode refuses it by name, and `--read-bytes` is not available with it.
-`--full --json` writes the same `tapes-session/8` object turn by turn: its
+`--full --json` writes the same `tapes-session/9` object turn by turn: its
 `read` evidence is one range from byte 0 to the source length with
 `projection_options: ["full"]`, and each turn's `record_ref` carries its own
 record span. Codex and Pi recordings are read twice: the first pass keeps only
@@ -430,7 +432,7 @@ in one screen, in that reading order.
 - `.context.md` — the exchange `show --exchange` returns: exact operator turns
   and assistant-visible text, without the harness's own commands, notices,
   attached context, or user turns of unknown sender. Read first.
-- `.json` — the canonical `tapes-session/8` object plus turns, cost, tokens,
+- `.json` — the canonical `tapes-session/9` object plus turns, cost, tokens,
   their `accounting` basis and coverage when present, any verified
   `trailing_record`, retained graph/artifact evidence, and the session
   directory's git head and branch when they resolve. Query selectively with
@@ -515,7 +517,7 @@ rather than a resent history. `tapes usage --here --since <date> --json` answers
 <date> --json` says what each of those sessions ends on, so a scan reads the
 few endings that matter instead of every tail.
 
-**Contracts you can build on.** `tapes-list/5`, `tapes-session/8`,
+**Contracts you can build on.** `tapes-list/5`, `tapes-session/9`,
 `tapes-events/6`, `tapes-usage/5`, `tapes-usage-summary/3`, `tapes-lineage/2`,
 `tapes-endings/6`, `tapes-child/3`, `tapes-stats/5`, `tapes-stats-summary/3`, `tapes-brief/6`,
 `tapes-page/4`, `tapes-history-search/4`, `tapes-metadata-history/4`,

@@ -13,8 +13,8 @@ use tapes_core::event::{EventKind, EventRecord, EventTranscript, Incomplete};
 use tapes_core::lineage::{ChildRef, LineageView};
 use tapes_core::model::{
     human_bytes, human_speaker, human_timestamp, human_title, speaker, Accounting, AccountingBasis,
-    AccountingCoverage, Cost, LiveState, Session, SourceBound, SourceDescriptor, Tokens,
-    Transcript, Truncation, Turn,
+    AccountingCoverage, Cost, LiveState, Projection, Session, SourceBound, SourceDescriptor,
+    Tokens, Transcript, Truncation, Turn, TurnKind, TurnSelection,
 };
 use tapes_core::stats::{
     Coverage, LineageStats, StatsView, TimeStats, ToolNameStats, ToolStats, TurnKindCounts,
@@ -289,6 +289,41 @@ impl ReadArgs {
             None => Ok(tapes_core::backend::backends()),
         }
     }
+}
+
+/// Which turn kinds a transcript keeps. Kinds are named by the labels turns
+/// carry: operator, assistant, reasoning, tool, control, ambient, notice, and
+/// unknown.
+#[derive(Args, Clone, Debug, Default)]
+struct TurnKindArgs {
+    /// Keep only turns of these kinds; repeatable or comma-separated. Kept
+    /// turns carry their timestamps and original ordinals, and every other
+    /// turn is counted by kind under `projection`.
+    #[arg(long, value_name = "KIND", value_delimiter = ',', value_parser = turn_kind_parser(), conflicts_with = "omit")]
+    only: Vec<TurnKind>,
+    /// Keep every turn but those of these kinds; repeatable or
+    /// comma-separated. Omitted turns are counted by kind under `projection`.
+    #[arg(long, value_name = "KIND", value_delimiter = ',', value_parser = turn_kind_parser())]
+    omit: Vec<TurnKind>,
+}
+
+impl TurnKindArgs {
+    /// The selection the flags ask for, with the flag that asked for it.
+    fn selection(&self) -> Option<(TurnSelection, &'static str)> {
+        if !self.only.is_empty() {
+            return Some((TurnSelection::only(self.only.iter().copied()), "--only"));
+        }
+        if !self.omit.is_empty() {
+            return Some((TurnSelection::omit(self.omit.iter().copied()), "--omit"));
+        }
+        None
+    }
+}
+
+fn turn_kind_parser() -> impl clap::builder::TypedValueParser<Value = TurnKind> {
+    use clap::builder::TypedValueParser as _;
+    clap::builder::PossibleValuesParser::new(TurnKind::ALL.map(TurnKind::label))
+        .map(|label| TurnKind::from_label(&label).expect("the parser admits only turn-kind labels"))
 }
 
 /// Select one session by ID, exact recorded title, or latest activity.
@@ -630,16 +665,16 @@ enum Command {
         selection: SelectionArgs,
         #[command(flatten)]
         read: ReadArgs,
-        /// Show only the final number of messages.
+        /// Show only the final number of messages. Under --exchange, --only,
+        /// or --omit it counts kept turns.
         #[arg(long)]
         tail: Option<usize>,
         /// Keep only the exchange: operator requests and the agent's visible
-        /// text, each with its timestamps and original ordinal. Reasoning,
-        /// tool calls and results, harness commands, notices, and attached
-        /// context are left out and counted under `projection`; --tail counts
-        /// exchange turns.
-        #[arg(long)]
+        /// text. Shorthand for --only operator,assistant.
+        #[arg(long, conflicts_with_all = ["only", "omit"])]
         exchange: bool,
+        #[command(flatten)]
+        kinds: TurnKindArgs,
         /// Read the whole recording instead of its bounded tail, writing each
         /// turn as it is read so memory follows one record rather than the
         /// file. Every turn is shown unless --tail is given; with --json the
@@ -906,6 +941,11 @@ enum Command {
     /// session keeps its own bounded bundle; a session whose store cannot be
     /// read is recorded in the manifest's `failed` and does not stop the run,
     /// which fails only when every selected session did.
+    ///
+    /// A bundle's files are fixed views of one read: `.context.md` holds the
+    /// exchange, as `show --exchange` returns it; `.json` and `.trace.md` hold
+    /// every turn. --only and --omit narrow all three, and the JSON and trace
+    /// count the omitted turns by kind under `projection`.
     #[command(group(clap::ArgGroup::new("export_selection")
         .args(["session", "latest", "title", "occurrence", "input", "here", "project", "global", "harness", "model", "directory", "since", "until", "search"])
         .required(true).multiple(true)))]
@@ -917,11 +957,8 @@ enum Command {
         /// Directory for the exported bundles and their manifest.
         #[arg(long)]
         bundle: Option<PathBuf>,
-        /// Keep only the exchange in each bundle: operator requests and the
-        /// agent's visible text, with their timestamps and original ordinals.
-        /// Omitted turns are counted under `projection`.
-        #[arg(long)]
-        exchange: bool,
+        #[command(flatten)]
+        kinds: TurnKindArgs,
     },
 }
 
@@ -1014,12 +1051,18 @@ fn dispatch(cli: Cli) -> Result<()> {
             read,
             tail,
             exchange,
+            kinds,
             full,
             json,
         } => {
             selection.validate_input()?;
             read.refuse_supplied(&selection.input)?;
             let by_latest = selection.latest;
+            let turns = if exchange {
+                Some((TurnSelection::EXCHANGE, "--exchange"))
+            } else {
+                kinds.selection()
+            };
             if full {
                 if selection.input.supplied() {
                     return Err(anyhow!(
@@ -1027,11 +1070,15 @@ fn dispatch(cli: Cli) -> Result<()> {
                          --scan-bytes, --decoded-bytes, and --record-bytes"
                     ));
                 }
-                return show_full(&selection, tail, exchange, json, by_latest);
+                return show_full(&selection, tail, turns, json, by_latest);
             }
-            // The exchange is cut from every turn the read reached, so its
-            // window counts exchange turns rather than turns of every kind.
-            let read_tail = if exchange { Some(usize::MAX) } else { tail };
+            // A selection is cut from every turn the read reached, so its
+            // window counts kept turns rather than turns of every kind.
+            let read_tail = if turns.is_some() {
+                Some(usize::MAX)
+            } else {
+                tail
+            };
             let transcript = if selection.input.supplied() {
                 let backends = selection.input.backends()?;
                 tapes_core::show_with_backends(
@@ -1048,15 +1095,14 @@ fn dispatch(cli: Cli) -> Result<()> {
                 liveness::annotate(std::slice::from_mut(&mut transcript.session));
                 transcript
             };
-            let transcript = if exchange {
-                transcript.into_exchange(tail.unwrap_or(100))
-            } else {
-                transcript
+            let transcript = match turns {
+                Some((kept, _)) => transcript.project(kept, tail.unwrap_or(100)),
+                None => transcript,
             };
             if json {
                 print_json(&transcript, &selection.input)?;
             } else {
-                print_transcript(&transcript, by_latest);
+                print_transcript(&transcript, by_latest, turns.map(|(_, flag)| flag));
             }
         }
         Command::Page {
@@ -1211,7 +1257,7 @@ fn dispatch(cli: Cli) -> Result<()> {
                     child.parent.id,
                     child.parent.harness()
                 );
-                print_transcript(&child.transcript, false);
+                print_transcript(&child.transcript, false, None);
                 print!("{}", render_usage(&child.usage));
                 if !child.ending.facts.is_empty() {
                     println!(
@@ -1493,15 +1539,11 @@ fn dispatch(cli: Cli) -> Result<()> {
             query,
             read,
             bundle,
-            exchange,
+            kinds,
         } => {
             query.validate_input()?;
             read.refuse_supplied(&query.input)?;
-            let view = if exchange {
-                tapes_core::TurnView::Exchange
-            } else {
-                tapes_core::TurnView::All
-            };
+            let view = kinds.selection().map(|(kept, _)| kept);
             if let Some(one) = query.single() {
                 let bundle = if query.input.supplied() {
                     let backends = query.input.backends()?;
@@ -2548,8 +2590,8 @@ fn print_bundle_file(file: &BundleFile) {
     println!("{}\t{}", file.path.display(), human_bytes(file.bytes));
 }
 
-fn print_transcript(transcript: &Transcript, by_latest: bool) {
-    print!("{}", render_transcript(transcript, by_latest));
+fn print_transcript(transcript: &Transcript, by_latest: bool, selected_by: Option<&str>) {
+    print!("{}", render_transcript(transcript, by_latest, selected_by));
 }
 
 /// `show --full` writes each turn as the reader produces it, so the whole
@@ -2557,7 +2599,7 @@ fn print_transcript(transcript: &Transcript, by_latest: bool) {
 fn show_full(
     selection: &SelectionArgs,
     tail: Option<usize>,
-    exchange: bool,
+    turns: Option<(TurnSelection, &'static str)>,
     json: bool,
     by_latest: bool,
 ) -> Result<()> {
@@ -2566,14 +2608,13 @@ fn show_full(
         out: std::io::BufWriter::new(stdout.lock()),
         by_latest,
         tail,
-        exchange,
+        projection: turns.map(|(kept, flag)| (Projection::new(kept), flag)),
         json,
         writer: None,
         session: None,
         window: std::collections::VecDeque::new(),
         last: None,
         total: 0,
-        omitted: std::collections::BTreeMap::new(),
     };
     let read = tapes_core::show_full_with_backends(
         &tapes_core::backend::backends(),
@@ -2587,7 +2628,8 @@ struct FullShow<W: std::io::Write> {
     out: W,
     by_latest: bool,
     tail: Option<usize>,
-    exchange: bool,
+    /// The kinds kept, counting what they omit, and the flag that chose them.
+    projection: Option<(Projection, &'static str)>,
     json: bool,
     /// The session object being written, under `--json`.
     writer: Option<tapes_core::model::StreamedSessionJson>,
@@ -2597,7 +2639,6 @@ struct FullShow<W: std::io::Write> {
     /// The newest turn written, which the activity note compares against.
     last: Option<Turn>,
     total: usize,
-    omitted: std::collections::BTreeMap<tapes_core::model::TurnKind, usize>,
 }
 
 impl<W: std::io::Write> tapes_core::TurnSink for FullShow<W> {
@@ -2618,9 +2659,10 @@ impl<W: std::io::Write> tapes_core::TurnSink for FullShow<W> {
     }
 
     fn turn(&mut self, turn: Turn) -> Result<()> {
-        if self.exchange && !turn.kind.in_exchange() {
-            *self.omitted.entry(turn.kind).or_insert(0) += 1;
-            return Ok(());
+        if let Some((projection, _)) = &mut self.projection {
+            if !projection.admit(turn.kind) {
+                return Ok(());
+            }
         }
         self.total += 1;
         match self.tail {
@@ -2690,12 +2732,10 @@ impl<W: std::io::Write> FullShow<W> {
             read.trailing_record,
             notes,
         );
-        if self.exchange {
-            transcript.projection = Some(tapes_core::model::Projection {
-                kind: tapes_core::model::ProjectionKind::Exchange,
-                omitted: std::mem::take(&mut self.omitted),
-            });
-        }
+        let flag = self.projection.take().map(|(projection, flag)| {
+            transcript.projection = Some(projection);
+            flag
+        });
         transcript.terminal = read.terminal;
         if let Some(writer) = self.writer.take() {
             transcript.read = Some(evidence);
@@ -2705,7 +2745,7 @@ impl<W: std::io::Write> FullShow<W> {
             return Ok(());
         }
         let mut footer = String::new();
-        render_footer(&mut footer, &transcript, self.by_latest);
+        render_footer(&mut footer, &transcript, self.by_latest, flag);
         footer.push_str(&format!(
             "Read evidence: the whole recording was streamed; source length {} bytes.\n",
             read.source_length
@@ -2720,13 +2760,18 @@ impl<W: std::io::Write> FullShow<W> {
 /// `--tail` is the recommended first probe, so a window that does not say it
 /// is one would be read as the whole session. A session reached by `--latest`
 /// names itself, because the caller did not name it and may have been handed
-/// its own session.
-fn render_transcript(transcript: &Transcript, by_latest: bool) -> String {
+/// its own session. `selected_by` names the flag that chose the kept turn
+/// kinds, so the note says what to drop to see the rest.
+fn render_transcript(
+    transcript: &Transcript,
+    by_latest: bool,
+    selected_by: Option<&str>,
+) -> String {
     let mut out = render_header(&transcript.session, by_latest);
     for turn in &transcript.turns {
         out.push_str(&render_turn(turn));
     }
-    render_footer(&mut out, transcript, by_latest);
+    render_footer(&mut out, transcript, by_latest, selected_by);
     out
 }
 
@@ -2757,7 +2802,12 @@ fn render_turn(turn: &Turn) -> String {
 }
 
 /// Everything a transcript's human render says after its turns.
-fn render_footer(out: &mut String, transcript: &Transcript, by_latest: bool) {
+fn render_footer(
+    out: &mut String,
+    transcript: &Transcript,
+    by_latest: bool,
+    selected_by: Option<&str>,
+) {
     if transcript.session.start_uncertain {
         out.push_str(&format!(
             "Note: The recorded start could not be read; {} is the earliest record reached, and the \
@@ -2774,9 +2824,11 @@ fn render_footer(out: &mut String, transcript: &Transcript, by_latest: bool) {
     }
     render_truncation_notes(out, &transcript.truncation);
     if let Some(projection) = &transcript.projection {
+        let drop =
+            selected_by.map_or_else(String::new, |flag| format!(" Drop {flag} to see them."));
         out.push_str(&format!(
-            "Note: Only the {} is shown; turns omitted by kind: {}. Drop --exchange to see them.\n",
-            projection.kind.label(),
+            "Note: Only {} turns are shown; turns omitted by kind: {}.{drop}\n",
+            projection.kept_summary(),
             projection.omitted_summary()
         ));
     }
@@ -3033,7 +3085,7 @@ mod tests {
 
     #[test]
     fn the_human_render_says_when_it_is_a_window() {
-        let windowed = render_transcript(&transcript(true), false);
+        let windowed = render_transcript(&transcript(true), false, None);
         assert!(
             windowed.contains(
                 "Showing the last 1 of 3 turns; 2 earlier turns fall outside the 1-turn window"
@@ -3044,7 +3096,7 @@ mod tests {
         assert!(windowed.contains("tapes export"), "{windowed}");
         assert!(windowed.contains("Skipped 1 unparseable line."));
 
-        let whole = render_transcript(&transcript(false), false);
+        let whole = render_transcript(&transcript(false), false, None);
         assert!(!whole.contains("Showing the last"), "{whole}");
         assert!(whole.contains("Skipped 1 unparseable line."));
         assert!(whole.starts_with("[user #0]"), "{whole}");
@@ -3054,12 +3106,12 @@ mod tests {
     fn an_uncertain_start_is_named_as_a_floor() {
         let mut floor = transcript(false);
         floor.session.start_uncertain = true;
-        let rendered = render_transcript(&floor, false);
+        let rendered = render_transcript(&floor, false, None);
         assert!(
             rendered.contains("The recorded start could not be read"),
             "{rendered}"
         );
-        assert!(!render_transcript(&transcript(false), false).contains("could not be read"));
+        assert!(!render_transcript(&transcript(false), false, None).contains("could not be read"));
     }
 
     /// A source bound is the reader's own limit, so its note names what was
@@ -3081,7 +3133,7 @@ mod tests {
                 chars: 4000,
             },
         ];
-        let rendered = render_transcript(&bounded, false);
+        let rendered = render_transcript(&bounded, false, None);
         assert!(
             rendered.contains("Only the final 4 MiB of the recording was read"),
             "{rendered}"
@@ -3107,13 +3159,13 @@ mod tests {
         let mut session = transcript(false);
         session.turns[0].ts = Some(newest_turn);
         session.session.last_activity_at = Some("2026-08-23T23:27:56Z".parse().unwrap());
-        let rendered = render_transcript(&session, false);
+        let rendered = render_transcript(&session, false, None);
         assert!(rendered.contains("does not render as a turn"), "{rendered}");
         assert!(rendered.contains("23:27:56"), "{rendered}");
         assert!(rendered.contains("23:24:52"), "{rendered}");
 
         session.session.last_activity_at = Some(newest_turn);
-        let agreeing = render_transcript(&session, false);
+        let agreeing = render_transcript(&session, false, None);
         assert!(
             !agreeing.contains("does not render as a turn"),
             "{agreeing}"
@@ -3128,7 +3180,7 @@ mod tests {
         transcript.session.last_activity_at =
             Some("2026-08-23T23:24:52.400Z".parse::<DateTime<Utc>>().unwrap());
 
-        let same_second = render_transcript(&transcript, false);
+        let same_second = render_transcript(&transcript, false, None);
         assert!(
             !same_second.contains("The store records activity"),
             "{same_second}"
@@ -3136,7 +3188,7 @@ mod tests {
 
         transcript.session.last_activity_at =
             Some("2026-08-23T23:24:53Z".parse::<DateTime<Utc>>().unwrap());
-        let next_second = render_transcript(&transcript, false);
+        let next_second = render_transcript(&transcript, false, None);
         assert!(
             next_second.contains("The store records activity"),
             "{next_second}"
@@ -3155,7 +3207,7 @@ mod tests {
             timestamp: Some(trailing_timestamp),
         });
 
-        let rendered = render_transcript(&transcript, false);
+        let rendered = render_transcript(&transcript, false, None);
         assert!(
             rendered.contains("The newest trailing record is `event_msg` at 2026-08-23T23:27:56Z"),
             "{rendered}"
@@ -3167,11 +3219,11 @@ mod tests {
     /// caller itself.
     #[test]
     fn latest_names_the_session_it_picked_and_how_to_skip_it() {
-        let picked = render_transcript(&transcript(false), true);
+        let picked = render_transcript(&transcript(false), true, None);
         assert!(picked.starts_with("# claude s1"), "{picked}");
         assert!(picked.contains("--exclude s1"), "{picked}");
 
-        let named = render_transcript(&transcript(false), false);
+        let named = render_transcript(&transcript(false), false, None);
         assert!(!named.contains("--exclude"), "{named}");
     }
 }

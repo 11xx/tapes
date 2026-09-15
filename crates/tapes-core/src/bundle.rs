@@ -198,7 +198,7 @@ fn render_trace(transcript: &Transcript) -> String {
     write_header(&mut out, transcript, "trace");
     if transcript.projection.is_some() {
         out.push_str(
-            "Only the exchange is traced; export without --exchange for tool, reasoning, and harness turns.\n\n",
+            "Only the kept turn kinds are traced; export without --only or --omit to trace every kind.\n\n",
         );
     }
     for turn in &transcript.turns {
@@ -247,8 +247,8 @@ fn write_header(out: &mut String, transcript: &Transcript, kind: &str) {
     if let Some(projection) = &transcript.projection {
         let _ = writeln!(
             out,
-            "- projection: {}; omitted {}",
-            projection.kind.label(),
+            "- projection: kept {}; omitted {}",
+            projection.kept_summary(),
             projection.omitted_summary()
         );
     }

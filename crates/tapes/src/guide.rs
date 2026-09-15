@@ -162,8 +162,9 @@ READ A SUPPLIED EXPORT
 
 PROBE BEFORE EXPORTING
   tapes show <id> --tail 40      A window, costing no bundle.
-  tapes show <id> --json         The same turns as tapes-session/8, with bounded read, graph, artifact, and terminal evidence.
-  tapes show <id> --exchange     Operator and assistant turns only, timestamps and ordinals kept; export takes it too.
+  tapes show <id> --json         The same turns as tapes-session/9, with bounded read, graph, artifact, and terminal evidence.
+  tapes show <id> --exchange     Operator and assistant turns only, timestamps and ordinals kept; the name for --only operator,assistant.
+  tapes show <id> --omit tool    Every turn but tool calls and results; --only and --omit take kind labels, and export takes both.
   tapes show <id> --full         Every turn of a Claude, Codex, or Pi recording, streamed past the file-tail bound; --json streams it too.
   tapes events <id> --json       Typed tool calls, results, pairs, and content parts.
   tapes usage <id> --json        Tokens, cost, quota observations, and turn counts.
@@ -317,7 +318,8 @@ EXPORT, THEN INGEST PROGRESSIVELY
   1. .context.md, whole. The turns show --exchange returns: operator turns and
      assistant-visible text — the session's argument, and the small part of
      it. The harness's own commands, notices, attached context, and user turns
-     of unknown sender stay out of it and remain in the trace.
+     of unknown sender stay out of it and remain in the trace. --only and
+     --omit narrow all three files.
   2. .json, narrowly, with jq. The canonical object plus turns, cost, tokens,
      and the session directory's git head and branch when they resolve. Query
      it for facts; do not print it.

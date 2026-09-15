@@ -23,7 +23,7 @@ use tapes_core::{
     export_selection_with_backends, latest_with_backends, list_with_backends,
     list_with_backends_filtered, list_with_backends_filtered_and_search,
     list_with_backends_options, resolve_session, scope::Scope, show_with_backends, ListFilters,
-    ListSort, ResolveError, Selection, SessionSelection, TurnView, Where, EXPORT_MANIFEST_SCHEMA,
+    ListSort, ResolveError, Selection, SessionSelection, Where, EXPORT_MANIFEST_SCHEMA,
     LIST_SEARCH_TAIL,
 };
 
@@ -3677,8 +3677,7 @@ fn a_selection_exports_every_readable_session_and_records_the_rest() {
     let directory = export_directory("partial");
 
     let export =
-        export_selection_with_backends(&backends, &selection(), Some(&directory), TurnView::All)
-            .unwrap();
+        export_selection_with_backends(&backends, &selection(), Some(&directory), None).unwrap();
 
     assert_eq!(export.manifest.schema, EXPORT_MANIFEST_SCHEMA);
     assert_eq!(
@@ -3728,8 +3727,7 @@ fn a_selection_whose_every_session_failed_says_so() {
     let directory = export_directory("total-failure");
 
     let export =
-        export_selection_with_backends(&backends, &selection(), Some(&directory), TurnView::All)
-            .unwrap();
+        export_selection_with_backends(&backends, &selection(), Some(&directory), None).unwrap();
 
     assert!(export.bundles.is_empty());
     assert!(export.every_session_failed());
@@ -3753,8 +3751,7 @@ fn an_empty_selection_writes_a_manifest_and_no_bundle() {
     let directory = export_directory("empty");
 
     let export =
-        export_selection_with_backends(&backends, &selection(), Some(&directory), TurnView::All)
-            .unwrap();
+        export_selection_with_backends(&backends, &selection(), Some(&directory), None).unwrap();
 
     assert!(export.manifest.sessions.is_empty());
     assert!(export.manifest.failed.is_empty());

@@ -10,7 +10,7 @@ use crate::content::{ContentCoverage, ContentPart};
 use crate::event::ToolEvent;
 use crate::usage::UsageDetail;
 
-pub const SESSION_SCHEMA: &str = "tapes-session/8";
+pub const SESSION_SCHEMA: &str = "tapes-session/9";
 /// Maximum length of a title derived from the first user turn.
 pub const DERIVED_TITLE_MAX_CHARS: usize = 96;
 
@@ -851,10 +851,31 @@ pub fn human_timestamp(timestamp: DateTime<Utc>) -> String {
 }
 
 impl TurnKind {
+    /// Every kind, in the order a projection lists them.
+    pub const ALL: [TurnKind; 8] = [
+        TurnKind::Operator,
+        TurnKind::Assistant,
+        TurnKind::Reasoning,
+        TurnKind::Tool,
+        TurnKind::Control,
+        TurnKind::Ambient,
+        TurnKind::Notice,
+        TurnKind::Unknown,
+    ];
+
     /// Whether a turn of this kind belongs to the exchange: what the operator
     /// asked and what the agent visibly said back.
     pub fn in_exchange(self) -> bool {
-        matches!(self, Self::Operator | Self::Assistant)
+        TurnSelection::EXCHANGE.keeps(self)
+    }
+
+    /// The kind a label names, the inverse of [`label`](Self::label).
+    pub fn from_label(label: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|kind| kind.label() == label)
+    }
+
+    fn bit(self) -> u8 {
+        1 << self as u8
     }
 
     /// The name a human render uses for the kind.
@@ -975,18 +996,13 @@ impl Transcript {
         }
     }
 
-    /// Keep only the exchange, then its newest `tail` turns. Kept turns keep
-    /// their ordinals, so the gaps between them show where omitted turns sat,
-    /// and every omitted turn is counted by kind.
-    pub fn into_exchange(mut self, tail: usize) -> Self {
-        let mut omitted = BTreeMap::new();
-        self.turns.retain(|turn| {
-            let kept = turn.kind.in_exchange();
-            if !kept {
-                *omitted.entry(turn.kind).or_insert(0) += 1;
-            }
-            kept
-        });
+    /// Keep only the turns whose kind `selection` keeps, then the newest
+    /// `tail` of them. Kept turns keep their ordinals, so the gaps between
+    /// them show where omitted turns sat, and every omitted turn is counted by
+    /// kind.
+    pub fn project(mut self, selection: TurnSelection, tail: usize) -> Self {
+        let mut projection = Projection::new(selection);
+        self.turns.retain(|turn| projection.admit(turn.kind));
         let total = self.turns.len();
         if total > tail {
             self.turns.drain(..total - tail);
@@ -1015,24 +1031,101 @@ impl Transcript {
             omitted_exact: exact,
         });
         self.truncated = !self.truncation.is_empty();
-        self.projection = Some(Projection {
-            kind: ProjectionKind::Exchange,
-            omitted,
-        });
+        self.projection = Some(projection);
         self
     }
 }
 
-/// Which turns a projected transcript keeps, and how many turns of each other
-/// kind it left out. A turn missing from a projection says nothing about
+/// A set of turn kinds a projection keeps. It decides one turn at a time, so a
+/// reader that streams a recording applies it as each turn arrives.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TurnSelection {
+    kinds: u8,
+}
+
+impl TurnSelection {
+    /// The exchange: what the operator asked and what the agent visibly said.
+    pub const EXCHANGE: Self = Self {
+        kinds: 1 << TurnKind::Operator as u8 | 1 << TurnKind::Assistant as u8,
+    };
+
+    /// Keep the named kinds and no other.
+    pub fn only(kinds: impl IntoIterator<Item = TurnKind>) -> Self {
+        Self {
+            kinds: kinds.into_iter().fold(0, |set, kind| set | kind.bit()),
+        }
+    }
+
+    /// Keep every kind but the named ones.
+    pub fn omit(kinds: impl IntoIterator<Item = TurnKind>) -> Self {
+        let omitted = Self::only(kinds);
+        Self::only(
+            TurnKind::ALL
+                .into_iter()
+                .filter(|kind| !omitted.keeps(*kind)),
+        )
+    }
+
+    pub fn keeps(self, kind: TurnKind) -> bool {
+        self.kinds & kind.bit() != 0
+    }
+
+    /// The kept kinds, in [`TurnKind::ALL`] order.
+    pub fn kinds(self) -> impl Iterator<Item = TurnKind> {
+        TurnKind::ALL
+            .into_iter()
+            .filter(move |kind| self.keeps(*kind))
+    }
+}
+
+impl Serialize for TurnSelection {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_seq(self.kinds())
+    }
+}
+
+impl<'de> Deserialize<'de> for TurnSelection {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Vec::<TurnKind>::deserialize(deserializer).map(Self::only)
+    }
+}
+
+/// Which turn kinds a projected transcript keeps, and how many turns of each
+/// other kind it left out. A turn missing from a projection says nothing about
 /// whether the session recorded one.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Projection {
-    pub kind: ProjectionKind,
+    pub kept: TurnSelection,
     pub omitted: BTreeMap<TurnKind, usize>,
 }
 
 impl Projection {
+    pub fn new(kept: TurnSelection) -> Self {
+        Self {
+            kept,
+            omitted: BTreeMap::new(),
+        }
+    }
+
+    /// Whether a turn of this kind stays, counting it under `omitted` when it
+    /// does not.
+    pub fn admit(&mut self, kind: TurnKind) -> bool {
+        let kept = self.kept.keeps(kind);
+        if !kept {
+            *self.omitted.entry(kind).or_insert(0) += 1;
+        }
+        kept
+    }
+
+    /// The kept kinds for a human reader, e.g. `operator, assistant`.
+    pub fn kept_summary(&self) -> String {
+        let kept = self.kept.kinds().map(TurnKind::label).collect::<Vec<_>>();
+        if kept.is_empty() {
+            return "none".to_owned();
+        }
+        kept.join(", ")
+    }
+
     /// The omitted counts for a human reader, e.g. `3 tool, 1 reasoning`.
     pub fn omitted_summary(&self) -> String {
         if self.omitted.is_empty() {
@@ -1043,21 +1136,6 @@ impl Projection {
             .map(|(kind, count)| format!("{count} {}", kind.label()))
             .collect::<Vec<_>>()
             .join(", ")
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum ProjectionKind {
-    /// Operator requests and the agent's visible text.
-    Exchange,
-}
-
-impl ProjectionKind {
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Exchange => "exchange",
-        }
     }
 }
 
@@ -1705,6 +1783,31 @@ mod tests {
         let session = session();
         let value = serde_json::to_value(&session).unwrap();
         assert!(value.get("source").is_some(), "{value}");
+    }
+
+    #[test]
+    fn a_selection_keeps_its_kinds_and_serializes_them_in_kind_order() {
+        let omit = TurnSelection::omit([TurnKind::Tool, TurnKind::Reasoning]);
+        assert!(!omit.keeps(TurnKind::Tool));
+        assert!(omit.keeps(TurnKind::Unknown));
+        assert_eq!(
+            TurnSelection::only([TurnKind::Assistant, TurnKind::Operator]),
+            TurnSelection::EXCHANGE
+        );
+        assert!(TurnKind::ALL
+            .into_iter()
+            .all(|kind| TurnKind::from_label(kind.label()) == Some(kind)));
+
+        let mut projection = Projection::new(TurnSelection::EXCHANGE);
+        for kind in [TurnKind::Tool, TurnKind::Operator, TurnKind::Tool] {
+            projection.admit(kind);
+        }
+        let value = serde_json::to_value(&projection).unwrap();
+        assert_eq!(
+            value,
+            json!({"kept": ["operator", "assistant"], "omitted": {"tool": 2}})
+        );
+        assert_round_trip(&projection);
     }
 
     #[test]
