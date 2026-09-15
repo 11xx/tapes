@@ -3690,8 +3690,14 @@ fn a_selection_exports_every_readable_session_and_records_the_rest() {
     })];
     let directory = export_directory("partial");
 
-    let export =
-        export_selection_with_backends(&backends, &selection(), Some(&directory), None).unwrap();
+    let export = export_selection_with_backends(
+        &backends,
+        &selection(),
+        Some(&directory),
+        None,
+        tapes_core::ExportRead::Bounded,
+    )
+    .unwrap();
 
     assert_eq!(export.manifest.schema, EXPORT_MANIFEST_SCHEMA);
     assert_eq!(
@@ -3740,8 +3746,14 @@ fn a_selection_whose_every_session_failed_says_so() {
     })];
     let directory = export_directory("total-failure");
 
-    let export =
-        export_selection_with_backends(&backends, &selection(), Some(&directory), None).unwrap();
+    let export = export_selection_with_backends(
+        &backends,
+        &selection(),
+        Some(&directory),
+        None,
+        tapes_core::ExportRead::Bounded,
+    )
+    .unwrap();
 
     assert!(export.bundles.is_empty());
     assert!(export.every_session_failed());
@@ -3764,8 +3776,14 @@ fn an_empty_selection_writes_a_manifest_and_no_bundle() {
     })];
     let directory = export_directory("empty");
 
-    let export =
-        export_selection_with_backends(&backends, &selection(), Some(&directory), None).unwrap();
+    let export = export_selection_with_backends(
+        &backends,
+        &selection(),
+        Some(&directory),
+        None,
+        tapes_core::ExportRead::Bounded,
+    )
+    .unwrap();
 
     assert!(export.manifest.sessions.is_empty());
     assert!(export.manifest.failed.is_empty());

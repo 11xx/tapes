@@ -969,14 +969,16 @@ enum Command {
     /// session a selection holds: the listing flags choose the same set
     /// `list` would return, in the same order, and a `manifest.json` beside
     /// the bundles records that selection and every bundle it produced. Each
-    /// session keeps its own bounded bundle; a session whose store cannot be
-    /// read is recorded in the manifest's `failed` and does not stop the run,
-    /// which fails only when every selected session did.
+    /// session keeps its own bundle, bounded unless --full reads it whole; a
+    /// session whose store cannot be read is recorded in the manifest's
+    /// `failed` and does not stop the run, which fails only when every
+    /// selected session did.
     ///
     /// A bundle's files are fixed views of one read: `.context.md` holds the
     /// exchange, as `show --exchange` returns it; `.json` and `.trace.md` hold
-    /// every turn. --only and --omit narrow all three, and the JSON and trace
-    /// count the omitted turns by kind under `projection`.
+    /// every turn, and `.json` also holds the paired tool `events`. --only and
+    /// --omit narrow all three, and the JSON and trace count the omitted turns
+    /// by kind under `projection`.
     #[command(group(clap::ArgGroup::new("export_selection")
         .args(["session", "latest", "title", "occurrence", "input", "here", "project", "global", "harness", "model", "directory", "since", "until", "search"])
         .required(true).multiple(true)))]
@@ -990,6 +992,14 @@ enum Command {
         bundle: Option<PathBuf>,
         #[command(flatten)]
         kinds: TurnKindArgs,
+        /// Read each whole recording instead of its bounded tail. The
+        /// recording is streamed twice, first writing the JSON turns and then,
+        /// replaying the first read, pairing tool events and writing the
+        /// Markdown files, so memory follows one record rather than the file.
+        /// Installed Claude, Codex, and Pi recordings; OpenCode refuses it by
+        /// name, as a bulk export records under `failed`.
+        #[arg(long, conflicts_with = "read_bytes")]
+        full: bool,
     },
 }
 
@@ -1603,20 +1613,39 @@ fn dispatch(cli: Cli) -> Result<()> {
             read,
             bundle,
             kinds,
+            full,
         } => {
             query.validate_input()?;
             read.refuse_supplied(&query.input)?;
+            if full && query.input.supplied() {
+                return Err(anyhow!(
+                    "--full reads installed recordings; a supplied input is bounded by \
+                     --scan-bytes, --decoded-bytes, and --record-bytes"
+                ));
+            }
             let view = kinds.selection().map(|(kept, _)| kept);
+            let whole = if full {
+                tapes_core::ExportRead::Whole
+            } else {
+                tapes_core::ExportRead::Bounded
+            };
             if let Some(one) = query.single() {
                 let bundle = if query.input.supplied() {
                     let backends = query.input.backends()?;
-                    tapes_core::export_with_backends(&backends, one, bundle.as_deref(), view)?
+                    tapes_core::export_with_backends(
+                        &backends,
+                        one,
+                        bundle.as_deref(),
+                        view,
+                        whole,
+                    )?
                 } else {
                     tapes_core::export_with_backends(
                         &read.backends()?,
                         one,
                         bundle.as_deref(),
                         view,
+                        whole,
                     )?
                 };
                 print_manifest(&bundle);
@@ -1630,6 +1659,7 @@ fn dispatch(cli: Cli) -> Result<()> {
                         &query.set(),
                         bundle.as_deref(),
                         view,
+                        whole,
                     )?
                 } else {
                     tapes_core::export_selection_with_backends(
@@ -1637,6 +1667,7 @@ fn dispatch(cli: Cli) -> Result<()> {
                         &query.set(),
                         bundle.as_deref(),
                         view,
+                        whole,
                     )?
                 };
                 print_selection_manifest(&export);
@@ -2772,7 +2803,6 @@ impl<W: std::io::Write> FullShow<W> {
             .session
             .take()
             .ok_or_else(|| anyhow!("the whole-recording read resolved no session"))?;
-        let evidence = read.read_evidence(session.source.producer.clone());
         let (turns, window) = match self.tail {
             Some(bound) => {
                 let turns = self.window.drain(..).collect::<Vec<_>>();
@@ -2784,37 +2814,12 @@ impl<W: std::io::Write> FullShow<W> {
             }
             None => (self.last.take().into_iter().collect(), None),
         };
-        let mut notes = Vec::new();
-        if read.skipped > 0 {
-            let noun = if read.skipped == 1 {
-                "record"
-            } else {
-                "records"
-            };
-            notes.push(format!(
-                "Skipped {} unreadable {noun}: malformed, or longer than the {} record bound.",
-                read.skipped,
-                human_bytes(tapes_core::backend::FULL_RECORD_BYTES)
-            ));
-        }
-        notes.extend(read.notes);
-        let mut transcript = Transcript::new(
-            session,
-            turns,
-            Truncation {
-                window,
-                source: read.source_bounds,
-            },
-            read.trailing_record,
-            notes,
-        );
+        let mut transcript = read.transcript(session, turns, window);
         let flag = self.projection.take().map(|(projection, flag)| {
             transcript.projection = Some(projection);
             flag
         });
-        transcript.terminal = read.terminal;
         if let Some(writer) = self.writer.take() {
-            transcript.read = Some(evidence);
             writer.close(&mut self.out, &transcript)?;
             self.out.write_all(b"\n")?;
             self.out.flush()?;

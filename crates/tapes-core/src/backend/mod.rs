@@ -309,23 +309,32 @@ pub trait Backend {
     /// `turn` as it is produced, so memory follows one record rather than the
     /// file. The default refuses: a backend without a streamed reader must not
     /// answer with a bounded one.
+    ///
+    /// `replay` is an earlier read of the same session. Given one, the read
+    /// covers exactly the source that read observed and hands over the same
+    /// turns with the same record references, so a consumer can stream a
+    /// recording twice and join the passes; a source that can no longer be
+    /// read that way refuses.
     fn stream_transcript(
         &self,
         session: &Session,
+        replay: Option<&StreamedTranscript>,
         turn: &mut dyn FnMut(Turn) -> Result<()>,
     ) -> Result<StreamedTranscript> {
-        let _ = (session, turn);
+        let _ = (session, replay, turn);
         anyhow::bail!(
             "{} sessions cannot be read whole; their reader keeps a bounded tail",
             self.harness()
         )
     }
-    /// The session as every record of its recording up to `length` bytes
-    /// states it: counters, accounting, recorded usage detail, model, and
-    /// activity range folded from the whole recording rather than its bounded
-    /// tail. The default refuses, as `stream_transcript` does.
-    fn stream_session(&self, session: &Session, length: u64) -> Result<Session> {
-        let _ = (session, length);
+    /// The session as every record of the recording `read` covered states it:
+    /// counters, accounting, recorded usage detail, model, and activity range
+    /// folded from the whole recording rather than its bounded tail. The read
+    /// is replayed as `stream_transcript` replays it, so the session and the
+    /// turns of `read` describe the same records. The default refuses, as
+    /// `stream_transcript` does.
+    fn stream_session(&self, session: &Session, read: &StreamedTranscript) -> Result<Session> {
+        let _ = (session, read);
         anyhow::bail!(
             "{} sessions cannot be read whole; their reader keeps a bounded tail",
             self.harness()
@@ -673,6 +682,9 @@ pub struct StreamedTranscript {
     /// Bounds the reader reached inside the records it read, such as turn
     /// text a store projection cut. A whole read reaches no record-count bound.
     pub source_bounds: Vec<SourceBound>,
+    /// The source revision observed when the read opened, which every record
+    /// reference names. A replay of this read names it too.
+    pub source_revision: Option<String>,
     /// Records that could not be decoded: malformed, or longer than
     /// [`FULL_RECORD_BYTES`]. Each is also a gap.
     pub skipped: usize,
@@ -685,6 +697,18 @@ pub struct StreamedTranscript {
 }
 
 impl StreamedTranscript {
+    /// Where a replay of this file read stops, and the revision it reports.
+    pub(crate) fn pin(&self) -> Result<ReadPin<'_>> {
+        let revision = self
+            .source_revision
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("the earlier read names no file revision to replay"))?;
+        Ok(ReadPin {
+            length: self.source_length,
+            revision,
+        })
+    }
+
     /// The read evidence of a whole-recording read: one range from the start
     /// of the source to the length observed at open, in the read's own
     /// coordinates, marked by the `full` projection option. Record spans are
@@ -710,6 +734,35 @@ impl StreamedTranscript {
             context_records: Vec::new(),
             gaps: self.gaps.clone(),
         }
+    }
+
+    /// The transcript a whole-recording read closes with: its read evidence,
+    /// source bounds, terminal observation, trailing record, and notes around
+    /// the `turns` a consumer kept, under the turn `window` it applied.
+    pub fn transcript(
+        &self,
+        session: Session,
+        turns: Vec<Turn>,
+        window: Option<crate::model::TurnWindow>,
+    ) -> Transcript {
+        let mut notes = skipped_records_note(self.skipped)
+            .into_iter()
+            .collect::<Vec<_>>();
+        notes.extend(self.notes.iter().cloned());
+        let read = self.read_evidence(session.source.producer.clone());
+        let mut transcript = Transcript::new(
+            session,
+            turns,
+            Truncation {
+                window,
+                source: self.source_bounds.clone(),
+            },
+            self.trailing_record.clone(),
+            notes,
+        );
+        transcript.read = Some(read);
+        transcript.terminal = self.terminal.clone();
+        transcript
     }
 }
 
@@ -757,6 +810,8 @@ impl ActivityRange {
 
 pub(crate) struct StreamedJsonl {
     pub source_length: u64,
+    /// The revision observed at open, or the pinned one on a replay.
+    pub revision: String,
     pub skipped: usize,
     pub gaps: Vec<ReadGap>,
     /// The final decoded record and whether it produced turns, which is all a
@@ -764,59 +819,75 @@ pub(crate) struct StreamedJsonl {
     pub last: Option<(Value, bool)>,
 }
 
-/// Decode every record of a JSONL recording in order, up to the length the
-/// file had when it was opened, handing each to `record` with its absolute
-/// span and the source revision. `record` answers whether the record produced
-/// turns. A file replaced or shortened during the read refuses; one appended
-/// to is read to the length observed at open.
+impl StreamedJsonl {
+    /// Where a later pass over the same file stops, and the revision it
+    /// reports.
+    pub fn pin(&self) -> ReadPin<'_> {
+        ReadPin {
+            length: self.source_length,
+            revision: &self.revision,
+        }
+    }
+}
+
+/// What an earlier pass over a file observed at open: its length and its
+/// revision. A pass pinned to it reads those bytes and names that revision,
+/// so every pass hands over identical records.
+#[derive(Clone, Copy)]
+pub(crate) struct ReadPin<'a> {
+    length: u64,
+    revision: &'a str,
+}
+
+/// Decode every record of a JSONL recording in order, handing each to
+/// `record` with its absolute span and the source revision. `record` answers
+/// whether the record produced turns. Unpinned, the read stops at the length
+/// the file had when it was opened; pinned, at the length the earlier pass
+/// observed, reporting that pass's revision. A file replaced or shortened
+/// before or during the read refuses; one appended to is read to the length
+/// the read stops at.
 pub(crate) fn stream_jsonl(
     path: &Path,
+    pin: Option<ReadPin<'_>>,
     record: impl FnMut(&Value, ByteSpan, &str) -> Result<bool>,
 ) -> Result<StreamedJsonl> {
-    stream_jsonl_within(path, FULL_RECORD_BYTES, None, record)
+    stream_jsonl_within(path, FULL_RECORD_BYTES, pin, record)
 }
 
-/// A later pass over a recording an earlier pass already read: it stops at
-/// the length that pass observed, so both passes see the same records, and a
-/// file shorter than that refuses.
-pub(crate) fn stream_jsonl_to(
-    path: &Path,
-    length: u64,
-    record: impl FnMut(&Value, ByteSpan, &str) -> Result<bool>,
-) -> Result<StreamedJsonl> {
-    stream_jsonl_within(path, FULL_RECORD_BYTES, Some(length), record)
-}
-
-#[cfg(test)]
-fn stream_jsonl_bounded(
-    path: &Path,
-    record_bytes: u64,
-    record: impl FnMut(&Value, ByteSpan, &str) -> Result<bool>,
-) -> Result<StreamedJsonl> {
-    stream_jsonl_within(path, record_bytes, None, record)
+/// The pin a whole-recording read starts from: none for a first read, the
+/// earlier read's for a replay.
+pub(crate) fn replay_pin(replay: Option<&StreamedTranscript>) -> Result<Option<ReadPin<'_>>> {
+    replay.map(StreamedTranscript::pin).transpose()
 }
 
 fn stream_jsonl_within(
     path: &Path,
     record_bytes: u64,
-    length: Option<u64>,
+    pin: Option<ReadPin<'_>>,
     mut record: impl FnMut(&Value, ByteSpan, &str) -> Result<bool>,
 ) -> Result<StreamedJsonl> {
     let file = File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
     let metadata = file
         .metadata()
         .with_context(|| format!("failed to inspect {}", path.display()))?;
-    let source_length = match length {
-        Some(length) if metadata.len() < length => {
+    let (source_length, revision) = match pin {
+        Some(pin)
+            if metadata.len() < pin.length
+                || !pin.revision.starts_with(&format!(
+                    "stat:{}:{}:",
+                    metadata.dev(),
+                    metadata.ino()
+                )) =>
+        {
             anyhow::bail!("recording source was replaced or shortened between reads")
         }
-        Some(length) => length,
-        None => metadata.len(),
+        Some(pin) => (pin.length, pin.revision.to_owned()),
+        None => (metadata.len(), stat_revision(&metadata)),
     };
-    let revision = stat_revision(&metadata);
     let mut reader = BufReader::with_capacity(256 * 1024, file.take(source_length));
     let mut streamed = StreamedJsonl {
         source_length,
+        revision,
         skipped: 0,
         gaps: Vec::new(),
         last: None,
@@ -847,7 +918,7 @@ fn stream_jsonl_within(
             if !content.iter().all(u8::is_ascii_whitespace) {
                 match serde_json::from_slice::<Value>(content) {
                     Ok(value) => {
-                        let produced = record(&value, span, &revision)?;
+                        let produced = record(&value, span, &streamed.revision)?;
                         streamed.last = Some((value, produced));
                     }
                     Err(_) => {
@@ -1760,6 +1831,7 @@ pub(crate) fn matching_session_file(
 
 #[cfg(test)]
 mod tests {
+    use std::io::Write;
     use std::sync::atomic::{AtomicBool, Ordering};
 
     use super::*;
@@ -1777,7 +1849,7 @@ mod tests {
         )
         .unwrap();
         let mut seen = Vec::new();
-        let read = stream_jsonl_bounded(&path, 32, |value, span, _| {
+        let read = stream_jsonl_within(&path, 32, None, |value, span, _| {
             seen.push((value["n"].as_u64(), span));
             Ok(value["n"] == 2)
         })
@@ -1797,6 +1869,50 @@ mod tests {
             [("malformed-record", 8, 17), ("oversized-record", 17, 93)]
         );
         assert!(read.last.is_some_and(|(_, produced)| produced));
+    }
+
+    /// A replay pinned to an earlier pass reads the bytes that pass read and
+    /// names its revision, however the file grew since; a replaced file
+    /// refuses rather than replaying different records.
+    #[test]
+    fn a_pinned_replay_repeats_the_earlier_pass_over_a_grown_file() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(format!(
+            "../../target/stream-jsonl-pin-{}.jsonl",
+            std::process::id()
+        ));
+        fs::write(&path, "{\"n\":1}\n{\"n\":2}\n").unwrap();
+        let spans = |pin: Option<ReadPin<'_>>| {
+            let mut seen = Vec::new();
+            let read = stream_jsonl(&path, pin, |value, span, revision| {
+                seen.push((value["n"].as_u64(), span, revision.to_owned()));
+                Ok(true)
+            });
+            (read, seen)
+        };
+        let (first, observed) = spans(None);
+        let first = first.unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .write_all(b"{\"n\":3}\n")
+            .unwrap();
+        let (replay, replayed) = spans(Some(first.pin()));
+        assert_eq!(replayed, observed);
+        assert_eq!(replay.unwrap().revision, first.revision);
+        assert_ne!(stat_revision(&fs::metadata(&path).unwrap()), first.revision);
+
+        // The original stays linked, so the replacement cannot reuse its inode.
+        let kept = path.with_extension("kept");
+        let replacement = path.with_extension("replacement");
+        fs::hard_link(&path, &kept).unwrap();
+        fs::write(&replacement, "{\"n\":1}\n{\"n\":2}\n{\"n\":3}\n").unwrap();
+        fs::rename(&replacement, &path).unwrap();
+        let (replaced, _) = spans(Some(first.pin()));
+        fs::remove_file(&path).unwrap();
+        fs::remove_file(&kept).unwrap();
+        assert!(replaced.is_err());
     }
 
     #[test]

@@ -6,7 +6,7 @@ use serde_json::Value;
 
 use super::{
     accounting_for, head_directory, home_path, jsonl_files, list_files, list_files_with_search,
-    read_bounds, read_recording, session_file, skipped_records_note, stream_jsonl, stream_jsonl_to,
+    read_bounds, read_recording, replay_pin, session_file, skipped_records_note, stream_jsonl,
     timestamp, trailing_record, transcript_from_recording, ActivityRange, Backend, Jsonl, Listing,
     ParsedFile, Query, StreamedTranscript, TokenTotals,
 };
@@ -254,6 +254,7 @@ impl Backend for PiBackend {
     fn stream_transcript(
         &self,
         session: &Session,
+        replay: Option<&StreamedTranscript>,
         turn: &mut dyn FnMut(Turn) -> Result<()>,
     ) -> Result<StreamedTranscript> {
         let root = self
@@ -268,7 +269,7 @@ impl Backend for PiBackend {
         let mut positions = HashMap::<String, (usize, Option<String>)>::new();
         let mut last = None;
         let mut entries = 0;
-        let first = stream_jsonl(&path, |value, _, _| {
+        let first = stream_jsonl(&path, replay_pin(replay)?, |value, _, _| {
             if value["type"] == "session" {
                 return Ok(false);
             }
@@ -300,7 +301,7 @@ impl Backend for PiBackend {
         let mut position = 0;
         let mut abandoned = 0;
         let mut trailing_record = None;
-        let read = stream_jsonl_to(&path, first.source_length, |value, span, revision| {
+        let read = stream_jsonl(&path, Some(first.pin()), |value, span, revision| {
             if value["type"] == "session" {
                 return Ok(false);
             }
@@ -334,6 +335,7 @@ impl Backend for PiBackend {
             coordinates: super::StreamCoordinates::FileBytes,
             source_length: read.source_length,
             source_bounds: Vec::new(),
+            source_revision: Some(read.revision),
             skipped: read.skipped,
             gaps: read.gaps,
             trailing_record,
@@ -364,7 +366,7 @@ impl Backend for PiBackend {
     fn stream_lineage(&self, session: &Session) -> Result<Lineage> {
         let (root, path) = self.recording(session)?;
         let mut header = None;
-        let read = stream_jsonl(&path, |value, _, _| {
+        let read = stream_jsonl(&path, None, |value, _, _| {
             if header.is_none() && value["type"] == "session" {
                 header = Some(value["parentSession"].as_str().map(str::to_owned));
             }
@@ -382,12 +384,12 @@ impl Backend for PiBackend {
     /// pi sums per-request usage along the active branch, which is the last
     /// entry's ancestry. One pass keeps each entry's place in the tree and the
     /// facts it carries; the branch is walked once the last entry is known.
-    fn stream_session(&self, session: &Session, length: u64) -> Result<Session> {
+    fn stream_session(&self, session: &Session, read: &StreamedTranscript) -> Result<Session> {
         let (_, path) = self.recording(session)?;
         let mut entries = Vec::<PiEntry>::new();
         let mut positions = HashMap::<String, usize>::new();
         let mut activity = ActivityRange::default();
-        stream_jsonl_to(&path, length, |value, _, _| {
+        stream_jsonl(&path, Some(read.pin()?), |value, _, _| {
             activity.observe(value);
             if value["type"] == "session" {
                 return Ok(false);
