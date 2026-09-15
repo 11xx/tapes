@@ -152,7 +152,10 @@ they refuse a supplied export explicitly.
 `list` merges sessions from every available harness and sorts them by last
 activity. `--limit` bounds each harness and defaults to 20, `--harness` selects
 one backend, and `--here` restricts the listing to the project holding the
-current directory. `--model <substring>` matches case-insensitively against the
+current directory. A session recorded in a directory that no longer exists,
+such as a removed per-change worktree, cannot be proven to belong to the
+project; the scoped listing leaves it out and says how many directories it
+left out, and `--global --directory <substring>` reaches them. `--model <substring>` matches case-insensitively against the
 full model identity shown in the `MODEL` column (`id (variant)` when a variant
 exists); a session without a model never matches. `--directory <substring>`
 matches case-insensitively against the recorded directory path; a session

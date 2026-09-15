@@ -71,6 +71,101 @@ fn fixture_store(name: &str) -> (PathBuf, PathBuf) {
     (root.clone(), root.join("home"))
 }
 
+/// A removed per-change worktree leaves sessions whose recorded directory no
+/// longer exists. A scoped listing cannot prove their project, so it leaves
+/// them out, says how many directories it left out, and names the flags that
+/// reach them.
+#[test]
+fn scoped_listing_reports_directories_it_cannot_place() {
+    let root = std::env::temp_dir().join(format!("tapes-cli-unplaced-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&root);
+    let project = root.join("project");
+    fs::create_dir_all(&project).unwrap();
+    let initialized = Command::new("git")
+        .arg("-C")
+        .arg(&project)
+        .args(["init", "-q"])
+        .status()
+        .unwrap();
+    assert!(initialized.success());
+    let removed = root.join("project-removed-worktree");
+    let sessions = root.join("codex/sessions/2026/01/01");
+    fs::create_dir_all(&sessions).unwrap();
+    for (stamp, id, cwd) in [
+        ("10-00-00", "00000000-0000-0000-0000-00000000000a", &project),
+        ("11-00-00", "00000000-0000-0000-0000-00000000000b", &removed),
+    ] {
+        let meta = serde_json::json!({
+            "timestamp": "2026-01-01T10:00:00Z",
+            "type": "session_meta",
+            "payload": {"id": id, "session_id": id, "timestamp": "2026-01-01T10:00:00Z", "cwd": cwd, "model_provider": "openai"}
+        });
+        let message = serde_json::json!({
+            "timestamp": "2026-01-01T10:00:01Z",
+            "type": "response_item",
+            "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hello"}]}
+        });
+        fs::write(
+            sessions.join(format!("rollout-2026-01-01T{stamp}-{id}.jsonl")),
+            format!("{meta}\n{message}\n"),
+        )
+        .unwrap();
+    }
+    let list = |args: &[&str]| {
+        let output = tapes()
+            .args(args)
+            .current_dir(&project)
+            .env("CODEX_HOME", root.join("codex"))
+            .env("HOME", root.join("home"))
+            .env("PATH", "/usr/bin:/bin")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        output.stdout
+    };
+
+    let scoped: Value =
+        serde_json::from_slice(&list(&["list", "--here", "--harness", "codex", "--json"])).unwrap();
+    let ids = scoped["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|session| session["id"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(ids, ["00000000-0000-0000-0000-00000000000a"]);
+    assert_eq!(scoped["unplaced"]["directories"], 1, "{scoped}");
+    assert_eq!(
+        scoped["unplaced"]["examples"][0],
+        removed.display().to_string()
+    );
+
+    let human = String::from_utf8(list(&["list", "--here", "--harness", "codex"])).unwrap();
+    assert!(human.contains("Not placed"), "{human}");
+    assert!(human.contains(&removed.display().to_string()), "{human}");
+    assert!(human.contains("--global --directory"), "{human}");
+
+    let global: Value = serde_json::from_slice(&list(&[
+        "list",
+        "--global",
+        "--harness",
+        "codex",
+        "--directory",
+        "project-removed-worktree",
+        "--json",
+    ]))
+    .unwrap();
+    assert_eq!(
+        global["sessions"][0]["id"],
+        "00000000-0000-0000-0000-00000000000b"
+    );
+    assert!(global.get("unplaced").is_none(), "{global}");
+    fs::remove_dir_all(root).unwrap();
+}
+
 /// The exchange keeps what the operator asked and what the agent visibly said,
 /// with the ordinals and timestamps a whole show gives them, and counts every
 /// other turn it left out so their absence reads as the projection.

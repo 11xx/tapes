@@ -1132,6 +1132,12 @@ entries identify the session, source member, or search stage without turning an
 unreached record into a not-found claim. It also carries a failed OpenCode2
 local API stage when CLI API reads continue. It is distinct from
 `unreadable`, which describes a session that could not be normalized at all.
+A scoped listing (`--here`, `--project`) excludes a candidate whose recorded
+directory no longer exists, because nothing left on disk proves its
+repository; when it excludes any, the optional `unplaced` object reports
+`directories`, the count of distinct such directories among the inspected
+candidates, and `examples`, the first eight in path order. `--global` with
+`--directory <substring>` reaches those sessions.
 `list --search` inspects the last 32 normalized turns per candidate before the
 per-harness result limit. The object always includes `sort`, either `newest` or
 `oldest`, and includes `activity` only when an activity bound was requested:

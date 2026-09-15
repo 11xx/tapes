@@ -2454,6 +2454,30 @@ fn print_availability_note(result: &tapes_core::SessionList) {
         &result.unsearched,
         &result.unavailable,
     );
+    if let Some(unplaced) = &result.unplaced {
+        let examples = unplaced
+            .examples
+            .iter()
+            .map(|directory| directory.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let more = if unplaced.directories > unplaced.examples.len() {
+            ", …"
+        } else {
+            ""
+        };
+        let noun = if unplaced.directories == 1 {
+            "directory"
+        } else {
+            "directories"
+        };
+        println!(
+            "Not placed: sessions whose recorded directory no longer exists cannot be proven to belong \
+             to this project ({} {noun}: {examples}{more}). \
+             `tapes list --global --directory <substring>` reaches them.",
+            unplaced.directories
+        );
+    }
 }
 
 /// What a listing could not reach, stated the same way wherever a listing

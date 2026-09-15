@@ -8,7 +8,7 @@
 //! one, it is the current directory's subtree.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -27,6 +27,10 @@ pub struct Scope {
     /// A candidate directory's repository identity, once resolved. Candidates
     /// repeat heavily across a listing and each miss costs a process spawn.
     identities: RefCell<HashMap<PathBuf, Option<PathBuf>>>,
+    /// Recorded directories that no longer resolve on disk. Their repository
+    /// cannot be proven, so they are excluded, and kept so the exclusion can
+    /// be reported rather than silent.
+    unresolved: RefCell<BTreeSet<PathBuf>>,
 }
 
 impl Scope {
@@ -46,6 +50,7 @@ impl Scope {
             identity,
             roots,
             identities: RefCell::new(HashMap::new()),
+            unresolved: RefCell::new(BTreeSet::new()),
         })
     }
 
@@ -65,7 +70,9 @@ impl Scope {
         let Some(directory) = canonical(directory).ok() else {
             // The directory is gone. Nothing left on disk can prove which
             // repository it belonged to, so it is out of scope rather than
-            // guessed at from its name.
+            // guessed at from its name — and recorded, so the caller learns
+            // that a wider scope could reach it.
+            self.unresolved.borrow_mut().insert(directory.to_path_buf());
             return false;
         };
         if !self.roots.iter().any(|root| directory.starts_with(root)) {
@@ -86,6 +93,12 @@ impl Scope {
     /// opening anything.
     pub fn roots(&self) -> &[PathBuf] {
         &self.roots
+    }
+
+    /// Every recorded directory `contains` excluded because it no longer
+    /// resolves, in path order.
+    pub fn unresolved(&self) -> Vec<PathBuf> {
+        self.unresolved.borrow().iter().cloned().collect()
     }
 }
 
@@ -209,6 +222,8 @@ mod tests {
         let root = repository("missing");
         let scope = Scope::at(&root).expect("scope resolves");
         assert!(!scope.contains(&root.join("never-existed")));
+        assert!(!scope.contains(&root.join("never-existed")));
+        assert_eq!(scope.unresolved(), [root.join("never-existed")]);
         std::fs::remove_dir_all(root).expect("cleanup");
     }
 
