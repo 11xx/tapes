@@ -701,17 +701,17 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Read one bounded page of older Claude or Codex history as tapes-page/4,
-    /// including absolute record references and read evidence. Codex transcript
-    /// pages retain opening and newer provenance context separately from turns.
-    /// Resume with the returned cursor.
+    /// Read one bounded page of older Claude or Codex history as tapes-page/5,
+    /// including absolute record references and read evidence. A page decodes
+    /// only the records inside its byte range, so a turn's kind matches the one
+    /// a whole read gives it. Resume with the returned cursor.
     Page {
         #[command(flatten)]
         selection: SelectionArgs,
         #[arg(long)]
         cursor: Option<String>,
         /// Maximum payload bytes per page, between 1KiB and 4MiB.
-        /// Bounded header, alignment and provenance context reads are separate.
+        /// The one alignment byte read before the page is counted separately.
         #[arg(long, default_value_t = ByteSize::new(tapes_core::history::DEFAULT_BYTES as u64))]
         bytes: ByteSize,
         #[arg(long)]
@@ -734,7 +734,7 @@ enum Command {
         json: bool,
     },
     /// Recover recorded model observations outside the usual source tail as a
-    /// models-only tapes-page/4 projection, with explicit history coverage.
+    /// models-only tapes-page/5 projection, with explicit history coverage.
     Metadata {
         #[command(flatten)]
         selection: SelectionArgs,

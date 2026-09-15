@@ -262,7 +262,7 @@ optional `trailing_record` object; unavailable source timestamps remain absent.
 The activity note compares the store's last activity and the newest rendered
 turn at whole-second precision, matching the timestamps shown to the reader.
 The optional `read` object records the source length, configured bound,
-head/tail/context/alignment physical ranges, decoded record spans, context-only
+head/tail/alignment physical ranges, decoded record spans, context-only
 record spans, and gaps; physical coverage does not erase malformed records, and
 a partial gap is discharged only when a successful decode identifies that same
 record. A preceding newline lets an exact tail boundary retain its first
@@ -570,7 +570,7 @@ few endings that matter instead of every tail.
 **Contracts you can build on.** `tapes-list/5`, `tapes-session/9`,
 `tapes-events/6`, `tapes-usage/5`, `tapes-usage-summary/3`, `tapes-lineage/2`,
 `tapes-endings/6`, `tapes-child/3`, `tapes-stats/5`, `tapes-stats-summary/3`, `tapes-brief/6`,
-`tapes-page/4`, `tapes-history-search/4`, `tapes-metadata-history/4`,
+`tapes-page/5`, `tapes-history-search/5`, `tapes-metadata-history/5`,
 and `tapes-export-manifest/5` are versioned
 JSON; a breaking shape change bumps the version. A single-session `export`
 prints
@@ -617,13 +617,11 @@ returns.
 Claude or Codex recording. Pass its `next_cursor` to `--cursor` to continue.
 Turns are chronological within a page; ordinals are page-local. The source
 byte range plus session ID and store identify the page. Byte budgets range
-from 1 KiB to 4 MiB; the default is 64 KiB. Session metadata and the bounded
-opening-header probe are read separately. A page also probes at most one
-alignment byte, counted separately as `alignment_bytes`. Codex transcript pages
-also read up to 64 KiB of newer context, counted as `context_bytes`. The decoded
-opening and newer context-only records are listed separately in
-`read.context_records`, and none are returned as turns. A Codex turn's kind
-comes from its own record, so a page gives it the kind a whole read does.
+from 1 KiB to 4 MiB; the default is 64 KiB. Session lookup keeps its own
+bounded metadata read. A page also probes at most one alignment byte, counted
+separately as `alignment_bytes`, and decodes no record outside its byte range.
+A Codex turn's kind comes from its own record, so a page gives it the kind a
+whole read does.
 Ordinary show/export retain their source bounds.
 
 A cursor binds the recording's identity, size, modification time and change time. Changed
@@ -644,9 +642,8 @@ in reverse record order, page coverage and gaps, and a continuation cursor.
 An older observation is not asserted to be the current model, and ordinary
 session metadata is not overwritten. At most 100 observations are returned.
 History search and metadata accept 1–32 pages per call. Metadata pages extract
-model observations directly without normalizing transcript turns or reading
-operator-provenance context; their read evidence uses the page schema with the
-`models-only` option. Session lookup retains its ordinary bounded
+model observations directly without normalizing transcript turns; their read
+evidence uses the page schema with the `models-only` option. Session lookup retains its ordinary bounded
 metadata read; page counters describe the subsequent history traversal.
 ## Tool usage across sessions
 

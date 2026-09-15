@@ -156,7 +156,7 @@ fn claude_coordinates_survive_show_export_and_page() {
             "--json".into(),
         ],
     );
-    assert_eq!(page["schema"], "tapes-page/4");
+    assert_eq!(page["schema"], "tapes-page/5");
     assert_eq!(page["read"]["projection"], page["schema"]);
     assert_eq!(page["read"]["projection_options"], json!(["transcript"]));
     assert_content_reference(&page["turns"][0]["parts"][0]["record_ref"], 0, 0, None);
@@ -329,33 +329,22 @@ fn codex_history_events_and_metadata_report_their_actual_reads() {
         cursor = candidate["next_cursor"].as_str().map(str::to_owned);
         assert!(cursor.is_some(), "history ended before the older operator");
     };
-    assert_eq!(older_small["schema"], "tapes-page/4");
+    assert_eq!(older_small["schema"], "tapes-page/5");
     assert_eq!(older_small["read"]["projection"], older_small["schema"]);
-    assert!(older_small["read"]["projection_options"]
+    assert_eq!(
+        older_small["read"]["projection_options"],
+        json!(["transcript"])
+    );
+    let kinds = older_small["read"]["ranges"]
         .as_array()
         .unwrap()
         .iter()
-        .any(|option| option == "opening-and-newer-provenance"));
-    assert!(older_small["read"]["ranges"]
-        .as_array()
-        .unwrap()
+        .map(|range| range["kind"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert!(kinds
         .iter()
-        .any(|range| range["kind"] == "head"));
-    assert!(older_small["read"]["ranges"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|range| range["kind"] == "context"));
-    assert!(!older_small["read"]["context_records"]
-        .as_array()
-        .unwrap()
-        .is_empty());
-    let page_records = older_small["read"]["records"].as_array().unwrap();
-    assert!(older_small["read"]["context_records"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .all(|context| !page_records.iter().any(|record| record == context)));
+        .all(|kind| ["alignment", "tail"].contains(kind)));
+    assert!(older_small["read"].get("context_records").is_none());
     let older_turn = older_small["turns"]
         .as_array()
         .unwrap()
@@ -405,13 +394,12 @@ fn codex_history_events_and_metadata_report_their_actual_reads() {
             "--json".into(),
         ],
     );
-    assert_eq!(metadata["schema"], "tapes-metadata-history/4");
-    assert_eq!(metadata["reads"][0]["projection"], "tapes-page/4");
+    assert_eq!(metadata["schema"], "tapes-metadata-history/5");
+    assert_eq!(metadata["reads"][0]["projection"], "tapes-page/5");
     assert_eq!(
         metadata["reads"][0]["projection_options"],
         json!(["models-only"])
     );
-    assert_eq!(metadata["context_bytes"], 0);
     assert!(metadata["reads"][0].get("context_records").is_none());
 
     let events = json_command(root.path(), &["events".into(), id.into(), "--json".into()]);

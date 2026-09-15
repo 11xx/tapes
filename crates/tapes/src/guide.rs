@@ -184,8 +184,8 @@ PROBE BEFORE EXPORTING
   `--read-bytes` widens the file tail (4MiB by default, at most 1GiB), `show
   --full` streams a whole session past it and past OpenCode's store page, and
   explicit page reads reach older Claude or Codex file history. `read`
-  records the source length, configured bound, physical head/tail/context/
-  alignment ranges, decoded record spans, context-only record spans, and gaps;
+  records the source length, configured bound, physical head/tail/alignment
+  ranges, decoded record spans, context-only record spans, and gaps;
   physical coverage does not erase malformed records, and a partial gap is
   discharged only by a successful decode of that same record. A preceding
   newline lets an exact tail boundary retain its first record; a mid-record
@@ -504,10 +504,10 @@ HISTORICAL READS
   each page. Pass next_cursor back as --cursor. Changed sources refuse;
   malformed and oversized record gaps remain explicit. Budgets protect context:
   1 KiB–4 MiB per page, 1–32 pages per search, 100 excerpts/observations.
-  Metadata pages extract model observations without decoding transcript turns
-  or reading operator-provenance context; their read evidence uses the page
-  schema with the `models-only` option. Older model observations never
-  silently replace current session metadata.
+  Metadata pages extract model observations without decoding transcript
+  turns; their read evidence uses the page schema with the `models-only`
+  option. Older model observations never silently replace current session
+  metadata.
 TOOL USAGE OVER A SELECTION
   tapes stats --here --since 2026-01-01 --json
   Counts recorded tools by harness and name, retaining each session's read

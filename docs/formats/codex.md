@@ -47,10 +47,9 @@ invented from a neighboring record.
 
 The normalized transcript also retains a bounded `read` descriptor. It records
 the source length, the configured tail bound (4 MiB unless `--read-bytes` sets
-another), the physical head, tail,
-context, and alignment ranges, each decoded record's absolute byte span,
-separate spans for records used only as opening or newer provenance context,
-and gaps for the discarded partial prefix or malformed records. When the tail
+another), the physical head, tail, and alignment ranges, each decoded
+record's absolute byte span, separate spans for records decoded only from the
+opening, and gaps for the discarded partial prefix or malformed records. When the tail
 begins after byte zero, the reader reads one preceding byte as alignment
 evidence. A preceding newline proves that the tail begins at a record boundary,
 so the first tail record is retained; otherwise the bytes through the first
@@ -61,12 +60,13 @@ checked again before the result is returned; a mutation aborts the read.
 Physical overlap with the head does not erase a malformed gap; a partial gap is
 removed only when a successful decode of that same record covers it.
 
-Codex transcript history pages also read the opening and bounded newer records
-as context. The page records the bounded head range and those context-only
-record spans in `read`; it never inserts them into `turns`. A user-role
-message's kind comes from its own record alone, so a page gives it the kind a
-whole read does. Metadata pages use the same page envelope with the
-`models-only` option and do not perform this provenance read.
+A Codex history page reads its byte range and at most one preceding alignment
+byte, so its `read` names only `alignment` and `tail` ranges and no context
+records. A user-role message's kind comes from its own record alone, so a page
+gives it the kind a whole read does. The session a page reports, with its id,
+working directory, and derived title, comes from session lookup's ordinary
+bounded read of the opening and tail. Transcript pages carry the `transcript`
+projection option; metadata pages use the same envelope with `models-only`.
 
 The normalized reader retains only a bounded tail (4 MiB by default) for transcript reads,
 plus the first 64 KiB of the file. `session_meta` is the first line, so the

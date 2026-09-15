@@ -390,14 +390,13 @@ impl ByteSpan {
     }
 }
 
-/// The purpose of one physical source read. Alignment and context are kept
-/// apart from the bytes whose records were normalized.
+/// The purpose of one physical source read. An alignment read is kept apart
+/// from the bytes whose records were normalized.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum ReadRangeKind {
     Head,
     Tail,
-    Context,
     Alignment,
 }
 

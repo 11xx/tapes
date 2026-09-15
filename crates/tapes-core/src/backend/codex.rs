@@ -13,7 +13,7 @@ use super::{
 };
 use crate::content::{parts_from_array, project_text, tool_coverage, tool_part};
 use crate::event::{Bounded, EventKind, ToolEvent};
-use crate::history::{PageProjection, ReadContext};
+use crate::history::PageProjection;
 use crate::lineage::{ChildRef, Lineage, ParentRef, SourceRef};
 use crate::model::{
     is_known_envelope, is_known_notice, AccountingBasis, AccountingCoverage, Model, Role, Session,
@@ -149,12 +149,7 @@ impl CodexBackend {
             cursor,
             bytes,
             projection,
-            if projection == PageProjection::Transcript {
-                ReadContext::OperatorProvenance
-            } else {
-                ReadContext::None
-            },
-            |values, spans, _opening, _context, revision| {
+            |values, spans, revision| {
                 let turns = if projection == PageProjection::Transcript {
                     values
                         .iter()
