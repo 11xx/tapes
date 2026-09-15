@@ -48,7 +48,10 @@ FIND IT
   --limit bounds each harness and defaults to 20. The scope applies first, so
   a scoped listing cannot be emptied by a bound spent on other projects. An
   empty scoped list means the search found nothing — unless it says it stopped
-  early, which is a different fact and is reported when it happens.
+  early, which is a different fact and is reported when it happens. A session
+  recorded in a directory that no longer exists (a removed worktree) cannot be
+  placed in a project: the scoped list reports those directories as Not
+  placed, and `tapes list --global --directory <substring>` reaches them.
 
   --model <substring> matches case-insensitively against the full model
   identity shown in MODEL: `id (variant)` when a variant exists. A session

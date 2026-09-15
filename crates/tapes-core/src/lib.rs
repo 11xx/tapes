@@ -141,6 +141,36 @@ pub struct SessionList {
     /// A backend stopped at its scan ceiling with candidates left. The listing
     /// is a view, not the set — "I stopped looking" is not "it is not there".
     pub scan_truncated: bool,
+    /// Inspected candidates a scoped listing excluded because their recorded
+    /// directory no longer resolves. Absent when nothing was excluded so.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unplaced: Option<Unplaced>,
+}
+
+/// Recorded directories a scoped listing could not place. A session recorded
+/// in a removed directory — a deleted per-change worktree, most often — may
+/// belong to the project, but nothing left on disk proves which repository it
+/// was, so it is excluded and counted rather than guessed at from its path.
+#[derive(Debug, Serialize)]
+pub struct Unplaced {
+    /// Distinct directories excluded this way among the inspected candidates.
+    pub directories: usize,
+    /// The first of them in path order.
+    pub examples: Vec<std::path::PathBuf>,
+}
+
+const MAX_UNPLACED_EXAMPLES: usize = 8;
+
+impl Unplaced {
+    fn from_directories(directories: Vec<std::path::PathBuf>) -> Option<Self> {
+        (!directories.is_empty()).then(|| Self {
+            directories: directories.len(),
+            examples: directories
+                .into_iter()
+                .take(MAX_UNPLACED_EXAMPLES)
+                .collect(),
+        })
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -370,6 +400,7 @@ pub fn list_with_backends_options(
         unsearched: listed.unsearched,
         scanned: listed.scanned,
         scan_truncated: listed.scan_truncated,
+        unplaced: Unplaced::from_directories(listed.unplaced),
     })
 }
 
@@ -385,6 +416,8 @@ pub(crate) struct Listed {
     pub(crate) unsearched: Vec<String>,
     pub(crate) scanned: usize,
     pub(crate) scan_truncated: bool,
+    /// Recorded directories the scope excluded because they no longer resolve.
+    pub(crate) unplaced: Vec<std::path::PathBuf>,
 }
 
 pub(crate) fn list_scoped(
@@ -576,6 +609,7 @@ pub(crate) fn list_scoped(
         unsearched: unsearched_sessions,
         scanned,
         scan_truncated,
+        unplaced: scope.map(Scope::unresolved).unwrap_or_default(),
     })
 }
 
