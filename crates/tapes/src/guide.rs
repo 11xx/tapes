@@ -232,7 +232,8 @@ PROBE BEFORE EXPORTING
   claude reports wall-clock durations and a per-model split, pi and opencode
   report neither. Codex quota observations preserve credits balances and
   reached-limit flags exactly as recorded, including false and string zero;
-  absent fields remain unknown.
+  absent fields remain unknown. usage --full streams the whole recording and
+  folds every counter from it, so turns and accounting cover the session.
 
   stats counts what one recording holds as tapes-stats/5: turns by kind, tool
   calls by name with their paired durations and error counts, unpaired calls
@@ -264,7 +265,8 @@ PROBE BEFORE EXPORTING
   the Agent calls that spawned them, codex joins spawn and wait calls to the
   rollout headers naming this session as their parent, opencode reads the
   parent column on either projection, and pi carries a parent reference on the
-  child alone.
+  child alone. lineage --full streams every record, so a child spawned before
+  the tail window is still named.
 
   Given a scope or a listing filter instead of a session, usage answers that
   whole selection as tapes-usage-summary/3, using the flags list and export
@@ -485,6 +487,8 @@ CHILD RECORDINGS
   Read a Claude child's own transcript, usage and ending with its parent and
   reference retained. It is not an ordinary listed session; nested lineage
   remains uninspected and child activity is never added to parent totals.
+  --full streams the child's whole recording: usage covers every turn, and the
+  transcript and ending keep the newest --tail turns.
 HISTORICAL READS
   tapes page SESSION --bytes 65536 --json
   tapes history-search SESSION --search TEXT --pages 8 --json

@@ -349,6 +349,14 @@ separate fact about the account rather than about this session.
 otherwise; the read uses the same unbounded turn window `export` does, so the
 counts are the bounded read's rather than a display window's.
 
+`usage --full` answers from the whole recording streamed. `turns` counts every
+turn with coverage `session`; `tokens`, `cost`, `accounting`, `context_window`,
+`rate_limits`, and `session.model` are folded from every record the turn read
+reached rather than from the tail, so a summed figure's coverage is `session`;
+and `read` is the whole-recording evidence `show --full --json` carries. No
+`text_tail` is reported, and `truncation` holds only the `turn-text` bounds an
+OpenCode database projection cut.
+
 The remaining objects are present exactly when the harness recorded them:
 
 | member | source |
@@ -421,6 +429,12 @@ fact rather than a gap.
 The view refers to a child and never absorbs one: resolving a reference reads
 the child's header or row and never its turns, and a child's transcript is
 read under its own session ID, or with `child PARENT --reference CHILD` for a Claude subagent.
+
+`lineage --full` reads every record of the recording instead of its bounded
+tail, so every reference the recording holds is named and `truncated` is
+false. A store probe, such as the Codex search for child rollout headers,
+keeps its own bound and says so in `notes`. OpenCode's relationships are read
+from session rows, which no transcript bound reaches.
 
 `lineage` carries an optional `parent`, an always-present `children` array,
 and an optional `forked_from`. `ParentRef` is the parent's `native_id` in the
@@ -1268,3 +1282,10 @@ from the source coverage underlying usage and ending facts. Every native Claude 
 name the parent; missing or conflicting identity evidence is refused. Source
 bounds still limit which native records were validated.
 Nested lineage is explicitly unavailable rather than an asserted empty set.
+
+`child --full` streams the child's whole recording. Every record carrying a
+native session ID must name the parent; `usage` counts every turn and folds its
+counters from every record; `transcript` and `ending` hold only the newest
+`--tail` turns, with `transcript.truncation.window` counting the rest and the
+ending's coverage `window` when there are any; and `read` states
+whole-recording coverage.

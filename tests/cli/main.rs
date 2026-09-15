@@ -5573,6 +5573,127 @@ fn lineage_reports_a_subagent_reference_and_an_unresolved_parent() {
     assert!(human.contains("unresolved"), "{human}");
 }
 
+/// A spawn recorded before the tail window is outside a bounded lineage read;
+/// `lineage --full` streams the whole recording and names it.
+#[test]
+fn lineage_full_names_a_child_reference_recorded_before_the_tail_window() {
+    let root = TemporaryDirectory::new(
+        std::env::temp_dir().join(format!("tapes-cli-lineage-full-{}", std::process::id())),
+    );
+    let home = root.path().join("home");
+    let project = home.join(".claude/projects/-fixtures-project");
+    fs::create_dir_all(&project).unwrap();
+    let timestamp = "2026-01-01T10:00:00Z";
+    let filler = "x".repeat(100 * 1024);
+    let claude_record = |uuid: &str, role: &str, extra: Value, content: Value| {
+        let mut record = serde_json::json!({"type": role, "sessionId": "lineage-full", "uuid": uuid, "timestamp": timestamp, "cwd": "/fixtures/project", "message": {"role": role, "content": content}});
+        if let Value::Object(extra) = extra {
+            record.as_object_mut().unwrap().extend(extra);
+        }
+        record.to_string() + "\n"
+    };
+    let mut claude = claude_record(
+        "spawn",
+        "assistant",
+        Value::Null,
+        serde_json::json!([{"type": "tool_use", "id": "tool-early", "name": "Agent", "input": {"subagent_type": "Explore"}}]),
+    );
+    claude += &claude_record(
+        "spawned",
+        "user",
+        serde_json::json!({"toolUseResult": {"status": "completed", "agentId": "early-agent", "agentType": "Explore"}}),
+        serde_json::json!([{"type": "tool_result", "tool_use_id": "tool-early", "content": "done"}]),
+    );
+    for index in 0..48 {
+        claude += &claude_record(
+            &format!("filler-{index}"),
+            "assistant",
+            Value::Null,
+            serde_json::json!([{"type": "text", "text": filler}]),
+        );
+    }
+    fs::write(project.join("lineage-full.jsonl"), &claude).unwrap();
+
+    let codex_home = root.path().join("codex");
+    let codex_sessions = codex_home.join("sessions/2026/01/01");
+    fs::create_dir_all(&codex_sessions).unwrap();
+    let codex_id = "00000000-0000-0000-0000-0000000000f3";
+    let mut codex = serde_json::json!({"timestamp": timestamp, "type": "session_meta", "payload": {"id": codex_id, "timestamp": timestamp, "cwd": "/fixtures/project", "source": "cli"}}).to_string() + "\n";
+    codex += &serde_json::json!({"timestamp": timestamp, "type": "response_item", "payload": {"type": "function_call", "name": "spawn_agent", "call_id": "call-spawn", "arguments": "{\"task_name\":\"worker\"}"}}).to_string();
+    codex.push('\n');
+    codex += &serde_json::json!({"timestamp": timestamp, "type": "response_item", "payload": {"type": "function_call_output", "call_id": "call-spawn", "output": "{\"task_name\":\"/root/worker\"}"}}).to_string();
+    codex.push('\n');
+    for _ in 0..48 {
+        codex += &serde_json::json!({"timestamp": timestamp, "type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": filler}]}}).to_string();
+        codex.push('\n');
+    }
+    fs::write(
+        codex_sessions.join(format!("rollout-2026-01-01T10-00-00-{codex_id}.jsonl")),
+        codex,
+    )
+    .unwrap();
+
+    let run = |arguments: &[&str]| {
+        tapes()
+            .args(arguments)
+            .env("HOME", &home)
+            .env("CODEX_HOME", &codex_home)
+            .env("PATH", "/definitely/missing")
+            .output()
+            .unwrap()
+    };
+    let json = |arguments: &[&str]| -> Value {
+        let output = run(arguments);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice(&output.stdout).unwrap()
+    };
+
+    let bounded = json(&["lineage", "lineage-full", "--json"]);
+    assert_eq!(bounded["lineage"]["children"], serde_json::json!([]));
+    assert_eq!(bounded["truncated"], true);
+    let full = json(&["lineage", "lineage-full", "--full", "--json"]);
+    let children = full["lineage"]["children"].as_array().unwrap();
+    assert_eq!(children.len(), 1, "{full}");
+    assert_eq!(children[0]["reference"], "early-agent");
+    assert_eq!(children[0]["role"], "Explore");
+    assert_eq!(children[0]["disposition"], "completed");
+    assert_eq!(children[0]["resolved"], false);
+    assert_eq!(full["truncated"], false);
+    assert!(full.get("truncation").is_none(), "{full}");
+
+    let bounded = json(&["lineage", codex_id, "--json"]);
+    assert_eq!(bounded["lineage"]["children"], serde_json::json!([]));
+    let full = json(&["lineage", codex_id, "--full", "--json"]);
+    let children = full["lineage"]["children"].as_array().unwrap();
+    assert_eq!(children.len(), 1, "{full}");
+    assert_eq!(children[0]["reference"], "/root/worker");
+    assert_eq!(children[0]["group"], "/root");
+    assert_eq!(full["truncated"], false);
+
+    assert!(
+        !run(&["lineage", "lineage-full", "--full", "--read-bytes", "1m"])
+            .status
+            .success()
+    );
+    let refused = run(&[
+        "lineage",
+        "lineage-full",
+        "--full",
+        "--input",
+        "/definitely/missing.json",
+    ]);
+    assert!(!refused.status.success());
+    assert!(
+        String::from_utf8_lossy(&refused.stderr).contains("--scan-bytes"),
+        "{}",
+        String::from_utf8_lossy(&refused.stderr)
+    );
+}
+
 #[test]
 fn usage_help_names_the_schema_and_what_the_figures_mean() {
     let output = tapes().args(["usage", "--help"]).output().unwrap();
@@ -5652,6 +5773,143 @@ fn usage_json_reports_recorded_facts_and_turn_counts_show_agrees_with() {
     assert_eq!(value["turns"]["reasoning"], counted("reasoning"));
     assert_eq!(value["turns"]["total"], turns.len());
     assert_eq!(value["turns"]["coverage"], "session");
+}
+
+/// `usage --full` counts every turn of a recording past the read bound and
+/// folds the session's counters from every record: a Claude request sum
+/// covers the whole session, and a Codex total recorded before the tail
+/// window is still reported.
+#[test]
+fn usage_full_counts_every_turn_and_folds_the_whole_recordings_counters() {
+    let root = TemporaryDirectory::new(
+        std::env::temp_dir().join(format!("tapes-cli-usage-full-{}", std::process::id())),
+    );
+    let home = root.path().join("home");
+    let project = home.join(".claude/projects/-fixtures-project");
+    fs::create_dir_all(&project).unwrap();
+    let timestamp = "2026-01-01T10:00:00Z";
+    let filler = "x".repeat(100 * 1024);
+    let claude_user = |uuid: &str, text: &str| {
+        serde_json::json!({"type": "user", "sessionId": "usage-full", "uuid": uuid, "timestamp": timestamp, "cwd": "/fixtures/project", "message": {"role": "user", "content": text}}).to_string() + "\n"
+    };
+    let mut claude = claude_user("first", "opening request");
+    for index in 0..48 {
+        claude += &serde_json::json!({"type": "assistant", "sessionId": "usage-full", "uuid": format!("filler-{index}"), "requestId": format!("request-{index}"), "timestamp": timestamp, "cwd": "/fixtures/project", "message": {"role": "assistant", "model": "claude-fixture", "content": [{"type": "text", "text": filler}], "usage": {"input_tokens": 1, "output_tokens": 2}}}).to_string();
+        claude.push('\n');
+    }
+    claude += &claude_user("last", "closing request");
+    fs::write(project.join("usage-full.jsonl"), &claude).unwrap();
+
+    let codex_home = root.path().join("codex");
+    let codex_sessions = codex_home.join("sessions/2026/01/01");
+    fs::create_dir_all(&codex_sessions).unwrap();
+    let codex_id = "00000000-0000-0000-0000-0000000000f2";
+    let codex_user = |text: &str| {
+        serde_json::json!({"timestamp": timestamp, "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": text}]}}).to_string() + "\n"
+    };
+    let mut codex = serde_json::json!({"timestamp": timestamp, "type": "session_meta", "payload": {"id": codex_id, "timestamp": timestamp, "cwd": "/fixtures/project", "source": "cli"}}).to_string() + "\n";
+    codex += &codex_user("opening request");
+    codex += &serde_json::json!({"timestamp": timestamp, "type": "event_msg", "payload": {"type": "token_count", "info": {"total_token_usage": {"input_tokens": 500, "output_tokens": 20}, "model_context_window": 272000}}}).to_string();
+    codex.push('\n');
+    for _ in 0..48 {
+        codex += &serde_json::json!({"timestamp": timestamp, "type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": filler}]}}).to_string();
+        codex.push('\n');
+    }
+    codex += &codex_user("closing request");
+    fs::write(
+        codex_sessions.join(format!("rollout-2026-01-01T10-00-00-{codex_id}.jsonl")),
+        &codex,
+    )
+    .unwrap();
+
+    let run = |arguments: &[&str]| {
+        tapes()
+            .args(arguments)
+            .env("HOME", &home)
+            .env("CODEX_HOME", &codex_home)
+            .env("PATH", "/definitely/missing")
+            .output()
+            .unwrap()
+    };
+    let json = |arguments: &[&str]| -> Value {
+        let output = run(arguments);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice(&output.stdout).unwrap()
+    };
+
+    let bounded = json(&["usage", "usage-full", "--json"]);
+    assert_eq!(bounded["turns"]["coverage"], "read-window", "{bounded}");
+    assert!(
+        bounded["turns"]["total"].as_u64().unwrap() < 50,
+        "{bounded}"
+    );
+    assert_eq!(bounded["accounting"]["coverage"], "read-window");
+
+    let full = json(&["usage", "usage-full", "--full", "--json"]);
+    assert_eq!(full["schema"], "tapes-usage/5");
+    assert_eq!(full["turns"]["total"], 50, "{full}");
+    assert_eq!(full["turns"]["user"], 2);
+    assert_eq!(full["turns"]["assistant"], 48);
+    assert_eq!(full["turns"]["coverage"], "session");
+    assert_eq!(full["content"]["records"], 50);
+    assert_eq!(
+        full["tokens"],
+        serde_json::json!({"input": 48, "output": 96})
+    );
+    assert_eq!(
+        full["accounting"],
+        serde_json::json!({"basis": "summed-requests", "coverage": "session"})
+    );
+    assert_eq!(full["session"]["model"]["id"], "claude-fixture");
+    assert_eq!(full["read"]["source_length"], claude.len() as u64);
+    assert_eq!(full["read"]["projection_options"][0], "full");
+    assert_eq!(full["truncated"], false);
+    assert!(full.get("truncation").is_none(), "{full}");
+
+    let human = run(&["usage", "usage-full", "--full"]);
+    let human = String::from_utf8(human.stdout).unwrap();
+    assert!(human.contains("covering the whole session"), "{human}");
+    assert!(
+        human.contains("the whole recording was streamed; source length"),
+        "{human}"
+    );
+
+    let bounded = json(&["usage", codex_id, "--json"]);
+    assert!(bounded.get("tokens").is_none(), "{bounded}");
+    let full = json(&["usage", codex_id, "--full", "--json"]);
+    assert_eq!(full["turns"]["total"], 50, "{full}");
+    assert_eq!(
+        full["tokens"],
+        serde_json::json!({"input": 500, "output": 20})
+    );
+    assert_eq!(full["context_window"], 272_000);
+
+    let refused = run(&["usage", "usage-full", "--full", "--read-bytes", "1m"]);
+    assert!(!refused.status.success());
+    let refused = run(&["usage", "--global", "--full"]);
+    assert!(!refused.status.success());
+    assert!(
+        String::from_utf8_lossy(&refused.stderr).contains("one session"),
+        "{}",
+        String::from_utf8_lossy(&refused.stderr)
+    );
+    let refused = run(&[
+        "usage",
+        "usage-full",
+        "--full",
+        "--input",
+        "/definitely/missing.json",
+    ]);
+    assert!(!refused.status.success());
+    assert!(
+        String::from_utf8_lossy(&refused.stderr).contains("--scan-bytes"),
+        "{}",
+        String::from_utf8_lossy(&refused.stderr)
+    );
 }
 
 /// Human output states each recorded fact once and invents no line for a
@@ -7333,6 +7591,119 @@ fn child_rejects_mixed_native_parent_ids() {
     assert!(
         !output.status.success(),
         "mixed parent identities must refuse"
+    );
+}
+
+/// `child --full` streams a subagent recording past the read bound: usage
+/// counts every turn, the transcript and ending keep the newest --tail turns,
+/// and a parent identity no bounded window reaches is still checked.
+#[test]
+fn child_full_streams_a_subagent_recording_past_the_read_bound() {
+    let root = TemporaryDirectory::new(
+        std::env::temp_dir().join(format!("tapes-child-full-{}", std::process::id())),
+    );
+    let home = root.path().join("home");
+    let project = home.join(".claude/projects/fixture");
+    let children = project.join("session-claude/subagents");
+    fs::create_dir_all(&children).unwrap();
+    fs::write(project.join("session-claude.jsonl"), CLAUDE_SESSION).unwrap();
+    let filler = "x".repeat(100 * 1024);
+    let record = |parent: &str, uuid: &str, role: &str, content: Value| {
+        serde_json::json!({"type": role, "sessionId": parent, "uuid": uuid, "timestamp": "2026-01-01T10:00:01Z", "cwd": "/fixtures/project", "message": {"role": role, "content": content}}).to_string() + "\n"
+    };
+    let body = |foreign_at: Option<usize>| {
+        let mut body = record(
+            "session-claude",
+            "first",
+            "user",
+            Value::from("child opening"),
+        );
+        for index in 0..48 {
+            let parent = if foreign_at == Some(index) {
+                "other-parent"
+            } else {
+                "session-claude"
+            };
+            body += &record(
+                parent,
+                &format!("filler-{index}"),
+                "assistant",
+                serde_json::json!([{"type": "text", "text": filler}]),
+            );
+        }
+        body + &record(
+            "session-claude",
+            "last",
+            "assistant",
+            serde_json::json!([{"type": "text", "text": "child closing"}]),
+        )
+    };
+    let transcript = children.join("agent-big.jsonl");
+    fs::write(&transcript, body(None)).unwrap();
+    let run = |args: &[&str]| {
+        let mut command = tapes();
+        command.args(args);
+        with_fixture_env(&mut command, &root.path().join("codex"), &home, root.path());
+        command.output().unwrap()
+    };
+    let json = |args: &[&str]| -> Value {
+        let output = run(args);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice(&output.stdout).unwrap()
+    };
+    let child = ["child", "session-claude", "--reference", "big"];
+
+    let bounded = json(&[&child[..], &["--json"]].concat());
+    assert_eq!(bounded["usage"]["turns"]["coverage"], "read-window");
+    assert!(bounded["usage"]["turns"]["total"].as_u64().unwrap() < 50);
+
+    let full = json(&[&child[..], &["--full", "--tail", "2", "--json"]].concat());
+    assert_eq!(full["schema"], "tapes-child/3");
+    assert_eq!(full["usage"]["turns"]["total"], 50, "{}", full["usage"]);
+    assert_eq!(full["usage"]["turns"]["coverage"], "session");
+    assert_eq!(full["usage"]["read"]["projection_options"][0], "full");
+    let turns = full["transcript"]["turns"].as_array().unwrap();
+    assert_eq!(turns.len(), 2);
+    assert_eq!(turns[1]["text"], "child closing");
+    assert_eq!(turns[1]["ordinal"], 49);
+    assert_eq!(full["transcript"]["truncation"]["window"]["omitted"], 48);
+    assert_eq!(full["transcript"]["session"]["id"], "session-claude::big");
+    assert_eq!(
+        full["transcript"]["session"]["derived_title"],
+        "child opening"
+    );
+    assert_eq!(full["ending"]["source"]["coverage"], "window");
+
+    // A foreign parent identity between the opening probe and the tail window.
+    fs::write(&transcript, body(Some(2))).unwrap();
+    assert!(run(&[&child[..], &["--json"]].concat()).status.success());
+    let refused = run(&[&child[..], &["--full", "--json"]].concat());
+    assert!(!refused.status.success());
+    assert!(
+        String::from_utf8_lossy(&refused.stderr).contains("different or invalid native parent ID"),
+        "{}",
+        String::from_utf8_lossy(&refused.stderr)
+    );
+
+    assert!(
+        !run(&[&child[..], &["--full", "--read-bytes", "1m"]].concat())
+            .status
+            .success()
+    );
+    let refused = run(&[
+        &child[..],
+        &["--full", "--input", "/definitely/missing.json"],
+    ]
+    .concat());
+    assert!(!refused.status.success());
+    assert!(
+        String::from_utf8_lossy(&refused.stderr).contains("--scan-bytes"),
+        "{}",
+        String::from_utf8_lossy(&refused.stderr)
     );
 }
 
