@@ -632,6 +632,20 @@ mod tests {
     }
 
     #[test]
+    fn a_streamed_session_object_matches_the_whole_transcript() {
+        let expected = serde_json::to_string(&transcript()).unwrap();
+        let mut rest = transcript();
+        let turns = std::mem::take(&mut rest.turns);
+        let mut out = Vec::new();
+        let mut writer = crate::model::StreamedSessionJson::open(&mut out, &rest.session).unwrap();
+        for turn in &turns {
+            writer.turn(&mut out, turn).unwrap();
+        }
+        writer.close(&mut out, &rest).unwrap();
+        assert_eq!(String::from_utf8(out).unwrap(), expected);
+    }
+
+    #[test]
     fn json_carries_the_schema_and_the_transcript_notes() {
         let (directory, bundle) = export_into_temporary_directory("json");
         let value: Value =

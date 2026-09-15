@@ -303,8 +303,11 @@ in force.
 as it is read, so memory follows one record rather than the file. Every turn
 is shown unless `--tail` keeps the newest, and `--exchange` applies as it does
 to a bounded read. It reads installed Claude, Codex, and Pi recordings;
-OpenCode refuses it by name, and `--json` and `--read-bytes` are not available
-with it. Codex and Pi recordings are read twice: the first pass keeps only
+OpenCode refuses it by name, and `--read-bytes` is not available with it.
+`--full --json` writes the same `tapes-session/8` object turn by turn: its
+`read` evidence is one range from byte 0 to the source length with
+`projection_options: ["full"]`, and each turn's `record_ref` carries its own
+record span. Codex and Pi recordings are read twice: the first pass keeps only
 what projecting a turn needs from elsewhere in the file — the messages the
 operator sent, for Codex, and each entry's id and parent, for Pi's active
 branch — and the second pass, stopping at the length the first observed,

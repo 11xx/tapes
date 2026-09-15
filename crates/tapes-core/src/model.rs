@@ -1148,6 +1148,94 @@ struct TranscriptRef<'a> {
     projection: Option<&'a Projection>,
 }
 
+/// The `tapes-session` fields that follow `turns`, in the order and with the
+/// omissions [`TranscriptRef`] gives them.
+#[derive(Serialize)]
+struct TranscriptTail<'a> {
+    truncated: bool,
+    #[serde(skip_serializing_if = "truncation_is_empty")]
+    truncation: &'a Truncation,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    read: Option<&'a ReadEvidence>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    terminal: Option<&'a TerminalObservation>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    text_tail: Option<&'a TextTailEvidence>,
+    #[serde(skip_serializing_if = "<[crate::content::ArtifactReference]>::is_empty")]
+    artifacts: &'a [crate::content::ArtifactReference],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    graph: Option<&'a ConversationGraph>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    content: Option<ContentInventory>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    trailing_record: Option<&'a TrailingRecord>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    notes: &'a Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    projection: Option<&'a Projection>,
+}
+
+/// A `tapes-session` object written one turn at a time, for a read that
+/// streams a recording: [`open`](Self::open) before the first turn,
+/// [`turn`](Self::turn) for each, and [`close`](Self::close) with a transcript
+/// carrying every fact but its turns. The bytes are the ones serializing the
+/// whole transcript would produce, and the content inventory is summed as the
+/// turns pass.
+pub struct StreamedSessionJson {
+    turns: usize,
+    content: ContentInventory,
+}
+
+impl StreamedSessionJson {
+    pub fn open(out: &mut impl std::io::Write, session: &Session) -> std::io::Result<Self> {
+        out.write_all(b"{\"schema\":")?;
+        serde_json::to_writer(&mut *out, SESSION_SCHEMA)?;
+        out.write_all(b",\"session\":")?;
+        serde_json::to_writer(&mut *out, session)?;
+        out.write_all(b",\"turns\":[")?;
+        Ok(Self {
+            turns: 0,
+            content: ContentInventory::default(),
+        })
+    }
+
+    pub fn turn(&mut self, out: &mut impl std::io::Write, turn: &Turn) -> std::io::Result<()> {
+        if self.turns > 0 {
+            out.write_all(b",")?;
+        }
+        serde_json::to_writer(&mut *out, turn)?;
+        if let Some(inventory) = crate::content::inventory(std::slice::from_ref(turn)) {
+            self.content.merge(&inventory);
+        }
+        self.turns += 1;
+        Ok(())
+    }
+
+    pub fn close(
+        self,
+        out: &mut impl std::io::Write,
+        transcript: &Transcript,
+    ) -> std::io::Result<()> {
+        let tail = serde_json::to_vec(&TranscriptTail {
+            truncated: transcript.truncated,
+            truncation: &transcript.truncation,
+            read: transcript.read.as_ref(),
+            terminal: transcript.terminal.as_ref(),
+            text_tail: transcript.text_tail.as_ref(),
+            artifacts: &transcript.artifacts,
+            graph: transcript.graph.as_ref(),
+            content: (!self.content.is_empty()).then_some(self.content),
+            trailing_record: transcript.trailing_record.as_ref(),
+            notes: &transcript.notes,
+            projection: transcript.projection.as_ref(),
+        })?;
+        // The tail is an object that always opens on `truncated`, so dropping
+        // its brace continues the session object.
+        out.write_all(b"],")?;
+        out.write_all(&tail[1..])
+    }
+}
+
 #[derive(Deserialize)]
 struct SerializedTranscript {
     schema: String,

@@ -642,9 +642,10 @@ enum Command {
         exchange: bool,
         /// Read the whole recording instead of its bounded tail, writing each
         /// turn as it is read so memory follows one record rather than the
-        /// file. Every turn is shown unless --tail is given. Installed Claude,
+        /// file. Every turn is shown unless --tail is given; with --json the
+        /// same tapes-session object is written turn by turn. Installed Claude,
         /// Codex, and Pi recordings; OpenCode refuses it by name.
-        #[arg(long, conflicts_with_all = ["json", "read_bytes"])]
+        #[arg(long, conflicts_with = "read_bytes")]
         full: bool,
         /// Render the session as JSON. The session may include optional
         /// `live`, `accounting`, and `trailing_record` fields supplied by its
@@ -1026,7 +1027,7 @@ fn dispatch(cli: Cli) -> Result<()> {
                          --scan-bytes, --decoded-bytes, and --record-bytes"
                     ));
                 }
-                return show_full(&selection, tail, exchange, by_latest);
+                return show_full(&selection, tail, exchange, json, by_latest);
             }
             // The exchange is cut from every turn the read reached, so its
             // window counts exchange turns rather than turns of every kind.
@@ -2557,6 +2558,7 @@ fn show_full(
     selection: &SelectionArgs,
     tail: Option<usize>,
     exchange: bool,
+    json: bool,
     by_latest: bool,
 ) -> Result<()> {
     let stdout = std::io::stdout();
@@ -2565,6 +2567,8 @@ fn show_full(
         by_latest,
         tail,
         exchange,
+        json,
+        writer: None,
         session: None,
         window: std::collections::VecDeque::new(),
         last: None,
@@ -2584,6 +2588,9 @@ struct FullShow<W: std::io::Write> {
     by_latest: bool,
     tail: Option<usize>,
     exchange: bool,
+    json: bool,
+    /// The session object being written, under `--json`.
+    writer: Option<tapes_core::model::StreamedSessionJson>,
     session: Option<Session>,
     /// The newest turns, under `--tail`.
     window: std::collections::VecDeque<Turn>,
@@ -2597,8 +2604,15 @@ impl<W: std::io::Write> tapes_core::TurnSink for FullShow<W> {
     fn session(&mut self, session: &Session) -> Result<()> {
         let mut session = session.clone();
         liveness::annotate(std::slice::from_mut(&mut session));
-        self.out
-            .write_all(render_header(&session, self.by_latest).as_bytes())?;
+        if self.json {
+            self.writer = Some(tapes_core::model::StreamedSessionJson::open(
+                &mut self.out,
+                &session,
+            )?);
+        } else {
+            self.out
+                .write_all(render_header(&session, self.by_latest).as_bytes())?;
+        }
         self.session = Some(session);
         Ok(())
     }
@@ -2618,7 +2632,7 @@ impl<W: std::io::Write> tapes_core::TurnSink for FullShow<W> {
                 self.window.push_back(turn);
             }
             None => {
-                self.out.write_all(render_turn(&turn).as_bytes())?;
+                self.emit(&turn)?;
                 self.last = Some(turn);
             }
         }
@@ -2627,16 +2641,25 @@ impl<W: std::io::Write> tapes_core::TurnSink for FullShow<W> {
 }
 
 impl<W: std::io::Write> FullShow<W> {
+    fn emit(&mut self, turn: &Turn) -> Result<()> {
+        match &mut self.writer {
+            Some(writer) => writer.turn(&mut self.out, turn)?,
+            None => self.out.write_all(render_turn(turn).as_bytes())?,
+        }
+        Ok(())
+    }
+
     fn finish(mut self, read: tapes_core::backend::StreamedTranscript) -> Result<()> {
         let session = self
             .session
             .take()
             .ok_or_else(|| anyhow!("the whole-recording read resolved no session"))?;
+        let evidence = read.read_evidence(session.source.producer.clone());
         let (turns, window) = match self.tail {
             Some(bound) => {
                 let turns = self.window.drain(..).collect::<Vec<_>>();
                 for turn in &turns {
-                    self.out.write_all(render_turn(turn).as_bytes())?;
+                    self.emit(turn)?;
                 }
                 let window = Truncation::window(turns.len(), self.total, bound);
                 (turns, window)
@@ -2674,6 +2697,13 @@ impl<W: std::io::Write> FullShow<W> {
             });
         }
         transcript.terminal = read.terminal;
+        if let Some(writer) = self.writer.take() {
+            transcript.read = Some(evidence);
+            writer.close(&mut self.out, &transcript)?;
+            self.out.write_all(b"\n")?;
+            self.out.flush()?;
+            return Ok(());
+        }
         let mut footer = String::new();
         render_footer(&mut footer, &transcript, self.by_latest);
         footer.push_str(&format!(

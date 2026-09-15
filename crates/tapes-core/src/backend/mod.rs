@@ -617,6 +617,35 @@ pub struct StreamedTranscript {
     pub notes: Vec<String>,
 }
 
+impl StreamedTranscript {
+    /// The read evidence of a whole-recording read: one range from the first
+    /// byte to the length observed at open, marked by the `full` projection
+    /// option. Record spans are not collected here; each streamed turn's
+    /// `record_ref` carries its own.
+    pub fn read_evidence(&self, producer: Option<String>) -> ReadEvidence {
+        ReadEvidence {
+            source_length: self.source_length,
+            configured_bound: self.source_length,
+            coordinate_domain: "file-byte-range".to_owned(),
+            source_revision: None,
+            producer,
+            projection: crate::model::SESSION_SCHEMA.to_owned(),
+            projection_options: vec!["full".to_owned()],
+            observed_at: Utc::now(),
+            ranges: vec![ReadRange {
+                kind: ReadRangeKind::Tail,
+                span: ByteSpan {
+                    start: 0,
+                    end: self.source_length,
+                },
+            }],
+            records: Vec::new(),
+            context_records: Vec::new(),
+            gaps: self.gaps.clone(),
+        }
+    }
+}
+
 pub(crate) struct StreamedJsonl {
     pub source_length: u64,
     pub skipped: usize,
