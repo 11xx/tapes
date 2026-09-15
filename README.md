@@ -130,8 +130,10 @@ An OpenAI native directory or ZIP with a root `export_manifest.json` reads only
 the declared conversation shards, library metadata, and manifest-declared
 library `.dat` members. Nested site/account/settings JSON is ignored. Missing,
 corrupt, or size-mismatched declared members are explicit input gaps; an exact
-occurrence can return known evidence with those gaps, while ID and title
-selection refuses incomplete discovery. Records parsed from a ZIP member that
+occurrence can return known evidence with those gaps, while title selection
+refuses incomplete discovery and ID selection refuses any gap that could cover
+an unread ID. A record without a native ID was parsed in full, so its gap does
+not block ID selection. Records parsed from a ZIP member that
 fails decompression or checksum verification are withheld, not listed.
 
 The reader applies bounded per-invocation scan, decoded, record, resident, and

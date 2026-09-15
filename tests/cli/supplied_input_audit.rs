@@ -630,6 +630,49 @@ fn a_conversation_without_a_native_id_is_a_gap_rather_than_an_invented_identity(
 }
 
 #[test]
+fn a_record_without_a_native_id_does_not_block_lookup_by_id() {
+    let root = TempRoot::new("identity-coverage");
+    let input = root.path().join("missing-id.json");
+    let mut anonymous = dated_conversation("anonymous", 1_000);
+    anonymous.as_object_mut().unwrap().remove("id");
+    let records = json!([anonymous, dated_conversation("named", 2_000)]);
+    fs::write(&input, serde_json::to_vec(&records).unwrap()).unwrap();
+    let show = |input: &Path, selector: &[&str], extra: &[&str]| {
+        let mut arguments = input_args("show", input);
+        arguments.splice(1..1, selector.iter().map(|argument| (*argument).to_owned()));
+        run(&with(arguments, extra))
+    };
+
+    let shown = successful_json(show(&input, &["named"], &[]));
+    assert_eq!(shown["session"]["id"], "named");
+
+    let absent = show(&input, &["absent"], &[]);
+    assert!(!absent.status.success());
+    let stderr = String::from_utf8_lossy(&absent.stderr);
+    assert!(stderr.contains("session absent was not found"), "{stderr}");
+
+    // The ID-less record may still carry the title being asked for.
+    let titled = show(&input, &["--title", "named"], &[]);
+    assert!(!titled.status.success());
+    let stderr = String::from_utf8_lossy(&titled.stderr);
+    assert!(stderr.contains("incomplete lookup"), "{stderr}");
+
+    // A skipped record was never read, so its ID may be the one asked for.
+    let skipped = root.path().join("skipped.json");
+    let mut oversized = dated_conversation("oversized", 1_000);
+    oversized["mapping"]["message"]["message"]["content"]["parts"] = json!(["x".repeat(4_096)]);
+    let records = json!([oversized, dated_conversation("named", 2_000)]);
+    fs::write(&skipped, serde_json::to_vec(&records).unwrap()).unwrap();
+    let refused = show(&skipped, &["named"], &["--record-bytes", "1024"]);
+    assert!(!refused.status.success());
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert!(
+        stderr.contains("cannot prove that session named is unique"),
+        "{stderr}"
+    );
+}
+
+#[test]
 fn a_named_input_that_does_not_exist_is_an_error() {
     let root = TempRoot::new("missing-path");
     let missing = root.path().join("absent.json");

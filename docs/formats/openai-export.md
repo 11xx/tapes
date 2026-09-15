@@ -39,7 +39,9 @@ not choose a producer. A declared `--input-format` records its producer as a
 caller declaration and, when it does not recognize a record, reports the
 bounded diagnostic without trying another adapter. A conversation record
 without its native `conversation_id` or `id` is a `missing-native-id` gap with
-a diagnostic; the reader never invents an identity for it.
+a diagnostic; the reader never invents an identity for it. The record was
+parsed in full and holds no ID, so the gap does not block ID selection; it
+still blocks title selection, because the record may carry the title.
 
 Both OpenAI and ChatGPT Exporter mapping representations use `source.origin`
 with value `"openai"`; `source.representation` identifies the detected or declared
@@ -105,7 +107,8 @@ record is retained only when its bounded bytes fit the remaining resident
 budget. Oversized records are skipped structurally when possible, with a
 `read.gaps` entry and a diagnostic. If synchronization or a budget stops the
 scan, the result is partial and an unreached occurrence is not reported as
-absent. ID and title selection refuses incomplete discovery; an exact
+absent. Title selection refuses incomplete discovery, and ID selection refuses
+every gap except `missing-native-id`; an exact
 `--occurrence` may return the known evidence with its gaps. Its `read.gaps`
 contains only that member's byte coordinates; collection-wide limitations
 remain in the `input-coverage` bound and bounded diagnostic notes.
