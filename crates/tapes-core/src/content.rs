@@ -436,22 +436,43 @@ pub fn parts_from_array(value: &Value, source_field: &str) -> (Vec<ContentPart>,
             retained.push(text_part(text, &field, "text"));
             continue;
         }
-        let native_kind = part["type"].as_str().unwrap_or("unknown");
+        // OpenAI export mapping parts name their kind `content_type`.
+        let native_kind = part["type"]
+            .as_str()
+            .or_else(|| part["content_type"].as_str())
+            .unwrap_or("unknown");
         let field = format!("{source_field}[{}]", retained.len());
         let parsed = match native_kind {
             "input_text" | "output_text" | "text" => part["text"]
                 .as_str()
                 .map(|text| text_part(text, &field, native_kind))
                 .or_else(|| Some(unknown_part(part, &field, native_kind))),
-            "transcription" | "input_audio_transcription" | "audio_transcript" => part
+            "transcription"
+            | "input_audio_transcription"
+            | "audio_transcript"
+            | "audio_transcription" => part
                 .get("text")
                 .or_else(|| part.get("transcript"))
                 .and_then(Value::as_str)
                 .map(|text| transcription_part(text, &field, native_kind))
                 .or_else(|| Some(unknown_part(part, &field, native_kind))),
-            "image" | "input_image" | "output_image" | "audio" => {
-                Some(artifact_part(part, &field, native_kind, true))
-            }
+            "image"
+            | "input_image"
+            | "output_image"
+            | "audio"
+            | "image_asset_pointer"
+            | "audio_asset_pointer" => Some(artifact_part(part, &field, native_kind, true)),
+            // A real-time voice part wraps its audio pointer; the part itself
+            // carries no reference of its own.
+            "real_time_user_audio_video_asset_pointer" => Some(
+                match part
+                    .get("audio_asset_pointer")
+                    .filter(|value| value.is_object())
+                {
+                    Some(audio) => artifact_part(audio, &field, native_kind, true),
+                    None => unknown_part(part, &field, native_kind),
+                },
+            ),
             "file" | "input_file" | "output_file" | "file_reference" => {
                 Some(artifact_part(part, &field, native_kind, false))
             }
@@ -552,14 +573,14 @@ pub fn artifact_reference_object(
     value: &serde_json::Map<String, Value>,
     kind: &str,
 ) -> Option<ArtifactReference> {
-    let uri = ["uri", "url", "href"]
+    let uri = ["uri", "url", "href", "asset_pointer"]
         .into_iter()
         .find_map(|key| value.get(key).and_then(Value::as_str).map(str::to_owned));
     let path = value.get("path").and_then(Value::as_str).map(str::to_owned);
     let digest = ["digest", "sha256", "file_id", "fileId"]
         .into_iter()
         .find_map(|key| value.get(key).and_then(Value::as_str).map(str::to_owned));
-    let bytes = ["bytes", "size", "byte_count"]
+    let bytes = ["bytes", "size", "byte_count", "size_bytes"]
         .into_iter()
         .find_map(|key| value.get(key).and_then(Value::as_u64));
     (uri.is_some() || path.is_some() || digest.is_some() || bytes.is_some()).then_some(
@@ -653,6 +674,31 @@ mod tests {
         assert!(rendered.contains("/canary"));
         assert!(!rendered.contains("secret-bytes"));
         assert!(!rendered.contains("private"));
+    }
+
+    #[test]
+    fn openai_export_parts_are_classified_by_content_type() {
+        let (parts, coverage) = parts_from_array(
+            &serde_json::json!([
+                {"content_type":"audio_transcription","text":"spoken","direction":"in","decoding_id":null},
+                {"content_type":"image_asset_pointer","asset_pointer":"sediment://file_image","size_bytes":42,"width":1,"height":1},
+                {"content_type":"real_time_user_audio_video_asset_pointer","audio_asset_pointer":{"content_type":"audio_asset_pointer","asset_pointer":"sediment://file_audio","size_bytes":7,"format":"wav"},"frames_asset_pointers":[]}
+            ]),
+            "message.content.parts",
+        );
+        assert!(
+            matches!(&parts[0], ContentPart::Transcription { text, native_kind, .. } if text == "spoken" && native_kind == "audio_transcription")
+        );
+        let ContentPart::MediaReference { reference, .. } = &parts[1] else {
+            panic!("image pointer is a media reference: {parts:?}");
+        };
+        assert_eq!(reference.uri.as_deref(), Some("sediment://file_image"));
+        assert_eq!(reference.bytes, Some(42));
+        let ContentPart::MediaReference { reference, .. } = &parts[2] else {
+            panic!("real-time audio pointer is a media reference: {parts:?}");
+        };
+        assert_eq!(reference.uri.as_deref(), Some("sediment://file_audio"));
+        assert_eq!(coverage.availability, ContentAvailability::RetainedBody);
     }
 
     #[test]

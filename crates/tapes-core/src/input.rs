@@ -2007,6 +2007,7 @@ fn mapping_message(
         notes.push(format!("node {node_id} has an unknown author role"));
         return None;
     };
+    let role = record_role(message, role);
     let (parts, coverage) = message_parts(message);
     let text = content::project_text(&parts);
     if text.is_empty() && parts.is_empty() {
@@ -2146,6 +2147,7 @@ fn normalize_chatgpt_exporter(value: &Value) -> Result<NormalizedConversation> {
             continue;
         };
         recognized_message = true;
+        let role = record_role(message, role);
         let (parts, coverage) = message_parts(message);
         let text = content::project_text(&parts);
         if text.is_empty() && parts.is_empty() {
@@ -2436,6 +2438,12 @@ fn message_parts(message: &Value) -> (Vec<ContentPart>, ContentCoverage) {
             },
         );
     }
+    let content_type = content_value["content_type"]
+        .as_str()
+        .or_else(|| message["content_type"].as_str());
+    if let Some(retained) = reasoning_parts(content_value, content_type) {
+        return retained;
+    }
     let parts_value = content_value
         .get("parts")
         .or_else(|| message.get("parts"))
@@ -2445,10 +2453,7 @@ fn message_parts(message: &Value) -> (Vec<ContentPart>, ContentCoverage) {
     }
     (
         vec![ContentPart::Unknown {
-            native_kind: message["content_type"]
-                .as_str()
-                .unwrap_or("unknown")
-                .to_owned(),
+            native_kind: content_type.unwrap_or("unknown").to_owned(),
             descriptor: content::bounded_shape(message),
             source_field: "message.content".to_owned(),
             record_ref: None,
@@ -2461,6 +2466,62 @@ fn message_parts(message: &Value) -> (Vec<ContentPart>, ContentCoverage) {
             omitted_reason: Some("content shape was not recognized".to_owned()),
         },
     )
+}
+
+/// OpenAI records reasoning as `thoughts` and `reasoning_recap` messages under
+/// the assistant author, so the content type rather than the author names
+/// the role.
+fn record_role(message: &Value, role: Role) -> Role {
+    match message["content"]["content_type"].as_str() {
+        Some("thoughts" | "reasoning_recap") => Role::Reasoning,
+        _ => role,
+    }
+}
+
+/// Reasoning records hold their text outside `parts`: `thoughts` as a list of
+/// summary and content pairs, `reasoning_recap` as one `content` string.
+fn reasoning_parts(
+    content_value: &Value,
+    content_type: Option<&str>,
+) -> Option<(Vec<ContentPart>, ContentCoverage)> {
+    let native_kind = content_type?;
+    let fields: Vec<(String, &str)> = match native_kind {
+        "thoughts" => content_value["thoughts"]
+            .as_array()?
+            .iter()
+            .enumerate()
+            .flat_map(|(index, thought)| {
+                ["summary", "content"].into_iter().filter_map(move |field| {
+                    thought[field]
+                        .as_str()
+                        .filter(|text| !text.is_empty())
+                        .map(|text| (format!("message.content.thoughts[{index}].{field}"), text))
+                })
+            })
+            .collect(),
+        "reasoning_recap" => vec![(
+            "message.content.content".to_owned(),
+            content_value["content"].as_str()?,
+        )],
+        _ => return None,
+    };
+    if fields.is_empty() {
+        return None;
+    }
+    let parts = fields
+        .iter()
+        .take(content::MAX_CONTENT_PARTS)
+        .map(|(field, text)| content::text_part(*text, field, native_kind))
+        .collect::<Vec<_>>();
+    let omitted_parts = fields.len() - parts.len();
+    let coverage = ContentCoverage {
+        carrier: ContentCarrier::DirectPart,
+        availability: ContentAvailability::RetainedBody,
+        retained_parts: parts.len(),
+        omitted_parts,
+        omitted_reason: (omitted_parts > 0).then(|| "part-count-bound".to_owned()),
+    };
+    Some((parts, coverage))
 }
 
 fn role_from_str(role: Option<&str>) -> Option<Role> {

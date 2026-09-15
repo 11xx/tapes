@@ -832,6 +832,115 @@ fn supplied_single_conversation_reaches_list_show_and_export() {
         .any(|entry| entry.file_name().to_string_lossy().ends_with(".trace.md")));
 }
 
+/// The official export's voice and reasoning records keep their content
+/// outside the `type`-tagged parts other producers write: object parts name
+/// their kind `content_type`, and reasoning holds its text beside `parts`.
+#[test]
+fn supplied_openai_voice_and_reasoning_records_project_their_content() {
+    let root = TemporaryDirectory::new(
+        std::env::temp_dir().join(format!("tapes-input-voice-{}", std::process::id())),
+    );
+    let input = root.path().join("conversations-000.json");
+    let message = |id: &str, role: &str, content: Value| serde_json::json!({"id": id, "author": {"role": role}, "content": content});
+    let node = |id: &str, parent: Option<&str>, message: Value| serde_json::json!({"id": id, "parent": parent, "message": message});
+    fs::write(
+        &input,
+        serde_json::to_vec(&serde_json::json!([{
+            "conversation_id": "voice-1",
+            "title": "Voice",
+            "current_node": "image",
+            "mapping": {
+                "root": node("root", None, Value::Null),
+                "spoken": node("spoken", Some("root"), message("spoken-message", "user", serde_json::json!({
+                    "content_type": "multimodal_text",
+                    "parts": [
+                        {"content_type": "audio_transcription", "text": "operator speech", "direction": "in", "decoding_id": null},
+                        {"content_type": "real_time_user_audio_video_asset_pointer", "audio_asset_pointer": {"content_type": "audio_asset_pointer", "asset_pointer": "sediment://file_in", "size_bytes": 11, "format": "wav"}, "frames_asset_pointers": []}
+                    ]
+                }))),
+                "thoughts": node("thoughts", Some("spoken"), message("thoughts-message", "assistant", serde_json::json!({
+                    "content_type": "thoughts",
+                    "thoughts": [{"summary": "Weighing", "content": "private weighing", "chunks": [], "finished": true}],
+                    "source_analysis_msg_id": "analysis"
+                }))),
+                "recap": node("recap", Some("thoughts"), message("recap-message", "assistant", serde_json::json!({
+                    "content_type": "reasoning_recap",
+                    "content": "Thought for 3s"
+                }))),
+                "answer": node("answer", Some("recap"), message("answer-message", "assistant", serde_json::json!({
+                    "content_type": "multimodal_text",
+                    "parts": [
+                        {"content_type": "audio_transcription", "text": "assistant speech", "direction": "out", "decoding_id": null},
+                        {"content_type": "audio_asset_pointer", "asset_pointer": "sediment://file_out", "size_bytes": 13, "format": "wav"}
+                    ]
+                }))),
+                "image": node("image", Some("answer"), message("image-message", "user", serde_json::json!({
+                    "content_type": "multimodal_text",
+                    "parts": [
+                        {"content_type": "image_asset_pointer", "asset_pointer": "sediment://file_image", "size_bytes": 17, "width": 1, "height": 1},
+                        "caption"
+                    ]
+                })))
+            }
+        }]))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let shown = tapes()
+        .args([
+            "show",
+            "voice-1",
+            "--input",
+            input.to_str().unwrap(),
+            "--json",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        shown.status.success(),
+        "{}",
+        String::from_utf8_lossy(&shown.stderr)
+    );
+    let shown: Value = serde_json::from_slice(&shown.stdout).unwrap();
+    let turns = shown["turns"].as_array().unwrap();
+    let summary = turns
+        .iter()
+        .map(|turn| {
+            (
+                turn["role"].as_str().unwrap(),
+                turn["kind"].as_str().unwrap(),
+                turn["text"].as_str().unwrap(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        summary,
+        [
+            ("user", "operator", "operator speech"),
+            ("reasoning", "reasoning", "Weighing\nprivate weighing"),
+            ("reasoning", "reasoning", "Thought for 3s"),
+            ("assistant", "assistant", "assistant speech"),
+            ("user", "operator", "caption"),
+        ]
+    );
+    assert_eq!(shown["content"]["unknown"], 0, "{}", shown["content"]);
+    assert_eq!(shown["content"]["references"], 3, "{}", shown["content"]);
+    assert_eq!(turns[0]["parts"][0]["kind"], "transcription");
+    assert_eq!(turns[0]["parts"][0]["native_kind"], "audio_transcription");
+    assert_eq!(
+        turns[0]["parts"][1]["reference"]["uri"],
+        "sediment://file_in"
+    );
+    assert_eq!(turns[1]["parts"][1]["native_kind"], "thoughts");
+    assert_eq!(
+        turns[1]["parts"][1]["source_field"],
+        "message.content.thoughts[0].content"
+    );
+    assert_eq!(turns[3]["parts"][1]["kind"], "media-reference");
+    assert_eq!(turns[4]["parts"][0]["reference"]["bytes"], 17);
+}
+
 /// ChatGPT Exporter keeps the mapping graph rather than flattening it into a
 /// convenience message array. The chosen path is a transcript projection;
 /// sibling messages and their edges remain source evidence.
