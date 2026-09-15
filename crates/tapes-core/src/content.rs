@@ -86,6 +86,11 @@ pub struct ArtifactReference {
     pub origin: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub backing: Option<String>,
+    /// The conversation a library entry says the artifact originated in. It
+    /// stays apart from `backing`: an export can name a backing session it
+    /// does not contain beside an originating conversation it does.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub originating_conversation: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub author: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -589,6 +594,7 @@ pub fn artifact_reference_object(
             identity: None,
             origin: None,
             backing: None,
+            originating_conversation: None,
             author: None,
             completion: None,
             citation_count: None,

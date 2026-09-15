@@ -257,8 +257,10 @@ limited to 4 KiB of UTF-8 bytes and all citation descriptors share a 16 KiB
 cumulative byte bound.
 A truncated URI is explicitly incomplete and must not be treated as a valid
 reference. A grouped citation keeps its span and nests bounded `sources`; both
-group and source bounds report omitted members. `backing` records an
-association claim; it does not create a turn when the outer conversation is
+group and source bounds report omitted members. `backing` and
+`originating_conversation` record association claims — the session backing
+the artifact and the conversation it was requested in, which a source can
+name separately; neither creates a turn when the outer conversation is
 absent.
 
 OpenCode records a call and its outcome in one `tool` part. Its turn carries a
