@@ -1066,13 +1066,18 @@ that the session is stopped now. `text_tail` reports the requested and
 returned text entries and explains an empty tail as a zero request, no
 operator/assistant text in the read, or an empty complete projection.
 
-`show --full --json` streams a whole Claude, Codex, or Pi recording, and its
-`read` says so: one `tail` range from byte 0 to the length observed when the
-read opened, `configured_bound` equal to that length, `projection_options`
+`show --full --json` streams a whole Claude, Codex, Pi, or OpenCode session,
+and its `read` says so. For a recording file that is one `tail` range from
+byte 0 to the length observed when the read opened, `configured_bound` equal to that length, `projection_options`
 holding `full`, and gaps for malformed records or records longer than 64 MiB.
 Record spans are not listed under `read.records`; each turn's `record_ref`
-carries its own span and the source revision it was read at. No `text_tail`
-is reported, and `truncation` holds only a `--tail` window.
+carries its own span and the source revision it was read at. An OpenCode
+session is read whole from its store rather than a file, so its `read` counts
+message rows: `coordinate_domain` is `opencode-message`, the range runs from 0
+to the number of messages streamed, and its turns carry `native_id` without a
+`record_ref`. No `text_tail` is reported, and `truncation` holds only a
+`--tail` window and the `turn-text` bounds of part text the OpenCode database
+projection cut.
 
 `projection` is present when a caller kept turns by kind with `--only`,
 `--omit`, or `show --exchange`. `kept` lists the kept kinds in the order

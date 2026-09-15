@@ -13,7 +13,7 @@ use serde_json::{json, Value};
 
 use super::{
     accounting_for, filter_listing_search, filter_listing_search_parallel, search_turns, Backend,
-    Listing, Query, TokenTotals,
+    Listing, Query, StreamCoordinates, StreamedTranscript, TokenTotals,
 };
 use crate::content::{
     bounded_shape, text_part, tool_coverage, tool_part, ContentAvailability, ContentCarrier,
@@ -41,6 +41,10 @@ const MIN_MESSAGE_PAGE: usize = 8;
 const MAX_DB_PARTS: usize = 5_000;
 const MAX_DB_TEXT_CHARS: usize = 4_000;
 const MAX_DB_TOOL_CHARS: usize = 2_000;
+/// Parts per page of a whole database read. A projected part holds at most
+/// 6,000 characters, so this many fit the transport bound even when every
+/// character is written as a six-byte JSON escape.
+const MAX_DB_PART_PAGE: usize = 128;
 /// Keep each SQL prefilter query small without limiting the union of matches.
 const MAX_DB_SEARCH_IDS: usize = 256;
 /// A v2 message this large may still make the API confirmation ambiguous if its
@@ -796,35 +800,9 @@ impl OpenCodeBackend {
         }
 
         let mut part_rows = self.database(&format!(
-            "SELECT json_object( \
-                 'message_id', message_id, 'time_created', time_created, 'data', \
-                 CASE json_extract(data, '$.type') \
-             WHEN 'text' THEN json_object( \
-                 'type', 'text', \
-                 'text', substr(json_extract(data, '$.text'), 1, {MAX_DB_TEXT_CHARS}), \
-                 'truncated', length(json_extract(data, '$.text')) > {MAX_DB_TEXT_CHARS}, \
-                 'time', json_extract(data, '$.time')) \
-             WHEN 'reasoning' THEN json_object( \
-                 'type', 'reasoning', \
-                 'text', substr(json_extract(data, '$.text'), 1, {MAX_DB_TEXT_CHARS}), \
-                 'truncated', length(json_extract(data, '$.text')) > {MAX_DB_TEXT_CHARS}, \
-                 'time', json_extract(data, '$.time')) \
-             WHEN 'tool' THEN json_object( \
-                 'type', 'tool', \
-                 'tool', json_extract(data, '$.tool'), \
-                 'callID', json_extract(data, '$.callID'), \
-                 'state', json_object( \
-                     'status', json_extract(data, '$.state.status'), \
-                     'input', substr(json_extract(data, '$.state.input'), 1, {MAX_DB_TOOL_CHARS}), \
-                     'output', substr(json_extract(data, '$.state.output'), 1, {MAX_DB_TOOL_CHARS}), \
-                     'error', substr(json_extract(data, '$.state.error'), 1, {MAX_DB_TOOL_CHARS})), \
-                 'truncated', \
-                     length(json_extract(data, '$.state.input')) > {MAX_DB_TOOL_CHARS} OR \
-                     length(json_extract(data, '$.state.output')) > {MAX_DB_TOOL_CHARS} OR \
-                     length(json_extract(data, '$.state.error')) > {MAX_DB_TOOL_CHARS}, \
-                 'time', json_extract(data, '$.time')) \
-                 ELSE json_object('type', json_extract(data, '$.type')) END) AS row \
-             FROM part WHERE session_id = {id} ORDER BY time_created DESC LIMIT {}",
+            "SELECT {} FROM part WHERE session_id = {id} \
+             ORDER BY time_created DESC, id DESC LIMIT {}",
+            database_part_row(),
             MAX_DB_PARTS + 1
         ))?;
         if part_rows.len() > MAX_DB_PARTS {
@@ -834,56 +812,14 @@ impl OpenCodeBackend {
                 of: "parts".to_owned(),
             });
         }
+        part_rows.reverse();
+        let parts = group_parts(part_rows)?;
 
-        let mut parts = HashMap::<String, Vec<Value>>::new();
-        for row in part_rows {
-            let message_id = required_string(&row, "message_id")?;
-            parts
-                .entry(message_id)
-                .or_default()
-                .push(database_data(&row)?);
-        }
-        for values in parts.values_mut() {
-            values.reverse();
-        }
+        let mut cuts = TextCuts::default();
+        cuts.count(&message_rows, &parts);
+        source.extend(cuts.bounds());
 
-        // The projection cuts text and tool parts at different lengths, and
-        // each bound is reported with the count of normalized turns it
-        // touched: a user message's text parts join into one turn, an
-        // assistant message yields one turn per part.
-        let mut cut_text_turns = 0;
-        let mut cut_tool_turns = 0;
-        for row in &message_rows {
-            let Ok(data) = database_data(row) else {
-                continue;
-            };
-            let message_parts = row["id"]
-                .as_str()
-                .and_then(|id| parts.get(id))
-                .map_or(&[][..], Vec::as_slice);
-            let (text, tool) = cut_turn_counts(data["role"].as_str(), message_parts);
-            cut_text_turns += text;
-            cut_tool_turns += tool;
-        }
-        if cut_text_turns > 0 {
-            source.push(SourceBound::TurnText {
-                turns: cut_text_turns,
-                chars: MAX_DB_TEXT_CHARS,
-            });
-        }
-        if cut_tool_turns > 0 {
-            source.push(SourceBound::TurnText {
-                turns: cut_tool_turns,
-                chars: MAX_DB_TOOL_CHARS,
-            });
-        }
-
-        let messages = message_rows
-            .iter()
-            .filter_map(|row| {
-                database_message(row, parts.remove(row["id"].as_str()?).unwrap_or_default())
-            })
-            .collect::<Result<Vec<_>>>()?;
+        let messages = database_messages(&message_rows, parts)?;
         Ok(parse_transcript(
             session,
             &messages,
@@ -894,6 +830,145 @@ impl OpenCodeBackend {
                 source,
             },
         ))
+    }
+
+    /// Every message of a database session, oldest first, a page at a time.
+    /// The read stops at the newest message present when it opened, so a
+    /// message written while it streams belongs to the next read. Part text
+    /// keeps the projection's cuts, reported as source bounds.
+    fn database_stream(
+        &self,
+        session: &Session,
+        turn: &mut dyn FnMut(Turn) -> Result<()>,
+    ) -> Result<StreamedTranscript> {
+        let id = sql_literal(&session.id);
+        let newest = self.database(&format!(
+            "SELECT json_object('time_created', time_created, 'id', id) AS row FROM message \
+             WHERE session_id = {id} ORDER BY time_created DESC, id DESC LIMIT 1"
+        ))?;
+        let mut cuts = TextCuts::default();
+        let mut read = 0;
+        if let Some(newest) = newest.first() {
+            let newest = RowKey::from_row(newest)?;
+            let mut after = None;
+            loop {
+                let rows = self.database(&format!(
+                    "SELECT {DATABASE_MESSAGE_ROW} FROM message WHERE session_id = {id} \
+                     AND {}{} ORDER BY time_created, id LIMIT {MESSAGE_PAGE}",
+                    newest.at_or_before(),
+                    after
+                        .as_ref()
+                        .map_or_else(String::new, |key: &RowKey| format!(" AND {}", key.after())),
+                ))?;
+                let Some(last) = rows.last() else {
+                    break;
+                };
+                after = Some(RowKey::from_row(last)?);
+                let parts = self.database_message_parts(&id, &rows)?;
+                cuts.count(&rows, &parts);
+                read += rows.len() as u64;
+                let whole_page = rows.len() == MESSAGE_PAGE;
+                for message in database_messages(&rows, parts)? {
+                    for parsed in parse_message(&message) {
+                        turn(parsed)?;
+                    }
+                }
+                if !whole_page {
+                    break;
+                }
+            }
+        }
+        Ok(StreamedTranscript {
+            coordinates: StreamCoordinates::OpenCodeMessages,
+            source_length: read,
+            source_bounds: cuts.bounds(),
+            skipped: 0,
+            gaps: Vec::new(),
+            trailing_record: None,
+            terminal: None,
+            notes: Vec::new(),
+        })
+    }
+
+    /// Every part of these messages in the order a transcript reads them,
+    /// grouped by message and fetched in pages the transport always carries.
+    fn database_message_parts(
+        &self,
+        session: &str,
+        messages: &[Value],
+    ) -> Result<HashMap<String, Vec<Value>>> {
+        let ids = messages
+            .iter()
+            .map(|row| required_string(row, "id"))
+            .collect::<Result<Vec<_>>>()?;
+        let ids = sql_id_list(&ids);
+        let mut rows = Vec::new();
+        let mut after: Option<RowKey> = None;
+        loop {
+            let page = self.database(&format!(
+                "SELECT {} FROM part WHERE session_id = {session} AND message_id IN ({ids}){} \
+                 ORDER BY time_created, id LIMIT {MAX_DB_PART_PAGE}",
+                database_part_row(),
+                after
+                    .as_ref()
+                    .map_or_else(String::new, |key| format!(" AND {}", key.after())),
+            ))?;
+            let whole_page = page.len() == MAX_DB_PART_PAGE;
+            if let Some(last) = page.last() {
+                after = Some(RowKey::from_row(last)?);
+            }
+            rows.extend(page);
+            if !whole_page {
+                break;
+            }
+        }
+        group_parts(rows)
+    }
+
+    /// Every message the API projects, oldest first, a page at a time. The
+    /// endpoint pages until it runs out, so a message written while the read
+    /// streams may be part of it. A message too large for the transport
+    /// cannot be stepped over, so the read refuses there.
+    fn api_stream(
+        &self,
+        session: &Session,
+        turn: &mut dyn FnMut(Turn) -> Result<()>,
+    ) -> Result<StreamedTranscript> {
+        let request = |path: &str| self.request(path);
+        let mut pager = MessagePager::new(&request, &session.id, "asc", MESSAGE_PAGE);
+        let mut read = 0;
+        while !pager.exhausted {
+            let page = match pager.next_page(MESSAGE_PAGE) {
+                Ok(page) => page,
+                Err(error) if error.downcast_ref::<ResponseTooLarge>().is_some() => {
+                    return Err(anyhow!(
+                        "message {} of opencode session {} is larger than the {} transport \
+                         bound, so the session cannot be read whole; show without --full reads \
+                         the messages newer than it",
+                        read + 1,
+                        session.id,
+                        human_bytes(MAX_COMMAND_BYTES)
+                    ));
+                }
+                Err(error) => return Err(error),
+            };
+            read += page.len() as u64;
+            for message in &page {
+                for parsed in parse_message(message) {
+                    turn(parsed)?;
+                }
+            }
+        }
+        Ok(StreamedTranscript {
+            coordinates: StreamCoordinates::OpenCodeMessages,
+            source_length: read,
+            source_bounds: Vec::new(),
+            skipped: 0,
+            gaps: Vec::new(),
+            trailing_record: None,
+            terminal: None,
+            notes: Vec::new(),
+        })
     }
 }
 
@@ -1138,6 +1213,17 @@ impl Backend for OpenCodeBackend {
         Ok(paged_transcript(session.clone(), &pages, tail))
     }
 
+    fn stream_transcript(
+        &self,
+        session: &Session,
+        turn: &mut dyn FnMut(Turn) -> Result<()>,
+    ) -> Result<StreamedTranscript> {
+        if self.uses_database() {
+            return self.database_stream(session, turn);
+        }
+        self.api_stream(session, turn)
+    }
+
     fn lineage(&self, session: &Session) -> Result<Lineage> {
         if self.uses_database() {
             return self.database_lineage(session);
@@ -1239,15 +1325,147 @@ fn json_search_predicate(needle: &str) -> String {
     )
 }
 
+/// A message row as a transcript read consumes it: the `role` and `time` of
+/// its data and never the raw data, which can outgrow a query response.
+const DATABASE_MESSAGE_ROW: &str = "json_object( \
+     'id', id, 'time_created', time_created, 'data', \
+     json_object('role', json_extract(data, '$.role'), \
+                 'time', json_extract(data, '$.time'))) AS row";
+
 fn database_message_query(id: &str) -> String {
     format!(
-        "SELECT json_object( \
-             'id', id, 'time_created', time_created, 'data', \
-             json_object('role', json_extract(data, '$.role'), \
-                         'time', json_extract(data, '$.time'))) AS row \
-         FROM message WHERE session_id = {id} ORDER BY time_created DESC LIMIT {}",
+        "SELECT {DATABASE_MESSAGE_ROW} FROM message WHERE session_id = {id} \
+         ORDER BY time_created DESC, id DESC LIMIT {}",
         MAX_DB_MESSAGES + 1
     )
+}
+
+/// A part row cut to what a transcript read keeps: text and reasoning at
+/// `MAX_DB_TEXT_CHARS`, each tool payload field at `MAX_DB_TOOL_CHARS`, with
+/// `truncated` saying whether anything was cut.
+fn database_part_row() -> String {
+    format!(
+        "json_object( \
+             'id', id, 'message_id', message_id, 'time_created', time_created, 'data', \
+             CASE json_extract(data, '$.type') \
+         WHEN 'text' THEN json_object( \
+             'type', 'text', \
+             'text', substr(json_extract(data, '$.text'), 1, {MAX_DB_TEXT_CHARS}), \
+             'truncated', length(json_extract(data, '$.text')) > {MAX_DB_TEXT_CHARS}, \
+             'time', json_extract(data, '$.time')) \
+         WHEN 'reasoning' THEN json_object( \
+             'type', 'reasoning', \
+             'text', substr(json_extract(data, '$.text'), 1, {MAX_DB_TEXT_CHARS}), \
+             'truncated', length(json_extract(data, '$.text')) > {MAX_DB_TEXT_CHARS}, \
+             'time', json_extract(data, '$.time')) \
+         WHEN 'tool' THEN json_object( \
+             'type', 'tool', \
+             'tool', json_extract(data, '$.tool'), \
+             'callID', json_extract(data, '$.callID'), \
+             'state', json_object( \
+                 'status', json_extract(data, '$.state.status'), \
+                 'input', substr(json_extract(data, '$.state.input'), 1, {MAX_DB_TOOL_CHARS}), \
+                 'output', substr(json_extract(data, '$.state.output'), 1, {MAX_DB_TOOL_CHARS}), \
+                 'error', substr(json_extract(data, '$.state.error'), 1, {MAX_DB_TOOL_CHARS})), \
+             'truncated', \
+                 length(json_extract(data, '$.state.input')) > {MAX_DB_TOOL_CHARS} OR \
+                 length(json_extract(data, '$.state.output')) > {MAX_DB_TOOL_CHARS} OR \
+                 length(json_extract(data, '$.state.error')) > {MAX_DB_TOOL_CHARS}, \
+             'time', json_extract(data, '$.time')) \
+             ELSE json_object('type', json_extract(data, '$.type')) END) AS row"
+    )
+}
+
+/// A row's position in `time_created, id` order, the order a whole database
+/// read pages in.
+struct RowKey {
+    time_created: i64,
+    id: String,
+}
+
+impl RowKey {
+    fn from_row(row: &Value) -> Result<Self> {
+        Ok(Self {
+            time_created: row["time_created"]
+                .as_i64()
+                .ok_or_else(|| anyhow!("opencode record has no time_created"))?,
+            id: required_string(row, "id")?,
+        })
+    }
+
+    fn after(&self) -> String {
+        let (time, id) = (self.time_created, sql_literal(&self.id));
+        format!("(time_created > {time} OR (time_created = {time} AND id > {id}))")
+    }
+
+    fn at_or_before(&self) -> String {
+        let (time, id) = (self.time_created, sql_literal(&self.id));
+        format!("(time_created < {time} OR (time_created = {time} AND id <= {id}))")
+    }
+}
+
+/// Part rows grouped by message id, each message's parts in row order.
+fn group_parts(rows: Vec<Value>) -> Result<HashMap<String, Vec<Value>>> {
+    let mut parts = HashMap::<String, Vec<Value>>::new();
+    for row in rows {
+        let message_id = required_string(&row, "message_id")?;
+        parts
+            .entry(message_id)
+            .or_default()
+            .push(database_data(&row)?);
+    }
+    Ok(parts)
+}
+
+/// The messages these rows name, in row order, each carrying its parts.
+fn database_messages(
+    message_rows: &[Value],
+    mut parts: HashMap<String, Vec<Value>>,
+) -> Result<Vec<Value>> {
+    message_rows
+        .iter()
+        .filter_map(|row| {
+            database_message(row, parts.remove(row["id"].as_str()?).unwrap_or_default())
+        })
+        .collect()
+}
+
+/// Normalized turns whose text the part projection cut. Text and tool parts
+/// are cut at different lengths, so each bound is reported with the count of
+/// turns it touched: a user message's text parts join into one turn, an
+/// assistant message yields one turn per part.
+#[derive(Default)]
+struct TextCuts {
+    text: usize,
+    tool: usize,
+}
+
+impl TextCuts {
+    fn count(&mut self, message_rows: &[Value], parts: &HashMap<String, Vec<Value>>) {
+        for row in message_rows {
+            let Ok(data) = database_data(row) else {
+                continue;
+            };
+            let message_parts = row["id"]
+                .as_str()
+                .and_then(|id| parts.get(id))
+                .map_or(&[][..], Vec::as_slice);
+            let (text, tool) = cut_turn_counts(data["role"].as_str(), message_parts);
+            self.text += text;
+            self.tool += tool;
+        }
+    }
+
+    fn bounds(&self) -> Vec<SourceBound> {
+        [
+            (self.text, MAX_DB_TEXT_CHARS),
+            (self.tool, MAX_DB_TOOL_CHARS),
+        ]
+        .into_iter()
+        .filter(|(turns, _)| *turns > 0)
+        .map(|(turns, chars)| SourceBound::TurnText { turns, chars })
+        .collect()
+    }
 }
 
 fn database_data(row: &Value) -> Result<Value> {
@@ -1484,30 +1702,97 @@ enum PageStop {
     Ceiling,
 }
 
+/// One session's API message pages in one order. The endpoint answers every
+/// page with a `cursor.next`, including the page after its last message, so a
+/// page shorter than asked for is the only sign the store is exhausted; a
+/// follow-up page carries the cursor and no `order`, which the endpoint
+/// refuses to combine, and the cursor keeps the order it was issued in. A
+/// page the transport cannot carry is retried one message at a time, and the
+/// page size doubles back up while pages fit; every failed attempt costs a
+/// full transport bound of transfer, so one retry at the floor beats a ladder
+/// of them. A single message too large to carry fails with
+/// [`ResponseTooLarge`], and the caller decides what that means.
+struct MessagePager<'a> {
+    request: &'a dyn Fn(&str) -> Result<Value>,
+    id: &'a str,
+    order: &'static str,
+    page_size: usize,
+    limit: usize,
+    cursor: Option<String>,
+    exhausted: bool,
+}
+
+impl<'a> MessagePager<'a> {
+    fn new(
+        request: &'a dyn Fn(&str) -> Result<Value>,
+        id: &'a str,
+        order: &'static str,
+        page_size: usize,
+    ) -> Self {
+        Self {
+            request,
+            id,
+            order,
+            page_size,
+            limit: page_size,
+            cursor: None,
+            exhausted: false,
+        }
+    }
+
+    /// The next page, of at most `most` messages.
+    fn next_page(&mut self, most: usize) -> Result<Vec<Value>> {
+        let id = self.id;
+        loop {
+            let limit = self.limit.min(most);
+            let path = match &self.cursor {
+                None => format!(
+                    "/api/session/{id}/message?limit={limit}&order={}",
+                    self.order
+                ),
+                Some(cursor) => format!("/api/session/{id}/message?limit={limit}&cursor={cursor}"),
+            };
+            let mut page = match (self.request)(&path) {
+                Ok(page) => page,
+                Err(error) if limit > 1 && error.downcast_ref::<ResponseTooLarge>().is_some() => {
+                    self.limit = 1;
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
+            let Some(Value::Array(data)) = page.get_mut("data").map(Value::take) else {
+                return Err(match page["message"].as_str() {
+                    Some(message) => anyhow!("opencode message request failed: {message}"),
+                    None => anyhow!("opencode message response has no data array"),
+                });
+            };
+            self.cursor = page["cursor"]["next"].as_str().map(str::to_owned);
+            self.exhausted = data.len() < limit || self.cursor.is_none();
+            self.limit = (self.limit * 2).min(self.page_size);
+            return Ok(data);
+        }
+    }
+}
+
 /// Newest-first message pages, fetched until the requested number of turns is
-/// in hand, the store runs out, or the message ceiling is reached. The
-/// endpoint answers every page with a `cursor.next`, including the page after
-/// its last message, so a page shorter than asked for is the only sign the
-/// store is exhausted; a follow-up page carries the cursor and no `order`,
-/// which the endpoint refuses to combine. A page the transport cannot carry is
-/// retried one message at a time, and the page size doubles back up while
-/// pages fit; every failed attempt costs a full transport bound of transfer,
-/// so one retry at the floor beats a ladder of them. A single message too
-/// large to carry is the store's own
-/// limit: the read stops before it and says so, handing over the newer
-/// messages it has, unless that message is the newest one and nothing is
-/// readable at all.
+/// in hand, the store runs out, or the message ceiling is reached. A single
+/// message too large to carry is the store's own limit: the read stops before
+/// it and says so, handing over the newer messages it has, unless that
+/// message is the newest one and nothing is readable at all.
 fn paged_messages(
     request: &dyn Fn(&str) -> Result<Value>,
     id: &str,
     tail: usize,
 ) -> Result<MessagePages> {
+    let mut pager = MessagePager::new(
+        request,
+        id,
+        "desc",
+        tail.clamp(MIN_MESSAGE_PAGE, MESSAGE_PAGE),
+    );
     let mut messages: Vec<Value> = Vec::new();
     let mut notes = Vec::new();
     let mut turns = 0;
-    let mut cursor: Option<String> = None;
-    let page_size = tail.clamp(MIN_MESSAGE_PAGE, MESSAGE_PAGE);
-    let mut limit = page_size;
     let stop = loop {
         if turns >= tail {
             break PageStop::WindowFull;
@@ -1516,21 +1801,11 @@ fn paged_messages(
         if remaining == 0 {
             break PageStop::Ceiling;
         }
-        limit = limit.min(remaining);
-        let path = match &cursor {
-            None => format!("/api/session/{id}/message?limit={limit}&order=desc"),
-            Some(cursor) => format!("/api/session/{id}/message?limit={limit}&cursor={cursor}"),
-        };
-        let page = match request(&path) {
+        let page = match pager.next_page(remaining) {
             Ok(page) => page,
-            Err(error) if error.downcast_ref::<ResponseTooLarge>().is_some() => {
-                if limit > 1 {
-                    limit = 1;
-                    continue;
-                }
-                if messages.is_empty() {
-                    return Err(error);
-                }
+            Err(error)
+                if !messages.is_empty() && error.downcast_ref::<ResponseTooLarge>().is_some() =>
+            {
                 notes.push(format!(
                     "The message older than the {} fetched is larger than the {} transport \
                      bound; the read stopped before it.",
@@ -1541,23 +1816,14 @@ fn paged_messages(
             }
             Err(error) => return Err(error),
         };
-        let data = page["data"]
-            .as_array()
-            .ok_or_else(|| match page["message"].as_str() {
-                Some(message) => anyhow!("opencode message request failed: {message}"),
-                None => anyhow!("opencode message response has no data array"),
-            })?;
-        let short = data.len() < limit;
-        turns += data
+        turns += page
             .iter()
             .map(|message| parse_message(message).len())
             .sum::<usize>();
-        messages.extend(data.iter().cloned());
-        cursor = page["cursor"]["next"].as_str().map(str::to_owned);
-        if short || cursor.is_none() {
+        messages.extend(page);
+        if pager.exhausted {
             break PageStop::Exhausted;
         }
-        limit = (limit * 2).min(page_size);
     };
     Ok(MessagePages {
         messages,

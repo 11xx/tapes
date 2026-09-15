@@ -305,12 +305,18 @@ in force.
 `show --full` reads the whole recording instead of its tail, writing each turn
 as it is read, so memory follows one record rather than the file. Every turn
 is shown unless `--tail` keeps the newest, and `--exchange`, `--only`, and
-`--omit` apply as they do to a bounded read. It reads installed Claude, Codex, and Pi recordings;
-OpenCode refuses it by name, and `--read-bytes` is not available with it.
+`--omit` apply as they do to a bounded read. It reads installed Claude, Codex,
+Pi, and OpenCode sessions, and `--read-bytes` is not available with it.
 `--full --json` writes the same `tapes-session/9` object turn by turn: its
 `read` evidence is one range from byte 0 to the source length with
 `projection_options: ["full"]`, and each turn's `record_ref` carries its own
-record span. Codex and Pi recordings are read twice: the first pass keeps only
+record span. An OpenCode session is paged from its store oldest first, every
+message rather than the newest 1,000, so memory follows one page of messages;
+its `read` range counts messages (`coordinate_domain: "opencode-message"`),
+and its turns carry native ids rather than record spans. The stable database
+still cuts part text at 4,000 characters and each tool payload field at 2,000,
+reported under `truncation.source`, and a message larger than the 8 MiB API
+transport bound refuses the read. Codex and Pi recordings are read twice: the first pass keeps only
 what projecting a turn needs from elsewhere in the file — the messages the
 operator sent, for Codex, and each entry's id and parent, for Pi's active
 branch — and the second pass, stopping at the length the first observed,
