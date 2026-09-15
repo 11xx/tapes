@@ -382,13 +382,22 @@ pub fn tool_coverage() -> ContentCoverage {
 }
 
 pub fn inventory(turns: &[crate::model::Turn]) -> Option<ContentInventory> {
-    let mut inventory = ContentInventory {
-        records: turns.iter().filter(|turn| !turn.parts.is_empty()).count(),
-        ..ContentInventory::default()
-    };
+    let mut inventory = ContentInventory::default();
     for turn in turns {
-        inventory.parts += turn.parts.len();
-        inventory.references += turn
+        inventory.add(turn);
+    }
+    inventory.into_option()
+}
+
+impl ContentInventory {
+    /// Count one turn's content, so a streamed read can inventory turns it
+    /// never holds together.
+    pub fn add(&mut self, turn: &crate::model::Turn) {
+        if !turn.parts.is_empty() {
+            self.records += 1;
+        }
+        self.parts += turn.parts.len();
+        self.references += turn
             .parts
             .iter()
             .filter(|part| {
@@ -403,21 +412,25 @@ pub fn inventory(turns: &[crate::model::Turn]) -> Option<ContentInventory> {
                 )
             })
             .count();
-        inventory.omitted_parts += turn
+        self.omitted_parts += turn
             .coverage
             .as_ref()
             .map_or(0, |coverage| coverage.omitted_parts);
         match turn.coverage.as_ref().map(|coverage| coverage.availability) {
-            Some(ContentAvailability::RetainedBody) => inventory.retained_body += 1,
-            Some(ContentAvailability::ReferenceOnly) => inventory.reference_only += 1,
-            Some(ContentAvailability::UnsupportedRepresentation) => inventory.unsupported += 1,
+            Some(ContentAvailability::RetainedBody) => self.retained_body += 1,
+            Some(ContentAvailability::ReferenceOnly) => self.reference_only += 1,
+            Some(ContentAvailability::UnsupportedRepresentation) => self.unsupported += 1,
             Some(ContentAvailability::Unknown) | Some(ContentAvailability::ReadBound) => {
-                inventory.unknown += 1
+                self.unknown += 1
             }
             None => {}
         }
     }
-    (!inventory.is_empty()).then_some(inventory)
+
+    /// The inventory, or nothing when no turn carried content.
+    pub fn into_option(self) -> Option<Self> {
+        (!self.is_empty()).then_some(self)
+    }
 }
 
 pub fn parts_from_array(value: &Value, source_field: &str) -> (Vec<ContentPart>, ContentCoverage) {

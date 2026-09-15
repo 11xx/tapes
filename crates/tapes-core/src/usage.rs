@@ -12,11 +12,12 @@ use chrono::{DateTime, Utc};
 use serde::Serialize;
 use serde_json::Value;
 
-use crate::content::{self, ContentInventory};
+use crate::backend::{skipped_records_note, StreamedTranscript};
+use crate::content::ContentInventory;
 use crate::model::{
     Accounting, AccountingBasis, AccountingCoverage, Cost, Model, ReadEvidence, Role, Session,
     SessionMetadata, SourceBound, SourceDescriptor, TerminalObservation, TextTailEvidence, Tokens,
-    Transcript, Truncation,
+    Transcript, Truncation, Turn,
 };
 
 pub const USAGE_SCHEMA: &str = "tapes-usage/5";
@@ -233,7 +234,63 @@ pub struct UsageView {
 /// session's counters and nothing is derived from another counter; the
 /// projection reports what the read holds.
 pub fn usage(transcript: &Transcript) -> UsageView {
-    let session = &transcript.session;
+    let mut tally = TurnTally::default();
+    for turn in &transcript.turns {
+        tally.add(turn);
+    }
+    tally.counts.coverage = turn_coverage(&transcript.truncation);
+    project(
+        &transcript.session,
+        tally,
+        ReadFacts {
+            read: transcript.read.clone(),
+            terminal: transcript.terminal.clone(),
+            text_tail: transcript.text_tail.clone(),
+            truncated: transcript.truncated,
+            truncation: transcript.truncation.clone(),
+            notes: transcript.notes.clone(),
+        },
+    )
+}
+
+/// Project a whole-recording read into its usage answer. `session` carries
+/// the counters folded from every record, and `turns` every turn the read
+/// streamed, so the counts cover the session.
+pub fn streamed(session: &Session, mut turns: TurnTally, read: &StreamedTranscript) -> UsageView {
+    let mut notes = skipped_records_note(read.skipped)
+        .into_iter()
+        .collect::<Vec<_>>();
+    notes.extend(read.notes.iter().cloned());
+    let truncation = Truncation {
+        window: None,
+        source: read.source_bounds.clone(),
+    };
+    turns.counts.coverage = turn_coverage(&truncation);
+    project(
+        session,
+        turns,
+        ReadFacts {
+            read: Some(read.read_evidence(session.source.producer.clone())),
+            terminal: read.terminal.clone(),
+            text_tail: None,
+            truncated: !truncation.is_empty(),
+            truncation,
+            notes,
+        },
+    )
+}
+
+/// What a read established beside its turns, as a usage answer repeats it.
+struct ReadFacts {
+    read: Option<ReadEvidence>,
+    terminal: Option<TerminalObservation>,
+    text_tail: Option<TextTailEvidence>,
+    truncated: bool,
+    truncation: Truncation,
+    notes: Vec<String>,
+}
+
+fn project(session: &Session, turns: TurnTally, facts: ReadFacts) -> UsageView {
     let detail = session.usage_detail.clone().unwrap_or_default();
     UsageView {
         schema: USAGE_SCHEMA,
@@ -249,38 +306,42 @@ pub fn usage(transcript: &Transcript) -> UsageView {
         accounting: session.accounting.clone(),
         tokens: session.tokens.clone(),
         cost: session.cost.clone(),
-        turns: turn_counts(transcript),
+        turns: turns.counts,
         context_window: detail.context_window,
         rate_limits: detail.rate_limits,
         durations_ms: detail.durations_ms,
         by_model: detail.by_model,
-        read: transcript.read.clone(),
-        terminal: transcript.terminal.clone(),
-        text_tail: transcript.text_tail.clone(),
-        content: content::inventory(&transcript.turns),
-        truncated: transcript.truncated,
-        truncation: transcript.truncation.clone(),
-        notes: transcript.notes.clone(),
+        read: facts.read,
+        terminal: facts.terminal,
+        text_tail: facts.text_tail,
+        content: turns.content.into_option(),
+        truncated: facts.truncated,
+        truncation: facts.truncation,
+        notes: facts.notes,
     }
 }
 
-fn turn_counts(transcript: &Transcript) -> TurnCounts {
-    let mut counts = TurnCounts {
-        coverage: turn_coverage(&transcript.truncation),
-        ..TurnCounts::default()
-    };
-    for turn in &transcript.turns {
+/// Turn counts and the content inventory, folded one turn at a time so a
+/// streamed read never holds its turns.
+#[derive(Clone, Debug, Default)]
+pub struct TurnTally {
+    counts: TurnCounts,
+    content: ContentInventory,
+}
+
+impl TurnTally {
+    pub fn add(&mut self, turn: &Turn) {
         match turn.role {
-            Role::User => counts.user += 1,
-            Role::Assistant => counts.assistant += 1,
-            Role::Tool => counts.tool += 1,
-            Role::Reasoning => counts.reasoning += 1,
-            Role::System => counts.system += 1,
-            Role::Developer => counts.developer += 1,
+            Role::User => self.counts.user += 1,
+            Role::Assistant => self.counts.assistant += 1,
+            Role::Tool => self.counts.tool += 1,
+            Role::Reasoning => self.counts.reasoning += 1,
+            Role::System => self.counts.system += 1,
+            Role::Developer => self.counts.developer += 1,
         }
-        counts.total += 1;
+        self.counts.total += 1;
+        self.content.add(turn);
     }
-    counts
 }
 
 fn is_zero(value: &usize) -> bool {
