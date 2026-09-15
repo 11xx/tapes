@@ -28,7 +28,6 @@ use crate::lineage::{ChildRef, Lineage};
 use crate::model::{
     Accounting, Cost, LiveState, Model, ReadEvidence, RecordRef, SessionMetadata, SourceDescriptor,
     TerminalObservation, TextTailEvidence, Tokens, TrailingRecord, Transcript, Truncation,
-    TurnKind,
 };
 use crate::usage;
 
@@ -351,7 +350,7 @@ fn text_tail(transcript: &Transcript, tail: usize) -> Vec<TailEntry> {
     let entries = transcript
         .turns
         .iter()
-        .filter(|turn| matches!(turn.kind, TurnKind::Operator | TurnKind::Assistant))
+        .filter(|turn| turn.kind.in_exchange())
         .map(|turn| {
             let mut characters = turn.text.chars();
             let text = characters

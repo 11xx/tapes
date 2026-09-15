@@ -1062,6 +1062,14 @@ that the session is stopped now. `text_tail` reports the requested and
 returned text entries and explains an empty tail as a zero request, no
 operator/assistant text in the read, or an empty complete projection.
 
+`projection` is present when a caller kept only some of the read's turns.
+`show --exchange` and `export --exchange` write
+`{"kind": "exchange", "omitted": {"tool": 3, "reasoning": 1}}`: only
+`operator` and `assistant` turns remain, each keeping its ordinal, and
+`omitted` counts the dropped turns by kind. A turn window under a projection
+counts the kept turns. A turn absent from a projection says nothing about
+whether the session recorded it.
+
 A transcript that omitted anything carries `truncated: true` and a
 `truncation` object:
 

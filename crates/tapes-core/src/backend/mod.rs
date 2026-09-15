@@ -1281,15 +1281,7 @@ fn transcript_with_facts(
     let mut read_evidence = read_evidence;
     read_evidence.producer = session.source.producer.clone();
     let total = turns.len();
-    let text_count_in_read = turns
-        .iter()
-        .filter(|turn| {
-            matches!(
-                turn.kind,
-                crate::model::TurnKind::Operator | crate::model::TurnKind::Assistant
-            )
-        })
-        .count();
+    let text_count_in_read = turns.iter().filter(|turn| turn.kind.in_exchange()).count();
     for (ordinal, turn) in turns.iter_mut().enumerate() {
         turn.ordinal = ordinal;
     }

@@ -571,7 +571,7 @@ fn summarize_lineage(lineage: Lineage) -> LineageSummary {
 fn text_tail(turns: &[Turn], tail: usize) -> Vec<TailEntry> {
     let entries = turns
         .iter()
-        .filter(|turn| matches!(turn.kind, TurnKind::Operator | TurnKind::Assistant))
+        .filter(|turn| turn.kind.in_exchange())
         .map(|turn| {
             let mut characters = turn.text.chars();
             let text = characters
