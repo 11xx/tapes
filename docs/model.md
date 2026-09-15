@@ -1087,7 +1087,7 @@ structured citation spans, and its optional `backing` remains the source's
 association rather than a fabricated turn.
 
 When the source reader supplies it, `read` records the source length and the
-configured byte bound, each physical head/tail/context/alignment range, the
+configured byte bound, each physical head/tail/alignment range, the
 absolute spans of decoded records, separate spans for decoded records used
 only as projection context, and explicit gaps for bytes outside the bound,
 partial records, or malformed records. A range is an observation of

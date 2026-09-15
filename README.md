@@ -262,7 +262,7 @@ optional `trailing_record` object; unavailable source timestamps remain absent.
 The activity note compares the store's last activity and the newest rendered
 turn at whole-second precision, matching the timestamps shown to the reader.
 The optional `read` object records the source length, configured bound,
-head/tail/context/alignment physical ranges, decoded record spans, context-only
+head/tail/alignment physical ranges, decoded record spans, context-only
 record spans, and gaps; physical coverage does not erase malformed records, and
 a partial gap is discharged only when a successful decode identifies that same
 record. A preceding newline lets an exact tail boundary retain its first

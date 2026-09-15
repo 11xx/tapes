@@ -47,10 +47,9 @@ invented from a neighboring record.
 
 The normalized transcript also retains a bounded `read` descriptor. It records
 the source length, the configured tail bound (4 MiB unless `--read-bytes` sets
-another), the physical head, tail,
-context, and alignment ranges, each decoded record's absolute byte span,
-separate spans for records used only as opening or newer provenance context,
-and gaps for the discarded partial prefix or malformed records. When the tail
+another), the physical head, tail, and alignment ranges, each decoded
+record's absolute byte span, separate spans for records decoded only from the
+opening, and gaps for the discarded partial prefix or malformed records. When the tail
 begins after byte zero, the reader reads one preceding byte as alignment
 evidence. A preceding newline proves that the tail begins at a record boundary,
 so the first tail record is retained; otherwise the bytes through the first

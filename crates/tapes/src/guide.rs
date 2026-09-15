@@ -184,8 +184,8 @@ PROBE BEFORE EXPORTING
   `--read-bytes` widens the file tail (4MiB by default, at most 1GiB), `show
   --full` streams a whole session past it and past OpenCode's store page, and
   explicit page reads reach older Claude or Codex file history. `read`
-  records the source length, configured bound, physical head/tail/context/
-  alignment ranges, decoded record spans, context-only record spans, and gaps;
+  records the source length, configured bound, physical head/tail/alignment
+  ranges, decoded record spans, context-only record spans, and gaps;
   physical coverage does not erase malformed records, and a partial gap is
   discharged only by a successful decode of that same record. A preceding
   newline lets an exact tail boundary retain its first record; a mid-record
