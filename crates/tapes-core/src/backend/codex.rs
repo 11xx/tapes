@@ -6,8 +6,8 @@ use serde_json::Value;
 
 use super::{
     accounting_for, head_directory, head_jsonl, home_path, jsonl_files, list_files,
-    list_files_with_search, matching_session_file, read_bounds, read_recording, session_file,
-    skipped_records_note, stream_jsonl, stream_jsonl_to, streamed_trailing_record,
+    list_files_with_search, matching_session_file, read_bounds, read_recording, replay_pin,
+    session_file, skipped_records_note, stream_jsonl, streamed_trailing_record,
     terminal_from_values, timestamp, trailing_record, transcript_from_recording, ActivityRange,
     Backend, Jsonl, Listing, ParsedFile, Query, StreamedTranscript, TokenTotals,
 };
@@ -318,6 +318,7 @@ impl Backend for CodexBackend {
     fn stream_transcript(
         &self,
         session: &Session,
+        replay: Option<&StreamedTranscript>,
         turn: &mut dyn FnMut(Turn) -> Result<()>,
     ) -> Result<StreamedTranscript> {
         let root = self
@@ -328,7 +329,7 @@ impl Backend for CodexBackend {
             .ok_or_else(|| anyhow!("codex session {} is unavailable", session.id))?;
         let domain = format!("file:{}", path.display());
         let mut terminal = None;
-        let read = stream_jsonl(&path, |value, span, revision| {
+        let read = stream_jsonl(&path, replay_pin(replay)?, |value, span, revision| {
             if let Some(observed) = codex_terminal(value) {
                 terminal = Some(observed);
             }
@@ -344,6 +345,7 @@ impl Backend for CodexBackend {
             coordinates: super::StreamCoordinates::FileBytes,
             source_length: read.source_length,
             source_bounds: Vec::new(),
+            source_revision: Some(read.revision),
             skipped: read.skipped,
             trailing_record: streamed_trailing_record(read.last.as_ref(), codex_trailing_kind),
             terminal,
@@ -379,7 +381,7 @@ impl Backend for CodexBackend {
         let (files, path) = self.recording(session)?;
         let mut header = None;
         let mut agents = SpawnedAgents::default();
-        let read = stream_jsonl(&path, |value, _, _| {
+        let read = stream_jsonl(&path, None, |value, _, _| {
             if header.is_none() && value["type"] == "session_meta" {
                 header = Some(value["payload"].clone());
             }
@@ -392,10 +394,10 @@ impl Backend for CodexBackend {
         Ok(lineage)
     }
 
-    fn stream_session(&self, session: &Session, length: u64) -> Result<Session> {
+    fn stream_session(&self, session: &Session, read: &StreamedTranscript) -> Result<Session> {
         let (_, path) = self.recording(session)?;
         let mut records = CodexRecords::default();
-        stream_jsonl_to(&path, length, |value, _, _| {
+        stream_jsonl(&path, Some(read.pin()?), |value, _, _| {
             records.observe(value);
             Ok(false)
         })?;

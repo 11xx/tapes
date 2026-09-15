@@ -946,11 +946,11 @@ pub fn usage_full_with_backends(
     let resolved = selection.resolve(backends)?;
     let backend = &backends[resolved.backend_index];
     let mut turns = usage::TurnTally::default();
-    let read = backend.stream_transcript(&resolved.session, &mut |turn| {
+    let read = backend.stream_transcript(&resolved.session, None, &mut |turn| {
         turns.add(&turn);
         Ok(())
     })?;
-    let session = backend.stream_session(&resolved.session, read.source_length)?;
+    let session = backend.stream_session(&resolved.session, &read)?;
     Ok(usage::streamed(&session, turns, &read))
 }
 
@@ -1059,7 +1059,7 @@ pub fn show_full_with_backends(
     let resolved = selection.resolve(backends)?;
     sink.session(&resolved.session)?;
     let mut ordinal = 0;
-    backends[resolved.backend_index].stream_transcript(&resolved.session, &mut |mut turn| {
+    backends[resolved.backend_index].stream_transcript(&resolved.session, None, &mut |mut turn| {
         turn.ordinal = ordinal;
         ordinal += 1;
         sink.turn(turn)

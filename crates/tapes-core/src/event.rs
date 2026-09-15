@@ -2118,7 +2118,7 @@ mod tests {
                 let mut replay = |sink: &mut dyn FnMut(Turn)| {
                     let mut ordinal = 0;
                     backend
-                        .stream_transcript(&session, &mut |mut turn| {
+                        .stream_transcript(&session, None, &mut |mut turn| {
                             turn.ordinal = ordinal;
                             ordinal += 1;
                             sink(turn);

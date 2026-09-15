@@ -9,8 +9,8 @@ use serde_json::Value;
 
 use super::{
     accounting_for, head_directory, home_path, list_files, list_files_with_search,
-    matching_session_file, read_bounds, read_jsonl, read_recording, skipped_records_note,
-    stream_jsonl, stream_jsonl_to, streamed_trailing_record, timestamp, trailing_record,
+    matching_session_file, read_bounds, read_jsonl, read_recording, replay_pin,
+    skipped_records_note, stream_jsonl, streamed_trailing_record, timestamp, trailing_record,
     transcript, transcript_from_recording, ActivityRange, Backend, Jsonl, Listing, ParsedFile,
     Query, StreamedChild, StreamedTranscript, TokenTotals,
 };
@@ -469,6 +469,7 @@ impl Backend for ClaudeBackend {
     fn stream_transcript(
         &self,
         session: &Session,
+        replay: Option<&StreamedTranscript>,
         turn: &mut dyn FnMut(Turn) -> Result<()>,
     ) -> Result<StreamedTranscript> {
         let root = self
@@ -478,7 +479,7 @@ impl Backend for ClaudeBackend {
         let path = matching_session_file(session_files(root), &session.id)
             .ok_or_else(|| anyhow!("claude session {} is unavailable", session.id))?;
         let domain = format!("file:{}", path.display());
-        let read = stream_jsonl(&path, |value, span, revision| {
+        let read = stream_jsonl(&path, replay_pin(replay)?, |value, span, revision| {
             let mut parsed = parse_turns(value);
             super::attach_record_refs(&mut parsed, &domain, Some(revision), Some(span));
             let produced = !parsed.is_empty();
@@ -492,6 +493,7 @@ impl Backend for ClaudeBackend {
             coordinates: super::StreamCoordinates::FileBytes,
             source_length: read.source_length,
             source_bounds: Vec::new(),
+            source_revision: Some(read.revision),
             skipped: read.skipped,
             trailing_record: streamed_trailing_record(read.last.as_ref(), claude_trailing_kind),
             gaps: read.gaps,
@@ -518,7 +520,7 @@ impl Backend for ClaudeBackend {
     fn stream_lineage(&self, session: &Session) -> Result<Lineage> {
         let path = self.recording(session)?;
         let mut calls = AgentCalls::default();
-        let read = stream_jsonl(&path, |value, _, _| {
+        let read = stream_jsonl(&path, None, |value, _, _| {
             calls.observe(value);
             Ok(false)
         })?;
@@ -527,10 +529,10 @@ impl Backend for ClaudeBackend {
         Ok(lineage)
     }
 
-    fn stream_session(&self, session: &Session, length: u64) -> Result<Session> {
+    fn stream_session(&self, session: &Session, read: &StreamedTranscript) -> Result<Session> {
         let path = self.recording(session)?;
         let mut records = ClaudeRecords::default();
-        stream_jsonl_to(&path, length, |value, _, _| {
+        stream_jsonl(&path, Some(read.pin()?), |value, _, _| {
             records.observe(value);
             Ok(false)
         })?;
@@ -552,7 +554,7 @@ impl Backend for ClaudeBackend {
         // The first user turn that yields a title, which is all a derived
         // title needs from the turns streamed past.
         let mut title_turn = None::<Turn>;
-        let read = stream_jsonl(&path, |value, span, revision| {
+        let read = stream_jsonl(&path, None, |value, span, revision| {
             if let Some(id) = value.get("sessionId") {
                 if id.as_str() != Some(parent.id.as_str()) {
                     anyhow::bail!(
@@ -605,6 +607,7 @@ impl Backend for ClaudeBackend {
                 coordinates: super::StreamCoordinates::FileBytes,
                 source_length: read.source_length,
                 source_bounds: Vec::new(),
+                source_revision: Some(read.revision),
                 skipped: read.skipped,
                 trailing_record: streamed_trailing_record(read.last.as_ref(), claude_trailing_kind),
                 gaps: read.gaps,

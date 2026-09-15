@@ -882,6 +882,7 @@ impl OpenCodeBackend {
             coordinates: StreamCoordinates::OpenCodeMessages,
             source_length: read,
             source_bounds: cuts.bounds(),
+            source_revision: None,
             skipped: 0,
             gaps: Vec::new(),
             trailing_record: None,
@@ -963,6 +964,7 @@ impl OpenCodeBackend {
             coordinates: StreamCoordinates::OpenCodeMessages,
             source_length: read,
             source_bounds: Vec::new(),
+            source_revision: None,
             skipped: 0,
             gaps: Vec::new(),
             trailing_record: None,
@@ -1216,8 +1218,17 @@ impl Backend for OpenCodeBackend {
     fn stream_transcript(
         &self,
         session: &Session,
+        replay: Option<&StreamedTranscript>,
         turn: &mut dyn FnMut(Turn) -> Result<()>,
     ) -> Result<StreamedTranscript> {
+        // OpenCode updates a message's rows and parts in place, so a second
+        // read of the same messages can hand over different turns.
+        if replay.is_some() {
+            return Err(anyhow!(
+                "opencode sessions cannot be read whole twice: their messages are updated in \
+                 place, so a second read may not repeat the first"
+            ));
+        }
         if self.uses_database() {
             return self.database_stream(session, turn);
         }
@@ -1233,7 +1244,7 @@ impl Backend for OpenCodeBackend {
 
     /// OpenCode keeps a session's counters on its own row as a recorded total
     /// for the whole session, so the resolved session already states them.
-    fn stream_session(&self, session: &Session, _length: u64) -> Result<Session> {
+    fn stream_session(&self, session: &Session, _read: &StreamedTranscript) -> Result<Session> {
         Ok(session.clone())
     }
 
