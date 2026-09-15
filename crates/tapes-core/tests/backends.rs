@@ -3799,7 +3799,12 @@ fn selection_stats_preserve_read_failures_without_counting_them_as_zero_activity
         sessions: vec![resolver_session("readable"), resolver_session("gone")],
         unreadable: "gone",
     })];
-    let summary = tapes_core::stats_summary::with_backends(&backends, &selection()).unwrap();
+    let summary = tapes_core::stats_summary::with_backends(
+        &backends,
+        &selection(),
+        tapes_core::stats_summary::SessionRead::Bounded,
+    )
+    .unwrap();
     assert_eq!(summary.selected, 2);
     assert_eq!(summary.read, 1);
     assert_eq!(summary.failed.len(), 1);

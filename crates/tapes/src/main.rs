@@ -20,6 +20,7 @@ use tapes_core::stats::{
     Coverage, LineageStats, StatsView, TimeStats, ToolNameStats, ToolStats, TurnKindCounts,
     UsageStats, Warning,
 };
+use tapes_core::stats_summary::SessionRead;
 use tapes_core::usage::{
     Durations, GroupBy, GroupKey, ModelUsage, RateLimits, RateWindow, TurnCoverage, UsageTally,
     UsageView,
@@ -789,6 +790,16 @@ enum Command {
         /// this never aliases the recorded outer tool name.
         #[arg(long, value_name = "PROGRAM")]
         program: Vec<String>,
+        /// Stream the whole recording instead of its bounded tail, writing
+        /// each event as it is paired so memory follows the calls awaiting a
+        /// result rather than the file; with --json the same tapes-events/6
+        /// object is written event by event. The recording is read twice, the
+        /// second read replaying the first; --tail, --name, --call-id, and
+        /// --program select as they do over a bounded read. Installed Claude,
+        /// Codex, and Pi sessions; OpenCode refuses, since its messages are
+        /// updated in place and a second read may not repeat the first.
+        #[arg(long, conflicts_with = "read_bytes")]
+        full: bool,
         /// Render the versioned tapes-events/6 object as JSON.
         #[arg(long)]
         json: bool,
@@ -834,6 +845,16 @@ enum Command {
         query: SessionQueryArgs,
         #[command(flatten)]
         read: ReadArgs,
+        /// Stream the whole recording instead of its bounded tail, twice: the
+        /// first read counts turns and observes tool events, and the second
+        /// replays it to pair and count them, so memory follows the calls
+        /// awaiting a result rather than the file. Counters and children are
+        /// read from every record, so turn coverage is `session`. A selection
+        /// streams each selected session the same way. Installed Claude,
+        /// Codex, and Pi sessions; OpenCode refuses, since its messages are
+        /// updated in place and a second read may not repeat the first.
+        #[arg(long, conflicts_with = "read_bytes")]
+        full: bool,
         /// Render the versioned tapes-stats/5 object, or tapes-stats-summary/3
         /// for a selection, as JSON.
         #[arg(long)]
@@ -1346,11 +1367,21 @@ fn dispatch(cli: Cli) -> Result<()> {
             name,
             call_id,
             program,
+            full,
             json,
         } => {
             selection.validate_input()?;
             read.refuse_supplied(&selection.input)?;
             let by_latest = selection.latest;
+            let filter = tapes_core::event::EventFilter {
+                names: &name,
+                call_ids: &call_id,
+                programs: &program,
+            };
+            if full {
+                refuse_full_supplied(&selection.input)?;
+                return events_full(&selection, tail, &filter, json, by_latest);
+            }
             let mut events = if selection.input.supplied() {
                 let backends = selection.input.backends()?;
                 tapes_core::events_with_backends(
@@ -1367,7 +1398,7 @@ fn dispatch(cli: Cli) -> Result<()> {
                 liveness::annotate(std::slice::from_mut(&mut events.session));
                 events
             };
-            events.retain_with_program(&name, &call_id, &program);
+            events.retain(&filter);
             if json {
                 print_json(&events, &selection.input)?;
             } else {
@@ -1400,11 +1431,21 @@ fn dispatch(cli: Cli) -> Result<()> {
                 print!("{}", render_lineage(&lineage));
             }
         }
-        Command::Stats { query, read, json } => {
+        Command::Stats {
+            query,
+            read,
+            full,
+            json,
+        } => {
             query.validate_input()?;
             read.refuse_supplied(&query.input)?;
+            if full {
+                refuse_full_supplied(&query.input)?;
+            }
             if let Some(one) = query.single() {
-                let stats = if query.input.supplied() {
+                let stats = if full {
+                    tapes_core::stats_full_with_backends(&tapes_core::backend::backends(), one)?
+                } else if query.input.supplied() {
                     let backends = query.input.backends()?;
                     tapes_core::stats_with_backends(&backends, one)?
                 } else {
@@ -1419,11 +1460,25 @@ fn dispatch(cli: Cli) -> Result<()> {
                 if !query.has_set_selection() {
                     return Err(anyhow!("stats needs a session ID, --latest, or an explicit selection such as --here"));
                 }
-                let summary = if query.input.supplied() {
+                let summary = if full {
+                    tapes_core::stats_summary::with_backends(
+                        &tapes_core::backend::backends(),
+                        &query.set(),
+                        SessionRead::Whole,
+                    )?
+                } else if query.input.supplied() {
                     let backends = query.input.backends()?;
-                    tapes_core::stats_summary::with_backends(&backends, &query.set())?
+                    tapes_core::stats_summary::with_backends(
+                        &backends,
+                        &query.set(),
+                        SessionRead::Bounded,
+                    )?
                 } else {
-                    tapes_core::stats_summary::with_backends(&read.backends()?, &query.set())?
+                    tapes_core::stats_summary::with_backends(
+                        &read.backends()?,
+                        &query.set(),
+                        SessionRead::Bounded,
+                    )?
                 };
                 if json {
                     print_json(&summary, &query.input)?;
@@ -2729,6 +2784,96 @@ fn show_full(
         &mut sink,
     )?;
     sink.finish(read)
+}
+
+/// `events --full` writes each kept event as the second read pairs it, so the
+/// whole recording is never held.
+fn events_full(
+    selection: &SelectionArgs,
+    tail: Option<usize>,
+    filter: &tapes_core::event::EventFilter<'_>,
+    json: bool,
+    by_latest: bool,
+) -> Result<()> {
+    let stdout = std::io::stdout();
+    let mut sink = FullEvents {
+        out: std::io::BufWriter::new(stdout.lock()),
+        by_latest,
+        json,
+        writer: None,
+    };
+    let streamed = tapes_core::events_full_with_backends(
+        &tapes_core::backend::backends(),
+        selection.selection(),
+        tail.unwrap_or(usize::MAX),
+        filter,
+        &mut sink,
+    )?;
+    sink.finish(streamed)
+}
+
+struct FullEvents<W: std::io::Write> {
+    out: W,
+    by_latest: bool,
+    json: bool,
+    /// The events object being written, under `--json`.
+    writer: Option<tapes_core::event::StreamedEventsJson>,
+}
+
+impl<W: std::io::Write> tapes_core::EventSink for FullEvents<W> {
+    fn session(&mut self, session: &Session) -> Result<()> {
+        let mut session = session.clone();
+        liveness::annotate(std::slice::from_mut(&mut session));
+        if self.json {
+            self.writer = Some(tapes_core::event::StreamedEventsJson::open(
+                &mut self.out,
+                &session,
+            )?);
+        } else {
+            self.out
+                .write_all(render_header(&session, self.by_latest).as_bytes())?;
+        }
+        Ok(())
+    }
+
+    fn record(&mut self, record: EventRecord) -> Result<()> {
+        match &mut self.writer {
+            Some(writer) => writer.record(&mut self.out, &record)?,
+            None => {
+                self.out.write_all(render_event(&record).as_bytes())?;
+                self.out.write_all(b"\n")?;
+            }
+        }
+        Ok(())
+    }
+}
+
+impl<W: std::io::Write> FullEvents<W> {
+    fn finish(mut self, streamed: tapes_core::StreamedEvents) -> Result<()> {
+        let events = &streamed.events;
+        if let Some(writer) = self.writer.take() {
+            writer.close(&mut self.out, events)?;
+            self.out.write_all(b"\n")?;
+            self.out.flush()?;
+            return Ok(());
+        }
+        let mut footer = String::new();
+        if self.by_latest {
+            render_latest_note(&mut footer, &events.session);
+        }
+        render_truncation_notes(&mut footer, &events.truncation);
+        render_notes(&mut footer, &events.notes);
+        footer.push_str(&format!(
+            "Read evidence: the whole recording was streamed twice; {}.\n",
+            streamed
+                .read
+                .coordinates
+                .describe(streamed.read.source_length)
+        ));
+        self.out.write_all(footer.as_bytes())?;
+        self.out.flush()?;
+        Ok(())
+    }
 }
 
 struct FullShow<W: std::io::Write> {

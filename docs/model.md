@@ -300,6 +300,17 @@ never changes. On the OpenCode API path the window also bounds the read, so
 the events a wider `--tail` returns may pair with calls a narrower read never
 fetched.
 
+`events --full` projects the whole recording, streamed twice. The first read
+observes every tool record and counts the turns, so the `--tail` window is
+known before any event is written; the second replays the first, pinned to
+the source length and file revision it observed, and writes each kept record
+as pairing emits it. The records, pairs, window, and filters are those a
+bounded read reaching the whole file returns. `session` is the session every
+record states, `read` is the whole-recording evidence `show --full --json`
+carries, no `text_tail` is reported, and `truncation.source` is empty. A
+recording that changes between the two reads refuses, as does an OpenCode
+session, whose messages are updated in place.
+
 ```json
 {
   "schema": "tapes-events/6",
@@ -560,6 +571,16 @@ withheld whole turns and `session` otherwise, `pairs` is `complete-only`
 because every duration comes from a call and result the read holds both halves
 of, and `truncation` is the read's own record, absent when the read reached
 everything.
+
+`stats --full` counts the whole recording, streamed twice as `events --full`
+streams it: turns, the clock, and the content inventory are folded as the
+first read passes them, and tool calls, results, errors, and durations as the
+second pairs each record, through the same fold the bounded view uses.
+`session` and `usage` come from every record the turn read covered,
+`lineage` from the whole-recording read `lineage --full` takes, and `read` is
+the whole-recording evidence, so `coverage.turns` is `session`. A selection
+with `--full` streams each selected session the same way, and a session that
+cannot be streamed twice is named under `failed`.
 
 `turns` counts the normalized turns the read reached by the `kind` the harness
 recorded them as — `operator`, `assistant`, `tool`, `reasoning`, `control`,

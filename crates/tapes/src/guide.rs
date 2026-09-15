@@ -219,7 +219,9 @@ PROBE BEFORE EXPORTING
   observations are descriptors; tapes never opens the named object. Codex
   lifecycle mirrors for messages, reasoning, user messages, and compaction
   are not projected as tools; only the verified `CommandExecution` and
-  `FileChange` variants enter this event layer.
+  `FileChange` variants enter this event layer. events --full streams a whole
+  Claude, Codex, or Pi recording twice, pairing past the read bound and
+  writing each event as it pairs, with the same filters and counts.
 
   usage answers where a session's quota went as tapes-usage/5: its recorded
   tokens, cost, and accounting, and its turns counted by role. Read accounting
@@ -247,7 +249,9 @@ PROBE BEFORE EXPORTING
   for what its input counter already includes. warnings names the limits of
   the read behind the figures. What a count means for the work is the reader's
   inference: nothing here calls a call wasteful, explains a latency, or says
-  why a session ended.
+  why a session ended. stats --full streams the whole recording twice and
+  counts every record, so turn coverage is session; a selection with --full
+  streams each selected session.
 
   lineage answers which sessions a recording names as relatives, as
   tapes-lineage/2: the session it was spawned or forked from, and the children

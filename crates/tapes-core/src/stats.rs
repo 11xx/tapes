@@ -1,4 +1,4 @@
-//! One session's recorded statistics: what the bounded read holds, counted.
+//! One session's recorded statistics: what a read holds, counted.
 //!
 //! Every figure here is a count of records the harness wrote, and every total
 //! says what it covers. Nothing is labelled useful or wasteful, no reason is
@@ -7,17 +7,19 @@
 
 use std::collections::{BTreeMap, HashMap};
 
+use anyhow::Result;
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 
-use crate::content::{self, ContentInventory};
-use crate::event::{self, EventKind, EventRecord, Incomplete, PairRef};
+use crate::backend::Backend;
+use crate::content::ContentInventory;
+use crate::event::{self, EventKind, EventRecord, Incomplete, PairIndex, PairRef};
 use crate::lineage::Lineage;
 use crate::model::{
-    Accounting, Cost, ReadEvidence, TerminalObservation, TextTailEvidence, Tokens, Transcript,
-    Truncation, TurnKind,
+    Accounting, Cost, ReadEvidence, Session, TerminalObservation, TextTailEvidence, Tokens,
+    Transcript, Truncation, Turn, TurnKind,
 };
-use crate::usage::{self, TurnCoverage, UsageSession};
+use crate::usage::{self, TurnCoverage, UsageSession, UsageView};
 
 pub const STATS_SCHEMA: &str = "tapes-stats/5";
 
@@ -210,42 +212,122 @@ pub enum Warning {
 /// `events` returns, so nothing is parsed twice and nothing is read from a
 /// turn's harness envelope.
 pub fn stats(transcript: Transcript, lineage: &Lineage) -> StatsView {
-    let read = transcript.read.clone();
-    let terminal = transcript.terminal.clone();
-    let text_tail = transcript.text_tail.clone();
-    let content = content::inventory(&transcript.turns);
-    let usage = usage::usage(&transcript);
-    let turns = turn_kinds(&transcript);
-    let clock = clock(&transcript);
-    let events = event::project(transcript, usize::MAX);
-    let tools = tool_stats(&events.events, events.pairs.complete);
-    let coverage = Coverage {
-        turns: usage.turns.coverage,
-        pairs: PairCoverage::CompleteOnly,
-        truncation: events.truncation,
-    };
-    let durations_ms = clock.finish(tools.in_tool);
-    let warnings = warnings(&coverage, &turns, &tools.stats, durations_ms.as_ref());
-    StatsView {
-        schema: STATS_SCHEMA,
-        session: usage.session,
-        read,
-        terminal,
-        text_tail,
-        content,
-        coverage,
-        turns,
-        tools: tools.stats,
-        durations_ms,
-        usage: usage_stats(usage.tokens, usage.cost, usage.accounting),
-        lineage: lineage_stats(lineage),
-        warnings,
+    Counted::bounded(transcript).view(lineage)
+}
+
+/// One read counted: its usage answer, which carries the read's evidence and
+/// coverage, the turns by kind with their clock, and the tool figures.
+pub(crate) struct Counted {
+    usage: UsageView,
+    turns: TurnFold,
+    tools: ToolTally,
+}
+
+impl Counted {
+    /// Count a read held whole, folding its turns and the records its event
+    /// projection pairs.
+    pub(crate) fn bounded(transcript: Transcript) -> Self {
+        let usage = usage::usage(&transcript);
+        let mut turns = TurnFold::default();
+        for turn in &transcript.turns {
+            turns.add(turn);
+        }
+        let events = event::project(transcript, usize::MAX);
+        let mut tools = ToolFold::default();
+        for record in &events.events {
+            tools.add(record);
+        }
+        Self {
+            usage,
+            turns,
+            tools: tools.finish(events.pairs.complete),
+        }
+    }
+
+    /// Count a whole recording without holding it: the first streamed pass
+    /// folds the turns and observes every tool record, and the second,
+    /// replaying the first, pairs each record and folds it as it is emitted.
+    /// The counters and activity come from every record the turn read
+    /// covered, so memory follows the open calls rather than the file.
+    pub(crate) fn whole(backend: &dyn Backend, session: &Session) -> Result<Self> {
+        let mut tally = usage::TurnTally::default();
+        let mut turns = TurnFold::default();
+        let mut index = PairIndex::default();
+        let read = crate::stream_numbered(backend, session, None, &mut |turn| {
+            tally.add(&turn);
+            turns.add(&turn);
+            event::turn_records(&turn).for_each(|record| index.observe(&record));
+            Ok(())
+        })?;
+        let mut pairing = index.pairing(event::read_was_bounded(&read.source_bounds));
+        let mut tools = ToolFold::default();
+        crate::stream_numbered(backend, session, Some(&read), &mut |turn| {
+            for record in event::turn_records(&turn) {
+                tools.add(&pairing.emit(record)?);
+            }
+            Ok(())
+        })?;
+        let pairs = pairing.finish()?;
+        let whole = backend.stream_session(session, &read)?;
+        Ok(Self {
+            usage: usage::streamed(&whole, tally, &read),
+            turns,
+            tools: tools.finish(pairs.complete),
+        })
+    }
+
+    fn coverage(&self) -> Coverage {
+        Coverage {
+            turns: self.usage.turns.coverage,
+            pairs: PairCoverage::CompleteOnly,
+            truncation: self.usage.truncation.clone(),
+        }
+    }
+
+    /// The session, what its figures cover, and its tools, as a selection
+    /// reports each session it read.
+    pub(crate) fn session_tools(self) -> (UsageSession, Coverage, ToolStats) {
+        let coverage = self.coverage();
+        (self.usage.session, coverage, self.tools.stats)
+    }
+
+    pub(crate) fn view(self, lineage: &Lineage) -> StatsView {
+        let coverage = self.coverage();
+        let Self {
+            usage,
+            turns,
+            tools,
+        } = self;
+        let durations_ms = turns.clock.finish(tools.in_tool);
+        let warnings = warnings(&coverage, &turns.kinds, &tools.stats, durations_ms.as_ref());
+        StatsView {
+            schema: STATS_SCHEMA,
+            session: usage.session,
+            read: usage.read,
+            terminal: usage.terminal,
+            text_tail: usage.text_tail,
+            content: usage.content,
+            coverage,
+            turns: turns.kinds,
+            tools: tools.stats,
+            durations_ms,
+            usage: usage_stats(usage.tokens, usage.cost, usage.accounting),
+            lineage: lineage_stats(lineage),
+            warnings,
+        }
     }
 }
 
-fn turn_kinds(transcript: &Transcript) -> TurnKindCounts {
-    let mut counts = TurnKindCounts::default();
-    for turn in &transcript.turns {
+/// Turns by kind and the recorded clock, folded one turn at a time.
+#[derive(Default)]
+struct TurnFold {
+    kinds: TurnKindCounts,
+    clock: Clock,
+}
+
+impl TurnFold {
+    fn add(&mut self, turn: &Turn) {
+        let counts = &mut self.kinds;
         let slot = match turn.kind {
             TurnKind::Operator => &mut counts.operator,
             TurnKind::Assistant => &mut counts.assistant,
@@ -258,8 +340,10 @@ fn turn_kinds(transcript: &Transcript) -> TurnKindCounts {
         };
         *slot += 1;
         counts.total += 1;
+        if let Some(ts) = turn.ts {
+            self.clock.add(ts);
+        }
     }
-    counts
 }
 
 /// The recorded clock, accumulated over the turns that carry a timestamp.
@@ -302,14 +386,6 @@ impl Clock {
     }
 }
 
-fn clock(transcript: &Transcript) -> Clock {
-    let mut clock = Clock::default();
-    for ts in transcript.turns.iter().filter_map(|turn| turn.ts) {
-        clock.add(ts);
-    }
-    clock
-}
-
 /// What a paired counterpart contributes to a record that carries neither the
 /// tool's name nor the outcome: a harness may write either on one half alone.
 struct CallFacts {
@@ -324,31 +400,47 @@ struct ToolTally {
 
 const ERROR_STATUS: &str = "error";
 
-/// Count the typed events of one bounded read. Pairing, and therefore every
-/// duration, is the event projection's own; this adds nothing to it.
-pub(crate) fn count_tools(records: &[EventRecord], paired: usize) -> ToolStats {
-    tool_stats(records, paired).stats
+/// The tool figures of paired event records, folded one record at a time in
+/// the order pairing emits them, where a call always precedes its result.
+/// Pairing, and therefore every duration, is the event projection's own; this
+/// adds nothing to it. A paired call's name and outcome are kept until its
+/// result passes, so memory follows the calls still awaiting one.
+#[derive(Default)]
+struct ToolFold {
+    stats: ToolStats,
+    by_name: HashMap<String, ToolNameStats>,
+    in_tool: Option<i64>,
+    calls: HashMap<PairRef, CallFacts>,
 }
 
-fn tool_stats(records: &[EventRecord], paired: usize) -> ToolTally {
-    let calls = index_calls(records);
-    let mut stats = ToolStats {
-        paired,
-        ..ToolStats::default()
-    };
-    let mut by_name: HashMap<String, ToolNameStats> = HashMap::new();
-    let mut in_tool: Option<i64> = None;
-    for record in records {
-        let counterpart = record
-            .pair
-            .as_ref()
-            .and_then(|pair| calls.get(pair))
-            .filter(|_| record.event.kind == EventKind::ToolResult);
+impl ToolFold {
+    fn add(&mut self, record: &EventRecord) {
+        let counterpart = match record.event.kind {
+            EventKind::ToolCall => {
+                if record.pair.is_some() {
+                    self.calls
+                        .entry(PairRef {
+                            ordinal: record.ordinal,
+                            native_id: record.native_id.clone(),
+                            record_ref: record.record_ref.clone(),
+                        })
+                        .or_insert_with(|| CallFacts {
+                            name: record.event.name.clone(),
+                            status: record.event.status.clone(),
+                        });
+                }
+                None
+            }
+            EventKind::ToolResult => record
+                .pair
+                .as_ref()
+                .and_then(|pair| self.calls.remove(pair)),
+        };
         let name = record
             .event
             .name
             .clone()
-            .or_else(|| counterpart.and_then(|call| call.name.clone()));
+            .or_else(|| counterpart.as_ref().and_then(|call| call.name.clone()));
         let own_error = record.event.status.as_deref() == Some(ERROR_STATUS);
         // A harness records the outcome on the call, on the result, or on
         // both. Counting a paired call's error at its result leaves one count
@@ -357,9 +449,12 @@ fn tool_stats(records: &[EventRecord], paired: usize) -> ToolTally {
             EventKind::ToolCall => own_error && record.pair.is_none(),
             EventKind::ToolResult => {
                 own_error
-                    || counterpart.is_some_and(|call| call.status.as_deref() == Some(ERROR_STATUS))
+                    || counterpart
+                        .as_ref()
+                        .is_some_and(|call| call.status.as_deref() == Some(ERROR_STATUS))
             }
         };
+        let stats = &mut self.stats;
         match record.event.kind {
             EventKind::ToolCall => stats.calls += 1,
             EventKind::ToolResult => stats.results += 1,
@@ -376,12 +471,13 @@ fn tool_stats(records: &[EventRecord], paired: usize) -> ToolTally {
             *slot += 1;
         }
         if let Some(duration) = record.duration_ms {
-            in_tool = Some(in_tool.unwrap_or_default().saturating_add(duration));
+            self.in_tool = Some(self.in_tool.unwrap_or_default().saturating_add(duration));
         }
         let Some(name) = name else {
-            continue;
+            return;
         };
-        let entry = by_name
+        let entry = self
+            .by_name
             .entry(name.clone())
             .or_insert_with(|| ToolNameStats {
                 name,
@@ -406,36 +502,25 @@ fn tool_stats(records: &[EventRecord], paired: usize) -> ToolTally {
             durations.count += 1;
         }
     }
-    stats.by_name = by_name.into_values().collect();
-    stats.by_name.sort_by(|left, right| {
-        right
-            .calls
-            .cmp(&left.calls)
-            .then_with(|| left.name.cmp(&right.name))
-    });
-    ToolTally { stats, in_tool }
-}
 
-/// The paired calls, by the reference their results name them with, so a
-/// result can be read under the tool name and outcome its call carries.
-fn index_calls(records: &[EventRecord]) -> HashMap<PairRef, CallFacts> {
-    let mut calls = HashMap::new();
-    for record in records
-        .iter()
-        .filter(|record| record.event.kind == EventKind::ToolCall && record.pair.is_some())
-    {
-        calls
-            .entry(PairRef {
-                ordinal: record.ordinal,
-                native_id: record.native_id.clone(),
-                record_ref: record.record_ref.clone(),
-            })
-            .or_insert_with(|| CallFacts {
-                name: record.event.name.clone(),
-                status: record.event.status.clone(),
-            });
+    /// Close the fold with the pairing's own count of complete pairs.
+    fn finish(self, paired: usize) -> ToolTally {
+        let mut stats = ToolStats {
+            paired,
+            by_name: self.by_name.into_values().collect(),
+            ..self.stats
+        };
+        stats.by_name.sort_by(|left, right| {
+            right
+                .calls
+                .cmp(&left.calls)
+                .then_with(|| left.name.cmp(&right.name))
+        });
+        ToolTally {
+            stats,
+            in_tool: self.in_tool,
+        }
     }
-    calls
 }
 
 fn usage_stats(
