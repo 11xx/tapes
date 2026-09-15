@@ -1070,17 +1070,7 @@ impl Serialize for Transcript {
             schema: SESSION_SCHEMA,
             session: &self.session,
             turns: &self.turns,
-            truncated: self.truncated,
-            truncation: &self.truncation,
-            read: self.read.as_ref(),
-            terminal: self.terminal.as_ref(),
-            text_tail: self.text_tail.as_ref(),
-            artifacts: &self.artifacts,
-            graph: self.graph.as_ref(),
-            content: crate::content::inventory(&self.turns),
-            trailing_record: self.trailing_record.as_ref(),
-            notes: &self.notes,
-            projection: self.projection.as_ref(),
+            tail: TranscriptTail::of(self, crate::content::inventory(&self.turns)),
         }
         .serialize(serializer)
     }
@@ -1125,31 +1115,13 @@ struct TranscriptRef<'a> {
     schema: &'static str,
     session: &'a Session,
     turns: &'a [Turn],
-    truncated: bool,
-    #[serde(skip_serializing_if = "truncation_is_empty")]
-    truncation: &'a Truncation,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    read: Option<&'a ReadEvidence>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    terminal: Option<&'a TerminalObservation>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    text_tail: Option<&'a TextTailEvidence>,
-    #[serde(skip_serializing_if = "<[crate::content::ArtifactReference]>::is_empty")]
-    artifacts: &'a [crate::content::ArtifactReference],
-    #[serde(skip_serializing_if = "Option::is_none")]
-    graph: Option<&'a ConversationGraph>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    content: Option<ContentInventory>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    trailing_record: Option<&'a TrailingRecord>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    notes: &'a Vec<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    projection: Option<&'a Projection>,
+    #[serde(flatten)]
+    tail: TranscriptTail<'a>,
 }
 
-/// The `tapes-session` fields that follow `turns`, in the order and with the
-/// omissions [`TranscriptRef`] gives them.
+/// The `tapes-session` fields that follow `turns`. A whole transcript and a
+/// streamed one both serialize them through this one list, so the two cannot
+/// disagree about a field's order or omission.
 #[derive(Serialize)]
 struct TranscriptTail<'a> {
     truncated: bool,
@@ -1173,6 +1145,24 @@ struct TranscriptTail<'a> {
     notes: &'a Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     projection: Option<&'a Projection>,
+}
+
+impl<'a> TranscriptTail<'a> {
+    fn of(transcript: &'a Transcript, content: Option<ContentInventory>) -> Self {
+        Self {
+            truncated: transcript.truncated,
+            truncation: &transcript.truncation,
+            read: transcript.read.as_ref(),
+            terminal: transcript.terminal.as_ref(),
+            text_tail: transcript.text_tail.as_ref(),
+            artifacts: &transcript.artifacts,
+            graph: transcript.graph.as_ref(),
+            content,
+            trailing_record: transcript.trailing_record.as_ref(),
+            notes: &transcript.notes,
+            projection: transcript.projection.as_ref(),
+        }
+    }
 }
 
 /// A `tapes-session` object written one turn at a time, for a read that
@@ -1216,19 +1206,10 @@ impl StreamedSessionJson {
         out: &mut impl std::io::Write,
         transcript: &Transcript,
     ) -> std::io::Result<()> {
-        let tail = serde_json::to_vec(&TranscriptTail {
-            truncated: transcript.truncated,
-            truncation: &transcript.truncation,
-            read: transcript.read.as_ref(),
-            terminal: transcript.terminal.as_ref(),
-            text_tail: transcript.text_tail.as_ref(),
-            artifacts: &transcript.artifacts,
-            graph: transcript.graph.as_ref(),
-            content: (!self.content.is_empty()).then_some(self.content),
-            trailing_record: transcript.trailing_record.as_ref(),
-            notes: &transcript.notes,
-            projection: transcript.projection.as_ref(),
-        })?;
+        let tail = serde_json::to_vec(&TranscriptTail::of(
+            transcript,
+            (!self.content.is_empty()).then_some(self.content),
+        ))?;
         // The tail is an object that always opens on `truncated`, so dropping
         // its brace continues the session object.
         out.write_all(b"],")?;
