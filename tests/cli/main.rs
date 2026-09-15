@@ -3934,8 +3934,6 @@ fn human_renderers_show_derived_titles_and_whole_second_timestamps() {
             "\n",
             r##"{"timestamp":"2026-01-01T10:00:02.987654321Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"\n  <recommended_plugins>\n- Fixture helper\n</recommended_plugins>\n\n  # AGENTS.md instructions\n\n<INSTRUCTIONS>\nFollow the repository instructions before acting.\n</INSTRUCTIONS>\n\n<environment_context>\n  <cwd>/fixtures/project</cwd>\n</environment_context>\n\nInspect the fixture."}]}}"##,
             "\n",
-            r#"{"timestamp":"2026-01-01T10:00:02.999999999Z","type":"event_msg","payload":{"type":"user_message","message":"Inspect the fixture."}}"#,
-            "\n",
             r#"{"timestamp":"2026-01-01T10:00:03.123456789Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Fixture inspected."}]}}"#,
             "\n",
             r#"{"timestamp":"2026-01-01T10:00:06.123456789Z","type":"event","payload":{}}"#,
@@ -5117,10 +5115,9 @@ fn show_full_streams_a_claude_recording_past_the_read_bound() {
     );
 }
 
-/// Codex and Pi need facts from across the file to project a turn: Codex
-/// classifies a user turn against every message the operator sent, and Pi
-/// keeps only the last entry's branch. A whole read past the bound gets both
-/// right while it streams.
+/// A whole read streams a Codex or Pi recording past the read bound. Pi needs
+/// facts from across the file to project a turn, keeping only the last
+/// entry's branch, and gets that right while it streams.
 #[test]
 fn show_full_streams_codex_and_pi_recordings_past_the_read_bound() {
     let root = TemporaryDirectory::new(
@@ -5136,9 +5133,8 @@ fn show_full_streams_codex_and_pi_recordings_past_the_read_bound() {
     fs::create_dir_all(&codex_sessions).unwrap();
     let codex_user = |text: &str| {
         format!(
-            "{}\n{}\n",
-            serde_json::json!({"timestamp": timestamp, "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": text}]}}),
-            serde_json::json!({"timestamp": timestamp, "type": "event_msg", "payload": {"type": "user_message", "message": text}})
+            "{}\n",
+            serde_json::json!({"timestamp": timestamp, "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": text}]}})
         )
     };
     let mut codex = serde_json::json!({"timestamp": timestamp, "type": "session_meta", "payload": {"id": codex_id, "session_id": codex_id, "timestamp": timestamp, "cwd": "/fixtures/project", "source": "cli", "model_provider": "openai"}}).to_string() + "\n";
@@ -5943,7 +5939,6 @@ fn endings_text_tail_is_bounded_and_marks_what_it_cut() {
             r#"{{"timestamp":"2026-01-01T10:00:00Z","type":"session_meta","payload":{{"id":"{id}","cwd":"/fixtures/project"}}}}
 {{"timestamp":"2026-01-01T10:00:01Z","type":"turn_context","payload":{{"cwd":"/fixtures/project","model":"gpt-fixture"}}}}
 {{"timestamp":"2026-01-01T10:00:02Z","type":"response_item","payload":{{"type":"message","role":"user","content":[{{"type":"input_text","text":"Inspect the fixture."}}]}}}}
-{{"timestamp":"2026-01-01T10:00:02.500Z","type":"event_msg","payload":{{"type":"user_message","message":"Inspect the fixture."}}}}
 {{"timestamp":"2026-01-01T10:00:03Z","type":"response_item","payload":{{"type":"message","role":"assistant","content":[{{"type":"output_text","text":"{long}"}}]}}}}
 "#
         ),

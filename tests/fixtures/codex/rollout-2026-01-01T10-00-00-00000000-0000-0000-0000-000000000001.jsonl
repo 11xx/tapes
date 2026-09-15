@@ -1,7 +1,6 @@
 {"timestamp":"2026-01-01T10:00:00Z","type":"session_meta","payload":{"id":"00000000-0000-0000-0000-000000000001","session_id":"00000000-0000-0000-0000-000000000001","timestamp":"2026-01-01T10:00:00Z","cwd":"/fixtures/project","model_provider":"openai"}}
 {"timestamp":"2026-01-01T10:00:01Z","type":"turn_context","payload":{"cwd":"/fixtures/project","model":"gpt-fixture","effort":"high"}}
 {"timestamp":"2026-01-01T10:00:02Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Inspect the fixture."}]}}
-{"timestamp": "2026-01-01T10:00:02.500Z", "type": "event_msg", "payload": {"type": "user_message", "message": "Inspect the fixture."}}
 {"timestamp":"2026-01-01T10:00:03Z","type":"response_item","payload":{"type":"reasoning","id":"reasoning-1","summary":[{"type":"summary_text","text":"Consider the fixture."}],"encrypted_content":"fixture"}}
 {"timestamp":"2026-01-01T10:00:04Z","type":"response_item","payload":{"type":"function_call","name":"fixture_tool","arguments":"{\"path\":\"fixture\"}","call_id":"call-1"}}
 {"timestamp":"2026-01-01T10:00:04.500Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":500,"cached_input_tokens":0,"output_tokens":100,"reasoning_output_tokens":50,"total_tokens":600},"last_token_usage":{"input_tokens":500,"cached_input_tokens":0,"output_tokens":100,"reasoning_output_tokens":50,"total_tokens":600},"model_context_window":272000},"rate_limits":null}}

@@ -2,5 +2,4 @@
 {"timestamp":"2026-01-01T11:00:01Z","type":"turn_context","payload":{"cwd":"/fixtures/project","model":"gpt-fixture","effort":"medium"}}
 this is not json
 {"timestamp":"2026-01-01T11:00:02Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Read valid lines."}]}}
-{"timestamp": "2026-01-01T11:00:02.500Z", "type": "event_msg", "payload": {"type": "user_message", "message": "Read valid lines."}}
 {"timestamp":"2026-01-01T11:00:03Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Invalid line skipped."}]}}
