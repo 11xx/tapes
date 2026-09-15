@@ -270,6 +270,95 @@ fn exchange_keeps_operator_and_assistant_turns_and_counts_the_rest() {
     let _ = fs::remove_dir_all(&codex_home);
 }
 
+/// A bundle's context file is the exchange `show --exchange` returns, turn for
+/// turn, including where a user turn carries no evidence of its sender.
+#[test]
+fn a_bundle_context_holds_the_turns_show_exchange_returns() {
+    let root = TemporaryDirectory::new(
+        std::env::temp_dir().join(format!("tapes-cli-context-exchange-{}", std::process::id())),
+    );
+    let home = root.path().join("home");
+    let codex_home = root.path().join("codex");
+    let sessions = codex_home.join("sessions/2026/01/01");
+    fs::create_dir_all(&sessions).unwrap();
+    let id = "00000000-0000-0000-0000-0000000000c1";
+    let timestamp = "2026-01-01T10:00:00Z";
+    let item = |payload: Value| {
+        serde_json::json!({"timestamp": timestamp, "type": "response_item", "payload": payload})
+            .to_string()
+            + "\n"
+    };
+    let user = |text: &str| {
+        item(
+            serde_json::json!({"type": "message", "role": "user", "content": [{"type": "input_text", "text": text}]}),
+        )
+    };
+    let mut body = serde_json::json!({"timestamp": timestamp, "type": "session_meta", "payload": {"id": id, "session_id": id, "timestamp": timestamp, "cwd": "/fixtures/project", "source": "cli", "model_provider": "openai"}}).to_string() + "\n";
+    body += &user("Inspect the fixture.");
+    body += &(serde_json::json!({"timestamp": timestamp, "type": "event_msg", "payload": {"type": "user_message", "message": "Inspect the fixture."}}).to_string() + "\n");
+    body += &user("<environment_context>\n  <cwd>/fixtures/project</cwd>\n</environment_context>");
+    body += &user("A message no user_message event vouches for.");
+    body += &item(
+        serde_json::json!({"type": "reasoning", "summary": [{"type": "summary_text", "text": "Consider it."}]}),
+    );
+    body += &item(
+        serde_json::json!({"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Fixture inspected."}]}),
+    );
+    fs::write(
+        sessions.join(format!("rollout-2026-01-01T10-00-00-{id}.jsonl")),
+        body,
+    )
+    .unwrap();
+    let run = |args: &[&str]| {
+        let output = tapes()
+            .args(args)
+            .env("CODEX_HOME", &codex_home)
+            .env("HOME", &home)
+            .env("PATH", "/definitely/missing")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        output.stdout
+    };
+
+    let whole: Value = serde_json::from_slice(&run(&["show", id, "--json"])).unwrap();
+    let kinds = whole["turns"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|turn| turn["kind"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert!(kinds.contains(&"unknown"), "{kinds:?}");
+
+    let exchange: Value =
+        serde_json::from_slice(&run(&["show", id, "--exchange", "--json"])).unwrap();
+    let exchanged = exchange["turns"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|turn| format!("{} #{}", turn["role"].as_str().unwrap(), turn["ordinal"]))
+        .collect::<Vec<_>>();
+
+    let directory = root.path().join("bundle");
+    run(&["export", id, "--bundle", directory.to_str().unwrap()]);
+    let context = fs::read_dir(&directory)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find(|path| path.to_string_lossy().ends_with(".context.md"))
+        .unwrap();
+    let context = fs::read_to_string(context).unwrap();
+    let headed = context
+        .lines()
+        .filter_map(|line| line.strip_prefix("## "))
+        .map(|heading| heading.split(" — ").next().unwrap().to_owned())
+        .collect::<Vec<_>>();
+    assert_eq!(headed, exchanged, "{context}");
+}
+
 /// The file tail is the reader's own bound, so a caller can set it; the read
 /// evidence and the truncation report name the bound that was in force.
 #[test]

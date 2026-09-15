@@ -314,9 +314,10 @@ EXPORT, THEN INGEST PROGRESSIVELY
   Three files share one timestamped prefix, and stdout is exactly their paths
   and sizes, in the order they are meant to be read:
 
-  1. .context.md, whole. Operator turns and assistant-visible text — the
-     session's argument, and the small part of it. The harness's own commands,
-     notices, and attached context stay out of it and remain in the trace.
+  1. .context.md, whole. The turns show --exchange returns: operator turns and
+     assistant-visible text — the session's argument, and the small part of
+     it. The harness's own commands, notices, attached context, and user turns
+     of unknown sender stay out of it and remain in the trace.
   2. .json, narrowly, with jq. The canonical object plus turns, cost, tokens,
      and the session directory's git head and branch when they resolve. Query
      it for facts; do not print it.

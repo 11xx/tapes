@@ -427,8 +427,9 @@ in one screen, in that reading order.
 `export` writes a three-file bundle sharing one timestamped prefix, into
 `--bundle <dir>` or `/tmp`:
 
-- `.context.md` — exact operator turns and assistant-visible text, without the
-  harness's own commands, notices, and attached context. Read first.
+- `.context.md` — the exchange `show --exchange` returns: exact operator turns
+  and assistant-visible text, without the harness's own commands, notices,
+  attached context, or user turns of unknown sender. Read first.
 - `.json` — the canonical `tapes-session/8` object plus turns, cost, tokens,
   their `accounting` basis and coverage when present, any verified
   `trailing_record`, retained graph/artifact evidence, and the session
