@@ -7,8 +7,9 @@ use serde_json::Value;
 use super::{
     accounting_for, head_directory, head_jsonl, home_path, jsonl_files, list_files,
     list_files_with_search, matching_session_file, read_bounds, read_recording, session_file,
-    terminal_from_values, timestamp, trailing_record, transcript_from_recording, Backend, Jsonl,
-    Listing, ParsedFile, Query, TokenTotals,
+    stream_jsonl, stream_jsonl_to, streamed_trailing_record, terminal_from_values, timestamp,
+    trailing_record, transcript_from_recording, Backend, Jsonl, Listing, ParsedFile, Query,
+    StreamedTranscript, TokenTotals,
 };
 use crate::content::{parts_from_array, project_text, tool_coverage, tool_part};
 use crate::event::{Bounded, EventKind, ToolEvent};
@@ -332,6 +333,59 @@ impl Backend for CodexBackend {
             trailing_record,
             Vec::new(),
         ))
+    }
+
+    fn stream_transcript(
+        &self,
+        session: &Session,
+        turn: &mut dyn FnMut(Turn) -> Result<()>,
+    ) -> Result<StreamedTranscript> {
+        let root = self
+            .root
+            .as_deref()
+            .ok_or_else(|| anyhow!("codex store is unavailable"))?;
+        let path = session_file(root, &session.id)
+            .ok_or_else(|| anyhow!("codex session {} is unavailable", session.id))?;
+        // A user turn is classified against every message the operator sent,
+        // which Codex records as events anywhere in the file. The first pass
+        // keeps only those texts and the entry point; the second emits turns.
+        let mut source = None;
+        let mut sent = Vec::new();
+        let first = stream_jsonl(&path, |value, _, _| {
+            if source.is_none() {
+                source = codex_source(value).map(str::to_owned);
+            }
+            if let Some(message) = codex_user_message(value) {
+                sent.push(message.to_owned());
+            }
+            Ok(false)
+        })?;
+        let messages = UserMessages {
+            exec: source.as_deref() == Some("exec"),
+            text: sent.iter().map(String::as_str).collect(),
+        };
+        let domain = format!("file:{}", path.display());
+        let mut terminal = None;
+        let read = stream_jsonl_to(&path, first.source_length, |value, span, revision| {
+            if let Some(observed) = codex_terminal(value) {
+                terminal = Some(observed);
+            }
+            let mut parsed = parse_turns(value, &messages);
+            super::attach_record_refs(&mut parsed, &domain, Some(revision), Some(span));
+            let produced = !parsed.is_empty();
+            for parsed_turn in parsed {
+                turn(parsed_turn)?;
+            }
+            Ok(produced)
+        })?;
+        Ok(StreamedTranscript {
+            source_length: read.source_length,
+            skipped: read.skipped,
+            trailing_record: streamed_trailing_record(read.last.as_ref(), codex_trailing_kind),
+            terminal,
+            gaps: read.gaps,
+            notes: Vec::new(),
+        })
     }
 
     /// A Codex child is an ordinary rollout whose header names its parent, so

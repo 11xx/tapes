@@ -164,7 +164,7 @@ PROBE BEFORE EXPORTING
   tapes show <id> --tail 40      A window, costing no bundle.
   tapes show <id> --json         The same turns as tapes-session/8, with bounded read, graph, artifact, and terminal evidence.
   tapes show <id> --exchange     Operator and assistant turns only, timestamps and ordinals kept; export takes it too.
-  tapes show <id> --full         Every turn of a Claude recording, streamed past the file-tail bound.
+  tapes show <id> --full         Every turn of a Claude, Codex, or Pi recording, streamed past the file-tail bound.
   tapes events <id> --json       Typed tool calls, results, pairs, and content parts.
   tapes usage <id> --json        Tokens, cost, quota observations, and turn counts.
   tapes stats <id> --json        The same recording, counted with its read evidence.
@@ -181,7 +181,7 @@ PROBE BEFORE EXPORTING
   recovers; `source` lists bounds the reader itself reached (a file tail, a
   store page, cut turn text). Wider turn windows retain source bounds;
   `--read-bytes` widens the file tail (4MiB by default, at most 1GiB), `show
-  --full` streams a whole Claude recording past it, and
+  --full` streams a whole Claude, Codex, or Pi recording past it, and
   explicit page reads reach older Claude or Codex file history. `read`
   records the source length, configured bound, physical head/tail/context/
   alignment ranges, decoded record spans, context-only record spans, and gaps;

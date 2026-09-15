@@ -642,8 +642,8 @@ enum Command {
         exchange: bool,
         /// Read the whole recording instead of its bounded tail, writing each
         /// turn as it is read so memory follows one record rather than the
-        /// file. Every turn is shown unless --tail is given. Installed Claude
-        /// recordings; other harnesses refuse it by name.
+        /// file. Every turn is shown unless --tail is given. Installed Claude,
+        /// Codex, and Pi recordings; OpenCode refuses it by name.
         #[arg(long, conflicts_with_all = ["json", "read_bytes"])]
         full: bool,
         /// Render the session as JSON. The session may include optional
@@ -2673,6 +2673,7 @@ impl<W: std::io::Write> FullShow<W> {
                 omitted: std::mem::take(&mut self.omitted),
             });
         }
+        transcript.terminal = read.terminal;
         let mut footer = String::new();
         render_footer(&mut footer, &transcript, self.by_latest);
         footer.push_str(&format!(
