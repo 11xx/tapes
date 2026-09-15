@@ -7872,7 +7872,7 @@ fn metadata_history_recovers_midfile_models_and_reports_record_gaps() {
     ]);
     assert!(metadata["next_cursor"].is_null());
     assert_eq!(metadata["skipped_records"], 1);
-    assert_eq!(metadata["context_bytes"], 0);
+    assert!(metadata.get("context_bytes").is_none());
     assert_eq!(metadata["observations"][0]["model"]["id"], "recorded-model");
     let tiny = run(&["metadata", id, "--bytes", "1024", "--pages", "2", "--json"]);
     assert!(tiny["skipped_fragment_bytes"].as_u64().unwrap() > 0);
@@ -7912,7 +7912,7 @@ fn history_page_preserves_a_record_exactly_aligned_with_the_byte_budget() {
 }
 
 #[test]
-fn history_pages_keep_newer_provenance_context_and_detect_same_size_edits() {
+fn codex_history_pages_read_only_their_range_and_detect_same_size_edits() {
     let root = TemporaryDirectory::new(
         std::env::temp_dir().join(format!("tapes-page-context-{}", std::process::id())),
     );
@@ -7922,10 +7922,13 @@ fn history_pages_keep_newer_provenance_context_and_detect_same_size_edits() {
     let id = "90000000-0000-0000-0000-000000000001";
     let path = sessions.join(format!("rollout-2026-01-01T10-00-00-{id}.jsonl"));
     let header = serde_json::json!({"type":"session_meta","timestamp":"2026-01-01T10:00:00Z","payload":{"id":id,"source":"cli","cwd":"/fixture"}});
-    let user = serde_json::json!({"type":"response_item","timestamp":"2026-01-01T10:01:00Z","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"corroborated request"}]}});
+    let user = |text: &str| serde_json::json!({"type":"response_item","timestamp":"2026-01-01T10:01:00Z","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":text}]}});
+    let ambient = user("<environment_context>\n  <cwd>/fixture</cwd>\n</environment_context>");
+    let notice = user("<turn_aborted>\nThe user interrupted the previous turn.\n</turn_aborted>");
+    let operator = user("corroborated request");
     let evidence = serde_json::json!({"type":"event_msg","timestamp":"2026-01-01T10:01:00Z","payload":{"type":"user_message","message":"corroborated request"}});
     let mut body = format!(
-        "{header}\n{}\n{user}\n",
+        "{header}\n{}\n{ambient}\n{notice}\n{operator}\n",
         format!("{{\"padding\":\"{}\"}}\n", "x".repeat(4000)).repeat(20)
     );
     let mut newer = format!("{evidence}\n");
@@ -7940,16 +7943,69 @@ fn history_pages_keep_newer_provenance_context_and_detect_same_size_edits() {
         with_fixture_env(&mut command, &codex, &root.path().join("home"), root.path());
         command.output().unwrap()
     };
-    let first = run(&["page", id, "--bytes", "1024", "--json"]);
-    assert!(first.status.success());
-    let first: Value = serde_json::from_slice(&first.stdout).unwrap();
-    assert_eq!(first["skipped_records"], 0);
-    let cursor = first["next_cursor"].as_str().unwrap();
-    let older = run(&["page", id, "--bytes", "1024", "--cursor", cursor, "--json"]);
-    assert!(older.status.success());
-    let older: Value = serde_json::from_slice(&older.stdout).unwrap();
-    assert_eq!(older["turns"][0]["kind"], "operator");
-    assert_eq!(older["context_bytes"], 1024);
+    let json = |output: std::process::Output| -> Value {
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice(&output.stdout).unwrap()
+    };
+
+    let mut cursor: Option<String> = None;
+    let mut first_cursor = None;
+    let mut paged_kinds = Vec::new();
+    for _ in 0..8 {
+        let mut args = vec!["page", id, "--bytes", "1024", "--json"];
+        if let Some(cursor) = cursor.as_deref() {
+            args.extend(["--cursor", cursor]);
+        }
+        let page = json(run(&args));
+        assert_eq!(page["skipped_records"], 0);
+        assert!(page.get("context_bytes").is_none());
+        let read = &page["read"];
+        assert_eq!(
+            read["projection_options"],
+            serde_json::json!(["transcript"])
+        );
+        let ranges = read["ranges"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|range| range["kind"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(ranges, ["alignment", "tail"]);
+        assert!(read.get("context_records").is_none());
+        for turn in page["turns"].as_array().unwrap() {
+            if turn["role"] == "user" {
+                paged_kinds.push((turn["record_ref"]["span"].clone(), turn["kind"].clone()));
+            }
+        }
+        cursor = page["next_cursor"].as_str().map(str::to_owned);
+        first_cursor.get_or_insert_with(|| cursor.clone().unwrap());
+        if paged_kinds.len() == 3 {
+            break;
+        }
+    }
+    let shown = json(run(&["show", id, "--json"]));
+    let shown_kinds = shown["turns"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|turn| turn["role"] == "user")
+        .map(|turn| (turn["record_ref"]["span"].clone(), turn["kind"].clone()))
+        .collect::<Vec<_>>();
+    paged_kinds.sort_by_key(|(span, _)| span["start"].as_u64());
+    assert_eq!(paged_kinds, shown_kinds);
+    assert_eq!(
+        shown_kinds
+            .iter()
+            .map(|(_, kind)| kind.clone())
+            .collect::<Vec<_>>(),
+        ["ambient", "notice", "operator"]
+    );
+
+    let cursor = first_cursor.unwrap();
     let original = fs::metadata(&path).unwrap().modified().unwrap();
     let changed_body = body.replace("corroborated request", "CORROBORATED REQUEST");
     assert_eq!(changed_body.len(), body.len());
@@ -7960,7 +8016,7 @@ fn history_pages_keep_newer_provenance_context_and_detect_same_size_edits() {
         .unwrap()
         .set_modified(original)
         .unwrap();
-    let changed = run(&["page", id, "--cursor", cursor, "--json"]);
+    let changed = run(&["page", id, "--cursor", &cursor, "--json"]);
     assert!(!changed.status.success());
     assert!(String::from_utf8_lossy(&changed.stderr).contains("source changed"));
 }

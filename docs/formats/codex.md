@@ -61,12 +61,13 @@ checked again before the result is returned; a mutation aborts the read.
 Physical overlap with the head does not erase a malformed gap; a partial gap is
 removed only when a successful decode of that same record covers it.
 
-Codex transcript history pages also read the opening and bounded newer records
-as context. The page records the bounded head range and those context-only
-record spans in `read`; it never inserts them into `turns`. A user-role
-message's kind comes from its own record alone, so a page gives it the kind a
-whole read does. Metadata pages use the same page envelope with the
-`models-only` option and do not perform this provenance read.
+A Codex history page reads its byte range and at most one preceding alignment
+byte, so its `read` names only `alignment` and `tail` ranges and no context
+records. A user-role message's kind comes from its own record alone, so a page
+gives it the kind a whole read does. The session a page reports, with its id,
+working directory, and derived title, comes from session lookup's ordinary
+bounded read of the opening and tail. Transcript pages carry the `transcript`
+projection option; metadata pages use the same envelope with `models-only`.
 
 The normalized reader retains only a bounded tail (4 MiB by default) for transcript reads,
 plus the first 64 KiB of the file. `session_meta` is the first line, so the

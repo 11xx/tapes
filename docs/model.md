@@ -1274,27 +1274,25 @@ verbatim, so the exported set can be audited against the store it came from.
 
 ## Historical evidence
 
-`tapes-page/4` carries a normalized session, chronological `turns` with page-local
+`tapes-page/5` carries a normalized session, chronological `turns` with page-local
 ordinals, recorded `models`, source `start`/`end` byte offsets, `source_bytes`,
-`bytes_read`, separately counted `alignment_bytes` and `context_bytes`, malformed
-`skipped_records`, `skipped_fragment_bytes`, and an
-`read` evidence with absolute record spans and separate context-only record
-spans, and an
-optional `next_cursor`. A missing cursor means the source beginning was reached,
+`bytes_read`, a separately counted `alignment_bytes`, malformed
+`skipped_records`, `skipped_fragment_bytes`, `read` evidence with absolute
+record spans, and an optional `next_cursor`. A page decodes no record outside
+its byte range, so its `read` names only `alignment` and `tail` ranges. A missing cursor means the source beginning was reached,
 not that malformed or oversized records were decoded. The cursor is opaque;
 it binds the session and file snapshot and must be passed back unchanged.
 
-`tapes-history-search/4` carries session identity, accumulated pages/bytes/gaps
+`tapes-history-search/5` carries session identity, accumulated pages/bytes/gaps
 and one `read` descriptor per page,
 matching text excerpts identified by page start, end and ordinal, an output-truncation
-flag, and a continuation cursor. `tapes-metadata-history/4` carries the same
+flag, and a continuation cursor. `tapes-metadata-history/5` carries the same
 coverage facts with up to 100 reverse-record-ordered model observations and
 an observation-truncation flag. Neither schema infers facts outside its reads.
-Metadata traversal does not normalize transcript turns or read their
-provenance context; each metadata page labels its read as the `tapes-page/4`
-envelope with the `models-only` projection option, and its `context_bytes` is
-zero for Claude and Codex. Initial session resolution is separate from the
-page-byte counters.
+Metadata traversal does not normalize transcript turns; each metadata page
+labels its read as the `tapes-page/5` envelope with the `models-only`
+projection option. Initial session resolution is separate from the page-byte
+counters.
 ## Selection statistics: `tapes-stats-summary/3`
 
 `selection` records the listing query. `selected` counts its sessions, `read`

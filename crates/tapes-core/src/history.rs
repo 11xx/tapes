@@ -1,5 +1,4 @@
 //! Stateless backward pages of normalized file-backed session evidence.
-use std::collections::HashSet;
 use std::fs::{File, Metadata};
 use std::io::{Read, Seek, SeekFrom};
 use std::os::unix::fs::MetadataExt;
@@ -20,11 +19,10 @@ use crate::Selection;
 
 pub const DEFAULT_BYTES: usize = 64 * 1024;
 pub const MAX_BYTES: usize = 4 * 1024 * 1024;
-pub const PAGE_SCHEMA: &str = "tapes-page/4";
-pub const HISTORY_SEARCH_SCHEMA: &str = "tapes-history-search/4";
-pub const METADATA_HISTORY_SCHEMA: &str = "tapes-metadata-history/4";
+pub const PAGE_SCHEMA: &str = "tapes-page/5";
+pub const HISTORY_SEARCH_SCHEMA: &str = "tapes-history-search/5";
+pub const METADATA_HISTORY_SCHEMA: &str = "tapes-metadata-history/5";
 const MAX_CURSOR_BYTES: usize = 16 * 1024;
-const PROVENANCE_BYTES: u64 = 64 * 1024;
 const MAX_PAGES: usize = 32;
 const MAX_RESULTS: usize = 100;
 const EXCERPT_CHARS: usize = 600;
@@ -36,24 +34,12 @@ pub(crate) enum PageProjection {
 }
 
 impl PageProjection {
-    fn options(self, context: ReadContext) -> Vec<String> {
+    fn options(self) -> Vec<String> {
         match self {
-            Self::Transcript => {
-                let mut options = vec!["transcript".to_owned()];
-                if context != ReadContext::None {
-                    options.push("opening-and-newer-provenance".to_owned());
-                }
-                options
-            }
+            Self::Transcript => vec!["transcript".to_owned()],
             Self::Models => vec!["models-only".to_owned()],
         }
     }
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ReadContext {
-    None,
-    OperatorProvenance,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -131,7 +117,6 @@ pub struct Page {
     pub source_bytes: u64,
     pub bytes_read: usize,
     pub alignment_bytes: usize,
-    pub context_bytes: usize,
     pub skipped_records: usize,
     pub skipped_fragment_bytes: usize,
     pub read: ReadEvidence,
@@ -154,14 +139,7 @@ pub(crate) fn read_file(
     cursor: Option<&str>,
     bytes: usize,
     projection: PageProjection,
-    context: ReadContext,
-    normalize: impl FnOnce(
-        &[Value],
-        &[ByteSpan],
-        &[Value],
-        &[Value],
-        &str,
-    ) -> (Vec<Turn>, Vec<ModelObservation>),
+    normalize: impl FnOnce(&[Value], &[ByteSpan], &str) -> (Vec<Turn>, Vec<ModelObservation>),
 ) -> Result<Page> {
     if !(1024..=MAX_BYTES).contains(&bytes) {
         bail!(
@@ -235,16 +213,8 @@ pub(crate) fn read_file(
             reason: "discarded-partial-suffix".to_owned(),
         });
     }
-    let context_read = read_context(&mut file, end, state.size, context)?;
-    let (opening, opening_spans, opening_read_end, opening_gaps) =
-        if context == ReadContext::OperatorProvenance {
-            let head = backend::head_jsonl_from(&mut file, state.size)?;
-            (head.values, head.spans, head.read_end, head.gaps)
-        } else {
-            (Vec::new(), Vec::new(), 0, Vec::new())
-        };
     let revision = cursor_revision(&state);
-    let (mut turns, models) = normalize(&values, &spans, &opening, &context_read.values, &revision);
+    let (mut turns, models) = normalize(&values, &spans, &revision);
     for (ordinal, turn) in turns.iter_mut().enumerate() {
         turn.ordinal = ordinal;
     }
@@ -256,16 +226,7 @@ pub(crate) fn read_file(
     let next_cursor = (start > 0)
         .then(|| serde_json::to_string(&state))
         .transpose()?;
-    let mut ranges = Vec::with_capacity(4);
-    if opening_read_end > 0 {
-        ranges.push(ReadRange {
-            kind: ReadRangeKind::Head,
-            span: ByteSpan {
-                start: 0,
-                end: opening_read_end,
-            },
-        });
-    }
+    let mut ranges = Vec::with_capacity(2);
     if window_start > 0 {
         ranges.push(ReadRange {
             kind: ReadRangeKind::Alignment,
@@ -282,35 +243,6 @@ pub(crate) fn read_file(
             end,
         },
     });
-    if context_read.bytes > 0 {
-        ranges.push(ReadRange {
-            kind: ReadRangeKind::Context,
-            span: ByteSpan {
-                start: end,
-                end: end + context_read.bytes as u64,
-            },
-        });
-    }
-    let page_records = spans.iter().copied().collect::<HashSet<_>>();
-    let mut context_records = opening_spans
-        .iter()
-        .copied()
-        .chain(context_read.spans)
-        .filter(|span| !page_records.contains(span))
-        .collect::<Vec<_>>();
-    context_records.sort_by_key(|span| (span.start, span.end));
-    context_records.dedup();
-    let mut read_gaps = gaps;
-    read_gaps.extend(context_read.gaps);
-    read_gaps.extend(opening_gaps);
-    let covered_head = (opening_read_end > 0)
-        .then_some(ByteSpan {
-            start: 0,
-            end: opening_read_end,
-        })
-        .into_iter()
-        .collect::<Vec<_>>();
-    let read_gaps = backend::subtract_covered_ranges(&read_gaps, &covered_head, &opening_spans);
     let read = ReadEvidence {
         source_length: state.size,
         configured_bound: bytes as u64,
@@ -318,12 +250,12 @@ pub(crate) fn read_file(
         source_revision: Some(revision),
         producer: session.source.producer.clone(),
         projection: PAGE_SCHEMA.to_owned(),
-        projection_options: projection.options(context),
+        projection_options: projection.options(),
         observed_at: Utc::now(),
         records: spans,
         ranges,
-        context_records,
-        gaps: read_gaps,
+        context_records: Vec::new(),
+        gaps,
     };
     Ok(Page {
         schema: PAGE_SCHEMA,
@@ -333,7 +265,6 @@ pub(crate) fn read_file(
         source_bytes: state.size,
         bytes_read: data.len(),
         alignment_bytes,
-        context_bytes: context_read.bytes,
         skipped_records,
         skipped_fragment_bytes,
         read,
@@ -391,53 +322,10 @@ fn cursor_revision(cursor: &Cursor) -> String {
 }
 
 #[derive(Default)]
-struct ContextRead {
-    values: Vec<Value>,
-    spans: Vec<ByteSpan>,
-    bytes: usize,
-    gaps: Vec<ReadGap>,
-}
-
-fn read_context(file: &mut File, end: u64, size: u64, context: ReadContext) -> Result<ContextRead> {
-    if context == ReadContext::None {
-        return Ok(ContextRead::default());
-    }
-    let bytes = (size - end).min(PROVENANCE_BYTES) as usize;
-    let mut newer = vec![0; bytes];
-    file.seek(SeekFrom::Start(end))?;
-    file.read_exact(&mut newer)?;
-    let complete = if end + bytes as u64 == size {
-        newer.len()
-    } else {
-        newer
-            .iter()
-            .rposition(|byte| *byte == b'\n')
-            .map_or(0, |i| i + 1)
-    };
-    let (values, spans, _skipped, mut gaps) = parse_records(&newer[..complete], end);
-    if complete < newer.len() {
-        gaps.push(ReadGap {
-            span: ByteSpan {
-                start: end + complete as u64,
-                end: end + newer.len() as u64,
-            },
-            reason: "discarded-partial-context-suffix".to_owned(),
-        });
-    }
-    Ok(ContextRead {
-        values,
-        spans,
-        bytes,
-        gaps,
-    })
-}
-
-#[derive(Default)]
 struct ReadProgress {
     pages_read: usize,
     bytes_read: usize,
     alignment_bytes: usize,
-    context_bytes: usize,
     skipped_records: usize,
     skipped_fragment_bytes: usize,
     reads: Vec<ReadEvidence>,
@@ -467,7 +355,6 @@ fn visit_pages(
         progress.pages_read += 1;
         progress.bytes_read += page.bytes_read;
         progress.alignment_bytes += page.alignment_bytes;
-        progress.context_bytes += page.context_bytes;
         progress.skipped_records += page.skipped_records;
         progress.skipped_fragment_bytes += page.skipped_fragment_bytes;
         progress.reads.push(page.read.clone());
@@ -499,7 +386,6 @@ pub struct Search {
     pub pages_read: usize,
     pub bytes_read: usize,
     pub alignment_bytes: usize,
-    pub context_bytes: usize,
     pub skipped_records: usize,
     pub skipped_fragment_bytes: usize,
     pub reads: Vec<ReadEvidence>,
@@ -560,7 +446,6 @@ pub fn search(
         pages_read: progress.pages_read,
         bytes_read: progress.bytes_read,
         alignment_bytes: progress.alignment_bytes,
-        context_bytes: progress.context_bytes,
         skipped_records: progress.skipped_records,
         skipped_fragment_bytes: progress.skipped_fragment_bytes,
         reads: progress.reads,
@@ -578,7 +463,6 @@ pub struct MetadataHistory {
     pub pages_read: usize,
     pub bytes_read: usize,
     pub alignment_bytes: usize,
-    pub context_bytes: usize,
     pub skipped_records: usize,
     pub skipped_fragment_bytes: usize,
     pub reads: Vec<ReadEvidence>,
@@ -627,7 +511,6 @@ pub fn metadata(
         pages_read: progress.pages_read,
         bytes_read: progress.bytes_read,
         alignment_bytes: progress.alignment_bytes,
-        context_bytes: progress.context_bytes,
         skipped_records: progress.skipped_records,
         skipped_fragment_bytes: progress.skipped_fragment_bytes,
         reads: progress.reads,

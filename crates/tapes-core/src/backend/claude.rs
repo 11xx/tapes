@@ -19,7 +19,7 @@ use crate::content::{
     ContentCoverage, ContentPart,
 };
 use crate::event::{Bounded, EventKind, ToolEvent};
-use crate::history::{PageProjection, ReadContext};
+use crate::history::PageProjection;
 use crate::lineage::{ChildRef, Lineage, SourceRef};
 use crate::model::{
     derive_title, AccountingBasis, AccountingCoverage, Cost, Model, Role, Session,
@@ -178,9 +178,7 @@ impl ClaudeBackend {
             cursor,
             bytes,
             projection,
-            ReadContext::None,
-            |values, spans, opening, context, revision| {
-                let _ = (opening, context);
+            |values, spans, revision| {
                 let turns = if projection == PageProjection::Transcript {
                     values
                         .iter()

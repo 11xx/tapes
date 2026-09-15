@@ -504,10 +504,10 @@ HISTORICAL READS
   each page. Pass next_cursor back as --cursor. Changed sources refuse;
   malformed and oversized record gaps remain explicit. Budgets protect context:
   1 KiB–4 MiB per page, 1–32 pages per search, 100 excerpts/observations.
-  Metadata pages extract model observations without decoding transcript turns
-  or reading operator-provenance context; their read evidence uses the page
-  schema with the `models-only` option. Older model observations never
-  silently replace current session metadata.
+  Metadata pages extract model observations without decoding transcript
+  turns; their read evidence uses the page schema with the `models-only`
+  option. Older model observations never silently replace current session
+  metadata.
 TOOL USAGE OVER A SELECTION
   tapes stats --here --since 2026-01-01 --json
   Counts recorded tools by harness and name, retaining each session's read
