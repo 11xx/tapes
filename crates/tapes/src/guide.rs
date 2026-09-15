@@ -136,9 +136,10 @@ READ A SUPPLIED EXPORT
   A native OpenAI container with a root `export_manifest.json` selects only the
   declared conversation shards, library metadata, and declared library `.dat`
   members. Nested site/account/settings JSON is not scanned. Missing,
-  corrupt, or mismatched members remain explicit gaps; ID and title selection
-  refuses incomplete discovery, while an exact `--occurrence` can return the
-  known projection with its gaps. Records parsed from a ZIP member that fails
+  corrupt, or mismatched members remain explicit gaps. Title selection refuses
+  incomplete discovery and ID selection refuses any gap that could cover an
+  unread ID, which a record without a native ID cannot; an exact `--occurrence`
+  can return the known projection with its gaps. Records parsed from a ZIP member that fails
   decompression or checksum verification are withheld rather than listed.
 
   Source, member, pointer, and byte-span evidence stays attached to the

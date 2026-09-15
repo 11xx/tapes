@@ -250,7 +250,7 @@ impl Backend for InputBackend {
                 matches.len()
             );
         }
-        if dataset.discovery_incomplete {
+        if !dataset.identity_coverage_complete {
             if matches.is_empty() {
                 bail!(
                     "supplied input discovery is incomplete; session {id} was not reached, which does not establish that it is absent"
@@ -335,7 +335,10 @@ struct InputDataset {
     diagnostics: Vec<String>,
     scanned: usize,
     scan_truncated: bool,
-    discovery_incomplete: bool,
+    /// Every native ID in the collection was read: nothing was truncated and
+    /// no gap can cover a record whose ID went unread. A collection can be
+    /// incomplete and still complete for ID resolution.
+    identity_coverage_complete: bool,
 }
 
 #[derive(Clone)]
@@ -553,6 +556,8 @@ fn load_dataset(options: &InputOptions) -> Result<InputDataset> {
             diagnostics.join("; ")
         );
     }
+    let identity_coverage_complete =
+        !scan_truncated && collection_gaps.iter().all(gap_is_identity_safe);
     let observation = observation_revision(&observation_parts);
     for (ordinal, occurrence) in occurrences.iter_mut().enumerate() {
         occurrence.ordinal = ordinal;
@@ -574,15 +579,23 @@ fn load_dataset(options: &InputOptions) -> Result<InputDataset> {
         diagnostics,
         scanned,
         scan_truncated,
-        discovery_incomplete,
+        identity_coverage_complete,
     })
 }
+
+const MISSING_NATIVE_ID: &str = "missing-native-id";
 
 fn gap_stops_discovery(gap: &crate::model::ReadGap) -> bool {
     !matches!(
         gap.reason.as_str(),
-        "record-bytes-bound" | "resident-byte-bound" | "member-size-bound" | "missing-native-id"
+        "record-bytes-bound" | "resident-byte-bound" | "member-size-bound" | MISSING_NATIVE_ID
     )
+}
+
+/// A record rejected for lacking a native ID was parsed in full, so it cannot
+/// hold the ID a lookup asks for. Any other gap may cover an unread ID.
+fn gap_is_identity_safe(gap: &crate::model::ReadGap) -> bool {
+    gap.reason == MISSING_NATIVE_ID
 }
 
 struct Budget {
@@ -1632,7 +1645,7 @@ fn parse_record(
         ));
         gaps.push(crate::model::ReadGap {
             span,
-            reason: "missing-native-id".to_owned(),
+            reason: MISSING_NATIVE_ID.to_owned(),
         });
         return Ok(());
     };
