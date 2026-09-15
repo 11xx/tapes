@@ -166,12 +166,217 @@ fn scoped_listing_reports_directories_it_cannot_place() {
     fs::remove_dir_all(root).unwrap();
 }
 
-/// The exchange keeps what the operator asked and what the agent visibly said,
-/// with the ordinals and timestamps a whole show gives them, and counts every
-/// other turn it left out so their absence reads as the projection.
+/// The turns of a whole show that a kind predicate keeps, and the count of
+/// every other turn by kind, as `projection.omitted` states them.
+fn split_turns(turns: &[Value], keeps: impl Fn(&str) -> bool) -> (Vec<Value>, Value) {
+    let mut kept = Vec::new();
+    let mut omitted = serde_json::Map::new();
+    for turn in turns {
+        let kind = turn["kind"].as_str().unwrap();
+        if keeps(kind) {
+            kept.push(turn.clone());
+        } else {
+            let count = omitted.get(kind).and_then(Value::as_u64).unwrap_or(0) + 1;
+            omitted.insert(kind.to_owned(), count.into());
+        }
+    }
+    (kept, Value::Object(omitted))
+}
+
+/// What a turn is and where it sat, without the read evidence a bounded and a
+/// whole read record differently.
+fn turn_identities(turns: &Value) -> Vec<(u64, String, String)> {
+    turns
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|turn| {
+            (
+                turn["ordinal"].as_u64().unwrap(),
+                turn["kind"].as_str().unwrap().to_owned(),
+                turn["text"].as_str().unwrap().to_owned(),
+            )
+        })
+        .collect()
+}
+
+/// `--only` and `--omit` keep the named turn kinds with the ordinals and
+/// timestamps a whole show gives them, and count every other turn by kind so
+/// its absence reads as the projection. `--exchange` names one such
+/// selection; a bounded read, a whole read, and `--tail` agree on them.
 #[test]
-fn exchange_keeps_operator_and_assistant_turns_and_counts_the_rest() {
-    let (codex_home, home) = fixture_store("exchange");
+fn only_and_omit_keep_turn_kinds_and_count_the_rest() {
+    let (codex_home, home) = fixture_store("turn-kinds");
+    let id = "00000000-0000-0000-0000-000000000001";
+    let invoke = |args: &[&str]| {
+        tapes()
+            .args(args)
+            .env("CODEX_HOME", &codex_home)
+            .env("HOME", &home)
+            .env("PATH", "/definitely/missing")
+            .output()
+            .unwrap()
+    };
+    let run = |args: &[&str]| {
+        let output = invoke(args);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap()
+    };
+    let json = |args: &[&str]| -> Value { serde_json::from_str(&run(args)).unwrap() };
+
+    let whole = json(&["show", id, "--json"]);
+    assert!(whole.get("projection").is_none(), "{whole}");
+    let turns = whole["turns"].as_array().unwrap().clone();
+
+    let (exchanged, exchange_omitted) =
+        split_turns(&turns, |kind| matches!(kind, "operator" | "assistant"));
+    assert!(exchanged.len() >= 2, "{whole}");
+    assert!(exchange_omitted.get("tool").is_some(), "{whole}");
+    assert!(exchange_omitted.get("reasoning").is_some(), "{whole}");
+    let exchange = json(&["show", id, "--exchange", "--json"]);
+    assert_eq!(exchange["turns"], Value::Array(exchanged.clone()));
+    assert_eq!(
+        exchange["projection"],
+        serde_json::json!({"kept": ["operator", "assistant"], "omitted": exchange_omitted})
+    );
+    let spelled = json(&[
+        "show",
+        id,
+        "--only",
+        "assistant",
+        "--only",
+        "operator",
+        "--json",
+    ]);
+    assert_eq!(spelled["turns"], exchange["turns"]);
+    assert_eq!(spelled["projection"], exchange["projection"]);
+
+    let (without, omitted) = split_turns(&turns, |kind| !matches!(kind, "tool" | "reasoning"));
+    assert_eq!(
+        omitted.as_object().unwrap().keys().collect::<Vec<_>>(),
+        ["reasoning", "tool"]
+    );
+    let projection = serde_json::json!({
+        "kept": ["operator", "assistant", "control", "ambient", "notice", "unknown"],
+        "omitted": omitted
+    });
+    let omitting = json(&["show", id, "--omit", "tool,reasoning", "--json"]);
+    assert_eq!(omitting["turns"], Value::Array(without.clone()));
+    assert_eq!(omitting["projection"], projection);
+
+    let newest = json(&[
+        "show",
+        id,
+        "--omit",
+        "tool,reasoning",
+        "--tail",
+        "1",
+        "--json",
+    ]);
+    let last = without.last().unwrap();
+    assert_eq!(newest["turns"], serde_json::json!([last]));
+    assert_eq!(
+        newest["truncation"]["window"],
+        serde_json::json!({
+            "returned": 1,
+            "omitted": without.len() - 1,
+            "omitted_from": "head",
+            "bound": 1,
+            "ordinals": {"first": last["ordinal"], "last": last["ordinal"]}
+        })
+    );
+    assert_eq!(newest["projection"], projection);
+
+    let human = run(&["show", id, "--omit", "tool,reasoning"]);
+    assert!(
+        human.contains(
+            "Note: Only operator, assistant, control, ambient, notice, unknown turns are shown; \
+             turns omitted by kind: "
+        ),
+        "{human}"
+    );
+    assert!(human.contains("Drop --omit to see them."), "{human}");
+    assert!(!human.contains("fixture_tool"), "{human}");
+
+    let (operators, operator_omitted) = split_turns(&turns, |kind| kind == "operator");
+    let only = json(&["show", id, "--only", "operator", "--json"]);
+    assert_eq!(only["turns"], Value::Array(operators.clone()));
+    assert_eq!(
+        only["projection"],
+        serde_json::json!({"kept": ["operator"], "omitted": operator_omitted})
+    );
+    let human = run(&["show", id, "--only", "operator"]);
+    assert!(
+        human.contains("Note: Only operator turns are shown;"),
+        "{human}"
+    );
+    assert!(human.contains("Drop --only to see them."), "{human}");
+    assert!(!human.contains("Fixture inspected."), "{human}");
+    let human = run(&["show", id, "--exchange"]);
+    assert!(human.contains("Drop --exchange to see them."), "{human}");
+
+    let streamed = json(&["show", id, "--full", "--omit", "tool,reasoning", "--json"]);
+    assert_eq!(
+        turn_identities(&streamed["turns"]),
+        turn_identities(&Value::Array(without.clone()))
+    );
+    assert_eq!(streamed["projection"], projection);
+    let streamed = json(&[
+        "show",
+        id,
+        "--full",
+        "--omit",
+        "tool,reasoning",
+        "--tail",
+        "1",
+        "--json",
+    ]);
+    assert_eq!(
+        turn_identities(&streamed["turns"]),
+        turn_identities(&serde_json::json!([last]))
+    );
+    assert_eq!(
+        streamed["truncation"]["window"]["omitted"],
+        without.len() - 1
+    );
+    assert_eq!(streamed["projection"], projection);
+    let human = run(&["show", id, "--full", "--only", "operator"]);
+    assert!(
+        human.contains("Note: Only operator turns are shown;"),
+        "{human}"
+    );
+    assert!(human.contains("Drop --only to see them."), "{human}");
+    assert!(!human.contains("Fixture inspected."), "{human}");
+
+    for refused in [
+        &["show", id, "--only", "tool", "--omit", "reasoning"][..],
+        &["show", id, "--exchange", "--only", "tool"],
+        &["show", id, "--exchange", "--omit", "tool"],
+        &["export", id, "--only", "tool", "--omit", "reasoning"],
+    ] {
+        let output = invoke(refused);
+        assert_eq!(output.status.code(), Some(2), "{refused:?}");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("cannot be used with"),
+            "{refused:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    assert!(!invoke(&["export", id, "--exchange"]).status.success());
+    assert!(!invoke(&["show", id, "--only", "prompt"]).status.success());
+    let _ = fs::remove_dir_all(&codex_home);
+}
+
+/// `--omit` narrows every file of a bundle: the JSON and the trace hold every
+/// kept turn and count the rest, and the context file holds the exchange kinds
+/// the selection keeps. A bulk export applies it to each bundle.
+#[test]
+fn export_omit_narrows_every_bundle_file_and_counts_the_omitted_turns() {
+    let (codex_home, home) = fixture_store("export-omit");
     let id = "00000000-0000-0000-0000-000000000001";
     let run = |args: &[&str]| {
         let output = tapes()
@@ -188,66 +393,14 @@ fn exchange_keeps_operator_and_assistant_turns_and_counts_the_rest() {
         );
         output.stdout
     };
-    let json = |args: &[&str]| -> Value { serde_json::from_slice(&run(args)).unwrap() };
-    let in_exchange =
-        |turn: &Value| matches!(turn["kind"].as_str(), Some("operator" | "assistant"));
+    let whole: Value = serde_json::from_slice(&run(&["show", id, "--json"])).unwrap();
+    let (kept, omitted) = split_turns(whole["turns"].as_array().unwrap(), |kind| {
+        kind != "reasoning"
+    });
+    assert!(omitted.get("reasoning").is_some(), "{whole}");
 
-    let whole = json(&["show", id, "--json"]);
-    assert!(whole.get("projection").is_none(), "{whole}");
-    let turns = whole["turns"].as_array().unwrap();
-    let kept = turns
-        .iter()
-        .filter(|turn| in_exchange(turn))
-        .cloned()
-        .collect::<Vec<_>>();
-    let mut omitted = serde_json::Map::new();
-    for turn in turns.iter().filter(|turn| !in_exchange(turn)) {
-        let kind = turn["kind"].as_str().unwrap().to_owned();
-        let count = omitted.get(&kind).and_then(Value::as_u64).unwrap_or(0) + 1;
-        omitted.insert(kind, count.into());
-    }
-    assert!(kept.len() >= 2, "{whole}");
-    assert!(omitted.contains_key("tool"), "{whole}");
-    assert!(omitted.contains_key("reasoning"), "{whole}");
-
-    let exchange = json(&["show", id, "--exchange", "--json"]);
-    assert_eq!(exchange["turns"], Value::Array(kept.clone()));
-    assert_eq!(
-        exchange["projection"],
-        serde_json::json!({"kind": "exchange", "omitted": omitted})
-    );
-
-    let newest = json(&["show", id, "--exchange", "--tail", "1", "--json"]);
-    let last = kept.last().unwrap();
-    assert_eq!(newest["turns"], serde_json::json!([last]));
-    assert_eq!(
-        newest["truncation"]["window"],
-        serde_json::json!({
-            "returned": 1,
-            "omitted": kept.len() - 1,
-            "omitted_from": "head",
-            "bound": 1,
-            "ordinals": {"first": last["ordinal"], "last": last["ordinal"]}
-        })
-    );
-
-    let human = String::from_utf8(run(&["show", id, "--exchange"])).unwrap();
-    assert!(
-        human.contains("Note: Only the exchange is shown; turns omitted by kind:"),
-        "{human}"
-    );
-    assert!(!human.contains("fixture_tool"), "{human}");
-
-    let directory = codex_home.join("bundle");
-    run(&[
-        "export",
-        id,
-        "--exchange",
-        "--bundle",
-        directory.to_str().unwrap(),
-    ]);
-    let file = |suffix: &str| {
-        fs::read_dir(&directory)
+    let file = |directory: &Path, suffix: &str| {
+        fs::read_dir(directory)
             .unwrap()
             .map(|entry| entry.unwrap().path())
             .find(|path| {
@@ -256,18 +409,183 @@ fn exchange_keeps_operator_and_assistant_turns_and_counts_the_rest() {
             })
             .unwrap()
     };
-    let bundle: Value = serde_json::from_str(&fs::read_to_string(file(".json")).unwrap()).unwrap();
+    let directory = codex_home.join("bundle");
+    run(&[
+        "export",
+        id,
+        "--omit",
+        "reasoning",
+        "--bundle",
+        directory.to_str().unwrap(),
+    ]);
+    let bundle: Value =
+        serde_json::from_str(&fs::read_to_string(file(&directory, ".json")).unwrap()).unwrap();
     assert_eq!(bundle["turns"], Value::Array(kept));
-    assert_eq!(bundle["projection"], exchange["projection"]);
-    assert!(bundle.get("events").is_none(), "{bundle}");
-    let trace = fs::read_to_string(file(".trace.md")).unwrap();
+    assert_eq!(
+        bundle["projection"],
+        serde_json::json!({
+            "kept": ["operator", "assistant", "tool", "control", "ambient", "notice", "unknown"],
+            "omitted": omitted
+        })
+    );
+    let trace = fs::read_to_string(file(&directory, ".trace.md")).unwrap();
     assert!(
-        trace.contains("- projection: exchange; omitted "),
+        trace.contains(
+            "- projection: kept operator, assistant, tool, control, ambient, notice, unknown; \
+             omitted 1 reasoning"
+        ),
         "{trace}"
     );
-    assert!(trace.contains("Only the exchange is traced"), "{trace}");
-    assert!(!trace.contains("fixture_tool"), "{trace}");
+    assert!(
+        trace.contains("Only the kept turn kinds are traced"),
+        "{trace}"
+    );
+    assert!(trace.contains("fixture_tool"), "{trace}");
+    assert!(!trace.contains("Consider the fixture."), "{trace}");
+    let context = fs::read_to_string(file(&directory, ".context.md")).unwrap();
+    assert!(context.contains("Inspect the fixture."), "{context}");
+    assert!(context.contains("Fixture inspected."), "{context}");
+    assert!(!context.contains("fixture_tool"), "{context}");
+
+    let tools = codex_home.join("tools");
+    run(&[
+        "export",
+        id,
+        "--only",
+        "tool",
+        "--bundle",
+        tools.to_str().unwrap(),
+    ]);
+    let context = fs::read_to_string(file(&tools, ".context.md")).unwrap();
+    assert!(!context.contains("\n## "), "{context}");
+
+    let bulk = codex_home.join("bulk");
+    run(&[
+        "export",
+        "--global",
+        "--harness",
+        "codex",
+        "--omit",
+        "reasoning",
+        "--bundle",
+        bulk.to_str().unwrap(),
+    ]);
+    let manifest: Value =
+        serde_json::from_str(&fs::read_to_string(bulk.join("manifest.json")).unwrap()).unwrap();
+    let sessions = manifest["sessions"].as_array().unwrap();
+    assert_eq!(sessions.len(), 2, "{manifest}");
+    for session in sessions {
+        let bundle: Value = serde_json::from_str(
+            &fs::read_to_string(session["files"]["json"].as_str().unwrap()).unwrap(),
+        )
+        .unwrap();
+        assert!(
+            bundle["projection"]["kept"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|kind| kind != "reasoning"),
+            "{bundle}"
+        );
+        assert!(
+            bundle["turns"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|turn| turn["kind"] != "reasoning"),
+            "{bundle}"
+        );
+    }
     let _ = fs::remove_dir_all(&codex_home);
+}
+
+/// A bundle's context file is the exchange `show --exchange` returns, turn for
+/// turn, including where a user turn carries no evidence of its sender.
+#[test]
+fn a_bundle_context_holds_the_turns_show_exchange_returns() {
+    let root = TemporaryDirectory::new(
+        std::env::temp_dir().join(format!("tapes-cli-context-exchange-{}", std::process::id())),
+    );
+    let home = root.path().join("home");
+    let codex_home = root.path().join("codex");
+    let sessions = codex_home.join("sessions/2026/01/01");
+    fs::create_dir_all(&sessions).unwrap();
+    let id = "00000000-0000-0000-0000-0000000000c1";
+    let timestamp = "2026-01-01T10:00:00Z";
+    let item = |payload: Value| {
+        serde_json::json!({"timestamp": timestamp, "type": "response_item", "payload": payload})
+            .to_string()
+            + "\n"
+    };
+    let user = |text: &str| {
+        item(
+            serde_json::json!({"type": "message", "role": "user", "content": [{"type": "input_text", "text": text}]}),
+        )
+    };
+    let mut body = serde_json::json!({"timestamp": timestamp, "type": "session_meta", "payload": {"id": id, "session_id": id, "timestamp": timestamp, "cwd": "/fixtures/project", "source": "cli", "model_provider": "openai"}}).to_string() + "\n";
+    body += &user("Inspect the fixture.");
+    body += &(serde_json::json!({"timestamp": timestamp, "type": "event_msg", "payload": {"type": "user_message", "message": "Inspect the fixture."}}).to_string() + "\n");
+    body += &user("<environment_context>\n  <cwd>/fixtures/project</cwd>\n</environment_context>");
+    body += &user("A message no user_message event vouches for.");
+    body += &item(
+        serde_json::json!({"type": "reasoning", "summary": [{"type": "summary_text", "text": "Consider it."}]}),
+    );
+    body += &item(
+        serde_json::json!({"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Fixture inspected."}]}),
+    );
+    fs::write(
+        sessions.join(format!("rollout-2026-01-01T10-00-00-{id}.jsonl")),
+        body,
+    )
+    .unwrap();
+    let run = |args: &[&str]| {
+        let output = tapes()
+            .args(args)
+            .env("CODEX_HOME", &codex_home)
+            .env("HOME", &home)
+            .env("PATH", "/definitely/missing")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        output.stdout
+    };
+
+    let whole: Value = serde_json::from_slice(&run(&["show", id, "--json"])).unwrap();
+    let kinds = whole["turns"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|turn| turn["kind"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert!(kinds.contains(&"unknown"), "{kinds:?}");
+
+    let exchange: Value =
+        serde_json::from_slice(&run(&["show", id, "--exchange", "--json"])).unwrap();
+    let exchanged = exchange["turns"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|turn| format!("{} #{}", turn["role"].as_str().unwrap(), turn["ordinal"]))
+        .collect::<Vec<_>>();
+
+    let directory = root.path().join("bundle");
+    run(&["export", id, "--bundle", directory.to_str().unwrap()]);
+    let context = fs::read_dir(&directory)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find(|path| path.to_string_lossy().ends_with(".context.md"))
+        .unwrap();
+    let context = fs::read_to_string(context).unwrap();
+    let headed = context
+        .lines()
+        .filter_map(|line| line.strip_prefix("## "))
+        .map(|heading| heading.split(" — ").next().unwrap().to_owned())
+        .collect::<Vec<_>>();
+    assert_eq!(headed, exchanged, "{context}");
 }
 
 /// The file tail is the reader's own bound, so a caller can set it; the read
@@ -1750,7 +2068,7 @@ fn supplied_citation_descriptors_are_bounded_in_show_and_export() {
         .unwrap();
     assert!(shown.status.success());
     let shown: Value = serde_json::from_slice(&shown.stdout).unwrap();
-    assert_eq!(shown["schema"], "tapes-session/8");
+    assert_eq!(shown["schema"], "tapes-session/9");
     let citation = &shown["artifacts"][0]["citations"][0];
     assert_eq!(citation["uri"]["chars"], 5_024);
     assert_eq!(
@@ -1791,7 +2109,7 @@ fn supplied_citation_descriptors_are_bounded_in_show_and_export() {
         })
         .unwrap();
     let bundle_json: Value = serde_json::from_slice(&fs::read(json_path).unwrap()).unwrap();
-    assert_eq!(bundle_json["schema"], "tapes-session/8");
+    assert_eq!(bundle_json["schema"], "tapes-session/9");
     assert_eq!(
         bundle_json["artifacts"][0]["citations"][0]["title"]["text"]
             .as_str()
@@ -4680,7 +4998,7 @@ fn show_full_streams_a_claude_recording_past_the_read_bound() {
 
     let json: Value =
         serde_json::from_str(&stdout(&["show", "full-claude", "--full", "--json"])).unwrap();
-    assert_eq!(json["schema"], "tapes-session/8");
+    assert_eq!(json["schema"], "tapes-session/9");
     assert_eq!(json["turns"].as_array().unwrap().len(), 50);
     assert_eq!(json["turns"][0]["text"], "opening request");
     assert_eq!(json["turns"][49]["ordinal"], 49);

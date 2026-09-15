@@ -1020,11 +1020,11 @@ its `notes`, with the meanings they have on a transcript.
 
 ## JSON contract
 
-A serialized transcript is a `tapes-session/8` object:
+A serialized transcript is a `tapes-session/9` object:
 
 ```json
 {
-  "schema": "tapes-session/8",
+  "schema": "tapes-session/9",
   "session": {
     "id": "session-1",
     "source": {
@@ -1073,13 +1073,18 @@ Record spans are not listed under `read.records`; each turn's `record_ref`
 carries its own span and the source revision it was read at. No `text_tail`
 is reported, and `truncation` holds only a `--tail` window.
 
-`projection` is present when a caller kept only some of the read's turns.
-`show --exchange` and `export --exchange` write
-`{"kind": "exchange", "omitted": {"tool": 3, "reasoning": 1}}`: only
-`operator` and `assistant` turns remain, each keeping its ordinal, and
-`omitted` counts the dropped turns by kind. A turn window under a projection
+`projection` is present when a caller kept turns by kind with `--only`,
+`--omit`, or `show --exchange`. `kept` lists the kept kinds in the order
+`operator`, `assistant`, `reasoning`, `tool`, `control`, `ambient`, `notice`,
+`unknown`, and `omitted` counts every dropped turn by kind; `show --exchange`
+writes `{"kept": ["operator", "assistant"], "omitted": {"reasoning": 1,
+"tool": 3}}`. Kept turns keep their ordinals. A turn window under a projection
 counts the kept turns. A turn absent from a projection says nothing about
 whether the session recorded it.
+
+A bundle's `.context.md` holds the exchange that `show --exchange` returns —
+the `operator` and `assistant` turns — of those a selection keeps; its `.json`
+and `.trace.md` hold every kept turn.
 
 A transcript that omitted anything carries `truncated: true` and a
 `truncation` object:

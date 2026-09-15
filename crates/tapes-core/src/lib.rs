@@ -53,22 +53,12 @@ const LATEST_WINDOW: usize = 5;
 /// not the window `show` defaults to.
 const EXPORT_TAIL: usize = usize::MAX;
 
-/// Which of a read's turns an export keeps.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum TurnView {
-    /// Every turn the bounded read reached.
-    #[default]
-    All,
-    /// Only the exchange: operator requests and the agent's visible text.
-    Exchange,
-}
-
-impl TurnView {
-    fn project(self, transcript: Transcript) -> Transcript {
-        match self {
-            TurnView::All => transcript,
-            TurnView::Exchange => transcript.into_exchange(EXPORT_TAIL),
-        }
+/// Keep the turns an export's selection allows; no selection keeps every turn
+/// the bounded read reached.
+fn project_export(transcript: Transcript, turns: Option<model::TurnSelection>) -> Transcript {
+    match turns {
+        Some(selection) => transcript.project(selection, EXPORT_TAIL),
+        None => transcript,
     }
 }
 
@@ -1050,18 +1040,18 @@ pub fn show_full_with_backends(
 pub fn export(
     selection: Selection,
     bundle: Option<&Path>,
-    view: TurnView,
+    turns: Option<model::TurnSelection>,
 ) -> Result<bundle::Bundle> {
-    export_with_backends(&backend::backends(), selection, bundle, view)
+    export_with_backends(&backend::backends(), selection, bundle, turns)
 }
 
 pub fn export_with_backends(
     backends: &[Box<dyn Backend>],
     selection: Selection,
     directory: Option<&Path>,
-    view: TurnView,
+    turns: Option<model::TurnSelection>,
 ) -> Result<bundle::Bundle> {
-    let transcript = view.project(show_with_backends(backends, selection, EXPORT_TAIL)?);
+    let transcript = project_export(show_with_backends(backends, selection, EXPORT_TAIL)?, turns);
     bundle::export(&transcript, directory.unwrap_or_else(|| Path::new("/tmp")))
 }
 
@@ -1172,9 +1162,9 @@ impl BulkExport {
 pub fn export_selection(
     selection: &SessionSelection<'_>,
     directory: Option<&Path>,
-    view: TurnView,
+    turns: Option<model::TurnSelection>,
 ) -> Result<BulkExport> {
-    export_selection_with_backends(&backend::backends(), selection, directory, view)
+    export_selection_with_backends(&backend::backends(), selection, directory, turns)
 }
 
 /// Export every session a listing with the same filters would return, in the
@@ -1188,7 +1178,7 @@ pub fn export_selection_with_backends(
     backends: &[Box<dyn Backend>],
     selection: &SessionSelection<'_>,
     directory: Option<&Path>,
-    view: TurnView,
+    turns: Option<model::TurnSelection>,
 ) -> Result<BulkExport> {
     let scope = selection.within.resolve()?;
     let limit = selection.limit.unwrap_or(DEFAULT_LIST_LIMIT);
@@ -1208,7 +1198,7 @@ pub fn export_selection_with_backends(
     for (session, origin) in listed.sessions.into_iter().zip(listed.origins) {
         match backends[origin]
             .transcript(&session, EXPORT_TAIL)
-            .map(|transcript| view.project(transcript))
+            .map(|transcript| project_export(transcript, turns))
             .and_then(|transcript| bundle::export(&transcript, directory))
         {
             Ok(bundle) => {

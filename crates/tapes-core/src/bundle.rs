@@ -10,8 +10,7 @@ use serde_json::Value;
 
 use crate::model::{
     human_bytes, human_speaker, human_timestamp, human_title, AccountingBasis, AccountingCoverage,
-    Role, Session, SourceBound, TrailingRecord, Transcript, Truncation, Turn, TurnKind,
-    SESSION_SCHEMA,
+    Role, Session, SourceBound, TrailingRecord, Transcript, Truncation, Turn, SESSION_SCHEMA,
 };
 
 /// One exported file: where it landed and how big it is.
@@ -168,18 +167,14 @@ fn write_atomically(prefix: &Path, extension: &str, body: &str) -> Result<Bundle
     })
 }
 
-/// Operator turns and assistant-visible text only — small enough to read whole.
+/// The exchange `show --exchange` returns, as `TurnKind::in_exchange` defines
+/// it — small enough to read whole. Every other kind is in the trace.
 fn render_context(transcript: &Transcript) -> String {
     let mut out = String::new();
     write_header(&mut out, transcript, "context");
     for turn in &transcript.turns {
-        match turn.role {
-            // The session's argument: what was asked, and what the agent said
-            // back. A harness's own commands, the context it attached, and the
-            // messages it injected are recorded elsewhere in the bundle.
-            Role::User if matches!(turn.kind, TurnKind::Operator | TurnKind::Unknown) => {}
-            Role::Assistant => {}
-            _ => continue,
+        if !turn.kind.in_exchange() {
+            continue;
         }
         write_turn_heading(&mut out, &human_speaker(turn), turn);
         out.push_str(turn.text.trim_end());
@@ -203,7 +198,7 @@ fn render_trace(transcript: &Transcript) -> String {
     write_header(&mut out, transcript, "trace");
     if transcript.projection.is_some() {
         out.push_str(
-            "Only the exchange is traced; export without --exchange for tool, reasoning, and harness turns.\n\n",
+            "Only the kept turn kinds are traced; export without --only or --omit to trace every kind.\n\n",
         );
     }
     for turn in &transcript.turns {
@@ -252,8 +247,8 @@ fn write_header(out: &mut String, transcript: &Transcript, kind: &str) {
     if let Some(projection) = &transcript.projection {
         let _ = writeln!(
             out,
-            "- projection: {}; omitted {}",
-            projection.kind.label(),
+            "- projection: kept {}; omitted {}",
+            projection.kept_summary(),
             projection.omitted_summary()
         );
     }
@@ -469,7 +464,7 @@ mod tests {
     use super::*;
     use crate::model::{
         Accounting, AccountingBasis, AccountingCoverage, LiveState, Model, SourceDescriptor,
-        Tokens, TrailingRecord, Truncation, Turn,
+        Tokens, TrailingRecord, Truncation, Turn, TurnKind,
     };
 
     fn transcript() -> Transcript {
