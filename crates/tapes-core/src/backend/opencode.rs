@@ -393,9 +393,13 @@ impl OpenCodeBackend {
                 let database = database
                     .to_str()
                     .ok_or_else(|| anyhow!("opencode database path is not UTF-8"))?;
+                // List mode prints the one `json_object` column byte for
+                // byte, and `json_object` escapes every control character,
+                // so each row is one line. Tab mode quotes values that
+                // contain `"` in sqlite3 3.53 and later.
                 let bytes = self.command_bytes_with(
                     OsStr::new("sqlite3"),
-                    &["-readonly", "-batch", "-tabs", "-header", database, query],
+                    &["-readonly", "-batch", "-list", "-header", database, query],
                     "opencode database",
                 )?;
                 let text = String::from_utf8(bytes)

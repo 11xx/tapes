@@ -4982,29 +4982,46 @@ fn show_full_streams_every_message_of_an_opencode_api_session() {
     );
 }
 
-/// `show --full` pages a stable OpenCode database oldest first past the
-/// message ceiling, through messages that share a creation time across a
-/// page and a message whose parts span several part pages, and reports the
-/// part text the projection still cuts.
-#[test]
-fn show_full_streams_every_message_of_an_opencode_database_session() {
-    let root = TemporaryDirectory::new(std::env::temp_dir().join(format!(
-        "tapes-cli-opencode-database-full-{}",
-        std::process::id()
-    )));
-    let _program = opencode_program(root.path(), "opencode");
-    let sqlite3 = std::env::split_paths(&std::env::var_os("PATH").unwrap())
-        .map(|directory| directory.join("sqlite3"))
-        .find(|path| path.is_file())
-        .expect("the OpenCode database test drives a real sqlite3");
-    std::os::unix::fs::symlink(&sqlite3, root.path().join("sqlite3")).unwrap();
-    let store = root.path().join("home/.local/share/opencode");
+/// Every distinct `sqlite3` on PATH. sqlite3 output modes differ between
+/// versions, so a database test reads its store through each one installed
+/// rather than only the first.
+fn sqlite3_binaries() -> Vec<PathBuf> {
+    let mut binaries: Vec<PathBuf> = Vec::new();
+    for directory in std::env::split_paths(&std::env::var_os("PATH").unwrap()) {
+        let Ok(binary) = directory.join("sqlite3").canonicalize() else {
+            continue;
+        };
+        if binary.is_file() && !binaries.contains(&binary) {
+            binaries.push(binary);
+        }
+    }
+    assert!(
+        !binaries.is_empty(),
+        "the OpenCode database tests drive a real sqlite3"
+    );
+    binaries
+}
+
+/// Make `sqlite3` under `root` the given binary, the one tapes runs when
+/// `root` is its PATH.
+fn use_sqlite3(root: &Path, sqlite3: &Path) {
+    let link = root.join("sqlite3");
+    let _ = fs::remove_file(&link);
+    std::os::unix::fs::symlink(sqlite3, link).unwrap();
+    eprintln!(
+        "reading the OpenCode database through {}",
+        sqlite3.display()
+    );
+}
+
+/// A stable OpenCode store under `root` holding one session row and the rows
+/// `inserts` adds. The message and part tables copy a real store's schema;
+/// the session table holds the columns the reader selects.
+fn create_opencode_database(root: &Path, id: &str, inserts: &str) {
+    let store = root.join("home/.local/share/opencode");
     fs::create_dir_all(&store).unwrap();
-    // The message and part tables copy a real store's schema; the session
-    // table holds the columns the reader selects. Every third message shares
-    // a creation time, message 1 carries 300 parts of one creation time, and
-    // the last part is longer than the projection keeps.
-    let schema = r#"
+    let schema = format!(
+        r#"
 CREATE TABLE `session` (`id` text PRIMARY KEY, `parent_id` text, `directory` text NOT NULL,
   `title` text NOT NULL, `model` text, `cost` real, `tokens_input` integer,
   `tokens_output` integer, `tokens_reasoning` integer, `tokens_cache_read` integer,
@@ -5016,9 +5033,41 @@ CREATE TABLE `part` (`id` text PRIMARY KEY, `message_id` text NOT NULL, `session
   `time_created` integer NOT NULL, `time_updated` integer NOT NULL, `data` text NOT NULL);
 CREATE INDEX `part_session_idx` ON `part` (`session_id`);
 CREATE INDEX `part_message_id_id_idx` ON `part` (`message_id`,`id`);
-INSERT INTO session VALUES ('ses_many_database_fixture', NULL, '/fixtures/many',
-  'Many-message fixture session', '{"id":"fixture-db-model"}', 0, 0, 0, 0, 0, 0,
-  1784663000000, 1784664200000);
+INSERT INTO session VALUES ('{id}', NULL, '/fixtures/database', 'Database fixture session',
+  '{{"id":"fixture-db-model"}}', 0, 0, 0, 0, 0, 0, 1784663000000, 1784664200000);
+{inserts}
+"#
+    );
+    let mut create = Command::new(&sqlite3_binaries()[0])
+        .arg(store.join("opencode.db"))
+        .stdin(Stdio::piped())
+        .spawn()
+        .unwrap();
+    create
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(schema.as_bytes())
+        .unwrap();
+    assert!(create.wait().unwrap().success());
+}
+
+/// `show --full` pages a stable OpenCode database oldest first past the
+/// message ceiling, through messages that share a creation time across a
+/// page and a message whose parts span several part pages, and reports the
+/// part text the projection still cuts.
+#[test]
+fn show_full_streams_every_message_of_an_opencode_database_session() {
+    let root = TemporaryDirectory::new(std::env::temp_dir().join(format!(
+        "tapes-cli-opencode-database-full-{}",
+        std::process::id()
+    )));
+    let _program = opencode_program(root.path(), "opencode");
+    let id = "ses_many_database_fixture";
+    // Every third message shares a creation time, message 1 carries 300
+    // parts of one creation time, and the last part is longer than the
+    // projection keeps.
+    let inserts = r#"
 WITH RECURSIVE n(i) AS (SELECT 0 UNION ALL SELECT i + 1 FROM n WHERE i < 1199)
 INSERT INTO message SELECT printf('msg_many_%04d', i), 'ses_many_database_fixture',
   1784663000000 + (i / 3) * 1000, 1784663000000 + (i / 3) * 1000,
@@ -5040,32 +5089,10 @@ INSERT INTO part SELECT printf('prt_many_0001_%03d', j), 'msg_many_0001',
               'time', json_object('start', 1784663000000))
 FROM n;
 "#;
-    let mut create = Command::new(&sqlite3)
-        .arg(store.join("opencode.db"))
-        .stdin(Stdio::piped())
-        .spawn()
-        .unwrap();
-    create
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(schema.as_bytes())
-        .unwrap();
-    assert!(create.wait().unwrap().success());
-    let id = "ses_many_database_fixture";
+    create_opencode_database(root.path(), id, inserts);
     let json = |args: &[&str]| -> Value {
         serde_json::from_str(&opencode_stdout(root.path(), args)).unwrap()
     };
-
-    let bounded = json(&["show", id, "--tail", "5000", "--json"]);
-    let full = json(&["show", id, "--full", "--json"]);
-    assert_opencode_full_read_passes_the_ceiling(&bounded, &full);
-    let texts = full["turns"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|turn| turn["text"].as_str().unwrap().to_owned())
-        .collect::<Vec<_>>();
     let mut expected = Vec::new();
     for index in 0..1200 {
         match index {
@@ -5074,25 +5101,38 @@ FROM n;
             _ => expected.push(format!("Answer {index}")),
         }
     }
-    let (last, texts) = texts.split_last().unwrap();
     let (expected_last, expected) = expected.split_last().unwrap();
-    assert_eq!(texts, expected);
-    assert!(last.starts_with(&format!("{expected_last} x")), "{last}");
-    assert_eq!(last.chars().count(), 4000);
-    assert_eq!(
-        full["truncation"],
-        serde_json::json!({"source": [{"kind": "turn-text", "turns": 1, "chars": 4000}]})
-    );
 
-    let human = opencode_stdout(root.path(), &["show", id, "--full", "--tail", "1"]);
-    assert!(
-        human.contains("1 turn carries text cut at 4000 characters"),
-        "{human}"
-    );
-    assert!(
-        human.contains("the whole recording was streamed; 1200 messages"),
-        "{human}"
-    );
+    for sqlite3 in sqlite3_binaries() {
+        use_sqlite3(root.path(), &sqlite3);
+        let bounded = json(&["show", id, "--tail", "5000", "--json"]);
+        let full = json(&["show", id, "--full", "--json"]);
+        assert_opencode_full_read_passes_the_ceiling(&bounded, &full);
+        let texts = full["turns"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|turn| turn["text"].as_str().unwrap().to_owned())
+            .collect::<Vec<_>>();
+        let (last, texts) = texts.split_last().unwrap();
+        assert_eq!(texts, expected);
+        assert!(last.starts_with(&format!("{expected_last} x")), "{last}");
+        assert_eq!(last.chars().count(), 4000);
+        assert_eq!(
+            full["truncation"],
+            serde_json::json!({"source": [{"kind": "turn-text", "turns": 1, "chars": 4000}]})
+        );
+
+        let human = opencode_stdout(root.path(), &["show", id, "--full", "--tail", "1"]);
+        assert!(
+            human.contains("1 turn carries text cut at 4000 characters"),
+            "{human}"
+        );
+        assert!(
+            human.contains("the whole recording was streamed; 1200 messages"),
+            "{human}"
+        );
+    }
 }
 
 /// The normalized totals reach every surface unchanged: list, show, and the

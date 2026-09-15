@@ -247,7 +247,13 @@ projection is retained rather than reporting the shared record as ambiguous.
 Search applies that rule to candidates before accepting matches, so a later
 v2 projection cannot turn a stable projection's non-match into a match.
 The database command emits a `row` header followed by one JSON object per
-session row. Listing parses those rows independently: a row that cannot be
+session row. Every query selects a single `json_object(...) AS row` column, and
+`sqlite3` runs in list mode (`-list -header`): list mode prints that column
+byte for byte, and `json_object` escapes every control character, newline
+included, so each row is exactly one line. Tab mode (`-tabs`) is not
+verbatim: sqlite3 3.53.4 quotes a value containing `"` CSV-style
+(`"{""a"":1}"`) where 3.50.6 prints it bare. JSON mode (`-json`) is verbatim
+on both but escapes the row a second time, one extra byte per `"` and `\`. Listing parses those rows independently: a row that cannot be
 parsed is reported in the listing's `unreadable` field with its session id and
 parse diagnostic, while an exact lookup of that id preserves the parse error.
 
