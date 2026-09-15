@@ -399,9 +399,10 @@ READ THE ENDING
                                  and whether it landed.
   A closing summary, nothing open  Finished. A post-mortem, not a rescue.
 
-  Every turn carries a `kind`, filled only from fields the harness itself
-  wrote: `operator` for a message addressed to the agent, `control` for a
-  harness command such as `/exit`, `notice` for a message the harness injected,
+  Every turn carries a `kind`, filled only from what the harness itself
+  wrote, a field beside the text or an element it wraps its own text in:
+  `operator` for a message addressed to the agent, `control` for a harness
+  command such as `/exit`, `notice` for a message the harness injected,
   `ambient` for context it attached, and the role's own name for assistant,
   reasoning, and tool turns. A user turn the harness left no evidence for is
   `unknown`, which is an answer rather than a gap — read its text before

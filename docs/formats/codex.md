@@ -61,11 +61,11 @@ checked again before the result is returned; a mutation aborts the read.
 Physical overlap with the head does not erase a malformed gap; a partial gap is
 removed only when a successful decode of that same record covers it.
 
-Codex transcript history pages use the opening to decide whether a user-role
-message is operator-authored and use bounded newer records to corroborate that
-classification across page boundaries. The page records the bounded head range
-and those context-only record spans in `read`; it never inserts the opening
-records into `turns`. Metadata pages use the same page envelope with the
+Codex transcript history pages also read the opening and bounded newer records
+as context. The page records the bounded head range and those context-only
+record spans in `read`; it never inserts them into `turns`. A user-role
+message's kind comes from its own record alone, so a page gives it the kind a
+whole read does. Metadata pages use the same page envelope with the
 `models-only` option and do not perform this provenance read.
 
 The normalized reader retains only a bounded tail (4 MiB by default) for transcript reads,
@@ -129,26 +129,41 @@ reasoning turns with placeholder content.
 
 ## The operator's own messages
 
-A user `response_item` is what the model reads, wrapper included, so it does
-not by itself say which part somebody typed. The harness records that
-separately: for each message the operator sends, an `event_msg` with
-`payload.type == "user_message"` carries `payload.message`, the text as it was
-sent, and follows the matching `response_item`.
+A user `response_item` is what the model reads, and Codex writes no field on it
+naming who it came from. The same role carries the operator's requests, the
+context the harness attaches, and messages the harness raises on its own; the
+elements the harness wraps its own text in are what separate them. That holds
+for every entry point `payload.source` in the header names: `cli`, `vscode`,
+`exec` (`codex exec`, whose caller supplies one prompt), and the object-valued
+source of a spawned agent. The rollouts checked carry `session_meta.cli_version`
+0.133.0 through 0.154.0.
 
-```json
-{"type": "event_msg", "payload": {"type": "user_message", "message": "Implement the readable title."}}
-```
+| user message | kind |
+|---|---|
+| every `input_text` block is attached context | `ambient` |
+| its blocks add only a message the harness raised | `notice` |
+| anything else, including a request typed beside attached context or a pasted image | `operator` |
 
-`payload.source` in the header names the entry point the session was started
-from. An `exec` session — `codex exec`, whose caller supplies one prompt and
-reads the result — records no `user_message` event at all. There, its user
-messages are the wrapper followed by the caller's prompt, and the wrapper
-blocks are what separates them.
+Attached context blocks, whether they arrive as a record of their own or beside
+the request, begin with `<environment_context>`, `<recommended_plugins>`,
+`<in-app-browser-context>`, `<INSTRUCTIONS>`, `# AGENTS.md instructions`
+(sometimes followed by `for <directory>`), `# Files mentioned by the user:`, or
+`<skill>`. A `<skill>` record carries a skill's instructions and
+follows the message that invoked the skill.
 
-The wrapper blocks, whether they arrive as a record of their own or beside the
-request, begin with `<environment_context>`, `<recommended_plugins>`,
-`<in-app-browser-context>`, `<INSTRUCTIONS>`, `# AGENTS.md instructions`, or
-`# Files mentioned by the user:`.
+The messages the harness raises each fill a record of their own:
+
+| element | written when |
+|---|---|
+| `<turn_aborted>` | the operator interrupted the previous turn; an `event_msg` of `payload.type == "turn_aborted"` follows |
+| `<subagent_notification>` | a spawned agent reports its status to the parent |
+| `<codex_internal_context source="goal">` | the harness prompts the agent to keep working toward the thread's goal |
+
+Rollouts also mirror a request as an `event_msg` whose `payload.type` is
+`item_completed` and whose `payload.item.type` is `UserMessage`, with the text
+in `payload.item.content[]`. Spawned-agent rollouts from 0.147.0 carry requests
+with no mirror, so the mirror does not decide a message's kind. No rollout
+checked carries an `event_msg` of `payload.type == "user_message"`.
 
 ## Token accounting
 
@@ -240,9 +255,9 @@ rollouts correctly; the docstring was stale from a copied file. Nothing in this
 document is inherited from that claim — every row above was checked against a
 real rollout.
 
-The transcript reader consults the bounded opening header for `source=exec`
-evidence even when the header is outside the source tail. Opening turns are
-not added to the returned transcript.
+The transcript reader takes the session header and the first user turn's
+derived title from the bounded opening even when both are outside the source
+tail. Opening turns are not added to the returned transcript.
 
 ## Runtime and nested command evidence
 

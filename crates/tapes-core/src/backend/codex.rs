@@ -7,18 +7,17 @@ use serde_json::Value;
 use super::{
     accounting_for, head_directory, head_jsonl, home_path, jsonl_files, list_files,
     list_files_with_search, matching_session_file, read_bounds, read_recording, session_file,
-    stream_jsonl, stream_jsonl_to, streamed_trailing_record, terminal_from_values, timestamp,
-    trailing_record, transcript_from_recording, Backend, Jsonl, Listing, ParsedFile, Query,
-    StreamedTranscript, TokenTotals,
+    stream_jsonl, streamed_trailing_record, terminal_from_values, timestamp, trailing_record,
+    transcript_from_recording, Backend, Jsonl, Listing, ParsedFile, Query, StreamedTranscript,
+    TokenTotals,
 };
 use crate::content::{parts_from_array, project_text, tool_coverage, tool_part};
 use crate::event::{Bounded, EventKind, ToolEvent};
 use crate::history::{PageProjection, ReadContext};
 use crate::lineage::{ChildRef, Lineage, ParentRef, SourceRef};
 use crate::model::{
-    is_known_envelope, without_known_envelopes, AccountingBasis, AccountingCoverage, Model, Role,
-    Session, SourceDescriptor, TerminalObservation, Tokens, TrailingRecord, Transcript, Turn,
-    TurnKind,
+    is_known_envelope, is_known_notice, AccountingBasis, AccountingCoverage, Model, Role, Session,
+    SourceDescriptor, TerminalObservation, Tokens, TrailingRecord, Transcript, Turn, TurnKind,
 };
 use crate::usage::{Credits, RateLimits, RateWindow, UsageDetail};
 
@@ -95,12 +94,7 @@ impl CodexBackend {
                     variant: payload["effort"].as_str().map(str::to_owned),
                 })
             });
-        let evidence = user_message_evidence(&read.values, opening);
-        let turns = read
-            .values
-            .iter()
-            .flat_map(|value| parse_turns(value, &evidence))
-            .collect::<Vec<_>>();
+        let turns = read.values.iter().flat_map(parse_turns).collect::<Vec<_>>();
         let tokens = read.values.iter().rev().find_map(codex_tokens);
         let accounting = accounting_for(
             tokens.as_ref(),
@@ -137,11 +131,7 @@ impl CodexBackend {
         // The opening is the start of the file, so its first user turn is the
         // session's first user turn even when the tail cannot see it.
         let session = if read.truncated {
-            let opening_evidence = user_message_evidence(opening, opening);
-            let opening_turns = opening
-                .iter()
-                .flat_map(|value| parse_turns(value, &opening_evidence))
-                .collect::<Vec<_>>();
+            let opening_turns = opening.iter().flat_map(parse_turns).collect::<Vec<_>>();
             session.with_derived_title(&opening_turns)
         } else {
             session.with_derived_title(&turns)
@@ -170,17 +160,13 @@ impl CodexBackend {
             } else {
                 ReadContext::None
             },
-            |values, spans, opening, context, revision| {
+            |values, spans, _opening, _context, revision| {
                 let turns = if projection == PageProjection::Transcript {
-                    let mut evidence = user_message_evidence(values, opening);
-                    evidence
-                        .text
-                        .extend(context.iter().filter_map(codex_user_message));
                     values
                         .iter()
                         .zip(spans)
                         .flat_map(|(value, span)| {
-                            let mut turns = parse_turns(value, &evidence);
+                            let mut turns = parse_turns(value);
                             super::attach_record_refs(
                                 &mut turns,
                                 &format!("file:{}", path),
@@ -346,31 +332,13 @@ impl Backend for CodexBackend {
             .ok_or_else(|| anyhow!("codex store is unavailable"))?;
         let path = session_file(root, &session.id)
             .ok_or_else(|| anyhow!("codex session {} is unavailable", session.id))?;
-        // A user turn is classified against every message the operator sent,
-        // which Codex records as events anywhere in the file. The first pass
-        // keeps only those texts and the entry point; the second emits turns.
-        let mut source = None;
-        let mut sent = Vec::new();
-        let first = stream_jsonl(&path, |value, _, _| {
-            if source.is_none() {
-                source = codex_source(value).map(str::to_owned);
-            }
-            if let Some(message) = codex_user_message(value) {
-                sent.push(message.to_owned());
-            }
-            Ok(false)
-        })?;
-        let messages = UserMessages {
-            exec: source.as_deref() == Some("exec"),
-            text: sent.iter().map(String::as_str).collect(),
-        };
         let domain = format!("file:{}", path.display());
         let mut terminal = None;
-        let read = stream_jsonl_to(&path, first.source_length, |value, span, revision| {
+        let read = stream_jsonl(&path, |value, span, revision| {
             if let Some(observed) = codex_terminal(value) {
                 terminal = Some(observed);
             }
-            let mut parsed = parse_turns(value, &messages);
+            let mut parsed = parse_turns(value);
             super::attach_record_refs(&mut parsed, &domain, Some(revision), Some(span));
             let produced = !parsed.is_empty();
             for parsed_turn in parsed {
@@ -466,11 +434,10 @@ impl Backend for CodexBackend {
 fn read_transcript(path: &Path, read_bytes: u64) -> Result<CodexTranscriptRead> {
     let recording = read_recording(path, read_bytes)?;
     let read = &recording.tail;
-    let evidence = user_message_evidence(&read.values, recording.opening());
     let mut turns = Vec::new();
     let mut last_turn = None;
     for (index, value) in read.values.iter().enumerate() {
-        let mut parsed = parse_turns(value, &evidence);
+        let mut parsed = parse_turns(value);
         super::attach_record_refs(
             &mut parsed,
             &format!("file:{}", path.display()),
@@ -657,80 +624,35 @@ fn codex_trailing_kind(value: &Value) -> Option<&'static str> {
     }
 }
 
-/// What a rollout's own records say about the messages in its user role: the
-/// entry point its header names, and the text of every message the operator
-/// sent, which the harness records as a `user_message` event of its own.
-struct UserMessages<'a> {
-    /// Whether the session was started by `codex exec`, whose caller supplies
-    /// one prompt and whose records carry no `user_message` event.
-    exec: bool,
-    text: Vec<&'a str>,
-}
-
-fn user_message_evidence<'a>(values: &'a [Value], opening: &'a [Value]) -> UserMessages<'a> {
-    UserMessages {
-        exec: opening
-            .iter()
-            .chain(values)
-            .find_map(codex_source)
-            .is_some_and(|source| source == "exec"),
-        text: values.iter().filter_map(codex_user_message).collect(),
-    }
-}
-
-fn codex_source(value: &Value) -> Option<&str> {
-    (value["type"] == "session_meta")
-        .then(|| value["payload"]["source"].as_str())
-        .flatten()
-}
-
-fn codex_user_message(value: &Value) -> Option<&str> {
-    (value["type"] == "event_msg" && value["payload"]["type"] == "user_message")
-        .then(|| value["payload"]["message"].as_str())
-        .flatten()
-        .filter(|message| !message.is_empty())
-}
-
-/// Codex records the operator's own messages twice: once as the conversation
-/// item the model reads, and once as a `user_message` event carrying the text
-/// as it was sent. A conversation item the event vouches for is the operator's;
-/// one holding only blocks the harness wraps around a message is context it
-/// attached. An `exec` session records no such event, and there the wrapper
-/// blocks are all that separates the harness's own text from the caller's.
-fn codex_user_kind(payload: &Value, text: &str, messages: &UserMessages) -> TurnKind {
-    let mut blocks = payload["content"]
+/// Codex writes no field naming who a user message came from; the elements it
+/// wraps its own text in are what separate that text from somebody's request.
+/// A message whose every block is context the harness attached is ambient,
+/// one that adds only a message the harness raised on its own is a notice, and
+/// any other text was addressed to the agent. Each message answers from its
+/// own record, so every read of it gives the same kind.
+fn codex_user_kind(payload: &Value) -> TurnKind {
+    let blocks = payload["content"]
         .as_array()
         .into_iter()
         .flatten()
         .filter(|block| block["type"] == "input_text")
         .filter_map(|block| block["text"].as_str())
-        .peekable();
-    let attached = blocks.peek().is_some() && blocks.all(is_known_envelope);
-    if messages.exec {
-        return if attached {
-            TurnKind::Ambient
-        } else {
-            TurnKind::Operator
-        };
-    }
-    // The harness wraps a message either in records of its own or in the same
-    // block, so the sent text is matched against the message and against the
-    // message with the wrapper removed.
-    let requested = without_known_envelopes(text);
-    let sent = messages
-        .text
-        .iter()
-        .any(|sent| text.starts_with(sent) || requested.trim_start().starts_with(sent));
-    if sent {
+        .collect::<Vec<_>>();
+    if blocks.is_empty() {
         TurnKind::Operator
-    } else if attached {
+    } else if blocks.iter().all(|block| is_known_envelope(block)) {
         TurnKind::Ambient
+    } else if blocks
+        .iter()
+        .all(|block| is_known_envelope(block) || is_known_notice(block))
+    {
+        TurnKind::Notice
     } else {
-        TurnKind::Unknown
+        TurnKind::Operator
     }
 }
 
-fn parse_turns(value: &Value, messages: &UserMessages) -> Vec<Turn> {
+fn parse_turns(value: &Value) -> Vec<Turn> {
     if value["type"] == "event_msg"
         && matches!(
             value["payload"]["type"].as_str(),
@@ -781,9 +703,7 @@ fn parse_turns(value: &Value, messages: &UserMessages) -> Vec<Turn> {
             };
             let (parts, coverage) = parts_from_array(&payload["content"], "payload.content");
             let text = project_text(&parts);
-            let kind = role
-                .kind()
-                .unwrap_or_else(|| codex_user_kind(payload, &text, messages));
+            let kind = role.kind().unwrap_or_else(|| codex_user_kind(payload));
             (role, kind, text, None, parts, coverage)
         }
         Some("reasoning") => {

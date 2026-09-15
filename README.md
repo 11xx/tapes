@@ -234,9 +234,10 @@ available backend, rejects ambiguous prefixes with the matching candidates,
 and prints normalized turns in chronological order. Every turn carries a
 `kind` saying what the harness recorded it as — `operator`, `assistant`,
 `reasoning`, `tool`, `control`, `ambient`, `notice`, or `unknown` — filled
-only from fields the harness itself wrote, so a `/exit` command or an injected
-notice is not read as an unanswered prompt and a record with no such field
-stays `unknown` (see `docs/model.md`). Human output heads a user turn holding
+only from what the harness itself wrote, a field beside the text or an element
+it wraps its own text in, so a `/exit` command or an injected notice is not
+read as an unanswered prompt and a record carrying neither stays `unknown`
+(see `docs/model.md`). Human output heads a user turn holding
 anything but an operator's message `user/<kind>`. Every turn in `show` also carries its
 zero-based `ordinal` in the session's normalized sequence, which a file-backed
 session keeps under any window while a paged OpenCode API read renumbers when
@@ -570,12 +571,11 @@ byte range plus session ID and store identify the page. Byte budgets range
 from 1 KiB to 4 MiB; the default is 64 KiB. Session metadata and the bounded
 opening-header probe are read separately. A page also probes at most one
 alignment byte, counted separately as `alignment_bytes`. Codex transcript pages
-also read up to 64 KiB of newer context to corroborate user-message provenance across page
-boundaries, counted as `context_bytes`; those records are not returned as turns.
-The decoded opening and newer context-only records are listed separately in
-`read.context_records`, and none are returned as turns.
-A kind remains unknown when its corroborating evidence is outside these bounds. Ordinary show/export retain their
-source bounds.
+also read up to 64 KiB of newer context, counted as `context_bytes`. The decoded
+opening and newer context-only records are listed separately in
+`read.context_records`, and none are returned as turns. A Codex turn's kind
+comes from its own record, so a page gives it the kind a whole read does.
+Ordinary show/export retain their source bounds.
 
 A cursor binds the recording's identity, size, modification time and change time. Changed
 or replaced recordings refuse continuation; restart without a cursor. Malformed

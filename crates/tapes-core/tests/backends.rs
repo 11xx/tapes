@@ -3334,10 +3334,10 @@ fn a_bundle_context_keeps_operator_turns_and_drops_harness_records() {
     fs::remove_dir_all(directory).unwrap();
 }
 
-/// Codex records the operator's own messages as `user_message` events, and an
-/// `exec` session records none because its caller supplies the one prompt.
+/// Codex writes no sender field, so each user message is typed by the elements
+/// the harness wrapped its own text in, whatever entry point started it.
 #[test]
-fn codex_types_user_messages_from_its_own_records() {
+fn codex_types_user_messages_by_the_elements_the_harness_wrote() {
     let backend = CodexBackend::new(fixtures("codex"));
     let kinds = |id: &str| {
         let session = located(&backend, id);
@@ -3358,12 +3358,26 @@ fn codex_types_user_messages_from_its_own_records() {
     assert_eq!(
         kinds("30000000-0000-0000-0000-000000000005"),
         vec![TurnKind::Operator],
-        "an exec session's prompt needs no event"
+        "an exec session's prompt"
     );
     assert_eq!(
         kinds("20000000-0000-0000-0000-000000000004"),
-        vec![TurnKind::Unknown],
-        "a message with neither evidence is not guessed at"
+        vec![TurnKind::Operator],
+        "a header naming no entry point"
+    );
+    assert_eq!(
+        kinds("50000000-0000-7000-8000-000000000006"),
+        vec![
+            TurnKind::Ambient,
+            TurnKind::Operator,
+            TurnKind::Operator,
+            TurnKind::Ambient,
+            TurnKind::Notice,
+            TurnKind::Operator,
+            TurnKind::Notice,
+            TurnKind::Notice,
+        ],
+        "an interactive session's instructions, skill, requests, and notices"
     );
 }
 
