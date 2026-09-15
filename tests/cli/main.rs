@@ -5656,6 +5656,256 @@ fn export_full_bundles_claude_and_codex_recordings_past_the_read_bound() {
     );
 }
 
+/// `events --full` and `stats --full` stream a Claude or Codex recording past
+/// the read bound twice and answer what a bounded read wide enough to hold the
+/// file answers, apart from its read evidence and text tail: the same events,
+/// pairs, windows, and filters, a pair whose call falls outside the window
+/// included, and the same counts with coverage `session`. A selection streams
+/// each session, and what `--full` cannot honor refuses without writing.
+#[test]
+fn events_and_stats_full_stream_claude_and_codex_recordings_past_the_read_bound() {
+    let root = TemporaryDirectory::new(
+        std::env::temp_dir().join(format!("tapes-cli-events-full-{}", std::process::id())),
+    );
+    let home = root.path().join("home");
+    let codex_home = root.path().join("codex");
+    let filler = "x".repeat(100 * 1024);
+    let timestamp = |second: usize| format!("2026-01-01T10:{:02}:{:02}Z", second / 60, second % 60);
+
+    let claude_id = "events-full-claude";
+    let project = home.join(".claude/projects/-fixtures-project");
+    fs::create_dir_all(&project).unwrap();
+    let claude = |second: usize, uuid: &str, role: &str, content: Value| {
+        serde_json::json!({"type": role, "sessionId": claude_id, "uuid": uuid, "timestamp": timestamp(second), "cwd": "/fixtures/project", "message": {"role": role, "content": content}}).to_string() + "\n"
+    };
+    let mut body = claude(0, "first", "user", Value::from("opening request"))
+        + &claude(
+            1,
+            "call",
+            "assistant",
+            serde_json::json!([{"type": "tool_use", "id": "tool-early", "name": "fixture_tool", "input": {"path": "early"}}]),
+        )
+        + &claude(
+            3,
+            "result",
+            "user",
+            serde_json::json!([{"type": "tool_result", "tool_use_id": "tool-early", "content": "early result", "is_error": true}]),
+        );
+    for index in 0..48 {
+        body += &claude(
+            4 + index,
+            &format!("filler-{index}"),
+            "assistant",
+            serde_json::json!([{"type": "text", "text": filler}]),
+        );
+    }
+    body += &claude(60, "last", "user", Value::from("closing request"));
+    fs::write(project.join(format!("{claude_id}.jsonl")), &body).unwrap();
+
+    let codex_id = "00000000-0000-0000-0000-0000000000f3";
+    let codex_sessions = codex_home.join("sessions/2026/01/01");
+    fs::create_dir_all(&codex_sessions).unwrap();
+    let codex_item = |second: usize, payload: Value| {
+        serde_json::json!({"timestamp": timestamp(second), "type": "response_item", "payload": payload})
+            .to_string()
+            + "\n"
+    };
+    let codex_user = |second: usize, text: &str| {
+        codex_item(
+            second,
+            serde_json::json!({"type": "message", "role": "user", "content": [{"type": "input_text", "text": text}]}),
+        )
+    };
+    let mut codex = serde_json::json!({"timestamp": timestamp(0), "type": "session_meta", "payload": {"id": codex_id, "session_id": codex_id, "timestamp": timestamp(0), "cwd": "/fixtures/project", "source": "cli", "model_provider": "openai"}}).to_string() + "\n";
+    codex += &codex_user(0, "opening request");
+    codex += &codex_item(
+        1,
+        serde_json::json!({"type": "function_call", "name": "fixture_tool", "arguments": "{\"path\":\"early\"}", "call_id": "call-early"}),
+    );
+    codex += &codex_item(
+        2,
+        serde_json::json!({"type": "function_call_output", "call_id": "call-early", "output": "early result"}),
+    );
+    // A call whose result lands after the filler, so a narrow window holds
+    // the result and not the call that declares its program.
+    codex += &codex_item(
+        3,
+        serde_json::json!({"type": "function_call", "name": "exec_command", "arguments": "{\"cmd\":\"git status\"}", "call_id": "call-late"}),
+    );
+    for index in 0..48 {
+        codex += &codex_item(
+            4 + index,
+            serde_json::json!({"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": filler}]}),
+        );
+    }
+    codex += &codex_item(
+        58,
+        serde_json::json!({"type": "function_call_output", "call_id": "call-late", "output": "clean"}),
+    );
+    codex += &codex_user(60, "closing request");
+    fs::write(
+        codex_sessions.join(format!("rollout-2026-01-01T10-00-00-{codex_id}.jsonl")),
+        &codex,
+    )
+    .unwrap();
+
+    let run = |arguments: &[&str]| {
+        tapes()
+            .args(arguments)
+            .env("HOME", &home)
+            .env("CODEX_HOME", &codex_home)
+            .env("PATH", "/definitely/missing")
+            .output()
+            .unwrap()
+    };
+    let json = |arguments: &[&str]| -> Value {
+        let output = run(arguments);
+        assert!(
+            output.status.success(),
+            "{arguments:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice(&output.stdout).unwrap()
+    };
+    // What a whole read and a bounded read wide enough to hold the file share.
+    let comparable = |mut value: Value| {
+        let object = value.as_object_mut().unwrap();
+        object.remove("read");
+        object.remove("text_tail");
+        value
+    };
+
+    for (id, length) in [(claude_id, body.len()), (codex_id, codex.len())] {
+        let bounded = json(&["events", id, "--json"]);
+        assert_eq!(
+            bounded["truncation"]["source"][0]["kind"], "file-tail",
+            "{id}"
+        );
+        for selection in [
+            &[][..],
+            &["--name", "fixture_tool"],
+            &["--call-id", "call-early"],
+            &["--tail", "2"],
+        ] {
+            let full = json(&[&["events", id, "--full", "--json"], selection].concat());
+            let wide =
+                json(&[&["events", id, "--read-bytes", "64m", "--json"], selection].concat());
+            assert_eq!(full["read"]["projection_options"][0], "full", "{id}");
+            assert_eq!(full["read"]["source_length"], length as u64, "{id}");
+            assert_eq!(comparable(full), comparable(wide), "{id} {selection:?}");
+        }
+        let full = json(&["events", id, "--full", "--name", "fixture_tool", "--json"]);
+        assert_eq!(full["events"].as_array().unwrap().len(), 1, "{id}: {full}");
+        assert_eq!(
+            full["pairs"],
+            serde_json::json!({"complete": 1, "incomplete": 0})
+        );
+
+        let full = json(&["stats", id, "--full", "--json"]);
+        let wide = json(&["stats", id, "--read-bytes", "64m", "--json"]);
+        assert_eq!(full["coverage"]["turns"], "session", "{id}: {full}");
+        assert_eq!(
+            full["tools"]["paired"].as_u64(),
+            wide["tools"]["paired"].as_u64()
+        );
+        assert!(full["tools"]["paired"].as_u64() > Some(0), "{id}: {full}");
+        assert_eq!(full["read"]["projection_options"][0], "full", "{id}");
+        assert_eq!(comparable(full), comparable(wide), "{id}");
+        let bounded = json(&["stats", id, "--json"]);
+        assert_eq!(bounded["coverage"]["turns"], "read-window", "{id}");
+    }
+
+    // The late call declares `git`; its result shares the call id. A window
+    // holding only the result selects nothing, as a bounded read does.
+    for (selection, events) in [
+        (&["--program", "git"][..], 2),
+        (&["--program", "git", "--tail", "2"], 0),
+    ] {
+        let full = json(&[&["events", codex_id, "--full", "--json"], selection].concat());
+        let wide = json(
+            &[
+                &["events", codex_id, "--read-bytes", "64m", "--json"],
+                selection,
+            ]
+            .concat(),
+        );
+        assert_eq!(
+            full["events"].as_array().unwrap().len(),
+            events,
+            "{selection:?}: {full}"
+        );
+        assert_eq!(comparable(full), comparable(wide), "{selection:?}");
+    }
+    let window = json(&["events", codex_id, "--full", "--tail", "2", "--json"]);
+    assert_eq!(window["events"][0]["call_id"], "call-late", "{window}");
+    assert!(window["events"][0]["pair"].is_object(), "{window}");
+    assert_eq!(
+        window["pairs"],
+        serde_json::json!({"complete": 1, "incomplete": 0})
+    );
+
+    let human = run(&["events", claude_id, "--full", "--tail", "2"]);
+    let human = String::from_utf8(human.stdout).unwrap();
+    assert!(human.contains("Showing the last 2 of 52 turns"), "{human}");
+    assert!(
+        human.contains("the whole recording was streamed twice; source length"),
+        "{human}"
+    );
+
+    let summary = json(&[
+        "stats",
+        "--global",
+        "--harness",
+        "claude",
+        "--full",
+        "--json",
+    ]);
+    assert_eq!(summary["read"], 1, "{summary}");
+    let one = json(&["stats", claude_id, "--full", "--json"]);
+    assert_eq!(summary["sessions"][0]["tools"], one["tools"]);
+    assert_eq!(summary["sessions"][0]["coverage"], one["coverage"]);
+
+    for command in ["events", "stats"] {
+        let conflicting = run(&[command, claude_id, "--full", "--read-bytes", "1m"]);
+        assert_eq!(conflicting.status.code(), Some(2), "{command}");
+        let input = supplied_fixture("chatgpt-export.json");
+        let supplied = run(&[
+            command,
+            "supplied-1",
+            "--full",
+            "--input",
+            input.to_str().unwrap(),
+            "--input-format",
+            "chatgpt-exporter",
+        ]);
+        assert!(!supplied.status.success(), "{command}");
+        assert!(
+            String::from_utf8_lossy(&supplied.stderr).contains("--scan-bytes"),
+            "{command}: {}",
+            String::from_utf8_lossy(&supplied.stderr)
+        );
+
+        let _opencode = opencode_program(root.path(), "opencode2");
+        let mut opencode = tapes();
+        opencode.args([
+            command,
+            "ses_000000fixtureSharedSession",
+            "--full",
+            "--json",
+        ]);
+        with_fixture_env(&mut opencode, &codex_home, &home, root.path());
+        let opencode = opencode.output().unwrap();
+        assert!(!opencode.status.success(), "{command}");
+        assert!(
+            String::from_utf8_lossy(&opencode.stderr)
+                .contains("opencode sessions cannot be read whole twice"),
+            "{command}: {}",
+            String::from_utf8_lossy(&opencode.stderr)
+        );
+        assert!(opencode.stdout.is_empty(), "{command}");
+    }
+}
+
 /// Every turn says what it is, and a user turn the harness recorded its own
 /// command in says so in the heading a reader judges an ending by.
 #[test]

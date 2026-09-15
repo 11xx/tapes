@@ -381,6 +381,22 @@ records relationships on session rows, which no transcript bound reaches.
 Both refuse `--read-bytes` and supplied inputs, and `usage --full` refuses a
 selection.
 
+`events --full` and `stats --full` stream the whole recording twice: the first
+read observes every tool record and counts the turns, and the second replays
+it, pinned to the length and file revision the first observed, pairing each
+record and writing or counting it as it is emitted, so memory follows the
+calls awaiting a result rather than the file. `events --full` writes the same
+`tapes-events/6` object event by event; `--tail`, `--name`, `--call-id`, and
+`--program` select as they do over a bounded read, and `pairs` counts the
+returned events. `stats --full` folds turns, tool calls, durations, and errors
+record by record, takes the counters from every record and the children from
+the read `lineage --full` takes, so `coverage.turns` is `session`; given a
+selection it streams each selected session, and one that cannot be streamed
+is named under `failed`. Both read installed Claude, Codex, and Pi sessions,
+refuse `--read-bytes` and supplied inputs, and refuse an OpenCode session,
+whose messages are updated in place so a second read may not repeat the
+first.
+
 Given a scope or a listing filter instead of a session, `usage` answers the
 whole selection as `tapes-usage-summary/3`: the same flags `list` and `export`
 take, grouped by `--by harness,model,variant,directory` and defaulting to
@@ -636,7 +652,8 @@ metadata read; page counters describe the subsequent history traversal.
 
 `tapes stats --here --since 2026-01-01 --json` returns
 `tapes-stats-summary/3`. Listing filters select the sessions; each costs one
-bounded transcript read through its listed backend origin. The report includes
+bounded transcript read through its listed backend origin, or two streamed
+whole-recording reads with `--full`. The report includes
 selected/read/failed counts, per-session coverage and tool statistics, and
 aggregates by harness and tool name. Pair durations cover complete timestamped
 pairs only. Read failures have unknown activity and contribute no counters.

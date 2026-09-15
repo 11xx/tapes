@@ -1,14 +1,25 @@
-//! Tool statistics over one bounded read per selected backend origin.
+//! Tool statistics over one read per selected session, through the backend
+//! origin that listed it.
 use std::collections::BTreeMap;
 
 use anyhow::Result;
 use serde::Serialize;
 
 use crate::backend::{self, Backend};
-use crate::event;
-use crate::stats::{Coverage, PairCoverage, ToolNameStats, ToolStats};
-use crate::usage::{self, UsageSession};
+use crate::stats::{Counted, Coverage, ToolNameStats, ToolStats};
+use crate::usage::UsageSession;
 use crate::{list_scoped, selection_record, SelectionRecord, SessionSelection, DEFAULT_LIST_LIMIT};
+
+/// How much of each selected recording a summary reads.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SessionRead {
+    /// The bounded read a single session's stats take.
+    #[default]
+    Bounded,
+    /// The whole recording, streamed twice as `stats --full` streams one
+    /// session. A store that cannot replay a read fails that session alone.
+    Whole,
+}
 
 pub const SCHEMA: &str = "tapes-stats-summary/3";
 
@@ -43,13 +54,14 @@ pub struct StatsSummary {
     pub scan_truncated: bool,
 }
 
-pub fn summary(selection: &SessionSelection<'_>) -> Result<StatsSummary> {
-    with_backends(&backend::backends(), selection)
+pub fn summary(selection: &SessionSelection<'_>, read: SessionRead) -> Result<StatsSummary> {
+    with_backends(&backend::backends(), selection, read)
 }
 
 pub fn with_backends(
     backends: &[Box<dyn Backend>],
     selection: &SessionSelection<'_>,
+    read: SessionRead,
 ) -> Result<StatsSummary> {
     let scope = selection.within.resolve()?;
     let limit = selection.limit.unwrap_or(DEFAULT_LIST_LIMIT);
@@ -77,22 +89,23 @@ pub fn with_backends(
     };
     let mut by_harness = BTreeMap::<String, ToolAccumulator>::new();
     for (session, origin) in listed.sessions.into_iter().zip(listed.origins) {
-        match backends[origin].transcript(&session, usize::MAX) {
-            Ok(transcript) => {
-                let usage = usage::usage(&transcript);
-                let events = event::project(transcript, usize::MAX);
-                let tools = crate::stats::count_tools(&events.events, events.pairs.complete);
+        let backend = backends[origin].as_ref();
+        let counted = match read {
+            SessionRead::Bounded => backend
+                .transcript(&session, usize::MAX)
+                .map(Counted::bounded),
+            SessionRead::Whole => Counted::whole(backend, &session),
+        };
+        match counted {
+            Ok(counted) => {
+                let (identity, coverage, tools) = counted.session_tools();
                 by_harness
                     .entry(session.harness().to_owned())
                     .or_default()
                     .add(&tools);
                 report.sessions.push(SessionStats {
-                    session: usage.session,
-                    coverage: Coverage {
-                        turns: usage.turns.coverage,
-                        pairs: PairCoverage::CompleteOnly,
-                        truncation: events.truncation,
-                    },
+                    session: identity,
+                    coverage,
                     tools,
                 });
             }

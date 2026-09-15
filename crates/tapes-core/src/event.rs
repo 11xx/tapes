@@ -208,55 +208,148 @@ pub struct EventTranscript {
 }
 
 impl EventTranscript {
-    pub fn retain(&mut self, names: &[String], call_ids: &[String]) {
-        self.retain_with_program(names, call_ids, &[]);
-    }
-
-    pub fn retain_with_program(
-        &mut self,
-        names: &[String],
-        call_ids: &[String],
-        programs: &[String],
-    ) {
-        let selected_call_ids = self
+    /// Keep the records `filter` admits and count the pairs among them.
+    pub fn retain(&mut self, filter: &EventFilter<'_>) {
+        let selected = self
             .events
             .iter()
-            .filter(|record| program_matches(record, programs))
+            .filter(|record| filter.selects_call(record))
             .filter_map(|record| record.event.call_id.clone())
             .collect::<HashSet<_>>();
-        self.events.retain(|record| {
-            (names.is_empty()
-                || record
-                    .event
-                    .name
-                    .as_ref()
-                    .is_some_and(|name| names.contains(name)))
-                && (call_ids.is_empty()
-                    || record
-                        .event
-                        .call_id
-                        .as_ref()
-                        .is_some_and(|call_id| call_ids.contains(call_id)))
-                && (programs.is_empty()
-                    || program_matches(record, programs)
-                    || record
-                        .event
-                        .call_id
-                        .as_ref()
-                        .is_some_and(|call_id| selected_call_ids.contains(call_id)))
-        });
+        self.events
+            .retain(|record| filter.keeps(record, |call_id| selected.contains(call_id)));
         self.pairs = pair_counts(&self.events);
     }
 }
 
-fn program_matches(record: &EventRecord, programs: &[String]) -> bool {
-    programs.is_empty()
-        || record.event.invocations.iter().any(|invocation| {
-            invocation
-                .program
+/// Which paired records a caller asked for. Each list is matched exactly and
+/// an empty one admits every record. A record declaring a requested nested
+/// program selects its call id, so the records sharing that id are kept with
+/// it; filtering never changes how a record was paired.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct EventFilter<'a> {
+    pub names: &'a [String],
+    pub call_ids: &'a [String],
+    pub programs: &'a [String],
+}
+
+impl EventFilter<'_> {
+    /// Whether `record` declares a requested program, selecting its call id.
+    pub fn selects_call(&self, record: &EventRecord) -> bool {
+        !self.programs.is_empty() && program_matches(record, self.programs)
+    }
+
+    /// Whether `record` is kept, where `selected` answers whether a call id
+    /// was selected by a record [`selects_call`](Self::selects_call) admits
+    /// among the records the caller returns.
+    pub fn keeps(&self, record: &EventRecord, selected: impl Fn(&str) -> bool) -> bool {
+        let names = self.names.is_empty()
+            || record
+                .event
+                .name
                 .as_ref()
-                .is_some_and(|program| programs.iter().any(|wanted| wanted == program))
-        })
+                .is_some_and(|name| self.names.contains(name));
+        let call_ids = self.call_ids.is_empty()
+            || record
+                .event
+                .call_id
+                .as_ref()
+                .is_some_and(|call_id| self.call_ids.contains(call_id));
+        let programs = self.programs.is_empty()
+            || program_matches(record, self.programs)
+            || record.event.call_id.as_deref().is_some_and(selected);
+        names && call_ids && programs
+    }
+}
+
+fn program_matches(record: &EventRecord, programs: &[String]) -> bool {
+    record.event.invocations.iter().any(|invocation| {
+        invocation
+            .program
+            .as_ref()
+            .is_some_and(|program| programs.iter().any(|wanted| wanted == program))
+    })
+}
+
+/// A `tapes-events` object written one record at a time, for a read that
+/// streams a recording: [`open`](Self::open) before the first record,
+/// [`record`](Self::record) for each, and [`close`](Self::close) with the
+/// object carrying every fact but its records. The bytes are the ones
+/// serializing that object with the records in place would produce.
+pub struct StreamedEventsJson {
+    records: usize,
+}
+
+impl StreamedEventsJson {
+    pub fn open(out: &mut impl std::io::Write, session: &Session) -> std::io::Result<Self> {
+        out.write_all(b"{\"schema\":")?;
+        serde_json::to_writer(&mut *out, EVENTS_SCHEMA)?;
+        out.write_all(b",\"session\":")?;
+        serde_json::to_writer(&mut *out, session)?;
+        out.write_all(b",\"events\":[")?;
+        Ok(Self { records: 0 })
+    }
+
+    pub fn record(
+        &mut self,
+        out: &mut impl std::io::Write,
+        record: &EventRecord,
+    ) -> std::io::Result<()> {
+        if self.records > 0 {
+            out.write_all(b",")?;
+        }
+        serde_json::to_writer(&mut *out, record)?;
+        self.records += 1;
+        Ok(())
+    }
+
+    pub fn close(
+        self,
+        out: &mut impl std::io::Write,
+        events: &EventTranscript,
+    ) -> std::io::Result<()> {
+        let tail = serde_json::to_vec(&EventsTail::of(events))?;
+        // The tail is an object that always opens on `pairs`, so dropping both
+        // its braces continues the events object.
+        out.write_all(b"],")?;
+        out.write_all(&tail[1..tail.len() - 1])?;
+        out.write_all(b"}")
+    }
+}
+
+/// The members of an [`EventTranscript`] that follow its records, serialized
+/// under the same names and omission rules.
+#[derive(Serialize)]
+struct EventsTail<'a> {
+    pairs: &'a PairCounts,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    read: Option<&'a ReadEvidence>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    terminal: Option<&'a TerminalObservation>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    text_tail: Option<&'a TextTailEvidence>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    content: Option<&'a ContentInventory>,
+    truncated: bool,
+    #[serde(skip_serializing_if = "truncation_is_empty")]
+    truncation: &'a Truncation,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    notes: &'a Vec<String>,
+}
+
+impl<'a> EventsTail<'a> {
+    fn of(events: &'a EventTranscript) -> Self {
+        Self {
+            pairs: &events.pairs,
+            read: events.read.as_ref(),
+            terminal: events.terminal.as_ref(),
+            text_tail: events.text_tail.as_ref(),
+            content: events.content.as_ref(),
+            truncated: events.truncated,
+            truncation: &events.truncation,
+            notes: &events.notes,
+        }
+    }
 }
 
 fn truncation_is_empty(truncation: &Truncation) -> bool {
@@ -1771,23 +1864,51 @@ fn reference(record: &EventRecord) -> PairRef {
 }
 
 fn pair_counts(records: &[EventRecord]) -> PairCounts {
-    let incomplete = records
-        .iter()
-        .filter(|record| record.incomplete.is_some())
-        .count();
-    let mut complete = HashSet::<(PairRef, PairRef, Option<String>)>::new();
-    for record in records.iter().filter(|record| record.pair.is_some()) {
-        let own = reference(record);
-        let counterpart = record.pair.clone().expect("paired record has a reference");
-        let endpoints = match record.event.kind {
-            EventKind::ToolCall => (own, counterpart),
-            EventKind::ToolResult => (counterpart, own),
-        };
-        complete.insert((endpoints.0, endpoints.1, record.event.call_id.clone()));
+    let mut tally = PairTally::default();
+    for record in records {
+        tally.add(record, true);
     }
-    PairCounts {
-        complete: complete.len(),
-        incomplete,
+    tally.finish()
+}
+
+/// Pair counts over the records a caller keeps, taken as paired records pass
+/// in the order [`Pairing::emit`] leaves them, so a call always passes before
+/// its result. A complete pair counts once when either of its halves is kept,
+/// and an incomplete record counts when it is kept. Memory follows the kept
+/// calls whose result has not passed yet.
+#[derive(Default)]
+pub struct PairTally {
+    counts: PairCounts,
+    awaiting: HashSet<(PairRef, PairRef, Option<String>)>,
+}
+
+impl PairTally {
+    /// Count one record, which the caller either `kept` or passed over.
+    pub fn add(&mut self, record: &EventRecord, kept: bool) {
+        if kept && record.incomplete.is_some() {
+            self.counts.incomplete += 1;
+        }
+        let Some(counterpart) = record.pair.clone() else {
+            return;
+        };
+        let own = reference(record);
+        let call_id = record.event.call_id.clone();
+        match record.event.kind {
+            EventKind::ToolCall => {
+                if kept && self.awaiting.insert((own, counterpart, call_id)) {
+                    self.counts.complete += 1;
+                }
+            }
+            EventKind::ToolResult => {
+                if !self.awaiting.remove(&(counterpart, own, call_id)) && kept {
+                    self.counts.complete += 1;
+                }
+            }
+        }
+    }
+
+    pub fn finish(self) -> PairCounts {
+        self.counts
     }
 }
 
@@ -2163,6 +2284,92 @@ mod tests {
         }
         assert!(sessions >= 8, "fixture sessions reached: {sessions}");
         assert!(totals.complete > 0 && totals.incomplete > 0, "{totals:?}");
+    }
+
+    /// Counting kept records as they pass, with the passed-over ones offered
+    /// too, answers what counting the kept subset afterwards does, for every
+    /// way of keeping either half of a pair.
+    #[test]
+    fn a_pair_tally_over_passing_records_counts_what_the_kept_subset_holds() {
+        let records = project(
+            transcript(
+                vec![
+                    turn(0, 10, event(EventKind::ToolCall, "call-1")),
+                    turn(1, 11, event(EventKind::ToolCall, "call-2")),
+                    turn(2, 12, event(EventKind::ToolResult, "call-1")),
+                    turn(3, 13, event(EventKind::ToolResult, "call-orphan")),
+                    turn(4, 14, event(EventKind::ToolResult, "call-2")),
+                ],
+                Vec::new(),
+            ),
+            usize::MAX,
+        )
+        .events;
+        for mask in 0..1_u32 << records.len() {
+            let kept = |index: usize| mask & (1 << index) != 0;
+            let mut tally = PairTally::default();
+            for (index, record) in records.iter().enumerate() {
+                tally.add(record, kept(index));
+            }
+            let subset = records
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| kept(*index))
+                .map(|(_, record)| record.clone())
+                .collect::<Vec<_>>();
+            let mut expected = HashSet::new();
+            for record in subset.iter().filter(|record| record.pair.is_some()) {
+                let own = reference(record);
+                let counterpart = record.pair.clone().unwrap();
+                expected.insert(match record.event.kind {
+                    EventKind::ToolCall => (own, counterpart),
+                    EventKind::ToolResult => (counterpart, own),
+                });
+            }
+            assert_eq!(
+                tally.finish(),
+                PairCounts {
+                    complete: expected.len(),
+                    incomplete: subset.iter().filter(|r| r.incomplete.is_some()).count(),
+                },
+                "mask {mask:05b}"
+            );
+        }
+    }
+
+    /// The streamed object is byte for byte the serialized one, whichever
+    /// optional members are present.
+    #[test]
+    fn streamed_events_json_writes_the_serialized_object() {
+        let mut events = project(
+            transcript(
+                vec![
+                    turn(0, 10, event(EventKind::ToolCall, "call-1")),
+                    turn(1, 12, event(EventKind::ToolResult, "call-1")),
+                ],
+                vec![SourceBound::FileTail { bytes: 1024 }],
+            ),
+            1,
+        );
+        let write = |events: &EventTranscript| {
+            let mut out = Vec::new();
+            let mut writer = StreamedEventsJson::open(&mut out, &events.session).unwrap();
+            for record in &events.events {
+                writer.record(&mut out, record).unwrap();
+            }
+            let mut closing = events.clone();
+            closing.events.clear();
+            writer.close(&mut out, &closing).unwrap();
+            out
+        };
+        assert!(events.truncated && !events.events.is_empty());
+        assert_eq!(write(&events), serde_json::to_vec(&events).unwrap());
+
+        events.events.clear();
+        events.truncation = Truncation::default();
+        events.truncated = false;
+        events.notes = vec!["a note".to_owned()];
+        assert_eq!(write(&events), serde_json::to_vec(&events).unwrap());
     }
 
     fn record_at(offset: u64) -> RecordRef {

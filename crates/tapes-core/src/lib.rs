@@ -7,7 +7,7 @@ use chrono::{DateTime, NaiveDate, TimeZone, Utc};
 use serde::Serialize;
 
 use backend::{Backend, Listing, Query};
-use model::{Session, Transcript};
+use model::{Session, Transcript, Truncation};
 use scope::Scope;
 
 pub use event::{
@@ -998,6 +998,20 @@ pub fn stats_with_backends(
     Ok(stats::stats(transcript, &lineage))
 }
 
+/// One session's counted facts over its whole recording, streamed twice so
+/// tool events pair without holding the file, with the relatives every record
+/// names.
+pub fn stats_full_with_backends(
+    backends: &[Box<dyn Backend>],
+    selection: Selection,
+) -> Result<stats::StatsView> {
+    let resolved = selection.resolve(backends)?;
+    let backend = backends[resolved.backend_index].as_ref();
+    let counted = stats::Counted::whole(backend, &resolved.session)?;
+    let lineage = backend.stream_lineage(&resolved.session)?;
+    Ok(counted.view(&lineage))
+}
+
 /// What a continuation of one session needs from its recording. The read is
 /// export-shaped, so tool pairing sees every call and its result; `tail`
 /// bounds the rendered exchange alone.
@@ -1031,6 +1045,143 @@ pub fn events_with_backends(
 ) -> Result<event::EventTranscript> {
     let resolved = selection.resolve(backends)?;
     backends[resolved.backend_index].events(&resolved.session, tail)
+}
+
+/// Receives a whole-recording event projection as it streams: the session
+/// the recording states, then each kept record in recording order, final.
+pub trait EventSink {
+    fn session(&mut self, session: &Session) -> Result<()>;
+    fn record(&mut self, record: event::EventRecord) -> Result<()>;
+}
+
+/// What a whole-recording event projection established beside the records it
+/// streamed.
+pub struct StreamedEvents {
+    /// The projection the streamed records belong to, holding every member
+    /// but those records.
+    pub events: event::EventTranscript,
+    pub read: backend::StreamedTranscript,
+}
+
+/// Project one session's whole recording into paired tool events, streaming
+/// each record `filter` keeps within the newest `tail` turns to `sink`.
+///
+/// The recording is streamed twice. The first read observes every tool
+/// record, counts the turns so the window is known before anything is
+/// written, and notes which calls declare a requested program; the second,
+/// replaying the first, pairs each record and hands on the kept ones. Memory
+/// follows the calls still awaiting a result, never the file. Nothing reaches
+/// `sink` before the second read has opened, so a store that cannot replay a
+/// read refuses without writing.
+pub fn events_full_with_backends(
+    backends: &[Box<dyn Backend>],
+    selection: Selection,
+    tail: usize,
+    filter: &event::EventFilter<'_>,
+    sink: &mut dyn EventSink,
+) -> Result<StreamedEvents> {
+    let resolved = selection.resolve(backends)?;
+    let backend = backends[resolved.backend_index].as_ref();
+    let mut index = event::PairIndex::default();
+    let mut content = content::ContentInventory::default();
+    let mut title = None;
+    let mut turns = 0;
+    // The newest ordinal at which each call id was declared with a requested
+    // program, so the window can decide which declarations it holds.
+    let mut declared = HashMap::<String, usize>::new();
+    let read = stream_numbered(backend, &resolved.session, None, &mut |turn| {
+        turns += 1;
+        content.add(&turn);
+        keep_title_turn(&mut title, &turn);
+        for record in event::turn_records(&turn) {
+            if let Some(call_id) = record
+                .event
+                .call_id
+                .as_ref()
+                .filter(|_| filter.selects_call(&record))
+            {
+                declared.insert(call_id.clone(), record.ordinal);
+            }
+            index.observe(&record);
+        }
+        Ok(())
+    })?;
+    let returned = turns.min(tail);
+    let first = turns - returned;
+    let selected = declared
+        .into_iter()
+        .filter_map(|(call_id, ordinal)| (ordinal >= first).then_some(call_id))
+        .collect::<HashSet<_>>();
+    let session = whole_session(backend, &resolved.session, &read, &title)?;
+    let mut pairing = index.pairing(event::read_was_bounded(&read.source_bounds));
+    let mut pairs = event::PairTally::default();
+    let mut opened = false;
+    stream_numbered(backend, &resolved.session, Some(&read), &mut |turn| {
+        if !opened {
+            sink.session(&session)?;
+            opened = true;
+        }
+        for record in event::turn_records(&turn) {
+            let record = pairing.emit(record)?;
+            let kept = record.ordinal >= first
+                && filter.keeps(&record, |call_id| selected.contains(call_id));
+            pairs.add(&record, kept);
+            if kept {
+                sink.record(record)?;
+            }
+        }
+        Ok(())
+    })?;
+    if !opened {
+        sink.session(&session)?;
+    }
+    pairing.finish()?;
+    let transcript = read.transcript(
+        session,
+        Vec::new(),
+        Truncation::window(returned, turns, tail),
+    );
+    Ok(StreamedEvents {
+        events: event::EventTranscript {
+            schema: EVENTS_SCHEMA,
+            session: transcript.session,
+            events: Vec::new(),
+            pairs: pairs.finish(),
+            read: transcript.read,
+            terminal: transcript.terminal,
+            text_tail: transcript.text_tail,
+            content: content.into_option(),
+            truncated: transcript.truncated,
+            truncation: transcript.truncation,
+            notes: transcript.notes,
+        },
+        read,
+    })
+}
+
+/// Keep the recording's first user turn that yields a derived title, the one
+/// turn a whole session's title hint needs from the turns streamed past.
+fn keep_title_turn(title: &mut Option<model::Turn>, turn: &model::Turn) {
+    if title.is_none()
+        && turn.role == model::Role::User
+        && model::derive_title(&turn.text).is_some()
+    {
+        *title = Some(turn.clone());
+    }
+}
+
+/// The session a whole recording states: counters, accounting, model, and
+/// activity folded from every record `read` covered, and the title hint its
+/// first user turn yields.
+fn whole_session(
+    backend: &dyn Backend,
+    session: &Session,
+    read: &backend::StreamedTranscript,
+    title: &Option<model::Turn>,
+) -> Result<Session> {
+    Ok(backend
+        .stream_session(session, read)?
+        .with_derived_title(title.as_slice()))
 }
 
 pub fn show_with_backends(
@@ -1067,7 +1218,7 @@ pub fn show_full_with_backends(
 }
 
 /// Stream a whole recording with ordinals counted from its first turn.
-fn stream_numbered(
+pub(crate) fn stream_numbered(
     backend: &dyn Backend,
     session: &Session,
     replay: Option<&backend::StreamedTranscript>,
