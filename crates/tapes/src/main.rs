@@ -2727,7 +2727,7 @@ impl<W: std::io::Write> FullShow<W> {
             turns,
             Truncation {
                 window,
-                source: Vec::new(),
+                source: read.source_bounds,
             },
             read.trailing_record,
             notes,
@@ -2747,8 +2747,8 @@ impl<W: std::io::Write> FullShow<W> {
         let mut footer = String::new();
         render_footer(&mut footer, &transcript, self.by_latest, flag);
         footer.push_str(&format!(
-            "Read evidence: the whole recording was streamed; source length {} bytes.\n",
-            read.source_length
+            "Read evidence: the whole recording was streamed; {}.\n",
+            read.coordinates.describe(read.source_length)
         ));
         self.out.write_all(footer.as_bytes())?;
         self.out.flush()?;
