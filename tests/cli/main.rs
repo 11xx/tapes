@@ -5135,6 +5135,74 @@ FROM n;
     }
 }
 
+/// A bounded read of a stable OpenCode database whose newest 5,000 parts
+/// together outgrow the 8 MiB transport bound returns that newest window and
+/// reports both record ceilings, the same session a whole read pages through.
+#[test]
+fn show_reads_the_newest_parts_of_a_part_heavy_opencode_database_session() {
+    let root = TemporaryDirectory::new(std::env::temp_dir().join(format!(
+        "tapes-cli-opencode-database-part-heavy-{}",
+        std::process::id()
+    )));
+    let _program = opencode_program(root.path(), "opencode");
+    let id = "ses_part_heavy_database_fixture";
+    // 1,200 assistant messages of six 2,000-character parts each: the newest
+    // 1,000 messages hold 6,000 parts, and 5,001 projected rows are about
+    // 10.4 MiB.
+    let inserts = r#"
+WITH RECURSIVE n(i) AS (SELECT 0 UNION ALL SELECT i + 1 FROM n WHERE i < 1199)
+INSERT INTO message SELECT printf('msg_heavy_%04d', i), 'ses_part_heavy_database_fixture',
+  1784663000000 + i * 1000, 1784663000000 + i * 1000,
+  json_object('role', 'assistant', 'time', json_object('created', 1784663000000 + i * 1000))
+FROM n;
+WITH RECURSIVE n(i) AS (SELECT 0 UNION ALL SELECT i + 1 FROM n WHERE i < 1199),
+  m(j) AS (SELECT 0 UNION ALL SELECT j + 1 FROM m WHERE j < 5)
+INSERT INTO part SELECT printf('prt_heavy_%04d_%d', i, j), printf('msg_heavy_%04d', i),
+  'ses_part_heavy_database_fixture', 1784663000000 + i * 1000 + j, 1784663000000 + i * 1000 + j,
+  json_object('type', 'text',
+              'text', printf('Part %04d %d ', i, j) || replace(hex(zeroblob(2000)), '00', 'x'),
+              'time', json_object('start', 1784663000000 + i * 1000 + j))
+FROM n, m;
+"#;
+    create_opencode_database(root.path(), id, inserts);
+
+    for sqlite3 in sqlite3_binaries() {
+        use_sqlite3(root.path(), &sqlite3);
+        let bounded: Value = serde_json::from_str(&opencode_stdout(
+            root.path(),
+            &["show", id, "--tail", "5000", "--json"],
+        ))
+        .unwrap();
+        assert_eq!(
+            bounded["truncation"]["source"],
+            serde_json::json!([
+                {"kind": "record-page", "records": 1000, "of": "messages"},
+                {"kind": "record-page", "records": 5000, "of": "parts"}
+            ])
+        );
+        let turns = bounded["turns"].as_array().unwrap();
+        assert_eq!(turns.len(), 5000);
+        // The newest 5,000 parts are all of messages 367 to 1199 and the two
+        // newest parts of message 366.
+        assert!(
+            turns[0]["text"]
+                .as_str()
+                .unwrap()
+                .starts_with("Part 0366 4 "),
+            "{}",
+            turns[0]["text"]
+        );
+        assert!(
+            turns[4999]["text"]
+                .as_str()
+                .unwrap()
+                .starts_with("Part 1199 5 "),
+            "{}",
+            turns[4999]["text"]
+        );
+    }
+}
+
 /// The normalized totals reach every surface unchanged: list, show, and the
 /// export bundle carry the same counters, with absent ones omitted.
 #[test]
