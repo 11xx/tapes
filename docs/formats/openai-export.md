@@ -77,6 +77,19 @@ only for recognized text-bearing parts; references identify a source object
 without opening it. Shape descriptors keep keys and value types while
 excluding body values.
 
+The official export names a message's representation in
+`message.content.content_type` and an object part's kind in its own
+`content_type`, where other producers use `type`. Voice conversations are
+`multimodal_text` messages whose `audio_transcription` parts carry the spoken
+text and whose `image_asset_pointer`, `audio_asset_pointer`, and
+`real_time_user_audio_video_asset_pointer` parts become media references
+identified by `asset_pointer` and `size_bytes`; the real-time part's reference
+is its nested `audio_asset_pointer`. Reasoning arrives under the assistant
+author as `thoughts` messages, whose `thoughts[]` entries carry `summary` and
+`content`, and `reasoning_recap` messages with one `content` string. Both
+become `reasoning` turns with those strings as text parts; a reasoning record
+with no such string keeps an unknown part naming its content type.
+
 OpenAI library/report `.dat` members are decoded only when they contain the
 recognized widget-state report shape. A report reference retains bounded
 identity, origin, backing conversation, authorship, completion state, source
