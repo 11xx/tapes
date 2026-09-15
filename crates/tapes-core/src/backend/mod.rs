@@ -735,6 +735,35 @@ impl StreamedTranscript {
             gaps: self.gaps.clone(),
         }
     }
+
+    /// The transcript a whole-recording read closes with: its read evidence,
+    /// source bounds, terminal observation, trailing record, and notes around
+    /// the `turns` a consumer kept, under the turn `window` it applied.
+    pub fn transcript(
+        &self,
+        session: Session,
+        turns: Vec<Turn>,
+        window: Option<crate::model::TurnWindow>,
+    ) -> Transcript {
+        let mut notes = skipped_records_note(self.skipped)
+            .into_iter()
+            .collect::<Vec<_>>();
+        notes.extend(self.notes.iter().cloned());
+        let read = self.read_evidence(session.source.producer.clone());
+        let mut transcript = Transcript::new(
+            session,
+            turns,
+            Truncation {
+                window,
+                source: self.source_bounds.clone(),
+            },
+            self.trailing_record.clone(),
+            notes,
+        );
+        transcript.read = Some(read);
+        transcript.terminal = self.terminal.clone();
+        transcript
+    }
 }
 
 /// A child's whole-recording read: the child session its records state, and

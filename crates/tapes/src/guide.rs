@@ -312,6 +312,7 @@ PROBE BEFORE EXPORTING
 
 EXPORT, THEN INGEST PROGRESSIVELY
   tapes export <id|--latest> [--bundle <dir>]
+  tapes export <id> --full       Every turn of a Claude, Codex, or Pi recording, streamed into the bundle.
   tapes export --global --since 2026-01-01 --until 2026-01-08
 
   Three files share one timestamped prefix, and stdout is exactly their paths
@@ -331,13 +332,15 @@ EXPORT, THEN INGEST PROGRESSIVELY
      `result` for a bare result, and by `unnamed` otherwise.
 
   A bundle holds what the transcript held, and reads are capped, so a large
-  session exports as a window and says so.
+  session exports as a window and says so. --full streams a whole Claude,
+  Codex, or Pi recording into all three files instead; OpenCode refuses it.
+  Probe with show first: a whole bundle of a large session is large.
 
   Given the listing flags instead of an id — the scope flags, --harness,
   --model, --directory, --since, --until, --sort, --limit, --search — export
   takes the set list would return, in the same order, and writes one bundle
-  per session. Bundles are never joined: each session keeps its own bounded
-  three files, and manifest.json beside them is the only file spanning the
+  per session. Bundles are never joined: each session keeps its own three
+  files, bounded unless --full, and manifest.json beside them is the only file spanning the
   set. It records the selection, every bundle's paths, the sessions whose
   store could not be read, and the listing's own diagnostics, so the set can
   be audited against the store. A session that fails costs its own bundle and

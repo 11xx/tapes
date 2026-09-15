@@ -5400,6 +5400,262 @@ fn show_full_streams_codex_and_pi_recordings_past_the_read_bound() {
     );
 }
 
+/// `export --full` bundles a whole Claude or Codex recording past the read
+/// bound: all three files hold every turn, the JSON turns are the ones `show
+/// --full --json` writes, and its events are the ones `events` pairs over a
+/// read wide enough to hold the file. `--omit` narrows all three, a bulk export
+/// streams each selected session, and what `--full` cannot honor refuses.
+#[test]
+fn export_full_bundles_claude_and_codex_recordings_past_the_read_bound() {
+    let root = TemporaryDirectory::new(
+        std::env::temp_dir().join(format!("tapes-cli-export-full-{}", std::process::id())),
+    );
+    let home = root.path().join("home");
+    let codex_home = root.path().join("codex");
+    let filler = "x".repeat(100 * 1024);
+    let timestamp = "2026-01-01T10:00:00Z";
+
+    let claude_id = "export-full-claude";
+    let project = home.join(".claude/projects/-fixtures-project");
+    fs::create_dir_all(&project).unwrap();
+    // A user record Claude vouches for as typed is an operator turn, which the
+    // exchange in `.context.md` holds.
+    let claude = |uuid: &str, role: &str, content: Value| {
+        let mut record = serde_json::json!({"type": role, "sessionId": claude_id, "uuid": uuid, "timestamp": timestamp, "cwd": "/fixtures/project", "message": {"role": role, "content": content}});
+        if role == "user" && record["message"]["content"].is_string() {
+            record["promptSource"] = Value::from("typed");
+        }
+        record.to_string() + "\n"
+    };
+    let mut body = claude("first", "user", Value::from("opening request"))
+        + &claude(
+            "call",
+            "assistant",
+            serde_json::json!([{"type": "tool_use", "id": "tool-early", "name": "fixture_tool", "input": {"path": "early"}}]),
+        )
+        + &claude(
+            "result",
+            "user",
+            serde_json::json!([{"type": "tool_result", "tool_use_id": "tool-early", "content": "early result"}]),
+        );
+    for index in 0..48 {
+        body += &claude(
+            &format!("filler-{index}"),
+            "assistant",
+            serde_json::json!([{"type": "text", "text": filler}]),
+        );
+    }
+    body += &claude("last", "user", Value::from("closing request"));
+    fs::write(project.join(format!("{claude_id}.jsonl")), &body).unwrap();
+
+    let codex_id = "00000000-0000-0000-0000-0000000000f2";
+    let codex_sessions = codex_home.join("sessions/2026/01/01");
+    fs::create_dir_all(&codex_sessions).unwrap();
+    let codex_item = |payload: Value| {
+        serde_json::json!({"timestamp": timestamp, "type": "response_item", "payload": payload})
+            .to_string()
+            + "\n"
+    };
+    let codex_user = |text: &str| {
+        codex_item(
+            serde_json::json!({"type": "message", "role": "user", "content": [{"type": "input_text", "text": text}]}),
+        )
+    };
+    let mut codex = serde_json::json!({"timestamp": timestamp, "type": "session_meta", "payload": {"id": codex_id, "session_id": codex_id, "timestamp": timestamp, "cwd": "/fixtures/project", "source": "cli", "model_provider": "openai"}}).to_string() + "\n";
+    codex += &codex_user("opening request");
+    codex += &codex_item(
+        serde_json::json!({"type": "function_call", "name": "fixture_tool", "arguments": "{\"path\":\"early\"}", "call_id": "call-early"}),
+    );
+    codex += &codex_item(
+        serde_json::json!({"type": "function_call_output", "call_id": "call-early", "output": "early result"}),
+    );
+    for _ in 0..48 {
+        codex += &codex_item(
+            serde_json::json!({"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": filler}]}),
+        );
+    }
+    codex += &codex_user("closing request");
+    fs::write(
+        codex_sessions.join(format!("rollout-2026-01-01T10-00-00-{codex_id}.jsonl")),
+        codex,
+    )
+    .unwrap();
+
+    let run = |arguments: &[&str]| {
+        tapes()
+            .args(arguments)
+            .env("HOME", &home)
+            .env("CODEX_HOME", &codex_home)
+            .env("PATH", "/definitely/missing")
+            .output()
+            .unwrap()
+    };
+    let stdout = |arguments: &[&str]| {
+        let output = run(arguments);
+        assert!(
+            output.status.success(),
+            "{arguments:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap()
+    };
+    let bundle = |directory: &Path, id: &str| {
+        let file = |suffix: &str| {
+            let path = fs::read_dir(directory)
+                .unwrap()
+                .map(|entry| entry.unwrap().path())
+                .find(|path| {
+                    let name = path.to_string_lossy();
+                    name.contains(id) && name.ends_with(suffix)
+                })
+                .unwrap_or_else(|| panic!("no {suffix} for {id} in {}", directory.display()));
+            fs::read_to_string(path).unwrap()
+        };
+        let json: Value = serde_json::from_str(&file(".json")).unwrap();
+        (file(".context.md"), json, file(".trace.md"))
+    };
+
+    for id in [claude_id, codex_id] {
+        let directory = root.path().join(format!("bounded-{id}"));
+        stdout(&["export", id, "--bundle", directory.to_str().unwrap()]);
+        let (context, _, _) = bundle(&directory, id);
+        // A turn's text is followed by a blank line; the derived title in the
+        // header names the opening request too.
+        assert!(!context.contains("opening request\n\n"), "{id}");
+
+        let directory = root.path().join(format!("full-{id}"));
+        let manifest = stdout(&[
+            "export",
+            id,
+            "--full",
+            "--bundle",
+            directory.to_str().unwrap(),
+        ]);
+        assert_eq!(manifest.lines().count(), 3, "{manifest}");
+        let (context, json, trace) = bundle(&directory, id);
+        for file in [&context, &trace] {
+            assert!(file.contains("opening request\n\n"), "{id}");
+            assert!(file.contains("closing request"), "{id}");
+        }
+        assert!(
+            context.contains("- source read: the whole recording was streamed;"),
+            "{context:.600}"
+        );
+        assert!(trace.contains("## tool: fixture_tool"), "{id}");
+        let shown: Value =
+            serde_json::from_str(&stdout(&["show", id, "--full", "--json"])).unwrap();
+        assert!(shown["turns"].as_array().unwrap().len() > 50, "{id}");
+        assert_eq!(json["turns"], shown["turns"], "{id}");
+        assert_eq!(json["read"]["projection_options"][0], "full");
+        let events: Value =
+            serde_json::from_str(&stdout(&["events", id, "--read-bytes", "64m", "--json"]))
+                .unwrap();
+        assert!(
+            events["events"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|event| event["pair"].is_object()),
+            "{id}: {}",
+            events["events"]
+        );
+        assert_eq!(json["events"], events["events"], "{id}");
+
+        let directory = root.path().join(format!("omit-{id}"));
+        stdout(&[
+            "export",
+            id,
+            "--full",
+            "--omit",
+            "tool",
+            "--bundle",
+            directory.to_str().unwrap(),
+        ]);
+        let (context, json, trace) = bundle(&directory, id);
+        assert!(
+            json["turns"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|turn| turn["kind"] != "tool"),
+            "{id}"
+        );
+        assert!(
+            json["projection"]["omitted"]["tool"].as_u64() > Some(0),
+            "{id}"
+        );
+        assert!(!trace.contains("## tool:"), "{id}");
+        assert!(trace.contains("opening request"), "{id}");
+        assert!(context.contains("- projection: kept"), "{id}");
+        assert!(context.contains("closing request"), "{id}");
+    }
+
+    let directory = root.path().join("bulk");
+    stdout(&[
+        "export",
+        "--global",
+        "--harness",
+        "claude",
+        "--full",
+        "--bundle",
+        directory.to_str().unwrap(),
+    ]);
+    let manifest: Value =
+        serde_json::from_str(&fs::read_to_string(directory.join("manifest.json")).unwrap())
+            .unwrap();
+    assert_eq!(
+        manifest["sessions"].as_array().unwrap().len(),
+        1,
+        "{manifest}"
+    );
+    assert_eq!(manifest["failed"], serde_json::json!([]));
+    let (context, _, _) = bundle(&directory, claude_id);
+    assert!(context.contains("opening request"));
+
+    let conflicting = run(&["export", claude_id, "--full", "--read-bytes", "1m"]);
+    assert_eq!(conflicting.status.code(), Some(2));
+    let input = supplied_fixture("chatgpt-export.json");
+    let supplied = run(&[
+        "export",
+        "supplied-1",
+        "--full",
+        "--input",
+        input.to_str().unwrap(),
+        "--input-format",
+        "chatgpt-exporter",
+    ]);
+    assert!(!supplied.status.success());
+    assert!(
+        String::from_utf8_lossy(&supplied.stderr).contains("--scan-bytes"),
+        "{}",
+        String::from_utf8_lossy(&supplied.stderr)
+    );
+
+    let _opencode = opencode_program(root.path(), "opencode2");
+    let refused = root.path().join("opencode");
+    let mut opencode = tapes();
+    opencode.args([
+        "export",
+        "ses_000000fixtureSharedSession",
+        "--full",
+        "--bundle",
+        refused.to_str().unwrap(),
+    ]);
+    with_fixture_env(&mut opencode, &codex_home, &home, root.path());
+    let opencode = opencode.output().unwrap();
+    assert!(!opencode.status.success());
+    assert!(
+        String::from_utf8_lossy(&opencode.stderr)
+            .contains("opencode sessions cannot be read whole twice"),
+        "{}",
+        String::from_utf8_lossy(&opencode.stderr)
+    );
+    assert_eq!(
+        fs::read_dir(&refused).map_or(0, |entries| entries.count()),
+        0
+    );
+}
+
 /// Every turn says what it is, and a user turn the harness recorded its own
 /// command in says so in the heading a reader judges an ending by.
 #[test]

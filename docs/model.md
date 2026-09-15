@@ -1106,6 +1106,20 @@ A bundle's `.context.md` holds the exchange that `show --exchange` returns —
 the `operator` and `assistant` turns — of those a selection keeps; its `.json`
 and `.trace.md` hold every kept turn.
 
+A bundle's `.json` is one compact `tapes-session/9` object: the members `show
+--json` writes, in the same order, followed by `git` when the session
+directory resolves and `events`, the `tapes-events/6` records paired across
+every kept turn. `export --full` writes the object `show --full --json` writes,
+with the same whole-read evidence, plus those two members; its `events` are
+the ones `events` pairs over a read that covers the whole file. The recording
+is streamed twice: the first read writes the turns and observes tool calls
+and results, and the second replays it — stopping at the length the first
+observed and naming the source revision it observed, however the file grew
+since — to pair the events and write the Markdown files. A replay that differs
+from the first read refuses rather than writing a wrong pair. OpenCode refuses
+`export --full`: its message rows are updated in place, so a second read
+cannot promise the first read's turns.
+
 A transcript that omitted anything carries `truncated: true` and a
 `truncation` object:
 

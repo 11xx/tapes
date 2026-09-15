@@ -1058,20 +1058,48 @@ pub fn show_full_with_backends(
 ) -> Result<backend::StreamedTranscript> {
     let resolved = selection.resolve(backends)?;
     sink.session(&resolved.session)?;
+    stream_numbered(
+        backends[resolved.backend_index].as_ref(),
+        &resolved.session,
+        None,
+        &mut |turn| sink.turn(turn),
+    )
+}
+
+/// Stream a whole recording with ordinals counted from its first turn.
+fn stream_numbered(
+    backend: &dyn Backend,
+    session: &Session,
+    replay: Option<&backend::StreamedTranscript>,
+    turn: &mut dyn FnMut(model::Turn) -> Result<()>,
+) -> Result<backend::StreamedTranscript> {
     let mut ordinal = 0;
-    backends[resolved.backend_index].stream_transcript(&resolved.session, None, &mut |mut turn| {
-        turn.ordinal = ordinal;
+    backend.stream_transcript(session, replay, &mut |mut streamed| {
+        streamed.ordinal = ordinal;
         ordinal += 1;
-        sink.turn(turn)
+        turn(streamed)
     })
+}
+
+/// How much of a recording an export reads.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ExportRead {
+    /// The bounded read `show` takes, every turn it reaches.
+    #[default]
+    Bounded,
+    /// The whole recording, streamed twice: once to write the JSON turns and
+    /// observe tool events, and once, replaying the first read, to pair those
+    /// events and write the Markdown files.
+    Whole,
 }
 
 pub fn export(
     selection: Selection,
     bundle: Option<&Path>,
     turns: Option<model::TurnSelection>,
+    read: ExportRead,
 ) -> Result<bundle::Bundle> {
-    export_with_backends(&backend::backends(), selection, bundle, turns)
+    export_with_backends(&backend::backends(), selection, bundle, turns, read)
 }
 
 pub fn export_with_backends(
@@ -1079,9 +1107,64 @@ pub fn export_with_backends(
     selection: Selection,
     directory: Option<&Path>,
     turns: Option<model::TurnSelection>,
+    read: ExportRead,
 ) -> Result<bundle::Bundle> {
-    let transcript = project_export(show_with_backends(backends, selection, EXPORT_TAIL)?, turns);
-    bundle::export(&transcript, directory.unwrap_or_else(|| Path::new("/tmp")))
+    let directory = directory.unwrap_or_else(|| Path::new("/tmp"));
+    let resolved = selection.resolve(backends)?;
+    export_session(
+        backends[resolved.backend_index].as_ref(),
+        &resolved.session,
+        directory,
+        turns,
+        read,
+    )
+}
+
+fn export_session(
+    backend: &dyn Backend,
+    session: &Session,
+    directory: &Path,
+    turns: Option<model::TurnSelection>,
+    read: ExportRead,
+) -> Result<bundle::Bundle> {
+    match read {
+        ExportRead::Bounded => bundle::export(
+            &project_export(backend.transcript(session, EXPORT_TAIL)?, turns),
+            directory,
+        ),
+        ExportRead::Whole => export_whole(backend, session, directory, turns),
+    }
+}
+
+/// A bundle of the whole recording. Memory follows one record and the tool
+/// calls still awaiting a result, never the file. A file appended to between
+/// the two reads is replayed to the length the first observed.
+fn export_whole(
+    backend: &dyn Backend,
+    session: &Session,
+    directory: &Path,
+    turns: Option<model::TurnSelection>,
+) -> Result<bundle::Bundle> {
+    let mut first = bundle::JsonPass::open(directory, session)?;
+    let mut projection = turns.map(model::Projection::new);
+    let read = stream_numbered(backend, session, None, &mut |turn| {
+        if let Some(projection) = &mut projection {
+            if !projection.admit(turn.kind) {
+                return Ok(());
+            }
+        }
+        first.turn(&turn)
+    })?;
+    let mut facts = read.transcript(session.clone(), Vec::new(), None);
+    facts.projection = projection;
+    let mut second = first.close(&facts)?;
+    stream_numbered(backend, session, Some(&read), &mut |turn| {
+        if turns.is_some_and(|kept| !kept.keeps(turn.kind)) {
+            return Ok(());
+        }
+        second.turn(&turn)
+    })?;
+    second.finish()
 }
 
 /// Which sessions a command acts on in bulk, stated in the same terms a
@@ -1192,12 +1275,13 @@ pub fn export_selection(
     selection: &SessionSelection<'_>,
     directory: Option<&Path>,
     turns: Option<model::TurnSelection>,
+    read: ExportRead,
 ) -> Result<BulkExport> {
-    export_selection_with_backends(&backend::backends(), selection, directory, turns)
+    export_selection_with_backends(&backend::backends(), selection, directory, turns, read)
 }
 
 /// Export every session a listing with the same filters would return, in the
-/// listing's order, one bounded bundle each.
+/// listing's order, one bundle each, read as `read` says.
 ///
 /// The listing is computed once and its sessions are read through the backend
 /// that produced them: an id re-resolved against every store could reach a
@@ -1208,6 +1292,7 @@ pub fn export_selection_with_backends(
     selection: &SessionSelection<'_>,
     directory: Option<&Path>,
     turns: Option<model::TurnSelection>,
+    read: ExportRead,
 ) -> Result<BulkExport> {
     let scope = selection.within.resolve()?;
     let limit = selection.limit.unwrap_or(DEFAULT_LIST_LIMIT);
@@ -1225,11 +1310,7 @@ pub fn export_selection_with_backends(
     let mut sessions = Vec::new();
     let mut failed = Vec::new();
     for (session, origin) in listed.sessions.into_iter().zip(listed.origins) {
-        match backends[origin]
-            .transcript(&session, EXPORT_TAIL)
-            .map(|transcript| project_export(transcript, turns))
-            .and_then(|transcript| bundle::export(&transcript, directory))
-        {
+        match export_session(backends[origin].as_ref(), &session, directory, turns, read) {
             Ok(bundle) => {
                 sessions.push(ExportedSession {
                     id: session.id.clone(),

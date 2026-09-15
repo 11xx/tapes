@@ -1,5 +1,6 @@
 use std::fmt::Write as _;
-use std::fs;
+use std::fs::{self, File};
+use std::io::{BufWriter, Write as _};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -8,9 +9,10 @@ use chrono::Utc;
 use serde::Serialize;
 use serde_json::Value;
 
+use crate::event::{self, PairIndex, Pairing};
 use crate::model::{
     human_bytes, human_speaker, human_timestamp, human_title, AccountingBasis, AccountingCoverage,
-    Role, Session, SourceBound, TrailingRecord, Transcript, Truncation, Turn, SESSION_SCHEMA,
+    Role, Session, SourceBound, StreamedSessionJson, Transcript, Turn,
 };
 
 /// One exported file: where it landed and how big it is.
@@ -41,74 +43,146 @@ pub struct GitContext {
     pub branch: Option<String>,
 }
 
-#[derive(Serialize)]
-struct BundleJson<'a> {
-    schema: &'static str,
-    session: &'a Session,
-    turns: &'a [crate::model::Turn],
-    truncated: bool,
-    #[serde(skip_serializing_if = "truncation_is_empty")]
-    truncation: &'a Truncation,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    read: Option<&'a crate::model::ReadEvidence>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    terminal: Option<&'a crate::model::TerminalObservation>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    text_tail: Option<&'a crate::model::TextTailEvidence>,
-    #[serde(skip_serializing_if = "<[crate::content::ArtifactReference]>::is_empty")]
-    artifacts: &'a [crate::content::ArtifactReference],
-    #[serde(skip_serializing_if = "Option::is_none")]
-    graph: Option<&'a crate::model::ConversationGraph>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    content: Option<crate::content::ContentInventory>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    trailing_record: Option<&'a TrailingRecord>,
-    #[serde(skip_serializing_if = "<[String]>::is_empty")]
-    notes: &'a [String],
-    #[serde(skip_serializing_if = "Option::is_none")]
-    projection: Option<&'a crate::model::Projection>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    git: Option<&'a GitContext>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    events: Vec<crate::event::EventRecord>,
-}
-
-fn truncation_is_empty(truncation: &&Truncation) -> bool {
-    truncation.is_empty()
-}
-
+/// Export a transcript held in memory, through the same two passes a
+/// streamed recording takes.
 pub fn export(transcript: &Transcript, directory: &Path) -> Result<Bundle> {
-    let prefix = directory.join(bundle_stem(&transcript.session));
-    let mut session = transcript.session.clone();
-    session.live = None;
-    let git = git_context(session.directory.as_deref());
-    let events = crate::event::project(transcript.clone(), usize::MAX).events;
+    let mut first = JsonPass::open(directory, &transcript.session)?;
+    for turn in &transcript.turns {
+        first.turn(turn)?;
+    }
+    let mut second = first.close(transcript)?;
+    for turn in &transcript.turns {
+        second.turn(turn)?;
+    }
+    second.finish()
+}
 
-    let json = serde_json::to_string_pretty(&BundleJson {
-        schema: SESSION_SCHEMA,
-        session: &session,
-        turns: &transcript.turns,
-        truncated: transcript.truncated,
-        truncation: &transcript.truncation,
-        read: transcript.read.as_ref(),
-        terminal: transcript.terminal.as_ref(),
-        text_tail: transcript.text_tail.as_ref(),
-        artifacts: &transcript.artifacts,
-        graph: transcript.graph.as_ref(),
-        content: crate::content::inventory(&transcript.turns),
-        trailing_record: transcript.trailing_record.as_ref(),
-        notes: &transcript.notes,
-        projection: transcript.projection.as_ref(),
-        git: git.as_ref(),
-        events,
-    })
-    .context("failed to serialize the bundle JSON")?;
+/// The first of a bundle's two passes over one sequence of turns: each turn
+/// is written into the `.json` file, a `tapes-session` object, and its tool
+/// events are observed for pairing. Nothing but the pairing index outlives a
+/// turn, so a recording streamed through it is never held.
+pub struct JsonPass {
+    prefix: PathBuf,
+    session: Session,
+    json: PartialFile,
+    writer: StreamedSessionJson,
+    index: PairIndex,
+}
 
-    Ok(Bundle {
-        context: write_atomically(&prefix, "context.md", &render_context(transcript))?,
-        json: write_atomically(&prefix, "json", &json)?,
-        trace: write_atomically(&prefix, "trace.md", &render_trace(transcript))?,
-    })
+impl JsonPass {
+    /// Open the bundle's files under a new timestamped prefix in `directory`.
+    /// Volatile `live` state is not part of a bundle.
+    pub fn open(directory: &Path, session: &Session) -> Result<Self> {
+        let prefix = directory.join(bundle_stem(session));
+        let mut session = session.clone();
+        session.live = None;
+        let mut json = PartialFile::create(&prefix, "json")?;
+        let writer = StreamedSessionJson::open(&mut json, &session)?;
+        Ok(Self {
+            prefix,
+            session,
+            json,
+            writer,
+            index: PairIndex::default(),
+        })
+    }
+
+    pub fn turn(&mut self, turn: &Turn) -> Result<()> {
+        self.writer.turn(&mut self.json, turn)?;
+        for record in event::turn_records(turn) {
+            self.index.observe(&record);
+        }
+        Ok(())
+    }
+
+    /// Close the pass with `facts`, a transcript carrying every fact of the
+    /// read (its turns are not consulted): the `.json` members that follow
+    /// `turns` and the session directory's `git`, then the Markdown headers,
+    /// which state those facts before the second pass writes any turn.
+    pub fn close(mut self, facts: &Transcript) -> Result<EventPass> {
+        self.writer.close_members(&mut self.json, facts)?;
+        if let Some(git) = git_context(self.session.directory.as_deref()) {
+            self.json.write_all(b",\"git\":")?;
+            serde_json::to_writer(&mut self.json, &git)?;
+        }
+        let mut context = PartialFile::create(&self.prefix, "context.md")?;
+        let mut header = String::new();
+        write_header(&mut header, &self.session, facts, "context");
+        context.write_all(header.as_bytes())?;
+        let mut trace = PartialFile::create(&self.prefix, "trace.md")?;
+        header.clear();
+        write_header(&mut header, &self.session, facts, "trace");
+        if facts.projection.is_some() {
+            header.push_str(
+                "Only the kept turn kinds are traced; export without --only or --omit to trace every kind.\n\n",
+            );
+        }
+        trace.write_all(header.as_bytes())?;
+        Ok(EventPass {
+            json: self.json,
+            context,
+            trace,
+            pairing: self
+                .index
+                .pairing(event::read_was_bounded(&facts.truncation.source)),
+            events: 0,
+            turn: String::new(),
+        })
+    }
+}
+
+/// The second pass over the same turns, in the same order: each turn's tool
+/// events are paired and appended to the `.json` file's `events`, and the turn
+/// is written into `.context.md` when it belongs to the exchange and into
+/// `.trace.md` always. A sequence that differs from the first pass's refuses.
+pub struct EventPass {
+    json: PartialFile,
+    context: PartialFile,
+    trace: PartialFile,
+    pairing: Pairing,
+    events: usize,
+    /// One turn's Markdown, reused so a long turn's buffer is allocated once.
+    turn: String,
+}
+
+impl EventPass {
+    pub fn turn(&mut self, turn: &Turn) -> Result<()> {
+        for record in event::turn_records(turn) {
+            let record = self.pairing.emit(record)?;
+            let separator: &[u8] = if self.events == 0 {
+                b",\"events\":["
+            } else {
+                b","
+            };
+            self.json.write_all(separator)?;
+            serde_json::to_writer(&mut self.json, &record)?;
+            self.events += 1;
+        }
+        if turn.kind.in_exchange() {
+            self.turn.clear();
+            write_context_turn(&mut self.turn, turn);
+            self.context.write_all(self.turn.as_bytes())?;
+        }
+        self.turn.clear();
+        write_trace_turn(&mut self.turn, turn);
+        self.trace.write_all(self.turn.as_bytes())?;
+        Ok(())
+    }
+
+    /// Close the `.json` object and place all three files. A second pass
+    /// shorter than the first refuses here, and nothing is placed.
+    pub fn finish(mut self) -> Result<Bundle> {
+        self.pairing.finish()?;
+        if self.events > 0 {
+            self.json.write_all(b"]")?;
+        }
+        self.json.write_all(b"}")?;
+        Ok(Bundle {
+            context: self.context.place()?,
+            json: self.json.place()?,
+            trace: self.trace.place()?,
+        })
+    }
 }
 
 /// The file a bulk export writes beside its bundles, naming the selection
@@ -141,107 +215,138 @@ fn bundle_stem(session: &Session) -> String {
     )
 }
 
-/// Write to a temporary name in the target directory, then rename, so a
-/// half-written bundle never looks complete.
+/// Write a whole body under a temporary name, then rename it into place.
 fn write_atomically(prefix: &Path, extension: &str, body: &str) -> Result<BundleFile> {
-    let mut path = prefix.as_os_str().to_owned();
-    path.push(".");
-    path.push(extension);
-    let path = PathBuf::from(path);
-
-    let mut temporary = path.clone().into_os_string();
-    temporary.push(".partial");
-    let temporary = PathBuf::from(temporary);
-
-    if let Some(directory) = path.parent() {
-        fs::create_dir_all(directory)
-            .with_context(|| format!("failed to create {}", directory.display()))?;
-    }
-    fs::write(&temporary, body)
-        .with_context(|| format!("failed to write {}", temporary.display()))?;
-    fs::rename(&temporary, &path).with_context(|| format!("failed to place {}", path.display()))?;
-
-    Ok(BundleFile {
-        path,
-        bytes: body.len() as u64,
-    })
+    let mut file = PartialFile::create(prefix, extension)?;
+    file.write_all(body.as_bytes())?;
+    file.place()
 }
 
-/// The exchange `show --exchange` returns, as `TurnKind::in_exchange` defines
-/// it — small enough to read whole. Every other kind is in the trace.
-fn render_context(transcript: &Transcript) -> String {
-    let mut out = String::new();
-    write_header(&mut out, transcript, "context");
-    for turn in &transcript.turns {
-        if !turn.kind.in_exchange() {
-            continue;
-        }
-        write_turn_heading(&mut out, &human_speaker(turn), turn);
-        out.push_str(turn.text.trim_end());
-        out.push_str("\n\n");
-        for part in &turn.parts {
-            if part.text().is_none() {
-                let _ = writeln!(
-                    out,
-                    "content-part: {}",
-                    serde_json::to_string(part).unwrap_or_default()
-                );
-            }
-        }
-    }
-    out
+/// A bundle file written under a `.partial` name beside its own and renamed
+/// into place once complete, so a half-written file never looks complete. A
+/// file dropped before it is placed is removed.
+struct PartialFile {
+    path: PathBuf,
+    temporary: PathBuf,
+    out: BufWriter<File>,
+    bytes: u64,
+    placed: bool,
 }
 
-/// Every turn, reasoning and tool chronology included, for free-text search.
-fn render_trace(transcript: &Transcript) -> String {
-    let mut out = String::new();
-    write_header(&mut out, transcript, "trace");
-    if transcript.projection.is_some() {
-        out.push_str(
-            "Only the kept turn kinds are traced; export without --only or --omit to trace every kind.\n\n",
-        );
+impl PartialFile {
+    fn create(prefix: &Path, extension: &str) -> Result<Self> {
+        let mut path = prefix.as_os_str().to_owned();
+        path.push(".");
+        path.push(extension);
+        let path = PathBuf::from(path);
+
+        let mut temporary = path.clone().into_os_string();
+        temporary.push(".partial");
+        let temporary = PathBuf::from(temporary);
+
+        if let Some(directory) = path.parent() {
+            fs::create_dir_all(directory)
+                .with_context(|| format!("failed to create {}", directory.display()))?;
+        }
+        let file = File::create(&temporary)
+            .with_context(|| format!("failed to write {}", temporary.display()))?;
+        Ok(Self {
+            path,
+            temporary,
+            out: BufWriter::with_capacity(256 * 1024, file),
+            bytes: 0,
+            placed: false,
+        })
     }
-    for turn in &transcript.turns {
-        match turn.role {
-            Role::Tool => {
-                let label = tool_label(turn);
-                write_turn_heading(&mut out, &format!("tool: {label}"), turn);
-            }
-            _ => write_turn_heading(&mut out, &human_speaker(turn), turn),
-        }
-        out.push_str(turn.text.trim_end());
-        out.push_str("\n\n");
-        for part in &turn.parts {
-            if part.text().is_none() {
-                let _ = writeln!(
-                    out,
-                    "content-part: {}",
-                    serde_json::to_string(part).unwrap_or_default()
-                );
-            }
-        }
-        if let Some(tool) = &turn.tool {
-            for invocation in &tool.invocations {
-                let _ = writeln!(
-                    out,
-                    "invocation: {}",
-                    serde_json::to_string(invocation).unwrap_or_default()
-                );
-            }
-            for consumption in &tool.artifact_consumptions {
-                let _ = writeln!(
-                    out,
-                    "artifact-consumption: {}",
-                    serde_json::to_string(consumption).unwrap_or_default()
-                );
-            }
-        }
+
+    fn place(mut self) -> Result<BundleFile> {
+        self.out
+            .flush()
+            .with_context(|| format!("failed to write {}", self.temporary.display()))?;
+        fs::rename(&self.temporary, &self.path)
+            .with_context(|| format!("failed to place {}", self.path.display()))?;
+        self.placed = true;
+        Ok(BundleFile {
+            path: self.path.clone(),
+            bytes: self.bytes,
+        })
     }
-    out
 }
 
-fn write_header(out: &mut String, transcript: &Transcript, kind: &str) {
-    let session = &transcript.session;
+impl std::io::Write for PartialFile {
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        let written = self.out.write(buffer)?;
+        self.bytes += written as u64;
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.out.flush()
+    }
+}
+
+impl Drop for PartialFile {
+    fn drop(&mut self) {
+        if !self.placed {
+            let _ = fs::remove_file(&self.temporary);
+        }
+    }
+}
+
+/// One turn of `.context.md`, the exchange `show --exchange` returns as
+/// `TurnKind::in_exchange` defines it — small enough to read whole. Every
+/// other kind is in the trace.
+fn write_context_turn(out: &mut String, turn: &Turn) {
+    write_turn_heading(out, &human_speaker(turn), turn);
+    write_turn_body(out, turn);
+}
+
+/// One turn of `.trace.md`: every turn, reasoning and tool chronology
+/// included, for free-text search.
+fn write_trace_turn(out: &mut String, turn: &Turn) {
+    match turn.role {
+        Role::Tool => {
+            let label = tool_label(turn);
+            write_turn_heading(out, &format!("tool: {label}"), turn);
+        }
+        _ => write_turn_heading(out, &human_speaker(turn), turn),
+    }
+    write_turn_body(out, turn);
+    if let Some(tool) = &turn.tool {
+        for invocation in &tool.invocations {
+            let _ = writeln!(
+                out,
+                "invocation: {}",
+                serde_json::to_string(invocation).unwrap_or_default()
+            );
+        }
+        for consumption in &tool.artifact_consumptions {
+            let _ = writeln!(
+                out,
+                "artifact-consumption: {}",
+                serde_json::to_string(consumption).unwrap_or_default()
+            );
+        }
+    }
+}
+
+fn write_turn_body(out: &mut String, turn: &Turn) {
+    out.push_str(turn.text.trim_end());
+    out.push_str("\n\n");
+    for part in &turn.parts {
+        if part.text().is_none() {
+            let _ = writeln!(
+                out,
+                "content-part: {}",
+                serde_json::to_string(part).unwrap_or_default()
+            );
+        }
+    }
+}
+
+/// The facts a bundle file states before its turns: the exported `session`,
+/// and what `transcript` records about the read.
+fn write_header(out: &mut String, session: &Session, transcript: &Transcript, kind: &str) {
     let _ = writeln!(out, "# {} {} ({kind})", session.harness(), session.id);
     let _ = writeln!(out);
     if let Some(projection) = &transcript.projection {
@@ -353,12 +458,29 @@ fn write_header(out: &mut String, transcript: &Transcript, kind: &str) {
         };
     }
     if let Some(read) = &transcript.read {
-        let _ = writeln!(
-            out,
-            "- source read: {} bytes observed; configured bound {}",
-            read.source_length,
-            human_bytes(read.configured_bound)
-        );
+        let _ = if read
+            .projection_options
+            .iter()
+            .any(|option| option == "full")
+        {
+            writeln!(
+                out,
+                "- source read: the whole recording was streamed; {} {} observed",
+                read.source_length,
+                if read.coordinate_domain == "file-byte-range" {
+                    "bytes"
+                } else {
+                    "records"
+                }
+            )
+        } else {
+            writeln!(
+                out,
+                "- source read: {} bytes observed; configured bound {}",
+                read.source_length,
+                human_bytes(read.configured_bound)
+            )
+        };
         for range in &read.ranges {
             let _ = writeln!(
                 out,
@@ -464,7 +586,7 @@ mod tests {
     use super::*;
     use crate::model::{
         Accounting, AccountingBasis, AccountingCoverage, LiveState, Model, SourceDescriptor,
-        Tokens, TrailingRecord, Truncation, Turn, TurnKind,
+        Tokens, TrailingRecord, Truncation, Turn, TurnKind, SESSION_SCHEMA,
     };
 
     fn transcript() -> Transcript {
@@ -766,6 +888,246 @@ mod tests {
         }
 
         fs::remove_dir_all(directory).unwrap();
+    }
+
+    fn fixture_root() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures")
+    }
+
+    fn scratch(test: &str) -> PathBuf {
+        let directory =
+            std::env::temp_dir().join(format!("tapes-bundle-{}-{test}", std::process::id()));
+        let _ = fs::remove_dir_all(&directory);
+        directory
+    }
+
+    fn json_of(file: &BundleFile) -> Value {
+        serde_json::from_str(&fs::read_to_string(&file.path).unwrap()).unwrap()
+    }
+
+    /// A Markdown file's turns: everything after its title and header lists.
+    fn turns_of(file: &BundleFile) -> String {
+        let text = fs::read_to_string(&file.path).unwrap();
+        text.splitn(3, "\n\n").nth(2).unwrap().to_owned()
+    }
+
+    fn events_value(events: &[crate::event::EventRecord]) -> Value {
+        if events.is_empty() {
+            Value::Null
+        } else {
+            serde_json::to_value(events).unwrap()
+        }
+    }
+
+    /// Where the bounded read covers a whole recording, a whole-recording
+    /// export writes the bundle a bounded one does: the same turns, the same
+    /// paired events, which are the ones `events` projects, and the same
+    /// Markdown turns.
+    #[test]
+    fn a_whole_export_matches_a_bounded_export_where_the_bound_covers_the_file() {
+        use crate::backend::{
+            claude::ClaudeBackend, codex::CodexBackend, pi::PiBackend, Backend, Query,
+        };
+        use crate::ExportRead;
+
+        let root = fixture_root();
+        let backends: Vec<Box<dyn Backend>> = vec![
+            Box::new(ClaudeBackend::new(root.join("claude"))),
+            Box::new(CodexBackend::new(root.join("codex"))),
+            Box::new(PiBackend::new(root.join("pi"))),
+        ];
+        let directory = scratch("whole-matches-bounded");
+        let (mut sessions, mut events) = (0, 0);
+        for backend in &backends {
+            for session in backend.list(&Query::unscoped(usize::MAX)).unwrap().sessions {
+                let label = format!("{} {}", backend.harness(), session.id);
+                let export = |read, into: &str| {
+                    crate::export_session(
+                        backend.as_ref(),
+                        &session,
+                        &directory.join(into),
+                        None,
+                        read,
+                    )
+                    .unwrap()
+                };
+                let bounded = export(ExportRead::Bounded, "bounded");
+                let whole = export(ExportRead::Whole, "whole");
+                let (bounded_json, whole_json) = (json_of(&bounded.json), json_of(&whole.json));
+                assert_eq!(whole_json["turns"], bounded_json["turns"], "{label}");
+                let projected = crate::event::project(
+                    backend.transcript(&session, usize::MAX).unwrap(),
+                    usize::MAX,
+                )
+                .events;
+                assert_eq!(whole_json["events"], events_value(&projected), "{label}");
+                assert_eq!(bounded_json["events"], events_value(&projected), "{label}");
+                assert_eq!(whole_json["read"]["projection_options"][0], "full");
+                assert_eq!(
+                    turns_of(&whole.context),
+                    turns_of(&bounded.context),
+                    "{label}"
+                );
+                assert_eq!(turns_of(&whole.trace), turns_of(&bounded.trace), "{label}");
+                sessions += 1;
+                events += projected.len();
+            }
+        }
+        let leftovers = fs::read_dir(directory.join("whole"))
+            .unwrap()
+            .filter(|entry| {
+                entry
+                    .as_ref()
+                    .unwrap()
+                    .path()
+                    .to_string_lossy()
+                    .ends_with(".partial")
+            })
+            .count();
+        fs::remove_dir_all(&directory).unwrap();
+        assert_eq!(leftovers, 0);
+        assert!(
+            sessions >= 5 && events > 0,
+            "{sessions} sessions, {events} events"
+        );
+    }
+
+    /// A recording appended to between an export's two reads is exported as
+    /// the first read saw it: the replay stops where that read stopped, so a
+    /// call whose result arrived in between stays unanswered instead of
+    /// pairing with a result the JSON turns never held. A second read that is
+    /// not replayed diverges from the first, and no file is placed.
+    #[test]
+    fn a_recording_appended_between_the_two_reads_exports_what_the_first_read_saw() {
+        use std::cell::Cell;
+        use std::io::Write as _;
+
+        use crate::backend::{claude::ClaudeBackend, Backend, Listing, Query, StreamedTranscript};
+        use crate::ExportRead;
+
+        struct Appending {
+            inner: ClaudeBackend,
+            path: PathBuf,
+            appended: Cell<bool>,
+            replays: bool,
+        }
+
+        impl Backend for Appending {
+            fn harness(&self) -> &'static str {
+                self.inner.harness()
+            }
+            fn available(&self) -> bool {
+                true
+            }
+            fn list(&self, query: &Query) -> Result<Listing> {
+                self.inner.list(query)
+            }
+            fn locate(&self, id: &str) -> Result<Option<Session>> {
+                self.inner.locate(id)
+            }
+            fn transcript(&self, session: &Session, tail: usize) -> Result<Transcript> {
+                self.inner.transcript(session, tail)
+            }
+            fn stream_transcript(
+                &self,
+                session: &Session,
+                replay: Option<&StreamedTranscript>,
+                turn: &mut dyn FnMut(Turn) -> Result<()>,
+            ) -> Result<StreamedTranscript> {
+                let replay = replay.filter(|_| self.replays);
+                let read = self.inner.stream_transcript(session, replay, turn)?;
+                if !self.appended.replace(true) {
+                    // A later modification time, so the file's revision moves.
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                    let record = |uuid: &str, role: &str, content: Value| {
+                        serde_json::json!({"type": role, "sessionId": "appended", "uuid": uuid, "timestamp": "2026-01-01T10:00:05Z", "cwd": "/fixtures/project", "message": {"role": role, "content": content}}).to_string() + "\n"
+                    };
+                    let late = record(
+                        "r2",
+                        "user",
+                        serde_json::json!([{"type": "tool_result", "tool_use_id": "tool-late", "content": "late result"}]),
+                    ) + &record("a3", "assistant", Value::from("late answer"));
+                    fs::OpenOptions::new()
+                        .append(true)
+                        .open(&self.path)?
+                        .write_all(late.as_bytes())?;
+                }
+                Ok(read)
+            }
+        }
+
+        let directory = scratch("appended-between-reads");
+        let store = directory.join("store");
+        let project = store.join("-fixtures-project");
+        fs::create_dir_all(&project).unwrap();
+        let path = project.join("appended.jsonl");
+        let record = |uuid: &str, role: &str, content: Value| {
+            serde_json::json!({"type": role, "sessionId": "appended", "uuid": uuid, "timestamp": "2026-01-01T10:00:00Z", "cwd": "/fixtures/project", "message": {"role": role, "content": content}}).to_string() + "\n"
+        };
+        let opening = record("u1", "user", Value::from("start"))
+            + &record(
+                "a1",
+                "assistant",
+                serde_json::json!([{"type": "tool_use", "id": "tool-1", "name": "fixture_tool", "input": {}}]),
+            )
+            + &record(
+                "r1",
+                "user",
+                serde_json::json!([{"type": "tool_result", "tool_use_id": "tool-1", "content": "done"}]),
+            )
+            + &record(
+                "a2",
+                "assistant",
+                serde_json::json!([{"type": "tool_use", "id": "tool-late", "name": "fixture_tool", "input": {}}]),
+            );
+
+        let export = |replays: bool, into: &str| {
+            fs::write(&path, &opening).unwrap();
+            let backend = Appending {
+                inner: ClaudeBackend::new(&store),
+                path: path.clone(),
+                appended: Cell::new(false),
+                replays,
+            };
+            let session = backend.locate("appended").unwrap().unwrap();
+            let before = backend.transcript(&session, usize::MAX).unwrap();
+            let bundle = crate::export_session(
+                &backend,
+                &session,
+                &directory.join(into),
+                None,
+                ExportRead::Whole,
+            );
+            (before, bundle)
+        };
+
+        let (before, bundle) = export(true, "replayed");
+        let bundle = bundle.unwrap();
+        let json = json_of(&bundle.json);
+        let expected = crate::event::project(before.clone(), usize::MAX).events;
+        assert_eq!(json["turns"], serde_json::to_value(&before.turns).unwrap());
+        assert_eq!(json["events"], events_value(&expected));
+        assert_eq!(json["read"]["source_length"], opening.len() as u64);
+        assert!(
+            expected
+                .iter()
+                .any(|event| event.event.call_id.as_deref() == Some("tool-late")
+                    && event.incomplete == Some(crate::event::Incomplete::NoResultInRead)),
+            "{expected:?}"
+        );
+        assert!(!fs::read_to_string(&bundle.trace.path)
+            .unwrap()
+            .contains("late answer"));
+
+        let (_, diverged) = export(false, "unreplayed");
+        let error = format!("{:#}", diverged.err().expect("an unreplayed second read"));
+        let placed = fs::read_dir(directory.join("unreplayed")).unwrap().count();
+        fs::remove_dir_all(&directory).unwrap();
+        assert!(
+            error.contains("differed between the two pairing passes"),
+            "{error}"
+        );
+        assert_eq!(placed, 0);
     }
 
     #[test]

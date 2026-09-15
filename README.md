@@ -316,11 +316,10 @@ its `read` range counts messages (`coordinate_domain: "opencode-message"`),
 and its turns carry native ids rather than record spans. The stable database
 still cuts part text at 4,000 characters and each tool payload field at 2,000,
 reported under `truncation.source`, and a message larger than the 8 MiB API
-transport bound refuses the read. Codex and Pi recordings are read twice: the first pass keeps only
-what projecting a turn needs from elsewhere in the file — the messages the
-operator sent, for Codex, and each entry's id and parent, for Pi's active
-branch — and the second pass, stopping at the length the first observed,
-writes the turns.
+transport bound refuses the read. A Pi recording is read twice: the first pass
+keeps only each entry's id and parent, which its active branch needs from
+elsewhere in the file, and the second pass, stopping at the length and naming
+the source revision the first observed, writes the turns.
 A record that is malformed or longer than 64 MiB is skipped and counted. A
 recording replaced or shortened during the read refuses; one appended to is
 read to the length it had when the read opened.
@@ -475,13 +474,29 @@ because it exists.
 
 Stdout is a manifest of exactly those three paths and their sizes; nothing
 else goes there. Each file is written under a temporary name and renamed, so
-a bundle never looks complete while it is half written.
+a bundle never looks complete while it is half written, and a failed export
+leaves no file behind. The `.json` is one compact object; `jq` reads it as
+easily as an indented one.
+
+`export --full` bundles the whole recording instead of the bounded read, as
+`show --full` reads it, so memory follows one record rather than the file. The
+recording is streamed twice: the first read writes the JSON turns and observes
+tool calls and results, and the second replays it, stopping at the length and
+naming the source revision the first observed, to pair the events and write
+the Markdown files. A recording appended to between the two reads is exported
+as the first read saw it; one replaced between them refuses. The JSON turns
+are the ones `show --full --json` writes, and `--only` and `--omit` narrow all
+three files. It reads installed Claude, Codex, and Pi recordings; OpenCode
+refuses it by name, since its message rows are updated in place and a second
+read cannot promise the first read's turns. `--read-bytes` is not available
+with it, and a supplied input refuses it.
 
 Given the listing flags in place of an id — `--here`, `--project <path>`,
 `--global`, `--harness`, `--model`, `--directory`, `--since`, `--until`,
 `--sort`, `--limit`, `--search` — `export` takes the set `list` would return,
-in the same order, and writes one bundle per session. Bundles are never
-joined: each session keeps its own bounded three files, and a
+in the same order, and writes one bundle per session, each read whole under
+`--full`. Bundles are never
+joined: each session keeps its own three files, and a
 `tapes-export-manifest/5` `manifest.json` beside them is the only file that
 spans the set. It records the selection, each session's bundle paths, the
 artifact-native reports discovered in supplied inputs, the

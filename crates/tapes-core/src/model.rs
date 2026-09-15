@@ -1306,14 +1306,25 @@ impl StreamedSessionJson {
         out: &mut impl std::io::Write,
         transcript: &Transcript,
     ) -> std::io::Result<()> {
+        self.close_members(out, transcript)?;
+        out.write_all(b"}")
+    }
+
+    /// Write the members that follow `turns` and leave the object open, for a
+    /// caller that appends members of its own before closing it with `}`.
+    pub fn close_members(
+        self,
+        out: &mut impl std::io::Write,
+        transcript: &Transcript,
+    ) -> std::io::Result<()> {
         let tail = serde_json::to_vec(&TranscriptTail::of(
             transcript,
             (!self.content.is_empty()).then_some(self.content),
         ))?;
         // The tail is an object that always opens on `truncated`, so dropping
-        // its brace continues the session object.
+        // both its braces continues the session object.
         out.write_all(b"],")?;
-        out.write_all(&tail[1..])
+        out.write_all(&tail[1..tail.len() - 1])
     }
 }
 
