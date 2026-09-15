@@ -56,17 +56,11 @@ fn codex_header(id: &str) -> Vec<String> {
     ]
 }
 
-/// A Codex operator message: the conversation item the model reads, and the
-/// event that vouches for the text as the operator sent it.
+/// A Codex operator message: the conversation item the model reads.
 fn codex_operator(second: u32, text: &str) -> Vec<String> {
-    vec![
-        format!(
-            r#"{{"timestamp":"2026-01-01T10:00:{second:02}Z","type":"response_item","payload":{{"type":"message","role":"user","content":[{{"type":"input_text","text":"{text}"}}]}}}}"#
-        ),
-        format!(
-            r#"{{"timestamp":"2026-01-01T10:00:{second:02}.500Z","type":"event_msg","payload":{{"type":"user_message","message":"{text}"}}}}"#
-        ),
-    ]
+    vec![format!(
+        r#"{{"timestamp":"2026-01-01T10:00:{second:02}Z","type":"response_item","payload":{{"type":"message","role":"user","content":[{{"type":"input_text","text":"{text}"}}]}}}}"#
+    )]
 }
 
 fn codex_assistant(second: u32, text: &str) -> String {

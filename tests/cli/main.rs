@@ -20,6 +20,9 @@ const CODEX_SESSION_NO_MODEL: &str = include_str!(
 const CODEX_SESSION_OTHER_MODEL: &str = include_str!(
     "../fixtures/codex/rollout-2026-01-01T14-00-00-30000000-0000-0000-0000-000000000005.jsonl"
 );
+const CODEX_SESSION_INTERACTIVE: &str = include_str!(
+    "../fixtures/codex/rollout-2026-01-01T15-00-00-50000000-0000-7000-8000-000000000006.jsonl"
+);
 const CODEX_SESSION_TERMINAL_ONLY: &str = concat!(
     "{\"timestamp\":\"2026-01-01T15:00:00Z\",\"type\":\"session_meta\",\"payload\":{\"id\":\"00000000-0000-0000-0000-000000000006\",\"session_id\":\"00000000-0000-0000-0000-000000000006\",\"cwd\":\"/fixtures/project\",\"model_provider\":\"openai\"}}\n",
     "{\"timestamp\":\"2026-01-01T15:00:01Z\",\"type\":\"turn_context\",\"payload\":{\"cwd\":\"/fixtures/project\",\"model\":\"gpt-fixture\",\"effort\":\"high\",\"turn_id\":\"turn-terminal-only\"}}\n",
@@ -500,7 +503,7 @@ fn export_omit_narrows_every_bundle_file_and_counts_the_omitted_turns() {
 }
 
 /// A bundle's context file is the exchange `show --exchange` returns, turn for
-/// turn, including where a user turn carries no evidence of its sender.
+/// turn, leaving out the context and notices the harness wrote as user turns.
 #[test]
 fn a_bundle_context_holds_the_turns_show_exchange_returns() {
     let root = TemporaryDirectory::new(
@@ -524,9 +527,8 @@ fn a_bundle_context_holds_the_turns_show_exchange_returns() {
     };
     let mut body = serde_json::json!({"timestamp": timestamp, "type": "session_meta", "payload": {"id": id, "session_id": id, "timestamp": timestamp, "cwd": "/fixtures/project", "source": "cli", "model_provider": "openai"}}).to_string() + "\n";
     body += &user("Inspect the fixture.");
-    body += &(serde_json::json!({"timestamp": timestamp, "type": "event_msg", "payload": {"type": "user_message", "message": "Inspect the fixture."}}).to_string() + "\n");
     body += &user("<environment_context>\n  <cwd>/fixtures/project</cwd>\n</environment_context>");
-    body += &user("A message no user_message event vouches for.");
+    body += &user("<turn_aborted>\nThe user interrupted the previous turn.\n</turn_aborted>");
     body += &item(
         serde_json::json!({"type": "reasoning", "summary": [{"type": "summary_text", "text": "Consider it."}]}),
     );
@@ -561,7 +563,8 @@ fn a_bundle_context_holds_the_turns_show_exchange_returns() {
         .iter()
         .map(|turn| turn["kind"].as_str().unwrap())
         .collect::<Vec<_>>();
-    assert!(kinds.contains(&"unknown"), "{kinds:?}");
+    assert!(kinds.contains(&"ambient"), "{kinds:?}");
+    assert!(kinds.contains(&"notice"), "{kinds:?}");
 
     let exchange: Value =
         serde_json::from_slice(&run(&["show", id, "--exchange", "--json"])).unwrap();
@@ -586,6 +589,86 @@ fn a_bundle_context_holds_the_turns_show_exchange_returns() {
         .map(|heading| heading.split(" — ").next().unwrap().to_owned())
         .collect::<Vec<_>>();
     assert_eq!(headed, exchanged, "{context}");
+}
+
+/// An interactive Codex rollout carries its operator's messages beside the
+/// instructions, skills, and notices the harness writes into the same user
+/// role. The exchange keeps the operator's messages under both the bounded
+/// and the whole read, and files the harness's own items by what they are.
+#[test]
+fn exchange_keeps_the_operator_turns_of_an_interactive_codex_rollout() {
+    let root = TemporaryDirectory::new(
+        std::env::temp_dir().join(format!("tapes-cli-interactive-{}", std::process::id())),
+    );
+    let codex_home = root.path().join("codex");
+    let sessions = codex_home.join("sessions/2026/01/01");
+    fs::create_dir_all(&sessions).unwrap();
+    let name = "rollout-2026-01-01T15-00-00-50000000-0000-7000-8000-000000000006.jsonl";
+    fs::write(sessions.join(name), CODEX_SESSION_INTERACTIVE).unwrap();
+    let id = "50000000-0000-7000-8000-000000000006";
+    let json = |arguments: &[&str]| -> Value {
+        let mut command = tapes();
+        command.args(arguments);
+        with_fixture_env(
+            &mut command,
+            &codex_home,
+            &root.path().join("home"),
+            Path::new("/definitely/missing"),
+        );
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice(&output.stdout).unwrap()
+    };
+    let exchange = |turns: &Value| {
+        turns
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|turn| {
+                (
+                    turn["kind"].as_str().unwrap().to_owned(),
+                    turn["text"].as_str().unwrap().to_owned(),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    let kept = [
+        ("operator", "Summarize the fixture project."),
+        ("assistant", "The fixture project holds one crate."),
+        ("operator", "$fixture-skill review the crate."),
+        ("operator", "Keep the review short."),
+        ("assistant", "The crate is sound."),
+    ]
+    .map(|(kind, text)| (kind.to_owned(), text.to_owned()))
+    .to_vec();
+
+    for arguments in [
+        vec!["show", id, "--exchange", "--json"],
+        vec!["show", id, "--full", "--exchange", "--json"],
+    ] {
+        let shown = json(&arguments);
+        assert_eq!(exchange(&shown["turns"]), kept, "{arguments:?}: {shown}");
+        let omitted = &shown["projection"]["omitted"];
+        assert!(omitted.get("unknown").is_none(), "{arguments:?}: {omitted}");
+        assert_eq!(omitted["notice"], 3, "{arguments:?}: {omitted}");
+    }
+
+    let whole = json(&["show", id, "--json"]);
+    let user = whole["turns"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|turn| turn["role"] == "user")
+        .map(|turn| turn["kind"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        user,
+        ["ambient", "operator", "operator", "ambient", "notice", "operator", "notice", "notice"]
+    );
 }
 
 /// The file tail is the reader's own bound, so a caller can set it; the read
@@ -3851,8 +3934,6 @@ fn human_renderers_show_derived_titles_and_whole_second_timestamps() {
             "\n",
             r##"{"timestamp":"2026-01-01T10:00:02.987654321Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"\n  <recommended_plugins>\n- Fixture helper\n</recommended_plugins>\n\n  # AGENTS.md instructions\n\n<INSTRUCTIONS>\nFollow the repository instructions before acting.\n</INSTRUCTIONS>\n\n<environment_context>\n  <cwd>/fixtures/project</cwd>\n</environment_context>\n\nInspect the fixture."}]}}"##,
             "\n",
-            r#"{"timestamp":"2026-01-01T10:00:02.999999999Z","type":"event_msg","payload":{"type":"user_message","message":"Inspect the fixture."}}"#,
-            "\n",
             r#"{"timestamp":"2026-01-01T10:00:03.123456789Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Fixture inspected."}]}}"#,
             "\n",
             r#"{"timestamp":"2026-01-01T10:00:06.123456789Z","type":"event","payload":{}}"#,
@@ -5034,10 +5115,9 @@ fn show_full_streams_a_claude_recording_past_the_read_bound() {
     );
 }
 
-/// Codex and Pi need facts from across the file to project a turn: Codex
-/// classifies a user turn against every message the operator sent, and Pi
-/// keeps only the last entry's branch. A whole read past the bound gets both
-/// right while it streams.
+/// A whole read streams a Codex or Pi recording past the read bound. Pi needs
+/// facts from across the file to project a turn, keeping only the last
+/// entry's branch, and gets that right while it streams.
 #[test]
 fn show_full_streams_codex_and_pi_recordings_past_the_read_bound() {
     let root = TemporaryDirectory::new(
@@ -5053,9 +5133,8 @@ fn show_full_streams_codex_and_pi_recordings_past_the_read_bound() {
     fs::create_dir_all(&codex_sessions).unwrap();
     let codex_user = |text: &str| {
         format!(
-            "{}\n{}\n",
-            serde_json::json!({"timestamp": timestamp, "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": text}]}}),
-            serde_json::json!({"timestamp": timestamp, "type": "event_msg", "payload": {"type": "user_message", "message": text}})
+            "{}\n",
+            serde_json::json!({"timestamp": timestamp, "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": text}]}})
         )
     };
     let mut codex = serde_json::json!({"timestamp": timestamp, "type": "session_meta", "payload": {"id": codex_id, "session_id": codex_id, "timestamp": timestamp, "cwd": "/fixtures/project", "source": "cli", "model_provider": "openai"}}).to_string() + "\n";
@@ -5860,7 +5939,6 @@ fn endings_text_tail_is_bounded_and_marks_what_it_cut() {
             r#"{{"timestamp":"2026-01-01T10:00:00Z","type":"session_meta","payload":{{"id":"{id}","cwd":"/fixtures/project"}}}}
 {{"timestamp":"2026-01-01T10:00:01Z","type":"turn_context","payload":{{"cwd":"/fixtures/project","model":"gpt-fixture"}}}}
 {{"timestamp":"2026-01-01T10:00:02Z","type":"response_item","payload":{{"type":"message","role":"user","content":[{{"type":"input_text","text":"Inspect the fixture."}}]}}}}
-{{"timestamp":"2026-01-01T10:00:02.500Z","type":"event_msg","payload":{{"type":"user_message","message":"Inspect the fixture."}}}}
 {{"timestamp":"2026-01-01T10:00:03Z","type":"response_item","payload":{{"type":"message","role":"assistant","content":[{{"type":"output_text","text":"{long}"}}]}}}}
 "#
         ),

@@ -680,8 +680,9 @@ impl Role {
 
 /// Who a turn's content came from, which the role alone cannot say: a user
 /// turn holds an operator's request, a harness command, context the harness
-/// attached, or a message the harness injected. Every value rests on a field
-/// the harness itself wrote; `Unknown` is the answer where it wrote none.
+/// attached, or a message the harness injected. Every value rests on what the
+/// harness itself wrote, a field beside the text or an element it wraps its own
+/// text in; `Unknown` is the answer where it wrote neither.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum TurnKind {
@@ -754,16 +755,26 @@ fn derive_title_info(text: &str) -> Option<(String, bool)> {
 }
 
 /// Blocks a harness wraps in a tag of its own around the operator's message.
-const ENVELOPE_TAGS: [&str; 9] = [
+const ENVELOPE_TAGS: [&str; 10] = [
     "environment_context",
     "collaboration_mode",
     "permissions_instructions",
     "apps_instructions",
     "plugins_instructions",
     "skills_instructions",
+    "skill",
     "INSTRUCTIONS",
     "recommended_plugins",
     "in-app-browser-context",
+];
+
+/// Messages a harness raises in the user role on its own behalf, each in an
+/// element of its own: an interrupted turn, a finished subagent, and a prompt
+/// to keep working toward the thread's goal.
+const NOTICE_TAGS: [&str; 3] = [
+    "turn_aborted",
+    "subagent_notification",
+    "codex_internal_context",
 ];
 
 /// Blocks a harness opens with a heading rather than a tag.
@@ -780,6 +791,17 @@ pub fn without_known_envelopes(text: &str) -> String {
 /// Whether the text holds attached blocks and nothing else.
 pub fn is_known_envelope(text: &str) -> bool {
     without_known_envelopes(text).trim().is_empty()
+}
+
+/// Whether the text holds a message the harness raised on its own, with
+/// nothing beside it but blocks the harness attached.
+pub fn is_known_notice(text: &str) -> bool {
+    let mut cleaned = text.to_owned();
+    let mut raised = false;
+    for tag in NOTICE_TAGS {
+        raised |= strip_envelope(&mut cleaned, tag);
+    }
+    raised && is_known_envelope(&cleaned)
 }
 
 fn strip_known_envelopes(text: &mut String) {
@@ -1488,6 +1510,22 @@ mod tests {
         // A block that carries a request beside the envelope is not envelope.
         assert!(!is_known_envelope(
             "<environment_context>\n  <cwd>/work</cwd>\n</environment_context>\nfix the parser"
+        ));
+    }
+
+    #[test]
+    fn a_notice_is_a_raised_message_with_nothing_but_envelope_beside_it() {
+        assert!(is_known_notice(
+            "<turn_aborted>\nThe user interrupted the previous turn.\n</turn_aborted>"
+        ));
+        assert!(is_known_notice(
+            "<codex_internal_context source=\"goal\">\nKeep going.\n</codex_internal_context>\n<environment_context>/work</environment_context>"
+        ));
+        assert!(!is_known_notice(
+            "<environment_context>/work</environment_context>"
+        ));
+        assert!(!is_known_notice(
+            "<subagent_notification>{}</subagent_notification>\nnow fix the parser"
         ));
     }
 

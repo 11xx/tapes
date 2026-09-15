@@ -53,17 +53,11 @@ fn codex_header(id: &str, directory: &str) -> Vec<String> {
     ]
 }
 
-/// A Codex operator message: the conversation item the model reads, and the
-/// event that vouches for the text as the operator sent it.
+/// A Codex operator message: the conversation item the model reads.
 fn codex_operator(second: u32, text: &str) -> Vec<String> {
-    vec![
-        format!(
-            r#"{{"timestamp":"2026-01-01T10:00:{second:02}Z","type":"response_item","payload":{{"type":"message","role":"user","content":[{{"type":"input_text","text":"{text}"}}]}}}}"#
-        ),
-        format!(
-            r#"{{"timestamp":"2026-01-01T10:00:{second:02}.500Z","type":"event_msg","payload":{{"type":"user_message","message":"{text}"}}}}"#
-        ),
-    ]
+    vec![format!(
+        r#"{{"timestamp":"2026-01-01T10:00:{second:02}Z","type":"response_item","payload":{{"type":"message","role":"user","content":[{{"type":"input_text","text":"{text}"}}]}}}}"#
+    )]
 }
 
 fn codex_assistant(second: u32, text: &str) -> String {
@@ -158,7 +152,7 @@ fn a_brief_states_where_the_session_stopped_and_what_it_left_open() {
     strip_record_refs(&mut comparable);
     strip_content_fields(&mut comparable);
     assert_eq!(read["ranges"].as_array().unwrap().len(), 1);
-    assert!(read["records"].as_array().unwrap().len() >= 8);
+    assert!(read["records"].as_array().unwrap().len() >= 7);
     assert_eq!(text_tail["returned"], 2);
     let source = json!({
         "kind": "installed-recording",

@@ -210,14 +210,15 @@ any other value:
 | `notice` | A message the harness injected on the system's behalf, such as a task notification. |
 | `unknown` | A user-envelope turn the harness recorded no evidence for. |
 
-Every value rests on a field the harness itself wrote; nothing is inferred
-from the text, so `unknown` is the answer for a record whose harness version
-wrote no such field:
+Every value rests on what the harness itself wrote — a field beside the text,
+or an element the harness wraps its own text in — never on what the text seems
+to ask, so `unknown` is the answer for a record whose harness version wrote
+neither:
 
 | harness | evidence |
 |---|---|
 | Claude | `origin.kind` and `promptSource` name the sender; `isMeta` marks text the harness attached; on a record carrying none of the three, content that is exactly a `<command-name>` envelope or a `<local-command-stdout>` element is the harness's own command. |
-| Codex | A `user_message` event carries the text of each message the operator sent, so a user message the event vouches for is theirs; a message holding only the blocks the harness wraps around a message is attached context. On an `exec` session, whose header names that source and which records no such event, the wrapper blocks are the only separation. |
+| Codex | No field names the sender, so the elements the harness wraps its own text in are the separation, whatever entry point started the session. A user message whose every block is attached context, such as `<environment_context>`, an `<INSTRUCTIONS>` block, or a `<skill>`, is `ambient`; one that adds only a message the harness raised, `<turn_aborted>`, `<subagent_notification>`, or `<codex_internal_context>`, is `notice`; any other message is `operator`. A Codex user turn is never `unknown`, and its kind comes from its own record, so every read gives it the same one. |
 | pi, OpenCode | Neither records anything but the operator's messages in its user role. |
 
 ## Tool event layer
