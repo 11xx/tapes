@@ -100,9 +100,20 @@ citation descriptors share a 16 KiB cumulative byte bound. A truncated URI is in
 not a valid altered reference. Grouped citation spans retain bounded nested
 source URLs and titles, with omission counts at each bound. Structural
 traversal bounds are exposed separately when an omitted count cannot be
-established. When a report names a uniquely reached conversation it is
-attached as a structured artifact part of an existing turn and also remains
-in the artifact collection. A report without a reached outer conversation
+established.
+
+`library_files.json` associates a report with its member by `file_id`, which
+the official export spells as the member stem (`file_<hex>` for
+`file_<hex>.dat`). An entry's `origination_thread_id` (or
+`initiating_conversation_id`) becomes the reference's
+`originating_conversation`, and `backing_conversation_id` its `backing`; a
+report's own widget-state `backing_conversation_id` names a backing session
+the export may not contain, and stays `backing` beside the originating
+conversation rather than replacing it. `origination_message_id` names the
+message the report came from. When the backing conversation, originating
+conversation, or originating message identifies exactly one reached
+conversation, the report is attached as a structured artifact part of an
+existing turn and also remains in the artifact collection. A report without a reached outer conversation
 remains an explicit artifact with its unresolved association; it never becomes
 a fabricated message or turn.
 

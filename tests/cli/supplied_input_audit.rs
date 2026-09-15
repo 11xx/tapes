@@ -248,6 +248,82 @@ fn native_manifest_selects_conversation_and_associated_library_members() {
     assert!(zipped["unsearched"].as_array().unwrap().is_empty());
 }
 
+/// The official export's library entries name a report by the member stem
+/// (`file_<hex>` for `file_<hex>.dat`) and its originating conversation by
+/// `origination_thread_id`, while the report's own widget state names a
+/// backing session the export does not contain.
+#[test]
+fn library_reports_join_their_originating_conversation_by_member_stem() {
+    let root = TempRoot::new("library-stem");
+    let conversation_bytes = conversation("originating", "voice conversation");
+    let library = serde_json::to_vec(&json!([
+        {"file_id": "file_00aa", "origination_thread_id": "originating"},
+        {"file_id": "file_00bb", "origination_thread_id": "unreached"}
+    ]))
+    .unwrap();
+    let joined = report(Some("backing-session-a"), "report-a", "joined body");
+    let orphan = report(Some("backing-session-b"), "report-b", "orphan body");
+    let mut sizes = BTreeMap::new();
+    sizes.insert("conversations-000.json", conversation_bytes.len());
+    sizes.insert("library_files.json", library.len());
+    sizes.insert("file_00aa.dat", joined.len());
+    sizes.insert("file_00bb.dat", orphan.len());
+    let manifest_bytes = manifest(
+        &["conversations-000.json"],
+        &["library_files.json"],
+        &["file_00aa.dat", "file_00bb.dat"],
+        &sizes,
+    );
+    let zip_path = root.path().join("native-export.zip");
+    archive(
+        &zip_path,
+        &[
+            ("export_manifest.json", &manifest_bytes),
+            ("conversations-000.json", &conversation_bytes),
+            ("library_files.json", &library),
+            ("file_00aa.dat", &joined),
+            ("file_00bb.dat", &orphan),
+        ],
+    );
+
+    let mut show = input_args("show", &zip_path);
+    show.splice(1..1, ["originating".to_owned()]);
+    let shown = successful_json(run(&show));
+    let artifacts = shown["artifacts"].as_array().unwrap();
+    assert_eq!(artifacts.len(), 1, "{artifacts:?}");
+    assert_eq!(artifacts[0]["identity"], "report-a");
+    assert_eq!(artifacts[0]["originating_conversation"], "originating");
+    assert_eq!(artifacts[0]["backing"], "backing-session-a");
+    let part = shown["turns"][0]["parts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|part| part["native_kind"] == "openai-library-report")
+        .expect("the report is a part of the originating conversation");
+    assert_eq!(part["reference"]["body"]["text"], "joined body");
+
+    let listed = successful_json(run(&input_args("list", &zip_path)));
+    assert_eq!(listed["artifacts"].as_array().unwrap().len(), 2);
+    let unsearched = listed["unsearched"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|entry| entry.as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert!(
+        unsearched
+            .iter()
+            .any(|entry| entry.contains("file_00bb.dat")),
+        "{unsearched:?}"
+    );
+    assert!(
+        !unsearched
+            .iter()
+            .any(|entry| entry.contains("file_00aa.dat")),
+        "{unsearched:?}"
+    );
+}
+
 #[test]
 fn manifest_gaps_are_explicit_and_only_an_exact_occurrence_can_be_read() {
     let root = TempRoot::new("manifest-gap");

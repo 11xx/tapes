@@ -348,6 +348,7 @@ struct InputDataset {
 struct AssociatedReport {
     member: String,
     backing: Option<String>,
+    originating: Option<String>,
     origin_message: Option<String>,
     reference: ArtifactReference,
     part: ContentPart,
@@ -384,6 +385,7 @@ struct ManifestSelection {
 struct LibraryAssociation {
     file_id: Option<String>,
     backing: Option<String>,
+    originating: Option<String>,
     origin_message: Option<String>,
 }
 
@@ -3417,22 +3419,13 @@ fn parse_library_associations(
         let Some(file_id) = file_id else {
             continue;
         };
-        let backing = [
-            "backing_conversation_id",
-            "initiating_conversation_id",
-            "origination_thread_id",
-        ]
-        .into_iter()
-        .find_map(|field| entry.get(field).and_then(Value::as_str))
-        .map(str::to_owned);
-        let origin_message = entry
-            .get("origination_message_id")
-            .and_then(Value::as_str)
-            .map(str::to_owned);
+        let string = |field: &str| entry.get(field).and_then(Value::as_str).map(str::to_owned);
         let association = LibraryAssociation {
             file_id: Some(file_id.clone()),
-            backing,
-            origin_message,
+            backing: string("backing_conversation_id"),
+            originating: string("origination_thread_id")
+                .or_else(|| string("initiating_conversation_id")),
+            origin_message: string("origination_message_id"),
         };
         associations.insert(file_id, association);
     }
@@ -3444,9 +3437,16 @@ fn library_association_for(
     member: &str,
 ) -> Option<LibraryAssociation> {
     let basename = member.rsplit('/').next().unwrap_or(member);
+    // The official export's `file_id` is the member stem: `file_<hex>` names
+    // `file_<hex>.dat`.
     associations
         .get(member)
         .or_else(|| associations.get(basename))
+        .or_else(|| {
+            basename
+                .strip_suffix(".dat")
+                .and_then(|stem| associations.get(stem))
+        })
         .cloned()
 }
 
@@ -4260,6 +4260,7 @@ fn read_associated_report<R: Read>(
         .and_then(Value::as_str)
         .map(str::to_owned)
         .or_else(|| association.and_then(|association| association.backing.clone()));
+    let originating = association.and_then(|association| association.originating.clone());
     let origin_message = association.and_then(|association| association.origin_message.clone());
     let identity = object
         .get("widget_session_id")
@@ -4302,6 +4303,7 @@ fn read_associated_report<R: Read>(
             identity: None,
             origin: None,
             backing: None,
+            originating_conversation: None,
             author: None,
             completion: None,
             citation_count: None,
@@ -4322,6 +4324,7 @@ fn read_associated_report<R: Read>(
     reference.identity = identity;
     reference.origin = Some("openai-widget-state".to_owned());
     reference.backing = backing.clone();
+    reference.originating_conversation = originating.clone();
     reference.author = author;
     reference.completion = completion;
     reference.citation_count = Some(citations.len());
@@ -4352,6 +4355,7 @@ fn read_associated_report<R: Read>(
     Ok(Some(AssociatedReport {
         member: member.to_owned(),
         backing,
+        originating,
         origin_message,
         reference: reference.clone(),
         part: ContentPart::StructuredArtifact {
@@ -4752,12 +4756,16 @@ fn attach_associated_reports(
 ) {
     for report in reports {
         let backing = report.backing.as_deref();
+        let originating = report.originating.as_deref();
         let origin_message = report.origin_message.as_deref();
         let matching_indices = occurrences
             .iter()
             .enumerate()
             .filter_map(|(index, occurrence)| {
-                let by_backing = backing.is_some_and(|backing| occurrence.session.id == backing);
+                let by_conversation = [backing, originating]
+                    .into_iter()
+                    .flatten()
+                    .any(|conversation| occurrence.session.id == conversation);
                 let by_message = origin_message.is_some_and(|message| {
                     occurrence
                         .turns
@@ -4772,7 +4780,7 @@ fn attach_associated_reports(
                             })
                         })
                 });
-                (by_backing || by_message).then_some(index)
+                (by_conversation || by_message).then_some(index)
             })
             .collect::<Vec<_>>();
         let matching = matching_indices.len();
@@ -4784,7 +4792,10 @@ fn attach_associated_reports(
             continue;
         }
         if matching > 1 {
-            let association = backing.or(origin_message).unwrap_or("unknown");
+            let association = backing
+                .or(originating)
+                .or(origin_message)
+                .unwrap_or("unknown");
             diagnostics.push(format!(
                 "associated report {} names an ambiguous library association {association} and remains unjoined",
                 report.member,
@@ -4794,7 +4805,10 @@ fn attach_associated_reports(
         let occurrence = occurrences
             .get_mut(matching_indices[0])
             .expect("matching associated report occurrence");
-        if report.reference.backing.is_none() {
+        // A report reached only through its originating message records that
+        // conversation as its backing; a recorded originating conversation is
+        // already the association and is not restated as a backing session.
+        if report.reference.backing.is_none() && originating.is_none() {
             report.reference.backing = Some(occurrence.session.id.clone());
             if let ContentPart::StructuredArtifact {
                 reference: Some(reference),
@@ -4805,7 +4819,7 @@ fn attach_associated_reports(
             }
         }
         let mut artifact = report.reference.clone();
-        if artifact.backing.is_none() {
+        if artifact.backing.is_none() && originating.is_none() {
             artifact.backing = Some(occurrence.session.id.clone());
         }
         let artifact_reference = RecordRef {
