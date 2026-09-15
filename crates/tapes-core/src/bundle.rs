@@ -67,6 +67,8 @@ struct BundleJson<'a> {
     #[serde(skip_serializing_if = "<[String]>::is_empty")]
     notes: &'a [String],
     #[serde(skip_serializing_if = "Option::is_none")]
+    projection: Option<&'a crate::model::Projection>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     git: Option<&'a GitContext>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     events: Vec<crate::event::EventRecord>,
@@ -97,6 +99,7 @@ pub fn export(transcript: &Transcript, directory: &Path) -> Result<Bundle> {
         content: crate::content::inventory(&transcript.turns),
         trailing_record: transcript.trailing_record.as_ref(),
         notes: &transcript.notes,
+        projection: transcript.projection.as_ref(),
         git: git.as_ref(),
         events,
     })
@@ -198,6 +201,11 @@ fn render_context(transcript: &Transcript) -> String {
 fn render_trace(transcript: &Transcript) -> String {
     let mut out = String::new();
     write_header(&mut out, transcript, "trace");
+    if transcript.projection.is_some() {
+        out.push_str(
+            "Only the exchange is traced; export without --exchange for tool, reasoning, and harness turns.\n\n",
+        );
+    }
     for turn in &transcript.turns {
         match turn.role {
             Role::Tool => {
@@ -241,6 +249,14 @@ fn write_header(out: &mut String, transcript: &Transcript, kind: &str) {
     let session = &transcript.session;
     let _ = writeln!(out, "# {} {} ({kind})", session.harness(), session.id);
     let _ = writeln!(out);
+    if let Some(projection) = &transcript.projection {
+        let _ = writeln!(
+            out,
+            "- projection: {}; omitted {}",
+            projection.kind.label(),
+            projection.omitted_summary()
+        );
+    }
     let title = human_title(session);
     if !title.is_empty() {
         let _ = writeln!(out, "- title: {title}");
@@ -556,6 +572,7 @@ mod tests {
             graph: None,
             trailing_record: None,
             notes: vec!["1 entry belongs to an abandoned branch.".into()],
+            projection: None,
         }
     }
 

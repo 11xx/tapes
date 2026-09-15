@@ -71,6 +71,110 @@ fn fixture_store(name: &str) -> (PathBuf, PathBuf) {
     (root.clone(), root.join("home"))
 }
 
+/// The exchange keeps what the operator asked and what the agent visibly said,
+/// with the ordinals and timestamps a whole show gives them, and counts every
+/// other turn it left out so their absence reads as the projection.
+#[test]
+fn exchange_keeps_operator_and_assistant_turns_and_counts_the_rest() {
+    let (codex_home, home) = fixture_store("exchange");
+    let id = "00000000-0000-0000-0000-000000000001";
+    let run = |args: &[&str]| {
+        let output = tapes()
+            .args(args)
+            .env("CODEX_HOME", &codex_home)
+            .env("HOME", &home)
+            .env("PATH", "/definitely/missing")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        output.stdout
+    };
+    let json = |args: &[&str]| -> Value { serde_json::from_slice(&run(args)).unwrap() };
+    let in_exchange =
+        |turn: &Value| matches!(turn["kind"].as_str(), Some("operator" | "assistant"));
+
+    let whole = json(&["show", id, "--json"]);
+    assert!(whole.get("projection").is_none(), "{whole}");
+    let turns = whole["turns"].as_array().unwrap();
+    let kept = turns
+        .iter()
+        .filter(|turn| in_exchange(turn))
+        .cloned()
+        .collect::<Vec<_>>();
+    let mut omitted = serde_json::Map::new();
+    for turn in turns.iter().filter(|turn| !in_exchange(turn)) {
+        let kind = turn["kind"].as_str().unwrap().to_owned();
+        let count = omitted.get(&kind).and_then(Value::as_u64).unwrap_or(0) + 1;
+        omitted.insert(kind, count.into());
+    }
+    assert!(kept.len() >= 2, "{whole}");
+    assert!(omitted.contains_key("tool"), "{whole}");
+    assert!(omitted.contains_key("reasoning"), "{whole}");
+
+    let exchange = json(&["show", id, "--exchange", "--json"]);
+    assert_eq!(exchange["turns"], Value::Array(kept.clone()));
+    assert_eq!(
+        exchange["projection"],
+        serde_json::json!({"kind": "exchange", "omitted": omitted})
+    );
+
+    let newest = json(&["show", id, "--exchange", "--tail", "1", "--json"]);
+    let last = kept.last().unwrap();
+    assert_eq!(newest["turns"], serde_json::json!([last]));
+    assert_eq!(
+        newest["truncation"]["window"],
+        serde_json::json!({
+            "returned": 1,
+            "omitted": kept.len() - 1,
+            "omitted_from": "head",
+            "bound": 1,
+            "ordinals": {"first": last["ordinal"], "last": last["ordinal"]}
+        })
+    );
+
+    let human = String::from_utf8(run(&["show", id, "--exchange"])).unwrap();
+    assert!(
+        human.contains("Note: Only the exchange is shown; turns omitted by kind:"),
+        "{human}"
+    );
+    assert!(!human.contains("fixture_tool"), "{human}");
+
+    let directory = codex_home.join("bundle");
+    run(&[
+        "export",
+        id,
+        "--exchange",
+        "--bundle",
+        directory.to_str().unwrap(),
+    ]);
+    let file = |suffix: &str| {
+        fs::read_dir(&directory)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .find(|path| {
+                let name = path.to_string_lossy();
+                name.contains(id) && name.ends_with(suffix)
+            })
+            .unwrap()
+    };
+    let bundle: Value = serde_json::from_str(&fs::read_to_string(file(".json")).unwrap()).unwrap();
+    assert_eq!(bundle["turns"], Value::Array(kept));
+    assert_eq!(bundle["projection"], exchange["projection"]);
+    assert!(bundle.get("events").is_none(), "{bundle}");
+    let trace = fs::read_to_string(file(".trace.md")).unwrap();
+    assert!(
+        trace.contains("- projection: exchange; omitted "),
+        "{trace}"
+    );
+    assert!(trace.contains("Only the exchange is traced"), "{trace}");
+    assert!(!trace.contains("fixture_tool"), "{trace}");
+    let _ = fs::remove_dir_all(&codex_home);
+}
+
 fn terminal_only_fixture_store(name: &str) -> (PathBuf, PathBuf) {
     let root = std::env::temp_dir().join(format!(
         "tapes-cli-terminal-only-{name}-{}",

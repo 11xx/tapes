@@ -601,6 +601,13 @@ enum Command {
         /// Show only the final number of messages.
         #[arg(long)]
         tail: Option<usize>,
+        /// Keep only the exchange: operator requests and the agent's visible
+        /// text, each with its timestamps and original ordinal. Reasoning,
+        /// tool calls and results, harness commands, notices, and attached
+        /// context are left out and counted under `projection`; --tail counts
+        /// exchange turns.
+        #[arg(long)]
+        exchange: bool,
         /// Render the session as JSON. The session may include optional
         /// `live`, `accounting`, and `trailing_record` fields supplied by its
         /// authorities.
@@ -855,6 +862,11 @@ enum Command {
         /// Directory for the exported bundles and their manifest.
         #[arg(long)]
         bundle: Option<PathBuf>,
+        /// Keep only the exchange in each bundle: operator requests and the
+        /// agent's visible text, with their timestamps and original ordinals.
+        /// Omitted turns are counted under `projection`.
+        #[arg(long)]
+        exchange: bool,
     },
 }
 
@@ -945,20 +957,29 @@ fn dispatch(cli: Cli) -> Result<()> {
         Command::Show {
             selection,
             tail,
+            exchange,
             json,
         } => {
             selection.validate_input()?;
             let by_latest = selection.latest;
+            // The exchange is cut from every turn the read reached, so its
+            // window counts exchange turns rather than turns of every kind.
+            let read_tail = if exchange { Some(usize::MAX) } else { tail };
             let transcript = if selection.input.supplied() {
                 let backends = selection.input.backends()?;
                 tapes_core::show_with_backends(
                     &backends,
                     selection.selection(),
-                    tail.unwrap_or(100),
+                    read_tail.unwrap_or(100),
                 )?
             } else {
-                let mut transcript = tapes_core::show(selection.selection(), tail)?;
+                let mut transcript = tapes_core::show(selection.selection(), read_tail)?;
                 liveness::annotate(std::slice::from_mut(&mut transcript.session));
+                transcript
+            };
+            let transcript = if exchange {
+                transcript.into_exchange(tail.unwrap_or(100))
+            } else {
                 transcript
             };
             if json {
@@ -1356,14 +1377,23 @@ fn dispatch(cli: Cli) -> Result<()> {
                 );
             }
         }
-        Command::Export { query, bundle } => {
+        Command::Export {
+            query,
+            bundle,
+            exchange,
+        } => {
             query.validate_input()?;
+            let view = if exchange {
+                tapes_core::TurnView::Exchange
+            } else {
+                tapes_core::TurnView::All
+            };
             if let Some(one) = query.single() {
                 let bundle = if query.input.supplied() {
                     let backends = query.input.backends()?;
-                    tapes_core::export_with_backends(&backends, one, bundle.as_deref())?
+                    tapes_core::export_with_backends(&backends, one, bundle.as_deref(), view)?
                 } else {
-                    tapes_core::export(one, bundle.as_deref())?
+                    tapes_core::export(one, bundle.as_deref(), view)?
                 };
                 print_manifest(&bundle);
             } else {
@@ -1375,9 +1405,10 @@ fn dispatch(cli: Cli) -> Result<()> {
                         &backends,
                         &query.set(),
                         bundle.as_deref(),
+                        view,
                     )?
                 } else {
-                    tapes_core::export_selection(&query.set(), bundle.as_deref())?
+                    tapes_core::export_selection(&query.set(), bundle.as_deref(), view)?
                 };
                 print_selection_manifest(&export);
                 if export.every_session_failed() {
@@ -2416,6 +2447,13 @@ fn render_transcript(transcript: &Transcript, by_latest: bool) -> String {
         render_latest_note(&mut out, &transcript.session);
     }
     render_truncation_notes(&mut out, &transcript.truncation);
+    if let Some(projection) = &transcript.projection {
+        out.push_str(&format!(
+            "Note: Only the {} is shown; turns omitted by kind: {}. Drop --exchange to see them.\n",
+            projection.kind.label(),
+            projection.omitted_summary()
+        ));
+    }
     render_read_notes(&mut out, transcript);
     render_notes(&mut out, &transcript.notes);
     out
@@ -2664,6 +2702,7 @@ mod tests {
             graph: None,
             trailing_record: None,
             notes: vec!["Skipped 1 unparseable line.".to_owned()],
+            projection: None,
         }
     }
 

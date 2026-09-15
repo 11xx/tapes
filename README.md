@@ -282,6 +282,12 @@ Citation kind, URI, and title descriptors use 4 KiB per-field and 16 KiB
 cumulative UTF-8 byte bounds; shortened values retain their original lengths
 and explicit truncation facts.
 
+`--exchange` on `show` or `export` keeps only the exchange: operator requests
+and assistant-visible text, each with its timestamps, native ids, and original
+ordinal. Reasoning, tool calls and results, harness commands, notices, and
+attached context are left out and counted by kind under `projection`, and
+`--tail` counts exchange turns.
+
 `show` and `export` also take `--latest` in place of an ID, which resolves the
 most recent session in scope. `--exclude <id>` is repeatable and passes over
 sessions the caller already holds — including its own, which is otherwise the

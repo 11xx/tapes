@@ -682,7 +682,7 @@ impl Role {
 /// turn holds an operator's request, a harness command, context the harness
 /// attached, or a message the harness injected. Every value rests on a field
 /// the harness itself wrote; `Unknown` is the answer where it wrote none.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum TurnKind {
     /// Content addressed to the agent by the person or caller driving the
@@ -851,6 +851,12 @@ pub fn human_timestamp(timestamp: DateTime<Utc>) -> String {
 }
 
 impl TurnKind {
+    /// Whether a turn of this kind belongs to the exchange: what the operator
+    /// asked and what the agent visibly said back.
+    pub fn in_exchange(self) -> bool {
+        matches!(self, Self::Operator | Self::Assistant)
+    }
+
     /// The name a human render uses for the kind.
     pub fn label(self) -> &'static str {
         match self {
@@ -918,6 +924,9 @@ pub struct Transcript {
     pub graph: Option<ConversationGraph>,
     pub trailing_record: Option<TrailingRecord>,
     pub notes: Vec<String>,
+    /// Present when the transcript keeps only some of the turns its read
+    /// produced.
+    pub projection: Option<Projection>,
 }
 
 impl Transcript {
@@ -962,6 +971,92 @@ impl Transcript {
             graph: None,
             trailing_record,
             notes,
+            projection: None,
+        }
+    }
+
+    /// Keep only the exchange, then its newest `tail` turns. Kept turns keep
+    /// their ordinals, so the gaps between them show where omitted turns sat,
+    /// and every omitted turn is counted by kind.
+    pub fn into_exchange(mut self, tail: usize) -> Self {
+        let mut omitted = BTreeMap::new();
+        self.turns.retain(|turn| {
+            let kept = turn.kind.in_exchange();
+            if !kept {
+                *omitted.entry(turn.kind).or_insert(0) += 1;
+            }
+            kept
+        });
+        let total = self.turns.len();
+        if total > tail {
+            self.turns.drain(..total - tail);
+        }
+        let returned = self.turns.len();
+        // A read that stopped once its own window was full knows only a floor
+        // for what came before it, and the exchange inherits that floor.
+        let exact = self
+            .truncation
+            .window
+            .as_ref()
+            .is_none_or(|window| window.omitted_exact);
+        self.truncation.window = (total > returned || !exact).then(|| TurnWindow {
+            returned,
+            omitted: total - returned,
+            omitted_from: End::Head,
+            bound: tail,
+            ordinals: self
+                .turns
+                .first()
+                .zip(self.turns.last())
+                .map(|(first, last)| OrdinalRange {
+                    first: first.ordinal,
+                    last: last.ordinal,
+                }),
+            omitted_exact: exact,
+        });
+        self.truncated = !self.truncation.is_empty();
+        self.projection = Some(Projection {
+            kind: ProjectionKind::Exchange,
+            omitted,
+        });
+        self
+    }
+}
+
+/// Which turns a projected transcript keeps, and how many turns of each other
+/// kind it left out. A turn missing from a projection says nothing about
+/// whether the session recorded one.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Projection {
+    pub kind: ProjectionKind,
+    pub omitted: BTreeMap<TurnKind, usize>,
+}
+
+impl Projection {
+    /// The omitted counts for a human reader, e.g. `3 tool, 1 reasoning`.
+    pub fn omitted_summary(&self) -> String {
+        if self.omitted.is_empty() {
+            return "none".to_owned();
+        }
+        self.omitted
+            .iter()
+            .map(|(kind, count)| format!("{count} {}", kind.label()))
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ProjectionKind {
+    /// Operator requests and the agent's visible text.
+    Exchange,
+}
+
+impl ProjectionKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Exchange => "exchange",
         }
     }
 }
@@ -985,6 +1080,7 @@ impl Serialize for Transcript {
             content: crate::content::inventory(&self.turns),
             trailing_record: self.trailing_record.as_ref(),
             notes: &self.notes,
+            projection: self.projection.as_ref(),
         }
         .serialize(serializer)
     }
@@ -1019,6 +1115,7 @@ impl<'de> Deserialize<'de> for Transcript {
             graph: serialized.graph,
             trailing_record: serialized.trailing_record,
             notes: serialized.notes,
+            projection: serialized.projection,
         })
     }
 }
@@ -1047,6 +1144,8 @@ struct TranscriptRef<'a> {
     trailing_record: Option<&'a TrailingRecord>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     notes: &'a Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    projection: Option<&'a Projection>,
 }
 
 #[derive(Deserialize)]
@@ -1071,6 +1170,8 @@ struct SerializedTranscript {
     trailing_record: Option<TrailingRecord>,
     #[serde(default)]
     notes: Vec<String>,
+    #[serde(default)]
+    projection: Option<Projection>,
 }
 
 #[cfg(test)]
@@ -1179,6 +1280,7 @@ mod tests {
                 timestamp: Some(timestamp(1_700_000_060)),
             }),
             notes: vec!["One record was unavailable.".into()],
+            projection: None,
         };
 
         assert_round_trip(&model);
@@ -1435,6 +1537,7 @@ mod tests {
             graph: None,
             trailing_record: None,
             notes: Vec::new(),
+            projection: None,
         };
 
         let value = serde_json::to_value(&transcript).unwrap();
@@ -1572,6 +1675,7 @@ mod tests {
                 timestamp: None,
             }),
             notes: Vec::new(),
+            projection: None,
         };
 
         let value = serde_json::to_value(&transcript).unwrap();
