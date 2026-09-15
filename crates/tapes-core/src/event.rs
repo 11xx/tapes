@@ -1,4 +1,6 @@
+use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet};
+use std::hash::{Hash, Hasher};
 
 use chrono::{DateTime, Utc};
 use serde::Serialize;
@@ -7,7 +9,7 @@ use serde_json::Value;
 use crate::content::{self, ArtifactReference, ContentCoverage, ContentInventory, ContentPart};
 use crate::model::{
     BoundedText, ByteSpan, ReadEvidence, RecordRef, Session, SourceBound, TerminalObservation,
-    TextTailEvidence, Transcript, Truncation,
+    TextTailEvidence, Transcript, Truncation, Turn,
 };
 
 pub const EVENTS_SCHEMA: &str = "tapes-events/6";
@@ -80,7 +82,7 @@ pub struct ArtifactConsumption {
     pub consumer: Option<RecordRef>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum EventKind {
     ToolCall,
@@ -266,50 +268,21 @@ fn truncation_is_empty(truncation: &Truncation) -> bool {
 /// outside the returned window.
 pub fn project(transcript: Transcript, tail: usize) -> EventTranscript {
     let total_turns = transcript.turns.len();
-    let read_was_bounded = transcript.truncation.source.iter().any(|bound| {
-        matches!(
-            bound,
-            SourceBound::FileTail { .. }
-                | SourceBound::RecordPage { .. }
-                | SourceBound::InputCoverage { .. }
-        )
-    });
-    let mut records = transcript
+    let unpaired = transcript
         .turns
         .iter()
-        .filter_map(|turn| {
-            turn.tool.clone().map(|event| EventRecord {
-                ordinal: turn.ordinal,
-                native_id: turn.native_id.clone(),
-                record_ref: turn.record_ref.clone(),
-                parts: turn.parts.clone(),
-                coverage: turn.coverage.clone(),
-                ts: turn.ts,
-                event,
-                pair: None,
-                duration_ms: None,
-                incomplete: None,
-            })
-        })
-        .flat_map(|call| {
-            let result = ((call.event.kind == EventKind::ToolCall)
-                && call.event.subtype == "tool"
-                && matches!(call.event.status.as_deref(), Some("completed" | "error")))
-            .then(|| {
-                let mut result = call.clone();
-                result.ts = result.event.completed_ts;
-                result.event.kind = EventKind::ToolResult;
-                result.event.arguments = None;
-                result.event.invocations.clear();
-                result.event.artifact_references.clear();
-                result.event.artifact_consumptions.clear();
-                result
-            });
-            std::iter::once(call).chain(result)
-        })
+        .flat_map(turn_records)
         .collect::<Vec<_>>();
-
-    pair(&mut records, read_was_bounded);
+    let mut index = PairIndex::default();
+    for record in &unpaired {
+        index.observe(record);
+    }
+    let mut pairing = index.pairing(read_was_bounded(&transcript.truncation.source));
+    let mut records = unpaired
+        .into_iter()
+        .map(|record| pairing.emit(record))
+        .collect::<anyhow::Result<Vec<_>>>()
+        .expect("records replayed from one vector match their observation");
 
     let returned_turns = total_turns.min(tail);
     let first_ordinal = total_turns.saturating_sub(returned_turns);
@@ -338,73 +311,277 @@ pub fn project(transcript: Transcript, tail: usize) -> EventTranscript {
     }
 }
 
-fn pair(records: &mut [EventRecord], read_was_bounded: bool) {
-    let mut calls = HashMap::<String, Vec<usize>>::new();
-    for index in 0..records.len() {
-        let Some(call_id) = records[index].event.call_id.clone() else {
-            records[index].incomplete = Some(match records[index].event.kind {
-                EventKind::ToolCall => Incomplete::NoResultInRead,
-                EventKind::ToolResult if read_was_bounded => Incomplete::CallBeforeReadBound,
-                EventKind::ToolResult => Incomplete::CallNotRecorded,
-            });
-            continue;
+/// Whether the read stopped short of the start of its source, so a result
+/// without its call may answer a call recorded beyond the bound.
+pub fn read_was_bounded(source: &[SourceBound]) -> bool {
+    source.iter().any(|bound| {
+        matches!(
+            bound,
+            SourceBound::FileTail { .. }
+                | SourceBound::RecordPage { .. }
+                | SourceBound::InputCoverage { .. }
+        )
+    })
+}
+
+/// The unpaired tool-event records one turn contributes, in order: its tool
+/// event, then the result a call part carries when it already records its
+/// own completion.
+pub fn turn_records(turn: &Turn) -> impl Iterator<Item = EventRecord> {
+    let call = turn.tool.clone().map(|event| EventRecord {
+        ordinal: turn.ordinal,
+        native_id: turn.native_id.clone(),
+        record_ref: turn.record_ref.clone(),
+        parts: turn.parts.clone(),
+        coverage: turn.coverage.clone(),
+        ts: turn.ts,
+        event,
+        pair: None,
+        duration_ms: None,
+        incomplete: None,
+    });
+    let result = call
+        .as_ref()
+        .filter(|call| {
+            call.event.kind == EventKind::ToolCall
+                && call.event.subtype == "tool"
+                && matches!(call.event.status.as_deref(), Some("completed" | "error"))
+        })
+        .map(|call| {
+            let mut result = call.clone();
+            result.ts = result.event.completed_ts;
+            result.event.kind = EventKind::ToolResult;
+            result.event.arguments = None;
+            result.event.invocations.clear();
+            result.event.artifact_references.clear();
+            result.event.artifact_consumptions.clear();
+            result
+        });
+    call.into_iter().chain(result)
+}
+
+/// The first of two pairing passes over one sequence of unpaired records.
+///
+/// A result pairs with the most recent open call carrying its call id. A call
+/// learns everything its result contributes (the pair reference, the
+/// duration, artifact consumption, and the witnessed structured runtime
+/// invocations) only once that result is seen, so this pass observes every
+/// record and keeps just those facts for each answered call, keyed by the
+/// call's position among the calls. [`PairIndex::pairing`] then replays the
+/// same records and emits each one final, in order. Memory follows the
+/// calls, never the records.
+#[derive(Default)]
+pub struct PairIndex {
+    open: HashMap<String, Vec<ObservedCall>>,
+    results: HashMap<usize, ResultFacts>,
+    calls: usize,
+    replay: Replay,
+}
+
+/// The second pairing pass: each record handed to [`Pairing::emit`] leaves
+/// final. The records must be the ones [`PairIndex::observe`] saw, in the
+/// same order; a replay that differs is an error rather than a wrong pair.
+pub struct Pairing {
+    open: HashMap<String, Vec<EmittedCall>>,
+    results: HashMap<usize, ResultFacts>,
+    calls: usize,
+    read_was_bounded: bool,
+    observed: Replay,
+    replay: Replay,
+    counts: PairCounts,
+}
+
+struct ObservedCall {
+    sequence: usize,
+    declares_artifacts: bool,
+}
+
+struct EmittedCall {
+    reference: PairRef,
+    result: Option<PairRef>,
+}
+
+/// What an answered call takes from its result.
+struct ResultFacts {
+    reference: PairRef,
+    ts: Option<DateTime<Utc>>,
+    artifact_references: Vec<ArtifactReference>,
+}
+
+/// The identity of a record sequence, so a replay can be checked against the
+/// observation without keeping the records.
+#[derive(Default)]
+struct Replay {
+    records: usize,
+    digest: DefaultHasher,
+}
+
+impl Replay {
+    fn add(&mut self, record: &EventRecord) {
+        self.records += 1;
+        reference(record).hash(&mut self.digest);
+        record.event.kind.hash(&mut self.digest);
+        record.event.call_id.hash(&mut self.digest);
+    }
+
+    fn matches(&self, other: &Self) -> bool {
+        self.records == other.records && self.digest.finish() == other.digest.finish()
+    }
+}
+
+const REPLAY_DIVERGED: &str =
+    "tool events differed between the two pairing passes; the recording changed while it was read";
+
+impl PairIndex {
+    pub fn observe(&mut self, record: &EventRecord) {
+        self.replay.add(record);
+        let Some(call_id) = &record.event.call_id else {
+            return;
         };
-        match records[index].event.kind {
-            EventKind::ToolCall => calls.entry(call_id).or_default().push(index),
-            EventKind::ToolResult => {
-                let Some(call_index) = calls.get_mut(&call_id).and_then(Vec::pop) else {
-                    records[index].incomplete = Some(if read_was_bounded {
-                        Incomplete::CallBeforeReadBound
-                    } else {
-                        Incomplete::CallNotRecorded
+        match record.event.kind {
+            EventKind::ToolCall => {
+                self.open
+                    .entry(call_id.clone())
+                    .or_default()
+                    .push(ObservedCall {
+                        sequence: self.calls,
+                        declares_artifacts: !record.event.artifact_references.is_empty(),
                     });
-                    continue;
+                self.calls += 1;
+            }
+            EventKind::ToolResult => {
+                let Some(call) = pop_open(&mut self.open, call_id) else {
+                    return;
                 };
-                records[call_index].pair = Some(reference(&records[index]));
-                records[index].pair = Some(reference(&records[call_index]));
-                records[call_index].event.artifact_consumptions = artifact_consumptions(
-                    &records[call_index].event.artifact_references,
-                    &records[index].event.artifact_references,
-                    records[index].record_ref.clone(),
+                self.results.insert(
+                    call.sequence,
+                    ResultFacts {
+                        reference: reference(record),
+                        ts: record.ts,
+                        artifact_references: if call.declares_artifacts {
+                            record.event.artifact_references.clone()
+                        } else {
+                            Vec::new()
+                        },
+                    },
                 );
-                let separate_native_record = matches!(
-                    (
-                        records[call_index].record_ref.as_ref(),
-                        records[index].record_ref.as_ref()
-                    ),
-                    (Some(call), Some(result)) if call != result
-                );
-                for invocation in &mut records[call_index].event.invocations {
-                    if separate_native_record
-                        && invocation.coverage == InvocationCoverage::StructuredRuntime
-                    {
-                        invocation.witnessed_result = records[index].record_ref.clone();
-                    }
-                }
-                records[call_index].duration_ms = match (records[call_index].ts, records[index].ts)
-                {
-                    (Some(call_ts), Some(result_ts)) if result_ts >= call_ts => {
-                        Some(result_ts.signed_duration_since(call_ts).num_milliseconds())
-                    }
-                    _ => None,
-                };
             }
         }
     }
-    for pending in calls.into_values().flatten() {
-        records[pending].incomplete = Some(Incomplete::NoResultInRead);
-        records[pending].event.artifact_consumptions = records[pending]
-            .event
-            .artifact_references
-            .iter()
-            .cloned()
-            .map(|reference| ArtifactConsumption {
-                reference,
-                status: ConsumptionStatus::NoMatchingConsumptionObservedInRead,
-                consumer: None,
-            })
-            .collect();
+
+    /// Start the emitting pass. `read_was_bounded` names why a result
+    /// without its call is incomplete; see [`read_was_bounded`].
+    pub fn pairing(self, read_was_bounded: bool) -> Pairing {
+        Pairing {
+            open: HashMap::new(),
+            results: self.results,
+            calls: 0,
+            read_was_bounded,
+            observed: self.replay,
+            replay: Replay::default(),
+            counts: PairCounts::default(),
+        }
     }
+}
+
+impl Pairing {
+    pub fn emit(&mut self, mut record: EventRecord) -> anyhow::Result<EventRecord> {
+        self.replay.add(&record);
+        if self.replay.records > self.observed.records {
+            anyhow::bail!(REPLAY_DIVERGED);
+        }
+        let orphan = if self.read_was_bounded {
+            Incomplete::CallBeforeReadBound
+        } else {
+            Incomplete::CallNotRecorded
+        };
+        let Some(call_id) = record.event.call_id.clone() else {
+            record.incomplete = Some(match record.event.kind {
+                EventKind::ToolCall => Incomplete::NoResultInRead,
+                EventKind::ToolResult => orphan,
+            });
+            self.counts.incomplete += 1;
+            return Ok(record);
+        };
+        match record.event.kind {
+            EventKind::ToolCall => {
+                let result = self.results.remove(&self.calls);
+                self.calls += 1;
+                let expected = result.as_ref().map(|facts| facts.reference.clone());
+                match result {
+                    Some(facts) => complete_call(&mut record, facts),
+                    None => {
+                        record.incomplete = Some(Incomplete::NoResultInRead);
+                        record.event.artifact_consumptions =
+                            artifact_consumptions(&record.event.artifact_references, &[], None);
+                        self.counts.incomplete += 1;
+                    }
+                }
+                self.open.entry(call_id).or_default().push(EmittedCall {
+                    reference: reference(&record),
+                    result: expected,
+                });
+            }
+            EventKind::ToolResult => match pop_open(&mut self.open, &call_id) {
+                Some(call) => {
+                    if call.result.as_ref() != Some(&reference(&record)) {
+                        anyhow::bail!(REPLAY_DIVERGED);
+                    }
+                    record.pair = Some(call.reference);
+                    self.counts.complete += 1;
+                }
+                None => {
+                    record.incomplete = Some(orphan);
+                    self.counts.incomplete += 1;
+                }
+            },
+        }
+        Ok(record)
+    }
+
+    /// Close the emitting pass. The counts are those of the emitted records:
+    /// every pair once, and every incomplete record.
+    pub fn finish(self) -> anyhow::Result<PairCounts> {
+        if !self.replay.matches(&self.observed) {
+            anyhow::bail!(REPLAY_DIVERGED);
+        }
+        Ok(self.counts)
+    }
+}
+
+fn pop_open<T>(open: &mut HashMap<String, Vec<T>>, call_id: &str) -> Option<T> {
+    let calls = open.get_mut(call_id)?;
+    let call = calls.pop();
+    if calls.is_empty() {
+        open.remove(call_id);
+    }
+    call
+}
+
+fn complete_call(call: &mut EventRecord, result: ResultFacts) {
+    call.event.artifact_consumptions = artifact_consumptions(
+        &call.event.artifact_references,
+        &result.artifact_references,
+        result.reference.record_ref.clone(),
+    );
+    let separate_native_record = matches!(
+        (call.record_ref.as_ref(), result.reference.record_ref.as_ref()),
+        (Some(call), Some(result)) if call != result
+    );
+    if separate_native_record {
+        for invocation in &mut call.event.invocations {
+            if invocation.coverage == InvocationCoverage::StructuredRuntime {
+                invocation.witnessed_result = result.reference.record_ref.clone();
+            }
+        }
+    }
+    call.duration_ms = match (call.ts, result.ts) {
+        (Some(call_ts), Some(result_ts)) if result_ts >= call_ts => {
+            Some(result_ts.signed_duration_since(call_ts).num_milliseconds())
+        }
+        _ => None,
+    };
+    call.pair = Some(result.reference);
 }
 
 fn artifact_key(
@@ -1802,6 +1979,415 @@ mod tests {
         assert_eq!(projected.events[0].pair.as_ref().unwrap().ordinal, 0);
         assert!(projected.events[0].incomplete.is_none());
         assert_eq!(projected.pairs.complete, 1);
+    }
+
+    /// An independent statement of pairing over one indexed vector: each call
+    /// is mutated in place when its result arrives and unanswered calls are
+    /// closed after the last record. The two-pass core must reproduce it.
+    fn whole_vector_pairing(records: &mut [EventRecord], read_was_bounded: bool) {
+        let mut calls = HashMap::<String, Vec<usize>>::new();
+        for index in 0..records.len() {
+            let Some(call_id) = records[index].event.call_id.clone() else {
+                records[index].incomplete = Some(match records[index].event.kind {
+                    EventKind::ToolCall => Incomplete::NoResultInRead,
+                    EventKind::ToolResult if read_was_bounded => Incomplete::CallBeforeReadBound,
+                    EventKind::ToolResult => Incomplete::CallNotRecorded,
+                });
+                continue;
+            };
+            match records[index].event.kind {
+                EventKind::ToolCall => calls.entry(call_id).or_default().push(index),
+                EventKind::ToolResult => {
+                    let Some(call_index) = calls.get_mut(&call_id).and_then(Vec::pop) else {
+                        records[index].incomplete = Some(if read_was_bounded {
+                            Incomplete::CallBeforeReadBound
+                        } else {
+                            Incomplete::CallNotRecorded
+                        });
+                        continue;
+                    };
+                    records[call_index].pair = Some(reference(&records[index]));
+                    records[index].pair = Some(reference(&records[call_index]));
+                    records[call_index].event.artifact_consumptions = artifact_consumptions(
+                        &records[call_index].event.artifact_references,
+                        &records[index].event.artifact_references,
+                        records[index].record_ref.clone(),
+                    );
+                    let separate_native_record = matches!(
+                        (
+                            records[call_index].record_ref.as_ref(),
+                            records[index].record_ref.as_ref()
+                        ),
+                        (Some(call), Some(result)) if call != result
+                    );
+                    for invocation in &mut records[call_index].event.invocations {
+                        if separate_native_record
+                            && invocation.coverage == InvocationCoverage::StructuredRuntime
+                        {
+                            invocation.witnessed_result = records[index].record_ref.clone();
+                        }
+                    }
+                    records[call_index].duration_ms =
+                        match (records[call_index].ts, records[index].ts) {
+                            (Some(call_ts), Some(result_ts)) if result_ts >= call_ts => {
+                                Some(result_ts.signed_duration_since(call_ts).num_milliseconds())
+                            }
+                            _ => None,
+                        };
+                }
+            }
+        }
+        for pending in calls.into_values().flatten() {
+            records[pending].incomplete = Some(Incomplete::NoResultInRead);
+            records[pending].event.artifact_consumptions = records[pending]
+                .event
+                .artifact_references
+                .iter()
+                .cloned()
+                .map(|reference| ArtifactConsumption {
+                    reference,
+                    status: ConsumptionStatus::NoMatchingConsumptionObservedInRead,
+                    consumer: None,
+                })
+                .collect();
+        }
+    }
+
+    type Replayer<'a> = dyn FnMut(&mut dyn FnMut(Turn)) + 'a;
+
+    /// Pair the way a streaming reader does: `replay` hands every turn to its
+    /// sink one at a time, once for each pass.
+    fn two_passes(
+        replay: &mut Replayer<'_>,
+        read_was_bounded: bool,
+    ) -> (Vec<EventRecord>, PairCounts) {
+        let mut index = PairIndex::default();
+        replay(&mut |turn| turn_records(&turn).for_each(|record| index.observe(&record)));
+        let mut pairing = index.pairing(read_was_bounded);
+        let mut emitted = Vec::new();
+        replay(&mut |turn| {
+            for record in turn_records(&turn) {
+                emitted.push(pairing.emit(record).expect("an identical replay pairs"));
+            }
+        });
+        (
+            emitted,
+            pairing.finish().expect("an identical replay closes"),
+        )
+    }
+
+    /// Assert that both passes over `replay` reproduce the whole-vector
+    /// pairing of `turns`, and return that pairing.
+    fn assert_two_passes_match(
+        label: &str,
+        turns: &[Turn],
+        replay: &mut Replayer<'_>,
+        read_was_bounded: bool,
+    ) -> Vec<EventRecord> {
+        let mut expected = turns.iter().flat_map(turn_records).collect::<Vec<_>>();
+        whole_vector_pairing(&mut expected, read_was_bounded);
+        let (emitted, counts) = two_passes(replay, read_was_bounded);
+        assert_eq!(emitted, expected, "{label}");
+        assert_eq!(counts, pair_counts(&expected), "{label}");
+        expected
+    }
+
+    fn fixture_root() -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures")
+    }
+
+    #[test]
+    fn two_pass_pairing_reproduces_the_whole_vector_over_every_fixture_recording() {
+        use crate::backend::{
+            claude::ClaudeBackend, codex::CodexBackend, opencode::OpenCodeBackend, pi::PiBackend,
+            Backend, Query,
+        };
+        use crate::input::{InputBackend, InputFormat, InputOptions};
+
+        let root = fixture_root();
+        let mut totals = PairCounts::default();
+        let mut sessions = 0;
+        let streamed: Vec<Box<dyn Backend>> = vec![
+            Box::new(ClaudeBackend::new(root.join("claude"))),
+            Box::new(CodexBackend::new(root.join("codex"))),
+            Box::new(PiBackend::new(root.join("pi"))),
+        ];
+        for backend in &streamed {
+            for session in backend.list(&Query::unscoped(usize::MAX)).unwrap().sessions {
+                let label = format!("{} {}", backend.harness(), session.id);
+                let mut replay = |sink: &mut dyn FnMut(Turn)| {
+                    let mut ordinal = 0;
+                    backend
+                        .stream_transcript(&session, &mut |mut turn| {
+                            turn.ordinal = ordinal;
+                            ordinal += 1;
+                            sink(turn);
+                            Ok(())
+                        })
+                        .unwrap();
+                };
+                let mut turns = Vec::new();
+                replay(&mut |turn| turns.push(turn));
+                let paired = assert_two_passes_match(&label, &turns, &mut replay, false);
+                let counts = pair_counts(&paired);
+                totals.complete += counts.complete;
+                totals.incomplete += counts.incomplete;
+                sessions += 1;
+            }
+        }
+        let read: Vec<Box<dyn Backend>> = vec![
+            Box::new(OpenCodeBackend::new(root.join("opencode/opencode2"))),
+            Box::new(
+                InputBackend::new(InputOptions::new(
+                    vec![root.join("input")],
+                    InputFormat::Auto,
+                ))
+                .unwrap(),
+            ),
+        ];
+        for backend in &read {
+            for session in backend.list(&Query::unscoped(usize::MAX)).unwrap().sessions {
+                let label = format!("{} {}", backend.harness(), session.id);
+                let transcript = backend.transcript(&session, usize::MAX).unwrap();
+                let bounded = read_was_bounded(&transcript.truncation.source);
+                let turns = transcript.turns.clone();
+                let mut replay =
+                    |sink: &mut dyn FnMut(Turn)| turns.iter().cloned().for_each(&mut *sink);
+                let paired = assert_two_passes_match(&label, &turns, &mut replay, bounded);
+                assert_eq!(project(transcript, usize::MAX).events, paired, "{label}");
+                let counts = pair_counts(&paired);
+                totals.complete += counts.complete;
+                totals.incomplete += counts.incomplete;
+                sessions += 1;
+            }
+        }
+        assert!(sessions >= 8, "fixture sessions reached: {sessions}");
+        assert!(totals.complete > 0 && totals.incomplete > 0, "{totals:?}");
+    }
+
+    fn record_at(offset: u64) -> RecordRef {
+        RecordRef {
+            domain: "file:fixture.jsonl".to_owned(),
+            revision: None,
+            span: Some(ByteSpan {
+                start: offset,
+                end: offset + 1,
+            }),
+            native_id: None,
+            pointer: None,
+            part_index: 0,
+            content_part_index: None,
+        }
+    }
+
+    fn located(mut turn: Turn, offset: u64) -> Turn {
+        turn.record_ref = Some(record_at(offset));
+        turn
+    }
+
+    fn declaring(mut event: ToolEvent, artifacts: Value) -> ToolEvent {
+        event.artifact_references = artifact_references(&artifacts);
+        event
+    }
+
+    fn without_call_id(mut event: ToolEvent) -> ToolEvent {
+        event.call_id = None;
+        event
+    }
+
+    fn running(mut event: ToolEvent) -> ToolEvent {
+        event.invocations = structured_runtime_invocations(
+            &serde_json::json!({ "command": ["git", "status"] }),
+            "payload.item.command",
+        );
+        event
+    }
+
+    #[test]
+    fn two_pass_pairing_covers_every_pairing_rule_in_both_read_bounds() {
+        let combined = ToolEvent {
+            subtype: "tool".to_owned(),
+            status: Some("completed".to_owned()),
+            completed_ts: Some(Utc.timestamp_opt(50, 0).unwrap()),
+            ..event(EventKind::ToolCall, "part-1")
+        };
+        let turns = vec![
+            located(
+                turn(
+                    0,
+                    10,
+                    declaring(
+                        event(EventKind::ToolCall, "repeated"),
+                        serde_json::json!([{ "path": "a.txt" }, { "path": "b.txt" }]),
+                    ),
+                ),
+                0,
+            ),
+            located(turn(1, 20, event(EventKind::ToolCall, "repeated")), 1),
+            located(turn(2, 23, event(EventKind::ToolResult, "repeated")), 2),
+            located(
+                turn(
+                    3,
+                    25,
+                    declaring(
+                        event(EventKind::ToolResult, "repeated"),
+                        serde_json::json!({ "path": "a.txt" }),
+                    ),
+                ),
+                3,
+            ),
+            located(turn(4, 26, event(EventKind::ToolResult, "orphan")), 4),
+            located(
+                turn(
+                    5,
+                    27,
+                    declaring(
+                        event(EventKind::ToolCall, "unanswered"),
+                        serde_json::json!({ "path": "c.txt" }),
+                    ),
+                ),
+                5,
+            ),
+            located(
+                turn(6, 28, without_call_id(event(EventKind::ToolCall, "-"))),
+                6,
+            ),
+            located(
+                turn(7, 29, without_call_id(event(EventKind::ToolResult, "-"))),
+                7,
+            ),
+            located(
+                turn(8, 40, running(event(EventKind::ToolCall, "runtime"))),
+                8,
+            ),
+            located(turn(9, 39, event(EventKind::ToolResult, "runtime")), 9),
+            located(turn(10, 45, combined), 10),
+            located(
+                turn(11, 60, running(event(EventKind::ToolCall, "inline"))),
+                11,
+            ),
+            located(turn(12, 61, event(EventKind::ToolResult, "inline")), 11),
+        ];
+
+        for (bounded, orphan) in [
+            (false, Incomplete::CallNotRecorded),
+            (true, Incomplete::CallBeforeReadBound),
+        ] {
+            let label = format!("bounded={bounded}");
+            let mut replay =
+                |sink: &mut dyn FnMut(Turn)| turns.iter().cloned().for_each(&mut *sink);
+            let records = assert_two_passes_match(&label, &turns, &mut replay, bounded);
+
+            assert_eq!(records.len(), 14, "{label}");
+            // Duplicate ids pair with the most recent open call first.
+            assert_eq!(records[1].pair.as_ref().unwrap().ordinal, 2, "{label}");
+            assert_eq!(records[0].pair.as_ref().unwrap().ordinal, 3, "{label}");
+            assert_eq!(records[0].duration_ms, Some(15_000), "{label}");
+            assert_eq!(
+                records[0]
+                    .event
+                    .artifact_consumptions
+                    .iter()
+                    .map(|consumption| (consumption.status, consumption.consumer.clone()))
+                    .collect::<Vec<_>>(),
+                vec![
+                    (
+                        ConsumptionStatus::MatchingConsumptionObserved,
+                        Some(record_at(3))
+                    ),
+                    (ConsumptionStatus::NoMatchingConsumptionObservedInRead, None),
+                ],
+                "{label}"
+            );
+            assert_eq!(records[4].incomplete, Some(orphan.clone()), "{label}");
+            assert_eq!(
+                records[5].incomplete,
+                Some(Incomplete::NoResultInRead),
+                "{label}"
+            );
+            assert_eq!(
+                records[5].event.artifact_consumptions[0].status,
+                ConsumptionStatus::NoMatchingConsumptionObservedInRead,
+                "{label}"
+            );
+            assert_eq!(
+                records[6].incomplete,
+                Some(Incomplete::NoResultInRead),
+                "{label}"
+            );
+            assert_eq!(records[7].incomplete, Some(orphan), "{label}");
+            // A result in its own native record witnesses the runtime call;
+            // a result recorded before its call yields no duration.
+            assert_eq!(
+                records[8].event.invocations[0].witnessed_result,
+                Some(record_at(9)),
+                "{label}"
+            );
+            assert_eq!(records[8].duration_ms, None, "{label}");
+            // A completed combined part pairs with the result it carries.
+            assert_eq!(records[11].event.kind, EventKind::ToolResult, "{label}");
+            assert_eq!(records[10].pair.as_ref().unwrap().ordinal, 10, "{label}");
+            assert_eq!(records[10].duration_ms, Some(5_000), "{label}");
+            // A result sharing its call's native record witnesses nothing.
+            assert_eq!(records[12].pair.as_ref().unwrap().ordinal, 12, "{label}");
+            assert_eq!(
+                records[12].event.invocations[0].witnessed_result, None,
+                "{label}"
+            );
+            assert_eq!(
+                pair_counts(&records),
+                PairCounts {
+                    complete: 5,
+                    incomplete: 4
+                },
+                "{label}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_replay_that_differs_from_its_observation_is_refused() {
+        let observe = |turns: &[Turn]| {
+            let mut index = PairIndex::default();
+            turns
+                .iter()
+                .flat_map(turn_records)
+                .for_each(|record| index.observe(&record));
+            index.pairing(false)
+        };
+        let answered = [
+            turn(0, 10, event(EventKind::ToolCall, "call")),
+            turn(1, 11, event(EventKind::ToolResult, "call")),
+        ];
+
+        let mut longer = observe(&answered);
+        for record in answered.iter().flat_map(turn_records) {
+            longer.emit(record).unwrap();
+        }
+        let appended = turn(2, 12, event(EventKind::ToolCall, "later"));
+        assert!(longer
+            .emit(turn_records(&appended).next().unwrap())
+            .is_err());
+
+        let mut moved = observe(&answered);
+        moved
+            .emit(turn_records(&answered[0]).next().unwrap())
+            .unwrap();
+        let elsewhere = turn(2, 11, event(EventKind::ToolResult, "call"));
+        assert!(moved
+            .emit(turn_records(&elsewhere).next().unwrap())
+            .is_err());
+
+        let mut shorter = observe(&answered);
+        shorter
+            .emit(turn_records(&answered[0]).next().unwrap())
+            .unwrap();
+        assert!(shorter.finish().is_err());
+
+        let mut renamed = observe(&[turn(0, 10, event(EventKind::ToolCall, "first"))]);
+        let other = turn(0, 10, event(EventKind::ToolCall, "second"));
+        renamed.emit(turn_records(&other).next().unwrap()).unwrap();
+        assert!(renamed.finish().is_err());
     }
 
     #[test]
