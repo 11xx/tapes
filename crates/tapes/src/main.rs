@@ -679,7 +679,9 @@ enum Command {
         /// turn as it is read so memory follows one record rather than the
         /// file. Every turn is shown unless --tail is given; with --json the
         /// same tapes-session object is written turn by turn. Installed Claude,
-        /// Codex, and Pi recordings; OpenCode refuses it by name.
+        /// Codex, Pi, and OpenCode sessions; OpenCode pages every message
+        /// oldest first, and its stable database keeps cutting part text at
+        /// 4000 characters (2000 for tool payloads), reported as a source bound.
         #[arg(long, conflicts_with = "read_bytes")]
         full: bool,
         /// Render the session as JSON. The session may include optional
@@ -2727,7 +2729,7 @@ impl<W: std::io::Write> FullShow<W> {
             turns,
             Truncation {
                 window,
-                source: Vec::new(),
+                source: read.source_bounds,
             },
             read.trailing_record,
             notes,
@@ -2747,8 +2749,8 @@ impl<W: std::io::Write> FullShow<W> {
         let mut footer = String::new();
         render_footer(&mut footer, &transcript, self.by_latest, flag);
         footer.push_str(&format!(
-            "Read evidence: the whole recording was streamed; source length {} bytes.\n",
-            read.source_length
+            "Read evidence: the whole recording was streamed; {}.\n",
+            read.coordinates.describe(read.source_length)
         ));
         self.out.write_all(footer.as_bytes())?;
         self.out.flush()?;

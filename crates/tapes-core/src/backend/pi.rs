@@ -337,7 +337,9 @@ impl Backend for PiBackend {
             Ok(produced)
         })?;
         Ok(StreamedTranscript {
+            coordinates: super::StreamCoordinates::FileBytes,
             source_length: read.source_length,
+            source_bounds: Vec::new(),
             skipped: read.skipped,
             gaps: read.gaps,
             trailing_record,

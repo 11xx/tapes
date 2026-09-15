@@ -512,7 +512,9 @@ impl Backend for ClaudeBackend {
         })?;
         Ok(StreamedTranscript {
             terminal: None,
+            coordinates: super::StreamCoordinates::FileBytes,
             source_length: read.source_length,
+            source_bounds: Vec::new(),
             skipped: read.skipped,
             trailing_record: streamed_trailing_record(read.last.as_ref(), claude_trailing_kind),
             gaps: read.gaps,

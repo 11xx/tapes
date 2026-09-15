@@ -4894,6 +4894,207 @@ fn show_renders_what_precedes_a_message_the_transport_cannot_carry() {
     );
 }
 
+/// Run tapes against an OpenCode store rooted at `root`, expecting success.
+fn opencode_stdout(root: &Path, args: &[&str]) -> String {
+    let output = tapes()
+        .args(args)
+        .env("HOME", root.join("home"))
+        .env_remove("XDG_DATA_HOME")
+        .env("PATH", root)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).unwrap()
+}
+
+/// A bounded read of a 1,200-message session stops at the 1,000-message
+/// ceiling; `--full` streams every message, and the newest turns it streams
+/// are the bounded read's turns, normalized the same way.
+fn assert_opencode_full_read_passes_the_ceiling(bounded: &Value, full: &Value) {
+    let bounded_turns = bounded["turns"].as_array().unwrap();
+    assert_eq!(bounded_turns.len(), 1000);
+    assert!(
+        bounded["truncation"]["source"]
+            .as_array()
+            .unwrap()
+            .contains(
+                &serde_json::json!({"kind": "record-page", "records": 1000, "of": "messages"})
+            ),
+        "{}",
+        bounded["truncation"]
+    );
+
+    let full_turns = full["turns"].as_array().unwrap();
+    assert_eq!(full["read"]["coordinate_domain"], "opencode-message");
+    assert_eq!(full["read"]["source_length"], 1200);
+    assert_eq!(full["read"]["projection_options"][0], "full");
+    let offset = full_turns.len() - bounded_turns.len();
+    for (index, turn) in full_turns.iter().enumerate() {
+        assert_eq!(turn["ordinal"], index);
+    }
+    for (bounded_turn, full_turn) in bounded_turns.iter().zip(&full_turns[offset..]) {
+        for field in ["role", "kind", "text", "native_id", "ts", "parts"] {
+            assert_eq!(bounded_turn[field], full_turn[field], "{field}");
+        }
+    }
+}
+
+/// `show --full` pages an OpenCode API session oldest first past the message
+/// ceiling a bounded read keeps.
+#[test]
+fn show_full_streams_every_message_of_an_opencode_api_session() {
+    let root = TemporaryDirectory::new(
+        std::env::temp_dir().join(format!("tapes-cli-opencode-many-{}", std::process::id())),
+    );
+    let _program = opencode_program(root.path(), "opencode2");
+    let id = "ses_many_fixture";
+    let json = |args: &[&str]| -> Value {
+        serde_json::from_str(&opencode_stdout(root.path(), args)).unwrap()
+    };
+
+    let bounded = json(&["show", id, "--tail", "5000", "--json"]);
+    let full = json(&["show", id, "--full", "--json"]);
+    assert_opencode_full_read_passes_the_ceiling(&bounded, &full);
+    let texts = full["turns"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|turn| turn["text"].as_str().unwrap().to_owned())
+        .collect::<Vec<_>>();
+    let expected = (0..1200)
+        .map(|index| match index % 2 {
+            0 => format!("Request {index}"),
+            _ => format!("Answer {index}"),
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(texts, expected);
+    assert!(full.get("truncation").is_none(), "{}", full["truncation"]);
+
+    let human = opencode_stdout(root.path(), &["show", id, "--full"]);
+    assert!(human.contains("Request 0\n"), "{human}");
+    assert!(
+        human.contains("the whole recording was streamed; 1200 messages"),
+        "{human}"
+    );
+}
+
+/// `show --full` pages a stable OpenCode database oldest first past the
+/// message ceiling, through messages that share a creation time across a
+/// page and a message whose parts span several part pages, and reports the
+/// part text the projection still cuts.
+#[test]
+fn show_full_streams_every_message_of_an_opencode_database_session() {
+    let root = TemporaryDirectory::new(std::env::temp_dir().join(format!(
+        "tapes-cli-opencode-database-full-{}",
+        std::process::id()
+    )));
+    let _program = opencode_program(root.path(), "opencode");
+    let sqlite3 = std::env::split_paths(&std::env::var_os("PATH").unwrap())
+        .map(|directory| directory.join("sqlite3"))
+        .find(|path| path.is_file())
+        .expect("the OpenCode database test drives a real sqlite3");
+    std::os::unix::fs::symlink(&sqlite3, root.path().join("sqlite3")).unwrap();
+    let store = root.path().join("home/.local/share/opencode");
+    fs::create_dir_all(&store).unwrap();
+    // The message and part tables copy a real store's schema; the session
+    // table holds the columns the reader selects. Every third message shares
+    // a creation time, message 1 carries 300 parts of one creation time, and
+    // the last part is longer than the projection keeps.
+    let schema = r#"
+CREATE TABLE `session` (`id` text PRIMARY KEY, `parent_id` text, `directory` text NOT NULL,
+  `title` text NOT NULL, `model` text, `cost` real, `tokens_input` integer,
+  `tokens_output` integer, `tokens_reasoning` integer, `tokens_cache_read` integer,
+  `tokens_cache_write` integer, `time_created` integer NOT NULL, `time_updated` integer NOT NULL);
+CREATE TABLE `message` (`id` text PRIMARY KEY, `session_id` text NOT NULL,
+  `time_created` integer NOT NULL, `time_updated` integer NOT NULL, `data` text NOT NULL);
+CREATE INDEX `message_session_time_created_id_idx` ON `message` (`session_id`,`time_created`,`id`);
+CREATE TABLE `part` (`id` text PRIMARY KEY, `message_id` text NOT NULL, `session_id` text NOT NULL,
+  `time_created` integer NOT NULL, `time_updated` integer NOT NULL, `data` text NOT NULL);
+CREATE INDEX `part_session_idx` ON `part` (`session_id`);
+CREATE INDEX `part_message_id_id_idx` ON `part` (`message_id`,`id`);
+INSERT INTO session VALUES ('ses_many_database_fixture', NULL, '/fixtures/many',
+  'Many-message fixture session', '{"id":"fixture-db-model"}', 0, 0, 0, 0, 0, 0,
+  1784663000000, 1784664200000);
+WITH RECURSIVE n(i) AS (SELECT 0 UNION ALL SELECT i + 1 FROM n WHERE i < 1199)
+INSERT INTO message SELECT printf('msg_many_%04d', i), 'ses_many_database_fixture',
+  1784663000000 + (i / 3) * 1000, 1784663000000 + (i / 3) * 1000,
+  json_object('role', CASE WHEN i % 2 = 0 THEN 'user' ELSE 'assistant' END,
+              'time', json_object('created', 1784663000000 + (i / 3) * 1000))
+FROM n;
+WITH RECURSIVE n(i) AS (SELECT 0 UNION ALL SELECT i + 1 FROM n WHERE i < 1199)
+INSERT INTO part SELECT printf('prt_many_%04d', i), printf('msg_many_%04d', i),
+  'ses_many_database_fixture', 1784663000000 + (i / 3) * 1000, 1784663000000 + (i / 3) * 1000,
+  json_object('type', 'text',
+              'text', CASE WHEN i % 2 = 0 THEN printf('Request %d', i) ELSE printf('Answer %d', i) END
+                      || CASE WHEN i = 1199 THEN ' ' || replace(hex(zeroblob(4500)), '00', 'x') ELSE '' END,
+              'time', json_object('start', 1784663000000 + (i / 3) * 1000))
+FROM n WHERE i <> 1;
+WITH RECURSIVE n(j) AS (SELECT 0 UNION ALL SELECT j + 1 FROM n WHERE j < 299)
+INSERT INTO part SELECT printf('prt_many_0001_%03d', j), 'msg_many_0001',
+  'ses_many_database_fixture', 1784663000000, 1784663000000,
+  json_object('type', 'text', 'text', printf('Answer 1 part %03d', j),
+              'time', json_object('start', 1784663000000))
+FROM n;
+"#;
+    let mut create = Command::new(&sqlite3)
+        .arg(store.join("opencode.db"))
+        .stdin(Stdio::piped())
+        .spawn()
+        .unwrap();
+    create
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(schema.as_bytes())
+        .unwrap();
+    assert!(create.wait().unwrap().success());
+    let id = "ses_many_database_fixture";
+    let json = |args: &[&str]| -> Value {
+        serde_json::from_str(&opencode_stdout(root.path(), args)).unwrap()
+    };
+
+    let bounded = json(&["show", id, "--tail", "5000", "--json"]);
+    let full = json(&["show", id, "--full", "--json"]);
+    assert_opencode_full_read_passes_the_ceiling(&bounded, &full);
+    let texts = full["turns"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|turn| turn["text"].as_str().unwrap().to_owned())
+        .collect::<Vec<_>>();
+    let mut expected = Vec::new();
+    for index in 0..1200 {
+        match index {
+            1 => expected.extend((0..300).map(|part| format!("Answer 1 part {part:03}"))),
+            _ if index % 2 == 0 => expected.push(format!("Request {index}")),
+            _ => expected.push(format!("Answer {index}")),
+        }
+    }
+    let (last, texts) = texts.split_last().unwrap();
+    let (expected_last, expected) = expected.split_last().unwrap();
+    assert_eq!(texts, expected);
+    assert!(last.starts_with(&format!("{expected_last} x")), "{last}");
+    assert_eq!(last.chars().count(), 4000);
+    assert_eq!(
+        full["truncation"],
+        serde_json::json!({"source": [{"kind": "turn-text", "turns": 1, "chars": 4000}]})
+    );
+
+    let human = opencode_stdout(root.path(), &["show", id, "--full", "--tail", "1"]);
+    assert!(
+        human.contains("1 turn carries text cut at 4000 characters"),
+        "{human}"
+    );
+    assert!(
+        human.contains("the whole recording was streamed; 1200 messages"),
+        "{human}"
+    );
+}
+
 /// The normalized totals reach every surface unchanged: list, show, and the
 /// export bundle carry the same counters, with absent ones omitted.
 #[test]
@@ -4996,8 +5197,7 @@ const CLAUDE_SUBAGENT_META: &str =
     include_str!("../fixtures/claude/project/session-claude/subagents/agent-fixture.meta.json");
 
 /// `show --full` reads a Claude recording past the bounded tail and writes
-/// every turn from the recording's first; the flags it cannot honor, and a
-/// harness without a streamed reader, refuse.
+/// every turn from the recording's first; a flag it cannot honor refuses.
 #[test]
 fn show_full_streams_a_claude_recording_past_the_read_bound() {
     let root = TemporaryDirectory::new(
@@ -5101,17 +5301,6 @@ fn show_full_streams_a_claude_recording_past_the_read_bound() {
         !run(&["show", "full-claude", "--full", "--read-bytes", "1m"])
             .status
             .success()
-    );
-    let _opencode = opencode_program(root.path(), "opencode2");
-    let mut opencode = tapes();
-    opencode.args(["show", "ses_000000fixtureSharedSession", "--full"]);
-    with_fixture_env(&mut opencode, &codex_home, &home, root.path());
-    let opencode = opencode.output().unwrap();
-    assert!(!opencode.status.success());
-    assert!(
-        String::from_utf8_lossy(&opencode.stderr).contains("cannot be read whole"),
-        "{}",
-        String::from_utf8_lossy(&opencode.stderr)
     );
 }
 

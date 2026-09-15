@@ -25,6 +25,7 @@ name=${invoked##*/}
 case $invoked in
   *opencode-titleless*) name=opencode2-titleless ;;
   *opencode-oversized*) name=opencode2-oversized ;;
+  *opencode-many*) name=opencode2-many ;;
 esac
 path=${4:-}
 query=${4:-}
@@ -57,6 +58,10 @@ case $name in
   opencode2-oversized*)
     list=list.json
     mode=oversized
+    ;;
+  opencode2-many*)
+    list=list.json
+    mode=many
     ;;
   opencode)
     mode=database
@@ -152,6 +157,70 @@ if [ "$mode" = oversized ]; then
     /api/session/ses_oversized_fixture|/api/session/ses_giant_message_fixture|/api/session/ses_endless_fixture)
       id=${path##*/}
       printf '{"data":{"id":"%s","projectID":"fixture","agent":"build","model":{"id":"fixture-model","providerID":"fixture","variant":"balanced"},"cost":0,"tokens":{"input":0,"output":0,"reasoning":0,"cache":{"read":0,"write":0}},"time":{"created":1784663000000,"updated":1784663400000},"title":"Oversized fixture session","location":{"directory":"/fixtures/oversized"}}}\n' "$id"
+      ;;
+    /api/session\?*)
+      /bin/cat "$fixture_dir/$list"
+      ;;
+    *)
+      exit 1
+      ;;
+  esac
+  exit 0
+fi
+
+# A session holding more messages than a bounded read fetches. Pages are
+# generated on demand. A cursor carries the order it was issued in and the
+# offset of the next message, and every page answers with a next cursor, as
+# the real endpoint does; only a short page says the session is exhausted.
+many_page() {
+  query=${path#*\?}
+  limit=
+  cursor=
+  order=desc
+  old_ifs=$IFS
+  IFS='&'
+  for pair in $query; do
+    case $pair in
+      limit=*) limit=${pair#limit=} ;;
+      cursor=*) cursor=${pair#cursor=} ;;
+      order=*) order=${pair#order=} ;;
+    esac
+  done
+  IFS=$old_ifs
+  [ -n "$limit" ] || exit 7
+  offset=0
+  if [ -n "$cursor" ]; then
+    order=${cursor%%-*}
+    offset=${cursor#*-}
+  fi
+  total=1200
+  printf '{"data":['
+  i=0
+  while [ "$i" -lt "$limit" ] && [ $((offset + i)) -lt "$total" ]; do
+    [ "$i" -gt 0 ] && printf ','
+    if [ "$order" = asc ]; then
+      k=$((offset + i))
+    else
+      k=$((total - 1 - offset - i))
+    fi
+    created=$((1784663000000 + k * 1000))
+    if [ $((k % 2)) -eq 0 ]; then
+      printf '{"id":"msg_many_%s","type":"user","time":{"created":%s},"text":"Request %s"}' "$k" "$created" "$k"
+    else
+      printf '{"id":"msg_many_%s","type":"assistant","time":{"created":%s},"content":[{"id":"prt_many_%s","type":"text","text":"Answer %s","time":{"created":%s}}]}' "$k" "$created" "$k" "$k" "$created"
+    fi
+    i=$((i + 1))
+  done
+  printf '],"cursor":{"next":"%s-%s","previous":"%s-%s"}}\n' "$order" $((offset + i)) "$order" "$offset"
+}
+
+if [ "$mode" = many ]; then
+  case $path in
+    /api/session/ses_many_fixture/message\?*)
+      many_page
+      ;;
+    /api/session/ses_many_fixture)
+      printf '%s\n' '{"data":{"id":"ses_many_fixture","projectID":"fixture","agent":"build","model":{"id":"fixture-model","providerID":"fixture"},"cost":0,"tokens":{"input":0,"output":0,"reasoning":0,"cache":{"read":0,"write":0}},"time":{"created":1784663000000,"updated":1784664200000},"title":"Many-message fixture session","location":{"directory":"/fixtures/many"}}}'
       ;;
     /api/session\?*)
       /bin/cat "$fixture_dir/$list"

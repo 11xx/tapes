@@ -299,6 +299,26 @@ larger than the transport bound still exports. A content search that reached
 fewer than the 32 turns it searches before a ceiling reports the session as
 unsearched rather than as a non-match.
 
+`show --full` reads a session whole, oldest first, emitting each page's turns
+before it fetches the next, and neither path has a message or part ceiling.
+The database path first selects the newest message's `time_created` and `id`,
+then pages `message` rows 50 at a time in `time_created, id` order, each page
+starting after the last row of the one before and none reaching past that
+newest message, so a message written during the read belongs to the next one.
+A page's parts are selected by message id, 128 rows at a time in the same
+order; with the projection's cuts, 128 rows fit the 8 MiB transport bound
+even when every character is a six-byte JSON escape. The cuts stay: the whole
+read reports cut part text as `turn-text` bounds exactly as a bounded read
+does. The bounded read orders messages and parts by `time_created, id` too, so
+both reads assemble a message's parts in one order. The API path asks for
+`limit=50&order=asc` and follows `cursor.next`; the cursor carries the order
+it was issued in, and a page shorter than its limit ends the read, so a
+message written while the read streams may be part of it. Transport retries
+follow the bounded read, but a single message larger than the bound cannot be
+stepped over, so the whole read refuses there, naming the message's position.
+The read evidence counts message rows (`coordinate_domain:
+"opencode-message"`), and turns carry native ids rather than record spans.
+
 OpenCode transcript reads render messages as turns and do not read a record kind
 that could follow the newest message. `Transcript.trailing_record` is therefore
 always absent for this backend.

@@ -601,11 +601,41 @@ pub(crate) fn read_jsonl(path: &Path, read_bytes: u64) -> Result<Jsonl> {
     Ok(read)
 }
 
+/// What a whole-recording read's `source_length` counts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StreamCoordinates {
+    /// Bytes of a recording file.
+    FileBytes,
+    /// An OpenCode session's message rows, oldest first.
+    OpenCodeMessages,
+}
+
+impl StreamCoordinates {
+    pub fn domain(self) -> &'static str {
+        match self {
+            Self::FileBytes => "file-byte-range",
+            Self::OpenCodeMessages => "opencode-message",
+        }
+    }
+
+    /// The source length in words, for human output.
+    pub fn describe(self, length: u64) -> String {
+        match self {
+            Self::FileBytes => format!("source length {length} bytes"),
+            Self::OpenCodeMessages => format!("{length} messages"),
+        }
+    }
+}
+
 /// What a whole-recording read established beside the turns it streamed.
 pub struct StreamedTranscript {
+    pub coordinates: StreamCoordinates,
     /// The source length observed when the read opened. The read stops there;
     /// anything appended later belongs to the next read.
     pub source_length: u64,
+    /// Bounds the reader reached inside the records it read, such as turn
+    /// text a store projection cut. A whole read reaches no record-count bound.
+    pub source_bounds: Vec<SourceBound>,
     /// Records that could not be decoded: malformed, or longer than
     /// [`FULL_RECORD_BYTES`]. Each is also a gap.
     pub skipped: usize,
@@ -618,15 +648,15 @@ pub struct StreamedTranscript {
 }
 
 impl StreamedTranscript {
-    /// The read evidence of a whole-recording read: one range from the first
-    /// byte to the length observed at open, marked by the `full` projection
-    /// option. Record spans are not collected here; each streamed turn's
-    /// `record_ref` carries its own.
+    /// The read evidence of a whole-recording read: one range from the start
+    /// of the source to the length observed at open, in the read's own
+    /// coordinates, marked by the `full` projection option. Record spans are
+    /// not collected here; a streamed turn's `record_ref` carries its own.
     pub fn read_evidence(&self, producer: Option<String>) -> ReadEvidence {
         ReadEvidence {
             source_length: self.source_length,
             configured_bound: self.source_length,
-            coordinate_domain: "file-byte-range".to_owned(),
+            coordinate_domain: self.coordinates.domain().to_owned(),
             source_revision: None,
             producer,
             projection: crate::model::SESSION_SCHEMA.to_owned(),
