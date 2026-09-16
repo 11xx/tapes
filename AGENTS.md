@@ -54,6 +54,23 @@ server, no session *writing* — `tapes` never mutates a harness's store.
   this repo has had passed build, clippy, and the full test suite, and was
   visible only by running the thing against a real store.
 
+## Releasing
+
+- **A version is the calendar date of its publication**, written `YYYY.M.D`
+  as the three numeric fields Cargo's semver parser accepts and nothing more:
+  no leading zero on the month or the day, and no fourth field, prerelease, or
+  build metadata. One release is cut per date; a second waits for the next date
+  rather than qualifying a version. The manifest, `tapes --version`, and the
+  changelog's top released heading carry the same string. A workspace that has
+  never been published stays at `0.1.0` until a release names its date.
+- The bare name `tapes` on crates.io belongs to an unrelated project, so the
+  published package takes another name while the binary it installs, the
+  repository, and the command stay `tapes`.
+- `tapes-core` is published before `tapes`, which depends on it by version.
+  A path dependency without a version requirement cannot be published at all.
+- `cargo publish` is the operator's act and is never run from a session; a
+  session may run `cargo publish --dry-run`.
+
 ## Harness formats
 
 `docs/formats/` documents what each harness's store actually contains. The

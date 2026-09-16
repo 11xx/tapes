@@ -3,6 +3,10 @@ name = "tapes"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+description = "Read, list, and export coding-agent sessions across harnesses."
+keywords = ["cli", "sessions", "transcripts", "agents"]
+categories = ["command-line-utilities", "development-tools"]
 
 [dependencies]
 anyhow.workspace = true
