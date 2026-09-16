@@ -1,0 +1,9 @@
+#!/bin/sh
+set -eu
+
+# A stable store whose every row reaches the reader without its closing brace,
+# so no row parses while each still names its session id.
+resolved=$(/usr/bin/readlink -f "$0")
+fixture_dir=${resolved%/*}
+rows=$("$fixture_dir/opencode2" "$@" database)
+printf '%s\n' "$rows" | /usr/bin/sed '2,$ s/}$//'

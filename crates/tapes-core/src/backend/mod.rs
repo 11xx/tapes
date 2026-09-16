@@ -226,6 +226,11 @@ pub struct Listing {
     /// These use the same vocabulary as the public listing's `unavailable`
     /// field, while a command or store failure still names the whole harness.
     pub unavailable: Vec<String>,
+    /// The session ids `unavailable` describes, for the diagnostics that name
+    /// one. A harness whose stores answer the same ids keeps a later store's
+    /// projection from standing in for a session an earlier store holds and
+    /// could not read.
+    pub unavailable_ids: Vec<String>,
     /// Candidates whose bounded content search could not be answered, plus
     /// diagnostics from a search stage that had to fall back.
     pub unsearched: Vec<String>,
@@ -240,6 +245,7 @@ impl Listing {
             sessions,
             artifacts: Vec::new(),
             unavailable: Vec::new(),
+            unavailable_ids: Vec::new(),
             unsearched: Vec::new(),
             scan_truncated: false,
         }

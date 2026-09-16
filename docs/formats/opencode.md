@@ -244,6 +244,12 @@ path. When both commands are installed, both stores are read and their
 sessions are merged under the `opencode` harness.
 If both projections contain the same session id, the stable executable's
 projection is retained rather than reporting the shared record as ambiguous.
+A session the store that takes precedence could not read is never answered
+from the other projection: an exact read fails, naming the store that failed,
+its diagnostic, and the store that also answers the id, and a listing reports
+that id as unreadable instead of listing the later projection of it. The two
+stores project the same session differently, so the substitute would answer
+with a recording the caller did not ask for.
 Search applies that rule to candidates before accepting matches, so a later
 v2 projection cannot turn a stable projection's non-match into a match.
 The database command emits a `row` header followed by one JSON object per
@@ -256,6 +262,8 @@ verbatim: sqlite3 3.53.4 quotes a value containing `"` CSV-style
 on both but escapes the row a second time, one extra byte per `"` and `\`. Listing parses those rows independently: a row that cannot be
 parsed is reported in the listing's `unreadable` field with its session id and
 parse diagnostic, while an exact lookup of that id preserves the parse error.
+A row that names its session id keeps that id's precedence over the other
+store's projection of the same session.
 
 The `message.data` column is the complete JSON message record and is not a
 bounded transcript field. In a verified v1 store, no stored `data` value
