@@ -86,6 +86,7 @@ fn grouping(by: &[ByArg]) -> Vec<GroupBy> {
 #[derive(Parser)]
 #[command(
     name = "tapes",
+    version,
     about = "Read and export coding-agent sessions",
     after_help = "Run `tapes` with no arguments for the workflow guide."
 )]

@@ -36,6 +36,13 @@ uses its installed CLI; absent harnesses remain optional. Development checks
 are `cargo build --all-targets`, `cargo test`, and
 `cargo clippy --all-targets -- -D warnings && cargo fmt --check`.
 
+## Versioning
+
+Released versions are the calendar date of publication, written `YYYY.M.D`.
+The command, the binary, and the repository are `tapes`; the published package
+name differs, because the bare name on crates.io belongs to an unrelated
+project.
+
 ## Fixture demo
 
 The demo uses only committed Codex fixtures. It creates an isolated temporary
