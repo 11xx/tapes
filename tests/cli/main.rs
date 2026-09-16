@@ -4317,6 +4317,101 @@ fn malformed_opencode_database_row_is_unreadable_without_breaking_listing() {
     assert!(error.contains("EOF while parsing a string"), "{error}");
 }
 
+/// The stable store takes precedence for an id both OpenCode stores answer.
+/// When its rows cannot be parsed, no read answers from the opencode2
+/// projection in its place: an exact read fails naming the store that failed
+/// and the store that answered, and a listing reports the id as unreadable.
+#[test]
+fn an_unreadable_stable_opencode_store_is_not_answered_from_opencode2() {
+    let root = TemporaryDirectory::new(std::env::temp_dir().join(format!(
+        "tapes-cli-opencode-unreadable-store-{}",
+        std::process::id()
+    )));
+    let stable = root.path().join("opencode");
+    std::os::unix::fs::symlink(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/opencode/opencode-unreadable-rows"),
+        &stable,
+    )
+    .unwrap();
+    let _stable = OpenCodeAlias { path: stable };
+    let _beta = opencode_program(root.path(), "opencode2");
+    let shared = "ses_000000fixtureSharedSession";
+    let bundle = root.path().join("bundle");
+    let bundle = bundle.to_str().unwrap();
+    let home = root.path().join("home");
+    let run = |args: &[&str]| {
+        tapes()
+            .args(args)
+            .env("HOME", &home)
+            .env_remove("XDG_DATA_HOME")
+            .env("PATH", root.path())
+            .output()
+            .unwrap()
+    };
+    let store = home.join(".local/share/opencode/opencode.db");
+    let store = store.to_str().unwrap();
+
+    for args in [
+        vec!["show", shared, "--json"],
+        vec!["show", shared, "--full", "--json"],
+        vec!["events", shared, "--json"],
+        vec!["usage", shared, "--json"],
+        vec!["stats", shared, "--json"],
+        vec!["brief", shared, "--json"],
+        vec!["export", shared, "--bundle", bundle],
+    ] {
+        let output = run(&args);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let error = String::from_utf8_lossy(&output.stderr);
+        assert!(!output.status.success(), "{args:?} answered: {stdout}");
+        assert!(output.stdout.is_empty(), "{args:?} answered: {stdout}");
+        assert!(error.contains(store), "{args:?}: {error}");
+        assert!(error.contains("EOF while parsing"), "{args:?}: {error}");
+        assert!(
+            error.contains(&format!("opencode2:/api/session/{shared}")),
+            "{args:?}: {error}"
+        );
+    }
+
+    let listed = |args: &[&str]| -> Value {
+        let output = run(args);
+        assert!(
+            output.status.success(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice(&output.stdout).unwrap()
+    };
+    let names_shared = |value: &Value| {
+        value["unreadable"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|diagnostic| diagnostic.as_str().unwrap().contains(shared))
+    };
+
+    let list = listed(&["list", "--harness", "opencode", "--global", "--json"]);
+    let ids = list["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|session| session["id"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(ids, vec!["ses_api_only_fixture"], "{list}");
+    assert!(names_shared(&list), "{list}");
+
+    let endings = listed(&["endings", "--harness", "opencode", "--global", "--json"]);
+    let ended = endings["endings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|ending| ending["session"]["id"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(ended, vec!["ses_api_only_fixture"], "{endings}");
+    assert!(names_shared(&endings), "{endings}");
+}
+
 #[test]
 fn database_prefilter_failure_is_visible_while_the_safe_fallback_runs() {
     let root = TemporaryDirectory::new(std::env::temp_dir().join(format!(
