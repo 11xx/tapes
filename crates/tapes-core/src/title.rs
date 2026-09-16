@@ -1,11 +1,9 @@
 //! Exact recorded-title resolution with bounded, explicit evidence.
-use std::collections::HashSet;
-
 use anyhow::{anyhow, Result};
 
 use crate::backend::{Backend, Query};
 use crate::scope::Scope;
-use crate::ResolvedSession;
+use crate::{ResolvedSession, StorePrecedence};
 
 const TITLE_SCAN_LIMIT: usize = 5_000;
 
@@ -29,7 +27,7 @@ pub fn resolve(
     );
     let mut matches = Vec::new();
     let mut incomplete = Vec::new();
-    let mut opencode_ids = HashSet::new();
+    let mut precedence = StorePrecedence::default();
     for (origin, backend) in backends.iter().enumerate() {
         if harness.is_some_and(|name| name != backend.harness()) || !backend.available() {
             continue;
@@ -47,10 +45,11 @@ pub fn resolve(
                 backend.harness()
             ));
         }
+        precedence.unreadable(backend.harness(), origin, &listing.unavailable_ids);
         incomplete.extend(listing.unavailable);
         incomplete.extend(listing.unsearched);
         for session in listing.sessions {
-            if backend.harness() == "opencode" && !opencode_ids.insert(session.id.clone()) {
+            if !precedence.admits(backend.harness(), origin, &session.id) {
                 continue;
             }
             if session.title.as_deref() == Some(title) {

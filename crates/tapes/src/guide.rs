@@ -96,6 +96,9 @@ FIND IT
   listing. If one stored session row cannot be read, listing keeps every other
   session and reports that one as unreadable, with its id and the diagnostic —
   a separate fact from an unavailable harness, since the store itself was fine.
+  OpenCode keeps two stores, and the first answers for a session id both hold;
+  a session it could not read fails the read naming both stores rather than
+  answering from the other one.
   A content search that cannot read one candidate's bounded tail reports that
   session separately in unsearched. A Codex row without model metadata can
   mean its model-bearing turn_context was before the bounded file tail; JSON

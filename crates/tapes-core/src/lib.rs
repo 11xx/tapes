@@ -189,6 +189,16 @@ pub enum ResolveError {
         query: String,
         failures: Vec<(String, String)>,
     },
+    /// The store that takes precedence for this id failed while a later store
+    /// of the same harness answered it. The later projection is not read in
+    /// its place: the stores project a session differently, so substituting
+    /// one would answer with a recording the caller did not ask for.
+    StoreFailed {
+        query: String,
+        failures: Vec<(String, String)>,
+        /// The store that answered, as the coordinate a session carries.
+        answered_by: String,
+    },
 }
 
 impl std::fmt::Display for ResolveError {
@@ -211,6 +221,24 @@ impl std::fmt::Display for ResolveError {
                 }
                 Ok(())
             }
+            Self::StoreFailed {
+                query,
+                failures,
+                answered_by,
+            } => {
+                writeln!(
+                    formatter,
+                    "session {query} could not be read from the store that takes precedence for it:"
+                )?;
+                for (harness, error) in failures {
+                    writeln!(formatter, "  {harness}: {error}")?;
+                }
+                writeln!(
+                    formatter,
+                    "  {answered_by} also answers this id; its projection is not read in place of the store that failed"
+                )?;
+                Ok(())
+            }
             Self::Ambiguous { query, candidates } => {
                 writeln!(formatter, "session prefix {query} is ambiguous:")?;
                 for candidate in candidates {
@@ -228,6 +256,60 @@ impl std::error::Error for ResolveError {}
 pub struct ResolvedSession {
     pub backend_index: usize,
     pub session: Session,
+}
+
+/// The one harness whose stores answer the same session ids: stable OpenCode
+/// and opencode2 project many of the same sessions.
+pub(crate) const SHARED_STORE_HARNESS: &str = "opencode";
+
+/// Which store answers for a session id when a harness keeps more than one.
+/// The store listed first takes precedence: a later store's projection is
+/// kept only where no earlier store of that harness listed the id or reported
+/// it unreadable. A session an earlier store holds and could not read stays
+/// unreadable rather than being answered from the later projection, because
+/// the two stores project the same session differently.
+#[derive(Default)]
+pub(crate) struct StorePrecedence {
+    listed: HashSet<String>,
+    unreadable: HashMap<String, usize>,
+}
+
+impl StorePrecedence {
+    /// Record the ids the store at `store` could not read.
+    pub(crate) fn unreadable(&mut self, harness: &str, store: usize, ids: &[String]) {
+        if harness != SHARED_STORE_HARNESS {
+            return;
+        }
+        for id in ids {
+            let earliest = self.unreadable.entry(id.clone()).or_insert(store);
+            *earliest = (*earliest).min(store);
+        }
+    }
+
+    /// Whether the store at `store` is the one to keep this session from.
+    pub(crate) fn admits(&mut self, harness: &str, store: usize, id: &str) -> bool {
+        if harness != SHARED_STORE_HARNESS {
+            return true;
+        }
+        if self
+            .unreadable
+            .get(id)
+            .is_some_and(|failed| *failed < store)
+        {
+            return false;
+        }
+        self.listed.insert(id.to_owned())
+    }
+}
+
+/// The harness and diagnostic of each failure, as a resolution error states
+/// them.
+fn reported_failures<'a>(
+    failures: impl Iterator<Item = &'a (usize, String, String)>,
+) -> Vec<(String, String)> {
+    failures
+        .map(|(_, harness, error)| (harness.clone(), error.clone()))
+        .collect()
 }
 
 /// Where a command looks: one project, or every session on the machine.
@@ -458,6 +540,7 @@ pub(crate) fn list_scoped(
     );
     query.sort = sort;
     let mut found: Vec<(Session, usize)> = Vec::new();
+    let mut precedence = StorePrecedence::default();
     let mut available_harnesses = HashSet::new();
     let mut unavailable_harnesses = Vec::new();
     let mut unreadable_sessions = Vec::new();
@@ -523,6 +606,7 @@ pub(crate) fn list_scoped(
                 mut sessions,
                 artifacts: discovered_artifacts,
                 unavailable,
+                unavailable_ids,
                 unsearched,
                 scanned: inspected,
                 scan_truncated: truncated,
@@ -535,6 +619,7 @@ pub(crate) fn list_scoped(
                     seen.extend(candidate_ids);
                 }
                 available_harnesses.insert(backend.harness().to_owned());
+                precedence.unreadable(backend.harness(), index, &unavailable_ids);
                 unreadable_sessions.extend(unavailable);
                 unsearched_sessions.extend(unsearched);
                 scanned += inspected;
@@ -561,11 +646,12 @@ pub(crate) fn list_scoped(
         }
     }
     // Stable OpenCode and opencode2 can expose the same global session id from
-    // different projections. The first backend wins, preserving one session
-    // row and its transcript origin instead of inventing ambiguity.
-    let mut opencode_ids = HashSet::new();
+    // different projections. The first store wins, preserving one session row
+    // and its transcript origin instead of inventing ambiguity, and a session
+    // it reported unreadable stays unreadable rather than being listed from
+    // the later store's projection of it.
     found.retain(|(session, origin)| {
-        backends[*origin].harness() != "opencode" || opencode_ids.insert(session.id.clone())
+        precedence.admits(backends[*origin].harness(), *origin, &session.id)
     });
     found.sort_by(|(left, _), (right, _)| compare_sessions(left, right, sort));
 
@@ -722,7 +808,7 @@ pub fn resolve_session(
     // exact-id path a miss is a miss however it arises, and probing costs a
     // second process spawn for API-backed harnesses.
     let mut located = Vec::new();
-    let mut failures = Vec::new();
+    let mut failures: Vec<(usize, String, String)> = Vec::new();
     for (backend_index, backend) in backends.iter().enumerate() {
         match backend.locate(query) {
             Ok(Some(session)) if session.id == query => located.push(ResolvedSession {
@@ -733,20 +819,48 @@ pub fn resolve_session(
             // Kept, not discarded: a hit elsewhere still wins, but if nothing
             // resolves the real failure has to surface rather than hide behind
             // "not found".
-            Err(error) => failures.push((backend.harness().to_owned(), format!("{error:#}"))),
+            Err(error) => failures.push((
+                backend_index,
+                backend.harness().to_owned(),
+                format!("{error:#}"),
+            )),
+        }
+    }
+    // A store that failed may be the one holding this session: stable OpenCode
+    // and opencode2 answer many of the same ids, and the store that takes
+    // precedence projects a session its own way. Reading the later store's
+    // projection would answer with a recording the caller did not ask for, so
+    // the failure stands.
+    if let Some(hit) = located
+        .iter()
+        .find(|resolved| backends[resolved.backend_index].harness() == SHARED_STORE_HARNESS)
+    {
+        let preceding = reported_failures(failures.iter().filter(|(store, harness, _)| {
+            harness == SHARED_STORE_HARNESS && *store < hit.backend_index
+        }));
+        if !preceding.is_empty() {
+            return Err(ResolveError::StoreFailed {
+                query: query.to_owned(),
+                failures: preceding,
+                answered_by: hit
+                    .session
+                    .locator()
+                    .unwrap_or(SHARED_STORE_HARNESS)
+                    .to_owned(),
+            });
         }
     }
     if located.len() > 1
         && located
             .iter()
-            .all(|resolved| backends[resolved.backend_index].harness() == "opencode")
+            .all(|resolved| backends[resolved.backend_index].harness() == SHARED_STORE_HARNESS)
     {
         return Ok(located.remove(0));
     }
-    if located.is_empty() && failures.iter().any(|(harness, _)| harness == "input") {
+    if located.is_empty() && failures.iter().any(|(_, harness, _)| harness == "input") {
         return Err(ResolveError::BackendFailed {
             query: query.to_owned(),
-            failures,
+            failures: reported_failures(failures.iter()),
         });
     }
     match located.len() {
@@ -776,6 +890,7 @@ pub fn resolve_session(
     // can only be seen across the whole set.
     let mut matches = Vec::new();
     let mut truncated = false;
+    let mut precedence = StorePrecedence::default();
     for (backend_index, backend) in backends.iter().enumerate() {
         if !backend.available() {
             continue;
@@ -783,6 +898,7 @@ pub fn resolve_session(
         let Ok(listing) = backend.list(&Query::unscoped(RESOLVE_LIMIT)) else {
             continue;
         };
+        precedence.unreadable(backend.harness(), backend_index, &listing.unavailable_ids);
         truncated |= listing.sessions.len() >= RESOLVE_LIMIT;
         matches.extend(
             listing
@@ -796,10 +912,12 @@ pub fn resolve_session(
         );
     }
 
-    let mut opencode_ids = HashSet::new();
     matches.retain(|resolved| {
-        backends[resolved.backend_index].harness() != "opencode"
-            || opencode_ids.insert(resolved.session.id.clone())
+        precedence.admits(
+            backends[resolved.backend_index].harness(),
+            resolved.backend_index,
+            &resolved.session.id,
+        )
     });
 
     let exact = matches
@@ -816,7 +934,7 @@ pub fn resolve_session(
     match matches.len() {
         0 if !failures.is_empty() => Err(ResolveError::BackendFailed {
             query: query.to_owned(),
-            failures,
+            failures: reported_failures(failures.iter()),
         }),
         0 => Err(ResolveError::NotFound {
             query: query.to_owned(),

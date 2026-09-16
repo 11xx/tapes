@@ -1200,6 +1200,9 @@ entries identify the session, source member, or search stage without turning an
 unreached record into a not-found claim. It also carries a failed OpenCode2
 local API stage when CLI API reads continue. It is distinct from
 `unreadable`, which describes a session that could not be normalized at all.
+Where a harness keeps two stores that answer the same ids, OpenCode's, an
+unreadable session stays in `unreadable` rather than being listed from the
+other store's projection of that id.
 A scoped listing (`--here`, `--project`) excludes a candidate whose recorded
 directory no longer exists, because nothing left on disk proves its
 repository; when it excludes any, the optional `unplaced` object reports

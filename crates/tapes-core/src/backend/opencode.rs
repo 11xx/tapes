@@ -608,19 +608,25 @@ impl OpenCodeBackend {
                     });
                     listing.sessions.push(session);
                 }
-                Err(error) => listing
-                    .unavailable
-                    .push(session_diagnostic(row["id"].as_str(), error.to_string())),
+                Err(error) => {
+                    if let Some(id) = row["id"].as_str() {
+                        listing.unavailable_ids.push(id.to_owned());
+                    }
+                    listing
+                        .unavailable
+                        .push(session_diagnostic(row["id"].as_str(), error.to_string()));
+                }
             }
         }
-        listing
-            .unavailable
-            .extend(rows.invalid.into_iter().map(|row| {
-                session_diagnostic(
-                    row.id.as_deref(),
-                    format!("opencode database returned an invalid row: {}", row.error),
-                )
-            }));
+        for row in rows.invalid {
+            if let Some(id) = &row.id {
+                listing.unavailable_ids.push(id.clone());
+            }
+            listing.unavailable.push(session_diagnostic(
+                row.id.as_deref(),
+                format!("opencode database returned an invalid row: {}", row.error),
+            ));
+        }
         Ok(listing)
     }
 
@@ -985,6 +991,29 @@ impl OpenCodeBackend {
             notes: Vec::new(),
         })
     }
+
+    /// The session this store records under `id`, where it holds one.
+    fn locate_in_store(&self, id: &str) -> Result<Option<Session>> {
+        if self.uses_database() {
+            return self.database_locate(id);
+        }
+        // A genuine miss is `Ok(None)`; a broken API or malformed payload is an
+        // error and must stay one. Resolution lets another backend win over a
+        // failing one, but reports the failure when nothing resolves — so
+        // collapsing the two here would hide real breakage from `show` and
+        // `export`.
+        let response = self.request(&format!("/api/session/{id}"))?;
+        let data = &response["data"];
+        if !data.is_object() {
+            return Ok(None);
+        }
+        let mut session = parse_session(data)?;
+        session.source.location = Some(SourceLocation {
+            locator: self.store_coordinate(&session.id),
+            member: None,
+        });
+        Ok(Some(session))
+    }
 }
 
 fn installed_programs() -> Vec<OsString> {
@@ -1119,10 +1148,14 @@ impl Backend for OpenCodeBackend {
         };
         let page = self.session_listing(candidate_limit)?;
         let unavailable = page.unavailable;
+        let unavailable_ids = page.unavailable_ids;
         let mut filtered = self.filter_sessions(query, page.sessions);
         filtered.scanned = page.scanned;
         filtered.scan_truncated = page.scanned >= MAX_API_SESSIONS;
         filtered.unavailable = unavailable;
+        // The rows this store could not read keep their precedence: a filtered
+        // page still says which ids it holds and could not normalize.
+        filtered.unavailable_ids = unavailable_ids;
         Ok(filtered)
     }
 
@@ -1191,7 +1224,9 @@ impl Backend for OpenCodeBackend {
     }
 
     /// One session GET rather than a listing page, so an exact id costs a
-    /// single request regardless of how many sessions the store holds.
+    /// single request regardless of how many sessions the store holds. A
+    /// failure names the store it came from, because two OpenCode stores
+    /// answer many of the same ids and resolution reports which one failed.
     fn locate(&self, id: &str) -> Result<Option<Session>> {
         // OpenCode ids are self-identifying. Rejecting a foreign shape here
         // avoids spawning OpenCode for every claude, codex, or pi lookup — each
@@ -1199,25 +1234,8 @@ impl Backend for OpenCodeBackend {
         if !id.starts_with(SESSION_ID_PREFIX) {
             return Ok(None);
         }
-        if self.uses_database() {
-            return self.database_locate(id);
-        }
-        // A genuine miss is `Ok(None)`; a broken API or malformed payload is an
-        // error and must stay one. Resolution lets another backend win over a
-        // failing one, but reports the failure when nothing resolves — so
-        // collapsing the two here would hide real breakage from `show` and
-        // `export`.
-        let response = self.request(&format!("/api/session/{id}"))?;
-        let data = &response["data"];
-        if !data.is_object() {
-            return Ok(None);
-        }
-        let mut session = parse_session(data)?;
-        session.source.location = Some(SourceLocation {
-            locator: self.store_coordinate(&session.id),
-            member: None,
-        });
-        Ok(Some(session))
+        self.locate_in_store(id)
+            .with_context(|| format!("opencode store {}", self.store_coordinate(id)))
     }
 
     fn transcript(&self, session: &Session, tail: usize) -> Result<Transcript> {
