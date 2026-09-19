@@ -724,7 +724,7 @@ impl StreamedTranscript {
             source_length: self.source_length,
             configured_bound: self.source_length,
             coordinate_domain: self.coordinates.domain().to_owned(),
-            source_revision: None,
+            source_revision: self.source_revision.clone(),
             producer,
             projection: crate::model::SESSION_SCHEMA.to_owned(),
             projection_options: vec!["full".to_owned()],

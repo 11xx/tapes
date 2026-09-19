@@ -1105,8 +1105,9 @@ operator/assistant text in the read, or an empty complete projection.
 
 `show --full --json` streams a whole Claude, Codex, Pi, or OpenCode session,
 and its `read` says so. For a recording file that is one `tail` range from
-byte 0 to the length observed when the read opened, `configured_bound` equal to that length, `projection_options`
-holding `full`, and gaps for malformed records or records longer than 64 MiB.
+byte 0 to the length observed when the read opened, `configured_bound` equal to that length, `source_revision`
+naming the file revision observed then, `projection_options` holding `full`,
+and gaps for malformed records or records longer than 64 MiB.
 Record spans are not listed under `read.records`; each turn's `record_ref`
 carries its own span and the source revision it was read at. An OpenCode
 session is read whole from its store rather than a file, so its `read` counts

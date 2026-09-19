@@ -5490,6 +5490,13 @@ fn show_full_streams_a_claude_recording_past_the_read_bound() {
     assert_eq!(json["turns"][49]["ordinal"], 49);
     assert_eq!(json["read"]["source_length"], body.len() as u64);
     assert_eq!(json["read"]["projection_options"][0], "full");
+    // The read names the revision it opened at, the one every turn cites.
+    assert_eq!(
+        json["read"]["source_revision"], json["turns"][0]["record_ref"]["revision"],
+        "{}",
+        json["read"]
+    );
+    assert!(json["read"]["source_revision"].is_string());
     assert!(json.get("truncation").is_none(), "{}", json["truncation"]);
     let tailed: Value = serde_json::from_str(&stdout(&[
         "show",
