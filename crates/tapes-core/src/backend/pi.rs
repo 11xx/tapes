@@ -8,7 +8,7 @@ use super::{
     accounting_for, head_directory, home_path, jsonl_files, list_files, list_files_with_search,
     read_bounds, read_recording, replay_pin, session_file, skipped_records_note, stream_jsonl,
     timestamp, trailing_record, transcript_from_recording, ActivityRange, Backend, Jsonl, Listing,
-    ParsedFile, Query, StreamedTranscript, TokenTotals,
+    ParsedFile, Query, StreamedTranscript, TokenTotals, UnmappedTally,
 };
 use crate::content::{
     bounded_shape, text_part, tool_coverage, tool_part, ContentAvailability, ContentCarrier,
@@ -238,9 +238,9 @@ impl Backend for PiBackend {
             .ok_or_else(|| anyhow!("pi store is unavailable"))?;
         let path = session_file(root, &session.id)
             .ok_or_else(|| anyhow!("pi session {} is unavailable", session.id))?;
-        let (turns, recording, abandoned, trailing_record) =
+        let (turns, recording, abandoned, trailing_record, unmapped) =
             read_transcript(&path, self.read_bytes)?;
-        Ok(transcript_from_recording(
+        let mut transcript = transcript_from_recording(
             session.clone(),
             turns,
             tail,
@@ -248,7 +248,11 @@ impl Backend for PiBackend {
             None,
             trailing_record,
             abandoned_notes(abandoned),
-        ))
+        );
+        if let Some(read) = &mut transcript.read {
+            read.unmapped = Some(unmapped);
+        }
+        Ok(transcript)
     }
 
     fn stream_transcript(
@@ -301,8 +305,10 @@ impl Backend for PiBackend {
         let mut position = 0;
         let mut abandoned = 0;
         let mut trailing_record = None;
+        let mut unmapped = UnmappedTally::default();
         let read = stream_jsonl(&path, Some(first.pin()), |value, span, revision| {
             if value["type"] == "session" {
+                count_unmapped(&mut unmapped, value);
                 return Ok(false);
             }
             let entry = position;
@@ -317,6 +323,9 @@ impl Backend for PiBackend {
                 return Ok(false);
             }
             let mut parsed = parse_turns(value);
+            if parsed.is_empty() {
+                count_unmapped(&mut unmapped, value);
+            }
             super::attach_record_refs(&mut parsed, &domain, Some(revision), Some(span));
             let produced = !parsed.is_empty();
             trailing_record = (!produced)
@@ -341,6 +350,7 @@ impl Backend for PiBackend {
             trailing_record,
             terminal: None,
             notes: abandoned_notes(abandoned),
+            unmapped: Some(unmapped.finish()),
         })
     }
 
@@ -487,12 +497,25 @@ struct PiEntry {
     thinking: Option<String>,
 }
 
-fn read_transcript(
-    path: &Path,
-    read_bytes: u64,
-) -> Result<(Vec<Turn>, super::Recording, usize, Option<TrailingRecord>)> {
+type PiTranscriptRead = (
+    Vec<Turn>,
+    super::Recording,
+    usize,
+    Option<TrailingRecord>,
+    crate::model::UnmappedRecords,
+);
+
+fn read_transcript(path: &Path, read_bytes: u64) -> Result<PiTranscriptRead> {
     let recording = read_recording(path, read_bytes)?;
     let read = &recording.tail;
+    let mut unmapped = UnmappedTally::default();
+    for header in read
+        .values
+        .iter()
+        .filter(|value| value["type"] == "session")
+    {
+        count_unmapped(&mut unmapped, header);
+    }
     let entries = read
         .values
         .iter()
@@ -515,6 +538,9 @@ fn read_transcript(
     let mut last_turn = None;
     for (index, value) in active.iter().enumerate() {
         let mut parsed = parse_turns(value);
+        if parsed.is_empty() {
+            count_unmapped(&mut unmapped, value);
+        }
         let span = read
             .values
             .iter()
@@ -533,7 +559,23 @@ fn read_transcript(
     }
     let trailing_record = trailing_record(active.iter().copied(), last_turn, pi_trailing_kind);
 
-    Ok((turns, recording, abandoned, trailing_record))
+    Ok((
+        turns,
+        recording,
+        abandoned,
+        trailing_record,
+        unmapped.finish(),
+    ))
+}
+
+/// Count an active-branch entry, or the session header, that produced no
+/// turn under its `type`. The reader declines the header and the model and
+/// thinking-level changes it reads into the session; an entry of any other
+/// type carries content no view holds.
+fn count_unmapped(tally: &mut UnmappedTally, value: &Value) {
+    let kind = value["type"].as_str().unwrap_or("(untyped)");
+    let declined = matches!(kind, "session" | "model_change" | "thinking_level_change");
+    tally.add(kind.to_owned(), declined);
 }
 
 fn abandoned_notes(abandoned: usize) -> Vec<String> {

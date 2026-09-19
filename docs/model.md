@@ -1095,8 +1095,21 @@ only as projection context, and explicit gaps for bytes outside the bound,
 partial records, or malformed records. A range is an observation of
 this read, not a content digest or a portable source identity. Physical
 coverage does not erase a malformed record gap; a partial gap is discharged
-only when a successful decode identifies that same record. A terminal
-observation is independent of normalized turns: it preserves the native record
+only when a successful decode identifies that same record.
+
+`unmapped` counts the decoded records a read represented as no turn, by native
+record type, where the reader counts them: a Claude, Codex, or pi transcript
+read, bounded or `--full`. `declined` holds the types a reader leaves out on
+purpose — records carrying no text a turn would hold, such as accounting,
+headers, and UI state, and records restating text another record already
+carries; `unrecognized` holds every other type, whose content no view shows.
+The per-harness lists are in `docs/formats/`. An empty object means every
+decoded record became a turn; an absent one means the reader does not count,
+as for OpenCode, supplied inputs, and pages. A pi record on an abandoned branch
+is counted by the abandoned-branch note, not here. A reader names at most 64
+types in each map and counts any others under `(other types)`.
+
+A terminal observation is independent of normalized turns: it preserves the native record
 type, payload subtype, explicit turn identity, outcome/code/message, and
 duration only where the reached record supplies them. Its presence never says
 that the session is stopped now. `text_tail` reports the requested and

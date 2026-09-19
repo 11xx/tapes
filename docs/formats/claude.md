@@ -284,11 +284,24 @@ omits `thinkingTokens` while `message.usage` carries
 
 ## Metadata types
 
-`mode`, `last-prompt`, `ai-title`, `queue-operation`, `attachment`, and
-`cost-state` are UI or accounting metadata carrying no conversation content,
-so they produce no turns. `cost-state` contributes session accounting but is
-not a `trailing_record` kind. `ai-title` is the exception the backend does
-read: it is the only harness-supplied session title of the four.
+These record types produce no turns. A read counts each under `unmapped` in
+its read evidence, as `declined` when it carries no text a turn would hold or
+restates text another record carries, and as `unrecognized` otherwise.
+
+| `type` | Holds | Counted as |
+|---|---|---|
+| `cost-state` | Session accounting; see above | declined |
+| `ai-title`, `custom-title`, `agent-name` | A title or name for the session; `ai-title` is the one the backend reads | declined |
+| `last-prompt` | The last prompt typed, which its user record carries | declined |
+| `queue-operation` | `enqueue`, `dequeue`, `remove`, or `popAll` of a message typed while the agent worked; the message reaches the conversation as a user record | declined |
+| `mode`, `permission-mode`, `atis-latch` | UI state | declined |
+| `bridge-session` | Remote-control session ids | declined |
+| `file-history-snapshot`, `file-history-delta` | File backups for undo | declined |
+| `system` | By `subtype`: `turn_duration` and `stop_hook_summary` are timing and hook telemetry (declined); `away_summary`, `local_command`, `informational`, `compact_boundary`, and `scheduled_task_fire` carry text shown to the person | counted as `system/<subtype>` |
+| `attachment` | Context attached for the model, by `attachment.type`: reminders (`total_tokens_reminder`, `silent_turn_reminder`, `batching_reminder_sent`), instruction and listing deltas, `queued_command` prompts, `edited_text_file` snippets | unrecognized, as `attachment/<type>` |
+
+`cost-state` contributes session accounting but is not a `trailing_record`
+kind.
 
 When the final records after the newest rendered turn are the verified
 metadata kinds `last-prompt`, `ai-title`, `mode`, `permission-mode`, or

@@ -1771,6 +1771,7 @@ fn parse_record(
         records: vec![span],
         context_records: Vec::new(),
         gaps: Vec::new(),
+        unmapped: None,
     };
     occurrences.push(InputOccurrence {
         session,

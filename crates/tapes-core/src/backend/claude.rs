@@ -12,7 +12,7 @@ use super::{
     matching_session_file, read_bounds, read_jsonl, read_recording, replay_pin,
     skipped_records_note, stream_jsonl, streamed_trailing_record, timestamp, trailing_record,
     transcript, transcript_from_recording, ActivityRange, Backend, Jsonl, Listing, ParsedFile,
-    Query, StreamedChild, StreamedTranscript, TokenTotals,
+    Query, StreamedChild, StreamedTranscript, TokenTotals, UnmappedTally,
 };
 use crate::content::{
     bounded_shape, text_part, tool_coverage, tool_part, ContentAvailability, ContentCarrier,
@@ -453,9 +453,10 @@ impl Backend for ClaudeBackend {
             .ok_or_else(|| anyhow!("claude store is unavailable"))?;
         let path = matching_session_file(session_files(root), &session.id)
             .ok_or_else(|| anyhow!("claude session {} is unavailable", session.id))?;
-        let (turns, recording, trailing_record) = read_transcript(&path, self.read_bytes)?;
+        let (turns, recording, trailing_record, unmapped) =
+            read_transcript(&path, self.read_bytes)?;
         let notes = subagent_notes(&path);
-        Ok(transcript_from_recording(
+        let mut transcript = transcript_from_recording(
             session.clone(),
             turns,
             tail,
@@ -463,7 +464,11 @@ impl Backend for ClaudeBackend {
             None,
             trailing_record,
             notes,
-        ))
+        );
+        if let Some(read) = &mut transcript.read {
+            read.unmapped = Some(unmapped);
+        }
+        Ok(transcript)
     }
 
     fn stream_transcript(
@@ -479,8 +484,12 @@ impl Backend for ClaudeBackend {
         let path = matching_session_file(session_files(root), &session.id)
             .ok_or_else(|| anyhow!("claude session {} is unavailable", session.id))?;
         let domain = format!("file:{}", path.display());
+        let mut unmapped = UnmappedTally::default();
         let read = stream_jsonl(&path, replay_pin(replay)?, |value, span, revision| {
             let mut parsed = parse_turns(value);
+            if parsed.is_empty() {
+                count_unmapped(&mut unmapped, value);
+            }
             super::attach_record_refs(&mut parsed, &domain, Some(revision), Some(span));
             let produced = !parsed.is_empty();
             for parsed_turn in parsed {
@@ -498,6 +507,7 @@ impl Backend for ClaudeBackend {
             trailing_record: streamed_trailing_record(read.last.as_ref(), claude_trailing_kind),
             gaps: read.gaps,
             notes: subagent_notes(&path),
+            unmapped: Some(unmapped.finish()),
         })
     }
 
@@ -613,6 +623,7 @@ impl Backend for ClaudeBackend {
                 gaps: read.gaps,
                 terminal: None,
                 notes: Vec::new(),
+                unmapped: None,
             },
         })
     }
@@ -778,13 +789,22 @@ fn claude_model(value: &Value) -> Option<Model> {
 fn read_transcript(
     path: &Path,
     read_bytes: u64,
-) -> Result<(Vec<Turn>, super::Recording, Option<TrailingRecord>)> {
+) -> Result<(
+    Vec<Turn>,
+    super::Recording,
+    Option<TrailingRecord>,
+    crate::model::UnmappedRecords,
+)> {
     let recording = read_recording(path, read_bytes)?;
     let read = &recording.tail;
     let mut turns = Vec::new();
     let mut last_turn = None;
+    let mut unmapped = UnmappedTally::default();
     for (index, value) in read.values.iter().enumerate() {
         let mut parsed = parse_turns(value);
+        if parsed.is_empty() {
+            count_unmapped(&mut unmapped, value);
+        }
         super::attach_record_refs(
             &mut parsed,
             &format!("file:{}", path.display()),
@@ -797,7 +817,41 @@ fn read_transcript(
         turns.extend(parsed);
     }
     let trailing_record = trailing_record(read.values.iter(), last_turn, claude_trailing_kind);
-    Ok((turns, recording, trailing_record))
+    Ok((turns, recording, trailing_record, unmapped.finish()))
+}
+
+/// Count a record that produced no turn under its native type: `type`, and
+/// for an `attachment` or `system` record the kind it names. The reader
+/// declines a record that carries no text a turn would hold — counters, ids,
+/// flags, file backups — or that restates text another record carries; any
+/// other record's text reaches no view.
+fn count_unmapped(tally: &mut UnmappedTally, value: &Value) {
+    let kind = value["type"].as_str().unwrap_or("(untyped)");
+    let detail = match kind {
+        "attachment" => value["attachment"]["type"].as_str(),
+        "system" => value["subtype"].as_str(),
+        _ => None,
+    };
+    let native_type = detail.map_or_else(|| kind.to_owned(), |detail| format!("{kind}/{detail}"));
+    let declined = matches!(
+        kind,
+        "cost-state"
+            | "ai-title"
+            | "custom-title"
+            | "agent-name"
+            | "last-prompt"
+            | "mode"
+            | "permission-mode"
+            | "atis-latch"
+            | "queue-operation"
+            | "bridge-session"
+            | "file-history-snapshot"
+            | "file-history-delta"
+    ) || matches!(
+        native_type.as_str(),
+        "system/turn_duration" | "system/stop_hook_summary"
+    );
+    tally.add(native_type, declined);
 }
 
 /// Subagent transcripts are recordings of their own; a parent read names how

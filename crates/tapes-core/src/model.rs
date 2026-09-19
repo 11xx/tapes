@@ -439,6 +439,24 @@ pub struct ReadEvidence {
     pub context_records: Vec<ByteSpan>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub gaps: Vec<ReadGap>,
+    /// Decoded records the read represented as no turn, where the reader
+    /// counts them. Absent where it does not; present and empty when every
+    /// record it decoded became a turn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unmapped: Option<UnmappedRecords>,
+}
+
+/// Decoded records that produced no turn, counted by native record type.
+/// `declined` holds the types a reader leaves out on purpose: a mirror of a
+/// record it already represents, or metadata it reads into the session.
+/// `unrecognized` holds the types it has no reading for, whose content no
+/// view carries.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UnmappedRecords {
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub declined: BTreeMap<String, usize>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub unrecognized: BTreeMap<String, usize>,
 }
 
 /// A source identity that is meaningful only within its qualified domain.

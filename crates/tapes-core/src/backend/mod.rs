@@ -708,6 +708,8 @@ pub struct StreamedTranscript {
     /// records one.
     pub terminal: Option<TerminalObservation>,
     pub notes: Vec<String>,
+    /// The records that produced no turn, where the reader counts them.
+    pub unmapped: Option<crate::model::UnmappedRecords>,
 }
 
 impl StreamedTranscript {
@@ -747,6 +749,7 @@ impl StreamedTranscript {
             records: Vec::new(),
             context_records: Vec::new(),
             gaps: self.gaps.clone(),
+            unmapped: self.unmapped.clone(),
         }
     }
 
@@ -777,6 +780,36 @@ impl StreamedTranscript {
         transcript.read = Some(read);
         transcript.terminal = self.terminal.clone();
         transcript
+    }
+}
+
+/// Distinct native types an unmapped-record tally names before it counts the
+/// rest together, so a recording of arbitrary type strings stays bounded.
+const MAX_UNMAPPED_TYPES: usize = 64;
+const OTHER_UNMAPPED_TYPES: &str = "(other types)";
+
+/// Counts the records a read decoded and represented as no turn.
+#[derive(Default)]
+pub(crate) struct UnmappedTally(crate::model::UnmappedRecords);
+
+impl UnmappedTally {
+    /// Count one record of `native_type`, left out on purpose when `declined`.
+    pub(crate) fn add(&mut self, native_type: String, declined: bool) {
+        let counts = if declined {
+            &mut self.0.declined
+        } else {
+            &mut self.0.unrecognized
+        };
+        let key = if counts.len() < MAX_UNMAPPED_TYPES || counts.contains_key(&native_type) {
+            native_type
+        } else {
+            OTHER_UNMAPPED_TYPES.to_owned()
+        };
+        *counts.entry(key).or_default() += 1;
+    }
+
+    pub(crate) fn finish(self) -> crate::model::UnmappedRecords {
+        self.0
     }
 }
 
@@ -1491,6 +1524,7 @@ pub(crate) fn read_evidence(read: &Jsonl) -> ReadEvidence {
         records: read.spans.clone(),
         context_records: Vec::new(),
         gaps: read.gaps.clone(),
+        unmapped: None,
     }
 }
 
@@ -1539,6 +1573,7 @@ pub(crate) fn recording_evidence(recording: &Recording) -> ReadEvidence {
         ranges,
         records,
         context_records,
+        unmapped: None,
         gaps: subtract_covered_ranges(
             &recording
                 .head_gaps

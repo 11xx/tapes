@@ -68,6 +68,16 @@ than turns. When either is the final entry on the active path after the newest
 rendered turn, the backend reports its kind and timestamp as
 `trailing_record`. The `session` header is not a trailing record.
 
+A read counts the header and each active-path entry that produced no turn
+under `unmapped` in its read evidence, by `type`: `session`, `model_change`,
+and `thinking_level_change` as declined, since the reader takes the session's
+facts from them, and every other type as unrecognized. Entries seen on the
+active path in a 245-session store that no turn carries are `custom_message`,
+`compaction`, `custom`, `session_info`, and `message` itself: an assistant
+message with no content, nearly always a request that ended with
+`stopReason: error`. Entries on an abandoned branch are
+counted by the abandoned-branch note instead.
+
 ## Message content
 
 `message.role` is `user`, `assistant`, or `toolResult` — the tool result is a

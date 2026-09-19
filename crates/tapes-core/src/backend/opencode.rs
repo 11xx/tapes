@@ -903,6 +903,7 @@ impl OpenCodeBackend {
             trailing_record: None,
             terminal: None,
             notes: Vec::new(),
+            unmapped: None,
         })
     }
 
@@ -989,6 +990,7 @@ impl OpenCodeBackend {
             trailing_record: None,
             terminal: None,
             notes: Vec::new(),
+            unmapped: None,
         })
     }
 
