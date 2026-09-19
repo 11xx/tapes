@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Result};
@@ -88,7 +88,12 @@ impl CodexBackend {
             .rev()
             .find(|value| value["type"] == "turn_context")
             .and_then(turn_context_model);
-        let turns = read.values.iter().flat_map(parse_turns).collect::<Vec<_>>();
+        let mut reader = CodexTurns::default();
+        let turns = read
+            .values
+            .iter()
+            .flat_map(|value| reader.parse(value))
+            .collect::<Vec<_>>();
         let tokens = read.values.iter().rev().find_map(codex_tokens);
         let accounting = accounting_for(
             tokens.as_ref(),
@@ -125,7 +130,11 @@ impl CodexBackend {
         // The opening is the start of the file, so its first user turn is the
         // session's first user turn even when the tail cannot see it.
         let session = if read.truncated {
-            let opening_turns = opening.iter().flat_map(parse_turns).collect::<Vec<_>>();
+            let mut reader = CodexTurns::default();
+            let opening_turns = opening
+                .iter()
+                .flat_map(|value| reader.parse(value))
+                .collect::<Vec<_>>();
             session.with_derived_title(&opening_turns)
         } else {
             session.with_derived_title(&turns)
@@ -151,11 +160,12 @@ impl CodexBackend {
             projection,
             |values, spans, revision| {
                 let turns = if projection == PageProjection::Transcript {
+                    let mut reader = CodexTurns::default();
                     values
                         .iter()
                         .zip(spans)
                         .flat_map(|(value, span)| {
-                            let mut turns = parse_turns(value);
+                            let mut turns = reader.parse(value);
                             super::attach_record_refs(
                                 &mut turns,
                                 &format!("file:{}", path),
@@ -324,11 +334,12 @@ impl Backend for CodexBackend {
             .ok_or_else(|| anyhow!("codex session {} is unavailable", session.id))?;
         let domain = format!("file:{}", path.display());
         let mut terminal = None;
+        let mut reader = CodexTurns::default();
         let read = stream_jsonl(&path, replay_pin(replay)?, |value, span, revision| {
             if let Some(observed) = codex_terminal(value) {
                 terminal = Some(observed);
             }
-            let mut parsed = parse_turns(value);
+            let mut parsed = reader.parse(value);
             super::attach_record_refs(&mut parsed, &domain, Some(revision), Some(span));
             let produced = !parsed.is_empty();
             for parsed_turn in parsed {
@@ -485,8 +496,9 @@ fn read_transcript(path: &Path, read_bytes: u64) -> Result<CodexTranscriptRead> 
     let read = &recording.tail;
     let mut turns = Vec::new();
     let mut last_turn = None;
+    let mut reader = CodexTurns::default();
     for (index, value) in read.values.iter().enumerate() {
-        let mut parsed = parse_turns(value);
+        let mut parsed = reader.parse(value);
         super::attach_record_refs(
             &mut parsed,
             &format!("file:{}", path.display()),
@@ -757,6 +769,79 @@ fn codex_user_kind(payload: &Value) -> TurnKind {
     }
 }
 
+/// Codex records much of its tool work twice: a `response_item` the model
+/// saw, and an `event_msg` item the runtime reports. Code mode records the
+/// operations its `exec` script ran only as items, so an item is a tool turn
+/// of its own unless a record read before it names the same operation.
+/// Reading a recording's records in order through one `CodexTurns` keeps
+/// each operation once.
+#[derive(Default)]
+struct CodexTurns {
+    /// Every `id` and `call_id` a `response_item` has carried so far.
+    response_ids: HashSet<String>,
+    /// The ids and actions of web searches turned into a turn whose other
+    /// record has not been read yet, and whether that turn came from the item.
+    /// Codex records a search both as an item and as a `web_search_call`, in
+    /// either order; a record of the other kind sharing a key consumes the
+    /// pending one, so a search repeated later is a turn of its own.
+    searches: Vec<(bool, Vec<String>)>,
+}
+
+impl CodexTurns {
+    fn parse(&mut self, value: &Value) -> Vec<Turn> {
+        let payload = &value["payload"];
+        match value["type"].as_str() {
+            Some("response_item") => {
+                for key in ["id", "call_id"] {
+                    if let Some(id) = payload[key].as_str() {
+                        self.response_ids.insert(id.to_owned());
+                    }
+                }
+                if payload["type"] == "web_search_call" && !self.first_search(payload, false) {
+                    return Vec::new();
+                }
+            }
+            Some("event_msg") => {
+                let item = &payload["item"];
+                if item["type"] == "WebSearch" {
+                    if !self.first_search(item, true) {
+                        return Vec::new();
+                    }
+                } else if item["id"]
+                    .as_str()
+                    .is_some_and(|id| self.response_ids.contains(id))
+                {
+                    return Vec::new();
+                }
+            }
+            _ => {}
+        }
+        parse_turns(value)
+    }
+
+    /// Whether this is the first record of its web search: remembered when
+    /// it is, and consuming the first record's keys when it is the second.
+    fn first_search(&mut self, search: &Value, item: bool) -> bool {
+        let keys = [
+            search["id"].as_str().map(str::to_owned),
+            (!search["action"].is_null()).then(|| search["action"].to_string()),
+        ];
+        let keys = keys.into_iter().flatten().collect::<Vec<_>>();
+        match self.searches.iter().position(|(pending_item, pending)| {
+            *pending_item != item && pending.iter().any(|key| keys.contains(key))
+        }) {
+            Some(first) => {
+                self.searches.remove(first);
+                false
+            }
+            None => {
+                self.searches.push((item, keys));
+                true
+            }
+        }
+    }
+}
+
 fn parse_turns(value: &Value) -> Vec<Turn> {
     if value["type"] == "event_msg"
         && matches!(
@@ -853,6 +938,14 @@ fn parse_turns(value: &Value) -> Vec<Turn> {
                 coverage,
             )
         }
+        Some("web_search_call") => (
+            Role::Tool,
+            TurnKind::Tool,
+            payload.to_string(),
+            Some(codex_runtime_tool_event(payload, true)),
+            vec![tool_part(payload, "payload", "web_search_call")],
+            tool_coverage(),
+        ),
         Some(
             subtype @ ("function_call"
             | "function_call_output"
@@ -893,12 +986,23 @@ fn parse_turns(value: &Value) -> Vec<Turn> {
 }
 
 fn is_codex_runtime_tool(item: &Value) -> bool {
-    // These are the verified native item variants that describe a tool
-    // operation. AgentMessage, Reasoning, UserMessage, and ContextCompaction
-    // are lifecycle mirrors of ordinary conversation state.
+    // The native item variants that describe a tool operation. AgentMessage,
+    // Reasoning, UserMessage, ContextCompaction, and Plan (the text of the
+    // `<proposed_plan>` assistant message that follows it) mirror
+    // conversation state; a tool item that mirrors a `response_item` is left
+    // out by `CodexTurns`.
     matches!(
         item["type"].as_str(),
-        Some("CommandExecution" | "FileChange")
+        Some(
+            "CommandExecution"
+                | "FileChange"
+                | "McpToolCall"
+                | "ImageView"
+                | "Extension"
+                | "WebSearch"
+                | "CollabAgentToolCall"
+                | "SubAgentActivity"
+        )
     )
 }
 
@@ -974,9 +1078,17 @@ fn codex_runtime_tool_event(item: &Value, completed: bool) -> ToolEvent {
             .flatten(),
         output: completed
             .then(|| {
-                ["stdout", "stderr", "formatted_output", "aggregated_output"]
-                    .into_iter()
-                    .find_map(|key| Bounded::from_value(&item[key]))
+                [
+                    "stdout",
+                    "stderr",
+                    "formatted_output",
+                    "aggregated_output",
+                    "result",
+                    "results",
+                    "action",
+                ]
+                .into_iter()
+                .find_map(|key| Bounded::from_value(&item[key]))
             })
             .flatten(),
         completed_ts: completed
