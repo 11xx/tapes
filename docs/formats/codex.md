@@ -261,11 +261,29 @@ tail. Opening turns are not added to the returned transcript.
 
 ## Runtime and nested command evidence
 
-Codex `item_started` and `item_completed` records are lifecycle mirrors for
-several native item types. The verified tool-bearing types in this reader are
-`CommandExecution` and `FileChange`; `AgentMessage`, `Reasoning`,
-`UserMessage`, and `ContextCompaction` remain ordinary lifecycle evidence and
-do not become phantom tool turns. For `CommandExecution`, the native
+Codex reports runtime items as `event_msg` records whose `payload.type` is
+`item_completed` (and, in the reader's fixtures, `item_started`); no rollout
+in a 905-file store carried `item_started`. Code mode runs one outer `exec`
+call whose script's operations are recorded only as items, so the tool-bearing
+item types — `CommandExecution`, `FileChange`, `McpToolCall`, `ImageView`,
+`Extension`, `WebSearch`, `CollabAgentToolCall`, and `SubAgentActivity` — are
+tool turns of their own. An item whose `id` a `response_item` read earlier
+carried as its `id` or `call_id` mirrors that record and is not a second turn:
+in the store above that held for 2,632 of 7,622 `FileChange` items (the
+`custom_tool_call_output` of an `apply_patch`), 5 of 839 `McpToolCall`, the
+17 `clock.sleep` `Extension` items, and every `CollabAgentToolCall` and
+`SubAgentActivity` (the `function_call` that spawned or waited on an agent).
+A web search is recorded as a `WebSearch` item and as a
+`response_item/web_search_call` carrying the same `action`, and sometimes the
+same `ws_` id, in either order; the first of the two is the turn and the other
+is its mirror. Two identical searches are two turns.
+
+`AgentMessage`, `Reasoning`, `UserMessage`, `ContextCompaction`, and `Plan`
+remain ordinary lifecycle evidence and do not become phantom tool turns; a
+`Plan` item's text is restated by the assistant message that follows it,
+wrapped in `<proposed_plan>`. A completed item with no `item_started` is a
+tool result whose call Codex did not record as a record of its own, so
+`events` reports it as `call-not-recorded`. For `CommandExecution`, the native
 `command` array is the argv carrier. Its elements must be strings and the
 array must fit the supported argument bound; otherwise the invocation is
 explicitly unsupported rather than silently filtered or truncated. The native

@@ -2814,6 +2814,111 @@ fn codex_reads_cumulative_token_totals_from_the_latest_event_with_usage() {
     assert!(without.accounting.is_none());
 }
 
+/// Code mode records the operations its `exec` script ran only as runtime
+/// items, so each is a tool turn; an item whose id a `response_item` already
+/// carried, a web search recorded as both an item and a `web_search_call`,
+/// and a plan the next assistant message restates each appear once.
+#[test]
+fn codex_runtime_items_are_tool_turns_unless_a_record_read_before_names_them() {
+    let root =
+        std::env::temp_dir().join(format!("tapes-codex-runtime-items-{}", std::process::id()));
+    let day = root.join("2026/01/01");
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&day).unwrap();
+    let id = "00000000-0000-0000-0000-00000000b001";
+    let path = day.join(format!("rollout-2026-01-01T10-00-00-{id}.jsonl"));
+    let item = |item: serde_json::Value| serde_json::json!({"timestamp": "2026-01-01T10:00:02Z", "type": "event_msg", "payload": {"type": "item_completed", "thread_id": id, "turn_id": "turn-1", "item": item}});
+    let response = |payload: serde_json::Value| serde_json::json!({"timestamp": "2026-01-01T10:00:01Z", "type": "response_item", "payload": payload});
+    let search = serde_json::json!({"type": "search", "query": "fixture", "queries": ["fixture"]});
+    let records = [
+        serde_json::json!({"timestamp": "2026-01-01T10:00:00Z", "type": "session_meta", "payload": {"id": id, "source": "cli", "cwd": "/fixtures/project"}}),
+        response(
+            serde_json::json!({"type": "custom_tool_call", "call_id": "call-exec", "name": "exec", "input": "await tools.view_image({path: 'shot.png'})", "status": "completed"}),
+        ),
+        item(
+            serde_json::json!({"type": "McpToolCall", "id": "exec-mcp", "server": "fixture", "tool": "lookup", "arguments": {"q": "x"}, "status": "completed", "result": {"content": []}}),
+        ),
+        item(
+            serde_json::json!({"type": "ImageView", "id": "exec-image", "path": "file:///fixtures/shot.png"}),
+        ),
+        item(
+            serde_json::json!({"type": "Extension", "kind": "web.search", "id": "exec-extension", "query": "fixture", "results": []}),
+        ),
+        response(
+            serde_json::json!({"type": "custom_tool_call_output", "call_id": "call-patch", "output": "applied"}),
+        ),
+        item(serde_json::json!({"type": "FileChange", "id": "call-patch", "changes": {}})),
+        item(serde_json::json!({"type": "FileChange", "id": "exec-patch", "changes": {}})),
+        response(
+            serde_json::json!({"type": "function_call", "call_id": "call-spawn", "name": "spawn_agent", "arguments": "{}"}),
+        ),
+        item(
+            serde_json::json!({"type": "SubAgentActivity", "id": "call-spawn", "kind": "interacted", "agent_path": "/root"}),
+        ),
+        item(
+            serde_json::json!({"type": "WebSearch", "id": "ws_first", "query": "fixture", "action": search}),
+        ),
+        response(
+            serde_json::json!({"type": "web_search_call", "status": "completed", "action": search}),
+        ),
+        item(
+            serde_json::json!({"type": "WebSearch", "id": "ws_again", "query": "fixture", "action": search}),
+        ),
+        response(
+            serde_json::json!({"type": "web_search_call", "id": "ws_call", "status": "completed", "action": {"type": "search", "query": "call first"}}),
+        ),
+        item(
+            serde_json::json!({"type": "WebSearch", "id": "ws_call", "query": "call first", "action": {"type": "search", "query": "call first"}}),
+        ),
+        item(serde_json::json!({"type": "Plan", "id": "turn-1-plan", "text": "# Plan"})),
+        response(
+            serde_json::json!({"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "<proposed_plan>\n# Plan\n</proposed_plan>"}]}),
+        ),
+    ];
+    let body = records
+        .iter()
+        .map(|record| record.to_string() + "\n")
+        .collect::<String>();
+    fs::write(&path, body).unwrap();
+
+    let backend = CodexBackend::new(&root);
+    let session = located(&backend, id);
+    let tools = backend
+        .transcript(&session, usize::MAX)
+        .unwrap()
+        .turns
+        .into_iter()
+        .filter(|turn| turn.kind == TurnKind::Tool)
+        .map(|turn| {
+            let record: serde_json::Value = serde_json::from_str(&turn.text).unwrap();
+            format!(
+                "{}:{}",
+                record["type"].as_str().unwrap(),
+                record["id"]
+                    .as_str()
+                    .or_else(|| record["call_id"].as_str())
+                    .unwrap_or("-")
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        tools,
+        [
+            "custom_tool_call:call-exec",
+            "McpToolCall:exec-mcp",
+            "ImageView:exec-image",
+            "Extension:exec-extension",
+            "custom_tool_call_output:call-patch",
+            "FileChange:exec-patch",
+            "function_call:call-spawn",
+            "WebSearch:ws_first",
+            "WebSearch:ws_again",
+            "web_search_call:ws_call",
+        ]
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
 #[test]
 fn codex_terminal_prefers_nested_native_error_fields_and_keeps_later_accounting() {
     let root =
