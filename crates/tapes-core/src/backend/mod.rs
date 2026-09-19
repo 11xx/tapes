@@ -767,6 +767,8 @@ impl StreamedTranscript {
             context_records: Vec::new(),
             gaps: self.gaps.clone(),
             unmapped: self.unmapped.clone(),
+            record_sha256: Vec::new(),
+            reader: Some(crate::reader::identity()),
         }
     }
 
@@ -1543,6 +1545,8 @@ pub(crate) fn read_evidence(read: &Jsonl) -> ReadEvidence {
         context_records: Vec::new(),
         gaps: read.gaps.clone(),
         unmapped: None,
+        record_sha256: Vec::new(),
+        reader: Some(crate::reader::identity()),
     }
 }
 
@@ -1592,6 +1596,8 @@ pub(crate) fn recording_evidence(recording: &Recording) -> ReadEvidence {
         records,
         context_records,
         unmapped: None,
+        record_sha256: Vec::new(),
+        reader: Some(crate::reader::identity()),
         gaps: subtract_covered_ranges(
             &recording
                 .head_gaps

@@ -1120,6 +1120,17 @@ this read, not a content digest or a portable source identity. Physical
 coverage does not erase a malformed record gap; a partial gap is discharged
 only when a successful decode identifies that same record.
 
+`reader` names the build that produced the read: the `package` and
+`version`, and a `build` that is `{"from": "checkout", "revision": <commit>,
+"modified": <bool>}` when the reader was built from a git checkout —
+`modified` when its sources differed from that commit — and
+`{"from": "unknown"}` otherwise. A reader repair can change what the same
+source projects to under the same schema version, and this is what tells the
+two apart. `record_sha256`, where a reader digests records (supplied inputs),
+holds the lowercase hex SHA-256 of each span in `records`, in order. An export
+manifest carries the same `reader`, and `tapes --version` names it on the line
+after the version.
+
 `unmapped` counts the decoded records a read represented as no turn, by native
 record type, where the reader counts them: a Claude, Codex, or pi transcript
 read, bounded or `--full`. `declined` holds the types a reader leaves out on

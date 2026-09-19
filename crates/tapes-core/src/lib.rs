@@ -27,6 +27,7 @@ pub mod history;
 pub mod input;
 pub mod lineage;
 pub mod model;
+pub mod reader;
 pub mod scope;
 pub mod stats;
 pub mod stats_summary;
@@ -1565,6 +1566,8 @@ pub struct FailedExport {
 #[derive(Debug, Serialize)]
 pub struct ExportManifest {
     pub schema: &'static str,
+    /// The build of the reader that wrote every bundle it lists.
+    pub reader: crate::reader::ReaderIdentity,
     pub selection: SelectionRecord,
     /// Exported sessions, in selection order.
     pub sessions: Vec<ExportedSession>,
@@ -1658,6 +1661,7 @@ pub fn export_selection_with_backends(
 
     let manifest = ExportManifest {
         schema: EXPORT_MANIFEST_SCHEMA,
+        reader: crate::reader::identity(),
         selection: selection_record(selection, limit),
         sessions,
         artifacts: listed.artifacts,

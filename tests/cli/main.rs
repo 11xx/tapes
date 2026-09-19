@@ -157,6 +157,59 @@ fn self_names_the_session_its_harness_exports() {
     let _ = fs::remove_dir_all(&codex_home);
 }
 
+/// Read evidence names the reader build that produced it, and a supplied
+/// record's span carries the SHA-256 of its source bytes, so a consumer can
+/// bind retained bytes without decoding the input again. The digest below is
+/// `sha256sum` of bytes 4..291 of the fixture.
+#[test]
+fn supplied_reads_name_the_reader_and_digest_each_record() {
+    let input = supplied_fixture("chatgpt-export.json");
+    let output = tapes()
+        .args([
+            "show",
+            "supplied-1",
+            "--input",
+            input.to_str().unwrap(),
+            "--input-format",
+            "chatgpt-exporter",
+            "--json",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let read = &value["read"];
+    assert_eq!(
+        read["records"],
+        serde_json::json!([{"start": 4, "end": 291}])
+    );
+    assert_eq!(
+        read["record_sha256"],
+        serde_json::json!(["aa7816abb18408864856f85b2afb710ece96edc2d69169eca804479a2b2c115d"])
+    );
+    assert_eq!(read["reader"]["package"], "tapes-core");
+    assert_eq!(read["reader"]["version"], env!("CARGO_PKG_VERSION"));
+    assert!(read["reader"]["build"]["from"].is_string(), "{read}");
+
+    let version = tapes().arg("--version").output().unwrap();
+    let version = String::from_utf8(version.stdout).unwrap();
+    let mut lines = version.lines();
+    assert_eq!(
+        lines.next(),
+        Some(format!("tapes {}", env!("CARGO_PKG_VERSION")).as_str())
+    );
+    assert!(
+        lines
+            .next()
+            .is_some_and(|line| line.starts_with("reader: tapes-core ")),
+        "{version}"
+    );
+}
+
 /// A removed per-change worktree leaves sessions whose recorded directory no
 /// longer exists. A scoped listing cannot prove their project, so it leaves
 /// them out, says how many directories it left out, and names the flags that
@@ -562,6 +615,7 @@ fn export_omit_narrows_every_bundle_file_and_counts_the_omitted_turns() {
         serde_json::from_str(&fs::read_to_string(bulk.join("manifest.json")).unwrap()).unwrap();
     let sessions = manifest["sessions"].as_array().unwrap();
     assert_eq!(sessions.len(), 2, "{manifest}");
+    assert_eq!(manifest["reader"]["package"], "tapes-core", "{manifest}");
     for session in sessions {
         let bundle: Value = serde_json::from_str(
             &fs::read_to_string(session["files"]["json"].as_str().unwrap()).unwrap(),

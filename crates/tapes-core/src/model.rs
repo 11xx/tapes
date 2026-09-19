@@ -444,6 +444,14 @@ pub struct ReadEvidence {
     /// record it decoded became a turn.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unmapped: Option<UnmappedRecords>,
+    /// The SHA-256 of each span in `records`, in the same order, as
+    /// lowercase hex, where the reader digests them: a supplied input's
+    /// decoded records.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub record_sha256: Vec<String>,
+    /// The build of the reader that produced this read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reader: Option<crate::reader::ReaderIdentity>,
 }
 
 /// Decoded records that produced no turn, counted by native record type.
