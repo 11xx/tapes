@@ -3304,6 +3304,80 @@ fn claude_types_each_user_record_from_the_fields_it_recorded() {
     assert_eq!(kind("assistant-2"), TurnKind::Assistant);
 }
 
+/// Each user record types from what Claude wrote beside it: an SDK prompt
+/// source, the `!` shell envelope, an interruption, a compaction summary, and
+/// the brief that opens a subagent's transcript. A sender value nobody has
+/// verified, and text with no evidence at all, stay unknown.
+#[test]
+fn claude_types_sdk_shell_interruption_compaction_and_subagent_records() {
+    let root = std::env::temp_dir().join(format!(
+        "tapes-claude-user-populations-{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&root);
+    let id = "7f3c2a10-0000-4000-8000-000000000001";
+    let project = root.join("-fixtures-project");
+    let subagents = project.join(id).join("subagents");
+    fs::create_dir_all(&subagents).unwrap();
+    let user = |uuid: &str, fields: serde_json::Value, content: serde_json::Value| {
+        let mut record = serde_json::json!({"type": "user", "sessionId": id, "uuid": uuid, "parentUuid": "previous", "timestamp": "2026-01-01T10:00:00Z", "cwd": "/fixtures/project", "isSidechain": false, "entrypoint": "cli", "promptId": "prompt", "message": {"role": "user", "content": content}});
+        for (key, value) in fields.as_object().unwrap() {
+            record[key] = value.clone();
+        }
+        record.to_string() + "\n"
+    };
+    let none = serde_json::json!({});
+    let recording = [
+        user("sdk", serde_json::json!({"promptSource": "sdk", "entrypoint": "sdk-cli"}), "Summarize the fixture.".into()),
+        user("bash-input", none.clone(), "<bash-input>ls</bash-input>".into()),
+        user("bash-output", none.clone(), "<bash-stdout>fixture.txt</bash-stdout><bash-stderr></bash-stderr>".into()),
+        user("interrupted", serde_json::json!({"interruptedMessageId": "msg_fixture"}), "[Request interrupted by user]".into()),
+        user("interrupted-tool", none.clone(), serde_json::json!([{"type": "text", "text": "[Request interrupted by user for tool use]"}])),
+        user("compacted", serde_json::json!({"isCompactSummary": true, "isVisibleInTranscriptOnly": true}), "This session is being continued from a previous conversation.".into()),
+        user("unverified-source", serde_json::json!({"promptSource": "queued"}), "Queued text.".into()),
+        user("no-evidence", none.clone(), "Plain text.".into()),
+    ]
+    .concat();
+    fs::write(project.join(format!("{id}.jsonl")), recording).unwrap();
+    let child = |uuid: &str, parent: Option<&str>, text: &str| {
+        serde_json::json!({"type": "user", "sessionId": id, "uuid": uuid, "parentUuid": parent, "timestamp": "2026-01-01T10:00:01Z", "cwd": "/fixtures/project", "isSidechain": true, "agentId": "a0fixture", "entrypoint": "cli", "promptId": "prompt", "message": {"role": "user", "content": text}}).to_string() + "\n"
+    };
+    fs::write(
+        subagents.join("agent-a0fixture.jsonl"),
+        child("brief", None, "Inspect the fixture and report.")
+            + &child("later", Some("brief"), "Plain text."),
+    )
+    .unwrap();
+
+    let backend = ClaudeBackend::new(&root);
+    let session = located(&backend, id);
+    let transcript = backend.transcript(&session, usize::MAX).unwrap();
+    let kind = |turns: &[Turn], native_id: &str| {
+        turns
+            .iter()
+            .find(|turn| turn.native_id.as_deref() == Some(native_id))
+            .unwrap_or_else(|| panic!("fixture has no record {native_id}"))
+            .kind
+    };
+    for (native_id, expected) in [
+        ("sdk", TurnKind::Operator),
+        ("bash-input", TurnKind::Control),
+        ("bash-output", TurnKind::Control),
+        ("interrupted", TurnKind::Notice),
+        ("interrupted-tool", TurnKind::Notice),
+        ("compacted", TurnKind::Ambient),
+        ("unverified-source", TurnKind::Unknown),
+        ("no-evidence", TurnKind::Unknown),
+    ] {
+        assert_eq!(kind(&transcript.turns, native_id), expected, "{native_id}");
+    }
+
+    let subagent = backend.child_transcript(&session, "a0fixture").unwrap();
+    assert_eq!(kind(&subagent.turns, "brief"), TurnKind::Operator);
+    assert_eq!(kind(&subagent.turns, "later"), TurnKind::Unknown);
+    fs::remove_dir_all(root).unwrap();
+}
+
 /// The ending a reader judges: the operator's last turn is the one before the
 /// commands the harness recorded on its way out, so a session that ends on a
 /// control turn is not an unanswered prompt.

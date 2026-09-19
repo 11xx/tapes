@@ -219,7 +219,7 @@ neither:
 
 | harness | evidence |
 |---|---|
-| Claude | `origin.kind` and `promptSource` name the sender; `isMeta` marks text the harness attached; on a record carrying none of the three, content that is exactly a `<command-name>` envelope or a `<local-command-stdout>` element is the harness's own command. |
+| Claude | `origin.kind` and `promptSource` name the sender, `sdk` included; `isMeta` marks text the harness attached; on a record carrying none of the three, `interruptedMessageId` or Claude's interruption text is a notice, `isCompactSummary` is ambient, a subagent transcript's opening brief is the operator's, and content that is exactly a `<command-name>` envelope, a `<local-command-stdout>` element, or a `!` command's `<bash-input>` or `<bash-stdout>`/`<bash-stderr>` is the harness's own command. |
 | Codex | No field names the sender, so the elements the harness wraps its own text in are the separation, whatever entry point started the session. A user message whose every block is attached context, such as `<environment_context>`, an `<INSTRUCTIONS>` block, or a `<skill>`, is `ambient`; one that adds only a message the harness raised, `<turn_aborted>`, `<subagent_notification>`, or `<codex_internal_context>`, is `notice`; any other message is `operator`. A Codex user turn is never `unknown`, and its kind comes from its own record, so every read gives it the same one. |
 | pi, OpenCode | Neither records anything but the operator's messages in its user role. |
 
