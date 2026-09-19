@@ -1,5 +1,6 @@
 mod guide;
 mod liveness;
+mod self_token;
 
 use std::path::PathBuf;
 
@@ -338,12 +339,86 @@ fn turn_kind_parser() -> impl clap::builder::TypedValueParser<Value = TurnKind> 
         .map(|label| TurnKind::from_label(&label).expect("the parser admits only turn-kind labels"))
 }
 
+/// The fields of a selector that accept a session id, so `self` can be
+/// replaced with the caller's own id before the selector is read.
+trait SelfSelectable {
+    fn ids_mut(&mut self) -> (&mut Option<String>, &mut Vec<String>);
+    fn input_supplied(&self) -> bool;
+}
+
+/// Replace `self` in a selector with the caller's own session id, reporting
+/// what it became. A supplied input holds no session of the caller's, so
+/// `self` refuses there.
+fn apply_self(selector: &mut dyn SelfSelectable) -> Result<()> {
+    let supplied = selector.input_supplied();
+    let (session, exclude) = selector.ids_mut();
+    let named = session.as_deref() == Some(self_token::TOKEN)
+        || exclude.iter().any(|id| id == self_token::TOKEN);
+    if !named {
+        return Ok(());
+    }
+    if supplied {
+        return Err(anyhow!(
+            "self names the caller's own installed session and selects nothing from a supplied input"
+        ));
+    }
+    let resolved = self_token::resolve(&tapes_core::backend::backends())?;
+    eprintln!("Note: {}.", resolved.report());
+    for id in session.iter_mut().chain(exclude.iter_mut()) {
+        if id == self_token::TOKEN {
+            id.clone_from(&resolved.id);
+        }
+    }
+    Ok(())
+}
+
+impl SelfSelectable for SelectionArgs {
+    fn ids_mut(&mut self) -> (&mut Option<String>, &mut Vec<String>) {
+        (&mut self.session, &mut self.exclude)
+    }
+
+    fn input_supplied(&self) -> bool {
+        self.input.supplied()
+    }
+}
+
+impl SelfSelectable for SessionQueryArgs {
+    fn ids_mut(&mut self) -> (&mut Option<String>, &mut Vec<String>) {
+        (&mut self.session, &mut self.exclude)
+    }
+
+    fn input_supplied(&self) -> bool {
+        self.input.supplied()
+    }
+}
+
+impl Command {
+    /// The selector this command reads its session from, where it has one.
+    fn selector_mut(&mut self) -> Option<&mut dyn SelfSelectable> {
+        match self {
+            Command::Show { selection, .. }
+            | Command::Page { selection, .. }
+            | Command::HistorySearch { selection, .. }
+            | Command::Metadata { selection, .. }
+            | Command::Child { selection, .. }
+            | Command::Events { selection, .. }
+            | Command::Lineage { selection, .. }
+            | Command::Brief { selection, .. } => Some(selection),
+            Command::Stats { query, .. }
+            | Command::Usage { query, .. }
+            | Command::Export { query, .. } => Some(query),
+            _ => None,
+        }
+    }
+}
+
 /// Select one session by ID, exact recorded title, or latest activity.
 /// ID resolution crosses stores; title and latest selection honor explicit
 /// scope and harness restrictions.
 #[derive(Args)]
 struct SelectionArgs {
-    /// Session identifier, full or an unambiguous prefix.
+    /// Session identifier, full or an unambiguous prefix, or `self` for the
+    /// session the caller runs in, as its harness's exported variable names it.
     #[arg(
         required_unless_present_any = ["latest", "title", "occurrence"],
         conflicts_with_all = ["latest", "title", "occurrence", "exclude", "harness", "here", "project", "global"]
@@ -355,11 +430,11 @@ struct SelectionArgs {
     /// Take the most recent session in scope instead of naming one. A
     /// caller asking from inside a live session is usually itself the most
     /// recent one in its own project, so reaching an older session takes
-    /// `--exclude <own-id>`.
+    /// `--exclude self`.
     #[arg(long)]
     latest: bool,
     /// Pass over this session when taking the latest. Repeatable. An agent
-    /// asking from inside its own session passes its own id here.
+    /// asking from inside its own session passes `self` here.
     #[arg(long, requires = "latest")]
     exclude: Vec<String>,
     /// Restrict title or latest lookup to one harness.
@@ -422,7 +497,8 @@ impl SelectionArgs {
 #[derive(Args)]
 #[group(multiple = true)]
 struct SessionQueryArgs {
-    /// Session identifier, full or an unambiguous prefix.
+    /// Session identifier, full or an unambiguous prefix, or `self` for the
+    /// session the caller runs in, as its harness's exported variable names it.
     #[arg(conflicts_with_all = ["title", "latest", "occurrence", "exclude", "harness", "here", "project", "global"])]
     session: Option<String>,
     /// Match the recorded title exactly in scope; incomplete or ambiguous lookup refuses.
@@ -431,11 +507,11 @@ struct SessionQueryArgs {
     /// Take the most recent session in scope instead of naming one. A
     /// caller asking from inside a live session is usually itself the most
     /// recent one in its own project, so reaching an older session takes
-    /// `--exclude <own-id>`.
+    /// `--exclude self`.
     #[arg(long)]
     latest: bool,
     /// Pass over this session when taking the latest. Repeatable. An agent
-    /// asking from inside its own session passes its own id here.
+    /// asking from inside its own session passes `self` here.
     #[arg(long, requires = "latest")]
     exclude: Vec<String>,
     /// Restrict title, latest, or set selection to one harness.
@@ -1045,10 +1121,13 @@ fn print_json<T: Serialize>(value: &T, input: &InputArgs) -> Result<()> {
 }
 
 fn dispatch(cli: Cli) -> Result<()> {
-    let Some(command) = cli.command else {
+    let Some(mut command) = cli.command else {
         guide::print();
         return Ok(());
     };
+    if let Some(selector) = command.selector_mut() {
+        apply_self(selector)?;
+    }
     match command {
         Command::List {
             harness,
@@ -3156,11 +3235,21 @@ fn render_read_notes(out: &mut String, transcript: &Transcript) {
     }
 }
 
+/// Name what to pass to reach the session before the one `--latest` picked:
+/// `self` when that session is the caller's own, its id otherwise.
 fn render_latest_note(out: &mut String, session: &Session) {
-    out.push_str(&format!(
-        "Note: --latest picked the newest session in scope. Pass --exclude {} to reach the one before it.\n",
-        session.id
-    ));
+    let own = self_token::detect(|variable| std::env::var(variable).ok())
+        .is_ok_and(|detected| detected.id == session.id);
+    if own {
+        out.push_str(
+            "Note: --latest picked the newest session in scope, which is this one. Pass --exclude self to reach the one before it.\n",
+        );
+    } else {
+        out.push_str(&format!(
+            "Note: --latest picked the newest session in scope. Pass --exclude {} to reach the one before it.\n",
+            session.id
+        ));
+    }
 }
 
 fn render_notes(out: &mut String, notes: &[String]) {

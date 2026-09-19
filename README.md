@@ -337,7 +337,17 @@ read to the length it had when the read opened.
 `show` and `export` also take `--latest` in place of an ID, which resolves the
 most recent session in scope. `--exclude <id>` is repeatable and passes over
 sessions the caller already holds — including its own, which is otherwise the
-newest one there. `--project <path>` scopes elsewhere and `--global` drops the
+newest one there.
+
+`self` stands for the caller's own session wherever a session id is taken —
+`tapes show self`, `--exclude self` — resolved from the first of
+`CLAUDE_SESSION_ID`, `CLAUDE_CODE_SESSION_ID`, `CODEX_THREAD_ID`,
+`OPENCODE_SESSION`, and `PI_SESSION_ID` that is set; the hand-set Claude
+spelling comes before the one Claude Code exports. What it became is written
+to stderr. It refuses when none is set (OpenCode v2 exports no session id),
+when no installed store holds the id as a session of the harness that
+exported it, and for a supplied input, which holds no session of the
+caller's. `--project <path>` scopes elsewhere and `--global` drops the
 scope.
 
 `events` projects tool calls and results into the harness-neutral
@@ -555,9 +565,9 @@ of restating it.
 
 **Exclude the session doing the asking.** An agent running `--latest` inside a
 live session is usually the newest session in its own project. Nothing in a
-store separates it from the session that just died, so a wrapper that knows its
-own ID should pass `--exclude <id>`; `tapes` reports the latest and never
-guesses which one the caller meant.
+store separates it from the session that just died, so a caller should pass
+`--exclude self`, or `--exclude <id>` where its harness exports no id; `tapes`
+reports the latest and never guesses which one the caller meant.
 
 **The cheap probe first.** `tapes show --latest --tail 40` answers "is there
 anything here worth having?" without exporting. Reach for `export` only after

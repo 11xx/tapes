@@ -16,7 +16,7 @@ disturb a live session.
 
 START WITHOUT AN ID
   tapes show --latest --tail 40  The newest session of this project.
-  tapes show --latest --exclude <your own id>
+  tapes show --latest --exclude self
   tapes export --latest
 
   --latest takes the most recent session in scope, so nothing has to read a
@@ -36,8 +36,12 @@ START WITHOUT AN ID
   Asking from inside a live session usually returns that session — it is the
   newest one there. Nothing in a store distinguishes the session asking from
   the session that just died, so pass --exclude <id> for any session you
-  already hold. A harness that tells an agent its own session id makes this
-  exact; without one, read the first turns and check whose they are.
+  already hold. self stands for your own session wherever an id does, read
+  from the variable your harness exports (CLAUDE_SESSION_ID or
+  CLAUDE_CODE_SESSION_ID, CODEX_THREAD_ID, OPENCODE_SESSION, PI_SESSION_ID);
+  stderr says what it became, and it refuses when none is set or the store
+  does not hold the id. Without one, read the first turns and check whose
+  they are.
 
 FIND IT
   tapes list                     Every available harness, newest first.
