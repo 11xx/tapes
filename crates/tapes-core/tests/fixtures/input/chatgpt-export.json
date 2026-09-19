@@ -1,0 +1,12 @@
+[
+  {
+    "id": "supplied-1",
+    "title": "Bounded input",
+    "created_at": "2026-09-12T10:00:00Z",
+    "updated_at": "2026-09-12T10:01:00Z",
+    "messages": [
+      {"id": "m1", "role": "user", "content": "question"},
+      {"id": "m2", "role": "assistant", "content": "answer"}
+    ]
+  }
+]

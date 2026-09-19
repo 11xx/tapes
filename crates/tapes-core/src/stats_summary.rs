@@ -56,6 +56,8 @@ pub struct StatsSummary {
     pub unsearched: Vec<String>,
     pub scanned: usize,
     pub scan_truncated: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unplaced: Option<crate::Unplaced>,
 }
 
 /// One harness's turns across the sessions a summary read, and the kinds it
@@ -102,6 +104,7 @@ pub fn with_backends(
         unsearched: listed.unsearched,
         scanned: listed.scanned,
         scan_truncated: listed.scan_truncated,
+        unplaced: crate::Unplaced::from_directories(listed.unplaced.clone()),
     };
     let mut by_harness = BTreeMap::<String, ToolAccumulator>::new();
     let mut kinds_by_harness = BTreeMap::<String, (KindDeclaration, TurnKindCounts)>::new();

@@ -53,6 +53,8 @@ pub struct StatsView {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lineage: Option<LineageStats>,
     pub warnings: Vec<Warning>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub notes: Vec<String>,
 }
 
 /// What the figures are figures about. `turns` is `read-window` when a source
@@ -380,6 +382,7 @@ impl Counted {
             usage: usage_stats(usage.tokens, usage.cost, usage.accounting),
             lineage: lineage_stats(lineage),
             warnings,
+            notes: usage.notes,
         }
     }
 }
@@ -742,6 +745,7 @@ mod tests {
             invocations: Vec::new(),
             artifact_references: Vec::new(),
             artifact_consumptions: Vec::new(),
+            self_contained: false,
         }
     }
 
@@ -758,6 +762,7 @@ mod tests {
             invocations: Vec::new(),
             artifact_references: Vec::new(),
             artifact_consumptions: Vec::new(),
+            self_contained: false,
         }
     }
 

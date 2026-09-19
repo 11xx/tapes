@@ -1,0 +1,4 @@
+{"type":"session","version":3,"id":"malformed","timestamp":"2026-01-01T11:00:00Z","cwd":"/fixtures/project"}
+{"type":"message","id":"user-1","parentId":null,"timestamp":"2026-01-01T11:00:01Z","message":{"role":"user","timestamp":1767265201000,"content":[{"type":"text","text":"Read valid lines."}]}}
+this is not json
+{"type":"message","id":"assistant-1","parentId":"user-1","timestamp":"2026-01-01T11:00:02Z","message":{"role":"assistant","timestamp":1767265202000,"provider":"openai-codex","model":"gpt-fixture","content":[{"type":"text","text":"Invalid line skipped."}]}}

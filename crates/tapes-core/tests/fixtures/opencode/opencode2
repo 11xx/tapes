@@ -1,0 +1,383 @@
+#!/bin/sh
+set -eu
+
+# The checked-in executable is addressed through temporary symlink aliases and
+# small fixture wrappers. Their names select the response set, while the
+# resolved path locates the JSON fixtures without process-global configuration.
+invoked=$0
+case $invoked in
+  */*) ;;
+  *)
+    original_ifs=$IFS
+    IFS=:
+    for directory in $PATH; do
+      if [ -x "$directory/$invoked" ]; then
+        invoked=$directory/$invoked
+        break
+      fi
+    done
+    IFS=$original_ifs
+    ;;
+esac
+resolved=$(/usr/bin/readlink -f "$invoked")
+fixture_dir=${resolved%/*}
+name=${invoked##*/}
+case $invoked in
+  *opencode-titleless*) name=opencode2-titleless ;;
+  *opencode-oversized*) name=opencode2-oversized ;;
+  *opencode-many*) name=opencode2-many ;;
+esac
+path=${4:-}
+query=${4:-}
+
+case $name in
+  opencode2)
+    list=list.json
+    messages=messages.json
+    session=session.json
+    mode=normal
+    ;;
+  opencode2-titleless*)
+    list=list-no-title.json
+    messages=messages-no-title.json
+    session=session-no-title.json
+    mode=normal
+    ;;
+  opencode2-counting*)
+    list=list.json
+    messages=messages.json
+    session=session.json
+    mode=counting
+    ;;
+  opencode2-serve-failed*)
+    list=list.json
+    messages=messages.json
+    session=session.json
+    mode=serve-failed
+    ;;
+  opencode2-oversized*)
+    list=list.json
+    mode=oversized
+    ;;
+  opencode2-many*)
+    list=list.json
+    mode=many
+    ;;
+  opencode)
+    mode=database
+    ;;
+  opencode2-broken-resolve*|opencode2-broken-hit-wins*)
+    mode=exit
+    ;;
+  opencode2-broken-list*)
+    mode=broken-list
+    ;;
+  opencode2-broken-malformed*)
+    mode=malformed
+    ;;
+  opencode2-broken-absent*)
+    mode=absent
+    ;;
+  *)
+    exit 1
+    ;;
+esac
+
+case ${5:-} in
+  malformed-row) mode=database-malformed ;;
+  database) mode=database ;;
+esac
+
+if [ "$mode" = serve-failed ] && [ "${1:-}" = serve ]; then
+  exit 7
+fi
+
+if [ "$mode" = counting ] || [ "$mode" = oversized ]; then
+  printf '%s\n' "$path" >> "${invoked}.calls"
+fi
+
+# A session whose whole message projection is larger than any transport bound.
+# Pages are generated on demand: two full pages, then a short one. The unpaged
+# route answers with more bytes than a reader may accept, so a reader that asks
+# for it fails the way the real store makes it fail.
+oversized_page() {
+  giant=$1
+  query=${path#*\?}
+  limit=
+  cursor=
+  old_ifs=$IFS
+  IFS='&'
+  for pair in $query; do
+    case $pair in
+      limit=*) limit=${pair#limit=} ;;
+      cursor=*) cursor=${pair#cursor=} ;;
+    esac
+  done
+  IFS=$old_ifs
+  [ -n "$limit" ] || exit 7
+  page=${cursor:-1}
+  if [ "$giant" = endless ]; then
+    : # every page is full and every cursor leads to another
+  elif [ "$page" -gt 2 ] && [ "$giant" = yes ]; then
+    /usr/bin/head -c 9000000 /dev/zero | /usr/bin/tr '\0' x
+    return
+  fi
+  if [ "$page" -gt 2 ] && [ "$giant" != endless ]; then
+    printf '%s\n' '{"data":[],"cursor":{"next":"4","previous":"3"}}'
+    return
+  fi
+  printf '{"data":['
+  i=0
+  while [ "$i" -lt "$limit" ]; do
+    [ "$i" -gt 0 ] && printf ','
+    created=$((1784663300000 - page * 1000000 - i * 1000))
+    if [ $((i % 2)) -eq 0 ]; then
+      printf '{"id":"msg_oversized_%s_%s","type":"assistant","time":{"created":%s},"content":[{"type":"text","text":"Page %s message %s","time":{"created":%s}}]}' "$page" "$i" "$created" "$page" "$i" "$created"
+    else
+      printf '{"id":"msg_oversized_%s_%s","type":"user","time":{"created":%s},"text":"Ask page %s message %s"}' "$page" "$i" "$created" "$page" "$i"
+    fi
+    i=$((i + 1))
+  done
+  printf '],"cursor":{"next":"%s","previous":"%s"}}\n' $((page + 1)) $((page - 1))
+}
+
+if [ "$mode" = oversized ]; then
+  case $path in
+    /api/session/ses_oversized_fixture/message\?*)
+      oversized_page no
+      ;;
+    /api/session/ses_giant_message_fixture/message\?*)
+      oversized_page yes
+      ;;
+    /api/session/ses_endless_fixture/message\?*)
+      oversized_page endless
+      ;;
+    /api/session/ses_oversized_fixture/message|/api/session/ses_giant_message_fixture/message)
+      /usr/bin/head -c 9000000 /dev/zero | /usr/bin/tr '\0' x
+      ;;
+    /api/session/ses_oversized_fixture|/api/session/ses_giant_message_fixture|/api/session/ses_endless_fixture)
+      id=${path##*/}
+      printf '{"data":{"id":"%s","projectID":"fixture","agent":"build","model":{"id":"fixture-model","providerID":"fixture","variant":"balanced"},"cost":0,"tokens":{"input":0,"output":0,"reasoning":0,"cache":{"read":0,"write":0}},"time":{"created":1784663000000,"updated":1784663400000},"title":"Oversized fixture session","location":{"directory":"/fixtures/oversized"}}}\n' "$id"
+      ;;
+    /api/session\?*)
+      /bin/cat "$fixture_dir/$list"
+      ;;
+    *)
+      exit 1
+      ;;
+  esac
+  exit 0
+fi
+
+# A session holding more messages than a bounded read fetches. Pages are
+# generated on demand. A cursor carries the order it was issued in and the
+# offset of the next message, and every page answers with a next cursor, as
+# the real endpoint does; only a short page says the session is exhausted.
+many_page() {
+  query=${path#*\?}
+  limit=
+  cursor=
+  order=desc
+  old_ifs=$IFS
+  IFS='&'
+  for pair in $query; do
+    case $pair in
+      limit=*) limit=${pair#limit=} ;;
+      cursor=*) cursor=${pair#cursor=} ;;
+      order=*) order=${pair#order=} ;;
+    esac
+  done
+  IFS=$old_ifs
+  [ -n "$limit" ] || exit 7
+  offset=0
+  if [ -n "$cursor" ]; then
+    order=${cursor%%-*}
+    offset=${cursor#*-}
+  fi
+  total=1200
+  printf '{"data":['
+  i=0
+  while [ "$i" -lt "$limit" ] && [ $((offset + i)) -lt "$total" ]; do
+    [ "$i" -gt 0 ] && printf ','
+    if [ "$order" = asc ]; then
+      k=$((offset + i))
+    else
+      k=$((total - 1 - offset - i))
+    fi
+    created=$((1784663000000 + k * 1000))
+    if [ $((k % 2)) -eq 0 ]; then
+      printf '{"id":"msg_many_%s","type":"user","time":{"created":%s},"text":"Request %s"}' "$k" "$created" "$k"
+    else
+      printf '{"id":"msg_many_%s","type":"assistant","time":{"created":%s},"content":[{"id":"prt_many_%s","type":"text","text":"Answer %s","time":{"created":%s}}]}' "$k" "$created" "$k" "$k" "$created"
+    fi
+    i=$((i + 1))
+  done
+  printf '],"cursor":{"next":"%s-%s","previous":"%s-%s"}}\n' "$order" $((offset + i)) "$order" "$offset"
+}
+
+if [ "$mode" = many ]; then
+  case $path in
+    /api/session/ses_many_fixture/message\?*)
+      many_page
+      ;;
+    /api/session/ses_many_fixture)
+      printf '%s\n' '{"data":{"id":"ses_many_fixture","projectID":"fixture","agent":"build","model":{"id":"fixture-model","providerID":"fixture"},"cost":0,"tokens":{"input":0,"output":0,"reasoning":0,"cache":{"read":0,"write":0}},"time":{"created":1784663000000,"updated":1784664200000},"title":"Many-message fixture session","location":{"directory":"/fixtures/many"}}}'
+      ;;
+    /api/session\?*)
+      /bin/cat "$fixture_dir/$list"
+      ;;
+    *)
+      exit 1
+      ;;
+  esac
+  exit 0
+fi
+
+database_rows() {
+  printf '%s\n' row
+  /bin/cat "$fixture_dir/$1"
+}
+
+if [ "$mode" = database ] || [ "$mode" = database-malformed ]; then
+  case "$query" in
+    *"SELECT id AS row FROM session ORDER BY time_updated DESC LIMIT "*)
+      printf '%s\n' row
+      /usr/bin/sed -n 's/.*"id":"\([^"]*\)".*/\1/p' "$fixture_dir/database-sessions.json"
+      ;;
+    *"FROM session ORDER BY time_updated DESC LIMIT "*)
+      if [ "$mode" = database-malformed ]; then
+        database_rows database-sessions-malformed.json
+      else
+        database_rows database-sessions.json
+      fi
+      ;;
+    *"SELECT json_object('id', session_id) AS row FROM ("*)
+      case "$query" in
+        *"'prefiltererror'"*)
+          printf '%s\n' row '{"id":'
+          ;;
+        *)
+          database_rows database-search.json
+          ;;
+      esac
+      ;;
+    *"'parent_id', parent_id"*)
+      case "$query" in
+        *"ses_database_only_fixture"*)
+          database_rows database-lineage-database-only.json
+          ;;
+        *"ses_000000fixtureSharedSession"*)
+          database_rows database-lineage-shared.json
+          ;;
+        *)
+          exit 0
+          ;;
+      esac
+      ;;
+    *"FROM session WHERE parent_id = "*)
+      case "$query" in
+        *"ses_000000fixtureSharedSession"*)
+          database_rows database-children-shared.json
+          ;;
+        *)
+          exit 0
+          ;;
+      esac
+      ;;
+    *"FROM session WHERE id = "*)
+      case "$query" in
+        *"ses_truncated_fixture"*)
+          database_rows database-locate-truncated.json
+          ;;
+        *"ses_000000fixtureSharedSession"*)
+          database_rows database-locate-shared.json
+          ;;
+        *"ses_database_only_fixture"*)
+          database_rows database-locate-database-only.json
+          ;;
+        *)
+          exit 0
+          ;;
+      esac
+      ;;
+    *"FROM message WHERE session_id = "*)
+      case "$query" in
+        *"'data', data"*)
+          database_rows database-messages-truncated.json
+          ;;
+        *"ses_000000fixtureSharedSession"*)
+          database_rows database-messages-shared.json
+          ;;
+        *"ses_database_only_fixture"*)
+          database_rows database-messages-database-only.json
+          ;;
+        *)
+          exit 0
+          ;;
+      esac
+      ;;
+    *"FROM part WHERE session_id = "*)
+      case "$query" in
+        *"ses_000000fixtureSharedSession"*)
+          database_rows database-parts-shared.json
+          ;;
+        *"ses_database_only_fixture"*)
+          database_rows database-parts-database-only.json
+          ;;
+        *)
+          exit 0
+          ;;
+      esac
+      ;;
+    *)
+      exit 1
+      ;;
+  esac
+  exit 0
+fi
+
+case $path in
+  /api/session\?*)
+    case $mode in
+      broken-list) exit 7 ;;
+      exit|malformed|absent) printf '%s\n' '{"data":[]}' ;;
+      *) /bin/cat "$fixture_dir/$list" ;;
+    esac
+    ;;
+  /api/session/*/message|/api/session/*/message\?*)
+    case $mode in
+      exit|malformed|absent) exit 7 ;;
+      *) /bin/cat "$fixture_dir/$messages" ;;
+    esac
+    ;;
+  /api/session/*)
+    case $mode in
+      exit) exit 7 ;;
+      malformed) printf '%s\n' '{"data":{"nope":1}}' ;;
+      absent) printf '%s\n' '{"data":null}' ;;
+      *)
+        case "$name" in
+          opencode2-titleless*)
+            /bin/cat "$fixture_dir/$session"
+            ;;
+          *)
+            case "$path" in
+              /api/session/ses_000000fixtureSharedSession)
+                /bin/cat "$fixture_dir/session.json"
+                ;;
+              /api/session/ses_api_only_fixture)
+                /bin/cat "$fixture_dir/session-api-only.json"
+                ;;
+              *)
+                printf '%s\n' '{"data":null}'
+                ;;
+            esac
+            ;;
+        esac
+        ;;
+    esac
+    ;;
+  *)
+    exit 1
+    ;;
+esac

@@ -8,8 +8,8 @@
 //! anything that could not be copied is a manifest gap rather than a partial
 //! file.
 
-use std::fs::{self, File};
-use std::io::{BufReader, Read, Seek, SeekFrom};
+use std::fs::{self, File, OpenOptions};
+use std::io::{BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Context, Result};
@@ -25,6 +25,7 @@ pub const EVIDENCE_SCHEMA: &str = "tapes-evidence/1";
 
 /// The most bytes one copied member may decompress to. A member larger than
 /// this is a gap, so an evidence set stays bounded like every other read.
+#[cfg(feature = "zip")]
 const MAX_MEMBER_BYTES: u64 = 512 * 1024 * 1024;
 
 /// The manifest an evidence set is described by.
@@ -106,7 +107,11 @@ pub struct EvidenceGap {
 /// Where a supplied record's bytes live: a file, or a member of a ZIP.
 enum Source {
     File(PathBuf),
-    Zip { archive: PathBuf, member: String },
+    #[cfg(feature = "zip")]
+    Zip {
+        archive: PathBuf,
+        member: String,
+    },
 }
 
 /// Copy the evidence behind `transcript`, a projection of a supplied input,
@@ -130,10 +135,17 @@ pub fn write(transcript: &Transcript, json: &Path) -> Result<BundleFile> {
         .as_ref()
         .ok_or_else(|| anyhow!("the session names no source to copy from"))?;
     let source = match &location.member {
+        #[cfg(feature = "zip")]
         Some(member) => Source::Zip {
             archive: PathBuf::from(&location.locator),
             member: member.clone(),
         },
+        #[cfg(not(feature = "zip"))]
+        Some(_) => {
+            return Err(anyhow!(
+                "ZIP evidence requires the `zip` feature; rebuild with `--features zip`"
+            ))
+        }
         None => Source::File(PathBuf::from(&location.locator)),
     };
 
@@ -183,6 +195,7 @@ pub fn write(transcript: &Transcript, json: &Path) -> Result<BundleFile> {
         .map(|(field, _)| field)
         .collect();
         let copied = match &source {
+            #[cfg(feature = "zip")]
             Source::Zip { archive, .. } => match copy_member(archive, &member, &partial.path) {
                 Ok(file) => {
                     manifest.files.push(file);
@@ -235,6 +248,7 @@ impl Source {
     fn container(&self) -> &Path {
         match self {
             Source::File(path) => path,
+            #[cfg(feature = "zip")]
             Source::Zip { archive, .. } => archive,
         }
     }
@@ -242,6 +256,7 @@ impl Source {
     fn member(&self) -> Option<&str> {
         match self {
             Source::File(_) => None,
+            #[cfg(feature = "zip")]
             Source::Zip { member, .. } => Some(member),
         }
     }
@@ -300,6 +315,7 @@ fn copy_record(
 ) -> std::result::Result<EvidenceFile, String> {
     let (bytes, member) = match source {
         Source::File(path) => (read_span(path, span)?, None),
+        #[cfg(feature = "zip")]
         Source::Zip { archive, member } => {
             let (whole, facts) = read_member(archive, member)?;
             let slice = usize::try_from(span.start)
@@ -319,7 +335,7 @@ fn copy_record(
         ));
     }
     let file = format!("sha256-{sha256}.json");
-    fs::write(directory.join(&file), &bytes).map_err(|error| error.to_string())?;
+    write_atomically(directory, &file, &bytes)?;
     Ok(EvidenceFile {
         role: EvidenceRole::Record,
         file,
@@ -331,6 +347,7 @@ fn copy_record(
 }
 
 /// Copy a whole report member, named by its digest and keeping its extension.
+#[cfg(feature = "zip")]
 fn copy_member(
     archive: &Path,
     member: &str,
@@ -343,7 +360,7 @@ fn copy_member(
         .map(|extension| format!(".{}", extension.to_string_lossy()))
         .unwrap_or_default();
     let file = format!("sha256-{sha256}{extension}");
-    fs::write(directory.join(&file), &bytes).map_err(|error| error.to_string())?;
+    write_atomically(directory, &file, &bytes)?;
     Ok(EvidenceFile {
         role: EvidenceRole::Report,
         file,
@@ -374,6 +391,7 @@ fn read_span(path: &Path, span: ByteSpan) -> std::result::Result<Vec<u8>, String
 }
 
 /// A whole member, read to its end so the archive's checksum is verified.
+#[cfg(feature = "zip")]
 fn read_member(
     archive: &Path,
     member: &str,
@@ -416,9 +434,7 @@ struct PartialDirectory {
 
 impl PartialDirectory {
     fn create(path: PathBuf) -> Result<Self> {
-        let _ = fs::remove_dir_all(&path);
-        fs::create_dir_all(&path)
-            .with_context(|| format!("failed to create {}", path.display()))?;
+        fs::create_dir(&path).with_context(|| format!("failed to create {}", path.display()))?;
         Ok(Self {
             path,
             placed: false,
@@ -426,10 +442,92 @@ impl PartialDirectory {
     }
 
     fn place(mut self, target: &Path) -> Result<()> {
+        if target.exists() {
+            anyhow::bail!(
+                "refusing to replace existing evidence directory {}",
+                target.display()
+            );
+        }
         fs::rename(&self.path, target)
             .with_context(|| format!("failed to place {}", target.display()))?;
         self.placed = true;
         Ok(())
+    }
+}
+
+/// Write one evidence member through a create-new temporary file, so a copy
+/// that later becomes a manifest gap never leaves a readable partial member.
+fn write_atomically(directory: &Path, name: &str, bytes: &[u8]) -> std::result::Result<(), String> {
+    let target = directory.join(name);
+    if let Some(reused) = existing_evidence_file(&target, bytes)? {
+        if reused {
+            return Ok(());
+        }
+    }
+    let temporary = PathBuf::from(format!("{}.partial", target.display()));
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temporary)
+        .map_err(|error| error.to_string())?;
+    if let Err(error) = file.write_all(bytes).and_then(|()| file.flush()) {
+        drop(file);
+        let _ = fs::remove_file(&temporary);
+        return Err(error.to_string());
+    }
+    drop(file);
+    if let Err(error) = fs::hard_link(&temporary, &target) {
+        if error.kind() == std::io::ErrorKind::AlreadyExists {
+            let reused = match existing_evidence_file(&target, bytes) {
+                Ok(reused) => reused,
+                Err(reason) => {
+                    let _ = fs::remove_file(&temporary);
+                    return Err(reason);
+                }
+            };
+            let _ = fs::remove_file(&temporary);
+            if reused == Some(true) {
+                return Ok(());
+            }
+        } else {
+            let _ = fs::remove_file(&temporary);
+            return Err(error.to_string());
+        }
+        return Err(error.to_string());
+    }
+    if let Err(error) = fs::remove_file(&temporary) {
+        let _ = fs::remove_file(&target);
+        return Err(error.to_string());
+    }
+    Ok(())
+}
+
+/// Return `Some(true)` only for a regular file whose bytes are exactly the
+/// requested content. Other file types and conflicting regular files stay
+/// refusal paths, so an export never adopts an unrelated path.
+fn existing_evidence_file(
+    target: &Path,
+    expected: &[u8],
+) -> std::result::Result<Option<bool>, String> {
+    let metadata = match fs::symlink_metadata(target) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.to_string()),
+    };
+    if !metadata.file_type().is_file() {
+        return Err(format!(
+            "{} is not a regular evidence file; refusing to replace it",
+            target.display()
+        ));
+    }
+    let actual = fs::read(target).map_err(|error| error.to_string())?;
+    if actual == expected {
+        Ok(Some(true))
+    } else {
+        Err(format!(
+            "{} already contains different evidence bytes; refusing to replace it",
+            target.display()
+        ))
     }
 }
 
@@ -441,7 +539,7 @@ impl Drop for PartialDirectory {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "zip"))]
 mod tests {
     use std::io::Write;
 
@@ -485,6 +583,67 @@ mod tests {
             1,
             "only the archive remains"
         );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_report_write_failure_leaves_no_partial_member() {
+        let root = temporary("report-write-failure");
+        let archive = root.join("export.zip");
+        let body = b"report body";
+        let mut writer = zip::ZipWriter::new(File::create(&archive).unwrap());
+        writer
+            .start_file(
+                "report.dat",
+                zip::write::SimpleFileOptions::default()
+                    .compression_method(zip::CompressionMethod::Stored),
+            )
+            .unwrap();
+        writer.write_all(body).unwrap();
+        writer.finish().unwrap();
+
+        let name = format!("sha256-{}.dat", hex(&Sha256::digest(body)));
+        let occupied = root.join(&name);
+        fs::create_dir(&occupied).unwrap();
+        fs::write(occupied.join("keep"), b"another export").unwrap();
+
+        let error = copy_member(&archive, "report.dat", &root).unwrap_err();
+        assert!(!error.is_empty());
+        assert!(occupied.join("keep").is_file());
+        assert!(!root.join(format!("{name}.partial")).exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn conflicting_or_symlinked_evidence_is_never_replaced() {
+        let root = temporary("report-conflict");
+        let archive = root.join("export.zip");
+        let body = b"report body";
+        let mut writer = zip::ZipWriter::new(File::create(&archive).unwrap());
+        writer
+            .start_file(
+                "report.dat",
+                zip::write::SimpleFileOptions::default()
+                    .compression_method(zip::CompressionMethod::Stored),
+            )
+            .unwrap();
+        writer.write_all(body).unwrap();
+        writer.finish().unwrap();
+        let name = format!("sha256-{}.dat", hex(&Sha256::digest(body)));
+        let target = root.join(&name);
+
+        fs::write(&target, b"conflicting bytes").unwrap();
+        assert!(copy_member(&archive, "report.dat", &root).is_err());
+        assert_eq!(fs::read(&target).unwrap(), b"conflicting bytes");
+        assert!(!root.join(format!("{name}.partial")).exists());
+        fs::remove_file(&target).unwrap();
+
+        let destination = root.join("elsewhere");
+        fs::write(&destination, b"symlink target").unwrap();
+        std::os::unix::fs::symlink(&destination, &target).unwrap();
+        assert!(copy_member(&archive, "report.dat", &root).is_err());
+        assert_eq!(fs::read_link(&target).unwrap(), destination);
+        assert!(!root.join(format!("{name}.partial")).exists());
         fs::remove_dir_all(root).unwrap();
     }
 

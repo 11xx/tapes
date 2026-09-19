@@ -1,0 +1,13 @@
+#!/bin/sh
+set -eu
+
+# A stable store whose session listing fails outright while every other read
+# it answers succeeds.
+resolved=$(/usr/bin/readlink -f "$0")
+fixture_dir=${resolved%/*}
+case "${4:-}" in
+  *"FROM session ORDER BY time_updated DESC LIMIT "*)
+    exit 1
+    ;;
+esac
+exec "$fixture_dir/opencode2" "$@" database

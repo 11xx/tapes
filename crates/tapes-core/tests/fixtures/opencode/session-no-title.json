@@ -1,0 +1,30 @@
+{
+  "data": {
+    "id": "ses_titleless_fixture",
+    "projectID": "0000000000000000000000000000000000000001",
+    "agent": "build",
+    "model": {
+      "id": "kimi-k3",
+      "providerID": "opencode-go",
+      "variant": "max"
+    },
+    "cost": 0.25,
+    "tokens": {
+      "input": 100,
+      "output": 20,
+      "reasoning": 10,
+      "cache": {
+        "read": 0,
+        "write": 0
+      }
+    },
+    "time": {
+      "created": 1784662770000,
+      "updated": 1784662790000
+    },
+    "title": null,
+    "location": {
+      "directory": "/fixtures/project"
+    }
+  }
+}

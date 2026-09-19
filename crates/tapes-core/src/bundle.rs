@@ -1,5 +1,5 @@
 use std::fmt::Write as _;
-use std::fs::{self, File};
+use std::fs::{self, File, OpenOptions};
 use std::io::{BufWriter, Write as _};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -36,6 +36,31 @@ impl Bundle {
             .into_iter()
             .chain(self.evidence.as_ref())
     }
+
+    /// Remove the files this invocation published after a later stage failed.
+    /// The namespace was reserved before any of them were written, so this
+    /// never targets another export's files.
+    pub(crate) fn discard(self) -> Result<()> {
+        let mut errors = Vec::new();
+        for file in [&self.context, &self.json, &self.trace] {
+            if let Err(error) = remove_owned_file(&file.path) {
+                errors.push(error);
+            }
+        }
+        if let Some(evidence) = &self.evidence {
+            if let Err(error) = remove_owned_file(&evidence.path) {
+                errors.push(error);
+            }
+        }
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(anyhow::anyhow!(
+                "failed to remove this export's published files: {}",
+                errors.join("; ")
+            ))
+        }
+    }
 }
 
 /// The commit a session's working directory sat on, when that is knowable.
@@ -67,6 +92,7 @@ pub fn export(transcript: &Transcript, directory: &Path) -> Result<Bundle> {
 /// turn, so a recording streamed through it is never held.
 pub struct JsonPass {
     prefix: PathBuf,
+    namespace: ExportNamespace,
     session: Session,
     json: PartialFile,
     writer: StreamedSessionJson,
@@ -77,13 +103,15 @@ impl JsonPass {
     /// Open the bundle's files under a new timestamped prefix in `directory`.
     /// Volatile `live` state is not part of a bundle.
     pub fn open(directory: &Path, session: &Session) -> Result<Self> {
-        let prefix = directory.join(bundle_stem(session));
+        let namespace = ExportNamespace::reserve(directory, session)?;
+        let prefix = namespace.prefix.clone();
         let mut session = session.clone();
         session.live = None;
         let mut json = PartialFile::create(&prefix, "json")?;
         let writer = StreamedSessionJson::open(&mut json, &session)?;
         Ok(Self {
             prefix,
+            namespace,
             session,
             json,
             writer,
@@ -126,6 +154,7 @@ impl JsonPass {
             json: self.json,
             context,
             trace,
+            namespace: self.namespace,
             pairing: self
                 .index
                 .pairing(event::read_was_bounded(&facts.truncation.source)),
@@ -143,6 +172,7 @@ pub struct EventPass {
     json: PartialFile,
     context: PartialFile,
     trace: PartialFile,
+    namespace: ExportNamespace,
     pairing: Pairing,
     events: usize,
     /// One turn's Markdown, reused so a long turn's buffer is allocated once.
@@ -182,6 +212,7 @@ impl EventPass {
         }
         self.json.write_all(b"}")?;
         let [context, json, trace] = place_all([self.context, self.json, self.trace])?;
+        let _namespace = self.namespace;
         Ok(Bundle {
             context,
             json,
@@ -221,6 +252,79 @@ fn bundle_stem(session: &Session) -> String {
     )
 }
 
+/// An export owns a stem before it creates any sibling file. The reservation
+/// marker is hidden and short-lived; the three published files remain direct
+/// children of the caller's bundle directory.
+struct ExportNamespace {
+    prefix: PathBuf,
+    reservation: PathBuf,
+}
+
+impl ExportNamespace {
+    fn reserve(directory: &Path, session: &Session) -> Result<Self> {
+        fs::create_dir_all(directory)
+            .with_context(|| format!("failed to create {}", directory.display()))?;
+        let base = directory.join(bundle_stem(session));
+        for suffix in 0..10_000_u32 {
+            let prefix = if suffix == 0 {
+                base.clone()
+            } else {
+                PathBuf::from(format!("{}-{suffix}", base.display()))
+            };
+            let stem = prefix
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("tapes-export");
+            let reservation = prefix.with_file_name(format!(".{stem}.reserve"));
+            let marker = match OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&reservation)
+            {
+                Ok(marker) => marker,
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => {
+                    return Err(error).with_context(|| {
+                        format!("failed to reserve export namespace {}", prefix.display())
+                    })
+                }
+            };
+            drop(marker);
+            let occupied = ["context.md", "json", "trace.md"]
+                .into_iter()
+                .any(|extension| {
+                    let mut path = prefix.as_os_str().to_owned();
+                    path.push(format!(".{extension}"));
+                    let path = PathBuf::from(path);
+                    path.exists() || PathBuf::from(format!("{}.partial", path.display())).exists()
+                })
+                || {
+                    let evidence = PathBuf::from(format!("{}.evidence", prefix.display()));
+                    evidence.exists()
+                        || PathBuf::from(format!("{}.partial", evidence.display())).exists()
+                };
+            if occupied {
+                let _ = fs::remove_file(&reservation);
+                continue;
+            }
+            return Ok(Self {
+                prefix,
+                reservation,
+            });
+        }
+        Err(anyhow::anyhow!(
+            "could not reserve a unique export namespace under {}",
+            directory.display()
+        ))
+    }
+}
+
+impl Drop for ExportNamespace {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.reservation);
+    }
+}
+
 /// Place every file or none: when one cannot be placed, the files already
 /// placed are removed, so a failed export leaves no partial bundle.
 fn place_all<const N: usize>(files: [PartialFile; N]) -> Result<[BundleFile; N]> {
@@ -230,7 +334,7 @@ fn place_all<const N: usize>(files: [PartialFile; N]) -> Result<[BundleFile; N]>
             Ok(file) => placed.push(file),
             Err(error) => {
                 for file in &placed {
-                    let _ = fs::remove_file(&file.path);
+                    let _ = remove_owned_file(&file.path);
                 }
                 return Err(error);
             }
@@ -274,7 +378,10 @@ impl PartialFile {
             fs::create_dir_all(directory)
                 .with_context(|| format!("failed to create {}", directory.display()))?;
         }
-        let file = File::create(&temporary)
+        let file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)
             .with_context(|| format!("failed to write {}", temporary.display()))?;
         Ok(Self {
             path,
@@ -289,14 +396,34 @@ impl PartialFile {
         self.out
             .flush()
             .with_context(|| format!("failed to write {}", self.temporary.display()))?;
-        fs::rename(&self.temporary, &self.path)
+        fs::hard_link(&self.temporary, &self.path)
             .with_context(|| format!("failed to place {}", self.path.display()))?;
+        if let Err(error) = fs::remove_file(&self.temporary) {
+            let _ = fs::remove_file(&self.path);
+            return Err(error)
+                .with_context(|| format!("failed to retire {}", self.temporary.display()));
+        }
         self.placed = true;
         Ok(BundleFile {
             path: self.path.clone(),
             bytes: self.bytes,
         })
     }
+}
+
+fn remove_owned_file(path: &Path) -> std::result::Result<(), String> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(format!("{}: {error}", path.display())),
+    };
+    if !metadata.file_type().is_file() {
+        return Err(format!(
+            "{} is not a regular file; it was left untouched",
+            path.display()
+        ));
+    }
+    fs::remove_file(path).map_err(|error| format!("{}: {error}", path.display()))
 }
 
 impl std::io::Write for PartialFile {
@@ -998,6 +1125,7 @@ mod tests {
                         &directory.join(into),
                         None,
                         read,
+                        &[],
                     )
                     .unwrap()
                 };
@@ -1150,6 +1278,7 @@ mod tests {
                 &directory.join(into),
                 None,
                 ExportRead::Whole,
+                &[],
             );
             (before, bundle)
         };

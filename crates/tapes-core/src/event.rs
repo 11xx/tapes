@@ -138,6 +138,10 @@ pub struct ToolEvent {
     pub artifact_references: Vec<ArtifactReference>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub artifact_consumptions: Vec<ArtifactConsumption>,
+    /// A single native record carries both the invocation and its result.
+    /// This is internal pairing state, not another wire field.
+    #[serde(skip)]
+    pub(crate) self_contained: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize)]
@@ -437,8 +441,14 @@ pub fn turn_records(turn: &Turn) -> impl Iterator<Item = EventRecord> {
         .as_ref()
         .filter(|call| {
             call.event.kind == EventKind::ToolCall
-                && call.event.subtype == "tool"
-                && matches!(call.event.status.as_deref(), Some("completed" | "error"))
+                && (call.event.self_contained
+                    || matches!(
+                        call.event.status.as_deref(),
+                        Some("completed" | "error" | "failed")
+                    ))
+                && (call.event.self_contained
+                    || call.event.subtype == "tool"
+                    || (call.event.arguments.is_some() && call.event.output.is_some()))
         })
         .map(|call| {
             let mut result = call.clone();
@@ -1955,6 +1965,7 @@ mod tests {
             invocations: Vec::new(),
             artifact_references: Vec::new(),
             artifact_consumptions: Vec::new(),
+            self_contained: false,
         }
     }
 
@@ -2069,6 +2080,7 @@ mod tests {
             invocations: Vec::new(),
             artifact_references: Vec::new(),
             artifact_consumptions: Vec::new(),
+            self_contained: false,
         };
         let projected = project(
             transcript(vec![turn(0, 10, completed)], Vec::new()),

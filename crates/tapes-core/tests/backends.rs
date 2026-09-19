@@ -29,7 +29,7 @@ use tapes_core::{
 
 fn fixtures(harness: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../tests/fixtures")
+        .join("tests/fixtures")
         .join(harness)
 }
 

@@ -9,25 +9,30 @@ use std::time::{Duration, Instant};
 use serde_json::Value;
 
 const CODEX_SESSION_ONE: &str = include_str!(
-    "../fixtures/codex/rollout-2026-01-01T10-00-00-00000000-0000-0000-0000-000000000001.jsonl"
+    "fixtures/codex/rollout-2026-01-01T10-00-00-00000000-0000-0000-0000-000000000001.jsonl"
 );
 const CODEX_SESSION_TWO: &str = include_str!(
-    "../fixtures/codex/rollout-2026-01-01T11-00-00-10000000-0000-0000-0000-000000000002.jsonl"
+    "fixtures/codex/rollout-2026-01-01T11-00-00-10000000-0000-0000-0000-000000000002.jsonl"
 );
 const CODEX_SESSION_NO_MODEL: &str = include_str!(
-    "../fixtures/codex/rollout-2026-01-01T13-00-00-20000000-0000-0000-0000-000000000004.jsonl"
+    "fixtures/codex/rollout-2026-01-01T13-00-00-20000000-0000-0000-0000-000000000004.jsonl"
 );
 const CODEX_SESSION_OTHER_MODEL: &str = include_str!(
-    "../fixtures/codex/rollout-2026-01-01T14-00-00-30000000-0000-0000-0000-000000000005.jsonl"
+    "fixtures/codex/rollout-2026-01-01T14-00-00-30000000-0000-0000-0000-000000000005.jsonl"
 );
 const CODEX_SESSION_INTERACTIVE: &str = include_str!(
-    "../fixtures/codex/rollout-2026-01-01T15-00-00-50000000-0000-7000-8000-000000000006.jsonl"
+    "fixtures/codex/rollout-2026-01-01T15-00-00-50000000-0000-7000-8000-000000000006.jsonl"
 );
 const CODEX_SESSION_TERMINAL_ONLY: &str = concat!(
     "{\"timestamp\":\"2026-01-01T15:00:00Z\",\"type\":\"session_meta\",\"payload\":{\"id\":\"00000000-0000-0000-0000-000000000006\",\"session_id\":\"00000000-0000-0000-0000-000000000006\",\"cwd\":\"/fixtures/project\",\"model_provider\":\"openai\"}}\n",
     "{\"timestamp\":\"2026-01-01T15:00:01Z\",\"type\":\"turn_context\",\"payload\":{\"cwd\":\"/fixtures/project\",\"model\":\"gpt-fixture\",\"effort\":\"high\",\"turn_id\":\"turn-terminal-only\"}}\n",
     "{\"timestamp\":\"2026-01-01T15:00:02Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\",\"turn_id\":\"turn-terminal-only\",\"outcome\":\"error\",\"error\":{\"codex_error_info\":\"usage_limit_exceeded\",\"message\":\"synthetic quota message\"},\"duration_ms\":1250}}\n",
     "{\"timestamp\":\"2026-01-01T15:00:03Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{\"total_token_usage\":{\"input_tokens\":17,\"output_tokens\":3,\"cached_input_tokens\":0,\"cache_write_input_tokens\":0}},\"rate_limits\":null}}\n"
+);
+const CODEX_SESSION_COMPLETED_ONLY_RUNTIME: &str = concat!(
+    "{\"timestamp\":\"2026-01-01T16:00:00Z\",\"type\":\"session_meta\",\"payload\":{\"id\":\"00000000-0000-0000-0000-00000000000a\",\"session_id\":\"00000000-0000-0000-0000-00000000000a\",\"cwd\":\"/fixtures/project\",\"model_provider\":\"openai\"}}\n",
+    "{\"timestamp\":\"2026-01-01T16:00:01Z\",\"type\":\"turn_context\",\"payload\":{\"cwd\":\"/fixtures/project\",\"model\":\"gpt-fixture\",\"effort\":\"high\"}}\n",
+    "{\"timestamp\":\"2026-01-01T16:00:02Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"item_completed\",\"item\":{\"type\":\"McpToolCall\",\"id\":\"mcp-completed-only\",\"server\":\"node_repl\",\"tool\":\"js\",\"arguments\":{\"cmd\":\"echo completed\",\"why\":\"verify runtime pairing\"},\"result\":{\"text\":\"completed output\"},\"status\":\"completed\",\"duration\":{\"wall_ms\":7}}}}\n"
 );
 const CODEX_SESSION_INVOCATIONS: &str = concat!(
     "{\"timestamp\":\"2026-01-01T16:00:00Z\",\"type\":\"session_meta\",\"payload\":{\"id\":\"00000000-0000-0000-0000-000000000007\",\"session_id\":\"00000000-0000-0000-0000-000000000007\",\"cwd\":\"/fixtures/project\",\"model_provider\":\"openai\"}}\n",
@@ -210,6 +215,125 @@ fn supplied_reads_name_the_reader_and_digest_each_record() {
     );
 }
 
+#[cfg(not(feature = "zip"))]
+#[test]
+fn disabled_zip_input_reports_the_feature_that_enables_it() {
+    let root = TemporaryDirectory::new(
+        std::env::temp_dir().join(format!("tapes-cli-disabled-zip-{}", std::process::id())),
+    );
+    let input = root.path().join("export.zip");
+    fs::write(&input, b"PK\x03\x04disabled-test").unwrap();
+    let output = tapes()
+        .args(["list", "--input", input.to_str().unwrap(), "--json"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("--features zip"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// Concurrent exports own separate sibling namespaces, and a later evidence
+/// export cannot replace the files an earlier invocation published.
+#[test]
+fn exports_preserve_existing_outputs_across_concurrent_and_evidence_runs() {
+    let root = TemporaryDirectory::new(std::env::temp_dir().join(format!(
+        "tapes-cli-export-publication-{}",
+        std::process::id()
+    )));
+    let input = supplied_fixture("chatgpt-export.json");
+    let bundle = root.path().join("bundles");
+    fs::create_dir_all(&bundle).unwrap();
+    let arguments = vec![
+        "export".to_owned(),
+        "supplied-1".to_owned(),
+        "--input".to_owned(),
+        input.display().to_string(),
+        "--input-format".to_owned(),
+        "chatgpt-exporter".to_owned(),
+        "--bundle".to_owned(),
+        bundle.display().to_string(),
+    ];
+
+    let first = tapes().args(&arguments).output().unwrap();
+    assert!(
+        first.status.success(),
+        "{}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    let original = fs::read_dir(&bundle)
+        .unwrap()
+        .map(|entry| {
+            let path = entry.unwrap().path();
+            (path.clone(), fs::read(path).unwrap())
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(original.len(), 3);
+
+    let results = std::thread::scope(|scope| {
+        (0..8)
+            .map(|_| {
+                let arguments = arguments.clone();
+                scope.spawn(move || tapes().args(arguments).output().unwrap())
+            })
+            .map(|handle| handle.join().unwrap())
+            .collect::<Vec<_>>()
+    });
+    assert!(
+        results.iter().all(|output| output.status.success()),
+        "{}",
+        results
+            .iter()
+            .map(|output| String::from_utf8_lossy(&output.stderr))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+    for (path, bytes) in &original {
+        assert_eq!(
+            fs::read(path).unwrap(),
+            *bytes,
+            "{} changed",
+            path.display()
+        );
+    }
+    assert_eq!(
+        fs::read_dir(&bundle)
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "md"))
+            .count(),
+        18
+    );
+
+    let mut evidence_arguments = arguments.clone();
+    evidence_arguments.push("--evidence".to_owned());
+    for _ in 0..2 {
+        let output = tapes().args(&evidence_arguments).output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    assert_eq!(
+        fs::read_dir(&bundle)
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| entry
+                .path()
+                .extension()
+                .is_some_and(|ext| ext == "evidence"))
+            .count(),
+        2
+    );
+    assert!(!fs::read_dir(&bundle)
+        .unwrap()
+        .filter_map(|entry| entry.ok())
+        .any(|entry| entry.file_name().to_string_lossy().ends_with(".partial")));
+}
+
 /// A removed per-change worktree leaves sessions whose recorded directory no
 /// longer exists. A scoped listing cannot prove their project, so it leaves
 /// them out, says how many directories it left out, and names the flags that
@@ -228,11 +352,28 @@ fn scoped_listing_reports_directories_it_cannot_place() {
         .unwrap();
     assert!(initialized.success());
     let removed = root.join("project-removed-worktree");
+    let other = root.join("other-project-removed-worktree");
     let sessions = root.join("codex/sessions/2026/01/01");
     fs::create_dir_all(&sessions).unwrap();
-    for (stamp, id, cwd) in [
-        ("10-00-00", "00000000-0000-0000-0000-00000000000a", &project),
-        ("11-00-00", "00000000-0000-0000-0000-00000000000b", &removed),
+    for (stamp, id, cwd, modified) in [
+        (
+            "10-00-00",
+            "00000000-0000-0000-0000-00000000000a",
+            &project,
+            1_800_000_002,
+        ),
+        (
+            "11-00-00",
+            "00000000-0000-0000-0000-00000000000b",
+            &removed,
+            1_800_000_001,
+        ),
+        (
+            "12-00-00",
+            "00000000-0000-0000-0000-00000000000c",
+            &other,
+            1_800_000_000,
+        ),
     ] {
         let meta = serde_json::json!({
             "timestamp": "2026-01-01T10:00:00Z",
@@ -244,11 +385,14 @@ fn scoped_listing_reports_directories_it_cannot_place() {
             "type": "response_item",
             "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hello"}]}
         });
-        fs::write(
-            sessions.join(format!("rollout-2026-01-01T{stamp}-{id}.jsonl")),
-            format!("{meta}\n{message}\n"),
-        )
-        .unwrap();
+        let path = sessions.join(format!("rollout-2026-01-01T{stamp}-{id}.jsonl"));
+        fs::write(&path, format!("{meta}\n{message}\n")).unwrap();
+        fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(modified))
+            .unwrap();
     }
     let list = |args: &[&str]| {
         let output = tapes()
@@ -276,16 +420,51 @@ fn scoped_listing_reports_directories_it_cannot_place() {
         .map(|session| session["id"].as_str().unwrap())
         .collect::<Vec<_>>();
     assert_eq!(ids, ["00000000-0000-0000-0000-00000000000a"]);
-    assert_eq!(scoped["unplaced"]["directories"], 1, "{scoped}");
+    assert_eq!(scoped["unplaced"]["directories"], 2, "{scoped}");
     assert_eq!(
         scoped["unplaced"]["examples"][0],
         removed.display().to_string()
+    );
+    assert_eq!(
+        scoped["unplaced"]["examples"][1],
+        other.display().to_string()
+    );
+
+    let narrow: Value = serde_json::from_slice(&list(&[
+        "list",
+        "--here",
+        "--harness",
+        "codex",
+        "--limit",
+        "1",
+        "--json",
+    ]))
+    .unwrap();
+    assert!(
+        narrow.get("unplaced").is_none() || narrow["unplaced"]["directories"].as_u64().unwrap() < 2,
+        "{narrow}"
     );
 
     let human = String::from_utf8(list(&["list", "--here", "--harness", "codex"])).unwrap();
     assert!(human.contains("Not placed"), "{human}");
     assert!(human.contains(&removed.display().to_string()), "{human}");
     assert!(human.contains("--global --directory"), "{human}");
+
+    for command in ["stats", "usage", "endings"] {
+        let report: Value =
+            serde_json::from_slice(&list(&[command, "--here", "--harness", "codex", "--json"]))
+                .unwrap();
+        assert_eq!(report["unplaced"]["directories"], 2, "{command}: {report}");
+    }
+    let latest = list(&["show", "--latest", "--here", "--harness", "codex", "--json"]);
+    let latest: Value = serde_json::from_slice(&latest).unwrap();
+    assert!(
+        latest["notes"].as_array().unwrap().iter().any(|note| note
+            .as_str()
+            .unwrap()
+            .contains("newer activity may be hidden")),
+        "{latest}"
+    );
 
     let global: Value = serde_json::from_slice(&list(&[
         "list",
@@ -907,6 +1086,22 @@ fn terminal_only_fixture_store(name: &str) -> (PathBuf, PathBuf) {
     (root.clone(), root.join("home"))
 }
 
+fn completed_only_runtime_fixture_store(name: &str) -> (PathBuf, PathBuf) {
+    let root = std::env::temp_dir().join(format!(
+        "tapes-cli-codex-completed-only-{name}-{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&root);
+    let sessions = root.join("sessions/2026/01/01");
+    fs::create_dir_all(&sessions).unwrap();
+    fs::write(
+        sessions.join("rollout-2026-01-01T16-00-00-00000000-0000-0000-0000-00000000000a.jsonl"),
+        CODEX_SESSION_COMPLETED_ONLY_RUNTIME,
+    )
+    .unwrap();
+    (root.clone(), root.join("home"))
+}
+
 fn invocation_fixture_store(name: &str) -> (PathBuf, PathBuf) {
     let root = std::env::temp_dir().join(format!(
         "tapes-cli-invocations-{name}-{}",
@@ -1239,7 +1434,7 @@ fn fixture_command(name: &str, args: &[&str]) -> std::process::Output {
 
 fn supplied_fixture(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../tests/fixtures/input")
+        .join("tests/fixtures/input")
         .join(name)
 }
 
@@ -1287,8 +1482,7 @@ fn titleless_opencode_program(root: &Path) -> OpenCodeAlias {
 
 fn opencode_program(root: &Path, name: &str) -> OpenCodeAlias {
     let program = root.join(name);
-    let fixture =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/opencode/opencode2");
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/opencode/opencode2");
     std::os::unix::fs::symlink(fixture, &program).unwrap();
     OpenCodeAlias { path: program }
 }
@@ -1296,7 +1490,7 @@ fn opencode_program(root: &Path, name: &str) -> OpenCodeAlias {
 fn malformed_opencode_program(root: &Path) -> OpenCodeAlias {
     let program = root.join("opencode");
     let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../tests/fixtures/opencode/opencode-malformed-row");
+        .join("tests/fixtures/opencode/opencode-malformed-row");
     std::os::unix::fs::symlink(fixture, &program).unwrap();
     OpenCodeAlias { path: program }
 }
@@ -1875,6 +2069,7 @@ fn supplied_duplicate_ids_require_an_occurrence_and_never_use_installed_stores()
     assert_eq!(selected["turns"][0]["text"], "second");
 }
 
+#[cfg(feature = "zip")]
 #[test]
 fn supplied_zip_reads_conversations_and_retains_associated_report_evidence() {
     let root = TemporaryDirectory::new(
@@ -2228,6 +2423,7 @@ fn supplied_zip_reads_conversations_and_retains_associated_report_evidence() {
 
 /// Citation descriptors are bounded independently of the enclosing record and
 /// preserve their original lengths when UTF-8 strings are shortened.
+#[cfg(feature = "zip")]
 #[test]
 fn supplied_citation_descriptors_are_bounded_in_show_and_export() {
     let root = TemporaryDirectory::new(std::env::temp_dir().join(format!(
@@ -2557,6 +2753,7 @@ fn perplexity_envelope_preserves_entry_fields_and_separate_response_evidence() {
     assert_eq!(brief["tail"][0]["metadata"]["engine"], "research");
 }
 
+#[cfg(feature = "zip")]
 #[test]
 fn perplexity_zip_ignores_an_unrelated_workbook_and_declared_wrong_format_does_not_fallback() {
     let root = TemporaryDirectory::new(
@@ -2712,6 +2909,95 @@ fn events_json_answers_call_counts_and_incomplete_calls_without_raw_text() {
     assert!(incomplete.get("duration_ms").is_none(), "{incomplete}");
     assert_eq!(events[0]["duration_ms"], 1_000);
     assert!(events[1].get("duration_ms").is_none(), "{}", events[1]);
+}
+
+/// Codex can record a complete runtime operation in one `item_completed`
+/// record. Every caller-visible read must project its call and result from
+/// that record, retaining the recorded arguments and source coordinate.
+#[test]
+fn completed_only_codex_runtime_items_are_complete_operations_everywhere() {
+    let (codex_home, home) = completed_only_runtime_fixture_store("projection");
+    let id = "00000000-0000-0000-0000-00000000000a";
+    let bundle = codex_home.join("bundle");
+    let run = |arguments: &[&str]| {
+        let mut command = tapes();
+        command.args(arguments);
+        with_fixture_env(
+            &mut command,
+            &codex_home,
+            &home,
+            Path::new("/definitely/missing"),
+        );
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "{arguments:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice::<Value>(&output.stdout).unwrap()
+    };
+    let assert_complete = |events: &Value| {
+        if !events["pairs"].is_null() {
+            assert_eq!(
+                events["pairs"],
+                serde_json::json!({"complete": 1, "incomplete": 0})
+            );
+        }
+        let records = events["events"].as_array().unwrap();
+        assert_eq!(records.len(), 2, "{events}");
+        assert_eq!(records[0]["kind"], "tool-call");
+        assert_eq!(records[1]["kind"], "tool-result");
+        assert_eq!(records[0]["record_ref"], records[1]["record_ref"]);
+        assert_eq!(records[1]["pair"]["record_ref"], records[0]["record_ref"]);
+        assert_eq!(records[0]["arguments"]["chars"], 55);
+        assert_eq!(
+            records[0]["arguments"]["preview"],
+            r#"{"cmd":"echo completed","why":"verify runtime pairing"}"#
+        );
+    };
+
+    let bounded = run(&["events", id, "--json"]);
+    assert_complete(&bounded);
+    let full = run(&["events", id, "--full", "--json"]);
+    assert_complete(&full);
+
+    let stats = run(&["stats", id, "--json"]);
+    assert_eq!(stats["tools"]["calls"], 1);
+    assert_eq!(stats["tools"]["results"], 1);
+    assert_eq!(stats["tools"]["paired"], 1);
+    assert_eq!(stats["tools"]["incomplete"]["call-not-recorded"], 0);
+
+    let page = run(&["page", id, "--bytes", "65536", "--json"]);
+    assert_eq!(page["turns"].as_array().unwrap().len(), 1);
+    assert!(page["turns"][0]["record_ref"].is_object(), "{page}");
+
+    let exported = {
+        let mut command = tapes();
+        command.args(["export", id, "--bundle", bundle.to_str().unwrap()]);
+        with_fixture_env(
+            &mut command,
+            &codex_home,
+            &home,
+            Path::new("/definitely/missing"),
+        );
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let json_path = fs::read_dir(&bundle)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .find(|path| {
+                path.extension()
+                    .is_some_and(|extension| extension == "json")
+            })
+            .unwrap();
+        serde_json::from_slice::<Value>(&fs::read(json_path).unwrap()).unwrap()
+    };
+    assert_complete(&exported);
+    let _ = fs::remove_dir_all(&codex_home);
 }
 
 #[test]
@@ -2999,9 +3285,9 @@ fn events_expose_nested_declarations_and_qualified_artifact_consumption() {
     let stats = stats.output().unwrap();
     assert!(stats.status.success());
     let stats: Value = serde_json::from_slice(&stats.stdout).unwrap();
-    assert_eq!(stats["tools"]["calls"], 10);
+    assert_eq!(stats["tools"]["calls"], 11);
     assert_eq!(stats["tools"]["results"], 3);
-    assert_eq!(stats["tools"]["paired"], 2);
+    assert_eq!(stats["tools"]["paired"], 3);
 
     let mut filtered = tapes();
     filtered.args(["events", id, "--program", "cargo", "--json"]);
@@ -4473,7 +4759,7 @@ fn an_unreadable_stable_opencode_store_is_not_answered_from_opencode2() {
     let stable = root.path().join("opencode");
     std::os::unix::fs::symlink(
         Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../tests/fixtures/opencode/opencode-unreadable-rows"),
+            .join("tests/fixtures/opencode/opencode-unreadable-rows"),
         &stable,
     )
     .unwrap();
@@ -4555,6 +4841,47 @@ fn an_unreadable_stable_opencode_store_is_not_answered_from_opencode2() {
     assert!(names_shared(&endings), "{endings}");
 }
 
+#[test]
+fn latest_names_unreadable_rows_beside_the_readable_choice() {
+    let root = TemporaryDirectory::new(std::env::temp_dir().join(format!(
+        "tapes-cli-opencode-latest-unreadable-{}",
+        std::process::id()
+    )));
+    let stable = root.path().join("opencode");
+    std::os::unix::fs::symlink(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/opencode/opencode-unreadable-rows"),
+        &stable,
+    )
+    .unwrap();
+    let _stable = OpenCodeAlias { path: stable };
+    let _beta = opencode_program(root.path(), "opencode2");
+    let output = tapes()
+        .args([
+            "show",
+            "--latest",
+            "--harness",
+            "opencode",
+            "--global",
+            "--json",
+        ])
+        .env("HOME", root.path().join("home"))
+        .env_remove("XDG_DATA_HOME")
+        .env("PATH", root.path())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["session"]["id"], "ses_api_only_fixture");
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert!(error.contains("ses_000000fixtureSharedSession"), "{error}");
+    assert!(error.contains("newer activity may be hidden"), "{error}");
+}
+
 /// A listing names the stable OpenCode store it could not read and never
 /// lists, from opencode2, a session that store may hold: rows whose ids the
 /// transport hid are named from the store's ids alone, and a store that
@@ -4586,7 +4913,7 @@ fn a_listing_names_the_opencode_store_it_could_not_read() {
         let stable = root.path().join("opencode");
         std::os::unix::fs::symlink(
             Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join(format!("../../tests/fixtures/opencode/{fixture}")),
+                .join(format!("tests/fixtures/opencode/{fixture}")),
             &stable,
         )
         .unwrap();
@@ -5605,12 +5932,12 @@ fn list_sort_oldest_keeps_the_oldest_sessions_under_the_limit() {
     fs::remove_dir_all(codex_home).unwrap();
 }
 
-const CLAUDE_SESSION: &str = include_str!("../fixtures/claude/project/session-claude.jsonl");
-const PI_SESSION: &str = include_str!("../fixtures/pi/2026-01-01T10-00-00-000Z_session-pi.jsonl");
+const CLAUDE_SESSION: &str = include_str!("fixtures/claude/project/session-claude.jsonl");
+const PI_SESSION: &str = include_str!("fixtures/pi/2026-01-01T10-00-00-000Z_session-pi.jsonl");
 const CLAUDE_SUBAGENT: &str =
-    include_str!("../fixtures/claude/project/session-claude/subagents/agent-fixture.jsonl");
+    include_str!("fixtures/claude/project/session-claude/subagents/agent-fixture.jsonl");
 const CLAUDE_SUBAGENT_META: &str =
-    include_str!("../fixtures/claude/project/session-claude/subagents/agent-fixture.meta.json");
+    include_str!("fixtures/claude/project/session-claude/subagents/agent-fixture.meta.json");
 
 /// `show --full` reads a Claude recording past the bounded tail and writes
 /// every turn from the recording's first; a flag it cannot honor refuses.
@@ -7465,7 +7792,7 @@ fn endings_text_tail_is_bounded_and_marks_what_it_cut() {
 }
 
 const CODEX_SESSION_TITLE: &str = include_str!(
-    "../fixtures/codex/rollout-2026-01-01T12-00-00-10000000-0000-0000-0000-000000000003.jsonl"
+    "fixtures/codex/rollout-2026-01-01T12-00-00-10000000-0000-0000-0000-000000000003.jsonl"
 );
 
 /// A recording whose every counted figure is chosen: a call repeated under
@@ -8012,8 +8339,7 @@ fn selection_stats_cli_reports_partial_and_total_read_failure() {
     let root = TemporaryDirectory::new(
         std::env::temp_dir().join(format!("tapes-stats-failure-{}", std::process::id())),
     );
-    let fixture =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/opencode/opencode2");
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/opencode/opencode2");
     let program = root.path().join("opencode2");
     let calls = root.path().join("calls");
     for (pattern, reads, success) in [

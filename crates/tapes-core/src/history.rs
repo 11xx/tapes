@@ -125,12 +125,18 @@ pub struct Page {
     pub turns: Vec<Turn>,
     pub models: Vec<ModelObservation>,
     pub next_cursor: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub notes: Vec<String>,
 }
 
 pub fn page(selection: Selection<'_>, cursor: Option<&str>, bytes: usize) -> Result<Page> {
     let backends = backend::backends();
     let resolved = selection.resolve(&backends)?;
-    backends[resolved.backend_index].history_page(&resolved.session, cursor, bytes)
+    let mut page =
+        backends[resolved.backend_index].history_page(&resolved.session, cursor, bytes)?;
+    page.notes
+        .extend(resolved.diagnostics.latest_warnings(&resolved.session));
+    Ok(page)
 }
 
 pub(crate) fn read_file(
@@ -275,6 +281,7 @@ pub(crate) fn read_file(
         turns,
         models,
         next_cursor,
+        notes: Vec::new(),
     })
 }
 
@@ -397,6 +404,8 @@ pub struct Search {
     pub matches: Vec<SearchMatch>,
     pub matches_truncated: bool,
     pub next_cursor: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub notes: Vec<String>,
 }
 
 pub fn search(
@@ -443,6 +452,7 @@ pub fn search(
             }
         },
     )?;
+    let notes = resolved.diagnostics.latest_warnings(&resolved.session);
     Ok(Search {
         schema: HISTORY_SEARCH_SCHEMA,
         session: resolved.session,
@@ -456,6 +466,7 @@ pub fn search(
         matches,
         matches_truncated,
         next_cursor: progress.next_cursor,
+        notes,
     })
 }
 
@@ -474,6 +485,8 @@ pub struct MetadataHistory {
     pub observations: Vec<ModelObservation>,
     pub observations_truncated: bool,
     pub next_cursor: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub notes: Vec<String>,
 }
 
 /// Recorded model observations in reverse record order, without asserting a current model.
@@ -508,6 +521,7 @@ pub fn metadata(
             }
         },
     )?;
+    let notes = resolved.diagnostics.latest_warnings(&resolved.session);
     Ok(MetadataHistory {
         schema: METADATA_HISTORY_SCHEMA,
         session: resolved.session,
@@ -521,5 +535,6 @@ pub fn metadata(
         observations,
         observations_truncated,
         next_cursor: progress.next_cursor,
+        notes,
     })
 }

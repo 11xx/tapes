@@ -56,6 +56,7 @@ pub fn resolve(
                 matches.push(ResolvedSession {
                     backend_index: origin,
                     session,
+                    diagnostics: crate::SelectionDiagnostics::default(),
                 });
             }
         }

@@ -100,6 +100,49 @@ impl Scope {
     pub fn unresolved(&self) -> Vec<PathBuf> {
         self.unresolved.borrow().iter().cloned().collect()
     }
+
+    /// The unresolved directories in relevance order for a human example
+    /// list. A surviving ancestor inside a project root is strongest evidence
+    /// about where the missing directory sat; a basename matching this
+    /// project's worktree naming convention comes next. Neither category
+    /// proves that a missing directory belonged to this project.
+    pub fn unresolved_ranked(&self) -> Vec<PathBuf> {
+        let mut directories = self.unresolved();
+        directories.sort_by(|left, right| {
+            unresolved_rank(self, left)
+                .cmp(&unresolved_rank(self, right))
+                .then_with(|| left.cmp(right))
+        });
+        directories
+    }
+}
+
+fn unresolved_rank(scope: &Scope, directory: &Path) -> (u8, usize) {
+    let mut ancestor = directory.parent();
+    let mut distance = 1;
+    while let Some(path) = ancestor {
+        if path.is_dir() && scope.roots.iter().any(|root| path.starts_with(root)) {
+            return (0, distance);
+        }
+        ancestor = path.parent();
+        distance += 1;
+    }
+
+    let matches_worktree_name = directory
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| {
+            scope.roots.iter().any(|root| {
+                root.file_name()
+                    .and_then(|root| root.to_str())
+                    .is_some_and(|root| name.starts_with(&format!("{root}-")))
+            })
+        });
+    if matches_worktree_name {
+        (1, 0)
+    } else {
+        (2, 0)
+    }
 }
 
 fn canonical(path: &Path) -> std::io::Result<PathBuf> {

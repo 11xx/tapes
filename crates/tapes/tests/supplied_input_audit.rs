@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::fs;
+#[cfg(feature = "zip")]
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -65,6 +66,7 @@ fn another_input_gap_does_not_become_a_local_byte_range() {
     assert!(shown["read"]["gaps"].as_array().is_none_or(Vec::is_empty));
 }
 
+#[cfg(feature = "zip")]
 fn report(backing: Option<&str>, identity: &str, body: &str) -> Vec<u8> {
     let mut value = json!({
         "widget_session_id": identity,
@@ -121,6 +123,7 @@ fn manifest(
     .unwrap()
 }
 
+#[cfg(feature = "zip")]
 fn archive(path: &Path, members: &[(&str, &[u8])]) {
     let file = fs::File::create(path).unwrap();
     let mut writer = zip::ZipWriter::new(file);
@@ -167,6 +170,7 @@ fn input_args(command: &str, input: &Path) -> Vec<String> {
     ]
 }
 
+#[cfg(feature = "zip")]
 #[test]
 fn native_manifest_selects_conversation_and_associated_library_members() {
     let root = TempRoot::new("manifest");
@@ -252,6 +256,7 @@ fn native_manifest_selects_conversation_and_associated_library_members() {
 /// (`file_<hex>` for `file_<hex>.dat`) and its originating conversation by
 /// `origination_thread_id`, while the report's own widget state names a
 /// backing session the export does not contain.
+#[cfg(feature = "zip")]
 #[test]
 fn library_reports_join_their_originating_conversation_by_member_stem() {
     let root = TempRoot::new("library-stem");
@@ -324,6 +329,7 @@ fn library_reports_join_their_originating_conversation_by_member_stem() {
     );
 }
 
+#[cfg(feature = "zip")]
 fn sha256(bytes: &[u8]) -> String {
     use sha2::{Digest, Sha256};
     Sha256::digest(bytes)
@@ -336,6 +342,7 @@ fn sha256(bytes: &[u8]) -> String {
 /// associated report member byte for byte beside the bundle, names each file
 /// by its SHA-256, and says where every byte came from; a report no
 /// conversation reached is not copied.
+#[cfg(feature = "zip")]
 #[test]
 fn evidence_export_copies_the_record_and_its_reports_verbatim() {
     let root = TempRoot::new("evidence");
@@ -449,6 +456,88 @@ fn evidence_export_copies_the_record_and_its_reports_verbatim() {
     ]);
     assert!(!installed.status.success());
     assert!(String::from_utf8_lossy(&installed.stderr).contains("supplied input"));
+}
+
+#[cfg(feature = "zip")]
+#[test]
+fn evidence_reuses_identical_report_bytes_without_false_gaps() {
+    let root = TempRoot::new("duplicate-evidence");
+    let conversation_bytes = conversation("originating", "voice conversation");
+    let library = serde_json::to_vec(&json!([
+        {"file_id": "file_00aa", "origination_thread_id": "originating"},
+        {"file_id": "file_00bb", "origination_thread_id": "originating"}
+    ]))
+    .unwrap();
+    let duplicate = report(Some("backing-session"), "same-report", "identical body");
+    let mut sizes = BTreeMap::new();
+    sizes.insert("conversations-000.json", conversation_bytes.len());
+    sizes.insert("library_files.json", library.len());
+    sizes.insert("file_00aa.dat", duplicate.len());
+    sizes.insert("file_00bb.dat", duplicate.len());
+    let manifest_bytes = manifest(
+        &["conversations-000.json"],
+        &["library_files.json"],
+        &["file_00aa.dat", "file_00bb.dat"],
+        &sizes,
+    );
+    let zip_path = root.path().join("input.zip");
+    archive(
+        &zip_path,
+        &[
+            ("export_manifest.json", &manifest_bytes),
+            ("conversations-000.json", &conversation_bytes),
+            ("library_files.json", &library),
+            ("file_00aa.dat", &duplicate),
+            ("file_00bb.dat", &duplicate),
+        ],
+    );
+
+    let bundle = root.path().join("bundle");
+    let output = run(&[
+        "export".to_owned(),
+        "originating".to_owned(),
+        "--input".to_owned(),
+        zip_path.display().to_string(),
+        "--evidence".to_owned(),
+        "--bundle".to_owned(),
+        bundle.display().to_string(),
+    ]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json_path = fs::read_dir(&bundle)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find(|path| {
+            path.extension()
+                .is_some_and(|extension| extension == "json")
+        })
+        .unwrap();
+    let evidence = json_path.with_extension("evidence");
+    let evidence_manifest: Value =
+        serde_json::from_slice(&fs::read(evidence.join("manifest.json")).unwrap()).unwrap();
+    assert_eq!(evidence_manifest["gaps"], json!([]));
+    assert_eq!(
+        evidence_manifest["associations"],
+        json!([
+            {"member": "file_00aa.dat", "named_by": ["originating_conversation"], "copied": true},
+            {"member": "file_00bb.dat", "named_by": ["originating_conversation"], "copied": true}
+        ])
+    );
+    let files = evidence_manifest["files"].as_array().unwrap();
+    assert_eq!(files.len(), 3);
+    assert_eq!(files[1]["file"], files[2]["file"]);
+    assert_eq!(
+        fs::read(evidence.join(files[1]["file"].as_str().unwrap())).unwrap(),
+        duplicate
+    );
+    assert!(!evidence.read_dir().unwrap().any(|entry| entry
+        .unwrap()
+        .file_name()
+        .to_string_lossy()
+        .ends_with(".partial")));
 }
 
 #[test]
@@ -695,6 +784,7 @@ fn homogeneous_content_parts_use_the_shared_bound_and_empty_coverage() {
     assert!(shown["turns"].as_array().unwrap().is_empty());
 }
 
+#[cfg(feature = "zip")]
 #[test]
 fn source_and_decoded_budgets_cover_archive_metadata_and_reader_io() {
     let root = TempRoot::new("budgets");
@@ -951,6 +1041,7 @@ fn empty_and_null_perplexity_fields_neither_request_nor_close() {
     );
 }
 
+#[cfg(feature = "zip")]
 #[test]
 fn records_from_a_member_that_fails_verification_are_withheld() {
     let root = TempRoot::new("checksum");

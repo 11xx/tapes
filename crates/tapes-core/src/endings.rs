@@ -292,6 +292,8 @@ pub struct EndingsReport {
     pub unsearched: Vec<String>,
     pub scanned: usize,
     pub scan_truncated: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unplaced: Option<crate::Unplaced>,
 }
 
 /// What every session a listing with the same filters would return ends on.
@@ -324,6 +326,7 @@ pub fn endings_with_backends(
         &selection.filters,
         selection.sort,
     )?;
+    let unplaced = crate::Unplaced::from_directories(listed.unplaced.clone());
 
     let mut endings = Vec::new();
     let mut unread = Vec::new();
@@ -351,6 +354,7 @@ pub fn endings_with_backends(
         unsearched: listed.unsearched,
         scanned: listed.scanned,
         scan_truncated: listed.scan_truncated,
+        unplaced,
     })
 }
 

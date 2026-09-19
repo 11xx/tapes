@@ -1,5 +1,5 @@
 [package]
-name = "tapes"
+name = "tapes-cli"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -8,6 +8,10 @@ description = "Read, list, and export coding-agent sessions across harnesses."
 keywords = ["cli", "sessions", "transcripts", "agents"]
 categories = ["command-line-utilities", "development-tools"]
 
+[features]
+default = []
+zip = ["tapes-core/zip", "dep:zip"]
+
 [dependencies]
 anyhow.workspace = true
 clap.workspace = true
@@ -15,16 +19,20 @@ libc.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tapes-core.workspace = true
+zip = { workspace = true, optional = true }
 
 [dev-dependencies]
 chrono.workspace = true
 sha2.workspace = true
-zip.workspace = true
+
+[[bin]]
+name = "tapes"
+path = "src/main.rs"
 
 [[test]]
 name = "cli"
-path = "../../tests/cli/main.rs"
+path = "tests/cli.rs"
 
 [[test]]
 name = "supplied-input-audit"
-path = "../../tests/cli/supplied_input_audit.rs"
+path = "tests/supplied_input_audit.rs"

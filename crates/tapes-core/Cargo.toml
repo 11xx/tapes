@@ -8,10 +8,14 @@ description = "Normalized session model and per-harness backends for reading cod
 keywords = ["sessions", "transcripts", "agents", "jsonl"]
 categories = ["development-tools", "parser-implementations"]
 
+[features]
+default = []
+zip = ["dep:zip"]
+
 [dependencies]
 anyhow.workspace = true
 chrono.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
-zip.workspace = true
+zip = { workspace = true, optional = true }
