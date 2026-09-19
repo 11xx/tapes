@@ -342,9 +342,11 @@ fn only_and_omit_keep_turn_kinds_and_count_the_rest() {
         turn_identities(&streamed["turns"]),
         turn_identities(&serde_json::json!([last]))
     );
+    // Kept turns keep their source ordinals, so the window names those rather
+    // than positions among the kept turns.
     assert_eq!(
-        streamed["truncation"]["window"]["omitted"],
-        without.len() - 1
+        streamed["truncation"]["window"],
+        newest["truncation"]["window"]
     );
     assert_eq!(streamed["projection"], projection);
     let human = run(&["show", id, "--full", "--only", "operator"]);

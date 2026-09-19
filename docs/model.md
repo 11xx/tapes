@@ -1120,7 +1120,8 @@ projection cut.
 `unknown`, and `omitted` counts every dropped turn by kind; `show --exchange`
 writes `{"kept": ["operator", "assistant"], "omitted": {"reasoning": 1,
 "tool": 3}}`. Kept turns keep their ordinals. A turn window under a projection
-counts the kept turns. A turn absent from a projection says nothing about
+counts the kept turns, and its `ordinals` are the first and last kept turn's
+own. A turn absent from a projection says nothing about
 whether the session recorded it.
 
 A bundle's `.context.md` holds the exchange that `show --exchange` returns —

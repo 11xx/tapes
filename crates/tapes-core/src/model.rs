@@ -556,6 +556,27 @@ impl Truncation {
             omitted_exact: true,
         })
     }
+
+    /// A window over the newest `kept` of `total` turns, naming the ordinals
+    /// those turns carry. A projection keeps turns whose ordinals are sparse,
+    /// so their positions among the kept turns are not their ordinals.
+    pub fn window_of(kept: &[Turn], total: usize, bound: usize) -> Option<TurnWindow> {
+        Self::window(kept.len(), total, bound).map(|window| TurnWindow {
+            ordinals: ordinal_range(kept),
+            ..window
+        })
+    }
+}
+
+/// The first and last ordinal of `turns`, or nothing for no turns.
+fn ordinal_range(turns: &[Turn]) -> Option<OrdinalRange> {
+    turns
+        .first()
+        .zip(turns.last())
+        .map(|(first, last)| OrdinalRange {
+            first: first.ordinal,
+            last: last.ordinal,
+        })
 }
 
 /// A turn window keeps the newest turns, so what it omits is always the head.
@@ -1041,14 +1062,7 @@ impl Transcript {
             omitted: total - returned,
             omitted_from: End::Head,
             bound: tail,
-            ordinals: self
-                .turns
-                .first()
-                .zip(self.turns.last())
-                .map(|(first, last)| OrdinalRange {
-                    first: first.ordinal,
-                    last: last.ordinal,
-                }),
+            ordinals: ordinal_range(&self.turns),
             omitted_exact: exact,
         });
         self.truncated = !self.truncation.is_empty();

@@ -2955,7 +2955,7 @@ impl<W: std::io::Write> FullShow<W> {
                 for turn in &turns {
                     self.emit(turn)?;
                 }
-                let window = Truncation::window(turns.len(), self.total, bound);
+                let window = Truncation::window_of(&turns, self.total, bound);
                 (turns, window)
             }
             None => (self.last.take().into_iter().collect(), None),
