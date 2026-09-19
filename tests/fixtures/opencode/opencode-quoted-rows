@@ -1,0 +1,11 @@
+#!/bin/sh
+set -eu
+
+# A stable store read through a transport that quotes every value containing
+# `"` and doubles the quotes inside it, as sqlite3 3.53.4 tab mode does, so no
+# listing row parses or reveals its id. A value without `"`, such as a bare
+# session id, passes through unquoted.
+resolved=$(/usr/bin/readlink -f "$0")
+fixture_dir=${resolved%/*}
+rows=$("$fixture_dir/opencode2" "$@" database)
+printf '%s\n' "$rows" | /usr/bin/sed '/"/ { s/"/""/g; s/^/"/; s/$/"/; }'

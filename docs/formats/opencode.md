@@ -262,8 +262,18 @@ verbatim: sqlite3 3.53.4 quotes a value containing `"` CSV-style
 on both but escapes the row a second time, one extra byte per `"` and `\`. Listing parses those rows independently: a row that cannot be
 parsed is reported in the listing's `unreadable` field with its session id and
 parse diagnostic, while an exact lookup of that id preserves the parse error.
-A row that names its session id keeps that id's precedence over the other
-store's projection of the same session.
+A row whose id cannot be read from it either — a transport that quoted every
+row — is named by a second query that selects the session ids alone, which no
+transport quotes; the ids the listing could not parse are its unreadable
+ones. The store adds one line naming its database file and how many of the
+rows it scanned were unreadable. Every unreadable id keeps its precedence over
+the other store's projection of the same session.
+
+A store that cannot be listed at all is named in `unreadable` with its
+failure. Any id the other store lists may be one it holds, and reading that
+session refuses as an exact read does, so the other store's sessions are
+withheld from the listing and counted in one more line. The harness stays
+available while one of its stores answers.
 
 The `message.data` column is the complete JSON message record and is not a
 bounded transcript field. In a verified v1 store, no stored `data` value

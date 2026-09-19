@@ -4264,12 +4264,16 @@ fn malformed_opencode_database_row_is_unreadable_without_breaking_listing() {
     );
     let unreadable = value["unreadable"].as_array().unwrap();
     assert_eq!(value["scanned"], 3);
-    assert_eq!(unreadable.len(), 1);
+    assert_eq!(unreadable.len(), 2, "{unreadable:?}");
     assert!(unreadable[0]
         .as_str()
         .unwrap()
+        .ends_with("opencode.db: 1 of 3 session rows unreadable"));
+    assert!(unreadable[1]
+        .as_str()
+        .unwrap()
         .contains("ses_truncated_fixture"));
-    assert!(unreadable[0]
+    assert!(unreadable[1]
         .as_str()
         .unwrap()
         .contains("EOF while parsing a string"));
@@ -4412,6 +4416,76 @@ fn an_unreadable_stable_opencode_store_is_not_answered_from_opencode2() {
         .collect::<Vec<_>>();
     assert_eq!(ended, vec!["ses_api_only_fixture"], "{endings}");
     assert!(names_shared(&endings), "{endings}");
+}
+
+/// A listing names the stable OpenCode store it could not read and never
+/// lists, from opencode2, a session that store may hold: rows whose ids the
+/// transport hid are named from the store's ids alone, and a store that
+/// cannot be listed at all withholds every opencode2 session, counted.
+#[test]
+fn a_listing_names_the_opencode_store_it_could_not_read() {
+    for (fixture, expected, diagnostics) in [
+        (
+            "opencode-quoted-rows",
+            vec!["ses_api_only_fixture"],
+            vec![
+                "2 of 2 session rows unreadable",
+                "ses_000000fixtureSharedSession",
+            ],
+        ),
+        (
+            "opencode-list-fails",
+            vec![],
+            vec![
+                "could not be listed",
+                "exited with exit status: 1",
+                "withheld 2 sessions another store listed",
+            ],
+        ),
+    ] {
+        let root = TemporaryDirectory::new(
+            std::env::temp_dir().join(format!("tapes-cli-{fixture}-{}", std::process::id())),
+        );
+        let stable = root.path().join("opencode");
+        std::os::unix::fs::symlink(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join(format!("../../tests/fixtures/opencode/{fixture}")),
+            &stable,
+        )
+        .unwrap();
+        let _stable = OpenCodeAlias { path: stable };
+        let _beta = opencode_program(root.path(), "opencode2");
+        let home = root.path().join("home");
+        let output = tapes()
+            .args(["list", "--harness", "opencode", "--global", "--json"])
+            .env("HOME", &home)
+            .env_remove("XDG_DATA_HOME")
+            .env("PATH", root.path())
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{fixture}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let list: Value = serde_json::from_slice(&output.stdout).unwrap();
+        let ids = list["sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|session| session["id"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(ids, expected, "{fixture}: {list}");
+        let unreadable = list["unreadable"].to_string();
+        let store = home.join(".local/share/opencode/opencode.db");
+        assert!(
+            unreadable.contains(store.to_str().unwrap()),
+            "{fixture}: {unreadable}"
+        );
+        for diagnostic in diagnostics {
+            assert!(unreadable.contains(diagnostic), "{fixture}: {unreadable}");
+        }
+    }
 }
 
 #[test]

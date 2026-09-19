@@ -258,47 +258,48 @@ pub struct ResolvedSession {
     pub session: Session,
 }
 
-/// The one harness whose stores answer the same session ids: stable OpenCode
-/// and opencode2 project many of the same sessions.
-pub(crate) const SHARED_STORE_HARNESS: &str = "opencode";
-
-/// Which store answers for a session id when a harness keeps more than one.
-/// The store listed first takes precedence: a later store's projection is
-/// kept only where no earlier store of that harness listed the id or reported
-/// it unreadable. A session an earlier store holds and could not read stays
+/// Which store answers for a session id when a harness keeps more than one
+/// that answer the same ids ([`Backend::shares_session_ids`]). The store
+/// listed first takes precedence: a later store's projection is kept only
+/// where no earlier store of that harness listed the id or reported it
+/// unreadable. A session an earlier store holds and could not read stays
 /// unreadable rather than being answered from the later projection, because
-/// the two stores project the same session differently.
+/// the stores project the same session differently.
 #[derive(Default)]
 pub(crate) struct StorePrecedence {
-    listed: HashSet<String>,
-    unreadable: HashMap<String, usize>,
+    listed: HashSet<(&'static str, String)>,
+    unreadable: HashMap<(&'static str, String), usize>,
 }
 
 impl StorePrecedence {
     /// Record the ids the store at `store` could not read.
-    pub(crate) fn unreadable(&mut self, harness: &str, store: usize, ids: &[String]) {
-        if harness != SHARED_STORE_HARNESS {
+    pub(crate) fn unreadable(&mut self, backend: &dyn Backend, store: usize, ids: &[String]) {
+        if !backend.shares_session_ids() {
             return;
         }
         for id in ids {
-            let earliest = self.unreadable.entry(id.clone()).or_insert(store);
+            let earliest = self
+                .unreadable
+                .entry((backend.harness(), id.clone()))
+                .or_insert(store);
             *earliest = (*earliest).min(store);
         }
     }
 
     /// Whether the store at `store` is the one to keep this session from.
-    pub(crate) fn admits(&mut self, harness: &str, store: usize, id: &str) -> bool {
-        if harness != SHARED_STORE_HARNESS {
+    pub(crate) fn admits(&mut self, backend: &dyn Backend, store: usize, id: &str) -> bool {
+        if !backend.shares_session_ids() {
             return true;
         }
+        let key = (backend.harness(), id.to_owned());
         if self
             .unreadable
-            .get(id)
+            .get(&key)
             .is_some_and(|failed| *failed < store)
         {
             return false;
         }
-        self.listed.insert(id.to_owned())
+        self.listed.insert(key)
     }
 }
 
@@ -541,6 +542,9 @@ pub(crate) fn list_scoped(
     query.sort = sort;
     let mut found: Vec<(Session, usize)> = Vec::new();
     let mut precedence = StorePrecedence::default();
+    // The earliest store of each harness whose stores answer the same ids
+    // that could not be listed at all, and the name its diagnostics use.
+    let mut failed_stores = HashMap::<&'static str, (usize, String)>::new();
     let mut available_harnesses = HashSet::new();
     let mut unavailable_harnesses = Vec::new();
     let mut unreadable_sessions = Vec::new();
@@ -619,7 +623,7 @@ pub(crate) fn list_scoped(
                     seen.extend(candidate_ids);
                 }
                 available_harnesses.insert(backend.harness().to_owned());
-                precedence.unreadable(backend.harness(), index, &unavailable_ids);
+                precedence.unreadable(backend.as_ref(), index, &unavailable_ids);
                 unreadable_sessions.extend(unavailable);
                 unsearched_sessions.extend(unsearched);
                 scanned += inspected;
@@ -641,6 +645,18 @@ pub(crate) fn list_scoped(
                         .or_default()
                         .extend(candidate_ids);
                 }
+                if backend.shares_session_ids() {
+                    let store = backend
+                        .store()
+                        .unwrap_or_else(|| backend.harness().to_owned());
+                    unreadable_sessions.push(format!(
+                        "{} store {store} could not be listed: {error:#}",
+                        backend.harness()
+                    ));
+                    failed_stores
+                        .entry(backend.harness())
+                        .or_insert((index, store));
+                }
                 unavailable_harnesses.push(backend.harness());
             }
         }
@@ -651,8 +667,30 @@ pub(crate) fn list_scoped(
     // it reported unreadable stays unreadable rather than being listed from
     // the later store's projection of it.
     found.retain(|(session, origin)| {
-        precedence.admits(backends[*origin].harness(), *origin, &session.id)
+        precedence.admits(backends[*origin].as_ref(), *origin, &session.id)
     });
+    // A store that could not be listed may hold any id a later store of its
+    // harness lists, and reading that session refuses for the same reason,
+    // so the later store's sessions are withheld and counted.
+    let mut withheld = HashMap::<&'static str, usize>::new();
+    found.retain(|(_, origin)| {
+        let backend = backends[*origin].as_ref();
+        let behind_failure = failed_stores
+            .get(backend.harness())
+            .is_some_and(|(failed, _)| failed < origin);
+        if behind_failure {
+            *withheld.entry(backend.harness()).or_default() += 1;
+        }
+        !behind_failure
+    });
+    for (harness, (_, store)) in &failed_stores {
+        if let Some(count) = withheld.get(harness) {
+            let noun = if *count == 1 { "session" } else { "sessions" };
+            unreadable_sessions.push(format!(
+                "{harness}: withheld {count} {noun} another store listed, because {store} may hold them and could not be read"
+            ));
+        }
+    }
     found.sort_by(|(left, _), (right, _)| compare_sessions(left, right, sort));
 
     // A harness may have more than one installed store, such as stable
@@ -833,27 +871,25 @@ pub fn resolve_session(
     // the failure stands.
     if let Some(hit) = located
         .iter()
-        .find(|resolved| backends[resolved.backend_index].harness() == SHARED_STORE_HARNESS)
+        .find(|resolved| backends[resolved.backend_index].shares_session_ids())
     {
-        let preceding = reported_failures(failures.iter().filter(|(store, harness, _)| {
-            harness == SHARED_STORE_HARNESS && *store < hit.backend_index
-        }));
+        let hit_harness = backends[hit.backend_index].harness();
+        let preceding =
+            reported_failures(failures.iter().filter(|(store, harness, _)| {
+                harness == hit_harness && *store < hit.backend_index
+            }));
         if !preceding.is_empty() {
             return Err(ResolveError::StoreFailed {
                 query: query.to_owned(),
                 failures: preceding,
-                answered_by: hit
-                    .session
-                    .locator()
-                    .unwrap_or(SHARED_STORE_HARNESS)
-                    .to_owned(),
+                answered_by: hit.session.locator().unwrap_or(hit_harness).to_owned(),
             });
         }
     }
     if located.len() > 1
         && located
             .iter()
-            .all(|resolved| backends[resolved.backend_index].harness() == SHARED_STORE_HARNESS)
+            .all(|resolved| backends[resolved.backend_index].shares_session_ids())
     {
         return Ok(located.remove(0));
     }
@@ -898,7 +934,7 @@ pub fn resolve_session(
         let Ok(listing) = backend.list(&Query::unscoped(RESOLVE_LIMIT)) else {
             continue;
         };
-        precedence.unreadable(backend.harness(), backend_index, &listing.unavailable_ids);
+        precedence.unreadable(backend.as_ref(), backend_index, &listing.unavailable_ids);
         truncated |= listing.sessions.len() >= RESOLVE_LIMIT;
         matches.extend(
             listing
@@ -914,7 +950,7 @@ pub fn resolve_session(
 
     matches.retain(|resolved| {
         precedence.admits(
-            backends[resolved.backend_index].harness(),
+            backends[resolved.backend_index].as_ref(),
             resolved.backend_index,
             &resolved.session.id,
         )

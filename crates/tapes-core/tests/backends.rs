@@ -191,7 +191,13 @@ fn opencode_fixture_executables_are_stable() {
         "OpenCode backend tests must not write shell executable bytes at runtime"
     );
 
-    for name in ["opencode2", "opencode-malformed-row"] {
+    for name in [
+        "opencode2",
+        "opencode-malformed-row",
+        "opencode-unreadable-rows",
+        "opencode-quoted-rows",
+        "opencode-list-fails",
+    ] {
         let program = fixtures("opencode").join(name);
         let metadata = fs::metadata(&program).unwrap();
         assert!(metadata.is_file(), "checked-in OpenCode fixture is missing");
@@ -1296,9 +1302,10 @@ fn malformed_opencode_database_rows_leave_other_sessions_and_a_diagnostic() {
             "ses_000000fixtureSharedSession"
         ]
     );
-    assert_eq!(listing.unavailable.len(), 1);
-    assert!(listing.unavailable[0].contains("ses_truncated_fixture"));
-    assert!(listing.unavailable[0].contains("EOF while parsing a string"));
+    assert_eq!(listing.unavailable.len(), 2, "{:?}", listing.unavailable);
+    assert!(listing.unavailable[0].ends_with("1 of 3 session rows unreadable"));
+    assert!(listing.unavailable[1].contains("ses_truncated_fixture"));
+    assert!(listing.unavailable[1].contains("EOF while parsing a string"));
 }
 
 #[test]
@@ -1318,8 +1325,8 @@ fn malformed_opencode_database_rows_do_not_hide_searchable_sessions() {
     .unwrap();
 
     assert_eq!(result.sessions.len(), 2);
-    assert_eq!(result.unreadable.len(), 1);
-    assert!(result.unreadable[0].contains("ses_truncated_fixture"));
+    assert_eq!(result.unreadable.len(), 2, "{:?}", result.unreadable);
+    assert!(result.unreadable[1].contains("ses_truncated_fixture"));
     assert!(result.unsearched.is_empty());
 }
 
@@ -4173,6 +4180,10 @@ struct TitleProjection {
     origin: &'static str,
 }
 impl Backend for TitleProjection {
+    fn shares_session_ids(&self) -> bool {
+        true
+    }
+
     fn kinds(&self) -> tapes_core::model::KindDeclaration {
         tapes_core::model::KindDeclaration {
             recordable: tapes_core::model::TurnSelection::only(TurnKind::ALL),

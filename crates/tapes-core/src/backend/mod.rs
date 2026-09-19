@@ -333,6 +333,17 @@ pub trait Backend {
             self.harness()
         )
     }
+    /// Whether another installed store of this harness answers the same
+    /// session ids with its own projection of them, so listing and resolution
+    /// must pick one store's answer per id.
+    fn shares_session_ids(&self) -> bool {
+        false
+    }
+    /// The store this backend reads, where its harness has more than one, as
+    /// a diagnostic names it.
+    fn store(&self) -> Option<String> {
+        None
+    }
     /// Which turn kinds this harness's records can evidence, and the kind its
     /// reader gives a user turn that carries no evidence of its own.
     fn kinds(&self) -> crate::model::KindDeclaration;
