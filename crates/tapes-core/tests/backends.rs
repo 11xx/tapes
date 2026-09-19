@@ -3210,7 +3210,7 @@ fn a_truncated_claude_read_keeps_whole_session_coverage_for_a_cost_state_record(
     }
     writeln!(
         file,
-        r#"{{"type":"cost-state","sessionId":"session-truncated-cost","totalCostUSD":3.5,"modelUsage":{{"claude-fixture":{{"inputTokens":10,"outputTokens":20,"thinkingTokens":30,"cacheReadInputTokens":40,"cacheCreationInputTokens":50}}}},"hasUnknownModelCost":false}}"#
+        r#"{{"type":"cost-state","sessionId":"session-truncated-cost","totalCostUSD":3.5,"modelUsage":{{"claude-fixture":{{"inputTokens":1100,"outputTokens":2200,"thinkingTokens":30,"cacheReadInputTokens":40,"cacheCreationInputTokens":50}}}},"hasUnknownModelCost":false}}"#
     )
     .unwrap();
     drop(file);
@@ -3221,8 +3221,8 @@ fn a_truncated_claude_read_keeps_whole_session_coverage_for_a_cost_state_record(
     assert_eq!(
         session.tokens,
         Some(Tokens {
-            input: Some(10),
-            output: Some(20),
+            input: Some(1100),
+            output: Some(2200),
             reasoning: Some(30),
             cache_read: Some(40),
             cache_write: Some(50),

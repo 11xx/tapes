@@ -118,7 +118,9 @@ impl ClaudeBackend {
             );
             turns.extend(parsed);
         }
-        let (tokens, cost, basis) = claude_accounting(&read.values);
+        let requests = claude_request_tokens(&read.values);
+        let cost_state = covering_cost_state(newest_cost_state(&read.values), requests.as_ref());
+        let (tokens, cost, basis) = recorded_accounting(cost_state, requests);
         // A cost-state record is cumulative for the whole session wherever the
         // read reached it; only a sum over the read's requests is bounded by
         // the read.
@@ -128,7 +130,7 @@ impl ClaudeBackend {
             AccountingCoverage::ReadWindow
         };
         let accounting = accounting_for(tokens.as_ref(), cost.as_ref(), basis, coverage);
-        let usage_detail = newest_cost_state(&read.values)
+        let usage_detail = cost_state
             .map(cost_state_detail)
             .and_then(UsageDetail::into_option);
 
@@ -742,18 +744,16 @@ impl ClaudeRecords {
     /// Set the session's counters, accounting, usage detail, model, and
     /// activity range to what every folded record states.
     fn apply(self, session: &mut Session) {
-        let requests = self.requests;
-        let (tokens, cost, basis) =
-            recorded_accounting(self.cost_state.as_ref(), || requests.finish());
+        let requests = self.requests.finish();
+        let cost_state = covering_cost_state(self.cost_state.as_ref(), requests.as_ref());
+        let (tokens, cost, basis) = recorded_accounting(cost_state, requests);
         session.accounting = accounting_for(
             tokens.as_ref(),
             cost.as_ref(),
             basis,
             AccountingCoverage::Session,
         );
-        session.usage_detail = self
-            .cost_state
-            .as_ref()
+        session.usage_detail = cost_state
             .map(cost_state_detail)
             .and_then(UsageDetail::into_option);
         session.tokens = tokens;
@@ -824,15 +824,44 @@ fn newest_cost_state(values: &[Value]) -> Option<&Value> {
         .find(|value| value["type"] == "cost-state")
 }
 
-fn claude_accounting(values: &[Value]) -> (Option<Tokens>, Option<Cost>, AccountingBasis) {
-    recorded_accounting(newest_cost_state(values), || claude_request_tokens(values))
+/// The `cost-state` to account from: the newest one, unless it states fewer
+/// tokens than the recording's own requests. Some sessions end on a zeroed or
+/// partial one, and a total below the requests read cannot be the session's.
+fn covering_cost_state<'a>(
+    cost_state: Option<&'a Value>,
+    requests: Option<&Tokens>,
+) -> Option<&'a Value> {
+    cost_state.filter(|cost_state| {
+        requests.is_none_or(|requests| covers(cost_state_tokens(cost_state), requests))
+    })
 }
 
-/// A `cost-state` record is the session's cumulative total wherever the read
-/// reached it. Without one, the counters are a sum over the requests read.
+/// Whether `total` counts at least as many input, output, and cache tokens as
+/// `part`. Reasoning is left out: it is a share of output, and a `cost-state`
+/// often records no thinking count at all.
+fn covers(total: Option<Tokens>, part: &Tokens) -> bool {
+    let kinds = |tokens: &Tokens| {
+        [
+            tokens.input,
+            tokens.output,
+            tokens.cache_read,
+            tokens.cache_write,
+        ]
+        .map(|count| count.unwrap_or(0))
+    };
+    let total = total.as_ref().map_or([0; 4], kinds);
+    total
+        .iter()
+        .zip(kinds(part))
+        .all(|(total, part)| *total >= part)
+}
+
+/// A covering `cost-state` record is the session's cumulative total wherever
+/// the read reached it. Without one, the counters are a sum over the requests
+/// read.
 fn recorded_accounting(
     cost_state: Option<&Value>,
-    requests: impl FnOnce() -> Option<Tokens>,
+    requests: Option<Tokens>,
 ) -> (Option<Tokens>, Option<Cost>, AccountingBasis) {
     match cost_state {
         Some(cost_state) => (
@@ -840,7 +869,7 @@ fn recorded_accounting(
             cost_state["totalCostUSD"].as_f64().map(|usd| Cost { usd }),
             AccountingBasis::RecordedTotal,
         ),
-        None => (requests(), None, AccountingBasis::SummedRequests),
+        None => (requests, None, AccountingBasis::SummedRequests),
     }
 }
 

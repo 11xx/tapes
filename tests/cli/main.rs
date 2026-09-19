@@ -6626,6 +6626,72 @@ fn usage_full_counts_every_turn_and_folds_the_whole_recordings_counters() {
 /// Human output states each recorded fact once and invents no line for a
 /// fact the harness did not record.
 #[test]
+fn a_claude_cost_state_below_the_recorded_requests_is_not_the_session_total() {
+    let root = TemporaryDirectory::new(
+        std::env::temp_dir().join(format!("tapes-cli-cost-state-{}", std::process::id())),
+    );
+    let home = root.path().join("home");
+    let project = home.join(".claude/projects/-fixtures-project");
+    fs::create_dir_all(&project).unwrap();
+    let recording = |id: &str, cost_state: Value| {
+        let user = serde_json::json!({"type": "user", "sessionId": id, "uuid": "user", "timestamp": "2026-01-01T10:00:00Z", "cwd": "/fixtures/project", "message": {"role": "user", "content": "Inspect the fixture."}});
+        let assistant = serde_json::json!({"type": "assistant", "sessionId": id, "uuid": "assistant", "requestId": "request", "timestamp": "2026-01-01T10:00:01Z", "cwd": "/fixtures/project", "message": {"role": "assistant", "model": "claude-fixture", "content": [{"type": "text", "text": "Fixture inspected."}], "usage": {"input_tokens": 10, "output_tokens": 20, "cache_read_input_tokens": 30, "cache_creation_input_tokens": 40, "output_tokens_details": {"thinking_tokens": 5}}}});
+        let mut cost_state = cost_state;
+        cost_state["type"] = Value::from("cost-state");
+        cost_state["sessionId"] = Value::from(id);
+        fs::write(
+            project.join(format!("{id}.jsonl")),
+            format!("{user}\n{assistant}\n{cost_state}\n"),
+        )
+        .unwrap();
+    };
+    recording(
+        "zeroed-cost-state",
+        serde_json::json!({"totalCostUSD": 0, "totalDuration": 1000, "modelUsage": {}}),
+    );
+    recording(
+        "covering-cost-state",
+        serde_json::json!({"totalCostUSD": 2.5, "modelUsage": {"claude-fixture": {"inputTokens": 100, "outputTokens": 200, "cacheReadInputTokens": 300, "cacheCreationInputTokens": 400}}}),
+    );
+    let usage = |id: &str, full: bool| -> Value {
+        let mut command = tapes();
+        command.args(["usage", id, "--json"]);
+        if full {
+            command.arg("--full");
+        }
+        with_fixture_env(&mut command, &root.path().join("codex"), &home, root.path());
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice(&output.stdout).unwrap()
+    };
+
+    for full in [false, true] {
+        let zeroed = usage("zeroed-cost-state", full);
+        assert_eq!(zeroed["accounting"]["basis"], "summed-requests", "{zeroed}");
+        assert_eq!(
+            zeroed["tokens"],
+            serde_json::json!({"input": 10, "output": 20, "reasoning": 5, "cache_read": 30, "cache_write": 40}),
+            "{zeroed}"
+        );
+        assert!(zeroed.get("cost").is_none(), "{zeroed}");
+        assert!(zeroed.get("durations_ms").is_none(), "{zeroed}");
+
+        // A cost-state without a thinking count still covers the requests.
+        let covering = usage("covering-cost-state", full);
+        assert_eq!(
+            covering["accounting"]["basis"], "recorded-total",
+            "{covering}"
+        );
+        assert_eq!(covering["tokens"]["output"], 200, "{covering}");
+        assert_eq!(covering["cost"]["usd"], 2.5, "{covering}");
+    }
+}
+
+#[test]
 fn usage_human_output_names_the_recorded_facts_only() {
     let id = "00000000-0000-0000-0000-000000000001";
     let output = fixture_command("usage-human", &["usage", id]);
@@ -8500,7 +8566,7 @@ fn usage_summary_partitions_incompatible_accounting_without_a_grand_sum() {
     assert!(report["totals"].get("tokens").is_none());
     assert!(report["totals"].get("cost").is_none());
     assert_eq!(report["partitions"].as_array().unwrap().len(), 2);
-    let recorded = format!("{}\n{{\"type\":\"cost-state\",\"modelUsage\":{{\"claude-fixture\":{{\"inputTokens\":100,\"outputTokens\":20}}}},\"totalCostUSD\":1.0}}\n", CLAUDE_SESSION.replace("session-claude","recorded"));
+    let recorded = format!("{}\n{{\"type\":\"cost-state\",\"modelUsage\":{{\"claude-fixture\":{{\"inputTokens\":100,\"outputTokens\":200,\"cacheReadInputTokens\":300,\"cacheCreationInputTokens\":400}}}},\"totalCostUSD\":1.0}}\n", CLAUDE_SESSION.replace("session-claude","recorded"));
     fs::write(project.join("recorded.jsonl"), recorded).unwrap();
     let mut command = tapes();
     command.args(["usage", "--global", "--harness", "claude", "--json"]);

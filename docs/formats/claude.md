@@ -261,6 +261,15 @@ record is the session's accounting source; otherwise assistant `message.usage`
 records provide a per-request sum. Claude records no per-request cost in
 `message.usage`.
 
+The newest `cost-state` is not always the session's total. Some recordings end
+on one whose `modelUsage` is empty and whose `totalCostUSD` is 0, and a live
+session's newest one can trail the requests already recorded after it. A
+`cost-state` whose input, output, or cache token totals fall below the sum of
+the read's own `message.usage` records is therefore not used; the per-request
+sum is. Thinking tokens are left out of that comparison: `modelUsage` often
+omits `thinkingTokens` while `message.usage` carries
+`output_tokens_details.thinking_tokens`.
+
 ## Metadata types
 
 `mode`, `last-prompt`, `ai-title`, `queue-operation`, `attachment`, and

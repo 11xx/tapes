@@ -131,7 +131,9 @@ OpenCode supplies recorded totals from its session row or API response, and
 Codex supplies the cumulative totals of the newest `token_count` event in the
 bounded read. Both are `recorded-total`/`session` because the harness records
 running session totals. Claude uses the newest `cost-state` record in the
-bounded read as a `recorded-total`/`session`; without one, it sums each
+bounded read as a `recorded-total`/`session` when its input, output, and cache
+totals are at least those of the requests the read holds; without one, or when
+it counts fewer than they do, it sums each
 per-request `message.usage` once by `requestId`, using `summed-requests` with
 coverage determined by the file-tail bound. pi sums `message.usage` from the
 active conversation path, excluding abandoned branches, with the same
