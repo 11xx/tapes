@@ -333,6 +333,14 @@ pub trait Backend {
             self.harness()
         )
     }
+    /// Whether this session can be streamed twice with the second read
+    /// handing over the first read's turns. A consumer that joins two passes
+    /// asks before the first, so a source that cannot be replayed refuses
+    /// without being read. The default can be.
+    fn replayable(&self, session: &Session) -> Result<()> {
+        let _ = session;
+        Ok(())
+    }
     /// The session as every record of the recording `read` covered states it:
     /// counters, accounting, recorded usage detail, model, and activity range
     /// folded from the whole recording rather than its bounded tail. The read

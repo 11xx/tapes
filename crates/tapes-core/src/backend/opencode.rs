@@ -1252,13 +1252,8 @@ impl Backend for OpenCodeBackend {
         replay: Option<&StreamedTranscript>,
         turn: &mut dyn FnMut(Turn) -> Result<()>,
     ) -> Result<StreamedTranscript> {
-        // OpenCode updates a message's rows and parts in place, so a second
-        // read of the same messages can hand over different turns.
         if replay.is_some() {
-            return Err(anyhow!(
-                "opencode sessions cannot be read whole twice: their messages are updated in \
-                 place, so a second read may not repeat the first"
-            ));
+            self.replayable(session)?;
         }
         if self.uses_database() {
             return self.database_stream(session, turn);
@@ -1275,6 +1270,15 @@ impl Backend for OpenCodeBackend {
 
     /// OpenCode keeps a session's counters on its own row as a recorded total
     /// for the whole session, so the resolved session already states them.
+    /// OpenCode updates a message's rows and parts in place, so a second read
+    /// of the same messages can hand over different turns.
+    fn replayable(&self, _session: &Session) -> Result<()> {
+        Err(anyhow!(
+            "opencode sessions cannot be read whole twice: their messages are updated in \
+             place, so a second read may not repeat the first"
+        ))
+    }
+
     fn stream_session(&self, session: &Session, _read: &StreamedTranscript) -> Result<Session> {
         Ok(session.clone())
     }
