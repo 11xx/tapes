@@ -20,11 +20,11 @@ use tapes_core::model::{
 };
 use tapes_core::usage::{usage, Durations, ModelUsage, RateWindow, TurnCoverage};
 use tapes_core::{
-    export_selection_with_backends, latest_with_backends, list_with_backends,
+    export_selection_with_backends, export_with_backends, latest_with_backends, list_with_backends,
     list_with_backends_filtered, list_with_backends_filtered_and_search,
-    list_with_backends_options, resolve_session, scope::Scope, show_with_backends, ListFilters,
-    ListSort, ResolveError, Selection, SessionSelection, Where, EXPORT_MANIFEST_SCHEMA,
-    LIST_SEARCH_TAIL,
+    list_with_backends_options, resolve_session, scope::Scope, show_with_backends,
+    stats_full_with_backends, ExportRead, ListFilters, ListSort, ResolveError, Selection,
+    SessionSelection, Where, EXPORT_MANIFEST_SCHEMA, LIST_SEARCH_TAIL,
 };
 
 fn fixtures(harness: &str) -> PathBuf {
@@ -503,6 +503,37 @@ fn opencode_v2_only_search_keeps_all_genuine_fixture_matches() {
     );
     assert_eq!(result.unsearched.len(), 1, "{:?}", result.unsearched);
     assert!(result.unsearched[0].contains("opencode v2 search could not use the local API server"));
+}
+
+/// OpenCode cannot promise a second read the first read's turns, so a
+/// consumer that joins two passes refuses before reading any message.
+#[test]
+fn opencode_refuses_a_two_pass_read_before_reading_a_message() {
+    let api = OpenCodeAlias::counting();
+    let backends: Vec<Box<dyn Backend>> = vec![Box::new(OpenCodeBackend::new(api.path()))];
+    let id = "ses_000000fixtureSharedSession";
+    let directory =
+        std::env::temp_dir().join(format!("tapes-opencode-two-pass-{}", std::process::id()));
+
+    let stats = stats_full_with_backends(&backends, Selection::Id(id)).err();
+    let export = export_with_backends(
+        &backends,
+        Selection::Id(id),
+        Some(&directory),
+        None,
+        ExportRead::Whole,
+    )
+    .err();
+    for error in [stats, export] {
+        let error = error.expect("a two-pass OpenCode read refuses").to_string();
+        assert!(error.contains("cannot be read whole twice"), "{error}");
+    }
+    let calls = fs::read_to_string(api.calls.as_ref().unwrap()).unwrap_or_default();
+    assert!(
+        !calls.lines().any(|path| path.contains("/message")),
+        "{calls}"
+    );
+    assert!(!directory.exists());
 }
 
 #[test]
@@ -3210,7 +3241,7 @@ fn a_truncated_claude_read_keeps_whole_session_coverage_for_a_cost_state_record(
     }
     writeln!(
         file,
-        r#"{{"type":"cost-state","sessionId":"session-truncated-cost","totalCostUSD":3.5,"modelUsage":{{"claude-fixture":{{"inputTokens":10,"outputTokens":20,"thinkingTokens":30,"cacheReadInputTokens":40,"cacheCreationInputTokens":50}}}},"hasUnknownModelCost":false}}"#
+        r#"{{"type":"cost-state","sessionId":"session-truncated-cost","totalCostUSD":3.5,"modelUsage":{{"claude-fixture":{{"inputTokens":1100,"outputTokens":2200,"thinkingTokens":30,"cacheReadInputTokens":40,"cacheCreationInputTokens":50}}}},"hasUnknownModelCost":false}}"#
     )
     .unwrap();
     drop(file);
@@ -3221,8 +3252,8 @@ fn a_truncated_claude_read_keeps_whole_session_coverage_for_a_cost_state_record(
     assert_eq!(
         session.tokens,
         Some(Tokens {
-            input: Some(10),
-            output: Some(20),
+            input: Some(1100),
+            output: Some(2200),
             reasoning: Some(30),
             cache_read: Some(40),
             cache_write: Some(50),

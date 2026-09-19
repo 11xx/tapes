@@ -1207,6 +1207,7 @@ pub fn events_full_with_backends(
     // The newest ordinal at which each call id was declared with a requested
     // program, so the window can decide which declarations it holds.
     let mut declared = HashMap::<String, usize>::new();
+    backend.replayable(&resolved.session)?;
     let read = stream_numbered(backend, &resolved.session, None, &mut |turn| {
         turns += 1;
         content.add(&turn);
@@ -1414,6 +1415,7 @@ fn export_whole(
     directory: &Path,
     turns: Option<model::TurnSelection>,
 ) -> Result<bundle::Bundle> {
+    backend.replayable(session)?;
     let mut first = bundle::JsonPass::open(directory, session)?;
     let mut projection = turns.map(model::Projection::new);
     let read = stream_numbered(backend, session, None, &mut |turn| {

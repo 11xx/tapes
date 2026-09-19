@@ -131,7 +131,9 @@ OpenCode supplies recorded totals from its session row or API response, and
 Codex supplies the cumulative totals of the newest `token_count` event in the
 bounded read. Both are `recorded-total`/`session` because the harness records
 running session totals. Claude uses the newest `cost-state` record in the
-bounded read as a `recorded-total`/`session`; without one, it sums each
+bounded read as a `recorded-total`/`session` when its input, output, and cache
+totals are at least those of the requests the read holds; without one, or when
+it counts fewer than they do, it sums each
 per-request `message.usage` once by `requestId`, using `summed-requests` with
 coverage determined by the file-tail bound. pi sums `message.usage` from the
 active conversation path, excluding abandoned branches, with the same
@@ -1103,8 +1105,9 @@ operator/assistant text in the read, or an empty complete projection.
 
 `show --full --json` streams a whole Claude, Codex, Pi, or OpenCode session,
 and its `read` says so. For a recording file that is one `tail` range from
-byte 0 to the length observed when the read opened, `configured_bound` equal to that length, `projection_options`
-holding `full`, and gaps for malformed records or records longer than 64 MiB.
+byte 0 to the length observed when the read opened, `configured_bound` equal to that length, `source_revision`
+naming the file revision observed then, `projection_options` holding `full`,
+and gaps for malformed records or records longer than 64 MiB.
 Record spans are not listed under `read.records`; each turn's `record_ref`
 carries its own span and the source revision it was read at. An OpenCode
 session is read whole from its store rather than a file, so its `read` counts
@@ -1120,7 +1123,8 @@ projection cut.
 `unknown`, and `omitted` counts every dropped turn by kind; `show --exchange`
 writes `{"kept": ["operator", "assistant"], "omitted": {"reasoning": 1,
 "tool": 3}}`. Kept turns keep their ordinals. A turn window under a projection
-counts the kept turns. A turn absent from a projection says nothing about
+counts the kept turns, and its `ordinals` are the first and last kept turn's
+own. A turn absent from a projection says nothing about
 whether the session recorded it.
 
 A bundle's `.context.md` holds the exchange that `show --exchange` returns —

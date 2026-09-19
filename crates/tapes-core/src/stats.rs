@@ -253,6 +253,7 @@ impl Counted {
         let mut tally = usage::TurnTally::default();
         let mut turns = TurnFold::default();
         let mut index = PairIndex::default();
+        backend.replayable(session)?;
         let read = crate::stream_numbered(backend, session, None, &mut |turn| {
             tally.add(&turn);
             turns.add(&turn);

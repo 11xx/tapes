@@ -375,7 +375,8 @@ carries the same coverage for the read behind it. Cost is only what the harness
 recorded; a provider quota is a separate fact about the account. Facts beyond
 the normalized counters appear only where a harness records them: Codex adds
 `context_window` and `rate_limits`, Claude adds `durations_ms` and `by_model`
-when the recording holds a `cost-state`, and pi and OpenCode add neither.
+when the recording holds a `cost-state` that accounts for its requests, and pi
+and OpenCode add neither.
 Human output prints one line per recorded fact and closes with the same
 truncation notes `show` prints.
 
