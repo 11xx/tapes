@@ -459,6 +459,11 @@ impl PartialDirectory {
 /// that later becomes a manifest gap never leaves a readable partial member.
 fn write_atomically(directory: &Path, name: &str, bytes: &[u8]) -> std::result::Result<(), String> {
     let target = directory.join(name);
+    if let Some(reused) = existing_evidence_file(&target, bytes)? {
+        if reused {
+            return Ok(());
+        }
+    }
     let temporary = PathBuf::from(format!("{}.partial", target.display()));
     let mut file = OpenOptions::new()
         .write(true)
@@ -472,7 +477,22 @@ fn write_atomically(directory: &Path, name: &str, bytes: &[u8]) -> std::result::
     }
     drop(file);
     if let Err(error) = fs::hard_link(&temporary, &target) {
-        let _ = fs::remove_file(&temporary);
+        if error.kind() == std::io::ErrorKind::AlreadyExists {
+            let reused = match existing_evidence_file(&target, bytes) {
+                Ok(reused) => reused,
+                Err(reason) => {
+                    let _ = fs::remove_file(&temporary);
+                    return Err(reason);
+                }
+            };
+            let _ = fs::remove_file(&temporary);
+            if reused == Some(true) {
+                return Ok(());
+            }
+        } else {
+            let _ = fs::remove_file(&temporary);
+            return Err(error.to_string());
+        }
         return Err(error.to_string());
     }
     if let Err(error) = fs::remove_file(&temporary) {
@@ -480,6 +500,35 @@ fn write_atomically(directory: &Path, name: &str, bytes: &[u8]) -> std::result::
         return Err(error.to_string());
     }
     Ok(())
+}
+
+/// Return `Some(true)` only for a regular file whose bytes are exactly the
+/// requested content. Other file types and conflicting regular files stay
+/// refusal paths, so an export never adopts an unrelated path.
+fn existing_evidence_file(
+    target: &Path,
+    expected: &[u8],
+) -> std::result::Result<Option<bool>, String> {
+    let metadata = match fs::symlink_metadata(target) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.to_string()),
+    };
+    if !metadata.file_type().is_file() {
+        return Err(format!(
+            "{} is not a regular evidence file; refusing to replace it",
+            target.display()
+        ));
+    }
+    let actual = fs::read(target).map_err(|error| error.to_string())?;
+    if actual == expected {
+        Ok(Some(true))
+    } else {
+        Err(format!(
+            "{} already contains different evidence bytes; refusing to replace it",
+            target.display()
+        ))
+    }
 }
 
 impl Drop for PartialDirectory {
@@ -561,6 +610,39 @@ mod tests {
         let error = copy_member(&archive, "report.dat", &root).unwrap_err();
         assert!(!error.is_empty());
         assert!(occupied.join("keep").is_file());
+        assert!(!root.join(format!("{name}.partial")).exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn conflicting_or_symlinked_evidence_is_never_replaced() {
+        let root = temporary("report-conflict");
+        let archive = root.join("export.zip");
+        let body = b"report body";
+        let mut writer = zip::ZipWriter::new(File::create(&archive).unwrap());
+        writer
+            .start_file(
+                "report.dat",
+                zip::write::SimpleFileOptions::default()
+                    .compression_method(zip::CompressionMethod::Stored),
+            )
+            .unwrap();
+        writer.write_all(body).unwrap();
+        writer.finish().unwrap();
+        let name = format!("sha256-{}.dat", hex(&Sha256::digest(body)));
+        let target = root.join(&name);
+
+        fs::write(&target, b"conflicting bytes").unwrap();
+        assert!(copy_member(&archive, "report.dat", &root).is_err());
+        assert_eq!(fs::read(&target).unwrap(), b"conflicting bytes");
+        assert!(!root.join(format!("{name}.partial")).exists());
+        fs::remove_file(&target).unwrap();
+
+        let destination = root.join("elsewhere");
+        fs::write(&destination, b"symlink target").unwrap();
+        std::os::unix::fs::symlink(&destination, &target).unwrap();
+        assert!(copy_member(&archive, "report.dat", &root).is_err());
+        assert_eq!(fs::read_link(&target).unwrap(), destination);
         assert!(!root.join(format!("{name}.partial")).exists());
         fs::remove_dir_all(root).unwrap();
     }

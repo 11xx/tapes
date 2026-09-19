@@ -458,6 +458,88 @@ fn evidence_export_copies_the_record_and_its_reports_verbatim() {
     assert!(String::from_utf8_lossy(&installed.stderr).contains("supplied input"));
 }
 
+#[cfg(feature = "zip")]
+#[test]
+fn evidence_reuses_identical_report_bytes_without_false_gaps() {
+    let root = TempRoot::new("duplicate-evidence");
+    let conversation_bytes = conversation("originating", "voice conversation");
+    let library = serde_json::to_vec(&json!([
+        {"file_id": "file_00aa", "origination_thread_id": "originating"},
+        {"file_id": "file_00bb", "origination_thread_id": "originating"}
+    ]))
+    .unwrap();
+    let duplicate = report(Some("backing-session"), "same-report", "identical body");
+    let mut sizes = BTreeMap::new();
+    sizes.insert("conversations-000.json", conversation_bytes.len());
+    sizes.insert("library_files.json", library.len());
+    sizes.insert("file_00aa.dat", duplicate.len());
+    sizes.insert("file_00bb.dat", duplicate.len());
+    let manifest_bytes = manifest(
+        &["conversations-000.json"],
+        &["library_files.json"],
+        &["file_00aa.dat", "file_00bb.dat"],
+        &sizes,
+    );
+    let zip_path = root.path().join("input.zip");
+    archive(
+        &zip_path,
+        &[
+            ("export_manifest.json", &manifest_bytes),
+            ("conversations-000.json", &conversation_bytes),
+            ("library_files.json", &library),
+            ("file_00aa.dat", &duplicate),
+            ("file_00bb.dat", &duplicate),
+        ],
+    );
+
+    let bundle = root.path().join("bundle");
+    let output = run(&[
+        "export".to_owned(),
+        "originating".to_owned(),
+        "--input".to_owned(),
+        zip_path.display().to_string(),
+        "--evidence".to_owned(),
+        "--bundle".to_owned(),
+        bundle.display().to_string(),
+    ]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json_path = fs::read_dir(&bundle)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find(|path| {
+            path.extension()
+                .is_some_and(|extension| extension == "json")
+        })
+        .unwrap();
+    let evidence = json_path.with_extension("evidence");
+    let evidence_manifest: Value =
+        serde_json::from_slice(&fs::read(evidence.join("manifest.json")).unwrap()).unwrap();
+    assert_eq!(evidence_manifest["gaps"], json!([]));
+    assert_eq!(
+        evidence_manifest["associations"],
+        json!([
+            {"member": "file_00aa.dat", "named_by": ["originating_conversation"], "copied": true},
+            {"member": "file_00bb.dat", "named_by": ["originating_conversation"], "copied": true}
+        ])
+    );
+    let files = evidence_manifest["files"].as_array().unwrap();
+    assert_eq!(files.len(), 3);
+    assert_eq!(files[1]["file"], files[2]["file"]);
+    assert_eq!(
+        fs::read(evidence.join(files[1]["file"].as_str().unwrap())).unwrap(),
+        duplicate
+    );
+    assert!(!evidence.read_dir().unwrap().any(|entry| entry
+        .unwrap()
+        .file_name()
+        .to_string_lossy()
+        .ends_with(".partial")));
+}
+
 #[test]
 fn manifest_gaps_are_explicit_and_only_an_exact_occurrence_can_be_read() {
     let root = TempRoot::new("manifest-gap");

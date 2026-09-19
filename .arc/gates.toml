@@ -1,10 +1,19 @@
 # tapes' integration gates — same shape as arc's, since arc is the sibling
 # project and its executors already know this contract.
 [gates.build]
-command = "cargo build --all-targets"
+command = "cargo build --all-targets --no-default-features"
 
 [gates.test]
-command = "cargo test"
+command = "cargo test --no-default-features"
 
 [gates.lint]
-command = "cargo clippy --all-targets -- -D warnings && cargo fmt --check"
+command = "cargo clippy --all-targets --no-default-features -- -D warnings && cargo fmt --check"
+
+[gates.build-zip]
+command = "cargo build --all-targets --features zip"
+
+[gates.test-zip]
+command = "cargo test --features zip"
+
+[gates.lint-zip]
+command = "cargo clippy --all-targets --features zip -- -D warnings && cargo fmt --check"

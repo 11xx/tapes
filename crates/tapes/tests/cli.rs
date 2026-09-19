@@ -355,10 +355,25 @@ fn scoped_listing_reports_directories_it_cannot_place() {
     let other = root.join("other-project-removed-worktree");
     let sessions = root.join("codex/sessions/2026/01/01");
     fs::create_dir_all(&sessions).unwrap();
-    for (stamp, id, cwd) in [
-        ("10-00-00", "00000000-0000-0000-0000-00000000000a", &project),
-        ("11-00-00", "00000000-0000-0000-0000-00000000000b", &removed),
-        ("12-00-00", "00000000-0000-0000-0000-00000000000c", &other),
+    for (stamp, id, cwd, modified) in [
+        (
+            "10-00-00",
+            "00000000-0000-0000-0000-00000000000a",
+            &project,
+            1_800_000_002,
+        ),
+        (
+            "11-00-00",
+            "00000000-0000-0000-0000-00000000000b",
+            &removed,
+            1_800_000_001,
+        ),
+        (
+            "12-00-00",
+            "00000000-0000-0000-0000-00000000000c",
+            &other,
+            1_800_000_000,
+        ),
     ] {
         let meta = serde_json::json!({
             "timestamp": "2026-01-01T10:00:00Z",
@@ -370,11 +385,14 @@ fn scoped_listing_reports_directories_it_cannot_place() {
             "type": "response_item",
             "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hello"}]}
         });
-        fs::write(
-            sessions.join(format!("rollout-2026-01-01T{stamp}-{id}.jsonl")),
-            format!("{meta}\n{message}\n"),
-        )
-        .unwrap();
+        let path = sessions.join(format!("rollout-2026-01-01T{stamp}-{id}.jsonl"));
+        fs::write(&path, format!("{meta}\n{message}\n")).unwrap();
+        fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(modified))
+            .unwrap();
     }
     let list = |args: &[&str]| {
         let output = tapes()

@@ -212,8 +212,7 @@ impl EventPass {
         }
         self.json.write_all(b"}")?;
         let [context, json, trace] = place_all([self.context, self.json, self.trace])?;
-        let namespace = self.namespace;
-        namespace.release();
+        let _namespace = self.namespace;
         Ok(Bundle {
             context,
             json,
@@ -317,10 +316,6 @@ impl ExportNamespace {
             "could not reserve a unique export namespace under {}",
             directory.display()
         ))
-    }
-
-    fn release(&self) {
-        let _ = fs::remove_file(&self.reservation);
     }
 }
 
