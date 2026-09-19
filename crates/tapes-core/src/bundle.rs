@@ -177,10 +177,11 @@ impl EventPass {
             self.json.write_all(b"]")?;
         }
         self.json.write_all(b"}")?;
+        let [context, json, trace] = place_all([self.context, self.json, self.trace])?;
         Ok(Bundle {
-            context: self.context.place()?,
-            json: self.json.place()?,
-            trace: self.trace.place()?,
+            context,
+            json,
+            trace,
         })
     }
 }
@@ -213,6 +214,26 @@ fn bundle_stem(session: &Session) -> String {
         Utc::now().format("%Y%m%dT%H%M%SZ"),
         session.harness()
     )
+}
+
+/// Place every file or none: when one cannot be placed, the files already
+/// placed are removed, so a failed export leaves no partial bundle.
+fn place_all<const N: usize>(files: [PartialFile; N]) -> Result<[BundleFile; N]> {
+    let mut placed = Vec::with_capacity(N);
+    for file in files {
+        match file.place() {
+            Ok(file) => placed.push(file),
+            Err(error) => {
+                for file in &placed {
+                    let _ = fs::remove_file(&file.path);
+                }
+                return Err(error);
+            }
+        }
+    }
+    Ok(placed
+        .try_into()
+        .unwrap_or_else(|_| unreachable!("one placed file per partial file")))
 }
 
 /// Write a whole body under a temporary name, then rename it into place.
@@ -581,6 +602,27 @@ fn git(directory: &Path, args: &[&str]) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_bundle_file_that_cannot_be_placed_takes_the_placed_ones_with_it() {
+        let directory =
+            std::env::temp_dir().join(format!("tapes-bundle-place-all-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&directory);
+        let prefix = directory.join("bundle");
+        let files = ["context.md", "json", "trace.md"]
+            .map(|extension| super::PartialFile::create(&prefix, extension).unwrap());
+        // A non-empty directory where the last file belongs refuses its rename.
+        fs::create_dir_all(directory.join("bundle.trace.md/occupied")).unwrap();
+
+        assert!(super::place_all(files).is_err());
+        let mut left = fs::read_dir(&directory)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect::<Vec<_>>();
+        left.sort();
+        assert_eq!(left, ["bundle.trace.md"]);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
     use chrono::TimeZone;
 
     use super::*;
