@@ -23,6 +23,7 @@ pub mod child;
 pub mod content;
 pub mod endings;
 pub mod event;
+pub mod evidence;
 pub mod history;
 pub mod input;
 pub mod lineage;
@@ -1415,6 +1416,9 @@ pub enum ExportRead {
     /// observe tool events, and once, replaying the first read, to pair those
     /// events and write the Markdown files.
     Whole,
+    /// The bounded read of a supplied input, with the source bytes behind it
+    /// copied verbatim into an evidence set beside the bundle.
+    Evidence,
 }
 
 pub fn export(
@@ -1457,6 +1461,13 @@ fn export_session(
             directory,
         ),
         ExportRead::Whole => export_whole(backend, session, directory, turns),
+        ExportRead::Evidence => {
+            let transcript =
+                project_export(declared_transcript(backend, session, EXPORT_TAIL)?, turns);
+            let mut bundle = bundle::export(&transcript, directory)?;
+            bundle.evidence = Some(evidence::write(&transcript, &bundle.json.path)?);
+            Ok(bundle)
+        }
     }
 }
 
@@ -1542,6 +1553,9 @@ pub struct ExportedFiles {
     pub context: PathBuf,
     pub json: PathBuf,
     pub trace: PathBuf,
+    /// The evidence set's manifest, when the export copied one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub evidence: Option<PathBuf>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1647,6 +1661,7 @@ pub fn export_selection_with_backends(
                         context: bundle.context.path.clone(),
                         json: bundle.json.path.clone(),
                         trace: bundle.trace.path.clone(),
+                        evidence: bundle.evidence.as_ref().map(|file| file.path.clone()),
                     },
                 });
                 bundles.push(bundle);

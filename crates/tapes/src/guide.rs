@@ -127,6 +127,7 @@ READ A SUPPLIED EXPORT
   tapes list --input <path> --input-format perplexity --json
   tapes show --occurrence <coordinate> --input <path> --json
   tapes export <id> --input <path> --bundle <dir>
+  tapes export <id> --input <path> --bundle <dir> --evidence
 
   `--input` reads files, extracted directories, and ZIP archives as a separate
   source collection. It never falls back to installed harness stores. `auto`
@@ -161,8 +162,11 @@ READ A SUPPLIED EXPORT
   Oversized records and malformed
   members are reported as gaps or diagnostics while synchronization remains
   possible. A partial scan never becomes a not-found claim. Referenced files,
-  media, and ZIP members are not opened or extracted; unsupported history-page
-  and child-qualified reads refuse a supplied export explicitly.
+  media, and ZIP members are not opened or extracted, except that
+  export --evidence copies the conversation record's span and each associated
+  report's member verbatim into <bundle>.evidence/, named by SHA-256, with a
+  manifest of where every byte came from; unsupported history-page and
+  child-qualified reads refuse a supplied export explicitly.
   Mapping inputs retain bounded graph nodes and edges beside the selected path;
   associated reports retain bounded bodies and citation spans as artifacts,
   including when their backing conversation is unresolved.

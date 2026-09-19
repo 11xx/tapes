@@ -1100,6 +1100,14 @@ enum Command {
         /// name, as a bulk export records under `failed`.
         #[arg(long, conflicts_with = "read_bytes")]
         full: bool,
+        /// Beside each supplied conversation's bundle, copy the source bytes
+        /// behind it into `<bundle>.evidence/`: the conversation record's own
+        /// span and each associated report's whole member, byte for byte and
+        /// named by their SHA-256, with a tapes-evidence/1 manifest naming
+        /// the input's length and digest, each file's member, size, CRC, and
+        /// span, and what could not be copied. Supplied inputs only.
+        #[arg(long, conflicts_with = "full")]
+        evidence: bool,
     },
 }
 
@@ -1762,9 +1770,16 @@ fn dispatch(cli: Cli) -> Result<()> {
             bundle,
             kinds,
             full,
+            evidence,
         } => {
             query.validate_input()?;
             read.refuse_supplied(&query.input)?;
+            if evidence && !query.input.supplied() {
+                return Err(anyhow!(
+                    "--evidence copies the bytes of a supplied input; an installed recording's \
+                     file is already the evidence"
+                ));
+            }
             if full && query.input.supplied() {
                 return Err(anyhow!(
                     "--full reads installed recordings; a supplied input is bounded by \
@@ -1774,6 +1789,8 @@ fn dispatch(cli: Cli) -> Result<()> {
             let view = kinds.selection().map(|(kept, _)| kept);
             let whole = if full {
                 tapes_core::ExportRead::Whole
+            } else if evidence {
+                tapes_core::ExportRead::Evidence
             } else {
                 tapes_core::ExportRead::Bounded
             };

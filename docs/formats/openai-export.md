@@ -163,6 +163,27 @@ exact bytes without decoding the input again. `read.reader` names the build of
 the reader, so a changed projection of unchanged bytes is attributable to the
 reader rather than to the source.
 
+`export --evidence` copies those bytes out of the input beside each supplied
+conversation's bundle, into a `<bundle>.evidence/` directory. The
+conversation's record is its span copied byte for byte out of its file or ZIP
+member; each report the projection associates with the conversation is its
+whole ZIP member. Every file is named `sha256-<hex>` with its source's
+extension, so the projection's `read.record_sha256` names the record file
+directly and every `record_ref.pointer` resolves inside it without the input.
+A `tapes-evidence/1` `manifest.json` records the input file's byte length and
+SHA-256; `reader` and the projection's `schema` and `projection_options`; per
+file its `role` (`record` or `report`), `sha256`, `bytes`, the ZIP member's
+`name`, `size`, and `crc32`, and a record's `span`; per association the report
+member, which of the report's fields (`backing`, `originating_conversation`)
+named the conversation, and whether it was copied; and `gaps` for anything not
+copied, including the read's own gaps. Members are read to their end so the
+archive's checksum is checked: a member that fails decompression or its
+checksum is a gap, never a file. A record whose bytes no longer match the
+digest the read recorded is refused as a changed input. A report is copied
+only out of the ZIP that holds its conversation. The directory is written
+under a `.partial` name and renamed into place whole, and the input is only
+ever opened for reading.
+
 The normal output contracts remain versioned (`tapes-list/5`,
 `tapes-session/10`, `tapes-events/6`, `tapes-brief/6`, `tapes-endings/6`,
 `tapes-stats/6`, `tapes-usage/5`, and `tapes-export-manifest/5`). History-page
