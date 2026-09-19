@@ -257,6 +257,8 @@ pub(crate) fn read_file(
         context_records: Vec::new(),
         gaps,
         unmapped: None,
+        record_sha256: Vec::new(),
+        reader: Some(crate::reader::identity()),
     };
     Ok(Page {
         schema: PAGE_SCHEMA,

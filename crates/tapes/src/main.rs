@@ -5,7 +5,7 @@ mod self_token;
 use std::path::PathBuf;
 
 use anyhow::{anyhow, Result};
-use clap::{Args, Parser, Subcommand, ValueEnum};
+use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
 use serde::Serialize;
 use tapes_core::brief::{Brief, OpenCall, OpenChild, DEFAULT_BRIEF_TAIL, TAIL_TEXT_CHARS};
 use tapes_core::bundle::{Bundle, BundleFile, GitContext};
@@ -1105,7 +1105,18 @@ enum Command {
 
 fn main() -> Result<()> {
     reset_sigpipe();
-    dispatch(Cli::parse())
+    // `--version` names the reader build on a second line; its first line
+    // stays the version alone.
+    let long_version: &'static str = Box::leak(
+        format!(
+            "{}\nreader: {}",
+            env!("CARGO_PKG_VERSION"),
+            tapes_core::reader::describe()
+        )
+        .into_boxed_str(),
+    );
+    let matches = Cli::command().long_version(long_version).get_matches();
+    dispatch(Cli::from_arg_matches(&matches)?)
 }
 
 fn print_json<T: Serialize>(value: &T, input: &InputArgs) -> Result<()> {

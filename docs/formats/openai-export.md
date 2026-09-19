@@ -150,6 +150,19 @@ observation that emitted the coordinate; changed input refuses continuation.
 A named `--input` path that does not exist is an error, not an unavailable
 store.
 
+`occurrence` and `record_ref.domain` identify one observation of the input and
+nothing more. `domain` embeds the input path as the command line spelled it,
+so the same archive named relatively and absolutely yields two domains, and
+`occurrence` hashes the path with the file's device, inode, size, and times.
+Both are correct as cursors within the observation that emitted them and must
+not be persisted as the identity of a conversation or a record. What does
+survive the input moving is the record's bytes: `read.record_sha256` holds the
+SHA-256 of each span in `read.records`, in the same order, computed over the
+source bytes the span covers, so a consumer can bind a retained citation to
+exact bytes without decoding the input again. `read.reader` names the build of
+the reader, so a changed projection of unchanged bytes is attributable to the
+reader rather than to the source.
+
 The normal output contracts remain versioned (`tapes-list/5`,
 `tapes-session/10`, `tapes-events/6`, `tapes-brief/6`, `tapes-endings/6`,
 `tapes-stats/6`, `tapes-usage/5`, and `tapes-export-manifest/5`). History-page

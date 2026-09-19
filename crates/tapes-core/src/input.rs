@@ -1595,6 +1595,47 @@ fn parse_record(
     diagnostics: &mut Vec<String>,
     gaps: &mut Vec<crate::model::ReadGap>,
 ) -> Result<()> {
+    let digest = sha256_hex(bytes);
+    parse_record_spanning(
+        bytes,
+        span,
+        &digest,
+        locator,
+        member,
+        source_length,
+        revision,
+        options,
+        occurrences,
+        diagnostics,
+        gaps,
+    )
+}
+
+/// The lowercase hex SHA-256 of `bytes`.
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+/// Parse a record whose source bytes are the span `span` digesting to
+/// `digest`; a conversation nested in the record shares both.
+#[allow(clippy::too_many_arguments)]
+fn parse_record_spanning(
+    bytes: &[u8],
+    span: ByteSpan,
+    digest: &str,
+    locator: &str,
+    member: Option<&str>,
+    source_length: u64,
+    revision: String,
+    options: &InputOptions,
+    occurrences: &mut Vec<InputOccurrence>,
+    diagnostics: &mut Vec<String>,
+    gaps: &mut Vec<crate::model::ReadGap>,
+) -> Result<()> {
     let value: Value = match serde_json::from_slice(bytes) {
         Ok(value) => value,
         Err(error) => {
@@ -1613,9 +1654,10 @@ fn parse_record(
         for conversation in conversations {
             let conversation = serde_json::to_vec(conversation)
                 .context("serialize bounded conversation envelope member")?;
-            parse_record(
+            parse_record_spanning(
                 &conversation,
                 span,
+                digest,
                 locator,
                 member,
                 source_length,
@@ -1791,6 +1833,8 @@ fn parse_record(
         context_records: Vec::new(),
         gaps: Vec::new(),
         unmapped: None,
+        record_sha256: vec![digest.to_owned()],
+        reader: Some(crate::reader::identity()),
     };
     occurrences.push(InputOccurrence {
         session,
