@@ -9,7 +9,7 @@ use super::{
     list_files_with_search, matching_session_file, read_bounds, read_recording, replay_pin,
     session_file, skipped_records_note, stream_jsonl, streamed_trailing_record,
     terminal_from_values, timestamp, trailing_record, transcript_from_recording, ActivityRange,
-    Backend, Jsonl, Listing, ParsedFile, Query, StreamedTranscript, TokenTotals,
+    Backend, Jsonl, Listing, ParsedFile, Query, StreamedTranscript, TokenTotals, UnmappedTally,
 };
 use crate::content::{parts_from_array, project_text, tool_coverage, tool_part};
 use crate::event::{Bounded, EventKind, ToolEvent};
@@ -33,6 +33,7 @@ type CodexTranscriptRead = (
     super::Recording,
     Option<TrailingRecord>,
     Option<TerminalObservation>,
+    crate::model::UnmappedRecords,
 );
 
 impl CodexBackend {
@@ -307,9 +308,9 @@ impl Backend for CodexBackend {
             .ok_or_else(|| anyhow!("codex store is unavailable"))?;
         let path = session_file(root, &session.id)
             .ok_or_else(|| anyhow!("codex session {} is unavailable", session.id))?;
-        let (turns, recording, trailing_record, terminal) =
+        let (turns, recording, trailing_record, terminal, unmapped) =
             read_transcript(&path, self.read_bytes)?;
-        Ok(transcript_from_recording(
+        let mut transcript = transcript_from_recording(
             session.clone(),
             turns,
             tail,
@@ -317,7 +318,11 @@ impl Backend for CodexBackend {
             terminal,
             trailing_record,
             Vec::new(),
-        ))
+        );
+        if let Some(read) = &mut transcript.read {
+            read.unmapped = Some(unmapped);
+        }
+        Ok(transcript)
     }
 
     fn stream_transcript(
@@ -357,6 +362,7 @@ impl Backend for CodexBackend {
             terminal,
             gaps: read.gaps,
             notes: Vec::new(),
+            unmapped: Some(reader.unmapped()),
         })
     }
 
@@ -512,7 +518,13 @@ fn read_transcript(path: &Path, read_bytes: u64) -> Result<CodexTranscriptRead> 
     }
     let trailing_record = trailing_record(read.values.iter(), last_turn, codex_trailing_kind);
     let terminal = terminal_from_values(&read.values, codex_terminal);
-    Ok((turns, recording, trailing_record, terminal))
+    Ok((
+        turns,
+        recording,
+        trailing_record,
+        terminal,
+        reader.unmapped(),
+    ))
 }
 
 /// Codex records the working directory in its `session_meta` header and
@@ -785,10 +797,31 @@ struct CodexTurns {
     /// either order; a record of the other kind sharing a key consumes the
     /// pending one, so a search repeated later is a turn of its own.
     searches: Vec<(bool, Vec<String>)>,
+    /// The records that produced no turn.
+    unmapped: UnmappedTally,
 }
 
 impl CodexTurns {
     fn parse(&mut self, value: &Value) -> Vec<Turn> {
+        let turns = self.parse_unless_mirrored(value);
+        if let Some(turns) = &turns {
+            if turns.is_empty() {
+                let (native_type, declined) = codex_unmapped(value);
+                self.unmapped.add(native_type, declined);
+            }
+        } else {
+            self.unmapped.add(codex_unmapped(value).0, true);
+        }
+        turns.unwrap_or_default()
+    }
+
+    /// The records a read represented as no turn, mirrors among them.
+    fn unmapped(self) -> crate::model::UnmappedRecords {
+        self.unmapped.finish()
+    }
+
+    /// The record's turns, or nothing when it mirrors a record already read.
+    fn parse_unless_mirrored(&mut self, value: &Value) -> Option<Vec<Turn>> {
         let payload = &value["payload"];
         match value["type"].as_str() {
             Some("response_item") => {
@@ -798,25 +831,25 @@ impl CodexTurns {
                     }
                 }
                 if payload["type"] == "web_search_call" && !self.first_search(payload, false) {
-                    return Vec::new();
+                    return None;
                 }
             }
             Some("event_msg") => {
                 let item = &payload["item"];
                 if item["type"] == "WebSearch" {
                     if !self.first_search(item, true) {
-                        return Vec::new();
+                        return None;
                     }
                 } else if item["id"]
                     .as_str()
                     .is_some_and(|id| self.response_ids.contains(id))
                 {
-                    return Vec::new();
+                    return None;
                 }
             }
             _ => {}
         }
-        parse_turns(value)
+        Some(parse_turns(value))
     }
 
     /// Whether this is the first record of its web search: remembered when
@@ -840,6 +873,41 @@ impl CodexTurns {
             }
         }
     }
+}
+
+/// The native type a Codex record that produced no turn is counted under —
+/// `type`, then `payload.type`, then an item's `type` — and whether the reader
+/// declines it: the session header and settings it reads, accounting and
+/// lifecycle events, and the items that restate a message, reasoning, or
+/// compaction the reader already represents.
+fn codex_unmapped(value: &Value) -> (String, bool) {
+    let payload = &value["payload"];
+    let native_type = [
+        value["type"].as_str(),
+        payload["type"].as_str(),
+        payload["item"]["type"].as_str(),
+    ]
+    .into_iter()
+    .map_while(|part| part)
+    .collect::<Vec<_>>()
+    .join("/");
+    let declined = matches!(
+        native_type.as_str(),
+        "session_meta"
+            | "turn_context"
+            | "token_usage_record"
+            | "event_msg/token_count"
+            | "event_msg/task_started"
+            | "event_msg/task_complete"
+            | "event_msg/turn_aborted"
+            | "event_msg/thread_settings_applied"
+            | "event_msg/item_completed/Reasoning"
+            | "event_msg/item_completed/AgentMessage"
+            | "event_msg/item_completed/UserMessage"
+            | "event_msg/item_completed/ContextCompaction"
+            | "event_msg/item_completed/Plan"
+    );
+    (native_type, declined)
 }
 
 fn parse_turns(value: &Value) -> Vec<Turn> {

@@ -45,6 +45,20 @@ gives its turn that id as `native_id`; one without leaves the field absent. A
 payload `turn_id` is retained separately as `request_turn_id` and is never
 invented from a neighboring record.
 
+A read counts each record that produced no turn under `unmapped` in its read
+evidence, by `type`, then `payload.type`, then an item's `type`, joined with
+`/`. Declined, because they hold no text a turn would carry or restate a record
+already read: `session_meta`, `turn_context`, `token_usage_record`,
+`event_msg/token_count`, `event_msg/task_started`, `event_msg/task_complete`,
+`event_msg/turn_aborted`, `event_msg/thread_settings_applied`, the
+`event_msg/item_completed` items `Reasoning`, `AgentMessage`, `UserMessage`,
+`ContextCompaction`, and `Plan`, and any tool item or web search that mirrors
+a record read before it. Every other type is unrecognized; in a 905-rollout
+store those were `world_state`, `compacted`,
+`inter_agent_communication_metadata`, `event_msg/thread_goal_updated`,
+`response_item/agent_message` (a message between agents, its payload
+encrypted), and `response_item/tool_search_call` and `tool_search_output`.
+
 The normalized transcript also retains a bounded `read` descriptor. It records
 the source length, the configured tail bound (4 MiB unless `--read-bytes` sets
 another), the physical head, tail, and alignment ranges, each decoded

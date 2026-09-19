@@ -256,6 +256,7 @@ pub(crate) fn read_file(
         ranges,
         context_records: Vec::new(),
         gaps,
+        unmapped: None,
     };
     Ok(Page {
         schema: PAGE_SCHEMA,

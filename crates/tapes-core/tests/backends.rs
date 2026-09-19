@@ -3409,6 +3409,97 @@ fn claude_types_each_user_record_from_the_fields_it_recorded() {
     assert_eq!(kind("assistant-2"), TurnKind::Assistant);
 }
 
+/// A read counts every decoded record it represented as no turn, by native
+/// type, whether it reads the recording's tail or streams all of it; OpenCode,
+/// which reads rows rather than records, does not count them.
+#[test]
+fn a_read_counts_the_records_it_represented_as_no_turn() {
+    let counts = |pairs: &[(&str, usize)]| {
+        pairs
+            .iter()
+            .map(|(kind, count)| ((*kind).to_owned(), *count))
+            .collect::<std::collections::BTreeMap<_, _>>()
+    };
+    let expected = [
+        counts(&[
+            ("ai-title", 2),
+            ("atis-latch", 1),
+            ("last-prompt", 1),
+            ("mode", 1),
+            ("permission-mode", 1),
+        ]),
+        counts(&[
+            ("event_msg/task_complete", 1),
+            ("event_msg/token_count", 3),
+            ("session_meta", 1),
+            ("turn_context", 1),
+        ]),
+        counts(&[
+            ("model_change", 1),
+            ("session", 1),
+            ("thinking_level_change", 2),
+        ]),
+    ];
+    for ((backend, id), declined) in file_fixture_backends().into_iter().zip(expected) {
+        let session = located(backend.as_ref(), id);
+        let bounded = backend
+            .transcript(&session, usize::MAX)
+            .unwrap()
+            .read
+            .unwrap()
+            .unmapped
+            .unwrap_or_else(|| panic!("{id} counts no unmapped records"));
+        assert_eq!(bounded.declined, declined, "{id}");
+        assert!(bounded.unrecognized.is_empty(), "{id}: {bounded:?}");
+        let streamed = backend
+            .stream_transcript(&session, None, &mut |_| Ok(()))
+            .unwrap()
+            .unmapped;
+        assert_eq!(streamed.as_ref(), Some(&bounded), "{id}");
+    }
+
+    let opencode = OpenCodeBackend::new(opencode_fixture_program());
+    let session = located(&opencode, "ses_000000fixtureSharedSession");
+    let read = opencode.transcript(&session, usize::MAX).unwrap().read;
+    assert!(read.is_none_or(|read| read.unmapped.is_none()));
+
+    let root =
+        std::env::temp_dir().join(format!("tapes-claude-unrecognized-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&root);
+    let project = root.join("-fixtures-project");
+    fs::create_dir_all(&project).unwrap();
+    let id = "7f3c2a10-0000-4000-8000-000000000002";
+    let records = [
+        serde_json::json!({"type": "user", "sessionId": id, "uuid": "user", "timestamp": "2026-01-01T10:00:00Z", "cwd": "/fixtures/project", "promptSource": "typed", "message": {"role": "user", "content": "Inspect the fixture."}}),
+        serde_json::json!({"type": "attachment", "sessionId": id, "uuid": "queued", "timestamp": "2026-01-01T10:00:01Z", "attachment": {"type": "queued_command", "prompt": "Also check the tests."}}),
+        serde_json::json!({"type": "system", "sessionId": id, "uuid": "away", "timestamp": "2026-01-01T10:00:02Z", "subtype": "away_summary", "content": "Inspection finished."}),
+        serde_json::json!({"type": "system", "sessionId": id, "uuid": "duration", "timestamp": "2026-01-01T10:00:03Z", "subtype": "turn_duration", "durationMs": 10}),
+    ];
+    fs::write(
+        project.join(format!("{id}.jsonl")),
+        records
+            .iter()
+            .map(|record| record.to_string() + "\n")
+            .collect::<String>(),
+    )
+    .unwrap();
+    let backend = ClaudeBackend::new(&root);
+    let session = located(&backend, id);
+    let unmapped = backend
+        .transcript(&session, usize::MAX)
+        .unwrap()
+        .read
+        .unwrap()
+        .unmapped
+        .unwrap();
+    assert_eq!(unmapped.declined, counts(&[("system/turn_duration", 1)]));
+    assert_eq!(
+        unmapped.unrecognized,
+        counts(&[("attachment/queued_command", 1), ("system/away_summary", 1)])
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
 /// Each user record types from what Claude wrote beside it: an SDK prompt
 /// source, the `!` shell envelope, an interruption, a compaction summary, and
 /// the brief that opens a subagent's transcript. A sender value nobody has
