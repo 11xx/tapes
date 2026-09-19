@@ -95,7 +95,7 @@ of the model, so three top-level fields say what a record actually is:
 | Field | Values seen | Means |
 |---|---|---|
 | `origin.kind` | `human`, `task-notification`, `auto-continuation` | Who sent the message. Every prompt a person typed carries `human`. |
-| `promptSource` | `typed`, `system` | How the prompt reached the harness. A typed prompt carries `typed` alongside `origin.kind: human`; a message the harness raised itself carries `system`. |
+| `promptSource` | `typed`, `system`, `sdk` | How the prompt reached the harness. A typed prompt carries `typed` alongside `origin.kind: human`; a message the harness raised itself carries `system`; a prompt an SDK client sent (`entrypoint` `sdk-cli`, `sdk-ts`, or `claude-desktop`) carries `sdk` and no `origin`. Another value names a sender nobody has verified and types as `unknown`. |
 | `isMeta` | `true` | The harness attached this text itself, such as a hook notice or the caveat that precedes a local command's output. |
 
 A record carrying none of the three is the harness's own local-command
@@ -108,12 +108,24 @@ envelope when its string content is exactly one of these and nothing else:
 
 `<command-name>` is accompanied by `<command-message>`, `<command-args>`, and
 sometimes `<command-contents>`, separated by whitespace. A `<local-command-caveat>`
-envelope rides on an `isMeta` record rather than on one of its own. The
-envelopes are read only where the sender fields are absent, since a person can
-type text that looks like one and the fields the harness wrote outrank the
-text every time. A record with neither a sender field nor an envelope — a
-transcript from a harness version that wrote none — says nothing about what it
-is, and the normalized turn keeps that absence as `kind: unknown`.
+envelope rides on an `isMeta` record rather than on one of its own. A `!` shell command is recorded the same way: its input as one
+`<bash-input>` element, and its output as a `<bash-stdout>` element followed by
+a `<bash-stderr>` element. Both are the harness's own command.
+
+Where the sender fields are absent, three more fields say what a record is:
+
+| Field | Means |
+|---|---|
+| `interruptedMessageId` | The operator interrupted a response; the text is `[Request interrupted by user]`. The same text, or `[Request interrupted by user for tool use]`, also appears without the field, as a string or a one-block text array, and is the same notice. |
+| `isCompactSummary` | The summary Claude writes when it compacts a conversation, carrying no request. |
+| `isSidechain`, `agentId`, and a null `parentUuid` | The first record of a subagent's transcript: the brief the calling agent sent it, which is that transcript's request. |
+
+The envelopes are read only where the sender fields are absent, since a person
+can type text that looks like one and the fields the harness wrote outrank the
+text every time. A record with neither a sender field nor any of these — a
+transcript from a harness version that wrote none, or a later plain-text record
+in a subagent's transcript — says nothing about what it is, and the normalized
+turn keeps that absence as `kind: unknown`.
 
 ### Tool result (array content)
 

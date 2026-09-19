@@ -1064,7 +1064,7 @@ fn parse_turns(value: &Value) -> Vec<Turn> {
     let ts = timestamp(&value["timestamp"]);
     let native_id = value["uuid"].as_str().map(str::to_owned);
     let content = &message["content"];
-    let user_kind = claude_user_kind(value, content.as_str());
+    let user_kind = claude_user_kind(value, envelope_text(content));
     if let Some(text) = content.as_str() {
         return turn(
             role,
@@ -1206,12 +1206,24 @@ struct TurnContent {
 /// its content is one of the harness's own envelopes and nothing else. A
 /// record the sender fields do vouch for keeps its sender whatever its text
 /// resembles, so a person who types a command envelope is still an operator.
+/// The text a user record's envelope can be read from: its string content, or
+/// the one text block a single-block array holds.
+fn envelope_text(content: &Value) -> Option<&str> {
+    if let Some(text) = content.as_str() {
+        return Some(text);
+    }
+    match content.as_array()?.as_slice() {
+        [block] if block["type"] == "text" => block["text"].as_str(),
+        _ => None,
+    }
+}
+
 fn claude_user_kind(value: &Value, content: Option<&str>) -> TurnKind {
     let origin = value["origin"]["kind"].as_str();
     let prompt_source = value["promptSource"].as_str();
     let is_meta = value["isMeta"].as_bool() == Some(true);
     match (origin, prompt_source) {
-        (Some("human"), _) | (_, Some("typed")) => return TurnKind::Operator,
+        (Some("human"), _) | (_, Some("typed" | "sdk")) => return TurnKind::Operator,
         (Some("task-notification" | "auto-continuation"), _) | (_, Some("system")) => {
             return TurnKind::Notice
         }
@@ -1228,12 +1240,59 @@ fn claude_user_kind(value: &Value, content: Option<&str>) -> TurnKind {
     if origin.is_some() || prompt_source.is_some() {
         return TurnKind::Unknown;
     }
+    if value.get("interruptedMessageId").is_some() {
+        return TurnKind::Notice;
+    }
+    if value["isCompactSummary"].as_bool() == Some(true) {
+        return TurnKind::Ambient;
+    }
+    if opens_sidechain(value) {
+        return TurnKind::Operator;
+    }
     match content {
-        Some(text) if is_command_envelope(text) || is_element(text, "local-command-stdout") => {
+        Some(text)
+            if is_command_envelope(text)
+                || is_element(text, "local-command-stdout")
+                || is_bash_envelope(text) =>
+        {
             TurnKind::Control
         }
+        Some(text) if INTERRUPTION_MARKERS.contains(&text.trim()) => TurnKind::Notice,
         _ => TurnKind::Unknown,
     }
+}
+
+/// The first record of a subagent's transcript: the brief the caller that
+/// launched it wrote. Claude marks the transcript a sidechain, names the
+/// agent, and gives the record no parent.
+fn opens_sidechain(value: &Value) -> bool {
+    value["isSidechain"].as_bool() == Some(true)
+        && value["agentId"].is_string()
+        && value["parentUuid"].is_null()
+}
+
+/// The text Claude writes as a user record when the operator interrupts a
+/// response, with or without naming the interrupted message.
+const INTERRUPTION_MARKERS: [&str; 2] = [
+    "[Request interrupted by user]",
+    "[Request interrupted by user for tool use]",
+];
+
+/// The envelope Claude records a `!` shell command as: its `<bash-input>`
+/// alone, or the `<bash-stdout>` and `<bash-stderr>` of its output.
+fn is_bash_envelope(text: &str) -> bool {
+    let text = text.trim();
+    if is_element(text, "bash-input") {
+        return true;
+    }
+    let Some(rest) = text.strip_prefix("<bash-stdout>") else {
+        return false;
+    };
+    let Some(end) = rest.find("</bash-stdout>") else {
+        return false;
+    };
+    let rest = rest[end + "</bash-stdout>".len()..].trim_start();
+    rest.is_empty() || is_element(rest, "bash-stderr")
 }
 
 /// The envelope Claude records a slash command as: a `<command-name>` element
