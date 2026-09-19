@@ -919,7 +919,12 @@ impl TurnKind {
     fn bit(self) -> u8 {
         1 << self as u8
     }
+}
 
+// A selection holds one bit per kind, so a ninth kind needs a wider set.
+const _: () = assert!(TurnKind::ALL.len() <= u8::BITS as usize);
+
+impl TurnKind {
     /// The name a human render uses for the kind.
     pub fn label(self) -> &'static str {
         match self {
