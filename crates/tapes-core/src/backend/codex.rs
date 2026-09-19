@@ -16,8 +16,9 @@ use crate::event::{Bounded, EventKind, ToolEvent};
 use crate::history::PageProjection;
 use crate::lineage::{ChildRef, Lineage, ParentRef, SourceRef};
 use crate::model::{
-    is_known_envelope, is_known_notice, AccountingBasis, AccountingCoverage, Model, Role, Session,
-    SourceDescriptor, TerminalObservation, Tokens, TrailingRecord, Transcript, Turn, TurnKind,
+    is_known_envelope, is_known_notice, AccountingBasis, AccountingCoverage, KindDeclaration,
+    Model, Role, Session, SourceDescriptor, TerminalObservation, Tokens, TrailingRecord,
+    Transcript, Turn, TurnKind, TurnSelection, UserDefault,
 };
 use crate::usage::{Credits, RateLimits, RateWindow, UsageDetail};
 
@@ -213,6 +214,23 @@ impl Default for CodexBackend {
 }
 
 impl Backend for CodexBackend {
+    fn kinds(&self) -> KindDeclaration {
+        KindDeclaration {
+            recordable: TurnSelection::only([
+                TurnKind::Operator,
+                TurnKind::Assistant,
+                TurnKind::Reasoning,
+                TurnKind::Tool,
+                TurnKind::Ambient,
+                TurnKind::Notice,
+            ]),
+            user_default: Some(UserDefault {
+                kind: TurnKind::Operator,
+                basis: "Codex wraps the text it puts in the user role in elements of its own, so a user message holding anything else is the operator's".to_owned(),
+            }),
+        }
+    }
+
     fn history_page(
         &self,
         session: &Session,
@@ -363,6 +381,7 @@ impl Backend for CodexBackend {
             gaps: read.gaps,
             notes: Vec::new(),
             unmapped: Some(reader.unmapped()),
+            kinds: None,
         })
     }
 

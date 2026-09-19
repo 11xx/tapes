@@ -22,8 +22,8 @@ use crate::event::{Bounded, EventKind, ToolEvent};
 use crate::history::PageProjection;
 use crate::lineage::{ChildRef, Lineage, SourceRef};
 use crate::model::{
-    derive_title, AccountingBasis, AccountingCoverage, Cost, Model, Role, Session,
-    SourceDescriptor, Tokens, TrailingRecord, Transcript, Turn, TurnKind,
+    derive_title, AccountingBasis, AccountingCoverage, Cost, KindDeclaration, Model, Role, Session,
+    SourceDescriptor, Tokens, TrailingRecord, Transcript, Turn, TurnKind, TurnSelection,
 };
 use crate::usage::{Durations, ModelUsage, UsageDetail};
 
@@ -231,6 +231,16 @@ impl Default for ClaudeBackend {
 }
 
 impl Backend for ClaudeBackend {
+    /// Claude writes a sender field, a meta flag, or an envelope of its own on
+    /// every user record that is not a person's, so a record with none of
+    /// them stays `unknown` rather than taking a default.
+    fn kinds(&self) -> KindDeclaration {
+        KindDeclaration {
+            recordable: TurnSelection::only(TurnKind::ALL),
+            user_default: None,
+        }
+    }
+
     fn child_transcript(&self, parent: &Session, reference: &str) -> Result<Transcript> {
         let path = child_recording(parent, reference)?;
         let (mut session, turns, read) = self.parse_with_parent(&path, Some(&parent.id))?;
@@ -508,6 +518,7 @@ impl Backend for ClaudeBackend {
             gaps: read.gaps,
             notes: subagent_notes(&path),
             unmapped: Some(unmapped.finish()),
+            kinds: None,
         })
     }
 
@@ -624,6 +635,7 @@ impl Backend for ClaudeBackend {
                 terminal: None,
                 notes: Vec::new(),
                 unmapped: None,
+                kinds: None,
             },
         })
     }

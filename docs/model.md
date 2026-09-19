@@ -221,7 +221,27 @@ neither:
 |---|---|
 | Claude | `origin.kind` and `promptSource` name the sender, `sdk` included; `isMeta` marks text the harness attached; on a record carrying none of the three, `interruptedMessageId` or Claude's interruption text is a notice, `isCompactSummary` is ambient, a subagent transcript's opening brief is the operator's, and content that is exactly a `<command-name>` envelope, a `<local-command-stdout>` element, or a `!` command's `<bash-input>` or `<bash-stdout>`/`<bash-stderr>` is the harness's own command. |
 | Codex | No field names the sender, so the elements the harness wraps its own text in are the separation, whatever entry point started the session. A user message whose every block is attached context, such as `<environment_context>`, an `<INSTRUCTIONS>` block, or a `<skill>`, is `ambient`; one that adds only a message the harness raised, `<turn_aborted>`, `<subagent_notification>`, or `<codex_internal_context>`, is `notice`; any other message is `operator`. A Codex user turn is never `unknown`, and its kind comes from its own record, so every read gives it the same one. |
-| pi, OpenCode | Neither records anything but the operator's messages in its user role. |
+| pi, OpenCode | No field names the sender, and each records its other traffic as records of its own types — pi as `model_change`, `compaction`, `custom_message` and similar entries, OpenCode as tool, reasoning, and patch parts — so a user message is the operator's by default. In a 245-session pi store, 469 of 472 user messages are plain operator text; the others are one literal `/exit` and two that open with a `<skill>` block the operator invoked. |
+
+Each backend declares which kinds its harness's records can evidence, and the
+default it gives a user turn with no evidence of its own, with the basis for
+it. `tapes-session`, `tapes-stats`, and `tapes-stats-summary` carry that
+declaration as `kinds`:
+
+```json
+"kinds": {
+  "recordable": ["operator", "assistant", "reasoning", "tool"],
+  "user_default": {"kind": "operator", "basis": "pi records its model changes, …"}
+}
+```
+
+A kind outside `recordable` counts zero because the harness cannot record it,
+not because none occurred. Claude declares every kind and no default, since
+every user record Claude writes carries a sender field, a meta flag, or an
+envelope and one with none of them stays `unknown`. Codex declares `operator`,
+`assistant`, `reasoning`, `tool`, `ambient`, and `notice`; pi and OpenCode
+declare `operator`, `assistant`, `reasoning`, and `tool`; supplied inputs add
+`ambient` and `unknown` to those four.
 
 ## Tool event layer
 
@@ -563,7 +583,7 @@ recorded.
 ## Stats view
 
 `tapes stats` counts what one session's recording holds and serializes as a
-`tapes-stats/5` object. Every figure is a count of records the harness wrote:
+`tapes-stats/6` object. Every figure is a count of records the harness wrote:
 nothing here labels a call useful, attributes a reason to a latency, classifies
 why a session ended, or recommends anything.
 
@@ -586,7 +606,9 @@ cannot be streamed twice is named under `failed`.
 
 `turns` counts the normalized turns the read reached by the `kind` the harness
 recorded them as — `operator`, `assistant`, `tool`, `reasoning`, `control`,
-`ambient`, `notice`, `unknown` — plus their `total`.
+`ambient`, `notice`, `unknown` — plus their `total`. `kinds` is the harness's
+declaration, so a zero outside `kinds.recordable` reads as not recordable
+rather than as none observed.
 
 `tools` counts the same typed events `tapes events` returns. `calls` and
 `results` count event records, `paired` counts the distinct complete pairs
@@ -632,12 +654,13 @@ order:
 | `read-window` | a source bound withheld whole turns, so the counts are the read's rather than the session's |
 | `tail-window` | a turn window dropped turns the read had produced |
 | `kind-unknown` | a user-envelope turn carries no evidence of what it is |
+| `kind-undeclared` | a turn carries a kind its harness's declaration says it cannot record, so the declaration or the reader is wrong |
 | `incomplete-pairs` | a call or result the read holds has no counterpart in it |
 | `no-timestamps` | a turn the read reached carries no timestamp, so the clock covers fewer turns than the counts do |
 
 ```json
 {
-  "schema": "tapes-stats/5",
+  "schema": "tapes-stats/6",
   "session": {
     "id": "session-1",
     "harness": "codex",
@@ -1058,11 +1081,11 @@ its `notes`, with the meanings they have on a transcript.
 
 ## JSON contract
 
-A serialized transcript is a `tapes-session/9` object:
+A serialized transcript is a `tapes-session/10` object:
 
 ```json
 {
-  "schema": "tapes-session/9",
+  "schema": "tapes-session/10",
   "session": {
     "id": "session-1",
     "source": {
@@ -1144,7 +1167,7 @@ A bundle's `.context.md` holds the exchange that `show --exchange` returns —
 the `operator` and `assistant` turns — of those a selection keeps; its `.json`
 and `.trace.md` hold every kept turn.
 
-A bundle's `.json` is one compact `tapes-session/9` object: the members `show
+A bundle's `.json` is one compact `tapes-session/10` object: the members `show
 --json` writes, in the same order, followed by `git` when the session
 directory resolves and `events`, the `tapes-events/6` records paired across
 every kept turn. `export --full` writes the object `show --full --json` writes,
@@ -1313,15 +1336,19 @@ Metadata traversal does not normalize transcript turns; each metadata page
 labels its read as the `tapes-page/5` envelope with the `models-only`
 projection option. Initial session resolution is separate from the page-byte
 counters.
-## Selection statistics: `tapes-stats-summary/3`
+## Selection statistics: `tapes-stats-summary/4`
 
 `selection` records the listing query. `selected` counts its sessions, `read`
 counts successful transcript reads, and `failed` names each read failure with
 ID, harness, source and diagnostic. `sessions` holds each read session's identity,
-`coverage` and `tools` in the same shapes as `tapes-stats/5`. `by_harness` maps
+`coverage` and `tools` in the same shapes as `tapes-stats/6`. `by_harness` maps
 harness names to accumulated tool counters, including tool-name rows and
 complete-pair duration totals, maxima and contributing counts. Counters never
-cross-pair records from different sessions. Listing diagnostics (`unavailable`,
+cross-pair records from different sessions. `kinds_by_harness` maps each
+harness read to its `declared` kinds, the `turns` every session read held by
+kind, and `unobserved`: the recordable kinds none of them held. A recordable
+kind no session in a wide selection produced is the shape a reader that has
+stopped recognizing it takes, so the human summary names it. Listing diagnostics (`unavailable`,
 `unreadable`, `unsearched`, `scanned`, `scan_truncated`) remain separate from
 transcript failures and per-session read bounds. An all-failed selected set
 still emits the report and exits unsuccessfully.

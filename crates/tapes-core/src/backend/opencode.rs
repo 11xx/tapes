@@ -22,8 +22,9 @@ use crate::content::{
 use crate::event::{self, Bounded, EventKind, EventTranscript, ToolEvent};
 use crate::lineage::{ChildRef, Lineage, ParentRef, SourceRef};
 use crate::model::{
-    human_bytes, AccountingBasis, AccountingCoverage, Cost, Model, Role, Session, SourceBound,
-    SourceDescriptor, SourceLocation, Tokens, Transcript, Truncation, Turn, TurnKind, TurnWindow,
+    human_bytes, AccountingBasis, AccountingCoverage, Cost, KindDeclaration, Model, Role, Session,
+    SourceBound, SourceDescriptor, SourceLocation, Tokens, Transcript, Truncation, Turn, TurnKind,
+    TurnSelection, TurnWindow, UserDefault,
 };
 
 const MAX_COMMAND_BYTES: u64 = 8 * 1024 * 1024;
@@ -904,6 +905,7 @@ impl OpenCodeBackend {
             terminal: None,
             notes: Vec::new(),
             unmapped: None,
+            kinds: None,
         })
     }
 
@@ -991,6 +993,7 @@ impl OpenCodeBackend {
             terminal: None,
             notes: Vec::new(),
             unmapped: None,
+            kinds: None,
         })
     }
 
@@ -1127,6 +1130,21 @@ impl OpenCodeBackend {
 }
 
 impl Backend for OpenCodeBackend {
+    fn kinds(&self) -> KindDeclaration {
+        KindDeclaration {
+            recordable: TurnSelection::only([
+                TurnKind::Operator,
+                TurnKind::Assistant,
+                TurnKind::Reasoning,
+                TurnKind::Tool,
+            ]),
+            user_default: Some(UserDefault {
+                kind: TurnKind::Operator,
+                basis: "OpenCode records a user message as the text parts the operator sent and writes no sender field beside them".to_owned(),
+            }),
+        }
+    }
+
     fn harness(&self) -> &'static str {
         "opencode"
     }

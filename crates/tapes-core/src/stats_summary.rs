@@ -6,7 +6,8 @@ use anyhow::Result;
 use serde::Serialize;
 
 use crate::backend::{self, Backend};
-use crate::stats::{Counted, Coverage, ToolNameStats, ToolStats};
+use crate::model::{KindDeclaration, TurnKind};
+use crate::stats::{Counted, Coverage, ToolNameStats, ToolStats, TurnKindCounts};
 use crate::usage::UsageSession;
 use crate::{list_scoped, selection_record, SelectionRecord, SessionSelection, DEFAULT_LIST_LIMIT};
 
@@ -21,7 +22,7 @@ pub enum SessionRead {
     Whole,
 }
 
-pub const SCHEMA: &str = "tapes-stats-summary/3";
+pub const SCHEMA: &str = "tapes-stats-summary/4";
 
 #[derive(Debug, Serialize)]
 pub struct SessionStats {
@@ -47,11 +48,25 @@ pub struct StatsSummary {
     pub failed: Vec<ReadFailure>,
     pub sessions: Vec<SessionStats>,
     pub by_harness: BTreeMap<String, ToolStats>,
+    /// Per harness, the turns every session read held by kind, set against
+    /// what the harness declares it can record.
+    pub kinds_by_harness: BTreeMap<String, HarnessKinds>,
     pub unavailable: Vec<String>,
     pub unreadable: Vec<String>,
     pub unsearched: Vec<String>,
     pub scanned: usize,
     pub scan_truncated: bool,
+}
+
+/// One harness's turns across the sessions a summary read, and the kinds it
+/// declares recordable that none of them held. A recordable kind no session
+/// produced is worth a look: either nothing in the selection did it, or the
+/// reader has stopped recognizing it.
+#[derive(Debug, Serialize)]
+pub struct HarnessKinds {
+    pub declared: KindDeclaration,
+    pub turns: TurnKindCounts,
+    pub unobserved: Vec<TurnKind>,
 }
 
 pub fn summary(selection: &SessionSelection<'_>, read: SessionRead) -> Result<StatsSummary> {
@@ -81,6 +96,7 @@ pub fn with_backends(
         failed: vec![],
         sessions: vec![],
         by_harness: BTreeMap::new(),
+        kinds_by_harness: BTreeMap::new(),
         unavailable: listed.unavailable,
         unreadable: listed.unreadable,
         unsearched: listed.unsearched,
@@ -88,25 +104,33 @@ pub fn with_backends(
         scan_truncated: listed.scan_truncated,
     };
     let mut by_harness = BTreeMap::<String, ToolAccumulator>::new();
+    let mut kinds_by_harness = BTreeMap::<String, (KindDeclaration, TurnKindCounts)>::new();
     for (session, origin) in listed.sessions.into_iter().zip(listed.origins) {
         let backend = backends[origin].as_ref();
         let counted = match read {
-            SessionRead::Bounded => backend
-                .transcript(&session, usize::MAX)
-                .map(Counted::bounded),
+            SessionRead::Bounded => {
+                crate::declared_transcript(backend, &session, usize::MAX).map(Counted::bounded)
+            }
             SessionRead::Whole => Counted::whole(backend, &session),
         };
         match counted {
             Ok(counted) => {
-                let (identity, coverage, tools) = counted.session_tools();
+                let counted = counted.session_tools();
                 by_harness
                     .entry(session.harness().to_owned())
                     .or_default()
-                    .add(&tools);
+                    .add(&counted.tools);
+                if let Some(declared) = counted.kinds {
+                    kinds_by_harness
+                        .entry(session.harness().to_owned())
+                        .or_insert_with(|| (declared, TurnKindCounts::default()))
+                        .1
+                        .add(&counted.turns);
+                }
                 report.sessions.push(SessionStats {
-                    session: identity,
-                    coverage,
-                    tools,
+                    session: counted.session,
+                    coverage: counted.coverage,
+                    tools: counted.tools,
                 });
             }
             Err(error) => report.failed.push(ReadFailure {
@@ -121,6 +145,24 @@ pub fn with_backends(
     report.by_harness = by_harness
         .into_iter()
         .map(|(harness, tools)| (harness, tools.finish()))
+        .collect();
+    report.kinds_by_harness = kinds_by_harness
+        .into_iter()
+        .map(|(harness, (declared, turns))| {
+            let unobserved = declared
+                .recordable
+                .kinds()
+                .filter(|kind| turns.of(*kind) == 0)
+                .collect();
+            (
+                harness,
+                HarnessKinds {
+                    declared,
+                    turns,
+                    unobserved,
+                },
+            )
+        })
         .collect();
     Ok(report)
 }

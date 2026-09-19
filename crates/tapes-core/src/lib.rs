@@ -1110,8 +1110,8 @@ pub fn stats_with_backends(
     selection: Selection,
 ) -> Result<stats::StatsView> {
     let resolved = selection.resolve(backends)?;
-    let backend = &backends[resolved.backend_index];
-    let transcript = backend.transcript(&resolved.session, EXPORT_TAIL)?;
+    let backend = backends[resolved.backend_index].as_ref();
+    let transcript = declared_transcript(backend, &resolved.session, EXPORT_TAIL)?;
     let lineage = backend.lineage(&resolved.session)?;
     Ok(stats::stats(transcript, &lineage))
 }
@@ -1309,7 +1309,22 @@ pub fn show_with_backends(
     tail: usize,
 ) -> Result<Transcript> {
     let resolved = selection.resolve(backends)?;
-    backends[resolved.backend_index].transcript(&resolved.session, tail)
+    declared_transcript(
+        backends[resolved.backend_index].as_ref(),
+        &resolved.session,
+        tail,
+    )
+}
+
+/// A bounded transcript that names the kinds its harness can record.
+pub(crate) fn declared_transcript(
+    backend: &dyn Backend,
+    session: &Session,
+    tail: usize,
+) -> Result<Transcript> {
+    let mut transcript = backend.transcript(session, tail)?;
+    transcript.kinds = Some(backend.kinds());
+    Ok(transcript)
 }
 
 /// Receives a whole-recording read as it streams: the resolved session first,
@@ -1344,11 +1359,13 @@ pub(crate) fn stream_numbered(
     turn: &mut dyn FnMut(model::Turn) -> Result<()>,
 ) -> Result<backend::StreamedTranscript> {
     let mut ordinal = 0;
-    backend.stream_transcript(session, replay, &mut |mut streamed| {
+    let mut read = backend.stream_transcript(session, replay, &mut |mut streamed| {
         streamed.ordinal = ordinal;
         ordinal += 1;
         turn(streamed)
-    })
+    })?;
+    read.kinds = Some(backend.kinds());
+    Ok(read)
 }
 
 /// How much of a recording an export reads.
@@ -1399,7 +1416,7 @@ fn export_session(
 ) -> Result<bundle::Bundle> {
     match read {
         ExportRead::Bounded => bundle::export(
-            &project_export(backend.transcript(session, EXPORT_TAIL)?, turns),
+            &project_export(declared_transcript(backend, session, EXPORT_TAIL)?, turns),
             directory,
         ),
         ExportRead::Whole => export_whole(backend, session, directory, turns),

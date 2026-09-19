@@ -10,7 +10,7 @@ use crate::content::{ContentCoverage, ContentPart};
 use crate::event::ToolEvent;
 use crate::usage::UsageDetail;
 
-pub const SESSION_SCHEMA: &str = "tapes-session/9";
+pub const SESSION_SCHEMA: &str = "tapes-session/10";
 /// Maximum length of a title derived from the first user turn.
 pub const DERIVED_TITLE_MAX_CHARS: usize = 96;
 
@@ -1013,6 +1013,28 @@ pub struct Transcript {
     /// Present when the transcript keeps only some of the turns its read
     /// produced.
     pub projection: Option<Projection>,
+    /// The kinds the harness's records can evidence, where the reader that
+    /// produced the transcript is known.
+    pub kinds: Option<KindDeclaration>,
+}
+
+/// Which turn kinds a harness's records can evidence, and the kind its reader
+/// gives a user turn whose record carries no evidence of its own. A kind
+/// outside `recordable` counts zero because the harness cannot record it, not
+/// because none occurred.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KindDeclaration {
+    pub recordable: TurnSelection,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user_default: Option<UserDefault>,
+}
+
+/// The kind a reader assigns a user turn its record gives no evidence for,
+/// and the fact about the harness that makes the assignment sound.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UserDefault {
+    pub kind: TurnKind,
+    pub basis: String,
 }
 
 impl Transcript {
@@ -1058,6 +1080,7 @@ impl Transcript {
             trailing_record,
             notes,
             projection: None,
+            kinds: None,
         }
     }
 
@@ -1242,6 +1265,7 @@ impl<'de> Deserialize<'de> for Transcript {
             trailing_record: serialized.trailing_record,
             notes: serialized.notes,
             projection: serialized.projection,
+            kinds: serialized.kinds,
         })
     }
 }
@@ -1281,6 +1305,8 @@ struct TranscriptTail<'a> {
     notes: &'a Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     projection: Option<&'a Projection>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    kinds: Option<&'a KindDeclaration>,
 }
 
 impl<'a> TranscriptTail<'a> {
@@ -1297,6 +1323,7 @@ impl<'a> TranscriptTail<'a> {
             trailing_record: transcript.trailing_record.as_ref(),
             notes: &transcript.notes,
             projection: transcript.projection.as_ref(),
+            kinds: transcript.kinds.as_ref(),
         }
     }
 }
@@ -1388,6 +1415,8 @@ struct SerializedTranscript {
     notes: Vec<String>,
     #[serde(default)]
     projection: Option<Projection>,
+    #[serde(default)]
+    kinds: Option<KindDeclaration>,
 }
 
 #[cfg(test)]
@@ -1497,6 +1526,7 @@ mod tests {
             }),
             notes: vec!["One record was unavailable.".into()],
             projection: None,
+            kinds: None,
         };
 
         assert_round_trip(&model);
@@ -1770,6 +1800,7 @@ mod tests {
             trailing_record: None,
             notes: Vec::new(),
             projection: None,
+            kinds: None,
         };
 
         let value = serde_json::to_value(&transcript).unwrap();
@@ -1933,6 +1964,7 @@ mod tests {
             }),
             notes: Vec::new(),
             projection: None,
+            kinds: None,
         };
 
         let value = serde_json::to_value(&transcript).unwrap();

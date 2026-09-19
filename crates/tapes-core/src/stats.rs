@@ -16,12 +16,12 @@ use crate::content::ContentInventory;
 use crate::event::{self, EventKind, EventRecord, Incomplete, PairIndex, PairRef};
 use crate::lineage::Lineage;
 use crate::model::{
-    Accounting, Cost, ReadEvidence, Session, TerminalObservation, TextTailEvidence, Tokens,
-    Transcript, Truncation, Turn, TurnKind,
+    Accounting, Cost, KindDeclaration, ReadEvidence, Session, TerminalObservation,
+    TextTailEvidence, Tokens, Transcript, Truncation, Turn, TurnKind,
 };
 use crate::usage::{self, TurnCoverage, UsageSession, UsageView};
 
-pub const STATS_SCHEMA: &str = "tapes-stats/5";
+pub const STATS_SCHEMA: &str = "tapes-stats/6";
 
 /// One session's counted facts, in the order a reader takes them: what the
 /// figures cover, the turns, the tool calls behind them, the recorded clock,
@@ -41,6 +41,10 @@ pub struct StatsView {
     pub content: Option<ContentInventory>,
     pub coverage: Coverage,
     pub turns: TurnKindCounts,
+    /// The kinds the harness can record, so a zero for a kind outside them
+    /// reads as not recordable rather than as none observed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kinds: Option<KindDeclaration>,
     pub tools: ToolStats,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub durations_ms: Option<TimeStats>,
@@ -85,6 +89,45 @@ pub struct TurnKindCounts {
     pub notice: usize,
     pub unknown: usize,
     pub total: usize,
+}
+
+impl TurnKindCounts {
+    /// The turns counted of one kind.
+    pub fn of(&self, kind: TurnKind) -> usize {
+        match kind {
+            TurnKind::Operator => self.operator,
+            TurnKind::Assistant => self.assistant,
+            TurnKind::Reasoning => self.reasoning,
+            TurnKind::Tool => self.tool,
+            TurnKind::Control => self.control,
+            TurnKind::Ambient => self.ambient,
+            TurnKind::Notice => self.notice,
+            TurnKind::Unknown => self.unknown,
+        }
+    }
+
+    /// Add another count's turns to this one.
+    pub fn add(&mut self, other: &Self) {
+        self.operator += other.operator;
+        self.assistant += other.assistant;
+        self.tool += other.tool;
+        self.reasoning += other.reasoning;
+        self.control += other.control;
+        self.ambient += other.ambient;
+        self.notice += other.notice;
+        self.unknown += other.unknown;
+        self.total += other.total;
+    }
+}
+
+/// One session a selection counted: its identity, what its figures cover,
+/// its tools, its turns by kind, and its harness's declaration.
+pub(crate) struct SessionCount {
+    pub(crate) session: UsageSession,
+    pub(crate) coverage: Coverage,
+    pub(crate) tools: ToolStats,
+    pub(crate) turns: TurnKindCounts,
+    pub(crate) kinds: Option<KindDeclaration>,
 }
 
 /// The tool records the read reached. `calls` and `results` count typed event
@@ -200,6 +243,9 @@ pub enum Warning {
     TailWindow,
     /// A user-envelope turn carries no evidence of what it is.
     KindUnknown,
+    /// A turn carries a kind its harness's declaration says it cannot record,
+    /// so the declaration or the reader is wrong.
+    KindUndeclared,
     /// A call or result the read holds has no counterpart in it.
     IncompletePairs,
     /// A turn the read reached carries no timestamp, so the clock covers
@@ -221,6 +267,7 @@ pub(crate) struct Counted {
     usage: UsageView,
     turns: TurnFold,
     tools: ToolTally,
+    kinds: Option<KindDeclaration>,
 }
 
 impl Counted {
@@ -228,6 +275,7 @@ impl Counted {
     /// projection pairs.
     pub(crate) fn bounded(transcript: Transcript) -> Self {
         let usage = usage::usage(&transcript);
+        let kinds = transcript.kinds.clone();
         let mut turns = TurnFold::default();
         for turn in &transcript.turns {
             turns.add(turn);
@@ -241,6 +289,7 @@ impl Counted {
             usage,
             turns,
             tools: tools.finish(events.pairs.complete),
+            kinds,
         }
     }
 
@@ -274,6 +323,7 @@ impl Counted {
             usage: usage::streamed(&whole, tally, &read),
             turns,
             tools: tools.finish(pairs.complete),
+            kinds: read.kinds.clone(),
         })
     }
 
@@ -286,10 +336,17 @@ impl Counted {
     }
 
     /// The session, what its figures cover, and its tools, as a selection
-    /// reports each session it read.
-    pub(crate) fn session_tools(self) -> (UsageSession, Coverage, ToolStats) {
+    /// reports each session it read, with its turns by kind and its harness's
+    /// declaration.
+    pub(crate) fn session_tools(self) -> SessionCount {
         let coverage = self.coverage();
-        (self.usage.session, coverage, self.tools.stats)
+        SessionCount {
+            session: self.usage.session,
+            coverage,
+            tools: self.tools.stats,
+            turns: self.turns.kinds,
+            kinds: self.kinds,
+        }
     }
 
     pub(crate) fn view(self, lineage: &Lineage) -> StatsView {
@@ -298,9 +355,16 @@ impl Counted {
             usage,
             turns,
             tools,
+            kinds,
         } = self;
         let durations_ms = turns.clock.finish(tools.in_tool);
-        let warnings = warnings(&coverage, &turns.kinds, &tools.stats, durations_ms.as_ref());
+        let warnings = warnings(
+            &coverage,
+            &turns.kinds,
+            kinds.as_ref(),
+            &tools.stats,
+            durations_ms.as_ref(),
+        );
         StatsView {
             schema: STATS_SCHEMA,
             session: usage.session,
@@ -310,6 +374,7 @@ impl Counted {
             content: usage.content,
             coverage,
             turns: turns.kinds,
+            kinds,
             tools: tools.stats,
             durations_ms,
             usage: usage_stats(usage.tokens, usage.cost, usage.accounting),
@@ -572,10 +637,16 @@ fn lineage_stats(lineage: &Lineage) -> Option<LineageStats> {
 fn warnings(
     coverage: &Coverage,
     turns: &TurnKindCounts,
+    kinds: Option<&KindDeclaration>,
     tools: &ToolStats,
     durations: Option<&TimeStats>,
 ) -> Vec<Warning> {
     let stamped = durations.map_or(0, |durations| durations.count_with_timestamps);
+    let undeclared = kinds.is_some_and(|kinds| {
+        TurnKind::ALL
+            .into_iter()
+            .any(|kind| turns.of(kind) > 0 && !kinds.recordable.keeps(kind))
+    });
     [
         (
             coverage.turns == TurnCoverage::ReadWindow,
@@ -583,6 +654,7 @@ fn warnings(
         ),
         (coverage.truncation.window.is_some(), Warning::TailWindow),
         (turns.unknown > 0, Warning::KindUnknown),
+        (undeclared, Warning::KindUndeclared),
         (tools.incomplete.total() > 0, Warning::IncompletePairs),
         (stamped < turns.total, Warning::NoTimestamps),
     ]

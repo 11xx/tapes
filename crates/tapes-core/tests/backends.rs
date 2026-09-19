@@ -1920,6 +1920,13 @@ struct SearchFixture {
 }
 
 impl Backend for SearchFixture {
+    fn kinds(&self) -> tapes_core::model::KindDeclaration {
+        tapes_core::model::KindDeclaration {
+            recordable: tapes_core::model::TurnSelection::only(TurnKind::ALL),
+            user_default: None,
+        }
+    }
+
     fn harness(&self) -> &'static str {
         "fixture"
     }
@@ -1983,6 +1990,7 @@ impl Backend for SearchFixture {
             trailing_record: None,
             notes: Vec::new(),
             projection: None,
+            kinds: None,
         })
     }
 }
@@ -2117,6 +2125,13 @@ impl ResolverFixture {
 }
 
 impl Backend for ResolverFixture {
+    fn kinds(&self) -> tapes_core::model::KindDeclaration {
+        tapes_core::model::KindDeclaration {
+            recordable: tapes_core::model::TurnSelection::only(TurnKind::ALL),
+            user_default: None,
+        }
+    }
+
     fn harness(&self) -> &'static str {
         "fixture"
     }
@@ -3409,6 +3424,37 @@ fn claude_types_each_user_record_from_the_fields_it_recorded() {
     assert_eq!(kind("assistant-2"), TurnKind::Assistant);
 }
 
+/// A backend declares the kinds its harness's records can evidence, and every
+/// fixture turn is of a declared kind. A backend that gives user turns a
+/// default states why.
+#[test]
+fn every_fixture_turn_is_of_a_kind_its_backend_declares() {
+    for (backend, id) in fixture_backends() {
+        let declared = backend.kinds();
+        let session = located(backend.as_ref(), id);
+        let transcript = show_with_backends(
+            std::slice::from_ref(&backend),
+            Selection::Id(id),
+            usize::MAX,
+        )
+        .unwrap();
+        assert_eq!(transcript.kinds.as_ref(), Some(&declared), "{id}");
+        for turn in backend.transcript(&session, usize::MAX).unwrap().turns {
+            assert!(
+                declared.recordable.keeps(turn.kind),
+                "{id}: turn {} is {:?}, which {} does not declare",
+                turn.ordinal,
+                turn.kind,
+                backend.harness()
+            );
+        }
+        if let Some(default) = &declared.user_default {
+            assert!(declared.recordable.keeps(default.kind), "{id}");
+            assert!(!default.basis.is_empty(), "{id}");
+        }
+    }
+}
+
 /// A read counts every decoded record it represented as no turn, by native
 /// type, whether it reads the recording's tail or streams all of it; OpenCode,
 /// which reads rows rather than records, does not count them.
@@ -3906,6 +3952,13 @@ struct BulkExportFixture {
 }
 
 impl Backend for BulkExportFixture {
+    fn kinds(&self) -> tapes_core::model::KindDeclaration {
+        tapes_core::model::KindDeclaration {
+            recordable: tapes_core::model::TurnSelection::only(TurnKind::ALL),
+            user_default: None,
+        }
+    }
+
     fn harness(&self) -> &'static str {
         "fixture"
     }
@@ -3956,6 +4009,7 @@ impl Backend for BulkExportFixture {
             trailing_record: None,
             notes: Vec::new(),
             projection: None,
+            kinds: None,
         })
     }
 }
@@ -4119,6 +4173,13 @@ struct TitleProjection {
     origin: &'static str,
 }
 impl Backend for TitleProjection {
+    fn kinds(&self) -> tapes_core::model::KindDeclaration {
+        tapes_core::model::KindDeclaration {
+            recordable: tapes_core::model::TurnSelection::only(TurnKind::ALL),
+            user_default: None,
+        }
+    }
+
     fn locate(&self, _: &str) -> anyhow::Result<Option<Session>> {
         panic!("title selection must not re-resolve an ID")
     }

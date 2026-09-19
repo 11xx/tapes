@@ -17,8 +17,9 @@ use crate::content::{
 use crate::event::{Bounded, EventKind, ToolEvent};
 use crate::lineage::{Lineage, ParentRef};
 use crate::model::{
-    AccountingBasis, AccountingCoverage, Cost, Model, Role, Session, SourceDescriptor, Tokens,
-    TrailingRecord, Transcript, Turn, TurnKind,
+    AccountingBasis, AccountingCoverage, Cost, KindDeclaration, Model, Role, Session,
+    SourceDescriptor, Tokens, TrailingRecord, Transcript, Turn, TurnKind, TurnSelection,
+    UserDefault,
 };
 
 #[derive(Clone, Debug)]
@@ -161,6 +162,21 @@ impl Default for PiBackend {
 }
 
 impl Backend for PiBackend {
+    fn kinds(&self) -> KindDeclaration {
+        KindDeclaration {
+            recordable: TurnSelection::only([
+                TurnKind::Operator,
+                TurnKind::Assistant,
+                TurnKind::Reasoning,
+                TurnKind::Tool,
+            ]),
+            user_default: Some(UserDefault {
+                kind: TurnKind::Operator,
+                basis: "pi records its model changes, compactions, and extension messages as entries of their own types, so its user role holds what the operator sent".to_owned(),
+            }),
+        }
+    }
+
     fn harness(&self) -> &'static str {
         "pi"
     }
@@ -351,6 +367,7 @@ impl Backend for PiBackend {
             terminal: None,
             notes: abandoned_notes(abandoned),
             unmapped: Some(unmapped.finish()),
+            kinds: None,
         })
     }
 
