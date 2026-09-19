@@ -74,6 +74,89 @@ fn fixture_store(name: &str) -> (PathBuf, PathBuf) {
     (root.clone(), root.join("home"))
 }
 
+/// `self` is the caller's own session, named by the variable its harness
+/// exports: it is reported on stderr, it reaches the session before it under
+/// `--latest --exclude self`, and it refuses when no variable is set, when the
+/// id is one no store holds, or when the store holds it under another harness.
+#[test]
+fn self_names_the_session_its_harness_exports() {
+    let (codex_home, home) = fixture_store("self-token");
+    let newest = "10000000-0000-0000-0000-000000000002";
+    let older = "00000000-0000-0000-0000-000000000001";
+    let run = |args: &[&str], variables: &[(&str, &str)]| {
+        let mut command = tapes();
+        command.args(args);
+        with_fixture_env(&mut command, &codex_home, &home, &codex_home);
+        for variable in [
+            "CLAUDE_SESSION_ID",
+            "CLAUDE_CODE_SESSION_ID",
+            "CODEX_THREAD_ID",
+            "OPENCODE_SESSION",
+            "PI_SESSION_ID",
+        ] {
+            command.env_remove(variable);
+        }
+        command.envs(variables.iter().copied());
+        command.output().unwrap()
+    };
+    let as_self = [("CODEX_THREAD_ID", newest)];
+
+    let shown = run(&["show", "self", "--json"], &as_self);
+    assert!(
+        shown.status.success(),
+        "{}",
+        String::from_utf8_lossy(&shown.stderr)
+    );
+    let value: Value = serde_json::from_slice(&shown.stdout).unwrap();
+    assert_eq!(value["session"]["id"], newest);
+    assert!(
+        String::from_utf8_lossy(&shown.stderr).contains(&format!(
+            "self is codex session {newest}, from CODEX_THREAD_ID"
+        )),
+        "{}",
+        String::from_utf8_lossy(&shown.stderr)
+    );
+
+    let latest = run(&["show", "--latest", "--global", "--tail", "1"], &as_self);
+    let latest = String::from_utf8_lossy(&latest.stdout);
+    assert!(latest.contains("Pass --exclude self"), "{latest}");
+    let before = run(
+        &[
+            "show",
+            "--latest",
+            "--global",
+            "--exclude",
+            "self",
+            "--json",
+        ],
+        &as_self,
+    );
+    let value: Value = serde_json::from_slice(&before.stdout).unwrap();
+    assert_eq!(value["session"]["id"], older);
+
+    for (variables, expected) in [
+        (
+            vec![],
+            "none of CLAUDE_SESSION_ID, CLAUDE_CODE_SESSION_ID, CODEX_THREAD_ID",
+        ),
+        (
+            vec![("CODEX_THREAD_ID", "20000000-0000-0000-0000-000000000009")],
+            "no installed store holds that codex session",
+        ),
+        (
+            vec![("CLAUDE_SESSION_ID", newest)],
+            "no installed store holds that claude session",
+        ),
+    ] {
+        let refused = run(&["show", "self"], &variables);
+        assert!(!refused.status.success(), "{variables:?}");
+        assert!(refused.stdout.is_empty(), "{variables:?}");
+        let error = String::from_utf8_lossy(&refused.stderr);
+        assert!(error.contains(expected), "{variables:?}: {error}");
+    }
+    let _ = fs::remove_dir_all(&codex_home);
+}
+
 /// A removed per-change worktree leaves sessions whose recorded directory no
 /// longer exists. A scoped listing cannot prove their project, so it leaves
 /// them out, says how many directories it left out, and names the flags that
