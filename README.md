@@ -529,6 +529,14 @@ refuses it by name, since its message rows are updated in place and a second
 read cannot promise the first read's turns. `--read-bytes` is not available
 with it, and a supplied input refuses it.
 
+`export --evidence`, for a supplied input, also copies the source bytes behind
+each conversation into a `<bundle>.evidence/` directory beside its bundle: the
+conversation record's own span and every associated report's whole ZIP
+member, byte for byte, named by their SHA-256, with a `tapes-evidence/1`
+manifest giving the input's length and digest, each file's member, size, CRC,
+and span, and what could not be copied. A consumer that must cite exactly can
+keep the evidence and resolve every citation without the original archive.
+
 Given the listing flags in place of an id — `--here`, `--project <path>`,
 `--global`, `--harness`, `--model`, `--directory`, `--since`, `--until`,
 `--sort`, `--limit`, `--search` — `export` takes the set `list` would return,

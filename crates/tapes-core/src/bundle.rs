@@ -21,16 +21,20 @@ pub struct BundleFile {
     pub bytes: u64,
 }
 
-/// The three files an export writes, in the order a rescuer should read them.
+/// The three files an export writes, in the order a rescuer should read them,
+/// and the manifest of the evidence set a supplied export copies beside them.
 pub struct Bundle {
     pub context: BundleFile,
     pub json: BundleFile,
     pub trace: BundleFile,
+    pub evidence: Option<BundleFile>,
 }
 
 impl Bundle {
-    pub fn files(&self) -> [&BundleFile; 3] {
+    pub fn files(&self) -> impl Iterator<Item = &BundleFile> {
         [&self.context, &self.json, &self.trace]
+            .into_iter()
+            .chain(self.evidence.as_ref())
     }
 }
 
@@ -182,6 +186,7 @@ impl EventPass {
             context,
             json,
             trace,
+            evidence: None,
         })
     }
 }
@@ -752,7 +757,9 @@ mod tests {
 
         let names = bundle
             .files()
-            .map(|file| file.path.file_name().unwrap().to_str().unwrap().to_owned());
+            .map(|file| file.path.file_name().unwrap().to_str().unwrap().to_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(names.len(), 3);
         let stem = names[0].strip_suffix(".context.md").unwrap().to_owned();
         assert_eq!(names[1], format!("{stem}.json"));
         assert_eq!(names[2], format!("{stem}.trace.md"));

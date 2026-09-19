@@ -324,6 +324,133 @@ fn library_reports_join_their_originating_conversation_by_member_stem() {
     );
 }
 
+fn sha256(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+/// `export --evidence` copies the conversation record's span and each
+/// associated report member byte for byte beside the bundle, names each file
+/// by its SHA-256, and says where every byte came from; a report no
+/// conversation reached is not copied.
+#[test]
+fn evidence_export_copies_the_record_and_its_reports_verbatim() {
+    let root = TempRoot::new("evidence");
+    let conversation_bytes = conversation("originating", "voice conversation");
+    let library = serde_json::to_vec(&json!([
+        {"file_id": "file_00aa", "origination_thread_id": "originating"},
+        {"file_id": "file_00bb", "origination_thread_id": "unreached"}
+    ]))
+    .unwrap();
+    let joined = report(Some("backing-session-a"), "report-a", "joined body");
+    let orphan = report(Some("backing-session-b"), "report-b", "orphan body");
+    let mut sizes = BTreeMap::new();
+    sizes.insert("conversations-000.json", conversation_bytes.len());
+    sizes.insert("library_files.json", library.len());
+    sizes.insert("file_00aa.dat", joined.len());
+    sizes.insert("file_00bb.dat", orphan.len());
+    let manifest_bytes = manifest(
+        &["conversations-000.json"],
+        &["library_files.json"],
+        &["file_00aa.dat", "file_00bb.dat"],
+        &sizes,
+    );
+    let zip_path = root.path().join("native-export.zip");
+    archive(
+        &zip_path,
+        &[
+            ("export_manifest.json", &manifest_bytes),
+            ("conversations-000.json", &conversation_bytes),
+            ("library_files.json", &library),
+            ("file_00aa.dat", &joined),
+            ("file_00bb.dat", &orphan),
+        ],
+    );
+    let bundle = root.path().join("bundle");
+    let exported = run(&[
+        "export".to_owned(),
+        "originating".to_owned(),
+        "--input".to_owned(),
+        zip_path.display().to_string(),
+        "--evidence".to_owned(),
+        "--bundle".to_owned(),
+        bundle.display().to_string(),
+    ]);
+    assert!(
+        exported.status.success(),
+        "{}",
+        String::from_utf8_lossy(&exported.stderr)
+    );
+    let json_path = fs::read_dir(&bundle)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find(|path| {
+            path.extension()
+                .is_some_and(|extension| extension == "json")
+        })
+        .unwrap();
+    let projection: Value = serde_json::from_slice(&fs::read(&json_path).unwrap()).unwrap();
+    let evidence = json_path.with_extension("evidence");
+    assert!(
+        String::from_utf8_lossy(&exported.stdout)
+            .contains(&evidence.join("manifest.json").display().to_string()),
+        "{}",
+        String::from_utf8_lossy(&exported.stdout)
+    );
+    let manifest: Value =
+        serde_json::from_slice(&fs::read(evidence.join("manifest.json")).unwrap()).unwrap();
+    assert_eq!(manifest["schema"], "tapes-evidence/1");
+    assert_eq!(manifest["reader"]["package"], "tapes-core");
+    let zip_bytes = fs::read(&zip_path).unwrap();
+    assert_eq!(manifest["input"]["bytes"], zip_bytes.len());
+    assert_eq!(manifest["input"]["sha256"], sha256(&zip_bytes));
+    assert_eq!(manifest["projection"]["schema"], projection["schema"]);
+
+    let span = &projection["read"]["records"][0];
+    let (start, end) = (
+        span["start"].as_u64().unwrap() as usize,
+        span["end"].as_u64().unwrap() as usize,
+    );
+    let record = &conversation_bytes[start..end];
+    let files = manifest["files"].as_array().unwrap();
+    assert_eq!(files.len(), 2, "{manifest}");
+    for (file, role, source, member) in [
+        (&files[0], "record", record, "conversations-000.json"),
+        (&files[1], "report", &joined[..], "file_00aa.dat"),
+    ] {
+        assert_eq!(file["role"], role, "{file}");
+        assert_eq!(file["sha256"], sha256(source), "{file}");
+        assert_eq!(file["bytes"], source.len(), "{file}");
+        assert_eq!(file["member"]["name"], member, "{file}");
+        let copied = fs::read(evidence.join(file["file"].as_str().unwrap())).unwrap();
+        assert_eq!(copied, source, "{role} bytes are copied verbatim");
+    }
+    assert_eq!(files[0]["span"], *span);
+    assert_eq!(files[1]["member"]["size"], joined.len());
+    assert_eq!(projection["read"]["record_sha256"][0], files[0]["sha256"]);
+    assert_eq!(
+        manifest["associations"],
+        json!([{"member": "file_00aa.dat", "named_by": ["originating_conversation"], "copied": true}])
+    );
+    assert_eq!(manifest["gaps"], json!([]));
+    assert!(!fs::read_dir(&evidence).unwrap().any(|entry| entry
+        .unwrap()
+        .file_name()
+        .to_string_lossy()
+        .contains("partial")));
+
+    let installed = run(&[
+        "export".to_owned(),
+        "some-session".to_owned(),
+        "--evidence".to_owned(),
+    ]);
+    assert!(!installed.status.success());
+    assert!(String::from_utf8_lossy(&installed.stderr).contains("supplied input"));
+}
+
 #[test]
 fn manifest_gaps_are_explicit_and_only_an_exact_occurrence_can_be_read() {
     let root = TempRoot::new("manifest-gap");
