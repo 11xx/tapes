@@ -27,10 +27,10 @@ use crate::content::{
 use crate::lineage::Lineage;
 use crate::model::{
     ByteSpan, ConversationEdge, ConversationGraph, ConversationNode, EmptyTextTailReason,
-    EntryMetadata, Model, ReadEvidence, ReadRange, ReadRangeKind, RecordRef, Role, ScopeAuthority,
-    Session, SessionMetadata, SourceBound, SourceDescriptor, SourceLocation, SourceScope,
-    TerminalObservation, TextTailEvidence, Transcript, TranscriptEvidence, Truncation, Turn,
-    TurnKind,
+    EntryMetadata, KindDeclaration, Model, ReadEvidence, ReadRange, ReadRangeKind, RecordRef, Role,
+    ScopeAuthority, Session, SessionMetadata, SourceBound, SourceDescriptor, SourceLocation,
+    SourceScope, TerminalObservation, TextTailEvidence, Transcript, TranscriptEvidence, Truncation,
+    Turn, TurnKind, TurnSelection, UserDefault,
 };
 
 pub const DEFAULT_SCAN_BYTES: u64 = 512 * 1024 * 1024;
@@ -175,6 +175,25 @@ impl InputBackend {
 }
 
 impl Backend for InputBackend {
+    fn kinds(&self) -> KindDeclaration {
+        KindDeclaration {
+            recordable: TurnSelection::only([
+                TurnKind::Operator,
+                TurnKind::Assistant,
+                TurnKind::Reasoning,
+                TurnKind::Tool,
+                TurnKind::Ambient,
+                TurnKind::Unknown,
+            ]),
+            user_default: Some(UserDefault {
+                kind: TurnKind::Operator,
+                basis:
+                    "an exported conversation's user messages are the ones its account holder sent"
+                        .to_owned(),
+            }),
+        }
+    }
+
     fn harness(&self) -> &'static str {
         "input"
     }

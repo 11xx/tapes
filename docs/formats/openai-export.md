@@ -151,7 +151,7 @@ A named `--input` path that does not exist is an error, not an unavailable
 store.
 
 The normal output contracts remain versioned (`tapes-list/5`,
-`tapes-session/9`, `tapes-events/6`, `tapes-brief/6`, `tapes-endings/6`,
-`tapes-stats/5`, `tapes-usage/5`, and `tapes-export-manifest/5`). History-page
+`tapes-session/10`, `tapes-events/6`, `tapes-brief/6`, `tapes-endings/6`,
+`tapes-stats/6`, `tapes-usage/5`, and `tapes-export-manifest/5`). History-page
 and child-qualified operations are installed-recording capabilities and
 refuse supplied exports rather than interpreting an export as JSONL history.

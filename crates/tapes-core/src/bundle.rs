@@ -732,6 +732,7 @@ mod tests {
             trailing_record: None,
             notes: vec!["1 entry belongs to an abandoned branch.".into()],
             projection: None,
+            kinds: None,
         }
     }
 
@@ -1055,6 +1056,9 @@ mod tests {
         }
 
         impl Backend for Appending {
+            fn kinds(&self) -> crate::model::KindDeclaration {
+                self.inner.kinds()
+            }
             fn harness(&self) -> &'static str {
                 self.inner.harness()
             }

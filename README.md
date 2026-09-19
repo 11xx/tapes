@@ -288,7 +288,7 @@ disappear merely because it has no readable text. The turn's
 record. A part reference repeats that parent coordinate and adds
 `content_part_index` for its position within the turn; a source-native
 `pointer` remains the source pointer at both levels.
-JSON output uses the `tapes-session/9` transcript schema, with the optional
+JSON output uses the `tapes-session/10` transcript schema, with the optional
 `live` annotation when the authority answers. The human header marks the same
 state. Supplied mapping exports also carry bounded graph evidence with the
 selected canonical path, retained nodes, and retained parent-child edges.
@@ -317,7 +317,7 @@ as it is read, so memory follows one record rather than the file. Every turn
 is shown unless `--tail` keeps the newest, and `--exchange`, `--only`, and
 `--omit` apply as they do to a bounded read. It reads installed Claude, Codex,
 Pi, and OpenCode sessions, and `--read-bytes` is not available with it.
-`--full --json` writes the same `tapes-session/9` object turn by turn: its
+`--full --json` writes the same `tapes-session/10` object turn by turn: its
 `read` evidence is one range from byte 0 to the source length with
 `projection_options: ["full"]`, and each turn's `record_ref` carries its own
 record span. An OpenCode session is paged from its store oldest first, every
@@ -438,8 +438,9 @@ session whose read fails is named in `unread` with its diagnostic and does not
 stop the run. Human output is one line per session, the text tail indented
 beneath it when asked for, and the listing's own diagnostics.
 
-`stats` counts what one recording holds as `tapes-stats/5`: `turns` by the
-`kind` the harness recorded them as, `tools` — calls, results, complete pairs,
+`stats` counts what one recording holds as `tapes-stats/6`: `turns` by the
+`kind` the harness recorded them as, beside the kinds that harness can record
+at all, `tools` — calls, results, complete pairs,
 unpaired events by the boundary that left them unpaired, errors, and a
 `by_name` row per tool with its paired durations — the recorded clock in
 `durations_ms`, the session's own counters with the share of
@@ -477,7 +478,7 @@ in one screen, in that reading order.
 - `.context.md` — the exchange `show --exchange` returns: exact operator turns
   and assistant-visible text, without the harness's own commands, notices,
   attached context, or user turns of unknown sender. Read first.
-- `.json` — the canonical `tapes-session/9` object plus turns, cost, tokens,
+- `.json` — the canonical `tapes-session/10` object plus turns, cost, tokens,
   their `accounting` basis and coverage when present, any verified
   `trailing_record`, retained graph/artifact evidence, and the session
   directory's git head and branch when they resolve. Query selectively with
@@ -578,9 +579,9 @@ rather than a resent history. `tapes usage --here --since <date> --json` answers
 <date> --json` says what each of those sessions ends on, so a scan reads the
 few endings that matter instead of every tail.
 
-**Contracts you can build on.** `tapes-list/5`, `tapes-session/9`,
+**Contracts you can build on.** `tapes-list/5`, `tapes-session/10`,
 `tapes-events/6`, `tapes-usage/5`, `tapes-usage-summary/3`, `tapes-lineage/2`,
-`tapes-endings/6`, `tapes-child/3`, `tapes-stats/5`, `tapes-stats-summary/3`, `tapes-brief/6`,
+`tapes-endings/6`, `tapes-child/3`, `tapes-stats/6`, `tapes-stats-summary/4`, `tapes-brief/6`,
 `tapes-page/5`, `tapes-history-search/5`, `tapes-metadata-history/5`,
 and `tapes-export-manifest/5` are versioned
 JSON; a breaking shape change bumps the version. A single-session `export`
@@ -659,11 +660,12 @@ metadata read; page counters describe the subsequent history traversal.
 ## Tool usage across sessions
 
 `tapes stats --here --since 2026-01-01 --json` returns
-`tapes-stats-summary/3`. Listing filters select the sessions; each costs one
+`tapes-stats-summary/4`. Listing filters select the sessions; each costs one
 bounded transcript read through its listed backend origin, or two streamed
 whole-recording reads with `--full`. The report includes
-selected/read/failed counts, per-session coverage and tool statistics, and
-aggregates by harness and tool name. Pair durations cover complete timestamped
+selected/read/failed counts, per-session coverage and tool statistics,
+aggregates by harness and tool name, and per harness the kinds it can record
+that no session read held. Pair durations cover complete timestamped
 pairs only. Read failures have unknown activity and contribute no counters.
 These are recorded harness tool names, such as `bash`, not inferred shell
 commands. Child recordings contribute only when independently selected.

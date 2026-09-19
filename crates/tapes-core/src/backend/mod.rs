@@ -333,6 +333,9 @@ pub trait Backend {
             self.harness()
         )
     }
+    /// Which turn kinds this harness's records can evidence, and the kind its
+    /// reader gives a user turn that carries no evidence of its own.
+    fn kinds(&self) -> crate::model::KindDeclaration;
     /// Whether this session can be streamed twice with the second read
     /// handing over the first read's turns. A consumer that joins two passes
     /// asks before the first, so a source that cannot be replayed refuses
@@ -710,6 +713,9 @@ pub struct StreamedTranscript {
     pub notes: Vec<String>,
     /// The records that produced no turn, where the reader counts them.
     pub unmapped: Option<crate::model::UnmappedRecords>,
+    /// The kinds the harness's records can evidence, set by whoever knows
+    /// which backend streamed the read.
+    pub kinds: Option<crate::model::KindDeclaration>,
 }
 
 impl StreamedTranscript {
@@ -779,6 +785,7 @@ impl StreamedTranscript {
         );
         transcript.read = Some(read);
         transcript.terminal = self.terminal.clone();
+        transcript.kinds = self.kinds.clone();
         transcript
     }
 }

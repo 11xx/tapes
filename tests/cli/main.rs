@@ -2153,7 +2153,7 @@ fn supplied_citation_descriptors_are_bounded_in_show_and_export() {
         .unwrap();
     assert!(shown.status.success());
     let shown: Value = serde_json::from_slice(&shown.stdout).unwrap();
-    assert_eq!(shown["schema"], "tapes-session/9");
+    assert_eq!(shown["schema"], "tapes-session/10");
     let citation = &shown["artifacts"][0]["citations"][0];
     assert_eq!(citation["uri"]["chars"], 5_024);
     assert_eq!(
@@ -2194,7 +2194,7 @@ fn supplied_citation_descriptors_are_bounded_in_show_and_export() {
         })
         .unwrap();
     let bundle_json: Value = serde_json::from_slice(&fs::read(json_path).unwrap()).unwrap();
-    assert_eq!(bundle_json["schema"], "tapes-session/9");
+    assert_eq!(bundle_json["schema"], "tapes-session/10");
     assert_eq!(
         bundle_json["artifacts"][0]["citations"][0]["title"]["text"]
             .as_str()
@@ -5484,7 +5484,7 @@ fn show_full_streams_a_claude_recording_past_the_read_bound() {
 
     let json: Value =
         serde_json::from_str(&stdout(&["show", "full-claude", "--full", "--json"])).unwrap();
-    assert_eq!(json["schema"], "tapes-session/9");
+    assert_eq!(json["schema"], "tapes-session/10");
     assert_eq!(json["turns"].as_array().unwrap().len(), 50);
     assert_eq!(json["turns"][0]["text"], "opening request");
     assert_eq!(json["turns"][49]["ordinal"], 49);
@@ -6076,6 +6076,30 @@ fn events_and_stats_full_stream_claude_and_codex_recordings_past_the_read_bound(
     let one = json(&["stats", claude_id, "--full", "--json"]);
     assert_eq!(summary["sessions"][0]["tools"], one["tools"]);
     assert_eq!(summary["sessions"][0]["coverage"], one["coverage"]);
+    // Claude can record every kind, so each kind the one session lacks is
+    // one the summary reports no session held.
+    let claude = &summary["kinds_by_harness"]["claude"];
+    assert_eq!(claude["declared"], one["kinds"], "{summary}");
+    assert_eq!(claude["turns"], one["turns"], "{summary}");
+    let unobserved = [
+        "operator",
+        "assistant",
+        "reasoning",
+        "tool",
+        "control",
+        "ambient",
+        "notice",
+        "unknown",
+    ]
+    .into_iter()
+    .filter(|kind| one["turns"][kind] == 0)
+    .collect::<Vec<_>>();
+    assert!(!unobserved.is_empty());
+    assert_eq!(
+        claude["unobserved"],
+        serde_json::json!(unobserved),
+        "{summary}"
+    );
 
     for command in ["events", "stats"] {
         let conflicting = run(&[command, claude_id, "--full", "--read-bytes", "1m"]);
@@ -7322,7 +7346,7 @@ fn stats_help_names_the_schema_and_what_the_figures_cover() {
     let output = tapes().args(["stats", "--help"]).output().unwrap();
     assert!(output.status.success());
     let help = String::from_utf8_lossy(&output.stdout);
-    assert!(help.contains("tapes-stats/5"), "{help}");
+    assert!(help.contains("tapes-stats/6"), "{help}");
     assert!(help.contains("complete pairs only"), "{help}");
     assert!(
         help.contains("share of recorded token counts rather than of cost"),
@@ -7360,7 +7384,7 @@ fn stats_json_counts_a_chosen_recording_exactly() {
     assert_eq!(
         comparable,
         serde_json::json!({
-            "schema": "tapes-stats/5",
+            "schema": "tapes-stats/6",
             "session": {
                 "id": id,
                 "source": {
@@ -7393,6 +7417,13 @@ fn stats_json_counts_a_chosen_recording_exactly() {
                 "notice": 0,
                 "unknown": 0,
                 "total": 12
+            },
+            "kinds": {
+                "recordable": ["operator", "assistant", "reasoning", "tool", "ambient", "notice"],
+                "user_default": {
+                    "kind": "operator",
+                    "basis": "Codex wraps the text it puts in the user role in elements of its own, so a user message holding anything else is the operator's"
+                }
             },
             "tools": {
                 "calls": 5,
@@ -7748,7 +7779,7 @@ fn selection_stats_agree_with_individual_reads() {
         serde_json::from_slice::<Value>(&output.stdout).unwrap()
     };
     let summary = run(&["stats", "--global", "--harness", "codex", "--json"]);
-    assert_eq!(summary["schema"], "tapes-stats-summary/3");
+    assert_eq!(summary["schema"], "tapes-stats-summary/4");
     assert_eq!(summary["selected"], 2);
     assert_eq!(summary["read"], 2);
     let mut totals = [0_u64; 4];

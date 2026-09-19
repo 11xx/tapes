@@ -165,7 +165,7 @@ READ A SUPPLIED EXPORT
 
 PROBE BEFORE EXPORTING
   tapes show <id> --tail 40      A window, costing no bundle.
-  tapes show <id> --json         The same turns as tapes-session/9, with bounded read, graph, artifact, and terminal evidence.
+  tapes show <id> --json         The same turns as tapes-session/10, with bounded read, graph, artifact, and terminal evidence.
   tapes show <id> --exchange     Operator and assistant turns only, timestamps and ordinals kept; the name for --only operator,assistant.
   tapes show <id> --omit tool    Every turn but tool calls and results; --only and --omit take kind labels, and export takes both.
   tapes show <id> --full         Every turn of a Claude, Codex, Pi, or OpenCode session, streamed past the read bounds; --json streams it too.
@@ -240,7 +240,9 @@ PROBE BEFORE EXPORTING
   absent fields remain unknown. usage --full streams the whole recording and
   folds every counter from it, so turns and accounting cover the session.
 
-  stats counts what one recording holds as tapes-stats/5: turns by kind, tool
+  stats counts what one recording holds as tapes-stats/6: turns by kind
+  beside the kinds the harness can record at all, so a zero for a kind it
+  cannot record is not read as none observed, tool
   calls by name with their paired durations and error counts, unpaired calls
   by the boundary that left them unpaired, the recorded clock, the session's
   token counters with the share of input plus cache read plus cache write its
@@ -254,7 +256,9 @@ PROBE BEFORE EXPORTING
   inference: nothing here calls a call wasteful, explains a latency, or says
   why a session ended. stats --full streams the whole recording twice and
   counts every record, so turn coverage is session; a selection with --full
-  streams each selected session.
+  streams each selected session. A selection also names, per harness, the
+  kinds the harness can record that no session read held: across a wide
+  selection that is the shape of a reader that stopped recognizing a kind.
 
   lineage answers which sessions a recording names as relatives, as
   tapes-lineage/2: the session it was spawned or forked from, and the children

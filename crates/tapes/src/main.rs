@@ -828,7 +828,8 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Count what one session's recording holds: turns by kind, tool calls
+    /// Count what one session's recording holds: turns by kind beside the
+    /// kinds its harness can record at all, tool calls
     /// by name with their paired durations and error counts, the recorded
     /// clock, the session's own token counters with the share of
     /// `input + cache_read + cache_write` its cache accounts for, and the
@@ -838,9 +839,10 @@ enum Command {
     /// complete pairs only, and a cache ratio is a share of recorded token
     /// counts rather than of cost. Nothing is judged, ranked, or explained.
     /// A scope or listing filter selects multiple sessions and returns
-    /// tapes-stats-summary/3: recorded tools grouped by harness and name,
-    /// with per-session read coverage, pairing counts and failures. Children
-    /// are not read through their parents.
+    /// tapes-stats-summary/4: recorded tools grouped by harness and name,
+    /// with per-session read coverage, pairing counts and failures, and per
+    /// harness the recordable kinds no session read held. Children are not
+    /// read through their parents.
     Stats {
         #[command(flatten)]
         query: SessionQueryArgs,
@@ -856,7 +858,7 @@ enum Command {
         /// updated in place and a second read may not repeat the first.
         #[arg(long, conflicts_with = "read_bytes")]
         full: bool,
-        /// Render the versioned tapes-stats/5 object, or tapes-stats-summary/3
+        /// Render the versioned tapes-stats/6 object, or tapes-stats-summary/4
         /// for a selection, as JSON.
         #[arg(long)]
         json: bool,
@@ -1769,6 +1771,19 @@ fn print_stats_summary(summary: &tapes_core::stats_summary::StatsSummary) {
             );
         }
     }
+    for (harness, kinds) in &summary.kinds_by_harness {
+        if !kinds.unobserved.is_empty() {
+            println!(
+                "{harness}: no session read holds a turn of {}, which the harness can record",
+                kinds
+                    .unobserved
+                    .iter()
+                    .map(|kind| kind.label())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
+    }
     for session in &summary.sessions {
         println!(
             "  {} ({}): {} coverage",
@@ -2083,6 +2098,9 @@ fn render_stats(stats: &StatsView) -> String {
     out.push('\n');
     out.push_str(&format!("coverage: {}\n", render_coverage(&stats.coverage)));
     out.push_str(&format!("turns: {}\n", render_turn_kinds(&stats.turns)));
+    if let Some(kinds) = &stats.kinds {
+        out.push_str(&render_declaration(kinds));
+    }
     out.push_str(&format!("tools: {}\n", render_tools(&stats.tools)));
     if stats.tools.incomplete.total() > 0 {
         out.push_str(&format!(
@@ -2245,11 +2263,37 @@ fn render_children(lineage: &LineageStats) -> String {
         .join(", ")
 }
 
+/// The kinds a harness cannot record, so their zeros are not read as
+/// observations, and the default its reader gives a user turn.
+fn render_declaration(kinds: &tapes_core::model::KindDeclaration) -> String {
+    let mut out = String::new();
+    let unrecordable = TurnKind::ALL
+        .into_iter()
+        .filter(|kind| !kinds.recordable.keeps(*kind))
+        .map(TurnKind::label)
+        .collect::<Vec<_>>();
+    if !unrecordable.is_empty() {
+        out.push_str(&format!(
+            "not recordable by this harness: {}\n",
+            unrecordable.join(", ")
+        ));
+    }
+    if let Some(default) = &kinds.user_default {
+        out.push_str(&format!(
+            "user turns without evidence: {}, because {}\n",
+            default.kind.label(),
+            default.basis
+        ));
+    }
+    out
+}
+
 fn warning_label(warning: Warning) -> &'static str {
     match warning {
         Warning::ReadWindow => "read-window",
         Warning::TailWindow => "tail-window",
         Warning::KindUnknown => "kind-unknown",
+        Warning::KindUndeclared => "kind-undeclared",
         Warning::IncompletePairs => "incomplete-pairs",
         Warning::NoTimestamps => "no-timestamps",
     }
@@ -3307,6 +3351,7 @@ mod tests {
             trailing_record: None,
             notes: vec!["Skipped 1 unparseable line.".to_owned()],
             projection: None,
+            kinds: None,
         }
     }
 
