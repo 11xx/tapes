@@ -2440,9 +2440,7 @@ fn message_parts(message: &Value) -> (Vec<ContentPart>, ContentCoverage) {
             },
         );
     }
-    let content_type = content_value["content_type"]
-        .as_str()
-        .or_else(|| message["content_type"].as_str());
+    let content_type = content_type(message);
     if let Some(retained) = reasoning_parts(content_value, content_type) {
         return retained;
     }
@@ -2474,10 +2472,17 @@ fn message_parts(message: &Value) -> (Vec<ContentPart>, ContentCoverage) {
 /// the assistant author, so the content type rather than the author names
 /// the role.
 fn record_role(message: &Value, role: Role) -> Role {
-    match message["content"]["content_type"].as_str() {
+    match content_type(message) {
         Some("thoughts" | "reasoning_recap") => Role::Reasoning,
         _ => role,
     }
+}
+
+/// A message's content type, named on its content object or on the message.
+fn content_type(message: &Value) -> Option<&str> {
+    message["content"]["content_type"]
+        .as_str()
+        .or_else(|| message["content_type"].as_str())
 }
 
 /// Reasoning records hold their text outside `parts`: `thoughts` as a list of
