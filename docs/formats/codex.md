@@ -295,9 +295,12 @@ is its mirror. Two identical searches are two turns.
 `AgentMessage`, `Reasoning`, `UserMessage`, `ContextCompaction`, and `Plan`
 remain ordinary lifecycle evidence and do not become phantom tool turns; a
 `Plan` item's text is restated by the assistant message that follows it,
-wrapped in `<proposed_plan>`. A completed item with no `item_started` is a
-tool result whose call Codex did not record as a record of its own, so
-`events` reports it as `call-not-recorded`. For `CommandExecution`, the native
+wrapped in `<proposed_plan>`. A completed item with no `item_started` is one
+native record carrying both halves of an operation. `events` projects a call
+and result that share that record's source reference, retains the item's
+argument carrier on the call, and counts the pair as complete; no native call
+record is invented. An `item_started` reached in the same read keeps the
+ordinary started/completed pairing. For `CommandExecution`, the native
 `command` array is the argv carrier. Its elements must be strings and the
 array must fit the supported argument bound; otherwise the invocation is
 explicitly unsupported rather than silently filtered or truncated. The native

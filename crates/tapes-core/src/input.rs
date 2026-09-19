@@ -18,6 +18,7 @@ use std::sync::OnceLock;
 use anyhow::{anyhow, bail, Context, Result};
 use chrono::{DateTime, Utc};
 use serde_json::Value;
+#[cfg(feature = "zip")]
 use zip::ZipArchive;
 
 use crate::backend::{Backend, Listing, Query};
@@ -46,7 +47,9 @@ pub const MAX_RESIDENT_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 pub const MAX_MEMBERS: usize = 10_000;
 pub const MAX_DEPTH: usize = 128;
 pub const MAX_ARTIFACT_BODY_CHARS: usize = 64 * 1024;
+#[cfg(feature = "zip")]
 const MAX_ZIP_CENTRAL_DIRECTORY_BYTES: u64 = 16 * 1024 * 1024;
+#[cfg(feature = "zip")]
 const MAX_ZIP_EOCD_SEARCH_BYTES: u64 = 65_557;
 const MAX_MEMBER_NAME_BYTES: usize = 4 * 1024;
 const MAX_MANIFEST_BYTES: u64 = 4 * 1024 * 1024;
@@ -381,6 +384,7 @@ struct DirectoryMember {
     revision: String,
 }
 
+#[cfg(feature = "zip")]
 #[derive(Clone, Debug)]
 struct ZipMemberMetadata {
     name: String,
@@ -501,40 +505,53 @@ fn load_dataset(options: &InputOptions) -> Result<InputDataset> {
                 &mut scan_truncated,
                 &mut discovery_incomplete,
             )?;
-        } else if is_zip_path(path, &budget)? {
-            scan_zip(
-                path,
-                options,
-                &budget,
-                &mut occurrences,
-                &mut diagnostics,
-                &mut associated_reports,
-                &mut observation_parts,
-                &mut collection_gaps,
-                &mut scanned,
-                &mut scan_truncated,
-                &mut discovery_incomplete,
-            )?;
         } else {
-            budget.add_members(1)?;
-            let metadata = fs::metadata(path)?;
-            observation_parts.push(format!(
-                "file:{}:{}",
-                path.display(),
-                metadata_revision(&metadata)
-            ));
-            scan_file(
-                path,
-                None,
-                options,
-                &budget,
-                &mut occurrences,
-                &mut diagnostics,
-                &mut scanned,
-                &mut scan_truncated,
-                &mut discovery_incomplete,
-                &mut collection_gaps,
-            )?;
+            #[cfg(feature = "zip")]
+            {
+                if is_zip_path(path, &budget)? {
+                    scan_zip(
+                        path,
+                        options,
+                        &budget,
+                        &mut occurrences,
+                        &mut diagnostics,
+                        &mut associated_reports,
+                        &mut observation_parts,
+                        &mut collection_gaps,
+                        &mut scanned,
+                        &mut scan_truncated,
+                        &mut discovery_incomplete,
+                    )?;
+                } else {
+                    scan_plain_file(
+                        path,
+                        options,
+                        &budget,
+                        &mut occurrences,
+                        &mut diagnostics,
+                        &mut observation_parts,
+                        &mut scanned,
+                        &mut scan_truncated,
+                        &mut discovery_incomplete,
+                        &mut collection_gaps,
+                    )?;
+                }
+            }
+            #[cfg(not(feature = "zip"))]
+            {
+                scan_plain_file(
+                    path,
+                    options,
+                    &budget,
+                    &mut occurrences,
+                    &mut diagnostics,
+                    &mut observation_parts,
+                    &mut scanned,
+                    &mut scan_truncated,
+                    &mut discovery_incomplete,
+                    &mut collection_gaps,
+                )?;
+            }
         }
         if budget.exhausted() {
             scan_truncated = true;
@@ -2829,6 +2846,48 @@ fn is_report_name(name: &str) -> bool {
         .is_some_and(|extension| extension == "dat")
 }
 
+#[allow(clippy::too_many_arguments)]
+fn scan_plain_file(
+    path: &Path,
+    options: &InputOptions,
+    budget: &Budget,
+    occurrences: &mut Vec<InputOccurrence>,
+    diagnostics: &mut Vec<String>,
+    observation_parts: &mut Vec<String>,
+    scanned: &mut usize,
+    scan_truncated: &mut bool,
+    discovery_incomplete: &mut bool,
+    collection_gaps: &mut Vec<crate::model::ReadGap>,
+) -> Result<()> {
+    #[cfg(not(feature = "zip"))]
+    if path
+        .extension()
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("zip"))
+    {
+        bail!("ZIP input is disabled; rebuild tapes with `--features zip` to read archives");
+    }
+    budget.add_members(1)?;
+    let metadata = fs::metadata(path)?;
+    observation_parts.push(format!(
+        "file:{}:{}",
+        path.display(),
+        metadata_revision(&metadata)
+    ));
+    scan_file(
+        path,
+        None,
+        options,
+        budget,
+        occurrences,
+        diagnostics,
+        scanned,
+        scan_truncated,
+        discovery_incomplete,
+        collection_gaps,
+    )
+}
+
+#[cfg(feature = "zip")]
 fn is_zip_path(path: &Path, budget: &Budget) -> Result<bool> {
     if path
         .extension()
@@ -3519,6 +3578,7 @@ fn library_association_for(
         .cloned()
 }
 
+#[cfg(feature = "zip")]
 #[allow(clippy::too_many_arguments)]
 fn scan_zip(
     path: &Path,
@@ -3613,6 +3673,7 @@ fn scan_zip(
     Ok(())
 }
 
+#[cfg(feature = "zip")]
 fn preflight_zip(path: &Path, budget: &Budget) -> Result<Vec<ZipMemberMetadata>> {
     let file =
         File::open(path).with_context(|| format!("open input archive {}", path.display()))?;
@@ -3761,6 +3822,7 @@ fn preflight_zip(path: &Path, budget: &Budget) -> Result<Vec<ZipMemberMetadata>>
     Ok(members)
 }
 
+#[cfg(feature = "zip")]
 fn discard_bytes<R: Read>(reader: &mut R, mut bytes: usize) -> io::Result<()> {
     let mut buffer = [0; 64 * 1024];
     while bytes > 0 {
@@ -3777,14 +3839,17 @@ fn discard_bytes<R: Read>(reader: &mut R, mut bytes: usize) -> io::Result<()> {
     Ok(())
 }
 
+#[cfg(feature = "zip")]
 fn le_u16(value: &[u8]) -> Option<u16> {
     (value.len() >= 2).then(|| u16::from_le_bytes([value[0], value[1]]))
 }
 
+#[cfg(feature = "zip")]
 fn le_u32(value: &[u8]) -> Option<u32> {
     (value.len() >= 4).then(|| u32::from_le_bytes([value[0], value[1], value[2], value[3]]))
 }
 
+#[cfg(feature = "zip")]
 fn le_u64(value: &[u8]) -> Option<u64> {
     (value.len() >= 8).then(|| {
         u64::from_le_bytes([
@@ -3793,6 +3858,7 @@ fn le_u64(value: &[u8]) -> Option<u64> {
     })
 }
 
+#[cfg(feature = "zip")]
 #[allow(clippy::too_many_arguments)]
 fn scan_manifest_zip<R: Read + Seek>(
     path: &Path,
@@ -3971,6 +4037,7 @@ fn scan_manifest_zip<R: Read + Seek>(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[cfg(feature = "zip")]
 fn scan_raw_zip<R: Read + Seek>(
     path: &Path,
     members: &[ZipMemberMetadata],
@@ -4026,6 +4093,7 @@ fn scan_raw_zip<R: Read + Seek>(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[cfg(feature = "zip")]
 fn scan_zip_conversation<R: Read + Seek>(
     path: &Path,
     member: &ZipMemberMetadata,
@@ -4150,6 +4218,7 @@ fn scan_zip_conversation<R: Read + Seek>(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[cfg(feature = "zip")]
 fn scan_zip_report<R: Read + Seek>(
     member: &ZipMemberMetadata,
     archive: &mut ZipArchive<BudgetedSourceReader<'_, R>>,
@@ -4221,6 +4290,7 @@ fn scan_zip_report<R: Read + Seek>(
     Ok(())
 }
 
+#[cfg(feature = "zip")]
 fn read_zip_value<R: Read + Seek>(
     archive: &mut ZipArchive<BudgetedSourceReader<'_, R>>,
     member: &ZipMemberMetadata,
@@ -4263,6 +4333,7 @@ fn read_zip_value<R: Read + Seek>(
     }
 }
 
+#[cfg(feature = "zip")]
 fn drain_zip_member<R: Read>(reader: &mut R, budget: &Budget) -> io::Result<()> {
     let mut buffer = [0; 64 * 1024];
     loop {

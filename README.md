@@ -30,9 +30,16 @@ Build from a local checkout with a Rust toolchain and Cargo on a Unix-like host:
 cargo install --path crates/tapes --locked
 ```
 
+For a published install, use `cargo install tapes-cli --locked`; add
+`--features zip` to either command when ZIP input support is wanted.
+
 Ensure Cargo's binary directory is on `PATH`, then run `tapes` for the workflow
-guide. File-backed harnesses need only their recording stores. OpenCode access
-uses its installed CLI; absent harnesses remain optional. Development checks
+guide. The published package is `tapes-cli` and installs the `tapes` binary.
+ZIP input support is default-off; install with `--features zip` when archive
+inputs or ZIP evidence are needed. Without that feature, plain JSON files and
+directories remain available and a ZIP input reports the enabling command.
+File-backed harnesses need only their recording stores. OpenCode access uses
+its installed CLI; absent harnesses remain optional. Development checks
 are `cargo build --all-targets`, `cargo test`, and
 `cargo clippy --all-targets -- -D warnings && cargo fmt --check`.
 
@@ -226,7 +233,8 @@ carries `start_uncertain: true`, and `started_at` is then a floor. A Codex row w
 model-bearing `turn_context` before the bounded 4 MiB file-tail read; the
 absence is preserved rather than filled with a guess. JSON output is a
 `tapes-list/5` object containing `sessions`, `artifacts`, `unavailable`, `unreadable`,
-`unsearched`, `scanned`, and `scan_truncated`. `unavailable` names harnesses
+`unsearched`, `scanned`, and `scan_truncated`; scoped views may also carry
+structured `unplaced` exclusions. `unavailable` names harnesses
 that could not be read at all;
 `unreadable` names sessions a readable harness could not normalize, each with
 its id and diagnostic. They stay apart because a corrupt row says nothing about
@@ -337,7 +345,10 @@ read to the length it had when the read opened.
 `show` and `export` also take `--latest` in place of an ID, which resolves the
 most recent session in scope. `--exclude <id>` is repeatable and passes over
 sessions the caller already holds — including its own, which is otherwise the
-newest one there.
+newest one there. If the bounded candidate scan leaves unreadable rows or
+stores, the readable choice is returned with a warning naming them and saying
+that newer activity may be hidden; an unavailable harness alone is not such a
+warning.
 
 `self` stands for the caller's own session wherever a session id is taken —
 `tapes show self`, `--exclude self` — resolved from the first of
@@ -353,7 +364,9 @@ scope.
 `events` projects tool calls and results into the harness-neutral
 `tapes-events/6` schema. Each record keeps the turn ordinal and native id,
 bounded argument or output metadata, and an exact call/result pair when both
-halves occur in the bounded read. Unpaired calls report `no-result-in-read`;
+halves occur in the bounded read. A Codex completed runtime item that carries
+both halves in one native record is projected as that pair with one shared
+source reference. Unpaired calls report `no-result-in-read`;
 an unpaired result reports `call-before-read-bound` when a file-tail or
 record-page bound can hide its call, and `call-not-recorded` when the read
 reached the recording's start. `--tail` uses the same turn-ordinal window as
@@ -511,10 +524,12 @@ when free-text search is genuinely easier. Never ingest a whole bundle
 because it exists.
 
 Stdout is a manifest of exactly those three paths and their sizes; nothing
-else goes there. Each file is written under a temporary name and renamed, so
-a bundle never looks complete while it is half written, and a failed export
-leaves no file behind. The `.json` is one compact object; `jq` reads it as
-easily as an indented one.
+else goes there. Each invocation reserves a free timestamped prefix before it
+writes, and each file is created under a temporary name and published without
+replacing an existing path. A bundle never looks complete while it is half
+written, concurrent exports keep their own sibling files, and a failed export
+leaves only the invocation's files to clean up. The `.json` is one compact
+object; `jq` reads it as easily as an indented one.
 
 `export --full` bundles the whole recording instead of the bounded read, as
 `show --full` reads it, so memory follows one record rather than the file. The
@@ -548,7 +563,8 @@ spans the set. It records the selection, each session's bundle paths, the
 artifact-native reports discovered in supplied inputs, the
 sessions whose store could not be read under `failed`, and the listing's own
 `unavailable`, `unreadable`, `unsearched`, `scanned`, and `scan_truncated`
-diagnostics. Stdout adds each bundle's three lines in selection order, then
+diagnostics, plus scoped `unplaced` exclusions when present. Stdout adds each
+bundle's three lines in selection order, then
 the manifest's own path and size. A session whose store vanishes between the
 listing and the read costs its own bundle and nothing else; the command fails
 only when every selected session failed, or when the listing itself did.
@@ -604,9 +620,10 @@ few endings that matter instead of every tail.
 and `tapes-export-manifest/5` are versioned
 JSON; a breaking shape change bumps the version. A single-session `export`
 prints
-exactly three paths and their sizes on stdout, in reading order, and writes each
-file under a temporary name before renaming — so a bundle is never observed
-half-written. A harness whose binary or store is absent reports itself
+exactly three paths and their sizes on stdout, in reading order, reserves a
+unique sibling prefix, and publishes each file without replacing an existing
+path — so a bundle is never observed half-written or collides with another
+invocation. A harness whose binary or store is absent reports itself
 unavailable and never fails a listing, which means a caller can run against any
 subset of harnesses without branching on what is installed; `show` and `export`
 still fail when the session they were given cannot be resolved.

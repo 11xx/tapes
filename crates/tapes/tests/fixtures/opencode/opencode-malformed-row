@@ -1,0 +1,6 @@
+#!/bin/sh
+set -eu
+
+resolved=$(/usr/bin/readlink -f "$0")
+fixture_dir=${resolved%/*}
+exec "$fixture_dir/opencode2" "$@" malformed-row

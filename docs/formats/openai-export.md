@@ -181,8 +181,10 @@ archive's checksum is checked: a member that fails decompression or its
 checksum is a gap, never a file. A record whose bytes no longer match the
 digest the read recorded is refused as a changed input. A report is copied
 only out of the ZIP that holds its conversation. The directory is written
-under a `.partial` name and renamed into place whole, and the input is only
-ever opened for reading.
+under a `.partial` name and renamed into place whole; its member files are
+also published from create-new partials, so a failed member copy leaves a
+manifest gap without a partial member. The input is only ever opened for
+reading.
 
 The normal output contracts remain versioned (`tapes-list/5`,
 `tapes-session/10`, `tapes-events/6`, `tapes-brief/6`, `tapes-endings/6`,

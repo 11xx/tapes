@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::fs;
+#[cfg(feature = "zip")]
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -65,6 +66,7 @@ fn another_input_gap_does_not_become_a_local_byte_range() {
     assert!(shown["read"]["gaps"].as_array().is_none_or(Vec::is_empty));
 }
 
+#[cfg(feature = "zip")]
 fn report(backing: Option<&str>, identity: &str, body: &str) -> Vec<u8> {
     let mut value = json!({
         "widget_session_id": identity,
@@ -121,6 +123,7 @@ fn manifest(
     .unwrap()
 }
 
+#[cfg(feature = "zip")]
 fn archive(path: &Path, members: &[(&str, &[u8])]) {
     let file = fs::File::create(path).unwrap();
     let mut writer = zip::ZipWriter::new(file);
@@ -167,6 +170,7 @@ fn input_args(command: &str, input: &Path) -> Vec<String> {
     ]
 }
 
+#[cfg(feature = "zip")]
 #[test]
 fn native_manifest_selects_conversation_and_associated_library_members() {
     let root = TempRoot::new("manifest");
@@ -252,6 +256,7 @@ fn native_manifest_selects_conversation_and_associated_library_members() {
 /// (`file_<hex>` for `file_<hex>.dat`) and its originating conversation by
 /// `origination_thread_id`, while the report's own widget state names a
 /// backing session the export does not contain.
+#[cfg(feature = "zip")]
 #[test]
 fn library_reports_join_their_originating_conversation_by_member_stem() {
     let root = TempRoot::new("library-stem");
@@ -324,6 +329,7 @@ fn library_reports_join_their_originating_conversation_by_member_stem() {
     );
 }
 
+#[cfg(feature = "zip")]
 fn sha256(bytes: &[u8]) -> String {
     use sha2::{Digest, Sha256};
     Sha256::digest(bytes)
@@ -336,6 +342,7 @@ fn sha256(bytes: &[u8]) -> String {
 /// associated report member byte for byte beside the bundle, names each file
 /// by its SHA-256, and says where every byte came from; a report no
 /// conversation reached is not copied.
+#[cfg(feature = "zip")]
 #[test]
 fn evidence_export_copies_the_record_and_its_reports_verbatim() {
     let root = TempRoot::new("evidence");
@@ -695,6 +702,7 @@ fn homogeneous_content_parts_use_the_shared_bound_and_empty_coverage() {
     assert!(shown["turns"].as_array().unwrap().is_empty());
 }
 
+#[cfg(feature = "zip")]
 #[test]
 fn source_and_decoded_budgets_cover_archive_metadata_and_reader_io() {
     let root = TempRoot::new("budgets");
@@ -951,6 +959,7 @@ fn empty_and_null_perplexity_fields_neither_request_nor_close() {
     );
 }
 
+#[cfg(feature = "zip")]
 #[test]
 fn records_from_a_member_that_fails_verification_are_withheld() {
     let root = TempRoot::new("checksum");

@@ -35,8 +35,11 @@ pub fn read_with_backends(
     let parent = selection.resolve(backends)?;
     let mut transcript =
         backends[parent.backend_index].child_transcript(&parent.session, reference)?;
-    let usage = usage::usage(&transcript);
-    let ending = endings::ending(
+    let selection_notes = parent.diagnostics.latest_warnings(&parent.session);
+    transcript.notes.extend(selection_notes.clone());
+    let mut usage = usage::usage(&transcript);
+    usage.notes.extend(selection_notes.clone());
+    let mut ending = endings::ending(
         transcript.clone(),
         Err(anyhow!(
             "nested child lineage is not inspected by this read"
@@ -44,6 +47,7 @@ pub fn read_with_backends(
         tail,
         false,
     );
+    ending.notes.extend(selection_notes);
     let total = transcript.turns.len();
     if total > tail {
         transcript.turns.drain(..total - tail);
@@ -89,7 +93,9 @@ pub fn read_full_with_backends(
             Ok(())
         },
     )?;
-    let usage = usage::streamed(&session, tally, &read);
+    let selection_notes = parent.diagnostics.latest_warnings(&parent.session);
+    let mut usage = usage::streamed(&session, tally, &read);
+    usage.notes.extend(selection_notes.clone());
     let turns = Vec::from(window);
     let truncation = Truncation {
         window: Truncation::window(turns.len(), total, tail),
@@ -100,7 +106,7 @@ pub fn read_full_with_backends(
         terminal: read.terminal.clone(),
         text_tail: None,
     };
-    let transcript = Transcript::with_evidence(
+    let mut transcript = Transcript::with_evidence(
         session,
         turns,
         truncation,
@@ -108,7 +114,8 @@ pub fn read_full_with_backends(
         read.trailing_record.clone(),
         usage.notes.clone(),
     );
-    let ending = endings::ending(
+    transcript.notes.extend(selection_notes.clone());
+    let mut ending = endings::ending(
         transcript.clone(),
         Err(anyhow!(
             "nested child lineage is not inspected by this read"
@@ -116,6 +123,7 @@ pub fn read_full_with_backends(
         tail,
         false,
     );
+    ending.notes.extend(selection_notes);
     Ok(ChildView {
         schema: CHILD_SCHEMA,
         parent: parent.session,

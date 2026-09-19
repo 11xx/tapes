@@ -143,18 +143,18 @@ pub struct SessionList {
 /// in a removed directory — a deleted per-change worktree, most often — may
 /// belong to the project, but nothing left on disk proves which repository it
 /// was, so it is excluded and counted rather than guessed at from its path.
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct Unplaced {
     /// Distinct directories excluded this way among the inspected candidates.
     pub directories: usize,
-    /// The first of them in path order.
+    /// The first of them in relevance order; ordering never proves membership.
     pub examples: Vec<std::path::PathBuf>,
 }
 
 const MAX_UNPLACED_EXAMPLES: usize = 8;
 
 impl Unplaced {
-    fn from_directories(directories: Vec<std::path::PathBuf>) -> Option<Self> {
+    pub(crate) fn from_directories(directories: Vec<std::path::PathBuf>) -> Option<Self> {
         (!directories.is_empty()).then(|| Self {
             directories: directories.len(),
             examples: directories
@@ -169,6 +169,55 @@ impl Unplaced {
 pub struct SessionCandidate {
     pub id: String,
     pub harness: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct SelectionDiagnostics {
+    /// Rows or stores a bounded candidate scan could not read. Unavailable
+    /// harnesses stay separate: their absence does not make a readable choice
+    /// uncertain.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub unreadable: Vec<String>,
+    /// Scoped candidates whose recorded directories no longer resolve.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unplaced: Option<Unplaced>,
+}
+
+impl SelectionDiagnostics {
+    fn from_listed(listed: &Listed) -> Self {
+        Self {
+            unreadable: listed.unreadable.clone(),
+            unplaced: Unplaced::from_directories(listed.unplaced.clone()),
+        }
+    }
+
+    /// The warning a latest selection carries when the bounded candidate scan
+    /// did not establish that its readable choice is the newest activity.
+    pub fn latest_warnings(&self, session: &Session) -> Vec<String> {
+        let mut warnings = Vec::new();
+        if !self.unreadable.is_empty() {
+            warnings.push(format!(
+                "--latest picked {} session {}, but newer activity may be hidden because unreadable rows or stores were omitted from the bounded candidate scan: {}",
+                session.harness(),
+                session.id,
+                self.unreadable.join("; ")
+            ));
+        }
+        if let Some(unplaced) = &self.unplaced {
+            let noun = if unplaced.directories == 1 {
+                "directory"
+            } else {
+                "directories"
+            };
+            warnings.push(format!(
+                "--latest picked {} session {}, but newer activity may be hidden because the bounded scoped scan excluded {} unresolved {noun}; membership cannot be proven",
+                session.harness(),
+                session.id,
+                unplaced.directories
+            ));
+        }
+        warnings
+    }
 }
 
 #[derive(Debug)]
@@ -258,6 +307,7 @@ impl std::error::Error for ResolveError {}
 pub struct ResolvedSession {
     pub backend_index: usize,
     pub session: Session,
+    pub diagnostics: SelectionDiagnostics,
 }
 
 /// Which store answers for a session id when a harness keeps more than one
@@ -725,7 +775,7 @@ pub(crate) fn list_scoped(
         unsearched: unsearched_sessions,
         scanned,
         scan_truncated,
-        unplaced: scope.map(Scope::unresolved).unwrap_or_default(),
+        unplaced: scope.map(Scope::unresolved_ranked).unwrap_or_default(),
     })
 }
 
@@ -806,6 +856,7 @@ pub fn latest_with_backends(
             "--latest cannot choose the newest session {scoped}: at least one candidate has no recorded activity timestamp"
         );
     }
+    let diagnostics = SelectionDiagnostics::from_listed(&listed);
     listed
         .sessions
         .into_iter()
@@ -822,6 +873,7 @@ pub fn latest_with_backends(
         .map(|(session, backend_index)| ResolvedSession {
             backend_index,
             session,
+            diagnostics: diagnostics.clone(),
         })
         .ok_or_else(|| {
             let mut message = format!("no session was found {scoped}");
@@ -854,6 +906,7 @@ pub fn resolve_session(
             Ok(Some(session)) if session.id == query => located.push(ResolvedSession {
                 backend_index,
                 session,
+                diagnostics: SelectionDiagnostics::default(),
             }),
             Ok(_) => {}
             // Kept, not discarded: a hit elsewhere still wins, but if nothing
@@ -946,6 +999,7 @@ pub fn resolve_session(
                 .map(|session| ResolvedSession {
                     backend_index,
                     session,
+                    diagnostics: SelectionDiagnostics::default(),
                 }),
         );
     }
@@ -1029,6 +1083,7 @@ impl Selection<'_> {
                         Ok(Some(session)) => matches.push(ResolvedSession {
                             backend_index,
                             session,
+                            diagnostics: SelectionDiagnostics::default(),
                         }),
                         Ok(None) => {}
                         Err(error) => {
@@ -1070,6 +1125,16 @@ impl Selection<'_> {
     }
 }
 
+/// Resolve a selection's degraded latest warning without opening its
+/// transcript. Non-latest selections have no candidate-scan warning.
+pub fn selection_warnings_with_backends(
+    backends: &[Box<dyn Backend>],
+    selection: Selection,
+) -> Result<Vec<String>> {
+    let resolved = selection.resolve(backends)?;
+    Ok(resolved.diagnostics.latest_warnings(&resolved.session))
+}
+
 pub fn show(selection: Selection, tail: Option<usize>) -> Result<Transcript> {
     show_with_backends(&backend::backends(), selection, tail.unwrap_or(100))
 }
@@ -1102,10 +1167,12 @@ pub fn usage_full_with_backends(
     let resolved = selection.resolve(backends)?;
     let backend = &backends[resolved.backend_index];
     let mut turns = usage::TurnTally::default();
-    let read = backend.stream_transcript(&resolved.session, None, &mut |turn| {
+    let mut read = backend.stream_transcript(&resolved.session, None, &mut |turn| {
         turns.add(&turn);
         Ok(())
     })?;
+    read.notes
+        .extend(resolved.diagnostics.latest_warnings(&resolved.session));
     let session = backend.stream_session(&resolved.session, &read)?;
     Ok(usage::streamed(&session, turns, &read))
 }
@@ -1117,7 +1184,10 @@ pub fn lineage_full_with_backends(
 ) -> Result<lineage::LineageView> {
     let resolved = selection.resolve(backends)?;
     let read = backends[resolved.backend_index].stream_lineage(&resolved.session)?;
-    Ok(lineage::view(&resolved.session, read))
+    let mut view = lineage::view(&resolved.session, read);
+    view.notes
+        .extend(resolved.diagnostics.latest_warnings(&resolved.session));
+    Ok(view)
 }
 
 /// One session's recorded relatives. The read never opens a child's turns:
@@ -1133,7 +1203,10 @@ pub fn lineage_with_backends(
 ) -> Result<lineage::LineageView> {
     let resolved = selection.resolve(backends)?;
     let read = backends[resolved.backend_index].lineage(&resolved.session)?;
-    Ok(lineage::view(&resolved.session, read))
+    let mut view = lineage::view(&resolved.session, read);
+    view.notes
+        .extend(resolved.diagnostics.latest_warnings(&resolved.session));
+    Ok(view)
 }
 
 /// One session's counted facts. The transcript read uses the export-shaped
@@ -1149,7 +1222,10 @@ pub fn stats_with_backends(
 ) -> Result<stats::StatsView> {
     let resolved = selection.resolve(backends)?;
     let backend = backends[resolved.backend_index].as_ref();
-    let transcript = declared_transcript(backend, &resolved.session, EXPORT_TAIL)?;
+    let mut transcript = declared_transcript(backend, &resolved.session, EXPORT_TAIL)?;
+    transcript
+        .notes
+        .extend(resolved.diagnostics.latest_warnings(&resolved.session));
     let lineage = backend.lineage(&resolved.session)?;
     Ok(stats::stats(transcript, &lineage))
 }
@@ -1165,7 +1241,10 @@ pub fn stats_full_with_backends(
     let backend = backends[resolved.backend_index].as_ref();
     let counted = stats::Counted::whole(backend, &resolved.session)?;
     let lineage = backend.stream_lineage(&resolved.session)?;
-    Ok(counted.view(&lineage))
+    let mut view = counted.view(&lineage);
+    view.notes
+        .extend(resolved.diagnostics.latest_warnings(&resolved.session));
+    Ok(view)
 }
 
 /// What a continuation of one session needs from its recording. The read is
@@ -1185,7 +1264,11 @@ pub fn brief_with_backends(
     tail: usize,
 ) -> Result<brief::Brief> {
     let resolved = selection.resolve(backends)?;
-    let transcript = backends[resolved.backend_index].transcript(&resolved.session, EXPORT_TAIL)?;
+    let mut transcript =
+        backends[resolved.backend_index].transcript(&resolved.session, EXPORT_TAIL)?;
+    transcript
+        .notes
+        .extend(resolved.diagnostics.latest_warnings(&resolved.session));
     let lineage = backends[resolved.backend_index].lineage(&resolved.session);
     Ok(brief::brief(transcript, lineage, tail))
 }
@@ -1200,7 +1283,11 @@ pub fn events_with_backends(
     tail: usize,
 ) -> Result<event::EventTranscript> {
     let resolved = selection.resolve(backends)?;
-    backends[resolved.backend_index].events(&resolved.session, tail)
+    let mut events = backends[resolved.backend_index].events(&resolved.session, tail)?;
+    events
+        .notes
+        .extend(resolved.diagnostics.latest_warnings(&resolved.session));
+    Ok(events)
 }
 
 /// Receives a whole-recording event projection as it streams: the session
@@ -1246,7 +1333,7 @@ pub fn events_full_with_backends(
     // program, so the window can decide which declarations it holds.
     let mut declared = HashMap::<String, usize>::new();
     backend.replayable(&resolved.session)?;
-    let read = stream_numbered(backend, &resolved.session, None, &mut |turn| {
+    let mut read = stream_numbered(backend, &resolved.session, None, &mut |turn| {
         turns += 1;
         content.add(&turn);
         keep_title_turn(&mut title, &turn);
@@ -1263,6 +1350,8 @@ pub fn events_full_with_backends(
         }
         Ok(())
     })?;
+    read.notes
+        .extend(resolved.diagnostics.latest_warnings(&resolved.session));
     let returned = turns.min(tail);
     let first = turns - returned;
     let selected = declared
@@ -1347,11 +1436,15 @@ pub fn show_with_backends(
     tail: usize,
 ) -> Result<Transcript> {
     let resolved = selection.resolve(backends)?;
-    declared_transcript(
+    let mut transcript = declared_transcript(
         backends[resolved.backend_index].as_ref(),
         &resolved.session,
         tail,
-    )
+    )?;
+    transcript
+        .notes
+        .extend(resolved.diagnostics.latest_warnings(&resolved.session));
+    Ok(transcript)
 }
 
 /// A bounded transcript that names the kinds its harness can record.
@@ -1381,12 +1474,15 @@ pub fn show_full_with_backends(
 ) -> Result<backend::StreamedTranscript> {
     let resolved = selection.resolve(backends)?;
     sink.session(&resolved.session)?;
-    stream_numbered(
+    let mut read = stream_numbered(
         backends[resolved.backend_index].as_ref(),
         &resolved.session,
         None,
         &mut |turn| sink.turn(turn),
-    )
+    )?;
+    read.notes
+        .extend(resolved.diagnostics.latest_warnings(&resolved.session));
+    Ok(read)
 }
 
 /// Stream a whole recording with ordinals counted from its first turn.
@@ -1439,12 +1535,14 @@ pub fn export_with_backends(
 ) -> Result<bundle::Bundle> {
     let directory = directory.unwrap_or_else(|| Path::new("/tmp"));
     let resolved = selection.resolve(backends)?;
+    let selection_notes = resolved.diagnostics.latest_warnings(&resolved.session);
     export_session(
         backends[resolved.backend_index].as_ref(),
         &resolved.session,
         directory,
         turns,
         read,
+        &selection_notes,
     )
 }
 
@@ -1454,18 +1552,30 @@ fn export_session(
     directory: &Path,
     turns: Option<model::TurnSelection>,
     read: ExportRead,
+    selection_notes: &[String],
 ) -> Result<bundle::Bundle> {
     match read {
-        ExportRead::Bounded => bundle::export(
-            &project_export(declared_transcript(backend, session, EXPORT_TAIL)?, turns),
-            directory,
-        ),
-        ExportRead::Whole => export_whole(backend, session, directory, turns),
+        ExportRead::Bounded => {
+            let mut transcript = declared_transcript(backend, session, EXPORT_TAIL)?;
+            transcript.notes.extend_from_slice(selection_notes);
+            bundle::export(&project_export(transcript, turns), directory)
+        }
+        ExportRead::Whole => export_whole(backend, session, directory, turns, selection_notes),
         ExportRead::Evidence => {
-            let transcript =
-                project_export(declared_transcript(backend, session, EXPORT_TAIL)?, turns);
+            let mut transcript = declared_transcript(backend, session, EXPORT_TAIL)?;
+            transcript.notes.extend_from_slice(selection_notes);
+            let transcript = project_export(transcript, turns);
             let mut bundle = bundle::export(&transcript, directory)?;
-            bundle.evidence = Some(evidence::write(&transcript, &bundle.json.path)?);
+            match evidence::write(&transcript, &bundle.json.path) {
+                Ok(evidence) => bundle.evidence = Some(evidence),
+                Err(error) => {
+                    let cleanup = bundle.discard();
+                    return match cleanup {
+                        Ok(()) => Err(error),
+                        Err(cleanup) => Err(error.context(cleanup.to_string())),
+                    };
+                }
+            }
             Ok(bundle)
         }
     }
@@ -1479,6 +1589,7 @@ fn export_whole(
     session: &Session,
     directory: &Path,
     turns: Option<model::TurnSelection>,
+    selection_notes: &[String],
 ) -> Result<bundle::Bundle> {
     backend.replayable(session)?;
     let mut first = bundle::JsonPass::open(directory, session)?;
@@ -1492,6 +1603,7 @@ fn export_whole(
         first.turn(&turn)
     })?;
     let mut facts = read.transcript(session.clone(), Vec::new(), None);
+    facts.notes.extend_from_slice(selection_notes);
     facts.projection = projection;
     let mut second = first.close(&facts)?;
     stream_numbered(backend, session, Some(&read), &mut |turn| {
@@ -1593,6 +1705,8 @@ pub struct ExportManifest {
     pub unsearched: Vec<String>,
     pub scanned: usize,
     pub scan_truncated: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unplaced: Option<Unplaced>,
 }
 
 /// One bundle per selected session, plus the manifest that spans them.
@@ -1646,12 +1760,20 @@ pub fn export_selection_with_backends(
         selection.sort,
     )?;
     let directory = directory.unwrap_or_else(|| Path::new("/tmp"));
+    let unplaced = Unplaced::from_directories(listed.unplaced.clone());
 
     let mut bundles = Vec::new();
     let mut sessions = Vec::new();
     let mut failed = Vec::new();
     for (session, origin) in listed.sessions.into_iter().zip(listed.origins) {
-        match export_session(backends[origin].as_ref(), &session, directory, turns, read) {
+        match export_session(
+            backends[origin].as_ref(),
+            &session,
+            directory,
+            turns,
+            read,
+            &[],
+        ) {
             Ok(bundle) => {
                 sessions.push(ExportedSession {
                     id: session.id.clone(),
@@ -1686,6 +1808,7 @@ pub fn export_selection_with_backends(
         unsearched: listed.unsearched,
         scanned: listed.scanned,
         scan_truncated: listed.scan_truncated,
+        unplaced,
     };
     let body = serde_json::to_string_pretty(&manifest)
         .context("failed to serialize the export manifest")?;
@@ -1714,6 +1837,8 @@ pub struct UsageSummary {
     pub unsearched: Vec<String>,
     pub scanned: usize,
     pub scan_truncated: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unplaced: Option<Unplaced>,
 }
 
 pub fn usage_summary(
@@ -1755,6 +1880,7 @@ pub fn usage_summary_with_backends(
         unsearched: listed.unsearched,
         scanned: listed.scanned,
         scan_truncated: listed.scan_truncated,
+        unplaced: Unplaced::from_directories(listed.unplaced),
     })
 }
 

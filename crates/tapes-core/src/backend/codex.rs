@@ -810,6 +810,10 @@ fn codex_user_kind(payload: &Value) -> TurnKind {
 struct CodexTurns {
     /// Every `id` and `call_id` a `response_item` has carried so far.
     response_ids: HashSet<String>,
+    /// Runtime item ids whose `item_started` record was reached in this read.
+    /// A completed item outside this set carries both halves of its own
+    /// operation, because its one record contains the invocation and result.
+    started_runtime_ids: HashSet<String>,
     /// The ids and actions of web searches turned into a turn whose other
     /// record has not been read yet, and whether that turn came from the item.
     /// Codex records a search both as an item and as a `web_search_call`, in
@@ -842,6 +846,7 @@ impl CodexTurns {
     /// The record's turns, or nothing when it mirrors a record already read.
     fn parse_unless_mirrored(&mut self, value: &Value) -> Option<Vec<Turn>> {
         let payload = &value["payload"];
+        let mut completed_only = false;
         match value["type"].as_str() {
             Some("response_item") => {
                 for key in ["id", "call_id"] {
@@ -855,6 +860,15 @@ impl CodexTurns {
             }
             Some("event_msg") => {
                 let item = &payload["item"];
+                if payload["type"] == "item_started" && is_codex_runtime_tool(item) {
+                    if let Some(id) = item["id"].as_str() {
+                        self.started_runtime_ids.insert(id.to_owned());
+                    }
+                } else if payload["type"] == "item_completed" && is_codex_runtime_tool(item) {
+                    completed_only = item["id"]
+                        .as_str()
+                        .is_some_and(|id| !self.started_runtime_ids.contains(id));
+                }
                 if item["type"] == "WebSearch" {
                     if !self.first_search(item, true) {
                         return None;
@@ -868,7 +882,7 @@ impl CodexTurns {
             }
             _ => {}
         }
-        Some(parse_turns(value))
+        Some(parse_turns(value, completed_only))
     }
 
     /// Whether this is the first record of its web search: remembered when
@@ -929,7 +943,7 @@ fn codex_unmapped(value: &Value) -> (String, bool) {
     (native_type, declined)
 }
 
-fn parse_turns(value: &Value) -> Vec<Turn> {
+fn parse_turns(value: &Value, completed_only: bool) -> Vec<Turn> {
     if value["type"] == "event_msg"
         && matches!(
             value["payload"]["type"].as_str(),
@@ -942,7 +956,7 @@ fn parse_turns(value: &Value) -> Vec<Turn> {
             return Vec::new();
         }
         let completed = payload["type"] == "item_completed";
-        let event = codex_runtime_tool_event(item, completed);
+        let event = codex_runtime_tool_event(item, completed, completed_only);
         return vec![Turn {
             role: Role::Tool,
             kind: TurnKind::Tool,
@@ -1029,7 +1043,7 @@ fn parse_turns(value: &Value) -> Vec<Turn> {
             Role::Tool,
             TurnKind::Tool,
             payload.to_string(),
-            Some(codex_runtime_tool_event(payload, true)),
+            Some(codex_runtime_tool_event(payload, true, false)),
             vec![tool_part(payload, "payload", "web_search_call")],
             tool_coverage(),
         ),
@@ -1145,13 +1159,14 @@ fn codex_tool_event(payload: &Value, subtype: &str) -> ToolEvent {
             crate::event::artifact_references(&payload_json(&payload["output"]))
         },
         artifact_consumptions: Vec::new(),
+        self_contained: false,
     }
 }
 
-fn codex_runtime_tool_event(item: &Value, completed: bool) -> ToolEvent {
-    let command = item.get("command").filter(|value| !value.is_null());
+fn codex_runtime_tool_event(item: &Value, completed: bool, completed_only: bool) -> ToolEvent {
+    let arguments = runtime_arguments(item);
     ToolEvent {
-        kind: if completed {
+        kind: if completed && !completed_only {
             EventKind::ToolResult
         } else {
             EventKind::ToolCall
@@ -1160,8 +1175,8 @@ fn codex_runtime_tool_event(item: &Value, completed: bool) -> ToolEvent {
         name: item["type"].as_str().map(str::to_owned),
         call_id: item["id"].as_str().map(str::to_owned),
         status: item["status"].as_str().map(str::to_owned),
-        arguments: (!completed)
-            .then(|| command.and_then(Bounded::from_value))
+        arguments: (completed_only || !completed)
+            .then(|| arguments.and_then(|value| Bounded::from_value(&value)))
             .flatten(),
         output: completed
             .then(|| {
@@ -1188,7 +1203,14 @@ fn codex_runtime_tool_event(item: &Value, completed: bool) -> ToolEvent {
             Vec::new()
         },
         artifact_consumptions: Vec::new(),
+        self_contained: completed_only,
     }
+}
+
+fn runtime_arguments(item: &Value) -> Option<Value> {
+    ["command", "arguments", "input", "path", "query", "changes"]
+        .into_iter()
+        .find_map(|field| item.get(field).filter(|value| !value.is_null()).cloned())
 }
 
 fn reasoning_text(payload: &Value) -> String {

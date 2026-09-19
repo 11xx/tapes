@@ -1,0 +1,1 @@
+{"type":"assistant","sessionId":"session-claude","uuid":"subagent-1","parentUuid":null,"timestamp":"2026-01-01T10:00:01Z","cwd":"/fixtures/project","message":{"role":"assistant","model":"claude-fixture","content":[{"type":"text","text":"Subagent fixture."}]}}

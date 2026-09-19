@@ -491,6 +491,13 @@ impl SelectionArgs {
             },
         }
     }
+
+    fn latest_warnings(&self, backends: &[Box<dyn Backend>]) -> Result<Vec<String>> {
+        if !self.latest {
+            return Ok(Vec::new());
+        }
+        tapes_core::selection_warnings_with_backends(backends, self.selection())
+    }
 }
 
 /// The common single-session and session-set selectors for aggregate-capable views.
@@ -620,6 +627,16 @@ impl SessionQueryArgs {
             harness: self.harness.as_deref(),
             exclude: &self.exclude,
         })
+    }
+
+    fn latest_warnings(&self, backends: &[Box<dyn Backend>]) -> Result<Vec<String>> {
+        let Some(selection) = self.single() else {
+            return Ok(Vec::new());
+        };
+        if !self.latest {
+            return Ok(Vec::new());
+        }
+        tapes_core::selection_warnings_with_backends(backends, selection)
     }
 
     fn has_set_selection(&self) -> bool {
@@ -1139,6 +1156,30 @@ fn print_json<T: Serialize>(value: &T, input: &InputArgs) -> Result<()> {
     Ok(())
 }
 
+fn print_json_with_selection_warnings<T: Serialize>(
+    value: &T,
+    input: &InputArgs,
+    warnings: &[String],
+) -> Result<()> {
+    if warnings.is_empty() {
+        return print_json(value, input);
+    }
+    let mut value = serde_json::to_value(value)?;
+    if let serde_json::Value::Object(object) = &mut value {
+        object.insert(
+            "selection_warnings".to_owned(),
+            serde_json::to_value(warnings)?,
+        );
+    }
+    print_json(&value, input)
+}
+
+fn print_selection_warnings(warnings: &[String]) {
+    for warning in warnings {
+        eprintln!("Warning: {warning}.");
+    }
+}
+
 fn dispatch(cli: Cli) -> Result<()> {
     let Some(mut command) = cli.command else {
         guide::print();
@@ -1221,6 +1262,14 @@ fn dispatch(cli: Cli) -> Result<()> {
             selection.validate_input()?;
             read.refuse_supplied(&selection.input)?;
             let by_latest = selection.latest;
+            let installed_backends = (!selection.input.supplied())
+                .then(|| read.backends())
+                .transpose()?;
+            let latest_warnings = installed_backends.as_deref().map_or_else(
+                || Ok(Vec::new()),
+                |backends| selection.latest_warnings(backends),
+            )?;
+            print_selection_warnings(&latest_warnings);
             let turns = if exchange {
                 Some((TurnSelection::EXCHANGE, "--exchange"))
             } else {
@@ -1251,7 +1300,9 @@ fn dispatch(cli: Cli) -> Result<()> {
                 )?
             } else {
                 let mut transcript = tapes_core::show_with_backends(
-                    &read.backends()?,
+                    installed_backends
+                        .as_deref()
+                        .expect("installed backends are present for an installed selection"),
                     selection.selection(),
                     read_tail.unwrap_or(100),
                 )?;
@@ -1280,6 +1331,8 @@ fn dispatch(cli: Cli) -> Result<()> {
                     "--input is not supported by page; supplied exports have no installed history cursor"
                 ));
             }
+            let latest_warnings = selection.latest_warnings(&tapes_core::backend::backends())?;
+            print_selection_warnings(&latest_warnings);
             let page = tapes_core::history::page(
                 selection.selection(),
                 cursor.as_deref(),
@@ -1320,6 +1373,8 @@ fn dispatch(cli: Cli) -> Result<()> {
                     "--input is not supported by history-search; supplied exports have no installed history cursor"
                 ));
             }
+            let latest_warnings = selection.latest_warnings(&tapes_core::backend::backends())?;
+            print_selection_warnings(&latest_warnings);
             let report = tapes_core::history::search(
                 selection.selection(),
                 cursor.as_deref(),
@@ -1364,6 +1419,8 @@ fn dispatch(cli: Cli) -> Result<()> {
                     "--input is not supported by metadata; supplied exports have no installed history cursor"
                 ));
             }
+            let latest_warnings = selection.latest_warnings(&tapes_core::backend::backends())?;
+            print_selection_warnings(&latest_warnings);
             let report = tapes_core::history::metadata(
                 selection.selection(),
                 cursor.as_deref(),
@@ -1401,6 +1458,12 @@ fn dispatch(cli: Cli) -> Result<()> {
             json,
         } => {
             selection.validate_input()?;
+            let latest_warnings = if full {
+                selection.latest_warnings(&tapes_core::backend::backends())?
+            } else {
+                selection.latest_warnings(&read.backends()?)?
+            };
+            print_selection_warnings(&latest_warnings);
             if full {
                 refuse_full_supplied(&selection.input)?;
             }
@@ -1474,6 +1537,13 @@ fn dispatch(cli: Cli) -> Result<()> {
             selection.validate_input()?;
             read.refuse_supplied(&selection.input)?;
             let by_latest = selection.latest;
+            let event_backends = if full {
+                tapes_core::backend::backends()
+            } else {
+                read.backends()?
+            };
+            let latest_warnings = selection.latest_warnings(&event_backends)?;
+            print_selection_warnings(&latest_warnings);
             let filter = tapes_core::event::EventFilter {
                 names: &name,
                 call_ids: &call_id,
@@ -1492,7 +1562,7 @@ fn dispatch(cli: Cli) -> Result<()> {
                 )?
             } else {
                 let mut events = tapes_core::events_with_backends(
-                    &read.backends()?,
+                    &event_backends,
                     selection.selection(),
                     tail.unwrap_or(usize::MAX),
                 )?;
@@ -1514,6 +1584,13 @@ fn dispatch(cli: Cli) -> Result<()> {
         } => {
             selection.validate_input()?;
             read.refuse_supplied(&selection.input)?;
+            let lineage_backends = if full {
+                tapes_core::backend::backends()
+            } else {
+                read.backends()?
+            };
+            let latest_warnings = selection.latest_warnings(&lineage_backends)?;
+            print_selection_warnings(&latest_warnings);
             let lineage = if full {
                 refuse_full_supplied(&selection.input)?;
                 tapes_core::lineage_full_with_backends(
@@ -1524,7 +1601,7 @@ fn dispatch(cli: Cli) -> Result<()> {
                 let backends = selection.input.backends()?;
                 tapes_core::lineage_with_backends(&backends, selection.selection())?
             } else {
-                tapes_core::lineage_with_backends(&read.backends()?, selection.selection())?
+                tapes_core::lineage_with_backends(&lineage_backends, selection.selection())?
             };
             if json {
                 print_json(&lineage, &selection.input)?;
@@ -1543,6 +1620,13 @@ fn dispatch(cli: Cli) -> Result<()> {
             if full {
                 refuse_full_supplied(&query.input)?;
             }
+            let single_backends = if full {
+                tapes_core::backend::backends()
+            } else {
+                read.backends()?
+            };
+            let latest_warnings = query.latest_warnings(&single_backends)?;
+            print_selection_warnings(&latest_warnings);
             if let Some(one) = query.single() {
                 let stats = if full {
                     tapes_core::stats_full_with_backends(&tapes_core::backend::backends(), one)?
@@ -1550,10 +1634,10 @@ fn dispatch(cli: Cli) -> Result<()> {
                     let backends = query.input.backends()?;
                     tapes_core::stats_with_backends(&backends, one)?
                 } else {
-                    tapes_core::stats_with_backends(&read.backends()?, one)?
+                    tapes_core::stats_with_backends(&single_backends, one)?
                 };
                 if json {
-                    print_json(&stats, &query.input)?;
+                    print_json_with_selection_warnings(&stats, &query.input, &latest_warnings)?;
                 } else {
                     print!("{}", render_stats(&stats));
                 }
@@ -1585,6 +1669,7 @@ fn dispatch(cli: Cli) -> Result<()> {
                     print_json(&summary, &query.input)?;
                 } else {
                     print_stats_summary(&summary);
+                    print_unplaced_note(summary.unplaced.as_ref(), summary.scanned);
                 }
                 if summary.read == 0 && !summary.failed.is_empty() {
                     return Err(anyhow!("no selected session could be read"));
@@ -1603,6 +1688,13 @@ fn dispatch(cli: Cli) -> Result<()> {
             if full {
                 refuse_full_supplied(&query.input)?;
             }
+            let single_backends = if full {
+                tapes_core::backend::backends()
+            } else {
+                read.backends()?
+            };
+            let latest_warnings = query.latest_warnings(&single_backends)?;
+            print_selection_warnings(&latest_warnings);
             if let Some(one) = query.single() {
                 let usage = if full {
                     tapes_core::usage_full_with_backends(&tapes_core::backend::backends(), one)?
@@ -1610,10 +1702,10 @@ fn dispatch(cli: Cli) -> Result<()> {
                     let backends = query.input.backends()?;
                     tapes_core::usage_with_backends(&backends, one)?
                 } else {
-                    tapes_core::usage_with_backends(&read.backends()?, one)?
+                    tapes_core::usage_with_backends(&single_backends, one)?
                 };
                 if json {
-                    print_json(&usage, &query.input)?;
+                    print_json_with_selection_warnings(&usage, &query.input, &latest_warnings)?;
                 } else {
                     print!("{}", render_usage(&usage));
                 }
@@ -1652,6 +1744,7 @@ fn dispatch(cli: Cli) -> Result<()> {
                         &summary.unsearched,
                         &summary.unavailable,
                     );
+                    print_unplaced_note(summary.unplaced.as_ref(), summary.scanned);
                 }
             }
         }
@@ -1663,15 +1756,15 @@ fn dispatch(cli: Cli) -> Result<()> {
         } => {
             selection.validate_input()?;
             read.refuse_supplied(&selection.input)?;
+            let brief_backends = read.backends()?;
+            let latest_warnings = selection.latest_warnings(&brief_backends)?;
+            print_selection_warnings(&latest_warnings);
             let brief = if selection.input.supplied() {
                 let backends = selection.input.backends()?;
                 tapes_core::brief_with_backends(&backends, selection.selection(), tail)?
             } else {
-                let mut brief = tapes_core::brief_with_backends(
-                    &read.backends()?,
-                    selection.selection(),
-                    tail,
-                )?;
+                let mut brief =
+                    tapes_core::brief_with_backends(&brief_backends, selection.selection(), tail)?;
                 liveness::annotate_brief(&mut brief);
                 brief
             };
@@ -1762,6 +1855,7 @@ fn dispatch(cli: Cli) -> Result<()> {
                     &report.unsearched,
                     &report.unavailable,
                 );
+                print_unplaced_note(report.unplaced.as_ref(), report.scanned);
             }
         }
         Command::Export {
@@ -1794,6 +1888,13 @@ fn dispatch(cli: Cli) -> Result<()> {
             } else {
                 tapes_core::ExportRead::Bounded
             };
+            let single_backends = if full {
+                tapes_core::backend::backends()
+            } else {
+                read.backends()?
+            };
+            let latest_warnings = query.latest_warnings(&single_backends)?;
+            print_selection_warnings(&latest_warnings);
             if let Some(one) = query.single() {
                 let bundle = if query.input.supplied() {
                     let backends = query.input.backends()?;
@@ -1806,7 +1907,7 @@ fn dispatch(cli: Cli) -> Result<()> {
                     )?
                 } else {
                     tapes_core::export_with_backends(
-                        &read.backends()?,
+                        &single_backends,
                         one,
                         bundle.as_deref(),
                         view,
@@ -1836,6 +1937,7 @@ fn dispatch(cli: Cli) -> Result<()> {
                     )?
                 };
                 print_selection_manifest(&export);
+                print_unplaced_note(export.manifest.unplaced.as_ref(), export.manifest.scanned);
                 if export.every_session_failed() {
                     return Err(anyhow!(
                         "no selected session could be exported; {} names each failure",
@@ -2827,30 +2929,33 @@ fn print_availability_note(result: &tapes_core::SessionList) {
         &result.unsearched,
         &result.unavailable,
     );
-    if let Some(unplaced) = &result.unplaced {
-        let examples = unplaced
-            .examples
-            .iter()
-            .map(|directory| directory.display().to_string())
-            .collect::<Vec<_>>()
-            .join(", ");
-        let more = if unplaced.directories > unplaced.examples.len() {
-            ", …"
-        } else {
-            ""
-        };
-        let noun = if unplaced.directories == 1 {
-            "directory"
-        } else {
-            "directories"
-        };
-        println!(
-            "Not placed: sessions whose recorded directory no longer exists cannot be proven to belong \
-             to this project ({} {noun}: {examples}{more}). \
-             `tapes list --global --directory <substring>` reaches them.",
-            unplaced.directories
-        );
-    }
+    print_unplaced_note(result.unplaced.as_ref(), result.scanned);
+}
+
+fn print_unplaced_note(unplaced: Option<&tapes_core::Unplaced>, scanned: usize) {
+    let Some(unplaced) = unplaced else {
+        return;
+    };
+    let examples = unplaced
+        .examples
+        .iter()
+        .map(|directory| directory.display().to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let more = if unplaced.directories > unplaced.examples.len() {
+        ", …"
+    } else {
+        ""
+    };
+    let noun = if unplaced.directories == 1 {
+        "directory"
+    } else {
+        "directories"
+    };
+    println!(
+        "Not placed: the bounded scan excluded {} distinct recorded {noun} among {scanned} inspected candidates; their sessions' membership in this project cannot be proven (examples: {examples}{more}). `tapes list --global --directory <substring>` reaches them.",
+        unplaced.directories
+    );
 }
 
 /// What a listing could not reach, stated the same way wherever a listing

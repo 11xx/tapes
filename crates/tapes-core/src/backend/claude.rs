@@ -1440,6 +1440,7 @@ fn claude_tool_event(block: &Value, subtype: &str) -> ToolEvent {
             crate::event::artifact_references(&block["content"])
         },
         artifact_consumptions: Vec::new(),
+        self_contained: false,
     }
 }
 

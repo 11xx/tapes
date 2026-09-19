@@ -70,7 +70,8 @@ projections; absent values remain omitted.
 Caller-supplied inputs use `--input PATH` one or more times with optional
 `--input-format auto|openai|chatgpt-exporter|perplexity` and `--source-scope`.
 The reader
-accepts files, extracted directories, and ZIP members without extracting or
+accepts files and extracted directories in every build; the optional `zip`
+feature adds ZIP members without extracting or
 opening referenced artifacts. It uses per-invocation scan, decoded, record,
 resident, member, and serialized-output bounds; `--after-occurrence` continues
 a collection only when the ordered supplied-input observation still matches.
@@ -105,7 +106,10 @@ and a file with no timestamp anywhere in either window remains a session with
 both timestamps absent. Missing activity is ordered after timestamped activity
 and cannot satisfy a date predicate. `--latest` refuses when a candidate lacks
 the activity evidence needed to prove the winner; filesystem modification time
-is never substituted.
+is never substituted. When a bounded latest scan has unreadable rows or
+stores, it returns the readable choice with a warning naming those diagnostics
+and stating that newer activity may be hidden; an unavailable harness alone
+does not produce that warning.
 
 `Model` contains the model identifier and an optional variant. The variant
 also carries an effort level when the harness records one. Its identity is the
@@ -306,7 +310,7 @@ An unpaired event carries one `incomplete` reason:
 |---|---|
 | `no-result-in-read` | The bounded read ended without reaching a result for this call. |
 | `call-before-read-bound` | A `file-tail` or `record-page` source bound can hide the call for this result. |
-| `call-not-recorded` | The read reached the recording's start and contains no call for this result. |
+| `call-not-recorded` | The read reached the recording's start and contains no call for this result; a Codex completion record that carries its own invocation is a complete pair instead. |
 
 `tapes events` serializes the projection as `tapes-events/6`. The object holds
 the same `Session` representation as `show`, the event records, complete and
@@ -727,8 +731,8 @@ flags and no transcript is read.
 `selection` restates the query that chose the set, with the members and
 meanings the export manifest's `selection` carries. The listing's
 `unavailable`, `unreadable`, `unsearched`, `scanned`, and `scan_truncated`
-are carried verbatim, so a total can be audited against the store it came
-from.
+are carried verbatim, as is the optional scoped `unplaced` record, so a total
+can be audited against the bounded scan and the store it came from.
 
 `groups` holds one entry per distinct combination of the requested
 dimensions: `harness`, `model` (the model id), `variant` (what qualifies that
@@ -867,7 +871,7 @@ opened. Each selected session then costs one bounded transcript read of
 `selection` restates the query that chose the set, with the members and
 meanings the export manifest's `selection` carries, and the listing's
 `unavailable`, `unreadable`, `unsearched`, `scanned`, and `scan_truncated` are
-carried verbatim.
+carried verbatim, along with optional `unplaced` scoped exclusions.
 
 Each ending carries the session identity, the coordinate to write down for it,
 the turns the report names, the facts the read establishes, and what it left
@@ -1258,7 +1262,10 @@ A scoped listing (`--here`, `--project`) excludes a candidate whose recorded
 directory no longer exists, because nothing left on disk proves its
 repository; when it excludes any, the optional `unplaced` object reports
 `directories`, the count of distinct such directories among the inspected
-candidates, and `examples`, the first eight in path order. `--global` with
+candidates, and `examples`, the first eight ranked by surviving ancestry,
+project worktree naming, then other paths. The count is dependent on the
+bounded scan, not a project total. The same structured `unplaced` record is
+carried by scoped usage, stats, endings, and export reports; `--global` with
 `--directory <substring>` reaches those sessions.
 `list --search` inspects the last 32 normalized turns per candidate before the
 per-harness result limit. The object always includes `sort`, either `newest` or
@@ -1292,7 +1299,8 @@ three files. Supplied-input artifact-native reports appear in the manifest's
 optional `artifacts` collection. A selected session whose store could not be read appears in
 `failed` with its diagnostic instead. The listing's own `unavailable`,
 `unreadable`, `unsearched`, `scanned`, and `scan_truncated` are carried
-verbatim, so the exported set can be audited against the store it came from.
+verbatim, along with optional `unplaced` scoped exclusions, so the exported
+set can be audited against the bounded scan and the store it came from.
 
 ```json
 {
@@ -1360,7 +1368,8 @@ harness read to its `declared` kinds, the `turns` every session read held by
 kind, and `unobserved`: the recordable kinds none of them held. A recordable
 kind no session in a wide selection produced is the shape a reader that has
 stopped recognizing it takes, so the human summary names it. Listing diagnostics (`unavailable`,
-`unreadable`, `unsearched`, `scanned`, `scan_truncated`) remain separate from
+`unreadable`, `unsearched`, `scanned`, `scan_truncated`, and optional `unplaced`)
+remain separate from
 transcript failures and per-session read bounds. An all-failed selected set
 still emits the report and exits unsuccessfully.
 

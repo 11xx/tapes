@@ -1,0 +1,3 @@
+{"type":"user","sessionId":"malformed","uuid":"user-1","parentUuid":null,"timestamp":"2026-01-01T11:00:00Z","cwd":"/fixtures/project","message":{"role":"user","content":"Read valid lines."}}
+this is not json
+{"type":"assistant","sessionId":"malformed","uuid":"assistant-1","parentUuid":"user-1","timestamp":"2026-01-01T11:00:01Z","cwd":"/fixtures/project","message":{"role":"assistant","model":"claude-fixture","content":[{"type":"text","text":"Invalid line skipped."}]}}

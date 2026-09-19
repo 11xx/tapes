@@ -23,7 +23,10 @@ START WITHOUT AN ID
   table of ids and choose between them. The scope is the
   project holding the current directory: every worktree of its repository, or
   the directory's subtree when it is not in one. --project <path> asks about
-  another project and --global drops the scope entirely.
+  another project and --global drops the scope entirely. If the bounded scan
+  cannot read candidate rows or stores, the chosen readable session remains
+  useful but every --latest view names the unreadable evidence and warns that
+  newer activity may be hidden; a missing harness alone is not a warning.
 
   "Most recent" is settled by recorded activity across the newest few sessions
   each store offers — but which ones those are is the store's own answer: file
@@ -129,7 +132,8 @@ READ A SUPPLIED EXPORT
   tapes export <id> --input <path> --bundle <dir>
   tapes export <id> --input <path> --bundle <dir> --evidence
 
-  `--input` reads files, extracted directories, and ZIP archives as a separate
+  `--input` reads files, extracted directories, and, with the optional `zip`
+  feature, ZIP archives as a separate
   source collection. It never falls back to installed harness stores. `auto`
   detects OpenAI, ChatGPT Exporter, and Perplexity shapes; a declared format never hands a
   failed record to another parser. Auto-detected overlapping representations
@@ -142,7 +146,9 @@ READ A SUPPLIED EXPORT
   same order. A named input path that does not exist is an error, and a
   conversation without a native ID is a gap rather than an invented identity.
   Exact titles are allowed; `--latest` is not, because supplied
-  exports do not establish a global newest session.
+  exports do not establish a global newest session. A build without `zip`
+  keeps plain JSON files and directories available and reports how to enable
+  the feature when a ZIP path is supplied.
 
   A native OpenAI container with a root `export_manifest.json` selects only the
   declared conversation shards, library metadata, and declared library `.dat`
@@ -361,9 +367,11 @@ EXPORT, THEN INGEST PROGRESSIVELY
   per session. Bundles are never joined: each session keeps its own three
   files, bounded unless --full, and manifest.json beside them is the only file spanning the
   set. It records the selection, every bundle's paths, the sessions whose
-  store could not be read, and the listing's own diagnostics, so the set can
-  be audited against the store. A session that fails costs its own bundle and
-  nothing else.
+  store could not be read, and the listing's own diagnostics, including scoped
+  `unplaced` directories, so the set can be audited against the bounded scan
+  and store. Each invocation reserves a unique sibling
+  prefix before writing, so concurrent exports do not replace one another; a
+  session that fails costs its own bundle and nothing else.
 
   Never ingest a whole bundle merely because it exists. A large trace read in
   full buys little over the context file and costs the budget the actual work

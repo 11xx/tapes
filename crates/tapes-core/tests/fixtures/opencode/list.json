@@ -1,0 +1,65 @@
+{
+  "data": [
+    {
+      "id": "ses_000000fixtureSharedSession",
+      "projectID": "0000000000000000000000000000000000000001",
+      "agent": "build",
+      "model": {
+        "id": "kimi-k3",
+        "providerID": "opencode-go",
+        "variant": "max"
+      },
+      "cost": 2.9737362000000003,
+      "tokens": {
+        "input": 132796,
+        "output": 36898,
+        "reasoning": 22925,
+        "cache": {
+          "read": 5593344,
+          "write": 0
+        }
+      },
+      "time": {
+        "created": 1784662770000,
+        "updated": 1784662790000
+      },
+      "title": "Synthetic opencode fixture session title",
+      "location": {
+        "directory": "/fixtures/shared-project"
+      }
+    },
+    {
+      "id": "ses_api_only_fixture",
+      "projectID": "0000000000000000000000000000000000000002",
+      "agent": "build",
+      "model": {
+        "id": "fixture-api-model",
+        "providerID": "opencode-go",
+        "variant": "balanced"
+      },
+      "cost": 0.5,
+      "tokens": {
+        "input": 120,
+        "output": 40,
+        "reasoning": 10,
+        "cache": {
+          "read": 20,
+          "write": 0
+        }
+      },
+      "time": {
+        "created": 1784663200000,
+        "updated": 1784663290000
+      },
+      "title": "API-only fixture session",
+      "location": {
+        "directory": "/fixtures/api-project"
+      },
+      "parentID": "ses_000000fixtureSharedSession"
+    }
+  ],
+  "cursor": {
+    "previous": "eyJvcmRlciI6ImRlc2MiLCJhbmNob3IiOnsiaWQiOiJzZXNfMDAwMDAwZml4dHVyZVNoYXJlZFNlc3Npb24iLCJ0aW1lIjoxNzg0NjYyNzkwMDAwLCJkaXJlY3Rpb24iOiJwcmV2aW91cyJ9fQ",
+    "next": "eyJvcmRlciI6ImRlc2MiLCJhbmNob3IiOnsiaWQiOiJzZXNfMDAwMDAwZml4dHVyZVNoYXJlZFNlc3Npb24iLCJ0aW1lIjoxNzg0NjYyNzkwMDAwLCJkaXJlY3Rpb24iOiJuZXh0In19"
+  }
+}
