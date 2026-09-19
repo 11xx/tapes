@@ -389,6 +389,12 @@ impl OpenCodeBackend {
     }
 
     fn database_rows(&self, query: &str) -> Result<DatabaseRows> {
+        parse_database_rows_lossy(&self.database_text(query)?)
+    }
+
+    /// A query's output with its header line, from sqlite3 in list mode where
+    /// it can reach the database file, or from `opencode db` otherwise.
+    fn database_text(&self, query: &str) -> Result<String> {
         if self.is_default_program("opencode") && program_available(OsStr::new("sqlite3")) {
             if let Some(database) = database_path("opencode.db").filter(|path| path.is_file()) {
                 let database = database
@@ -403,15 +409,12 @@ impl OpenCodeBackend {
                     &["-readonly", "-batch", "-list", "-header", database, query],
                     "opencode database",
                 )?;
-                let text = String::from_utf8(bytes)
-                    .context("opencode database returned non-UTF-8 output")?;
-                return parse_database_rows_lossy(&text);
+                return String::from_utf8(bytes)
+                    .context("opencode database returned non-UTF-8 output");
             }
         }
         let bytes = self.command_bytes(&["db", "--format", "tsv", query], "opencode database")?;
-        let text =
-            String::from_utf8(bytes).context("opencode database returned non-UTF-8 output")?;
-        parse_database_rows_lossy(&text)
+        String::from_utf8(bytes).context("opencode database returned non-UTF-8 output")
     }
 
     fn is_default_program(&self, name: &str) -> bool {
@@ -619,6 +622,7 @@ impl OpenCodeBackend {
                 }
             }
         }
+        let unidentified = rows.invalid.iter().any(|row| row.id.is_none());
         for row in rows.invalid {
             if let Some(id) = &row.id {
                 listing.unavailable_ids.push(id.clone());
@@ -628,7 +632,57 @@ impl OpenCodeBackend {
                 format!("opencode database returned an invalid row: {}", row.error),
             ));
         }
+        // A row that failed before its id could be read still names a
+        // session this store holds. The ids alone survive any transport, so
+        // the ones the listing could not read are the ones it did not parse.
+        if unidentified {
+            let parsed = listing
+                .sessions
+                .iter()
+                .map(|session| session.id.as_str())
+                .chain(listing.unavailable_ids.iter().map(String::as_str))
+                .map(str::to_owned)
+                .collect::<HashSet<_>>();
+            let unread = self
+                .database_ids(&format!(
+                    "SELECT id AS row FROM session ORDER BY time_updated DESC LIMIT {limit}"
+                ))?
+                .into_iter()
+                .filter(|id| !parsed.contains(id))
+                .collect::<Vec<_>>();
+            listing.unavailable.extend(unread.iter().map(|id| {
+                session_diagnostic(Some(id), "its listing row could not be parsed".to_owned())
+            }));
+            listing.unavailable_ids.extend(unread);
+        }
+        let unreadable = scanned - listing.sessions.len();
+        if unreadable > 0 {
+            listing.unavailable.insert(
+                0,
+                format!(
+                    "opencode store {}: {unreadable} of {scanned} session rows unreadable",
+                    self.store().unwrap_or_default(),
+                ),
+            );
+        }
         Ok(listing)
+    }
+
+    /// The bare values of a one-column query whose values need no quoting,
+    /// such as session ids, through the same transport as every other read.
+    fn database_ids(&self, query: &str) -> Result<Vec<String>> {
+        let text = self.database_text(query)?;
+        let mut lines = text.lines();
+        match lines.next() {
+            None => return Ok(Vec::new()),
+            Some("row") => {}
+            Some(_) => return Err(anyhow!("opencode database returned unexpected columns")),
+        }
+        Ok(lines
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(str::to_owned)
+            .collect())
     }
 
     fn database_locate(&self, id: &str) -> Result<Option<Session>> {
@@ -1130,6 +1184,22 @@ impl OpenCodeBackend {
 }
 
 impl Backend for OpenCodeBackend {
+    /// Stable OpenCode and opencode2 project many of the same sessions.
+    fn shares_session_ids(&self) -> bool {
+        true
+    }
+
+    fn store(&self) -> Option<String> {
+        Some(if self.uses_database() {
+            database_path("opencode.db").map_or_else(
+                || format!("{} db", self.program.to_string_lossy()),
+                |path| path.display().to_string(),
+            )
+        } else {
+            format!("{} api", self.program.to_string_lossy())
+        })
+    }
+
     fn kinds(&self) -> KindDeclaration {
         KindDeclaration {
             recordable: TurnSelection::only([

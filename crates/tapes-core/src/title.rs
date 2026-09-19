@@ -45,11 +45,11 @@ pub fn resolve(
                 backend.harness()
             ));
         }
-        precedence.unreadable(backend.harness(), origin, &listing.unavailable_ids);
+        precedence.unreadable(backend.as_ref(), origin, &listing.unavailable_ids);
         incomplete.extend(listing.unavailable);
         incomplete.extend(listing.unsearched);
         for session in listing.sessions {
-            if !precedence.admits(backend.harness(), origin, &session.id) {
+            if !precedence.admits(backend.as_ref(), origin, &session.id) {
                 continue;
             }
             if session.title.as_deref() == Some(title) {

@@ -240,6 +240,10 @@ database_rows() {
 
 if [ "$mode" = database ] || [ "$mode" = database-malformed ]; then
   case "$query" in
+    *"SELECT id AS row FROM session ORDER BY time_updated DESC LIMIT "*)
+      printf '%s\n' row
+      /usr/bin/sed -n 's/.*"id":"\([^"]*\)".*/\1/p' "$fixture_dir/database-sessions.json"
+      ;;
     *"FROM session ORDER BY time_updated DESC LIMIT "*)
       if [ "$mode" = database-malformed ]; then
         database_rows database-sessions-malformed.json
