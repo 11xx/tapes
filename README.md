@@ -546,11 +546,16 @@ with it, and a supplied input refuses it.
 
 `export --evidence`, for a supplied input, also copies the source bytes behind
 each conversation into a `<bundle>.evidence/` directory beside its bundle: the
-conversation record's own span and every associated report's whole ZIP
-member, byte for byte, named by their SHA-256, with a `tapes-evidence/1`
+conversation record's own span and every associated report's whole member,
+byte for byte, named by their SHA-256, with a `tapes-evidence/2`
 manifest giving the input's length and digest, each file's member, size, CRC,
-and span, and what could not be copied. A consumer that must cite exactly can
-keep the evidence and resolve every citation without the original archive.
+and span, and what could not be copied. A report is copied out of whichever
+container holds its conversation, a supplied directory or an archive alike;
+a record supplied as a file on its own sits beside no members, and the
+manifest says so with `associations_resolvable` rather than reporting an
+empty association list that could be mistaken for a conversation without
+reports. A consumer that must cite exactly can keep the evidence and resolve
+every citation without the original input.
 
 Given the listing flags in place of an id — `--here`, `--project <path>`,
 `--global`, `--harness`, `--model`, `--directory`, `--since`, `--until`,

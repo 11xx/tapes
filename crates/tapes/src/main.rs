@@ -1120,9 +1120,12 @@ enum Command {
         /// Beside each supplied conversation's bundle, copy the source bytes
         /// behind it into `<bundle>.evidence/`: the conversation record's own
         /// span and each associated report's whole member, byte for byte and
-        /// named by their SHA-256, with a tapes-evidence/1 manifest naming
+        /// named by their SHA-256, with a tapes-evidence/2 manifest naming
         /// the input's length and digest, each file's member, size, CRC, and
-        /// span, and what could not be copied. Supplied inputs only.
+        /// span, whether the input could hold associated reports at all, and
+        /// what could not be copied. Reports come out of the supplied
+        /// directory or archive holding the conversation. Supplied inputs
+        /// only.
         #[arg(long, conflicts_with = "full")]
         evidence: bool,
     },

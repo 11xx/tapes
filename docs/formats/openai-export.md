@@ -167,20 +167,26 @@ reader rather than to the source.
 conversation's bundle, into a `<bundle>.evidence/` directory. The
 conversation's record is its span copied byte for byte out of its file or ZIP
 member; each report the projection associates with the conversation is its
-whole ZIP member. Every file is named `sha256-<hex>` with its source's
+whole member, read from the supplied directory or the archive that holds the
+conversation. Every file is named `sha256-<hex>` with its source's
 extension, so the projection's `read.record_sha256` names the record file
 directly and every `record_ref.pointer` resolves inside it without the input.
-A `tapes-evidence/1` `manifest.json` records the input file's byte length and
+A `tapes-evidence/2` `manifest.json` records the input file's byte length and
 SHA-256; `reader` and the projection's `schema` and `projection_options`; per
 file its `role` (`record` or `report`), `sha256`, `bytes`, the ZIP member's
-`name`, `size`, and `crc32`, and a record's `span`; per association the report
-member, which of the report's fields (`backing`, `originating_conversation`)
-named the conversation, and whether it was copied; and `gaps` for anything not
-copied, including the read's own gaps. Members are read to their end so the
+`name`, `size`, and `crc32`, and a record's `span`; `associations_resolvable`,
+which is false for a record supplied as a file on its own, because such an
+input holds no members a report could be copied from and its empty
+association list is a fact about the input rather than about the
+conversation; per association the report member, which of the report's fields
+(`backing`, `originating_conversation`) named the conversation, and whether
+it was copied; and `gaps` for anything not copied, including the read's own
+gaps. Members are read to their end so the
 archive's checksum is checked: a member that fails decompression or its
 checksum is a gap, never a file. A record whose bytes no longer match the
 digest the read recorded is refused as a changed input. A report is copied
-only out of the ZIP that holds its conversation. The directory is written
+only out of the container that holds its conversation, and a member name that
+would leave that container is refused. The directory is written
 under a `.partial` name and renamed into place whole; its member files are
 also published from create-new partials, so a failed member copy leaves a
 manifest gap without a partial member. The input is only ever opened for

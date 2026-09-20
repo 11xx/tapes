@@ -9157,3 +9157,114 @@ fn usage_summary_partitions_incompatible_accounting_without_a_grand_sum() {
         assert!(row.get("tokens").is_some());
     }
 }
+
+/// A conversation supplied as a directory member carries its associated
+/// reports, so evidence export copies both the record's own span and each
+/// whole report beside it, without the archive feature being involved.
+#[test]
+fn directory_input_evidence_copies_the_record_and_its_associated_reports() {
+    let root = TemporaryDirectory::new(std::env::temp_dir().join(format!(
+        "tapes-input-directory-evidence-{}",
+        std::process::id()
+    )));
+    let input = root.path().join("export");
+    fs::create_dir_all(&input).unwrap();
+    let conversation = br#"[{"id":"associated-1","current_node":"node","mapping":{"root":{"id":"root","parent":null,"message":null},"node":{"id":"node","parent":"root","message":{"id":"message-1","author":{"role":"user"},"content":{"content_type":"text","parts":["hello"]}}}}}]"#;
+    fs::write(input.join("conversations.json"), conversation).unwrap();
+    let report = br#"{"backing_conversation_id":"associated-1","widget_session_id":"report-1","widget_state":{"status":"completed","report_message":{"id":"report-message","author":{"role":"assistant"},"content":{"parts":[{"type":"text","text":"private report body"}]}}}}"#;
+    fs::write(input.join("file-report.dat"), report).unwrap();
+
+    let bundle = root.path().join("bundles");
+    let output = tapes()
+        .args(["export", "associated-1", "--input"])
+        .arg(&input)
+        .args(["--input-format", "openai", "--evidence", "--bundle"])
+        .arg(&bundle)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let evidence = fs::read_dir(&bundle)
+        .unwrap()
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path())
+        .find(|path| path.extension().is_some_and(|ext| ext == "evidence"))
+        .expect("an evidence directory beside the bundle");
+    let manifest: Value =
+        serde_json::from_slice(&fs::read(evidence.join("manifest.json")).unwrap()).unwrap();
+    assert_eq!(manifest["schema"], "tapes-evidence/2");
+    assert_eq!(manifest["associations_resolvable"], true);
+    assert!(
+        manifest["gaps"].as_array().unwrap().is_empty(),
+        "{}",
+        manifest["gaps"]
+    );
+
+    let files = manifest["files"].as_array().unwrap();
+    let record = files
+        .iter()
+        .find(|file| file["role"] == "record")
+        .expect("the record's own bytes");
+    let copied = fs::read(evidence.join(record["file"].as_str().unwrap())).unwrap();
+    assert_eq!(
+        copied,
+        &conversation[1..conversation.len() - 1],
+        "the record's span is copied byte for byte"
+    );
+
+    let association = &manifest["associations"][0];
+    assert_eq!(association["member"], "file-report.dat");
+    assert_eq!(association["copied"], true);
+    let report_file = files
+        .iter()
+        .find(|file| file["role"] == "report")
+        .expect("the associated report");
+    assert_eq!(
+        fs::read(evidence.join(report_file["file"].as_str().unwrap())).unwrap(),
+        report,
+        "the report member is copied whole"
+    );
+}
+
+/// A record read from a file on its own sits beside no members at all, so an
+/// empty association list there is a fact about the input rather than about
+/// the conversation, and the manifest says which.
+#[test]
+fn single_file_input_evidence_reports_that_associations_are_out_of_scope() {
+    let root = TemporaryDirectory::new(
+        std::env::temp_dir().join(format!("tapes-input-file-evidence-{}", std::process::id())),
+    );
+    let bundle = root.path().join("bundles");
+    let output = tapes()
+        .args(["export", "supplied-1", "--input"])
+        .arg(supplied_fixture("chatgpt-export.json"))
+        .args([
+            "--input-format",
+            "chatgpt-exporter",
+            "--evidence",
+            "--bundle",
+        ])
+        .arg(&bundle)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let evidence = fs::read_dir(&bundle)
+        .unwrap()
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path())
+        .find(|path| path.extension().is_some_and(|ext| ext == "evidence"))
+        .expect("an evidence directory beside the bundle");
+    let manifest: Value =
+        serde_json::from_slice(&fs::read(evidence.join("manifest.json")).unwrap()).unwrap();
+    assert_eq!(manifest["associations_resolvable"], false);
+    assert!(manifest["associations"].as_array().unwrap().is_empty());
+}

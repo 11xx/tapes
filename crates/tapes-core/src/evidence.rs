@@ -18,14 +18,13 @@ use sha2::{Digest, Sha256};
 
 use crate::bundle::BundleFile;
 use crate::content::ArtifactReference;
-use crate::model::{ByteSpan, Transcript};
+use crate::model::{ByteSpan, SourceLocation, Transcript};
 use crate::reader::ReaderIdentity;
 
-pub const EVIDENCE_SCHEMA: &str = "tapes-evidence/1";
+pub const EVIDENCE_SCHEMA: &str = "tapes-evidence/2";
 
-/// The most bytes one copied member may decompress to. A member larger than
-/// this is a gap, so an evidence set stays bounded like every other read.
-#[cfg(feature = "zip")]
+/// The most bytes one copied member may hold. A member larger than this is
+/// a gap, so an evidence set stays bounded like every other read.
 const MAX_MEMBER_BYTES: u64 = 512 * 1024 * 1024;
 
 /// The manifest an evidence set is described by.
@@ -38,6 +37,11 @@ pub struct EvidenceManifest {
     /// The projection written beside the evidence, which cites it.
     pub projection: ProjectionCoordinates,
     pub files: Vec<EvidenceFile>,
+    /// Whether the input this record was read from can hold associated
+    /// reports at all. A whole file holds one record and no siblings, so an
+    /// empty `associations` there states the shape of the input rather than
+    /// the absence of reports for the conversation.
+    pub associations_resolvable: bool,
     /// Reports the projection associates with the conversation, and which of
     /// its fields named the conversation.
     pub associations: Vec<Association>,
@@ -104,9 +108,16 @@ pub struct EvidenceGap {
     pub reason: String,
 }
 
-/// Where a supplied record's bytes live: a file, or a member of a ZIP.
+/// Where a supplied record's bytes live: a whole file, a member of a
+/// supplied directory, or a member of a ZIP. A directory member and a ZIP
+/// member both sit beside the siblings a report is copied from; a whole file
+/// has no siblings and so can hold no association.
 enum Source {
     File(PathBuf),
+    Directory {
+        root: PathBuf,
+        path: PathBuf,
+    },
     #[cfg(feature = "zip")]
     Zip {
         archive: PathBuf,
@@ -134,20 +145,7 @@ pub fn write(transcript: &Transcript, json: &Path) -> Result<BundleFile> {
         .location
         .as_ref()
         .ok_or_else(|| anyhow!("the session names no source to copy from"))?;
-    let source = match &location.member {
-        #[cfg(feature = "zip")]
-        Some(member) => Source::Zip {
-            archive: PathBuf::from(&location.locator),
-            member: member.clone(),
-        },
-        #[cfg(not(feature = "zip"))]
-        Some(_) => {
-            return Err(anyhow!(
-                "ZIP evidence requires the `zip` feature; rebuild with `--features zip`"
-            ))
-        }
-        None => Source::File(PathBuf::from(&location.locator)),
-    };
+    let source = locate(location)?;
 
     let stem = json
         .file_stem()
@@ -168,6 +166,7 @@ pub fn write(transcript: &Transcript, json: &Path) -> Result<BundleFile> {
             projection_options: read.projection_options.clone(),
         },
         files: Vec::new(),
+        associations_resolvable: source.holds_siblings(),
         associations: Vec::new(),
         gaps: Vec::new(),
     };
@@ -194,26 +193,15 @@ pub fn write(transcript: &Transcript, json: &Path) -> Result<BundleFile> {
         .filter(|(_, conversation)| *conversation == Some(transcript.session.id.as_str()))
         .map(|(field, _)| field)
         .collect();
-        let copied = match &source {
-            #[cfg(feature = "zip")]
-            Source::Zip { archive, .. } => match copy_member(archive, &member, &partial.path) {
-                Ok(file) => {
-                    manifest.files.push(file);
-                    true
-                }
-                Err(reason) => {
-                    manifest.gaps.push(EvidenceGap {
-                        member: Some(member.clone()),
-                        reason,
-                    });
-                    false
-                }
-            },
-            Source::File(_) => {
+        let copied = match copy_report(&source, &member, &partial.path) {
+            Ok(file) => {
+                manifest.files.push(file);
+                true
+            }
+            Err(reason) => {
                 manifest.gaps.push(EvidenceGap {
                     member: Some(member.clone()),
-                    reason: "a report is copied only out of the ZIP that holds its conversation"
-                        .to_owned(),
+                    reason,
                 });
                 false
             }
@@ -245,9 +233,13 @@ pub fn write(transcript: &Transcript, json: &Path) -> Result<BundleFile> {
 }
 
 impl Source {
+    /// The file whose bytes the record was read out of, observed whole for
+    /// the manifest. For a directory member that is the member's own file,
+    /// not the directory, because a directory has no length or digest.
     fn container(&self) -> &Path {
         match self {
             Source::File(path) => path,
+            Source::Directory { path, .. } => path,
             #[cfg(feature = "zip")]
             Source::Zip { archive, .. } => archive,
         }
@@ -256,10 +248,58 @@ impl Source {
     fn member(&self) -> Option<&str> {
         match self {
             Source::File(_) => None,
+            Source::Directory { path, .. } => path.file_name().and_then(|name| name.to_str()),
             #[cfg(feature = "zip")]
             Source::Zip { member, .. } => Some(member),
         }
     }
+
+    /// Whether the record sits beside other members a report could be copied
+    /// from. A whole file does not, so its empty association list says
+    /// nothing about the conversation.
+    fn holds_siblings(&self) -> bool {
+        match self {
+            Source::File(_) => false,
+            Source::Directory { .. } => true,
+            #[cfg(feature = "zip")]
+            Source::Zip { .. } => true,
+        }
+    }
+}
+
+/// Resolve where a projection's record bytes are to be read from. The read
+/// records the container the record was one member of, so a supplied
+/// directory and an archive are told apart by what the input was rather
+/// than by what its paths look like.
+fn locate(location: &SourceLocation) -> Result<Source> {
+    let locator = PathBuf::from(&location.locator);
+    let Some(container) = location.container.as_ref().map(PathBuf::from) else {
+        return Ok(Source::File(locator));
+    };
+    if container.is_dir() {
+        return Ok(Source::Directory {
+            root: container,
+            path: locator,
+        });
+    }
+    zip_source(container, location.member.as_deref())
+}
+
+#[cfg(feature = "zip")]
+fn zip_source(archive: PathBuf, member: Option<&str>) -> Result<Source> {
+    let member = member
+        .ok_or_else(|| anyhow!("the read names an archive container but no member within it"))?;
+    Ok(Source::Zip {
+        archive,
+        member: member.to_owned(),
+    })
+}
+
+#[cfg(not(feature = "zip"))]
+fn zip_source(_archive: PathBuf, _member: Option<&str>) -> Result<Source> {
+    Err(anyhow!(
+        "ZIP evidence requires the `zip` feature; rebuild with `--features zip`"
+    ))
 }
 
 /// The reports the projection associates with its conversation: artifacts
@@ -315,6 +355,7 @@ fn copy_record(
 ) -> std::result::Result<EvidenceFile, String> {
     let (bytes, member) = match source {
         Source::File(path) => (read_span(path, span)?, None),
+        Source::Directory { path, .. } => (read_span(path, span)?, None),
         #[cfg(feature = "zip")]
         Source::Zip { archive, member } => {
             let (whole, facts) = read_member(archive, member)?;
@@ -346,14 +387,71 @@ fn copy_record(
     })
 }
 
-/// Copy a whole report member, named by its digest and keeping its extension.
-#[cfg(feature = "zip")]
-fn copy_member(
-    archive: &Path,
+/// Copy a whole report member out of whichever container holds it. A record
+/// read from a file on its own has no container to look in.
+fn copy_report(
+    source: &Source,
     member: &str,
     directory: &Path,
 ) -> std::result::Result<EvidenceFile, String> {
-    let (bytes, facts) = read_member(archive, member)?;
+    match source {
+        Source::File(_) => Err(
+            "a report is copied out of the directory or archive that holds its conversation; \
+             this record was read from a file on its own"
+                .to_owned(),
+        ),
+        Source::Directory { root, .. } => copy_sibling(root, member, directory),
+        #[cfg(feature = "zip")]
+        Source::Zip { archive, .. } => copy_member(archive, member, directory),
+    }
+}
+
+/// Copy a whole report member sitting beside its conversation in a supplied
+/// directory. The member name is the one the read normalized, and it is
+/// resolved under the root alone, so nothing outside the supplied directory
+/// is ever opened.
+fn copy_sibling(
+    root: &Path,
+    member: &str,
+    directory: &Path,
+) -> std::result::Result<EvidenceFile, String> {
+    let path = resolve_sibling(root, member)?;
+    let length = fs::metadata(&path)
+        .map_err(|error| format!("member {member}: {error}"))?
+        .len();
+    if length > MAX_MEMBER_BYTES {
+        return Err(format!(
+            "member {member} holds {length} bytes, over the {} bound",
+            crate::byte_size::ByteSize::new(MAX_MEMBER_BYTES)
+        ));
+    }
+    let bytes = fs::read(&path).map_err(|error| format!("member {member}: {error}"))?;
+    write_report(member, bytes, None, directory)
+}
+
+/// Join a normalized member name under the supplied root, refusing any name
+/// that would leave it.
+fn resolve_sibling(root: &Path, member: &str) -> std::result::Result<PathBuf, String> {
+    let relative = Path::new(member);
+    if relative.is_absolute()
+        || relative
+            .components()
+            .any(|component| !matches!(component, std::path::Component::Normal(_)))
+    {
+        return Err(format!(
+            "member {member} is not a name relative to the supplied directory"
+        ));
+    }
+    Ok(root.join(relative))
+}
+
+/// Name a copied report by its digest, keeping its extension, and write it.
+fn write_report(
+    member: &str,
+    bytes: Vec<u8>,
+    facts: Option<MemberFacts>,
+    directory: &Path,
+) -> std::result::Result<EvidenceFile, String> {
     let sha256 = hex(&Sha256::digest(&bytes));
     let extension = Path::new(member)
         .extension()
@@ -366,9 +464,20 @@ fn copy_member(
         file,
         sha256,
         bytes: bytes.len() as u64,
-        member: Some(facts),
+        member: facts,
         span: None,
     })
+}
+
+/// Copy a whole report member, named by its digest and keeping its extension.
+#[cfg(feature = "zip")]
+fn copy_member(
+    archive: &Path,
+    member: &str,
+    directory: &Path,
+) -> std::result::Result<EvidenceFile, String> {
+    let (bytes, facts) = read_member(archive, member)?;
+    write_report(member, bytes, Some(facts), directory)
 }
 
 fn read_span(path: &Path, span: ByteSpan) -> std::result::Result<Vec<u8>, String> {
