@@ -112,6 +112,11 @@ pub struct SourceLocation {
     pub locator: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub member: Option<String>,
+    /// The supplied directory or archive the record was one member of.
+    /// Absent when the input was a single file, which holds one record and
+    /// no siblings.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub container: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -147,6 +152,7 @@ impl SourceDescriptor {
             location: Some(SourceLocation {
                 locator: locator.into(),
                 member: None,
+                container: None,
             }),
         }
     }
@@ -169,6 +175,7 @@ impl SourceDescriptor {
             location: Some(SourceLocation {
                 locator: locator.into(),
                 member: None,
+                container: None,
             }),
         }
     }

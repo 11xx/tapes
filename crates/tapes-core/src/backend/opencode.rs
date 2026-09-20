@@ -609,6 +609,7 @@ impl OpenCodeBackend {
                     session.source.location = Some(SourceLocation {
                         locator: self.store_coordinate(&session.id),
                         member: None,
+                        container: None,
                     });
                     listing.sessions.push(session);
                 }
@@ -702,6 +703,7 @@ impl OpenCodeBackend {
             session.source.location = Some(SourceLocation {
                 locator: self.store_coordinate(&session.id),
                 member: None,
+                container: None,
             });
         }
         Ok(session)
@@ -1070,6 +1072,7 @@ impl OpenCodeBackend {
         session.source.location = Some(SourceLocation {
             locator: self.store_coordinate(&session.id),
             member: None,
+            container: None,
         });
         Ok(Some(session))
     }
@@ -1121,6 +1124,7 @@ impl OpenCodeBackend {
                 session.source.location = Some(SourceLocation {
                     locator: self.store_coordinate(&session.id),
                     member: None,
+                    container: None,
                 });
                 session
             })
