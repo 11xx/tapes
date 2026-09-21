@@ -102,10 +102,16 @@ that a command.
 
 | harness | store | retrieval |
 | :-- | :-- | :-- |
-| claude | `~/.claude/projects/<slug>/<session>.jsonl` | file discovery |
+| claude | `<CLAUDE_CONFIG_DIR>/projects/<slug>/<session>.jsonl` or `~/.claude/projects/<slug>/<session>.jsonl` | file discovery |
 | codex | `$CODEX_HOME/sessions/<y>/<m>/<d>/rollout-*.jsonl` | file discovery |
 | opencode | Stable SQLite or beta API store | `opencode db --format tsv` and `opencode2 api` |
 | pi | `~/.pi/agent/sessions`, append-only tree | file discovery |
+
+Claude uses the exact value of `CLAUDE_CONFIG_DIR` joined with `projects` when
+the variable is set. An empty value selects `projects` under the current
+working directory, and a relative value is resolved from there. When the
+variable is unset, the fallback is `HOME/.claude/projects`; tapes scans only
+the selected root.
 
 A harness whose binary or store is absent reports itself unavailable; it
 never fails a listing. Listing works with any subset installed.

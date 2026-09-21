@@ -6,8 +6,16 @@ harness and drifts; check a real transcript before trusting any row here.
 ## File location
 
 ```
-~/.claude/projects/<encoded-cwd>/<session-uuid>.jsonl
+<projects-root>/<encoded-cwd>/<session-uuid>.jsonl
 ```
+
+When `CLAUDE_CONFIG_DIR` is set, including when it is empty, `<projects-root>`
+is its exact value joined with `projects`. When the variable is unset, the
+root is `~/.claude/projects`. An empty value therefore selects `projects`
+relative to the process working directory, and a relative value is resolved
+relative to that directory. The path is used as written: `tapes` does not
+canonicalize it, expand a tilde, require an absolute path, substitute `HOME`
+for an empty value, or scan another root.
 
 `<encoded-cwd>` is the absolute path with each `/` replaced by `-`, with a
 leading `-`. A `.` is replaced the same way, and other punctuation is assumed
@@ -26,8 +34,6 @@ records the spelling the session used, so the same directory reached through
 a symlink produces a different name. `tapes` therefore never treats these
 names as an index of which project a session belongs to — the `cwd` field
 inside the transcript is the only authoritative answer.
-
-`$CLAUDE_HOME` (default `~/.claude`) and `$PROJECTS_DIR` are overridable for testing.
 
 ## Top-level fields on every message
 
@@ -316,7 +322,7 @@ A session's subagent threads live one level deeper, and each carries the
 **parent's** `sessionId`:
 
 ```
-~/.claude/projects/<encoded-cwd>/<session-uuid>/subagents/agent-<id>.jsonl
+<projects-root>/<encoded-cwd>/<session-uuid>/subagents/agent-<id>.jsonl
 ```
 
 Enumerating `<encoded-cwd>/*.jsonl` therefore lists sessions; recursing further

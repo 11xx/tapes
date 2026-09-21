@@ -694,6 +694,39 @@ fn every_file_backend_resolves_full_ids_and_unambiguous_prefixes() {
 }
 
 #[test]
+fn an_explicit_claude_root_is_authoritative_and_a_missing_root_is_absent() {
+    let root =
+        std::env::temp_dir().join(format!("tapes-claude-explicit-root-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&root);
+    let project = root.join("project");
+    fs::create_dir_all(&project).unwrap();
+    fs::copy(
+        fixtures("claude").join("project/session-claude.jsonl"),
+        project.join("session-claude.jsonl"),
+    )
+    .unwrap();
+
+    let backend = ClaudeBackend::new(&root);
+    assert!(backend.available());
+    assert_eq!(
+        backend.list(&Query::unscoped(10)).unwrap().sessions.len(),
+        1
+    );
+    assert_eq!(located(&backend, "session-claude").id, "session-claude");
+
+    let missing = ClaudeBackend::new(root.join("missing"));
+    assert!(!missing.available());
+    assert!(missing
+        .list(&Query::unscoped(10))
+        .unwrap()
+        .sessions
+        .is_empty());
+    assert!(missing.locate("session-claude").unwrap().is_none());
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
 fn every_file_backend_preserves_reasoning_and_tool_chronology() {
     for (backend, id) in fixture_backends() {
         let session = located(backend.as_ref(), id);
