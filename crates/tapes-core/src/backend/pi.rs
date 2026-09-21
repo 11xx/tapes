@@ -362,6 +362,7 @@ impl Backend for PiBackend {
             source_length: read.source_length,
             source_bounds: Vec::new(),
             source_revision: Some(read.revision),
+            source_prefix_sha256: Some(read.prefix_sha256),
             skipped: read.skipped,
             gaps: read.gaps,
             trailing_record,

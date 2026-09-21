@@ -401,9 +401,12 @@ observation status, and (where the source supports it) a by-model request
 observation split. The accounting `basis` and `coverage` decide whether
 figures may be summed — a recorded total and a sum of per-request records are
 both safe to add, while coverage says how much of each session a figure covers.
-An observed counter restart is `since-reset`; the newest recorded total stays
-numeric and is not rebuilt by summing request rows. Cost is only what the
-harness recorded; a provider quota is a separate fact about the account.
+An observed counter restart is `since-reset` for the newest recorded total;
+request attribution retains the coverage of the read that observed it and
+keeps the reset count even when modern request records are selected. The
+newest recorded total stays numeric and is not rebuilt by summing request rows.
+Cost is only what the harness recorded; a provider quota is a separate fact
+about the account.
 Claude's recorded `cost-state` keeps its durations and model split unchanged.
 Human output prints the attribution basis, uncertainty, and the same
 truncation notes `show` prints.
@@ -414,7 +417,8 @@ request identities. They preserve native ordinals, response IDs, source
 coordinates, model context, counters, quota-only events, repeats, resets, and
 classification. `--full --series` scans the pinned recording while retaining
 only the bounded recent suffix. The series reports rows observed, rows
-returned, row-cap/byte-budget/oversized-row omissions, and source gaps; the
+returned, row-cap/byte-budget/oversized-row omissions, and unique source gaps;
+gaps beyond the retained gap budget are counted once each. The
 aggregate attribution still covers the whole actual read. It is unavailable
 for supplied inputs, selection summaries, and unsupported harnesses.
 

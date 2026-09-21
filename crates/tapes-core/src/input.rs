@@ -1853,6 +1853,7 @@ fn parse_record_spanning(
         configured_bound: options.record_bytes,
         coordinate_domain: "supplied-occurrence".to_owned(),
         source_revision: Some(revision.clone()),
+        source_prefix_sha256: None,
         producer: producer.map(str::to_owned),
         projection: crate::model::SESSION_SCHEMA.to_owned(),
         projection_options: vec![format!("format={}", format.name())],

@@ -1003,14 +1003,18 @@ enum Command {
         by: Vec<ByArg>,
         /// Stream one session's whole recording instead of its bounded tail:
         /// turns are counted as they stream, and tokens, cost, context window,
-        /// quota, and model are folded from every record, so turn and
-        /// accounting coverage are `session`. Installed Claude, Codex, Pi, and
-        /// OpenCode sessions; a selection refuses it.
+        /// quota, and model are folded from every record. Turns and a complete
+        /// request-observation read cover the session; recorded-total
+        /// accounting keeps its own epoch coverage, including `since-reset`,
+        /// and Codex attribution reports its observation coverage separately.
+        /// Installed Claude, Codex, Pi, and OpenCode sessions; a selection
+        /// refuses it.
         #[arg(long, conflicts_with_all = ["read_bytes", "by"])]
         full: bool,
         /// Retain a bounded recent suffix of Codex accounting observations.
         /// With no value, 200 rows are retained; the accepted range is 1..=10000.
-        /// Rows are raw token observations, not guaranteed request identities.
+        /// Rows are raw token observations, not guaranteed request identities;
+        /// source gaps are retained and counted once per distinct gap.
         #[arg(
             long,
             value_name = "N",

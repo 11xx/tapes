@@ -448,6 +448,11 @@ pub struct ReadEvidence {
     pub coordinate_domain: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_revision: Option<String>,
+    /// Internal pin evidence for file-backed whole reads. It is carried only
+    /// within one process so a replay can verify the observed prefix without
+    /// adding a public evidence field.
+    #[serde(skip)]
+    pub(crate) source_prefix_sha256: Option<[u8; 32]>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub producer: Option<String>,
     pub projection: String,

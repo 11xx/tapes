@@ -414,10 +414,17 @@ The remaining objects are present exactly when the harness recorded them:
 | `rate_limits` | Codex `rate_limits`: optional `primary` and `secondary` windows with native `used_percent`, `window_minutes`, and an RFC 3339 `resets_at`, the account `plan`, native `credits`, reached-limit flags, and the observation timestamp |
 | `durations_ms` | Claude `cost-state` wall clock: `api`, `api_without_retries`, `tool`, `total` |
 | `by_model` | Claude `cost-state` `modelUsage`, or Codex request observations grouped by model and variant; Codex entries add `request_count` |
-| `attribution` | Codex observation basis (`usage-record` or `token-event-advance`), read/reset coverage, counted and unattributed observations, actual unknown counters, and bounded incomplete/budget reasons |
+| `attribution` | Codex observation basis (`usage-record` or `token-event-advance`), coverage of the observations this read reached, observed reset count, counted and unattributed observations, actual unknown counters, and bounded incomplete/budget reasons |
 
 pi and OpenCode record none of them, and each stays absent rather than empty
 or null.
+
+For Codex, `attribution.coverage` describes the observation read itself:
+`session` for a complete read and `read-window` for a bounded or gapped read.
+`accounting.coverage` describes the newest recorded total separately, so an
+observed counter restart can make accounting `since-reset` while attribution
+still covers every request observation the read reached. The reset count stays
+with attribution even when modern `usage-record` data is the selected basis.
 
 `usage SESSION --series[=N]` adds `series` to the usage object. It retains a
 recent suffix of raw Codex observations, 200 rows by default and at most
@@ -426,9 +433,10 @@ ordinal and response identity, `record_ref` coordinates, model context,
 classification, counted status, and only the counters and quota values its own
 source record carried. The row is not necessarily a request identity. The
 series reports `observed`, `returned`, independent `omissions` for the row cap,
-8 MiB serialized byte budget, and overlarge rows, plus bounded source `gaps`.
-Aggregates and `attribution` cover the actual read rather than just retained
-rows. Without `--series`, no row collection is retained or serialized.
+8 MiB serialized byte budget, and overlarge rows, plus bounded unique source
+`gaps` and a count of distinct gaps omitted after the gap budget. Aggregates
+and `attribution` cover the actual read rather than just retained rows.
+Without `--series`, no row collection is retained or serialized.
 
 ```json
 {

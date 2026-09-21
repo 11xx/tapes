@@ -7,6 +7,7 @@ use std::time::SystemTime;
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 use crate::event::{self, EventTranscript};
 use crate::lineage::Lineage;
@@ -729,6 +730,8 @@ pub struct StreamedTranscript {
     /// The source revision observed when the read opened, which every record
     /// reference names. A replay of this read names it too.
     pub source_revision: Option<String>,
+    /// Internal hash of the observed file prefix used by same-process replays.
+    pub(crate) source_prefix_sha256: Option<[u8; 32]>,
     /// Records that could not be decoded: malformed, or longer than
     /// [`FULL_RECORD_BYTES`]. Each is also a gap.
     pub skipped: usize,
@@ -755,6 +758,7 @@ impl StreamedTranscript {
         Ok(ReadPin {
             length: self.source_length,
             revision,
+            prefix_sha256: self.source_prefix_sha256.as_ref(),
         })
     }
 
@@ -768,6 +772,7 @@ impl StreamedTranscript {
             configured_bound: self.source_length,
             coordinate_domain: self.coordinates.domain().to_owned(),
             source_revision: self.source_revision.clone(),
+            source_prefix_sha256: self.source_prefix_sha256,
             producer,
             projection: crate::model::SESSION_SCHEMA.to_owned(),
             projection_options: vec!["full".to_owned()],
@@ -895,6 +900,8 @@ pub(crate) struct StreamedJsonl {
     pub source_length: u64,
     /// The revision observed at open, or the pinned one on a replay.
     pub revision: String,
+    /// The SHA-256 of the bytes a replay is required to repeat.
+    pub prefix_sha256: [u8; 32],
     pub skipped: usize,
     pub gaps: Vec<ReadGap>,
     /// The final decoded record and whether it produced turns, which is all a
@@ -909,26 +916,50 @@ impl StreamedJsonl {
         ReadPin {
             length: self.source_length,
             revision: &self.revision,
+            prefix_sha256: Some(&self.prefix_sha256),
         }
     }
 }
 
-/// What an earlier pass over a file observed at open: its length and its
-/// revision. A pass pinned to it reads those bytes and names that revision,
-/// so every pass hands over identical records.
+/// What an earlier pass over a file observed at open: its length, revision,
+/// and content hash. A pass pinned to it reads those bytes and names that
+/// revision, so every pass hands over identical records.
 #[derive(Clone, Copy)]
 pub(crate) struct ReadPin<'a> {
     length: u64,
     revision: &'a str,
+    prefix_sha256: Option<&'a [u8; 32]>,
+}
+
+struct DigestReader<R> {
+    inner: R,
+    digest: Sha256,
+}
+
+impl<R> DigestReader<R> {
+    fn new(inner: R) -> Self {
+        Self {
+            inner,
+            digest: Sha256::new(),
+        }
+    }
+}
+
+impl<R: Read> Read for DigestReader<R> {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        let read = self.inner.read(buffer)?;
+        self.digest.update(&buffer[..read]);
+        Ok(read)
+    }
 }
 
 /// Decode every record of a JSONL recording in order, handing each to
 /// `record` with its absolute span and the source revision. `record` answers
 /// whether the record produced turns. Unpinned, the read stops at the length
 /// the file had when it was opened; pinned, at the length the earlier pass
-/// observed, reporting that pass's revision. A file replaced or shortened
-/// before or during the read refuses; one appended to is read to the length
-/// the read stops at.
+/// observed, reporting that pass's revision. A file replaced, shortened, or
+/// changed within the pinned prefix refuses; bytes appended after that prefix
+/// are outside this replay and remain allowed.
 pub(crate) fn stream_jsonl(
     path: &Path,
     pin: Option<ReadPin<'_>>,
@@ -967,24 +998,23 @@ fn stream_jsonl_within(
     let metadata = file
         .metadata()
         .with_context(|| format!("failed to inspect {}", path.display()))?;
-    let (source_length, revision) = match pin {
-        Some(pin)
-            if metadata.len() < pin.length
-                || !pin.revision.starts_with(&format!(
-                    "stat:{}:{}:",
-                    metadata.dev(),
-                    metadata.ino()
-                )) =>
+    let source_length = pin.map_or(metadata.len(), |pin| pin.length);
+    if let Some(pin) = pin {
+        if metadata.len() < pin.length
+            || !pin
+                .revision
+                .starts_with(&format!("stat:{}:{}:", metadata.dev(), metadata.ino()))
         {
-            anyhow::bail!("recording source was replaced or shortened between reads")
+            anyhow::bail!("recording source was replaced or shortened between reads");
         }
-        Some(pin) => (pin.length, pin.revision.to_owned()),
-        None => (metadata.len(), stat_revision(&metadata)),
-    };
-    let mut reader = BufReader::with_capacity(256 * 1024, file.take(source_length));
+    }
+    let revision = pin.map_or_else(|| stat_revision(&metadata), |pin| pin.revision.to_owned());
+    let mut reader =
+        BufReader::with_capacity(256 * 1024, DigestReader::new(file).take(source_length));
     let mut streamed = StreamedJsonl {
         source_length,
         revision,
+        prefix_sha256: [0; 32],
         skipped: 0,
         gaps: Vec::new(),
         last: None,
@@ -1039,7 +1069,13 @@ fn stream_jsonl_within(
             line = Vec::new();
         }
     }
-    let after = reader.get_ref().get_ref().metadata()?;
+    streamed.prefix_sha256 = reader.get_ref().get_ref().digest.clone().finalize().into();
+    if let Some(expected) = pin.and_then(|pin| pin.prefix_sha256) {
+        if expected != &streamed.prefix_sha256 {
+            anyhow::bail!("recording source changed between pinned reads");
+        }
+    }
+    let after = reader.get_ref().get_ref().inner.metadata()?;
     if after.dev() != metadata.dev() || after.ino() != metadata.ino() || after.len() < source_length
     {
         anyhow::bail!("recording source was replaced or shortened during the read");
@@ -1618,6 +1654,7 @@ pub(crate) fn read_evidence(read: &Jsonl) -> ReadEvidence {
         configured_bound: read.configured_bound,
         coordinate_domain: "file-byte-range".to_owned(),
         source_revision: Some(read.source_revision.clone()),
+        source_prefix_sha256: None,
         producer: None,
         projection: crate::model::SESSION_SCHEMA.to_owned(),
         projection_options: Vec::new(),
@@ -1670,6 +1707,7 @@ pub(crate) fn recording_evidence(recording: &Recording) -> ReadEvidence {
         configured_bound: recording.tail.configured_bound,
         coordinate_domain: "file-byte-range".to_owned(),
         source_revision: Some(recording.tail.source_revision.clone()),
+        source_prefix_sha256: None,
         producer: None,
         projection: crate::model::SESSION_SCHEMA.to_owned(),
         projection_options: Vec::new(),

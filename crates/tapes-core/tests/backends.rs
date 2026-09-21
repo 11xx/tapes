@@ -2,7 +2,7 @@ use std::cell::Cell;
 use std::collections::HashSet;
 use std::fs::{self, File};
 use std::io::{BufWriter, Write};
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -12,11 +12,11 @@ use tapes_core::backend::claude::ClaudeBackend;
 use tapes_core::backend::codex::CodexBackend;
 use tapes_core::backend::opencode::OpenCodeBackend;
 use tapes_core::backend::pi::PiBackend;
-use tapes_core::backend::{Backend, Listing, Query};
+use tapes_core::backend::{Backend, Listing, Query, StreamedTranscript, MIN_READ_BYTES};
 use tapes_core::event::{project, EventKind, Incomplete};
 use tapes_core::model::{
-    Accounting, AccountingBasis, AccountingCoverage, Cost, Role, Session, SourceBound,
-    SourceDescriptor, Tokens, Transcript, Truncation, Turn, TurnKind,
+    Accounting, AccountingBasis, AccountingCoverage, Cost, ReadEvidence, Role, Session,
+    SourceBound, SourceDescriptor, Tokens, Transcript, Truncation, Turn, TurnKind,
 };
 use tapes_core::usage::{
     usage, Durations, ModelUsage, ObservationBasis, ObservationClassification, RateWindow,
@@ -3943,83 +3943,59 @@ fn codex_modern_usage_records_choose_the_modern_basis_and_keep_native_rows() {
 
 #[test]
 fn codex_legacy_counter_resets_keep_the_newest_total_and_since_reset_coverage() {
-    let root = std::env::temp_dir().join(format!("tapes-codex-reset-{}", std::process::id()));
-    let sessions = root.join("sessions/2026/01/01");
     let id = "70000000-0000-0000-0000-000000000008";
-    let _ = fs::remove_dir_all(&root);
-    fs::create_dir_all(&sessions).unwrap();
-    let record = |timestamp: &str, total: u64, last: u64| {
-        serde_json::json!({
-            "timestamp": timestamp,
-            "type": "event_msg",
-            "payload": {
-                "type": "token_count",
-                "info": {
-                    "total_token_usage": {"input_tokens": total, "output_tokens": total / 10},
-                    "last_token_usage": {"input_tokens": last, "output_tokens": last / 10}
-                },
-                "rate_limits": null
-            }
-        })
-    };
-    let lines = [
-        serde_json::json!({
-            "timestamp": "2026-01-01T17:00:00Z",
-            "type": "session_meta",
-            "payload": {"id": id, "session_id": id, "cwd": "/fixtures/reset-project"}
-        }),
-        serde_json::json!({
-            "timestamp": "2026-01-01T17:00:01Z",
-            "type": "turn_context",
-            "payload": {"cwd": "/fixtures/reset-project", "model": "gpt-reset", "effort": "high"}
-        }),
-        record("2026-01-01T17:00:02Z", 100, 100),
-        record("2026-01-01T17:00:03Z", 10, 10),
-        record("2026-01-01T17:00:04Z", 15, 5),
-    ]
-    .into_iter()
-    .map(|record| serde_json::to_string(&record).unwrap())
-    .collect::<Vec<_>>()
-    .join("\n");
-    fs::write(
-        sessions.join(format!("rollout-2026-01-01T17-00-00-{id}.jsonl")),
-        format!("{lines}\n"),
-    )
-    .unwrap();
+    let records = vec![
+        codex_meta(id),
+        codex_turn_context("gpt-reset"),
+        codex_token_count(2, 10, 10),
+        codex_token_count(3, 20, 10),
+        codex_token_count(4, 5, 5),
+    ];
+    let root = codex_rollout("legacy-reset", id, &records);
 
-    let backends: Vec<Box<dyn Backend>> = vec![Box::new(CodexBackend::new(&root))];
-    let view = usage_with_options_with_backends(
-        &backends,
-        Selection::Id(id),
-        UsageOptions {
-            full: false,
-            series: Some(UsageObservationOptions { limit: 8 }),
-        },
-    )
-    .unwrap();
-    assert_eq!(
-        view.tokens.as_ref().and_then(|tokens| tokens.input),
-        Some(15)
-    );
-    assert_eq!(
-        view.accounting
-            .as_ref()
-            .map(|accounting| accounting.coverage),
-        Some(AccountingCoverage::SinceReset)
-    );
-    let attribution = view.attribution.as_ref().unwrap();
-    assert_eq!(attribution.resets, 1);
-    assert_eq!(attribution.counted, 3);
-    assert_eq!(
-        view.series
-            .as_ref()
-            .unwrap()
-            .rows
-            .iter()
-            .filter(|row| row.classification == ObservationClassification::ResetAdvance)
-            .count(),
-        1
-    );
+    for full in [false, true] {
+        let view = codex_usage_with_options(&root, id, full, Some(8)).unwrap();
+        assert_eq!(
+            view.tokens.as_ref().and_then(|tokens| tokens.input),
+            Some(5),
+            "full={full}"
+        );
+        assert_eq!(
+            view.accounting
+                .as_ref()
+                .map(|accounting| accounting.coverage),
+            Some(AccountingCoverage::SinceReset),
+            "full={full}"
+        );
+        let attribution = view.attribution.as_ref().unwrap();
+        assert_eq!(
+            attribution.coverage,
+            AccountingCoverage::Session,
+            "full={full}"
+        );
+        assert_eq!(attribution.resets, 1, "full={full}");
+        assert_eq!(attribution.counted, 3, "full={full}");
+        assert_eq!(
+            view.by_model
+                .as_ref()
+                .and_then(|models| models.first())
+                .and_then(|model| model.tokens.as_ref())
+                .and_then(|tokens| tokens.input),
+            Some(25),
+            "full={full}"
+        );
+        assert_eq!(
+            view.series
+                .as_ref()
+                .unwrap()
+                .rows
+                .iter()
+                .filter(|row| row.classification == ObservationClassification::ResetAdvance)
+                .count(),
+            1,
+            "full={full}"
+        );
+    }
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -4088,16 +4064,495 @@ fn codex_token_count(ordinal: u64, total: u64, last: u64) -> serde_json::Value {
 }
 
 fn codex_usage(root: &Path, id: &str) -> tapes_core::usage::UsageView {
+    codex_usage_with_options(root, id, false, None).unwrap()
+}
+
+fn codex_usage_with_options(
+    root: &Path,
+    id: &str,
+    full: bool,
+    series_limit: Option<usize>,
+) -> anyhow::Result<tapes_core::usage::UsageView> {
     let backends: Vec<Box<dyn Backend>> = vec![Box::new(CodexBackend::new(root))];
     usage_with_options_with_backends(
         &backends,
         Selection::Id(id),
         UsageOptions {
-            full: false,
-            series: None,
+            full,
+            series: series_limit.map(|limit| UsageObservationOptions { limit }),
         },
     )
-    .unwrap()
+}
+
+fn codex_rollout_text(tag: &str, id: &str, contents: &str) -> PathBuf {
+    let root = std::env::temp_dir().join(format!("tapes-codex-{tag}-{}", std::process::id()));
+    let sessions = root.join("sessions/2026/01/01");
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&sessions).unwrap();
+    fs::write(
+        sessions.join(format!("rollout-2026-01-01T12-00-00-{id}.jsonl")),
+        contents,
+    )
+    .unwrap();
+    root
+}
+
+fn codex_token_count_with_plan(
+    ordinal: u64,
+    total: u64,
+    last: u64,
+    plan: &str,
+) -> serde_json::Value {
+    let mut value = codex_token_count(ordinal, total, last);
+    value["payload"]["rate_limits"] = serde_json::json!({"plan_type": plan});
+    value
+}
+
+fn codex_padding_record(size: usize) -> serde_json::Value {
+    serde_json::json!({
+        "timestamp": "2026-01-01T12:00:01Z",
+        "type": "padding",
+        "padding": "x".repeat(size)
+    })
+}
+
+#[derive(Clone, Copy)]
+enum CodexMutation {
+    Replace,
+    InPlace,
+}
+
+struct MutatingCodexBackend {
+    inner: CodexBackend,
+    path: PathBuf,
+    replacement: String,
+    mutation: CodexMutation,
+    mutated: Cell<bool>,
+}
+
+impl MutatingCodexBackend {
+    fn mutate_after_first_stream(&self) {
+        if self.mutated.replace(true) {
+            return;
+        }
+        match self.mutation {
+            CodexMutation::InPlace => fs::write(&self.path, &self.replacement).unwrap(),
+            CodexMutation::Replace => {
+                let replacement = self.path.with_extension("replacement");
+                let _ = fs::remove_file(&replacement);
+                fs::write(&replacement, &self.replacement).unwrap();
+                fs::rename(replacement, &self.path).unwrap();
+            }
+        }
+    }
+}
+
+impl Backend for MutatingCodexBackend {
+    fn harness(&self) -> &'static str {
+        self.inner.harness()
+    }
+
+    fn available(&self) -> bool {
+        self.inner.available()
+    }
+
+    fn list(&self, query: &Query) -> anyhow::Result<Listing> {
+        self.inner.list(query)
+    }
+
+    fn locate(&self, id: &str) -> anyhow::Result<Option<Session>> {
+        self.inner.locate(id)
+    }
+
+    fn transcript(&self, session: &Session, tail: usize) -> anyhow::Result<Transcript> {
+        self.inner.transcript(session, tail)
+    }
+
+    fn stream_transcript(
+        &self,
+        session: &Session,
+        replay: Option<&StreamedTranscript>,
+        turn: &mut dyn FnMut(Turn) -> anyhow::Result<()>,
+    ) -> anyhow::Result<StreamedTranscript> {
+        let read = self.inner.stream_transcript(session, replay, turn)?;
+        self.mutate_after_first_stream();
+        Ok(read)
+    }
+
+    fn kinds(&self) -> tapes_core::model::KindDeclaration {
+        self.inner.kinds()
+    }
+
+    fn usage_observations(
+        &self,
+        session: &Session,
+        read: Option<&tapes_core::model::ReadEvidence>,
+        options: UsageObservationOptions,
+    ) -> anyhow::Result<tapes_core::usage::UsageObservationResult> {
+        self.inner.usage_observations(session, read, options)
+    }
+}
+
+#[test]
+fn codex_series_gap_omissions_count_unique_source_gaps_for_bounded_and_full_reads() {
+    let id = "90000000-0000-0000-0000-000000000005";
+    let mut source = serde_json::to_string(&codex_meta(id)).unwrap();
+    source.push('\n');
+    for index in 0..70 {
+        source.push_str(&format!("malformed-{index}\n"));
+    }
+    let root = codex_rollout_text("gap-budget", id, &source);
+
+    for full in [false, true] {
+        let view = codex_usage_with_options(&root, id, full, Some(200)).unwrap();
+        let series = view.series.unwrap();
+        assert_eq!(series.gaps.len(), 64, "full={full}");
+        assert_eq!(series.gaps_omitted, 6, "full={full}");
+    }
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn codex_modern_reset_evidence_survives_basis_selection_and_separates_coverage() {
+    let id = "90000000-0000-0000-0000-000000000006";
+    let records = vec![
+        codex_meta(id),
+        codex_turn_context("gpt-modern-reset"),
+        codex_usage_record(2, "response-1", 10),
+        codex_token_count(3, 10, 10),
+        codex_usage_record(4, "response-2", 10),
+        codex_token_count(5, 20, 10),
+        codex_usage_record(6, "response-3", 5),
+        codex_token_count(7, 5, 5),
+    ];
+    let root = codex_rollout("modern-reset", id, &records);
+
+    for full in [false, true] {
+        let view = codex_usage_with_options(&root, id, full, Some(16)).unwrap();
+        assert_eq!(
+            view.tokens.as_ref().and_then(|tokens| tokens.input),
+            Some(5),
+            "full={full}"
+        );
+        assert_eq!(
+            view.accounting
+                .as_ref()
+                .map(|accounting| accounting.coverage),
+            Some(AccountingCoverage::SinceReset),
+            "full={full}"
+        );
+        let attribution = view.attribution.as_ref().unwrap();
+        assert_eq!(
+            attribution.basis,
+            ObservationBasis::UsageRecord,
+            "full={full}"
+        );
+        assert_eq!(
+            attribution.coverage,
+            AccountingCoverage::Session,
+            "full={full}"
+        );
+        assert_eq!(attribution.resets, 1, "full={full}");
+        assert_eq!(attribution.counted, 3, "full={full}");
+        assert_eq!(
+            view.by_model
+                .as_ref()
+                .and_then(|models| models.first())
+                .and_then(|model| model.tokens.as_ref())
+                .and_then(|tokens| tokens.input),
+            Some(25),
+            "full={full}"
+        );
+    }
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn codex_series_reports_row_byte_budget_omissions_without_dumping_rows() {
+    let id = "90000000-0000-0000-0000-000000000007";
+    let plan = "x".repeat(16_000);
+    let mut records = vec![codex_meta(id), codex_turn_context("gpt-byte-budget")];
+    for index in 0..600 {
+        records.push(codex_token_count_with_plan(index, index + 1, 1, &plan));
+    }
+    let root = codex_rollout("series-byte-budget", id, &records);
+
+    let view = codex_usage_with_options(&root, id, true, Some(1_000)).unwrap();
+    let series = view.series.unwrap();
+    assert_eq!(series.observed, 600);
+    assert!(series.omissions.byte_budget > 0);
+    assert_eq!(series.omissions.oversized_row, 0);
+    assert!(series.returned < series.observed);
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn codex_series_reports_an_oversized_row_as_an_omission() {
+    let id = "90000000-0000-0000-0000-000000000008";
+    let oversized_plan = "x".repeat(8 * 1024 * 1024 + 1_024);
+    let records = vec![
+        codex_meta(id),
+        codex_turn_context("gpt-oversized-row"),
+        codex_token_count_with_plan(2, 1, 1, &oversized_plan),
+    ];
+    let root = codex_rollout("series-oversized-row", id, &records);
+
+    let view = codex_usage_with_options(&root, id, true, Some(8)).unwrap();
+    let series = view.series.unwrap();
+    assert_eq!(series.observed, 1);
+    assert_eq!(series.returned, 0);
+    assert_eq!(series.omissions.oversized_row, 1);
+    assert_eq!(series.omissions.byte_budget, 0);
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn codex_bounded_prefix_reports_leading_uncounted_observation() {
+    let id = "90000000-0000-0000-0000-000000000009";
+    let records = vec![
+        codex_meta(id),
+        codex_padding_record(80 * 1024),
+        codex_turn_context("gpt-bounded-reset"),
+        codex_token_count(2, 10, 10),
+        codex_token_count(3, 20, 10),
+        codex_token_count(4, 5, 5),
+    ];
+    let root = codex_rollout("leading-uncounted", id, &records);
+    let backend = CodexBackend::new(&root).with_read_bytes(MIN_READ_BYTES);
+    let backends: Vec<Box<dyn Backend>> = vec![Box::new(backend)];
+
+    let view = usage_with_options_with_backends(
+        &backends,
+        Selection::Id(id),
+        UsageOptions {
+            full: false,
+            series: Some(UsageObservationOptions { limit: 8 }),
+        },
+    )
+    .unwrap();
+    let attribution = view.attribution.as_ref().unwrap();
+    assert_eq!(attribution.leading_uncounted, 1);
+    assert_eq!(attribution.coverage, AccountingCoverage::ReadWindow);
+    assert_eq!(attribution.resets, 1);
+    assert_eq!(attribution.counted, 2);
+    assert_eq!(
+        view.accounting
+            .as_ref()
+            .map(|accounting| accounting.coverage),
+        Some(AccountingCoverage::SinceReset)
+    );
+    assert_eq!(
+        view.by_model
+            .as_ref()
+            .and_then(|models| models.first())
+            .and_then(|model| model.tokens.as_ref())
+            .and_then(|tokens| tokens.input),
+        Some(15)
+    );
+    assert!(attribution
+        .incomplete
+        .iter()
+        .any(|reason| reason == "leading-uncounted"));
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn codex_bounded_modern_reset_evidence_keeps_read_window_coverage() {
+    let id = "90000000-0000-0000-0000-000000000012";
+    let records = vec![
+        codex_meta(id),
+        codex_padding_record(80 * 1024),
+        codex_turn_context("gpt-bounded-modern-reset"),
+        codex_usage_record(2, "bounded-response-1", 10),
+        codex_token_count(3, 10, 10),
+        codex_usage_record(4, "bounded-response-2", 10),
+        codex_token_count(5, 20, 10),
+        codex_usage_record(6, "bounded-response-3", 5),
+        codex_token_count(7, 5, 5),
+    ];
+    let root = codex_rollout("bounded-modern-reset", id, &records);
+    let backend = CodexBackend::new(&root).with_read_bytes(MIN_READ_BYTES);
+    let backends: Vec<Box<dyn Backend>> = vec![Box::new(backend)];
+
+    let view = usage_with_options_with_backends(
+        &backends,
+        Selection::Id(id),
+        UsageOptions {
+            full: false,
+            series: Some(UsageObservationOptions { limit: 16 }),
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        view.tokens.as_ref().and_then(|tokens| tokens.input),
+        Some(5)
+    );
+    assert_eq!(
+        view.accounting
+            .as_ref()
+            .map(|accounting| accounting.coverage),
+        Some(AccountingCoverage::SinceReset)
+    );
+    let attribution = view.attribution.as_ref().unwrap();
+    assert_eq!(attribution.basis, ObservationBasis::UsageRecord);
+    assert_eq!(attribution.coverage, AccountingCoverage::ReadWindow);
+    assert_eq!(attribution.resets, 1);
+    assert_eq!(attribution.counted, 3);
+    assert_eq!(
+        view.by_model
+            .as_ref()
+            .and_then(|models| models.first())
+            .and_then(|model| model.tokens.as_ref())
+            .and_then(|tokens| tokens.input),
+        Some(25)
+    );
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn codex_response_id_dedup_budget_reports_skipped_counting() {
+    let id = "90000000-0000-0000-0000-000000000010";
+    let mut records = vec![codex_meta(id), codex_turn_context("gpt-response-budget")];
+    for index in 0..20_000 {
+        records.push(codex_usage_record(index, &format!("response-{index}"), 1));
+    }
+    let root = codex_rollout("response-id-budget", id, &records);
+
+    let view = codex_usage_with_options(&root, id, true, Some(1)).unwrap();
+    let attribution = view.attribution.as_ref().unwrap();
+    assert_eq!(attribution.observed, 20_000);
+    assert!(attribution.counted < attribution.observed);
+    assert!(attribution
+        .incomplete
+        .iter()
+        .any(|reason| reason == "response-id-dedup-incomplete"));
+    assert!(attribution
+        .bounds
+        .iter()
+        .any(|reason| reason == "response-id-budget"));
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn public_full_usage_refuses_replacement_or_in_place_source_rewrite_between_passes() {
+    let id = "90000000-0000-0000-0000-000000000011";
+    let initial_records = [
+        codex_meta(id),
+        codex_turn_context("gpt-pinned"),
+        codex_usage_record(2, "response-1", 1),
+    ];
+    let replacement_records = [
+        codex_meta(id),
+        codex_turn_context("gpt-pinned"),
+        codex_usage_record(2, "response-1", 2),
+    ];
+    let initial = initial_records
+        .iter()
+        .map(|record| serde_json::to_string(record).unwrap())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let replacement = replacement_records
+        .iter()
+        .map(|record| serde_json::to_string(record).unwrap())
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    for mutation in [CodexMutation::Replace, CodexMutation::InPlace] {
+        let root = codex_rollout_text("pinned-mutation", id, &format!("{initial}\n"));
+        let path = root
+            .join("sessions/2026/01/01")
+            .join(format!("rollout-2026-01-01T12-00-00-{id}.jsonl"));
+        let backend = MutatingCodexBackend {
+            inner: CodexBackend::new(&root),
+            path,
+            replacement: format!("{replacement}\n"),
+            mutation,
+            mutated: Cell::new(false),
+        };
+        let backends: Vec<Box<dyn Backend>> = vec![Box::new(backend)];
+        let result = usage_with_options_with_backends(
+            &backends,
+            Selection::Id(id),
+            UsageOptions {
+                full: true,
+                series: Some(UsageObservationOptions { limit: 8 }),
+            },
+        );
+        let error = match result {
+            Ok(_) => panic!("a pinned usage replay must not mix a changed source"),
+            Err(error) => error,
+        };
+        assert!(
+            error.to_string().contains("source")
+                || error.to_string().contains("changed")
+                || error.to_string().contains("replaced"),
+            "{error:#}"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[test]
+fn codex_full_usage_rejects_roundtripped_evidence_without_prefix_integrity() {
+    let id = "90000000-0000-0000-0000-000000000013";
+    let records = vec![
+        codex_meta(id),
+        codex_turn_context("gpt-roundtrip-pin"),
+        codex_usage_record(2, "roundtrip-response", 1),
+    ];
+    let root = codex_rollout("roundtrip-pin", id, &records);
+    let path = root
+        .join("sessions/2026/01/01")
+        .join(format!("rollout-2026-01-01T12-00-00-{id}.jsonl"));
+    let backend = CodexBackend::new(&root);
+    let session = backend.locate(id).unwrap().unwrap();
+    let first = backend
+        .stream_transcript(&session, None, &mut |_| Ok(()))
+        .unwrap();
+    let native = first.read_evidence(None);
+    let roundtripped: ReadEvidence =
+        serde_json::from_slice(&serde_json::to_vec(&native).unwrap()).unwrap();
+
+    let before = fs::metadata(&path).unwrap();
+    let content = fs::read_to_string(&path).unwrap();
+    let replacement = content.replace("\"input_tokens\":1", "\"input_tokens\":9");
+    assert_ne!(content, replacement);
+    fs::write(&path, replacement).unwrap();
+    let after = fs::metadata(&path).unwrap();
+    assert_eq!(before.len(), after.len());
+    assert_eq!(before.dev(), after.dev());
+    assert_eq!(before.ino(), after.ino());
+
+    let native_result = backend.usage_observations(
+        &session,
+        Some(&native),
+        UsageObservationOptions { limit: 200 },
+    );
+    let native_error = match native_result {
+        Ok(_) => panic!("native evidence must reject the changed prefix"),
+        Err(error) => error,
+    };
+    assert!(native_error.to_string().contains("changed"));
+
+    let roundtripped_result = backend.usage_observations(
+        &session,
+        Some(&roundtripped),
+        UsageObservationOptions { limit: 200 },
+    );
+    let roundtripped_error = match roundtripped_result {
+        Ok(_) => panic!("round-tripped evidence without a prefix hash must fail closed"),
+        Err(error) => error,
+    };
+    assert!(roundtripped_error.to_string().contains("prefix integrity"));
+
+    fs::remove_dir_all(root).unwrap();
 }
 
 /// `distinct_observed` answers how many model selections a read actually saw,

@@ -366,6 +366,7 @@ impl Backend for CodexBackend {
             source_length: read.source_length,
             source_bounds: Vec::new(),
             source_revision: Some(read.revision),
+            source_prefix_sha256: Some(read.prefix_sha256),
             skipped: read.skipped,
             trailing_record: streamed_trailing_record(read.last.as_ref(), codex_trailing_kind),
             terminal,
@@ -448,14 +449,17 @@ impl Backend for CodexBackend {
         let (_, path) = self.recording(session)?;
         let read_window = read.is_none_or(|read| read.source_length > read.configured_bound);
         let records = CodexRecords::with_series(&path, read_window, options);
-        let (mut records, gaps) = if let Some(evidence) = read {
+        let records = if let Some(evidence) = read {
             if evidence
                 .projection_options
                 .iter()
                 .any(|option| option == "full")
             {
+                let prefix_sha256 = evidence.source_prefix_sha256.as_ref().ok_or_else(|| {
+                    anyhow!("the full usage read has no prefix integrity evidence")
+                })?;
                 let records = std::cell::RefCell::new(records);
-                let streamed = stream_jsonl_with_gaps(
+                stream_jsonl_with_gaps(
                     &path,
                     Some(ReadPin {
                         length: evidence.source_length,
@@ -463,6 +467,7 @@ impl Backend for CodexBackend {
                             .source_revision
                             .as_deref()
                             .ok_or_else(|| anyhow!("the full usage read has no source revision"))?,
+                        prefix_sha256: Some(prefix_sha256),
                     }),
                     |value, span, revision| {
                         records.borrow_mut().observe(value, Some(span), revision);
@@ -470,7 +475,7 @@ impl Backend for CodexBackend {
                     },
                     |gap| records.borrow_mut().observe_gap(gap),
                 )?;
-                (records.into_inner(), streamed.gaps)
+                records.into_inner()
             } else {
                 let recording = super::read_recording_at(&path, evidence)?;
                 let mut records = records;
@@ -480,7 +485,7 @@ impl Backend for CodexBackend {
                     &recording.tail.gaps,
                     &recording.tail.source_revision,
                 );
-                (records, recording.tail.gaps)
+                records
             }
         } else {
             let recording = super::read_recording(&path, self.read_bytes)?;
@@ -492,11 +497,8 @@ impl Backend for CodexBackend {
                 &recording.tail.gaps,
                 &recording.tail.source_revision,
             );
-            (records, recording.tail.gaps)
+            records
         };
-        for gap in &gaps {
-            records.observe_read_gap(gap);
-        }
         let mut observed = session.clone();
         let series = records.apply(&mut observed);
         Ok(UsageObservationResult {
@@ -944,6 +946,7 @@ struct CodexUsageObserver {
     legacy_seen: bool,
     legacy_preceded_modern: bool,
     reset_seen: bool,
+    observed_resets: usize,
     gap_seen: bool,
     modern: UsageCandidate,
     legacy: UsageCandidate,
@@ -975,6 +978,7 @@ impl CodexUsageObserver {
             legacy_seen: false,
             legacy_preceded_modern: false,
             reset_seen: false,
+            observed_resets: 0,
             gap_seen: false,
             modern: UsageCandidate::default(),
             legacy: UsageCandidate::default(),
@@ -1254,6 +1258,7 @@ impl CodexUsageObserver {
                 }
                 TotalChange::Reset => {
                     self.legacy.resets += 1;
+                    self.observed_resets += 1;
                     self.reset_seen = true;
                     let counted = if last.is_some() {
                         self.legacy.count_request(
@@ -1315,21 +1320,29 @@ impl CodexUsageObserver {
                 .incomplete
                 .add("legacy-observations-before-modern-basis");
         }
+        selected.resets = self.observed_resets;
         if self.model_budget.exhausted {
             selected.bounds.add("model-key-budget");
         }
         if self.response_id_budget_exhausted {
             selected.bounds.add("response-id-budget");
         }
-        let coverage = if self.reset_seen {
+        let accounting_coverage = if self.reset_seen {
             AccountingCoverage::SinceReset
         } else if self.read_window || self.gap_seen {
             AccountingCoverage::ReadWindow
         } else {
             AccountingCoverage::Session
         };
-        let attribution = (selected.observed > 0 || self.modern_seen || self.legacy_seen)
-            .then(|| selected.attribution(basis, coverage, &self.incomplete, &self.bounds));
+        let observation_coverage = if self.read_window || self.gap_seen {
+            AccountingCoverage::ReadWindow
+        } else {
+            AccountingCoverage::Session
+        };
+        let attribution =
+            (selected.observed > 0 || self.modern_seen || self.legacy_seen).then(|| {
+                selected.attribution(basis, observation_coverage, &self.incomplete, &self.bounds)
+            });
         let by_model = selected.into_models();
         let model_observation = (self.model_observed
             || attribution
@@ -1354,7 +1367,7 @@ impl CodexUsageObserver {
             self.tokens.as_ref(),
             None,
             AccountingBasis::RecordedTotal,
-            coverage,
+            accounting_coverage,
         );
         let usage_detail = UsageDetail {
             context_window: self.context_window,

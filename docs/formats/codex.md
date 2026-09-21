@@ -212,6 +212,10 @@ passed over for an older one. A window with no such event reports no tokens
 rather than zero. Totals are recorded values, not a promise of global
 monotonicity: an observed decrease is retained numerically and marks
 `accounting.coverage` as `since-reset` with reset evidence in attribution.
+Attribution coverage is separate: it says whether the request observations
+reached by this read cover the whole session or only a bounded/gapped read
+window. The reset count stays available when modern `usage-record`
+observations win basis selection.
 
 When no valid modern record is reached, the reader uses the explicitly named
 `token-event-advance` heuristic. A differing cumulative total may count its
@@ -230,8 +234,9 @@ counters present on their own source record. Quota stays on the token-count
 row that carried it and is never copied onto a modern request row. `--full`
 scans the pinned recording but keeps only the requested suffix. The series has
 an 8 MiB retained serialized-row budget and reports row-cap, byte-budget,
-oversized-row, and source-gap omissions independently. Ordinary usage, list,
-and show paths retain no observation row collection.
+oversized-row, and unique source-gap omissions independently. A gap delivered
+through more than one reader callback is still one source gap. Ordinary usage,
+list, and show paths retain no observation row collection.
 
 The same event carries two facts that are not accounting.
 `info.model_context_window` is how many tokens the session's model holds at

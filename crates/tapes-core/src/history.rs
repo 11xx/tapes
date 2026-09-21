@@ -254,6 +254,7 @@ pub(crate) fn read_file(
         configured_bound: bytes as u64,
         coordinate_domain: "file-byte-range".to_owned(),
         source_revision: Some(revision),
+        source_prefix_sha256: None,
         producer: session.source.producer.clone(),
         projection: PAGE_SCHEMA.to_owned(),
         projection_options: projection.options(),
