@@ -187,7 +187,12 @@ ordinal are retained as recorded; neither is inferred from a turn or from the
 position of a neighboring record. The normalized usage view groups valid,
 deduplicated observations by the model and effort context actually reached.
 Its basis is `usage-record`, and a late modern record selects that basis for
-the read without adding legacy token-event observations to it.
+the read without adding legacy token-event observations to it. Where legacy
+observations preceded the first modern record, the requests behind them are
+outside the selected aggregate entirely, so the attribution carries
+`legacy-observations-before-modern-basis` rather than presenting its counted
+requests as the whole session's. A `token_count` event that follows a modern
+record is the ordinary modern shape and is not such evidence.
 
 Older rollouts carry an `event_msg` with `payload.type == "token_count"` after
 a model response. Its `info.total_token_usage` is the newest recorded session

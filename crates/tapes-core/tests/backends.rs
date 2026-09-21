@@ -4071,6 +4071,22 @@ fn codex_usage_record(ordinal: u64, response_id: &str, input: u64) -> serde_json
     })
 }
 
+fn codex_token_count(ordinal: u64, total: u64, last: u64) -> serde_json::Value {
+    serde_json::json!({
+        "timestamp": "2026-01-01T12:00:03Z",
+        "type": "event_msg",
+        "ordinal": ordinal,
+        "payload": {
+            "type": "token_count",
+            "info": {
+                "total_token_usage": {"input_tokens": total, "output_tokens": 1},
+                "last_token_usage": {"input_tokens": last, "output_tokens": 1}
+            },
+            "rate_limits": null
+        }
+    })
+}
+
 fn codex_usage(root: &Path, id: &str) -> tapes_core::usage::UsageView {
     let backends: Vec<Box<dyn Backend>> = vec![Box::new(CodexBackend::new(root))];
     usage_with_options_with_backends(
@@ -4128,6 +4144,83 @@ fn codex_model_observations_withhold_the_count_past_the_key_budget() {
         .bounds
         .iter()
         .any(|reason| reason == "model-key-budget"));
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+/// A modern request record selects the modern basis for the whole read, and
+/// the legacy observations that preceded it are discarded rather than summed
+/// into it. The read says so: its attribution names the observations the
+/// basis cannot account for instead of presenting a fraction of the session
+/// as complete session coverage.
+#[test]
+fn codex_attribution_names_legacy_observations_the_modern_basis_discards() {
+    let id = "90000000-0000-0000-0000-000000000003";
+    let records = vec![
+        codex_meta(id),
+        codex_turn_context("gpt-late"),
+        codex_token_count(2, 10, 10),
+        codex_token_count(3, 25, 15),
+        codex_token_count(4, 40, 15),
+        codex_usage_record(5, "response-late-1", 7),
+    ];
+    let root = codex_rollout("late-modern", id, &records);
+
+    let view = codex_usage(&root, id);
+    assert_eq!(
+        view.tokens.as_ref().and_then(|tokens| tokens.input),
+        Some(40)
+    );
+    let attribution = view.attribution.as_ref().unwrap();
+    assert_eq!(attribution.basis, ObservationBasis::UsageRecord);
+    assert_eq!(attribution.counted, 1);
+    assert!(
+        attribution
+            .incomplete
+            .iter()
+            .any(|reason| reason == "legacy-observations-before-modern-basis"),
+        "{attribution:?}"
+    );
+    assert!(
+        view.session
+            .model_observation
+            .as_ref()
+            .unwrap()
+            .attribution_uncertain
+    );
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+/// Modern rollouts write a `token_count` beside their request records, so a
+/// legacy observation that follows the basis is the ordinary shape and is not
+/// reported as evidence the basis missed anything.
+#[test]
+fn codex_attribution_stays_complete_when_legacy_events_follow_the_modern_basis() {
+    let id = "90000000-0000-0000-0000-000000000004";
+    let records = vec![
+        codex_meta(id),
+        codex_turn_context("gpt-modern"),
+        codex_usage_record(2, "response-modern-1", 10),
+        codex_token_count(3, 10, 10),
+        codex_usage_record(4, "response-modern-2", 20),
+        codex_token_count(5, 30, 20),
+    ];
+    let root = codex_rollout("modern-with-events", id, &records);
+
+    let view = codex_usage(&root, id);
+    let attribution = view.attribution.as_ref().unwrap();
+    assert_eq!(attribution.basis, ObservationBasis::UsageRecord);
+    assert_eq!(attribution.counted, 2);
+    assert!(attribution.incomplete.is_empty(), "{attribution:?}");
+    assert!(
+        !view
+            .session
+            .model_observation
+            .as_ref()
+            .unwrap()
+            .attribution_uncertain
+    );
 
     fs::remove_dir_all(root).unwrap();
 }

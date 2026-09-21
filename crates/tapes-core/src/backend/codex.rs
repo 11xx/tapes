@@ -120,9 +120,6 @@ impl CodexBackend {
             occurrence: None,
             usage_detail: facts.usage_detail,
         };
-        let mut session = session;
-        session.started_at = started_at;
-        session.last_activity_at = last_activity_at;
         // The opening is the start of the file, so its first user turn is the
         // session's first user turn even when the tail cannot see it.
         let session = if read.truncated {
@@ -945,6 +942,7 @@ struct CodexUsageObserver {
     previous_total: Option<Tokens>,
     modern_seen: bool,
     legacy_seen: bool,
+    legacy_preceded_modern: bool,
     reset_seen: bool,
     gap_seen: bool,
     modern: UsageCandidate,
@@ -975,6 +973,7 @@ impl CodexUsageObserver {
             previous_total: None,
             modern_seen: false,
             legacy_seen: false,
+            legacy_preceded_modern: false,
             reset_seen: false,
             gap_seen: false,
             modern: UsageCandidate::default(),
@@ -1112,6 +1111,7 @@ impl CodexUsageObserver {
             self.push_series(row, ObservationBasis::UsageRecord, false);
             return;
         };
+        self.legacy_preceded_modern |= self.legacy_seen && !self.modern_seen;
         self.modern_seen = true;
         self.modern.observe();
         let Some(response_id) = response_id_raw.filter(|id| !id.is_empty()) else {
@@ -1305,6 +1305,15 @@ impl CodexUsageObserver {
             selected
                 .incomplete
                 .add("modern-records-not-observed-in-read");
+        }
+        // Choosing the modern basis discards the legacy candidate whole. Where
+        // legacy observations came first, the requests behind them are not in
+        // the selected aggregate and summing the two would be worse, so the
+        // read names what its basis cannot account for.
+        if self.legacy_preceded_modern {
+            selected
+                .incomplete
+                .add("legacy-observations-before-modern-basis");
         }
         if self.model_budget.exhausted {
             selected.bounds.add("model-key-budget");
