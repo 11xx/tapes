@@ -1597,7 +1597,7 @@ fn supplied_single_conversation_reaches_list_show_and_export() {
         String::from_utf8_lossy(&listed.stderr)
     );
     let listed: Value = serde_json::from_slice(&listed.stdout).unwrap();
-    assert_eq!(listed["schema"], "tapes-list/5");
+    assert_eq!(listed["schema"], "tapes-list/6");
     assert_eq!(listed["sessions"].as_array().unwrap().len(), 1);
     assert_eq!(listed["sessions"][0]["id"], "supplied-1");
     assert_eq!(listed["sessions"][0]["source"]["kind"], "supplied-export");
@@ -2408,7 +2408,7 @@ fn supplied_zip_reads_conversations_and_retains_associated_report_evidence() {
         .unwrap();
     assert!(brief.status.success());
     let brief: Value = serde_json::from_slice(&brief.stdout).unwrap();
-    assert_eq!(brief["schema"], "tapes-brief/6");
+    assert_eq!(brief["schema"], "tapes-brief/7");
     let grouped_brief_part = brief["tail"]
         .as_array()
         .unwrap()
@@ -2516,7 +2516,7 @@ fn supplied_citation_descriptors_are_bounded_in_show_and_export() {
         .unwrap();
     assert!(shown.status.success());
     let shown: Value = serde_json::from_slice(&shown.stdout).unwrap();
-    assert_eq!(shown["schema"], "tapes-session/10");
+    assert_eq!(shown["schema"], "tapes-session/11");
     let citation = &shown["artifacts"][0]["citations"][0];
     assert_eq!(citation["uri"]["chars"], 5_024);
     assert_eq!(
@@ -2557,7 +2557,7 @@ fn supplied_citation_descriptors_are_bounded_in_show_and_export() {
         })
         .unwrap();
     let bundle_json: Value = serde_json::from_slice(&fs::read(json_path).unwrap()).unwrap();
-    assert_eq!(bundle_json["schema"], "tapes-session/10");
+    assert_eq!(bundle_json["schema"], "tapes-session/11");
     assert_eq!(
         bundle_json["artifacts"][0]["citations"][0]["title"]["text"]
             .as_str()
@@ -2860,7 +2860,7 @@ fn events_help_explains_pairing_filters_and_the_default_bound() {
     assert!(help.contains("--name <NAME>"), "{help}");
     assert!(help.contains("--call-id <ID>"), "{help}");
     assert!(help.contains("--program <PROGRAM>"), "{help}");
-    assert!(help.contains("tapes-events/6"), "{help}");
+    assert!(help.contains("tapes-events/7"), "{help}");
 }
 
 #[test]
@@ -2913,7 +2913,7 @@ fn events_json_answers_call_counts_and_incomplete_calls_without_raw_text() {
     );
     let value: Value = serde_json::from_slice(&output.stdout).unwrap();
 
-    assert_eq!(value["schema"], "tapes-events/6");
+    assert_eq!(value["schema"], "tapes-events/7");
     assert_eq!(value["session"]["id"], id);
     assert!(value.get("truncation").is_none(), "{value}");
     assert_eq!(
@@ -3181,7 +3181,7 @@ fn events_expose_nested_declarations_and_qualified_artifact_consumption() {
         String::from_utf8_lossy(&output.stderr)
     );
     let value: Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(value["schema"], "tapes-events/6");
+    assert_eq!(value["schema"], "tapes-events/7");
     let events = value["events"].as_array().unwrap();
     let shell_call = events
         .iter()
@@ -3610,11 +3610,11 @@ fn human_list_keeps_id_column_exact() {
     let text = String::from_utf8_lossy(&output.stdout);
     let mut rows = text.lines().filter_map(|line| {
         let fields: Vec<_> = line.split('\t').collect();
-        (fields.len() == 7).then_some(fields)
+        (fields.len() == 8).then_some(fields)
     });
     assert_eq!(
         text.lines().next(),
-        Some("ID\tLIVE\tHARNESS\tMODEL\tTITLE\tDIRECTORY\tLAST ACTIVITY")
+        Some("ID\tLIVE\tHARNESS\tMODEL\tSTATUS\tTITLE\tDIRECTORY\tLAST ACTIVITY")
     );
     let first = rows
         .by_ref()
@@ -6239,7 +6239,7 @@ fn show_full_streams_a_claude_recording_past_the_read_bound() {
 
     let json: Value =
         serde_json::from_str(&stdout(&["show", "full-claude", "--full", "--json"])).unwrap();
-    assert_eq!(json["schema"], "tapes-session/10");
+    assert_eq!(json["schema"], "tapes-session/11");
     assert_eq!(json["turns"].as_array().unwrap().len(), 50);
     assert_eq!(json["turns"][0]["text"], "opening request");
     assert_eq!(json["turns"][49]["ordinal"], 49);
@@ -7196,13 +7196,13 @@ fn usage_help_names_the_schema_and_what_the_figures_mean() {
     let output = tapes().args(["usage", "--help"]).output().unwrap();
     assert!(output.status.success());
     let help = String::from_utf8_lossy(&output.stdout);
-    assert!(help.contains("tapes-usage/5"), "{help}");
+    assert!(help.contains("tapes-usage/6"), "{help}");
     assert!(
         help.contains("basis and coverage decide whether figures may be summed"),
         "{help}"
     );
     assert!(help.contains("quota is a separate fact"), "{help}");
-    assert!(help.contains("tapes-usage-summary/3"), "{help}");
+    assert!(help.contains("tapes-usage-summary/4"), "{help}");
     assert!(help.contains("--by"), "{help}");
 }
 
@@ -7229,7 +7229,7 @@ fn usage_json_reports_recorded_facts_and_turn_counts_show_agrees_with() {
     );
     let value: Value = serde_json::from_slice(&output.stdout).unwrap();
 
-    assert_eq!(value["schema"], "tapes-usage/5");
+    assert_eq!(value["schema"], "tapes-usage/6");
     assert_eq!(value["session"]["id"], id);
     assert_eq!(value["session"]["source"]["recorded_harness"], "codex");
     assert_eq!(
@@ -7256,9 +7256,13 @@ fn usage_json_reports_recorded_facts_and_turn_counts_show_agrees_with() {
     assert_eq!(value["rate_limits"]["credits"]["balance"], "0");
     assert_eq!(value["rate_limits"]["credits"]["has_credits"], false);
     assert_eq!(value["rate_limits"]["spend_control_reached"], false);
-    for absent in ["cost", "durations_ms", "by_model", "truncation"] {
+    for absent in ["cost", "durations_ms", "truncation"] {
         assert!(value.get(absent).is_none(), "{absent} in {value}");
     }
+    assert_eq!(value["by_model"][0]["model"], "gpt-fixture");
+    assert_eq!(value["by_model"][0]["variant"], "high");
+    assert_eq!(value["by_model"][0]["request_count"], 2);
+    assert_eq!(value["attribution"]["basis"], "token-event-advance");
 
     let shown = fixture_command("usage-show", &["show", id, "--json"]);
     let shown: Value = serde_json::from_slice(&shown.stdout).unwrap();
@@ -7270,6 +7274,34 @@ fn usage_json_reports_recorded_facts_and_turn_counts_show_agrees_with() {
     assert_eq!(value["turns"]["reasoning"], counted("reasoning"));
     assert_eq!(value["turns"]["total"], turns.len());
     assert_eq!(value["turns"]["coverage"], "session");
+}
+
+#[test]
+fn usage_series_is_opt_in_bounded_and_keeps_legacy_classifications() {
+    let id = "00000000-0000-0000-0000-000000000001";
+    let ordinary = fixture_command("usage-series-default", &["usage", id, "--json"]);
+    assert!(ordinary.status.success());
+    let ordinary: Value = serde_json::from_slice(&ordinary.stdout).unwrap();
+    assert!(ordinary.get("series").is_none(), "{ordinary}");
+
+    let output = fixture_command("usage-series", &["usage", id, "--series=2", "--json"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["schema"], "tapes-usage/6");
+    assert_eq!(value["series"]["observed"], 3);
+    assert_eq!(value["series"]["returned"], 2);
+    assert_eq!(value["series"]["rows"][0]["classification"], "advance");
+    assert_eq!(value["series"]["rows"][1]["classification"], "quota-only");
+    assert!(value["series"]["rows"][1]["rate_limits"].is_object());
+    assert!(value["series"]["rows"][0].get("rate_limits").is_none());
+
+    let invalid = fixture_command("usage-series-invalid", &["usage", id, "--series=0"]);
+    assert!(!invalid.status.success());
+    assert!(String::from_utf8_lossy(&invalid.stderr).contains("between 1 and 10000"));
 }
 
 /// `usage --full` counts every turn of a recording past the read bound and
@@ -7347,7 +7379,7 @@ fn usage_full_counts_every_turn_and_folds_the_whole_recordings_counters() {
     assert_eq!(bounded["accounting"]["coverage"], "read-window");
 
     let full = json(&["usage", "usage-full", "--full", "--json"]);
-    assert_eq!(full["schema"], "tapes-usage/5");
+    assert_eq!(full["schema"], "tapes-usage/6");
     assert_eq!(full["turns"]["total"], 50, "{full}");
     assert_eq!(full["turns"]["user"], 2);
     assert_eq!(full["turns"]["assistant"], 48);
@@ -7514,9 +7546,10 @@ fn usage_human_output_names_the_recorded_facts_only() {
         "{rendered}"
     );
     assert!(rendered.contains("plan: fixture\n"), "{rendered}");
-    for absent in ["cost:", "durations:", "model ", "Note:"] {
+    for absent in ["cost:", "durations:", "Note:"] {
         assert!(!rendered.contains(absent), "{absent} in {rendered}");
     }
+    assert!(rendered.contains("model gpt-fixture (high):"), "{rendered}");
 }
 
 /// The summary sums the same counters the listing reports per session, and
@@ -7561,7 +7594,7 @@ fn usage_summary_sums_the_listings_own_counters_and_counts_the_sessions_behind_t
     );
     let value: Value = serde_json::from_slice(&output.stdout).unwrap();
 
-    assert_eq!(value["schema"], "tapes-usage-summary/3");
+    assert_eq!(value["schema"], "tapes-usage-summary/4");
     assert_eq!(value["selection"]["scope"], "global");
     assert_eq!(value["selection"]["harness"], "codex");
     assert_eq!(value["scanned"], 4);
@@ -7598,6 +7631,7 @@ fn usage_summary_sums_the_listings_own_counters_and_counts_the_sessions_behind_t
             "recorded_total": 1,
             "summed_session": 0,
             "summed_read_window": 0,
+            "since_reset": 0,
             "no_accounting": 1
         })
     );
@@ -7686,15 +7720,15 @@ fn usage_summary_human_output_says_how_many_sessions_are_behind_each_sum() {
     assert_eq!(
         lines[0],
         "HARNESS\tMODEL\tSESSIONS\tINPUT\tOUTPUT\tREASONING\tCACHE READ\tCACHE WRITE\tCOST\t\
-         COVERAGE (RECORDED/SUMMED/WINDOW/NONE)"
+         COVERAGE (RECORDED/SUMMED/WINDOW/SINCE-RESET/NONE)"
     );
     assert_eq!(
         lines[2],
-        "codex\tgpt-fixture\t2\t1200 (1 of 2)\t300 (1 of 2)\t\t1000 (1 of 2)\t0 (1 of 2)\t\t1/0/0/1"
+        "codex\tgpt-fixture\t2\t1200 (1 of 2)\t300 (1 of 2)\t\t1000 (1 of 2)\t0 (1 of 2)\t\t1/0/0/0/1"
     );
     assert_eq!(
         lines[4],
-        "TOTAL\t\t4\t1200 (1 of 4)\t300 (1 of 4)\t\t1000 (1 of 4)\t0 (1 of 4)\t\t1/0/0/3"
+        "TOTAL\t\t4\t1200 (1 of 4)\t300 (1 of 4)\t\t1000 (1 of 4)\t0 (1 of 4)\t\t1/0/0/0/3"
     );
 
     fs::remove_dir_all(codex_home).unwrap();
@@ -8101,7 +8135,7 @@ fn stats_help_names_the_schema_and_what_the_figures_cover() {
     let output = tapes().args(["stats", "--help"]).output().unwrap();
     assert!(output.status.success());
     let help = String::from_utf8_lossy(&output.stdout);
-    assert!(help.contains("tapes-stats/6"), "{help}");
+    assert!(help.contains("tapes-stats/7"), "{help}");
     assert!(help.contains("complete pairs only"), "{help}");
     assert!(
         help.contains("share of recorded token counts rather than of cost"),
@@ -8139,7 +8173,7 @@ fn stats_json_counts_a_chosen_recording_exactly() {
     assert_eq!(
         comparable,
         serde_json::json!({
-            "schema": "tapes-stats/6",
+            "schema": "tapes-stats/7",
             "session": {
                 "id": id,
                 "source": {
@@ -8157,6 +8191,11 @@ fn stats_json_counts_a_chosen_recording_exactly() {
                     }
                 },
                 "model": { "id": "gpt-fixture", "variant": "high" },
+                "model_observation": {
+                    "mixed": false,
+                    "attribution_uncertain": true,
+                    "distinct_observed": 1
+                },
                 "started_at": "2026-02-02T09:00:00Z",
                 "last_activity_at": "2026-02-02T09:00:16.500Z",
                 "directory": "/fixtures/project",
@@ -8440,7 +8479,7 @@ fn brief_help_names_the_schema_and_the_half_it_reads() {
     assert!(output.status.success());
     let help = String::from_utf8_lossy(&output.stdout);
 
-    assert!(help.contains("tapes-brief/6"), "{help}");
+    assert!(help.contains("tapes-brief/7"), "{help}");
     assert!(help.contains("reads the recording alone"), "{help}");
     assert!(help.contains("--tail <N>"), "{help}");
     assert!(help.contains("[default: 12]"), "{help}");
@@ -8499,7 +8538,7 @@ fn brief_renders_the_continuation_in_reading_order() {
     assert!(narrow.contains("[assistant #4"), "{narrow}");
 
     let value: Value = serde_json::from_slice(&run(&["brief", id, "--json"])).unwrap();
-    assert_eq!(value["schema"], "tapes-brief/6");
+    assert_eq!(value["schema"], "tapes-brief/7");
     assert_eq!(value["session"]["id"], id);
     assert_eq!(value["working_set"]["directory_exists"], false);
     assert!(value["working_set"].get("git").is_none(), "{value}");
@@ -8534,7 +8573,7 @@ fn selection_stats_agree_with_individual_reads() {
         serde_json::from_slice::<Value>(&output.stdout).unwrap()
     };
     let summary = run(&["stats", "--global", "--harness", "codex", "--json"]);
-    assert_eq!(summary["schema"], "tapes-stats-summary/4");
+    assert_eq!(summary["schema"], "tapes-stats-summary/5");
     assert_eq!(summary["selected"], 2);
     assert_eq!(summary["read"], 2);
     let mut totals = [0_u64; 4];
@@ -9152,7 +9191,7 @@ fn child_reads_are_qualified_and_never_become_parent_activity() {
         String::from_utf8_lossy(&output.stderr)
     );
     let view: Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(view["schema"], "tapes-child/3");
+    assert_eq!(view["schema"], "tapes-child/4");
     assert_eq!(view["parent"]["id"], "session-claude");
     assert_eq!(
         view["transcript"]["session"]["id"],
@@ -9287,7 +9326,7 @@ fn child_full_streams_a_subagent_recording_past_the_read_bound() {
     assert!(bounded["usage"]["turns"]["total"].as_u64().unwrap() < 50);
 
     let full = json(&[&child[..], &["--full", "--tail", "2", "--json"]].concat());
-    assert_eq!(full["schema"], "tapes-child/3");
+    assert_eq!(full["schema"], "tapes-child/4");
     assert_eq!(full["usage"]["turns"]["total"], 50, "{}", full["usage"]);
     assert_eq!(full["usage"]["turns"]["coverage"], "session");
     assert_eq!(full["usage"]["read"]["projection_options"][0], "full");

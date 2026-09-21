@@ -18,13 +18,16 @@ use tapes_core::model::{
     Accounting, AccountingBasis, AccountingCoverage, Cost, Role, Session, SourceBound,
     SourceDescriptor, Tokens, Transcript, Truncation, Turn, TurnKind,
 };
-use tapes_core::usage::{usage, Durations, ModelUsage, RateWindow, TurnCoverage};
+use tapes_core::usage::{
+    usage, Durations, ModelUsage, ObservationBasis, ObservationClassification, RateWindow,
+    TurnCoverage, UsageObservationOptions, UsageOptions,
+};
 use tapes_core::{
     export_selection_with_backends, export_with_backends, latest_with_backends, list_with_backends,
     list_with_backends_filtered, list_with_backends_filtered_and_search,
     list_with_backends_options, resolve_session, scope::Scope, show_with_backends,
-    stats_full_with_backends, ExportRead, ListFilters, ListSort, ResolveError, Selection,
-    SessionSelection, Where, EXPORT_MANIFEST_SCHEMA, LIST_SEARCH_TAIL,
+    stats_full_with_backends, usage_with_options_with_backends, ExportRead, ListFilters, ListSort,
+    ResolveError, Selection, SessionSelection, Where, EXPORT_MANIFEST_SCHEMA, LIST_SEARCH_TAIL,
 };
 
 fn fixtures(harness: &str) -> PathBuf {
@@ -2213,6 +2216,7 @@ fn resolver_session(id: &str) -> Session {
         source: SourceDescriptor::installed("fixture", "fixture-recording"),
         metadata: None,
         model: None,
+        model_observation: None,
         title: None,
         derived_title: None,
         derived_title_truncated: None,
@@ -3849,12 +3853,174 @@ fn codex_usage_reports_the_context_window_and_the_newest_quota_windows() {
     assert_eq!(view.turns.total, 6);
     assert_eq!(view.turns.coverage, TurnCoverage::Session);
     assert!(view.durations_ms.is_none(), "Codex records no durations");
-    assert!(view.by_model.is_none(), "Codex records no per-model split");
+    assert_eq!(
+        view.by_model,
+        Some(vec![ModelUsage {
+            model: "gpt-fixture".to_owned(),
+            variant: Some("high".to_owned()),
+            tokens: Some(Tokens {
+                input: Some(1200),
+                output: Some(300),
+                reasoning: Some(50),
+                cache_read: Some(1000),
+                cache_write: Some(0),
+            }),
+            cost: None,
+            request_count: Some(2),
+        }])
+    );
+    let attribution = view
+        .attribution
+        .expect("legacy observations are attributed");
+    assert_eq!(attribution.basis, ObservationBasis::TokenEventAdvance);
+    assert_eq!(attribution.counted, 2);
+    assert_eq!(attribution.attributed, 2);
+    assert!(!attribution
+        .incomplete
+        .iter()
+        .any(|reason| reason == "leading-uncounted"));
 
     let without = located(&backend, "20000000-0000-0000-0000-000000000004");
     let without = usage(&backend.transcript(&without, usize::MAX).unwrap());
     assert!(without.context_window.is_none());
     assert!(without.rate_limits.is_none());
+}
+
+#[test]
+fn codex_modern_usage_records_choose_the_modern_basis_and_keep_native_rows() {
+    let backend: Vec<Box<dyn Backend>> = vec![Box::new(CodexBackend::new(fixtures("codex")))];
+    let selection = Selection::Id("60000000-0000-0000-0000-000000000007");
+    let view = usage_with_options_with_backends(
+        &backend,
+        selection,
+        UsageOptions {
+            full: false,
+            series: Some(UsageObservationOptions { limit: 16 }),
+        },
+    )
+    .unwrap();
+
+    assert_eq!(view.schema, "tapes-usage/6");
+    assert_eq!(
+        view.tokens.as_ref().and_then(|tokens| tokens.input),
+        Some(60)
+    );
+    assert!(view.session.model_observation.as_ref().unwrap().mixed);
+    let models = view.by_model.as_ref().unwrap();
+    assert_eq!(models.len(), 2);
+    assert_eq!(models[0].model, "gpt-alpha");
+    assert_eq!(models[0].variant.as_deref(), Some("high"));
+    assert_eq!(models[0].request_count, Some(2));
+    assert_eq!(models[1].model, "gpt-beta");
+    assert_eq!(models[1].request_count, Some(1));
+
+    let attribution = view.attribution.as_ref().unwrap();
+    assert_eq!(attribution.basis, ObservationBasis::UsageRecord);
+    assert_eq!(attribution.observed, 4);
+    assert_eq!(attribution.counted, 3);
+    assert_eq!(attribution.attributed, 3);
+    assert_eq!(attribution.unattributed, 0);
+
+    let series = view.series.unwrap();
+    assert_eq!(series.observed, 6);
+    assert_eq!(series.returned, 6);
+    assert_eq!(
+        series
+            .rows
+            .iter()
+            .map(|row| row.native_ordinal)
+            .collect::<Vec<_>>(),
+        vec![Some(2), Some(5), Some(8), Some(9), Some(10), Some(11)]
+    );
+    assert_eq!(
+        series.rows[2].classification,
+        ObservationClassification::Repeat
+    );
+    assert!(!series.rows[2].counted);
+    assert!(series.rows[4].rate_limits.is_none());
+    assert!(series.rows[5].rate_limits.is_some());
+}
+
+#[test]
+fn codex_legacy_counter_resets_keep_the_newest_total_and_since_reset_coverage() {
+    let root = std::env::temp_dir().join(format!("tapes-codex-reset-{}", std::process::id()));
+    let sessions = root.join("sessions/2026/01/01");
+    let id = "70000000-0000-0000-0000-000000000008";
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&sessions).unwrap();
+    let record = |timestamp: &str, total: u64, last: u64| {
+        serde_json::json!({
+            "timestamp": timestamp,
+            "type": "event_msg",
+            "payload": {
+                "type": "token_count",
+                "info": {
+                    "total_token_usage": {"input_tokens": total, "output_tokens": total / 10},
+                    "last_token_usage": {"input_tokens": last, "output_tokens": last / 10}
+                },
+                "rate_limits": null
+            }
+        })
+    };
+    let lines = [
+        serde_json::json!({
+            "timestamp": "2026-01-01T17:00:00Z",
+            "type": "session_meta",
+            "payload": {"id": id, "session_id": id, "cwd": "/fixtures/reset-project"}
+        }),
+        serde_json::json!({
+            "timestamp": "2026-01-01T17:00:01Z",
+            "type": "turn_context",
+            "payload": {"cwd": "/fixtures/reset-project", "model": "gpt-reset", "effort": "high"}
+        }),
+        record("2026-01-01T17:00:02Z", 100, 100),
+        record("2026-01-01T17:00:03Z", 10, 10),
+        record("2026-01-01T17:00:04Z", 15, 5),
+    ]
+    .into_iter()
+    .map(|record| serde_json::to_string(&record).unwrap())
+    .collect::<Vec<_>>()
+    .join("\n");
+    fs::write(
+        sessions.join(format!("rollout-2026-01-01T17-00-00-{id}.jsonl")),
+        format!("{lines}\n"),
+    )
+    .unwrap();
+
+    let backends: Vec<Box<dyn Backend>> = vec![Box::new(CodexBackend::new(&root))];
+    let view = usage_with_options_with_backends(
+        &backends,
+        Selection::Id(id),
+        UsageOptions {
+            full: false,
+            series: Some(UsageObservationOptions { limit: 8 }),
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        view.tokens.as_ref().and_then(|tokens| tokens.input),
+        Some(15)
+    );
+    assert_eq!(
+        view.accounting
+            .as_ref()
+            .map(|accounting| accounting.coverage),
+        Some(AccountingCoverage::SinceReset)
+    );
+    let attribution = view.attribution.as_ref().unwrap();
+    assert_eq!(attribution.resets, 1);
+    assert_eq!(attribution.counted, 3);
+    assert_eq!(
+        view.series
+            .as_ref()
+            .unwrap()
+            .rows
+            .iter()
+            .filter(|row| row.classification == ObservationClassification::ResetAdvance)
+            .count(),
+        1
+    );
+    fs::remove_dir_all(root).unwrap();
 }
 
 /// A Claude `cost-state` carries wall-clock durations and the per-model split
@@ -3894,6 +4060,7 @@ fn claude_usage_reports_cost_state_durations_and_the_per_model_split() {
         Some(vec![
             ModelUsage {
                 model: "claude-first".to_owned(),
+                variant: None,
                 tokens: Some(Tokens {
                     input: Some(100),
                     output: Some(200),
@@ -3902,9 +4069,11 @@ fn claude_usage_reports_cost_state_durations_and_the_per_model_split() {
                     cache_write: Some(500),
                 }),
                 cost: Some(Cost { usd: 12.0 }),
+                request_count: None,
             },
             ModelUsage {
                 model: "claude-second".to_owned(),
+                variant: None,
                 tokens: Some(Tokens {
                     input: Some(1),
                     output: Some(2),
@@ -3913,6 +4082,7 @@ fn claude_usage_reports_cost_state_durations_and_the_per_model_split() {
                     cache_write: Some(5),
                 }),
                 cost: Some(Cost { usd: 0.5 }),
+                request_count: None,
             },
         ])
     );

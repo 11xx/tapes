@@ -115,6 +115,7 @@ impl PiBackend {
             source: SourceDescriptor::installed("pi", path.display().to_string()),
             metadata: None,
             model,
+            model_observation: None,
             title: None,
             derived_title: None,
             derived_title_truncated: None,

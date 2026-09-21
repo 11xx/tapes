@@ -558,6 +558,7 @@ fn write_header(out: &mut String, session: &Session, transcript: &Transcript, ki
                 let coverage = match accounting.coverage {
                     AccountingCoverage::Session => "whole session",
                     AccountingCoverage::ReadWindow => "read window",
+                    AccountingCoverage::SinceReset => "since observed reset",
                 };
                 format!(" ({basis}, {coverage})")
             });
@@ -774,6 +775,7 @@ mod tests {
                     id: "kimi-k3".into(),
                     variant: Some("max".into()),
                 }),
+                model_observation: None,
                 title: Some("A rescue".into()),
                 derived_title: None,
                 derived_title_truncated: None,

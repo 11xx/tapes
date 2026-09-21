@@ -181,26 +181,52 @@ checked carries an `event_msg` of `payload.type == "user_message"`.
 
 ## Token accounting
 
-An `event_msg` with `payload.type == "token_count"` follows every model
-response. Its `info.total_token_usage` is the session's running total and
-`info.last_token_usage` is that one response, each with `input_tokens`,
-`cached_input_tokens`, `cache_write_input_tokens`, `output_tokens`,
-`reasoning_output_tokens`, and `total_tokens`. `info` is null on an event that
-carries no usage yet; `rate_limits` rides alongside and is not accounting.
-Codex reports no cost.
+Modern rollouts carry a top-level `token_usage_record` with `ordinal`,
+`payload.response_id`, and `payload.usage`. The response identity and native
+ordinal are retained as recorded; neither is inferred from a turn or from the
+position of a neighboring record. The normalized usage view groups valid,
+deduplicated observations by the model and effort context actually reached.
+Its basis is `usage-record`, and a late modern record selects that basis for
+the read without adding legacy token-event observations to it.
 
-The normalized `tokens` are the running total from the newest `token_count`
-event with usage in the bounded read: `input` from `input_tokens`,
-`cache_read` from `cached_input_tokens`, `cache_write` from
-`cache_write_input_tokens`, `output` from `output_tokens`, and `reasoning`
-from `reasoning_output_tokens`; `total_tokens` has no normalized field. A
-counter the event did not write stays absent, a counter written as zero is
-zero, and an event without usage is passed over for an older one. A window
-with no such event reports no tokens rather than zero. The totals are
-cumulative across the session: in every rollout checked they never decrease,
-across model and effort changes and across compaction, so the newest event
-is the whole session's accounting so far, not the accounting of the window.
-`last_token_usage` is per response and is not normalized.
+Older rollouts carry an `event_msg` with `payload.type == "token_count"` after
+a model response. Its `info.total_token_usage` is the newest recorded session
+total and `info.last_token_usage` is that event's response, each with
+`input_tokens`, `cached_input_tokens`, `cache_write_input_tokens`,
+`output_tokens`, `reasoning_output_tokens`, and `total_tokens`. `info` is null
+on an event that carries no usage; `rate_limits` rides alongside and is not
+accounting. Codex reports no cost.
+
+The normalized session `tokens` remain the newest `total_token_usage` observed
+in the read: `input` from `input_tokens`, `cache_read` from
+`cached_input_tokens`, `cache_write` from `cache_write_input_tokens`, `output`
+from `output_tokens`, and `reasoning` from `reasoning_output_tokens`;
+`total_tokens` has no normalized field. A counter the event did not write stays
+absent, a counter written as zero is zero, and an event without usage is
+passed over for an older one. A window with no such event reports no tokens
+rather than zero. Totals are recorded values, not a promise of global
+monotonicity: an observed decrease is retained numerically and marks
+`accounting.coverage` as `since-reset` with reset evidence in attribution.
+
+When no valid modern record is reached, the reader uses the explicitly named
+`token-event-advance` heuristic. A differing cumulative total may count its
+actual `last_token_usage`; an unchanged total, a leading bounded observation,
+missing counters, and quota-only records remain visibly uncounted. This is an
+observation heuristic, not a verified request identity. The usage view keeps
+raw rows, request counts, attribution coverage, and unattributed counters
+separate. Unknown counters are summed only from values the source actually
+wrote; no request usage is inferred by subtracting from a session total.
+
+`tapes usage SESSION --series[=N]` opts into a recent bounded suffix of these
+raw accounting observations (200 rows by default, 1 through 10,000 allowed).
+Rows carry their source byte span and revision, optional native ordinal and
+response identity, model context, classification, counted status, and the
+counters present on their own source record. Quota stays on the token-count
+row that carried it and is never copied onto a modern request row. `--full`
+scans the pinned recording but keeps only the requested suffix. The series has
+an 8 MiB retained serialized-row budget and reports row-cap, byte-budget,
+oversized-row, and source-gap omissions independently. Ordinary usage, list,
+and show paths retain no observation row collection.
 
 The same event carries two facts that are not accounting.
 `info.model_context_window` is how many tokens the session's model holds at

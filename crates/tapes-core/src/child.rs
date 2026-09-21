@@ -10,7 +10,7 @@ use crate::model::{Session, Transcript, TranscriptEvidence, Truncation};
 use crate::usage::{self, TurnTally, UsageView};
 use crate::Selection;
 
-pub const CHILD_SCHEMA: &str = "tapes-child/3";
+pub const CHILD_SCHEMA: &str = "tapes-child/4";
 
 #[derive(Debug, Serialize)]
 pub struct ChildView {

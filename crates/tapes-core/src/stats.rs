@@ -21,7 +21,7 @@ use crate::model::{
 };
 use crate::usage::{self, TurnCoverage, UsageSession, UsageView};
 
-pub const STATS_SCHEMA: &str = "tapes-stats/6";
+pub const STATS_SCHEMA: &str = "tapes-stats/7";
 
 /// One session's counted facts, in the order a reader takes them: what the
 /// figures cover, the turns, the tool calls behind them, the recorded clock,
@@ -685,6 +685,7 @@ mod tests {
             source: SourceDescriptor::installed("fixture", "fixture-recording"),
             metadata: None,
             model: None,
+            model_observation: None,
             title: None,
             derived_title: None,
             derived_title_truncated: None,

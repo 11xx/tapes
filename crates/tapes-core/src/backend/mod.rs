@@ -368,6 +368,22 @@ pub trait Backend {
             self.harness()
         )
     }
+    /// Read one backend's accounting observations against the same bounded or
+    /// pinned source evidence a caller already used. Ordinary usage never
+    /// calls this hook, so a backend does not retain a per-observation
+    /// collection unless the caller explicitly asks for one.
+    fn usage_observations(
+        &self,
+        session: &Session,
+        read: Option<&crate::model::ReadEvidence>,
+        options: crate::usage::UsageObservationOptions,
+    ) -> Result<crate::usage::UsageObservationResult> {
+        let _ = (session, read, options);
+        anyhow::bail!(
+            "{} sessions do not support usage observations",
+            self.harness()
+        )
+    }
     /// Every relationship the whole recording names, read record by record so
     /// memory follows the references kept rather than the file. The default
     /// refuses: a bounded lineage read is not an answer to a whole one.
@@ -918,7 +934,20 @@ pub(crate) fn stream_jsonl(
     pin: Option<ReadPin<'_>>,
     record: impl FnMut(&Value, ByteSpan, &str) -> Result<bool>,
 ) -> Result<StreamedJsonl> {
-    stream_jsonl_within(path, FULL_RECORD_BYTES, pin, record)
+    stream_jsonl_within(path, FULL_RECORD_BYTES, pin, record, |_| {})
+}
+
+/// Decode a JSONL recording while notifying an observer when malformed or
+/// oversized records create a source gap. The ordinary reader keeps its
+/// existing callback contract; accounting observers opt into this form so a
+/// gap can invalidate model context before later observations.
+pub(crate) fn stream_jsonl_with_gaps(
+    path: &Path,
+    pin: Option<ReadPin<'_>>,
+    record: impl FnMut(&Value, ByteSpan, &str) -> Result<bool>,
+    gap: impl FnMut(&ReadGap),
+) -> Result<StreamedJsonl> {
+    stream_jsonl_within(path, FULL_RECORD_BYTES, pin, record, gap)
 }
 
 /// The pin a whole-recording read starts from: none for a first read, the
@@ -932,6 +961,7 @@ fn stream_jsonl_within(
     record_bytes: u64,
     pin: Option<ReadPin<'_>>,
     mut record: impl FnMut(&Value, ByteSpan, &str) -> Result<bool>,
+    mut gap: impl FnMut(&ReadGap),
 ) -> Result<StreamedJsonl> {
     let file = File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
     let metadata = file
@@ -976,10 +1006,12 @@ fn stream_jsonl_within(
         if read > record_bytes && line.last() != Some(&b'\n') {
             span.end += skip_line(&mut reader)?;
             streamed.skipped += 1;
-            streamed.gaps.push(ReadGap {
+            let read_gap = ReadGap {
                 span,
                 reason: "oversized-record".to_owned(),
-            });
+            };
+            gap(&read_gap);
+            streamed.gaps.push(read_gap);
         } else {
             let content = line[..].strip_suffix(b"\n").unwrap_or(&line[..]);
             if !content.iter().all(u8::is_ascii_whitespace) {
@@ -990,10 +1022,12 @@ fn stream_jsonl_within(
                     }
                     Err(_) => {
                         streamed.skipped += 1;
-                        streamed.gaps.push(ReadGap {
+                        let read_gap = ReadGap {
                             span,
                             reason: "malformed-record".to_owned(),
-                        });
+                        };
+                        gap(&read_gap);
+                        streamed.gaps.push(read_gap);
                     }
                 }
             }
@@ -1053,7 +1087,15 @@ fn read_jsonl_from(
     metadata: &std::fs::Metadata,
     configured_bound: u64,
 ) -> Result<Jsonl> {
-    let source_length = metadata.len();
+    read_jsonl_from_length(file, metadata, configured_bound, metadata.len())
+}
+
+fn read_jsonl_from_length(
+    file: &mut File,
+    metadata: &std::fs::Metadata,
+    configured_bound: u64,
+    source_length: u64,
+) -> Result<Jsonl> {
     let truncated = source_length > configured_bound;
     let read_start = source_length.saturating_sub(configured_bound);
     let read_end = source_length;
@@ -1067,7 +1109,7 @@ fn read_jsonl_from(
     };
     file.seek(SeekFrom::Start(read_start))?;
     let mut bytes = Vec::with_capacity((read_end - read_start) as usize);
-    file.take(configured_bound).read_to_end(&mut bytes)?;
+    file.take(read_end - read_start).read_to_end(&mut bytes)?;
 
     let normalized_start = if truncated && !aligned {
         bytes
@@ -1112,6 +1154,46 @@ fn read_jsonl_from(
         configured_bound,
         source_revision: stat_revision(metadata),
         gaps,
+    })
+}
+
+/// Reopen a bounded recording at the exact revision and source length named
+/// by an earlier transcript read. A changed or appended source is refused so
+/// usage totals and an opt-in observation suffix cannot silently mix reads.
+pub(crate) fn read_recording_at(path: &Path, evidence: &ReadEvidence) -> Result<Recording> {
+    let mut file =
+        File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
+    let metadata = file
+        .metadata()
+        .with_context(|| format!("failed to inspect {}", path.display()))?;
+    let expected = evidence
+        .source_revision
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("the earlier read names no source revision to replay"))?;
+    if metadata.len() != evidence.source_length || stat_revision(&metadata) != expected {
+        anyhow::bail!("recording source changed between bounded usage reads");
+    }
+    let tail = read_jsonl_from_length(
+        &mut file,
+        &metadata,
+        evidence.configured_bound,
+        evidence.source_length,
+    )?;
+    let head = if tail.truncated {
+        head_jsonl_from(&mut file, tail.source_length)?
+    } else {
+        HeadJsonl::default()
+    };
+    let after = file.metadata()?;
+    if !same_source(&metadata, &after) {
+        anyhow::bail!("recording source changed during bounded usage replay");
+    }
+    Ok(Recording {
+        head: head.values,
+        head_spans: head.spans,
+        head_read_end: head.read_end,
+        head_gaps: head.gaps,
+        tail,
     })
 }
 
@@ -1922,10 +2004,16 @@ mod tests {
         )
         .unwrap();
         let mut seen = Vec::new();
-        let read = stream_jsonl_within(&path, 32, None, |value, span, _| {
-            seen.push((value["n"].as_u64(), span));
-            Ok(value["n"] == 2)
-        })
+        let read = stream_jsonl_within(
+            &path,
+            32,
+            None,
+            |value, span, _| {
+                seen.push((value["n"].as_u64(), span));
+                Ok(value["n"] == 2)
+            },
+            |_| {},
+        )
         .unwrap();
         fs::remove_file(&path).unwrap();
         assert_eq!(

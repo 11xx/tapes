@@ -202,6 +202,7 @@ mod tests {
             source: SourceDescriptor::installed("fixture", "fixture-recording"),
             metadata: None,
             model: None,
+            model_observation: None,
             title: None,
             derived_title: None,
             derived_title_truncated: None,

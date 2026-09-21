@@ -1831,6 +1831,7 @@ fn parse_record_spanning(
         source,
         metadata,
         model,
+        model_observation: None,
         title,
         derived_title: None,
         derived_title_truncated: None,
