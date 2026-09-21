@@ -223,8 +223,12 @@ impl ClaudeBackend {
 
 impl Default for ClaudeBackend {
     fn default() -> Self {
+        let root = std::env::var_os("CLAUDE_CONFIG_DIR")
+            .map(PathBuf::from)
+            .map(|path| path.join("projects"))
+            .or_else(|| home_path(&[".claude", "projects"]));
         Self {
-            root: home_path(&[".claude", "projects"]),
+            root,
             read_bytes: super::DEFAULT_READ_BYTES,
         }
     }

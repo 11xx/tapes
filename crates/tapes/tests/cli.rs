@@ -1,8 +1,9 @@
+use std::ffi::OsStr;
 use std::fs;
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Command, Output, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -1406,8 +1407,37 @@ fn with_fixture_env(command: &mut Command, codex_home: &Path, home: &Path, bin: 
     command
         .env("CODEX_HOME", codex_home)
         .env("HOME", home)
+        .env_remove("CLAUDE_CONFIG_DIR")
         .env_remove("XDG_DATA_HOME")
         .env("PATH", format!("{}:/usr/bin:/bin", bin.display()));
+}
+
+fn write_claude_fixture(root: &Path, id: &str) {
+    let project = root.join("projects/fixture");
+    fs::create_dir_all(&project).unwrap();
+    let recording = CLAUDE_SESSION.replace("session-claude", id);
+    fs::write(project.join(format!("{id}.jsonl")), recording).unwrap();
+}
+
+fn run_claude(
+    arguments: &[&str],
+    codex_home: &Path,
+    home: &Path,
+    cwd: &Path,
+    config_dir: Option<&OsStr>,
+) -> Output {
+    let mut command = tapes();
+    command.args(arguments).current_dir(cwd);
+    with_fixture_env(&mut command, codex_home, home, cwd);
+    match config_dir {
+        Some(config_dir) => {
+            command.env("CLAUDE_CONFIG_DIR", config_dir);
+        }
+        None => {
+            command.env_remove("CLAUDE_CONFIG_DIR");
+        }
+    }
+    command.output().unwrap()
 }
 
 fn session<'a>(value: &'a Value, id: &str) -> &'a Value {
@@ -5938,6 +5968,193 @@ const CLAUDE_SUBAGENT: &str =
     include_str!("fixtures/claude/project/session-claude/subagents/agent-fixture.jsonl");
 const CLAUDE_SUBAGENT_META: &str =
     include_str!("fixtures/claude/project/session-claude/subagents/agent-fixture.meta.json");
+
+#[test]
+fn claude_config_dir_absolute_override_reaches_only_relocated_store() {
+    let root = TemporaryDirectory::new(std::env::temp_dir().join(format!(
+        "tapes-cli-claude-config-dir-absolute-{}",
+        std::process::id()
+    )));
+    let home = root.path().join("home");
+    let cwd = root.path().join("cwd");
+    let config_dir = root.path().join("relocated-config");
+    fs::create_dir_all(&cwd).unwrap();
+    write_claude_fixture(&config_dir, "relocated-claude");
+    write_claude_fixture(&home.join(".claude"), "default-decoy");
+
+    let config_dir = config_dir.as_os_str();
+    let shown = run_claude(
+        &["show", "relocated-claude", "--json"],
+        &root.path().join("codex"),
+        &home,
+        &cwd,
+        Some(config_dir),
+    );
+    assert!(
+        shown.status.success(),
+        "{}",
+        String::from_utf8_lossy(&shown.stderr)
+    );
+    let shown: Value = serde_json::from_slice(&shown.stdout).unwrap();
+    assert_eq!(shown["session"]["id"], "relocated-claude");
+
+    let listed = run_claude(
+        &["list", "--global", "--harness", "claude", "--json"],
+        &root.path().join("codex"),
+        &home,
+        &cwd,
+        Some(config_dir),
+    );
+    assert!(
+        listed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&listed.stderr)
+    );
+    let listed: Value = serde_json::from_slice(&listed.stdout).unwrap();
+    let ids = listed["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|session| session["id"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(ids, ["relocated-claude"]);
+
+    let usage = run_claude(
+        &["usage", "relocated-claude", "--json"],
+        &root.path().join("codex"),
+        &home,
+        &cwd,
+        Some(config_dir),
+    );
+    assert!(
+        usage.status.success(),
+        "{}",
+        String::from_utf8_lossy(&usage.stderr)
+    );
+    let usage: Value = serde_json::from_slice(&usage.stdout).unwrap();
+    assert_eq!(usage["session"]["id"], "relocated-claude");
+    assert!(!usage["turns"].as_object().unwrap().is_empty());
+}
+
+#[test]
+fn claude_config_dir_accepts_empty_and_relative_values() {
+    let root = TemporaryDirectory::new(std::env::temp_dir().join(format!(
+        "tapes-cli-claude-config-dir-values-{}",
+        std::process::id()
+    )));
+    let home = root.path().join("home");
+    let cwd = root.path().join("cwd");
+    fs::create_dir_all(&cwd).unwrap();
+    write_claude_fixture(&cwd, "empty-claude");
+    write_claude_fixture(&cwd.join("relative-config"), "relative-claude");
+    let codex_home = root.path().join("codex");
+
+    let empty = run_claude(
+        &["show", "empty-claude", "--json"],
+        &codex_home,
+        &home,
+        &cwd,
+        Some(OsStr::new("")),
+    );
+    assert!(
+        empty.status.success(),
+        "{}",
+        String::from_utf8_lossy(&empty.stderr)
+    );
+    let empty: Value = serde_json::from_slice(&empty.stdout).unwrap();
+    assert_eq!(empty["session"]["id"], "empty-claude");
+
+    let relative = run_claude(
+        &["show", "relative-claude", "--json"],
+        &codex_home,
+        &home,
+        &cwd,
+        Some(OsStr::new("relative-config")),
+    );
+    assert!(
+        relative.status.success(),
+        "{}",
+        String::from_utf8_lossy(&relative.stderr)
+    );
+    let relative: Value = serde_json::from_slice(&relative.stdout).unwrap();
+    assert_eq!(relative["session"]["id"], "relative-claude");
+}
+
+#[test]
+fn claude_config_dir_unset_uses_the_home_default() {
+    let root = TemporaryDirectory::new(std::env::temp_dir().join(format!(
+        "tapes-cli-claude-config-dir-unset-{}",
+        std::process::id()
+    )));
+    let home = root.path().join("home");
+    let cwd = root.path().join("cwd");
+    fs::create_dir_all(&cwd).unwrap();
+    write_claude_fixture(&home.join(".claude"), "home-claude");
+    write_claude_fixture(&cwd, "relative-decoy");
+
+    let listed = run_claude(
+        &["list", "--global", "--harness", "claude", "--json"],
+        &root.path().join("codex"),
+        &home,
+        &cwd,
+        None,
+    );
+    assert!(
+        listed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&listed.stderr)
+    );
+    let listed: Value = serde_json::from_slice(&listed.stdout).unwrap();
+    let ids = listed["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|session| session["id"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(ids, ["home-claude"]);
+}
+
+#[test]
+fn claude_config_dir_missing_store_keeps_list_available_and_named_show_error() {
+    let root = TemporaryDirectory::new(std::env::temp_dir().join(format!(
+        "tapes-cli-claude-config-dir-missing-{}",
+        std::process::id()
+    )));
+    let home = root.path().join("home");
+    let cwd = root.path().join("cwd");
+    fs::create_dir_all(&cwd).unwrap();
+    let config_dir = root.path().join("missing-config");
+    let codex_home = root.path().join("codex");
+
+    let listed = run_claude(
+        &["list", "--global", "--harness", "claude", "--json"],
+        &codex_home,
+        &home,
+        &cwd,
+        Some(config_dir.as_os_str()),
+    );
+    assert!(
+        listed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&listed.stderr)
+    );
+    let listed: Value = serde_json::from_slice(&listed.stdout).unwrap();
+    assert!(listed["sessions"].as_array().unwrap().is_empty());
+
+    let shown = run_claude(
+        &["show", "missing-claude"],
+        &codex_home,
+        &home,
+        &cwd,
+        Some(config_dir.as_os_str()),
+    );
+    assert!(!shown.status.success());
+    assert!(
+        String::from_utf8_lossy(&shown.stderr).contains("was not found"),
+        "{}",
+        String::from_utf8_lossy(&shown.stderr)
+    );
+}
 
 /// `show --full` reads a Claude recording past the bounded tail and writes
 /// every turn from the recording's first; a flag it cannot honor refuses.
