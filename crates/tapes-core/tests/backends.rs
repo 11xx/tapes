@@ -4023,6 +4023,115 @@ fn codex_legacy_counter_resets_keep_the_newest_total_and_since_reset_coverage() 
     fs::remove_dir_all(root).unwrap();
 }
 
+/// One synthetic Codex rollout, written under a per-test store root so a
+/// usage read can be driven end to end through the ordinary resolver.
+fn codex_rollout(tag: &str, id: &str, records: &[serde_json::Value]) -> PathBuf {
+    let root = std::env::temp_dir().join(format!("tapes-codex-{tag}-{}", std::process::id()));
+    let sessions = root.join("sessions/2026/01/01");
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&sessions).unwrap();
+    let lines = records
+        .iter()
+        .map(|record| serde_json::to_string(record).unwrap())
+        .collect::<Vec<_>>()
+        .join("\n");
+    fs::write(
+        sessions.join(format!("rollout-2026-01-01T12-00-00-{id}.jsonl")),
+        format!("{lines}\n"),
+    )
+    .unwrap();
+    root
+}
+
+fn codex_meta(id: &str) -> serde_json::Value {
+    serde_json::json!({
+        "timestamp": "2026-01-01T12:00:00Z",
+        "type": "session_meta",
+        "payload": {"id": id, "session_id": id, "cwd": "/fixtures/observed"}
+    })
+}
+
+fn codex_turn_context(model: &str) -> serde_json::Value {
+    serde_json::json!({
+        "timestamp": "2026-01-01T12:00:01Z",
+        "type": "turn_context",
+        "payload": {"cwd": "/fixtures/observed", "model": model, "effort": "high"}
+    })
+}
+
+fn codex_usage_record(ordinal: u64, response_id: &str, input: u64) -> serde_json::Value {
+    serde_json::json!({
+        "timestamp": "2026-01-01T12:00:02Z",
+        "type": "token_usage_record",
+        "ordinal": ordinal,
+        "payload": {
+            "response_id": response_id,
+            "usage": {"input_tokens": input, "output_tokens": 1}
+        }
+    })
+}
+
+fn codex_usage(root: &Path, id: &str) -> tapes_core::usage::UsageView {
+    let backends: Vec<Box<dyn Backend>> = vec![Box::new(CodexBackend::new(root))];
+    usage_with_options_with_backends(
+        &backends,
+        Selection::Id(id),
+        UsageOptions {
+            full: false,
+            series: None,
+        },
+    )
+    .unwrap()
+}
+
+/// `distinct_observed` answers how many model selections a read actually saw,
+/// not how often the selection changed: a recording that alternates between
+/// two models observed two, however many times it switched.
+#[test]
+fn codex_model_observations_count_distinct_selections_not_switches() {
+    let id = "90000000-0000-0000-0000-000000000001";
+    let mut records = vec![codex_meta(id)];
+    for model in ["gpt-alpha", "gpt-beta", "gpt-alpha", "gpt-beta"] {
+        records.push(codex_turn_context(model));
+    }
+    let root = codex_rollout("distinct-selections", id, &records);
+
+    let status = codex_usage(&root, id).session.model_observation.unwrap();
+    assert!(status.mixed, "two selections alternated");
+    assert_eq!(status.distinct_observed, Some(2));
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+/// Past the retained model-key budget no exact distinct count exists, so the
+/// count is withheld and the budget is named instead of publishing the
+/// truncated one as exact.
+#[test]
+fn codex_model_observations_withhold_the_count_past_the_key_budget() {
+    let id = "90000000-0000-0000-0000-000000000002";
+    let mut records = vec![codex_meta(id)];
+    for index in 0..40 {
+        records.push(codex_turn_context(&format!("gpt-m{index:02}")));
+        records.push(codex_usage_record(index, &format!("response-{index}"), 1));
+    }
+    let root = codex_rollout("key-budget", id, &records);
+
+    let view = codex_usage(&root, id);
+    let status = view.session.model_observation.as_ref().unwrap();
+    assert!(status.mixed);
+    assert_eq!(status.distinct_observed, None);
+    assert!(status.attribution_uncertain);
+    let attribution = view.attribution.as_ref().unwrap();
+    assert_eq!(attribution.attributed, 32);
+    assert_eq!(attribution.unattributed, 8);
+    assert!(attribution
+        .bounds
+        .iter()
+        .any(|reason| reason == "model-key-budget"));
+
+    fs::remove_dir_all(root).unwrap();
+}
+
 /// A Claude `cost-state` carries wall-clock durations and the per-model split
 /// beside its totals. A recording without one carries neither.
 #[test]

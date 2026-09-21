@@ -399,8 +399,11 @@ Codex's optional `session.model_observation` has independent `mixed` and
 `attribution_uncertain` booleans. `mixed` means more than one model/effort
 selection was observed; `attribution_uncertain` means a source gap, bounded
 prefix, identity budget, or other fact prevented complete model attribution.
-They may both be true. The session model remains the latest observed selection
-for classification and filtering; it is not a claim that the session's whole
+They may both be true. The optional `distinct_observed` is how many distinct
+model/effort selections the read reached, not how often the selection changed,
+and it is absent when the retained key budget was exhausted and no exact count
+exists. The session model remains the latest observed selection for
+classification and filtering; it is not a claim that the session's whole
 recorded total belongs to that model.
 
 The remaining objects are present exactly when the harness recorded them:

@@ -667,6 +667,13 @@ struct ModelBudget {
 }
 
 impl ModelBudget {
+    /// How many distinct keys the budget retained, which is the read's
+    /// distinct-model count exactly while the budget has room for every key
+    /// observed.
+    fn retained(&self) -> usize {
+        self.keys.len()
+    }
+
     fn reserve(&mut self, key: &ModelKey) -> bool {
         if self.keys.contains(key) {
             return true;
@@ -931,7 +938,6 @@ struct CodexUsageObserver {
     model_budget: ModelBudget,
     model_observed: bool,
     mixed: bool,
-    distinct_models: usize,
     previous_model_key: Option<ModelKey>,
     seen_response_ids: HashSet<String>,
     seen_response_id_bytes: usize,
@@ -962,7 +968,6 @@ impl CodexUsageObserver {
             model_budget: ModelBudget::default(),
             model_observed: false,
             mixed: false,
-            distinct_models: 0,
             previous_model_key: None,
             seen_response_ids: HashSet::new(),
             seen_response_id_bytes: 0,
@@ -1049,7 +1054,6 @@ impl CodexUsageObserver {
             if self.previous_model_key.is_some() {
                 self.mixed = true;
             }
-            self.distinct_models = self.distinct_models.saturating_add(1);
             self.previous_model_key = Some(key.clone());
         }
         if !self.model_budget.reserve(&key) {
@@ -1332,7 +1336,10 @@ impl CodexUsageObserver {
                     || !attribution.bounds.is_empty()
             }) || !self.incomplete.0.is_empty()
                 || !self.bounds.0.is_empty(),
-            distinct_observed: self.model_observed.then_some(self.distinct_models),
+            // Past the key budget the retained set is a floor rather than a
+            // count, so no number is published for it.
+            distinct_observed: (self.model_observed && !self.model_budget.exhausted)
+                .then(|| self.model_budget.retained()),
         });
         let accounting = accounting_for(
             self.tokens.as_ref(),
