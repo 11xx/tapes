@@ -11,6 +11,12 @@
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+#[cfg(unix)]
+use std::{
+    ffi::CString,
+    os::fd::{AsRawFd, FromRawFd},
+    os::unix::ffi::OsStrExt,
+};
 
 use anyhow::{anyhow, Context, Result};
 use serde::Serialize;
@@ -407,42 +413,145 @@ fn copy_report(
 }
 
 /// Copy a whole report member sitting beside its conversation in a supplied
-/// directory. The member name is the one the read normalized, and it is
-/// resolved under the root alone, so nothing outside the supplied directory
-/// is ever opened.
+/// directory. The member name is the one the read normalized. On Unix the
+/// root and every member directory are held by descriptor while the leaf is
+/// opened without following symlinks, so a replacement cannot redirect the
+/// read outside the supplied directory.
 fn copy_sibling(
     root: &Path,
     member: &str,
     directory: &Path,
 ) -> std::result::Result<EvidenceFile, String> {
-    let path = resolve_sibling(root, member)?;
-    let length = fs::metadata(&path)
-        .map_err(|error| format!("member {member}: {error}"))?
-        .len();
-    if length > MAX_MEMBER_BYTES {
-        return Err(format!(
-            "member {member} holds {length} bytes, over the {} bound",
-            crate::byte_size::ByteSize::new(MAX_MEMBER_BYTES)
-        ));
-    }
-    let bytes = fs::read(&path).map_err(|error| format!("member {member}: {error}"))?;
+    let bytes = read_directory_member(root, member)?;
     write_report(member, bytes, None, directory)
 }
 
-/// Join a normalized member name under the supplied root, refusing any name
-/// that would leave it.
-fn resolve_sibling(root: &Path, member: &str) -> std::result::Result<PathBuf, String> {
+/// Split a normalized member name into ordinary components, refusing any name
+/// that could escape the supplied directory or designate the directory itself.
+fn validate_member(member: &str) -> std::result::Result<Vec<&std::ffi::OsStr>, String> {
     let relative = Path::new(member);
-    if relative.is_absolute()
-        || relative
-            .components()
-            .any(|component| !matches!(component, std::path::Component::Normal(_)))
-    {
+    let components = relative
+        .components()
+        .map(|component| match component {
+            std::path::Component::Normal(name) => Ok(name),
+            _ => Err(()),
+        })
+        .collect::<std::result::Result<Vec<_>, _>>();
+    let Ok(components) = components else {
+        return Err(format!(
+            "member {member} is not a name relative to the supplied directory"
+        ));
+    };
+    if components.is_empty() {
         return Err(format!(
             "member {member} is not a name relative to the supplied directory"
         ));
     }
-    Ok(root.join(relative))
+    Ok(components)
+}
+
+/// Read one directory member through stable descriptors. The size check before
+/// reading avoids a known oversize file, while the extra byte in the reader
+/// catches a file that grows after that observation without allocating or
+/// copying an unbounded report.
+fn read_directory_member(root: &Path, member: &str) -> std::result::Result<Vec<u8>, String> {
+    let components = validate_member(member)?;
+    #[cfg(unix)]
+    {
+        let mut directory = open_directory(root, member)?;
+        for component in &components[..components.len() - 1] {
+            directory = open_directory_at(&directory, component, member)?;
+        }
+        let leaf = components.last().expect("validated member has a leaf");
+        let file = open_file_at(&directory, leaf, member)?;
+        let metadata = file
+            .metadata()
+            .map_err(|error| format!("member {member}: {error}"))?;
+        if !metadata.is_file() {
+            return Err(format!(
+                "member {member} is not a regular file; refusing to read it"
+            ));
+        }
+        if metadata.len() > MAX_MEMBER_BYTES {
+            return Err(format!(
+                "member {member} holds {} bytes, over the {} bound",
+                metadata.len(),
+                crate::byte_size::ByteSize::new(MAX_MEMBER_BYTES)
+            ));
+        }
+        let capacity = usize::try_from(metadata.len()).unwrap_or(0);
+        let mut bytes = Vec::with_capacity(capacity);
+        file.take(MAX_MEMBER_BYTES + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|error| format!("member {member}: {error}"))?;
+        if bytes.len() as u64 > MAX_MEMBER_BYTES {
+            return Err(format!(
+                "member {member} grew beyond the {} bound while it was read",
+                crate::byte_size::ByteSize::new(MAX_MEMBER_BYTES)
+            ));
+        }
+        Ok(bytes)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (root, components);
+        Err(format!(
+            "member {member}: directory evidence requires descriptor-relative no-follow file access"
+        ))
+    }
+}
+
+#[cfg(unix)]
+fn open_directory(root: &Path, member: &str) -> std::result::Result<File, String> {
+    let path = CString::new(root.as_os_str().as_bytes())
+        .map_err(|_| format!("member {member}: supplied directory path contains NUL"))?;
+    let flags = libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
+    let descriptor = unsafe { libc::open(path.as_ptr(), flags, 0) };
+    if descriptor < 0 {
+        return Err(format!(
+            "member {member}: failed to open supplied directory: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    Ok(unsafe { File::from_raw_fd(descriptor) })
+}
+
+#[cfg(unix)]
+fn open_directory_at(
+    directory: &File,
+    component: &std::ffi::OsStr,
+    member: &str,
+) -> std::result::Result<File, String> {
+    let name = CString::new(component.as_bytes())
+        .map_err(|_| format!("member {member}: path component contains NUL"))?;
+    let flags = libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
+    let descriptor = unsafe { libc::openat(directory.as_raw_fd(), name.as_ptr(), flags, 0) };
+    if descriptor < 0 {
+        return Err(format!(
+            "member {member}: failed to open directory component: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    Ok(unsafe { File::from_raw_fd(descriptor) })
+}
+
+#[cfg(unix)]
+fn open_file_at(
+    directory: &File,
+    component: &std::ffi::OsStr,
+    member: &str,
+) -> std::result::Result<File, String> {
+    let name = CString::new(component.as_bytes())
+        .map_err(|_| format!("member {member}: path component contains NUL"))?;
+    let flags = libc::O_RDONLY | libc::O_NONBLOCK | libc::O_NOFOLLOW | libc::O_CLOEXEC;
+    let descriptor = unsafe { libc::openat(directory.as_raw_fd(), name.as_ptr(), flags, 0) };
+    if descriptor < 0 {
+        return Err(format!(
+            "member {member}: failed to open report: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    Ok(unsafe { File::from_raw_fd(descriptor) })
 }
 
 /// Name a copied report by its digest, keeping its extension, and write it.
