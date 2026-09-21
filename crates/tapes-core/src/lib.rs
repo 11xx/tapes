@@ -35,9 +35,9 @@ pub mod stats_summary;
 pub mod title;
 pub mod usage;
 
-pub const LIST_SCHEMA: &str = "tapes-list/5";
+pub const LIST_SCHEMA: &str = "tapes-list/6";
 pub const EXPORT_MANIFEST_SCHEMA: &str = "tapes-export-manifest/5";
-pub const USAGE_SUMMARY_SCHEMA: &str = "tapes-usage-summary/3";
+pub const USAGE_SUMMARY_SCHEMA: &str = "tapes-usage-summary/4";
 /// Number of normalized turns a `list --search` query inspects per session.
 /// Keeping this fixed makes the listing's cost predictable for callers.
 pub const LIST_SEARCH_TAIL: usize = 32;
@@ -1154,6 +1154,65 @@ pub fn usage_with_backends(
         selection,
         EXPORT_TAIL,
     )?))
+}
+
+/// Read one session's usage with an optional bounded observation suffix. The
+/// bounded form replays the transcript's own source evidence; the full form
+/// pins the observation pass to the first streamed read. A backend that does
+/// not expose accounting observations refuses only when the caller asks for
+/// the opt-in series.
+pub fn usage_with_options_with_backends(
+    backends: &[Box<dyn Backend>],
+    selection: Selection,
+    options: usage::UsageOptions,
+) -> Result<usage::UsageView> {
+    if let Some(series) = options.series {
+        if !(1..=10_000).contains(&series.limit) {
+            anyhow::bail!("usage observation rows must be between 1 and 10000");
+        }
+    }
+    let resolved = selection.resolve(backends)?;
+    let backend = &backends[resolved.backend_index];
+    if options.full {
+        let mut turns = usage::TurnTally::default();
+        let read = backend.stream_transcript(&resolved.session, None, &mut |turn| {
+            turns.add(&turn);
+            Ok(())
+        })?;
+        let read_evidence = read.read_evidence(resolved.session.source.producer.clone());
+        let observations = options
+            .series
+            .map(|series| {
+                backend.usage_observations(&resolved.session, Some(&read_evidence), series)
+            })
+            .transpose()?;
+        let session = observations
+            .as_ref()
+            .map(|observations| observations.session.clone())
+            .map_or_else(|| backend.stream_session(&resolved.session, &read), Ok)?;
+        let mut view = usage::streamed(&session, turns, &read);
+        view.notes
+            .extend(resolved.diagnostics.latest_warnings(&resolved.session));
+        view.series = observations.map(|observations| observations.series);
+        Ok(view)
+    } else {
+        let mut transcript = declared_transcript(backend.as_ref(), &resolved.session, EXPORT_TAIL)?;
+        transcript
+            .notes
+            .extend(resolved.diagnostics.latest_warnings(&resolved.session));
+        let observations = options
+            .series
+            .map(|series| {
+                backend.usage_observations(&transcript.session, transcript.read.as_ref(), series)
+            })
+            .transpose()?;
+        if let Some(observations) = &observations {
+            transcript.session = observations.session.clone();
+        }
+        let mut view = usage::usage(&transcript);
+        view.series = observations.map(|observations| observations.series);
+        Ok(view)
+    }
 }
 
 /// One session's usage over its whole recording. Turn counts and the content

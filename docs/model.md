@@ -129,12 +129,13 @@ present and serializes as an object with two independent axes:
   usage records.
 - `coverage` is `session` when the figures cover the whole recording, or
   `read-window` when a bounded source read may have left older requests
-  unread.
+  unread. A cumulative counter that decreases within the comparable read is
+  `since-reset`; the newest recorded total remains numeric and is not rebuilt.
 
-OpenCode supplies recorded totals from its session row or API response, and
-Codex supplies the cumulative totals of the newest `token_count` event in the
-bounded read. Both are `recorded-total`/`session` because the harness records
-running session totals. Claude uses the newest `cost-state` record in the
+OpenCode supplies recorded totals from its session row or API response. Codex
+supplies the cumulative totals of the newest `token_count` event in the read;
+the coverage follows the actual bound and becomes `since-reset` when a
+decrease is observed. Claude uses the newest `cost-state` record in the
 bounded read as a `recorded-total`/`session` when its input, output, and cache
 totals are at least those of the requests the read holds; without one, or when
 it counts fewer than they do, it sums each
@@ -312,7 +313,7 @@ An unpaired event carries one `incomplete` reason:
 | `call-before-read-bound` | A `file-tail` or `record-page` source bound can hide the call for this result. |
 | `call-not-recorded` | The read reached the recording's start and contains no call for this result; a Codex completion record that carries its own invocation is a complete pair instead. |
 
-`tapes events` serializes the projection as `tapes-events/6`. The object holds
+`tapes events` serializes the projection as `tapes-events/7`. The object holds
 the same `Session` representation as `show`, the event records, complete and
 incomplete pair counts, and the transcript's truncation and notes. A
 `--tail N` window keeps events whose turn ordinals are in the final `N` turns;
@@ -339,7 +340,7 @@ session, whose messages are updated in place.
 
 ```json
 {
-  "schema": "tapes-events/6",
+  "schema": "tapes-events/7",
   "session": {
     "id": "session-1",
     "source": {
@@ -373,7 +374,7 @@ session, whose messages are updated in place.
 ## Usage view
 
 `tapes usage` answers where one session's quota went and serializes as a
-`tapes-usage/5` object. `tokens`, `cost`, and `accounting` are the session's
+`tapes-usage/6` object. `tokens`, `cost`, and `accounting` are the session's
 own fields, repeated unchanged: a `recorded-total` is cumulative and a
 `summed-requests` figure is a sum of per-request records, so either may be
 added across sessions, and `coverage` is the difference a consumer must
@@ -394,6 +395,17 @@ and `read` is the whole-recording evidence `show --full --json` carries. No
 `text_tail` is reported, and `truncation` holds only the `turn-text` bounds an
 OpenCode database projection cut.
 
+Codex's optional `session.model_observation` has independent `mixed` and
+`attribution_uncertain` booleans. `mixed` means more than one model/effort
+selection was observed; `attribution_uncertain` means a source gap, bounded
+prefix, identity budget, or other fact prevented complete model attribution.
+They may both be true. The optional `distinct_observed` is how many distinct
+model/effort selections the read reached, not how often the selection changed,
+and it is absent when the retained key budget was exhausted and no exact count
+exists. The session model remains the latest observed selection for
+classification and filtering; it is not a claim that the session's whole
+recorded total belongs to that model.
+
 The remaining objects are present exactly when the harness recorded them:
 
 | member | source |
@@ -401,14 +413,34 @@ The remaining objects are present exactly when the harness recorded them:
 | `context_window` | Codex `info.model_context_window` |
 | `rate_limits` | Codex `rate_limits`: optional `primary` and `secondary` windows with native `used_percent`, `window_minutes`, and an RFC 3339 `resets_at`, the account `plan`, native `credits`, reached-limit flags, and the observation timestamp |
 | `durations_ms` | Claude `cost-state` wall clock: `api`, `api_without_retries`, `tool`, `total` |
-| `by_model` | Claude `cost-state` `modelUsage`, one entry per model with its `tokens` and `cost`, ordered by model id |
+| `by_model` | Claude `cost-state` `modelUsage`, or Codex request observations grouped by model and variant; Codex entries add `request_count` |
+| `attribution` | Codex observation basis (`usage-record` or `token-event-advance`), coverage of the observations this read reached, observed reset count, counted and unattributed observations, actual unknown counters, and bounded incomplete/budget reasons |
 
 pi and OpenCode record none of them, and each stays absent rather than empty
 or null.
 
+For Codex, `attribution.coverage` describes the observation read itself:
+`session` for a complete read and `read-window` for a bounded or gapped read.
+`accounting.coverage` describes the newest recorded total separately, so an
+observed counter restart can make accounting `since-reset` while attribution
+still covers every request observation the read reached. The reset count stays
+with attribution even when modern `usage-record` data is the selected basis.
+
+`usage SESSION --series[=N]` adds `series` to the usage object. It retains a
+recent suffix of raw Codex observations, 200 rows by default and at most
+10,000 requested. Each row carries its source record type, optional native
+ordinal and response identity, `record_ref` coordinates, model context,
+classification, counted status, and only the counters and quota values its own
+source record carried. The row is not necessarily a request identity. The
+series reports `observed`, `returned`, independent `omissions` for the row cap,
+8 MiB serialized byte budget, and overlarge rows, plus bounded unique source
+`gaps` and a count of distinct gaps omitted after the gap budget. Aggregates
+and `attribution` cover the actual read rather than just retained rows.
+Without `--series`, no row collection is retained or serialized.
+
 ```json
 {
-  "schema": "tapes-usage/5",
+  "schema": "tapes-usage/6",
   "session": {
     "id": "session-1",
     "source": {
@@ -587,7 +619,7 @@ recorded.
 ## Stats view
 
 `tapes stats` counts what one session's recording holds and serializes as a
-`tapes-stats/6` object. Every figure is a count of records the harness wrote:
+`tapes-stats/7` object. Every figure is a count of records the harness wrote:
 nothing here labels a call useful, attributes a reason to a latency, classifies
 why a session ended, or recommends anything.
 
@@ -664,7 +696,7 @@ order:
 
 ```json
 {
-  "schema": "tapes-stats/6",
+  "schema": "tapes-stats/7",
   "session": {
     "id": "session-1",
     "harness": "codex",
@@ -724,7 +756,7 @@ order:
 ## Usage summary
 
 `tapes usage` over a selection sums what that set of sessions spent and
-serializes as a `tapes-usage-summary/3` object. The counters come from the
+serializes as a `tapes-usage-summary/4` object. The counters come from the
 listing, so the summed set is exactly the set `list` returns for the same
 flags and no transcript is read.
 
@@ -754,13 +786,17 @@ from tokens, and a group with no recorded cost omits `cost`.
 `coverage` counts the sessions behind a sum by their accounting:
 `recorded_total` for a cumulative figure, `summed_session` and
 `summed_read_window` for a sum of per-request records by how much of its
-session it covers, and `no_accounting` for a session whose harness recorded
-no counters at all. A provider quota is not part of this view: it is an
-account-wide fact, not a sum over sessions.
+session it covers, `since_reset` for a cumulative counter whose read observed
+a restart, and `no_accounting` for a session whose harness recorded no counters
+at all. `mixed_models` and `attribution_uncertain` independently count sessions
+whose model observations switched or could not be fully attributed. The
+summary's grouping still uses the latest observed model as a classification,
+not as a claim about model spend. A provider quota is not part of this view:
+it is an account-wide fact, not a sum over sessions.
 
 ```json
 {
-  "schema": "tapes-usage-summary/3",
+  "schema": "tapes-usage-summary/4",
   "selection": {
     "scope": "global",
     "sort": "newest",
@@ -972,7 +1008,7 @@ verified `trailing_record`, with the meanings they have on a transcript.
 ## Continuation brief
 
 `tapes brief` answers what a continuation of one session needs from its
-recording and serializes as a `tapes-brief/6` object. The session is named by
+recording and serializes as a `tapes-brief/7` object. The session is named by
 id or reached with `--latest`, and costs one export-shaped transcript read and
 one lineage read: pairing therefore sees every call and result the reader
 reached, while `--tail` bounds the rendered exchange alone.
@@ -1022,7 +1058,7 @@ its `notes`, with the meanings they have on a transcript.
 
 ```json
 {
-  "schema": "tapes-brief/6",
+  "schema": "tapes-brief/7",
   "session": {
     "id": "session-1",
     "harness": "codex",
@@ -1085,11 +1121,11 @@ its `notes`, with the meanings they have on a transcript.
 
 ## JSON contract
 
-A serialized transcript is a `tapes-session/10` object:
+A serialized transcript is a `tapes-session/11` object:
 
 ```json
 {
-  "schema": "tapes-session/10",
+  "schema": "tapes-session/11",
   "session": {
     "id": "session-1",
     "source": {
@@ -1182,9 +1218,9 @@ A bundle's `.context.md` holds the exchange that `show --exchange` returns —
 the `operator` and `assistant` turns — of those a selection keeps; its `.json`
 and `.trace.md` hold every kept turn.
 
-A bundle's `.json` is one compact `tapes-session/10` object: the members `show
+A bundle's `.json` is one compact `tapes-session/11` object: the members `show
 --json` writes, in the same order, followed by `git` when the session
-directory resolves and `events`, the `tapes-events/6` records paired across
+directory resolves and `events`, the `tapes-events/7` records paired across
 every kept turn. `export --full` writes the object `show --full --json` writes,
 with the same whole-read evidence, plus those two members; its `events` are
 the ones `events` pairs over a read that covers the whole file. The recording
@@ -1247,7 +1283,7 @@ with a `Z` suffix. The human `show` activity note compares the store's last
 activity with the newest rendered turn after both timestamps are truncated to
 whole seconds.
 
-A serialized list is a `tapes-list/5` object with `sessions`, optional
+A serialized list is a `tapes-list/6` object with `sessions`, optional
 artifact-native `artifacts`, `unavailable`,
 `unreadable`, `unsearched`, `scanned`, and `scan_truncated`. `unsearched` names
 bounded content-search failures and supplied-input structural diagnostics; its
@@ -1279,7 +1315,7 @@ session id ascending, then harness ascending.
 
 ```json
 {
-  "schema": "tapes-list/5",
+  "schema": "tapes-list/6",
   "sort": "newest",
   "activity": {
     "since": "2026-01-01T00:00:00Z",
@@ -1336,7 +1372,7 @@ set can be audited against the bounded scan and the store it came from.
 
 ## Historical evidence
 
-`tapes-page/5` carries a normalized session, chronological `turns` with page-local
+`tapes-page/6` carries a normalized session, chronological `turns` with page-local
 ordinals, recorded `models`, source `start`/`end` byte offsets, `source_bytes`,
 `bytes_read`, a separately counted `alignment_bytes`, malformed
 `skipped_records`, `skipped_fragment_bytes`, `read` evidence with absolute
@@ -1345,22 +1381,22 @@ its byte range, so its `read` names only `alignment` and `tail` ranges. A missin
 not that malformed or oversized records were decoded. The cursor is opaque;
 it binds the session and file snapshot and must be passed back unchanged.
 
-`tapes-history-search/5` carries session identity, accumulated pages/bytes/gaps
+`tapes-history-search/6` carries session identity, accumulated pages/bytes/gaps
 and one `read` descriptor per page,
 matching text excerpts identified by page start, end and ordinal, an output-truncation
-flag, and a continuation cursor. `tapes-metadata-history/5` carries the same
+flag, and a continuation cursor. `tapes-metadata-history/6` carries the same
 coverage facts with up to 100 reverse-record-ordered model observations and
 an observation-truncation flag. Neither schema infers facts outside its reads.
 Metadata traversal does not normalize transcript turns; each metadata page
-labels its read as the `tapes-page/5` envelope with the `models-only`
+labels its read as the `tapes-page/6` envelope with the `models-only`
 projection option. Initial session resolution is separate from the page-byte
 counters.
-## Selection statistics: `tapes-stats-summary/4`
+## Selection statistics: `tapes-stats-summary/5`
 
 `selection` records the listing query. `selected` counts its sessions, `read`
 counts successful transcript reads, and `failed` names each read failure with
 ID, harness, source and diagnostic. `sessions` holds each read session's identity,
-`coverage` and `tools` in the same shapes as `tapes-stats/6`. `by_harness` maps
+`coverage` and `tools` in the same shapes as `tapes-stats/7`. `by_harness` maps
 harness names to accumulated tool counters, including tool-name rows and
 complete-pair duration totals, maxima and contributing counts. Counters never
 cross-pair records from different sessions. `kinds_by_harness` maps each
@@ -1373,7 +1409,7 @@ remain separate from
 transcript failures and per-session read bounds. An all-failed selected set
 still emits the report and exits unsuccessfully.
 
-## Child-qualified read: `tapes-child/3`
+## Child-qualified read: `tapes-child/4`
 
 `parent` is the selected parent session and `reference` is the exact child
 reference. `transcript`, `usage`, and `ending` use their normalized shapes with

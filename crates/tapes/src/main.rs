@@ -23,8 +23,9 @@ use tapes_core::stats::{
 };
 use tapes_core::stats_summary::SessionRead;
 use tapes_core::usage::{
-    Durations, GroupBy, GroupKey, ModelUsage, RateLimits, RateWindow, TurnCoverage, UsageTally,
-    UsageView,
+    Durations, GroupBy, GroupKey, ModelUsage, ObservationClassification, RateLimits, RateWindow,
+    TurnCoverage, UsageAttribution, UsageObservation, UsageObservationOptions, UsageOptions,
+    UsageTally, UsageView,
 };
 use tapes_core::{BulkExport, Selection, UsageSummary, Where};
 
@@ -82,6 +83,22 @@ fn grouping(by: &[ByArg]) -> Vec<GroupBy> {
         }
     }
     dimensions
+}
+
+const DEFAULT_SERIES_ROWS: usize = 200;
+const MAX_SERIES_ROWS: usize = 10_000;
+
+fn parse_series(value: Option<Option<usize>>) -> Result<Option<UsageObservationOptions>> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let limit = value.unwrap_or(DEFAULT_SERIES_ROWS);
+    if !(1..=MAX_SERIES_ROWS).contains(&limit) {
+        return Err(anyhow!(
+            "--series rows must be between 1 and {MAX_SERIES_ROWS}"
+        ));
+    }
+    Ok(Some(UsageObservationOptions { limit }))
 }
 
 #[derive(Parser)]
@@ -795,7 +812,7 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Read one bounded page of older Claude or Codex history as tapes-page/5,
+    /// Read one bounded page of older Claude or Codex history as tapes-page/6,
     /// including absolute record references and read evidence. A page decodes
     /// only the records inside its byte range, so a turn's kind matches the one
     /// a whole read gives it. Resume with the returned cursor.
@@ -828,7 +845,7 @@ enum Command {
         json: bool,
     },
     /// Recover recorded model observations outside the usual source tail as a
-    /// models-only tapes-page/5 projection, with explicit history coverage.
+    /// models-only tapes-page/6 projection, with explicit history coverage.
     Metadata {
         #[command(flatten)]
         selection: SelectionArgs,
@@ -841,7 +858,7 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Read a Claude child's own transcript, accounting and ending as tapes-child/3 under its parent session.
+    /// Read a Claude child's own transcript, accounting and ending as tapes-child/4 under its parent session.
     Child {
         #[command(flatten)]
         selection: SelectionArgs,
@@ -886,7 +903,7 @@ enum Command {
         program: Vec<String>,
         /// Stream the whole recording instead of its bounded tail, writing
         /// each event as it is paired so memory follows the calls awaiting a
-        /// result rather than the file; with --json the same tapes-events/6
+        /// result rather than the file; with --json the same tapes-events/7
         /// object is written event by event. The recording is read twice, the
         /// second read replaying the first; --tail, --name, --call-id, and
         /// --program select as they do over a bounded read. Installed Claude,
@@ -894,7 +911,7 @@ enum Command {
         /// updated in place and a second read may not repeat the first.
         #[arg(long, conflicts_with = "read_bytes")]
         full: bool,
-        /// Render the versioned tapes-events/6 object as JSON.
+        /// Render the versioned tapes-events/7 object as JSON.
         #[arg(long)]
         json: bool,
     },
@@ -932,7 +949,7 @@ enum Command {
     /// complete pairs only, and a cache ratio is a share of recorded token
     /// counts rather than of cost. Nothing is judged, ranked, or explained.
     /// A scope or listing filter selects multiple sessions and returns
-    /// tapes-stats-summary/4: recorded tools grouped by harness and name,
+    /// tapes-stats-summary/5: recorded tools grouped by harness and name,
     /// with per-session read coverage, pairing counts and failures, and per
     /// harness the recordable kinds no session read held. Children are not
     /// read through their parents.
@@ -951,17 +968,17 @@ enum Command {
         /// updated in place and a second read may not repeat the first.
         #[arg(long, conflicts_with = "read_bytes")]
         full: bool,
-        /// Render the versioned tapes-stats/6 object, or tapes-stats-summary/4
+        /// Render the versioned tapes-stats/7 object, or tapes-stats-summary/5
         /// for a selection, as JSON.
         #[arg(long)]
         json: bool,
     },
     /// Where quota went. A session named by id or reached with --latest
-    /// answers that session as tapes-usage/5: its recorded tokens, cost, and
+    /// answers that session as tapes-usage/6: its recorded tokens, cost, and
     /// turn counts, plus whatever else its harness recorded — a context
     /// window, a provider quota window, wall-clock durations, a per-model
     /// split. A scope or listing filter instead answers the whole selection
-    /// as tapes-usage-summary/3, grouped by --by and summing each counter
+    /// as tapes-usage-summary/4, grouped by --by and summing each counter
     /// over the sessions that recorded it. The accounting basis and coverage
     /// decide whether figures may be summed; cost is only what the harness
     /// recorded, and quota is a separate fact about the account rather than
@@ -986,18 +1003,33 @@ enum Command {
         by: Vec<ByArg>,
         /// Stream one session's whole recording instead of its bounded tail:
         /// turns are counted as they stream, and tokens, cost, context window,
-        /// quota, and model are folded from every record, so turn and
-        /// accounting coverage are `session`. Installed Claude, Codex, Pi, and
-        /// OpenCode sessions; a selection refuses it.
+        /// quota, and model are folded from every record. Turns and a complete
+        /// request-observation read cover the session; recorded-total
+        /// accounting keeps its own epoch coverage, including `since-reset`,
+        /// and Codex attribution reports its observation coverage separately.
+        /// Installed Claude, Codex, Pi, and OpenCode sessions; a selection
+        /// refuses it.
         #[arg(long, conflicts_with_all = ["read_bytes", "by"])]
         full: bool,
-        /// Render the versioned tapes-usage/5 object, or tapes-usage-summary/3
+        /// Retain a bounded recent suffix of Codex accounting observations.
+        /// With no value, 200 rows are retained; the accepted range is 1..=10000.
+        /// Rows are raw token observations, not guaranteed request identities;
+        /// source gaps are retained and counted once per distinct gap.
+        #[arg(
+            long,
+            value_name = "N",
+            num_args = 0..=1,
+            default_missing_value = "200",
+            conflicts_with = "read_bytes"
+        )]
+        series: Option<Option<usize>>,
+        /// Render the versioned tapes-usage/6 object, or tapes-usage-summary/4
         /// for a selection, as JSON.
         #[arg(long)]
         json: bool,
     },
     /// What a continuation of one session needs from its recording, as
-    /// tapes-brief/6: where the work stopped, the working directory and the
+    /// tapes-brief/7: where the work stopped, the working directory and the
     /// commit it sits on, the calls the read never saw a result for, the
     /// children whose outcome the store does not record, and a bounded tail
     /// of the exchange. It reads the recording alone and judges nothing —
@@ -1013,7 +1045,7 @@ enum Command {
         /// out of the tail.
         #[arg(long, value_name = "N", default_value_t = DEFAULT_BRIEF_TAIL)]
         tail: usize,
-        /// Render the versioned tapes-brief/6 object as JSON.
+        /// Render the versioned tapes-brief/7 object as JSON.
         #[arg(long)]
         json: bool,
     },
@@ -1684,10 +1716,22 @@ fn dispatch(cli: Cli) -> Result<()> {
             read,
             by,
             full,
+            series,
             json,
         } => {
             query.validate_input()?;
             read.refuse_supplied(&query.input)?;
+            let series = parse_series(series)?;
+            if series.is_some() && query.input.supplied() {
+                return Err(anyhow!(
+                    "--series is available only for installed recording sessions"
+                ));
+            }
+            if series.is_some() && query.single().is_none() {
+                return Err(anyhow!(
+                    "--series answers one installed session; name a session id, --latest, or --title"
+                ));
+            }
             if full {
                 refuse_full_supplied(&query.input)?;
             }
@@ -1700,10 +1744,30 @@ fn dispatch(cli: Cli) -> Result<()> {
             print_selection_warnings(&latest_warnings);
             if let Some(one) = query.single() {
                 let usage = if full {
-                    tapes_core::usage_full_with_backends(&tapes_core::backend::backends(), one)?
+                    if let Some(series) = series {
+                        tapes_core::usage_with_options_with_backends(
+                            &tapes_core::backend::backends(),
+                            one,
+                            UsageOptions {
+                                full: true,
+                                series: Some(series),
+                            },
+                        )?
+                    } else {
+                        tapes_core::usage_full_with_backends(&tapes_core::backend::backends(), one)?
+                    }
                 } else if query.input.supplied() {
                     let backends = query.input.backends()?;
                     tapes_core::usage_with_backends(&backends, one)?
+                } else if let Some(series) = series {
+                    tapes_core::usage_with_options_with_backends(
+                        &single_backends,
+                        one,
+                        UsageOptions {
+                            full: false,
+                            series: Some(series),
+                        },
+                    )?
                 } else {
                     tapes_core::usage_with_backends(&single_backends, one)?
                 };
@@ -2532,6 +2596,16 @@ fn render_usage(usage: &UsageView) -> String {
     if let Some(accounting) = &usage.accounting {
         out.push_str(&format!("accounting: {}\n", render_accounting(accounting)));
     }
+    if let Some(status) = &usage.session.model_observation {
+        out.push_str(&format!(
+            "model observations: mixed={}, attribution-uncertain={}{}\n",
+            status.mixed,
+            status.attribution_uncertain,
+            status
+                .distinct_observed
+                .map_or_else(String::new, |count| format!(", {count} distinct observed"))
+        ));
+    }
     let turns = &usage.turns;
     out.push_str(&format!(
         "turns: {} total, {} user, {} assistant, {} tool, {} reasoning, covering {}\n",
@@ -2556,6 +2630,29 @@ fn render_usage(usage: &UsageView) -> String {
     }
     for model in usage.by_model.iter().flatten() {
         out.push_str(&render_model_usage(model));
+    }
+    if let Some(attribution) = &usage.attribution {
+        out.push_str(&render_attribution(attribution));
+    }
+    if let Some(series) = &usage.series {
+        out.push_str(&format!(
+            "series: {} observations returned of {}; basis and counted status are read-local\n",
+            series.returned, series.observed
+        ));
+        if series.omissions.row_cap > 0
+            || series.omissions.byte_budget > 0
+            || series.omissions.oversized_row > 0
+        {
+            out.push_str(&format!(
+                "series omissions: row-cap {}, byte-budget {}, oversized {}\n",
+                series.omissions.row_cap,
+                series.omissions.byte_budget,
+                series.omissions.oversized_row
+            ));
+        }
+        for row in &series.rows {
+            out.push_str(&render_observation(row));
+        }
     }
     render_truncation_notes(&mut out, &usage.truncation);
     render_notes(&mut out, &usage.notes);
@@ -2603,6 +2700,7 @@ fn render_accounting(accounting: &Accounting) -> String {
     let coverage = match accounting.coverage {
         AccountingCoverage::Session => "the whole session",
         AccountingCoverage::ReadWindow => "the bounded read window",
+        AccountingCoverage::SinceReset => "since the observed counter reset",
     };
     format!("{basis}, covering {coverage}")
 }
@@ -2684,15 +2782,95 @@ fn render_durations(durations: &Durations) -> String {
 }
 
 fn render_model_usage(model: &ModelUsage) -> String {
-    let mut rendered = format!("model {}:", model.model);
+    let mut rendered = format!(
+        "model {}{}:",
+        model.model,
+        model
+            .variant
+            .as_ref()
+            .map_or_else(String::new, |variant| format!(" ({variant})"))
+    );
     if let Some(tokens) = &model.tokens {
         rendered.push_str(&format!(" {}", render_tokens(tokens)));
     }
     if let Some(cost) = &model.cost {
         rendered.push_str(&format!("; {}", render_cost(cost)));
     }
+    if let Some(requests) = model.request_count {
+        rendered.push_str(&format!("; {requests} observed requests"));
+    }
     rendered.push('\n');
     rendered
+}
+
+fn render_attribution(attribution: &UsageAttribution) -> String {
+    let basis = match attribution.basis {
+        tapes_core::usage::ObservationBasis::UsageRecord => "usage-record",
+        tapes_core::usage::ObservationBasis::TokenEventAdvance => "token-event-advance",
+    };
+    let coverage = match attribution.coverage {
+        AccountingCoverage::Session => "the whole session",
+        AccountingCoverage::ReadWindow => "the bounded read window",
+        AccountingCoverage::SinceReset => "the portion since an observed reset",
+    };
+    let mut rendered = format!(
+        "attribution: basis {basis}, covering {coverage}; {} observed, {} counted, {} attributed, {} unattributed, {} leading uncounted, {} resets\n",
+        attribution.observed,
+        attribution.counted,
+        attribution.attributed,
+        attribution.unattributed,
+        attribution.leading_uncounted,
+        attribution.resets
+    );
+    if !attribution.incomplete.is_empty() {
+        rendered.push_str(&format!(
+            "attribution incomplete: {}\n",
+            attribution.incomplete.join(", ")
+        ));
+    }
+    if !attribution.bounds.is_empty() {
+        rendered.push_str(&format!(
+            "attribution bounds: {}\n",
+            attribution.bounds.join(", ")
+        ));
+    }
+    rendered
+}
+
+fn render_observation(row: &UsageObservation) -> String {
+    let classification = match row.classification {
+        ObservationClassification::Request => "request",
+        ObservationClassification::Repeat => "repeat",
+        ObservationClassification::Advance => "advance",
+        ObservationClassification::LeadingUncounted => "leading-uncounted",
+        ObservationClassification::UnchangedTotal => "unchanged-total",
+        ObservationClassification::ResetAdvance => "reset-advance",
+        ObservationClassification::QuotaOnly => "quota-only",
+        ObservationClassification::Unattributed => "unattributed",
+        ObservationClassification::Incomplete => "incomplete",
+    };
+    let ordinal = row.native_ordinal.map_or_else(
+        || "ordinal -".to_owned(),
+        |ordinal| format!("ordinal {ordinal}"),
+    );
+    let model = row.model.as_ref().map_or_else(String::new, |model| {
+        row.variant.as_ref().map_or_else(
+            || format!(" model {model}"),
+            |variant| format!(" model {model} ({variant})"),
+        )
+    });
+    format!(
+        "  observation {} {} {}{}{}\n",
+        row.record_type,
+        ordinal,
+        classification,
+        if row.counted {
+            " counted"
+        } else {
+            " uncounted"
+        },
+        model
+    )
 }
 
 /// One row per group and a closing total, each counter cell naming how many
@@ -2707,7 +2885,7 @@ fn render_usage_summary(summary: &UsageSummary, by: &[GroupBy]) -> String {
     let mut out = key_columns.join("\t");
     out.push_str(
         "\tSESSIONS\tINPUT\tOUTPUT\tREASONING\tCACHE READ\tCACHE WRITE\tCOST\t\
-         COVERAGE (RECORDED/SUMMED/WINDOW/NONE)\n",
+         COVERAGE (RECORDED/SUMMED/WINDOW/SINCE-RESET/NONE)\n",
     );
     for group in &summary.groups {
         let mut cells: Vec<String> = by
@@ -2728,6 +2906,13 @@ fn render_usage_summary(summary: &UsageSummary, by: &[GroupBy]) -> String {
         out.push_str(
             "Mixed accounting: total counters are omitted; compatible partitions follow.\n",
         );
+    }
+    if summary.totals.mixed_models > 0 || summary.totals.attribution_uncertain > 0 {
+        out.push_str(&format!(
+            "Model observations: {} mixed, {} attribution-uncertain sessions; grouping uses the latest observed model only.\n",
+            summary.totals.mixed_models,
+            summary.totals.attribution_uncertain
+        ));
     }
     for partition in &summary.partitions {
         out.push_str(&format!(
@@ -2797,10 +2982,11 @@ fn tally_cells(tally: &UsageTally) -> Vec<String> {
         ),
         sum_cell(tally.cost.as_ref().map(render_cost), counted.cost, sessions),
         format!(
-            "{}/{}/{}/{}",
+            "{}/{}/{}/{}/{}",
             coverage.recorded_total,
             coverage.summed_session,
             coverage.summed_read_window,
+            coverage.since_reset,
             coverage.no_accounting
         ),
     ]
@@ -2888,18 +3074,30 @@ fn print_session_list(sessions: &[Session]) {
     if sessions.is_empty() {
         return;
     }
-    println!("ID\tLIVE\tHARNESS\tMODEL\tTITLE\tDIRECTORY\tLAST ACTIVITY");
+    println!("ID\tLIVE\tHARNESS\tMODEL\tSTATUS\tTITLE\tDIRECTORY\tLAST ACTIVITY");
     for session in sessions {
         let model = session
             .model
             .as_ref()
             .map_or_else(String::new, |model| model.identity());
+        let status = session
+            .model_observation
+            .as_ref()
+            .map_or_else(String::new, |status| {
+                match (status.mixed, status.attribution_uncertain) {
+                    (true, true) => "mixed,uncertain".to_owned(),
+                    (true, false) => "mixed".to_owned(),
+                    (false, true) => "uncertain".to_owned(),
+                    (false, false) => "".to_owned(),
+                }
+            });
         println!(
-            "{}\t{}\t{}\t{}\t{}\t{}\t{}",
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
             session.id,
             live_label(session),
             session.harness(),
             model,
+            status,
             human_title(session),
             session
                 .directory
@@ -3526,6 +3724,7 @@ mod tests {
                 source: SourceDescriptor::installed("claude", "fixture-recording"),
                 metadata: None,
                 model: None,
+                model_observation: None,
                 title: None,
                 derived_title: None,
                 derived_title_truncated: None,

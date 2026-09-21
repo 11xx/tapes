@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Result};
@@ -7,20 +7,26 @@ use serde_json::Value;
 use super::{
     accounting_for, head_directory, head_jsonl, home_path, jsonl_files, list_files,
     list_files_with_search, matching_session_file, read_bounds, read_recording, replay_pin,
-    session_file, skipped_records_note, stream_jsonl, streamed_trailing_record,
-    terminal_from_values, timestamp, trailing_record, transcript_from_recording, ActivityRange,
-    Backend, Jsonl, Listing, ParsedFile, Query, StreamedTranscript, TokenTotals, UnmappedTally,
+    session_file, skipped_records_note, stream_jsonl, stream_jsonl_with_gaps,
+    streamed_trailing_record, terminal_from_values, timestamp, trailing_record,
+    transcript_from_recording, ActivityRange, Backend, Jsonl, Listing, ParsedFile, Query, ReadPin,
+    StreamedTranscript, TokenTotals, UnmappedTally,
 };
 use crate::content::{parts_from_array, project_text, tool_coverage, tool_part};
 use crate::event::{Bounded, EventKind, ToolEvent};
 use crate::history::PageProjection;
 use crate::lineage::{ChildRef, Lineage, ParentRef, SourceRef};
 use crate::model::{
-    is_known_envelope, is_known_notice, AccountingBasis, AccountingCoverage, KindDeclaration,
-    Model, Role, Session, SourceDescriptor, TerminalObservation, Tokens, TrailingRecord,
-    Transcript, Turn, TurnKind, TurnSelection, UserDefault,
+    is_known_envelope, is_known_notice, AccountingBasis, AccountingCoverage, ByteSpan,
+    KindDeclaration, Model, ModelObservationStatus, ReadGap, RecordRef, Role, Session,
+    SourceDescriptor, TerminalObservation, Tokens, TrailingRecord, Transcript, Turn, TurnKind,
+    TurnSelection, UserDefault,
 };
-use crate::usage::{Credits, RateLimits, RateWindow, UsageDetail};
+use crate::usage::{
+    Credits, ModelUsage, ObservationBasis, ObservationClassification, RateLimits, RateWindow,
+    UsageAttribution, UsageDetail, UsageObservation, UsageObservationOmissions,
+    UsageObservationOptions, UsageObservationResult, UsageObservationSeries,
+};
 
 #[derive(Clone, Debug)]
 pub struct CodexBackend {
@@ -84,37 +90,22 @@ impl CodexBackend {
                     .find_map(codex_cwd)
                     .map(PathBuf::from)
             });
-        let model = read
-            .values
-            .iter()
-            .rev()
-            .find(|value| value["type"] == "turn_context")
-            .and_then(turn_context_model);
         let mut reader = CodexTurns::default();
         let turns = read
             .values
             .iter()
             .flat_map(|value| reader.parse(value))
             .collect::<Vec<_>>();
-        let tokens = read.values.iter().rev().find_map(codex_tokens);
-        let accounting = accounting_for(
-            tokens.as_ref(),
-            None,
-            AccountingBasis::RecordedTotal,
-            AccountingCoverage::Session,
-        );
-        let usage_detail = UsageDetail {
-            context_window: read.values.iter().rev().find_map(codex_context_window),
-            rate_limits: read.values.iter().rev().find_map(codex_rate_limits),
-            ..UsageDetail::default()
-        }
-        .into_option();
+        let mut records = CodexRecords::new(path, read.truncated);
+        records.observe_read(&read.values, &read.spans, &read.gaps, &read.source_revision);
+        let facts = records.finish();
 
         let session = Session {
             id,
             source: SourceDescriptor::installed("codex", path.display().to_string()),
             metadata: None,
-            model,
+            model: facts.model,
+            model_observation: facts.model_observation,
             title: None,
             derived_title: None,
             derived_title_truncated: None,
@@ -123,11 +114,11 @@ impl CodexBackend {
             last_activity_at,
             live: None,
             cost: None,
-            tokens,
-            accounting,
+            tokens: facts.tokens,
+            accounting: facts.accounting,
             start_uncertain: recording.start_uncertain(),
             occurrence: None,
-            usage_detail,
+            usage_detail: facts.usage_detail,
         };
         // The opening is the start of the file, so its first user turn is the
         // session's first user turn even when the tail cannot see it.
@@ -375,6 +366,7 @@ impl Backend for CodexBackend {
             source_length: read.source_length,
             source_bounds: Vec::new(),
             source_revision: Some(read.revision),
+            source_prefix_sha256: Some(read.prefix_sha256),
             skipped: read.skipped,
             trailing_record: streamed_trailing_record(read.last.as_ref(), codex_trailing_kind),
             terminal,
@@ -427,14 +419,92 @@ impl Backend for CodexBackend {
 
     fn stream_session(&self, session: &Session, read: &StreamedTranscript) -> Result<Session> {
         let (_, path) = self.recording(session)?;
-        let mut records = CodexRecords::default();
-        stream_jsonl(&path, Some(read.pin()?), |value, _, _| {
-            records.observe(value);
-            Ok(false)
-        })?;
+        let records = std::cell::RefCell::new(CodexRecords::new(&path, false));
+        let streamed = stream_jsonl_with_gaps(
+            &path,
+            Some(read.pin()?),
+            |value, span, revision| {
+                records.borrow_mut().observe(value, Some(span), revision);
+                Ok(false)
+            },
+            |gap| {
+                records.borrow_mut().observe_gap(gap);
+            },
+        )?;
+        let mut records = records.into_inner();
+        for gap in &streamed.gaps {
+            records.observe_read_gap(gap);
+        }
         let mut whole = session.clone();
         records.apply(&mut whole);
         Ok(whole)
+    }
+
+    fn usage_observations(
+        &self,
+        session: &Session,
+        read: Option<&crate::model::ReadEvidence>,
+        options: UsageObservationOptions,
+    ) -> Result<UsageObservationResult> {
+        let (_, path) = self.recording(session)?;
+        let read_window = read.is_none_or(|read| read.source_length > read.configured_bound);
+        let records = CodexRecords::with_series(&path, read_window, options);
+        let records = if let Some(evidence) = read {
+            if evidence
+                .projection_options
+                .iter()
+                .any(|option| option == "full")
+            {
+                let prefix_sha256 = evidence.source_prefix_sha256.as_ref().ok_or_else(|| {
+                    anyhow!("the full usage read has no prefix integrity evidence")
+                })?;
+                let records = std::cell::RefCell::new(records);
+                stream_jsonl_with_gaps(
+                    &path,
+                    Some(ReadPin {
+                        length: evidence.source_length,
+                        revision: evidence
+                            .source_revision
+                            .as_deref()
+                            .ok_or_else(|| anyhow!("the full usage read has no source revision"))?,
+                        prefix_sha256: Some(prefix_sha256),
+                    }),
+                    |value, span, revision| {
+                        records.borrow_mut().observe(value, Some(span), revision);
+                        Ok(false)
+                    },
+                    |gap| records.borrow_mut().observe_gap(gap),
+                )?;
+                records.into_inner()
+            } else {
+                let recording = super::read_recording_at(&path, evidence)?;
+                let mut records = records;
+                records.observe_read(
+                    &recording.tail.values,
+                    &recording.tail.spans,
+                    &recording.tail.gaps,
+                    &recording.tail.source_revision,
+                );
+                records
+            }
+        } else {
+            let recording = super::read_recording(&path, self.read_bytes)?;
+            let mut records = records;
+            records.set_read_window(recording.tail.truncated);
+            records.observe_read(
+                &recording.tail.values,
+                &recording.tail.spans,
+                &recording.tail.gaps,
+                &recording.tail.source_revision,
+            );
+            records
+        };
+        let mut observed = session.clone();
+        let series = records.apply(&mut observed);
+        Ok(UsageObservationResult {
+            session: observed,
+            series: series.ok_or_else(|| anyhow!("Codex did not produce an observation series"))?,
+        })
     }
 }
 
@@ -555,59 +625,937 @@ fn codex_cwd(value: &Value) -> Option<&str> {
     }
 }
 
-/// The model a `turn_context` record names, qualified by its effort.
-fn turn_context_model(value: &Value) -> Option<Model> {
-    let payload = &value["payload"];
-    payload["model"].as_str().map(|id| Model {
-        id: id.to_owned(),
-        variant: payload["effort"].as_str().map(str::to_owned),
-    })
+const MAX_MODEL_KEYS: usize = 32;
+const MAX_MODEL_KEY_BYTES: usize = 64 * 1024;
+const MAX_RESPONSE_IDS: usize = 16_384;
+const MAX_RESPONSE_ID_BYTES: usize = 1024 * 1024;
+const MAX_IDENTITY_BYTES: usize = 16 * 1024;
+const MAX_ATTRIBUTION_REASONS: usize = 32;
+const MAX_SERIES_BYTES: usize = 8 * 1024 * 1024;
+const MAX_SERIES_GAPS: usize = 64;
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct ModelKey {
+    model: String,
+    variant: Option<String>,
 }
 
-/// The session facts a Codex rollout's records carry beside its turns, folded
-/// one record at a time: each is the newest record stating it.
+impl ModelKey {
+    fn from_model(model: &Model) -> Option<Self> {
+        (model.id.len() <= MAX_IDENTITY_BYTES
+            && model
+                .variant
+                .as_ref()
+                .is_none_or(|variant| variant.len() <= MAX_IDENTITY_BYTES))
+        .then(|| Self {
+            model: model.id.clone(),
+            variant: model.variant.clone(),
+        })
+    }
+
+    fn bytes(&self) -> usize {
+        self.model.len() + self.variant.as_ref().map_or(0, String::len)
+    }
+}
+
 #[derive(Default)]
-struct CodexRecords {
+struct ModelBudget {
+    keys: BTreeSet<ModelKey>,
+    bytes: usize,
+    exhausted: bool,
+}
+
+impl ModelBudget {
+    /// How many distinct keys the budget retained, which is the read's
+    /// distinct-model count exactly while the budget has room for every key
+    /// observed.
+    fn retained(&self) -> usize {
+        self.keys.len()
+    }
+
+    fn reserve(&mut self, key: &ModelKey) -> bool {
+        if self.keys.contains(key) {
+            return true;
+        }
+        if self.keys.len() >= MAX_MODEL_KEYS
+            || self.bytes.saturating_add(key.bytes()) > MAX_MODEL_KEY_BYTES
+        {
+            self.exhausted = true;
+            return false;
+        }
+        self.bytes += key.bytes();
+        self.keys.insert(key.clone());
+        true
+    }
+}
+
+#[derive(Default)]
+struct BoundedReasons(Vec<String>);
+
+impl BoundedReasons {
+    fn add(&mut self, reason: &str) {
+        if !self.0.iter().any(|existing| existing == reason)
+            && self.0.len() < MAX_ATTRIBUTION_REASONS
+        {
+            self.0.push(reason.to_owned());
+        }
+    }
+
+    fn extend(&mut self, reasons: &Self) {
+        for reason in &reasons.0 {
+            self.add(reason);
+        }
+    }
+
+    fn into_inner(self) -> Vec<String> {
+        self.0
+    }
+}
+
+#[derive(Default)]
+struct CandidateModel {
+    tokens: Option<Tokens>,
+    request_count: usize,
+}
+
+#[derive(Default)]
+struct UsageCandidate {
+    observed: usize,
+    counted: usize,
+    attributed: usize,
+    unattributed: usize,
+    leading_uncounted: usize,
+    resets: usize,
+    by_model: BTreeMap<ModelKey, CandidateModel>,
+    unattributed_tokens: Option<Tokens>,
+    incomplete: BoundedReasons,
+    bounds: BoundedReasons,
+}
+
+impl UsageCandidate {
+    fn observe(&mut self) {
+        self.observed += 1;
+    }
+
+    fn add_unattributed(&mut self, tokens: Option<&Tokens>) {
+        self.unattributed += 1;
+        add_tokens(&mut self.unattributed_tokens, tokens);
+    }
+
+    fn count_request(
+        &mut self,
+        tokens: Option<&Tokens>,
+        model: Option<&Model>,
+        identity_valid: bool,
+        model_budget: &mut ModelBudget,
+    ) -> bool {
+        if !identity_valid {
+            self.add_unattributed(tokens);
+            self.incomplete.add("request-identity-missing");
+            return false;
+        }
+        self.counted += 1;
+        let Some(model) = model else {
+            self.add_unattributed(tokens);
+            self.incomplete.add("model-attribution-unknown");
+            return true;
+        };
+        let Some(key) = ModelKey::from_model(model) else {
+            self.add_unattributed(tokens);
+            self.bounds.add("model-identity-too-large");
+            return true;
+        };
+        if !model_budget.reserve(&key) {
+            self.add_unattributed(tokens);
+            self.bounds.add("model-key-budget");
+            return true;
+        }
+        let entry = self.by_model.entry(key).or_default();
+        add_tokens(&mut entry.tokens, tokens);
+        entry.request_count += 1;
+        self.attributed += 1;
+        true
+    }
+
+    fn attribution(
+        &self,
+        basis: ObservationBasis,
+        coverage: AccountingCoverage,
+        global_incomplete: &BoundedReasons,
+        global_bounds: &BoundedReasons,
+    ) -> UsageAttribution {
+        let mut incomplete = BoundedReasons::default();
+        incomplete.extend(&self.incomplete);
+        incomplete.extend(global_incomplete);
+        let mut bounds = BoundedReasons::default();
+        bounds.extend(&self.bounds);
+        bounds.extend(global_bounds);
+        UsageAttribution {
+            basis,
+            coverage,
+            observed: self.observed,
+            counted: self.counted,
+            attributed: self.attributed,
+            unattributed: self.unattributed,
+            leading_uncounted: self.leading_uncounted,
+            resets: self.resets,
+            unattributed_tokens: self.unattributed_tokens.clone(),
+            incomplete: incomplete.into_inner(),
+            bounds: bounds.into_inner(),
+        }
+    }
+
+    fn into_models(self) -> Option<Vec<ModelUsage>> {
+        let models = self
+            .by_model
+            .into_iter()
+            .map(|(key, value)| ModelUsage {
+                model: key.model,
+                variant: key.variant,
+                tokens: value.tokens,
+                cost: None,
+                request_count: Some(value.request_count),
+            })
+            .collect::<Vec<_>>();
+        (!models.is_empty()).then_some(models)
+    }
+}
+
+struct PendingSeriesRow {
+    row: UsageObservation,
+    basis: ObservationBasis,
+    counted: bool,
+}
+
+struct SeriesBuffer {
+    limit: usize,
+    bytes: usize,
+    observed: usize,
+    rows: VecDeque<PendingSeriesRow>,
+    omissions: UsageObservationOmissions,
+    gaps: Vec<ReadGap>,
+    gaps_omitted: usize,
+}
+
+impl SeriesBuffer {
+    fn new(limit: usize) -> Self {
+        Self {
+            limit,
+            bytes: 0,
+            observed: 0,
+            rows: VecDeque::new(),
+            omissions: UsageObservationOmissions::default(),
+            gaps: Vec::new(),
+            gaps_omitted: 0,
+        }
+    }
+
+    fn add_gap(&mut self, gap: &ReadGap) {
+        if self.gaps.iter().any(|existing| existing == gap) {
+            return;
+        }
+        if self.gaps.len() < MAX_SERIES_GAPS {
+            self.gaps.push(gap.clone());
+        } else {
+            self.gaps_omitted += 1;
+        }
+    }
+
+    fn push(&mut self, mut row: UsageObservation, basis: ObservationBasis, counted: bool) {
+        self.observed += 1;
+        row.counted = counted;
+        let Ok(size) = serde_json::to_vec(&row).map(|bytes| bytes.len()) else {
+            self.omissions.oversized_row += 1;
+            return;
+        };
+        if size > MAX_SERIES_BYTES {
+            self.omissions.oversized_row += 1;
+            return;
+        }
+        while self.rows.len() >= self.limit {
+            if let Some(old) = self.rows.pop_front() {
+                self.bytes = self.bytes.saturating_sub(serialized_size(&old.row));
+                self.omissions.row_cap += 1;
+            }
+        }
+        while self.bytes.saturating_add(size) > MAX_SERIES_BYTES {
+            let Some(old) = self.rows.pop_front() else {
+                break;
+            };
+            self.bytes = self.bytes.saturating_sub(serialized_size(&old.row));
+            self.omissions.byte_budget += 1;
+        }
+        self.bytes += size;
+        self.rows.push_back(PendingSeriesRow {
+            row,
+            basis,
+            counted,
+        });
+    }
+
+    fn finish(mut self, basis: ObservationBasis) -> UsageObservationSeries {
+        let mut rows = VecDeque::new();
+        let mut bytes: usize = 0;
+        while let Some(mut pending) = self.rows.pop_back() {
+            pending.row.counted = pending.basis == basis && pending.counted;
+            let size = serialized_size(&pending.row);
+            if size > MAX_SERIES_BYTES {
+                self.omissions.oversized_row += 1;
+                continue;
+            }
+            if bytes.saturating_add(size) > MAX_SERIES_BYTES {
+                self.omissions.byte_budget += 1;
+                continue;
+            }
+            bytes += size;
+            rows.push_front(pending.row);
+        }
+        let rows = rows.into_iter().collect::<Vec<_>>();
+        UsageObservationSeries {
+            observed: self.observed,
+            returned: rows.len(),
+            rows,
+            omissions: self.omissions,
+            gaps: self.gaps,
+            gaps_omitted: self.gaps_omitted,
+        }
+    }
+}
+
+fn serialized_size<T: serde::Serialize>(value: &T) -> usize {
+    serde_json::to_vec(value).map_or(usize::MAX, |bytes| bytes.len())
+}
+
+struct CodexUsageObserver {
+    domain: String,
+    read_window: bool,
     tokens: Option<Tokens>,
     context_window: Option<u64>,
     rate_limits: Option<RateLimits>,
-    model: Option<Model>,
+    latest_model: Option<Model>,
+    current_model: Option<Model>,
+    model_budget: ModelBudget,
+    model_observed: bool,
+    mixed: bool,
+    previous_model_key: Option<ModelKey>,
+    seen_response_ids: HashSet<String>,
+    seen_response_id_bytes: usize,
+    response_id_budget_exhausted: bool,
+    previous_total: Option<Tokens>,
+    modern_seen: bool,
+    legacy_seen: bool,
+    legacy_preceded_modern: bool,
+    reset_seen: bool,
+    observed_resets: usize,
+    gap_seen: bool,
+    modern: UsageCandidate,
+    legacy: UsageCandidate,
+    incomplete: BoundedReasons,
+    bounds: BoundedReasons,
     activity: ActivityRange,
+    series: Option<SeriesBuffer>,
 }
 
-impl CodexRecords {
-    fn observe(&mut self, value: &Value) {
-        if let Some(tokens) = codex_tokens(value) {
-            self.tokens = Some(tokens);
+impl CodexUsageObserver {
+    fn new(path: &Path, read_window: bool, series_limit: Option<usize>) -> Self {
+        Self {
+            domain: format!("file:{}", path.display()),
+            read_window,
+            tokens: None,
+            context_window: None,
+            rate_limits: None,
+            latest_model: None,
+            current_model: None,
+            model_budget: ModelBudget::default(),
+            model_observed: false,
+            mixed: false,
+            previous_model_key: None,
+            seen_response_ids: HashSet::new(),
+            seen_response_id_bytes: 0,
+            response_id_budget_exhausted: false,
+            previous_total: None,
+            modern_seen: false,
+            legacy_seen: false,
+            legacy_preceded_modern: false,
+            reset_seen: false,
+            observed_resets: 0,
+            gap_seen: false,
+            modern: UsageCandidate::default(),
+            legacy: UsageCandidate::default(),
+            incomplete: BoundedReasons::default(),
+            bounds: BoundedReasons::default(),
+            activity: ActivityRange::default(),
+            series: series_limit.map(SeriesBuffer::new),
+        }
+    }
+
+    fn observe_gap(&mut self, gap: &ReadGap) {
+        self.gap_seen = true;
+        self.current_model = None;
+        self.previous_total = None;
+        self.incomplete.add("source-gap");
+        if let Some(series) = self.series.as_mut() {
+            series.add_gap(gap);
+        }
+    }
+
+    fn observe_read_gap(&mut self, gap: &ReadGap) {
+        self.gap_seen = true;
+        self.incomplete.add("source-gap");
+        if let Some(series) = self.series.as_mut() {
+            series.add_gap(gap);
+        }
+    }
+
+    fn observe(&mut self, value: &Value, span: Option<ByteSpan>, revision: &str) {
+        self.activity.observe(value);
+        if value["type"] == "turn_context" {
+            self.observe_context(value);
+        }
+        if value["type"] == "token_usage_record" {
+            self.observe_modern(value, span, revision);
+        } else if is_token_count(value) {
+            self.observe_legacy(value, span, revision);
+        }
+    }
+
+    fn observe_context(&mut self, value: &Value) {
+        self.model_observed = true;
+        let payload = &value["payload"];
+        let Some(id) = payload["model"].as_str() else {
+            self.current_model = None;
+            self.incomplete.add("model-attribution-unknown");
+            return;
+        };
+        if id.len() > MAX_IDENTITY_BYTES {
+            self.current_model = None;
+            self.latest_model = None;
+            self.incomplete.add("model-identity-too-large");
+            self.bounds.add("model-identity-budget");
+            return;
+        }
+        let variant = payload["effort"].as_str().map(|effort| {
+            if effort.len() <= MAX_IDENTITY_BYTES {
+                effort.to_owned()
+            } else {
+                self.incomplete.add("model-variant-too-large");
+                String::new()
+            }
+        });
+        let variant = variant.filter(|variant| !variant.is_empty());
+        let model = Model {
+            id: id.to_owned(),
+            variant,
+        };
+        let Some(key) = ModelKey::from_model(&model) else {
+            self.current_model = None;
+            self.latest_model = None;
+            self.incomplete.add("model-identity-too-large");
+            return;
+        };
+        if self.previous_model_key.as_ref() != Some(&key) {
+            if self.previous_model_key.is_some() {
+                self.mixed = true;
+            }
+            self.previous_model_key = Some(key.clone());
+        }
+        if !self.model_budget.reserve(&key) {
+            self.bounds.add("model-key-budget");
+        }
+        self.current_model = Some(model.clone());
+        self.latest_model = Some(model);
+    }
+
+    fn record_ref(
+        &self,
+        span: Option<ByteSpan>,
+        revision: &str,
+        native_id: Option<String>,
+    ) -> Option<RecordRef> {
+        Some(RecordRef {
+            domain: self.domain.clone(),
+            revision: Some(revision.to_owned()),
+            span,
+            native_id,
+            pointer: None,
+            part_index: 0,
+            content_part_index: None,
+        })
+    }
+
+    fn observe_modern(&mut self, value: &Value, span: Option<ByteSpan>, revision: &str) {
+        let payload = &value["payload"];
+        let usage = tokens_from_object(&payload["usage"]);
+        let response_id_raw = payload["response_id"].as_str();
+        let response_id = response_id_raw
+            .filter(|id| id.len() <= MAX_IDENTITY_BYTES)
+            .map(str::to_owned);
+        let mut row = UsageObservation {
+            record_type: "token_usage_record".to_owned(),
+            payload_type: None,
+            native_ordinal: value["ordinal"].as_u64(),
+            record_ref: self.record_ref(span, revision, response_id.clone()),
+            timestamp: timestamp(&value["timestamp"]),
+            response_id,
+            model: self.current_model.as_ref().map(|model| model.id.clone()),
+            variant: self
+                .current_model
+                .as_ref()
+                .and_then(|model| model.variant.clone()),
+            classification: ObservationClassification::Incomplete,
+            counted: false,
+            usage: usage.clone(),
+            total_token_usage: None,
+            last_token_usage: None,
+            context_window: None,
+            rate_limits: None,
+        };
+        let Some(usage) = usage else {
+            self.incomplete.add("modern-usage-missing");
+            self.push_series(row, ObservationBasis::UsageRecord, false);
+            return;
+        };
+        self.legacy_preceded_modern |= self.legacy_seen && !self.modern_seen;
+        self.modern_seen = true;
+        self.modern.observe();
+        let Some(response_id) = response_id_raw.filter(|id| !id.is_empty()) else {
+            self.modern.add_unattributed(Some(&usage));
+            self.modern.incomplete.add("request-identity-missing");
+            row.classification = ObservationClassification::Unattributed;
+            self.push_series(row, ObservationBasis::UsageRecord, false);
+            return;
+        };
+        if response_id.len() > MAX_IDENTITY_BYTES {
+            self.modern.add_unattributed(Some(&usage));
+            self.modern.incomplete.add("request-identity-too-large");
+            self.bounds.add("response-id-size");
+            row.classification = ObservationClassification::Incomplete;
+            self.push_series(row, ObservationBasis::UsageRecord, false);
+            return;
+        }
+        if self.seen_response_ids.contains(response_id) {
+            row.classification = ObservationClassification::Repeat;
+            self.push_series(row, ObservationBasis::UsageRecord, false);
+            return;
+        }
+        if self.response_id_budget_exhausted
+            || self.seen_response_ids.len() >= MAX_RESPONSE_IDS
+            || self
+                .seen_response_id_bytes
+                .saturating_add(response_id.len())
+                > MAX_RESPONSE_ID_BYTES
+        {
+            self.response_id_budget_exhausted = true;
+            self.modern.add_unattributed(Some(&usage));
+            self.modern.incomplete.add("response-id-dedup-incomplete");
+            self.bounds.add("response-id-budget");
+            row.classification = ObservationClassification::Incomplete;
+            self.push_series(row, ObservationBasis::UsageRecord, false);
+            return;
+        }
+        self.seen_response_id_bytes += response_id.len();
+        self.seen_response_ids.insert(response_id.to_owned());
+        let attributed_before = self.modern.attributed;
+        let counted = self.modern.count_request(
+            Some(&usage),
+            self.current_model.as_ref(),
+            true,
+            &mut self.model_budget,
+        );
+        row.classification = if self.modern.attributed > attributed_before {
+            ObservationClassification::Request
+        } else if counted {
+            ObservationClassification::Unattributed
+        } else {
+            ObservationClassification::Incomplete
+        };
+        self.push_series(row, ObservationBasis::UsageRecord, counted);
+    }
+
+    fn observe_legacy(&mut self, value: &Value, span: Option<ByteSpan>, revision: &str) {
+        let total = codex_tokens(value);
+        let last = codex_last_tokens(value);
+        if let Some(total) = &total {
+            self.tokens = Some(total.clone());
         }
         if let Some(window) = codex_context_window(value) {
             self.context_window = Some(window);
         }
-        if let Some(limits) = codex_rate_limits(value) {
-            self.rate_limits = Some(limits);
+        let context_window = codex_context_window(value);
+        let rate_limits = codex_rate_limits(value);
+        if let Some(limits) = &rate_limits {
+            self.rate_limits = Some(limits.clone());
         }
-        if value["type"] == "turn_context" {
-            self.model = turn_context_model(value);
-        }
-        self.activity.observe(value);
+        let row_total = total.clone();
+        let row_last = last.clone();
+        let row_record_ref = self.record_ref(span, revision, None);
+        let row_model = self.current_model.as_ref().map(|model| model.id.clone());
+        let row_variant = self
+            .current_model
+            .as_ref()
+            .and_then(|model| model.variant.clone());
+        let row_ordinal = value["ordinal"].as_u64();
+        let row_timestamp = timestamp(&value["timestamp"]);
+        let row = move |classification, counted| UsageObservation {
+            record_type: "event_msg".to_owned(),
+            payload_type: Some("token_count".to_owned()),
+            native_ordinal: row_ordinal,
+            record_ref: row_record_ref.clone(),
+            timestamp: row_timestamp,
+            response_id: None,
+            model: row_model.clone(),
+            variant: row_variant.clone(),
+            classification,
+            counted,
+            usage: None,
+            total_token_usage: row_total.clone(),
+            last_token_usage: row_last.clone(),
+            context_window,
+            rate_limits: rate_limits.clone(),
+        };
+        let Some(total) = total else {
+            self.push_series(
+                row(ObservationClassification::QuotaOnly, false),
+                ObservationBasis::TokenEventAdvance,
+                false,
+            );
+            return;
+        };
+        self.legacy_seen = true;
+        self.legacy.observe();
+        let previous = self.previous_total.replace(total.clone());
+        let (classification, counted) = match previous {
+            None if !self.read_window && supports_single_legacy_request(&total, last.as_ref()) => {
+                let counted = self.legacy.count_request(
+                    last.as_ref(),
+                    self.current_model.as_ref(),
+                    true,
+                    &mut self.model_budget,
+                );
+                (ObservationClassification::Advance, counted)
+            }
+            None => {
+                self.legacy.leading_uncounted += 1;
+                self.legacy.add_unattributed(last.as_ref());
+                self.legacy.incomplete.add("leading-uncounted");
+                (ObservationClassification::LeadingUncounted, false)
+            }
+            Some(previous) => match compare_totals(&previous, &total) {
+                TotalChange::Advance => {
+                    let counted = if last.is_some() {
+                        self.legacy.count_request(
+                            last.as_ref(),
+                            self.current_model.as_ref(),
+                            true,
+                            &mut self.model_budget,
+                        )
+                    } else {
+                        self.legacy.add_unattributed(None);
+                        self.legacy.incomplete.add("last-usage-missing");
+                        false
+                    };
+                    (ObservationClassification::Advance, counted)
+                }
+                TotalChange::Reset => {
+                    self.legacy.resets += 1;
+                    self.observed_resets += 1;
+                    self.reset_seen = true;
+                    let counted = if last.is_some() {
+                        self.legacy.count_request(
+                            last.as_ref(),
+                            self.current_model.as_ref(),
+                            true,
+                            &mut self.model_budget,
+                        )
+                    } else {
+                        self.legacy.add_unattributed(None);
+                        self.legacy.incomplete.add("reset-last-usage-missing");
+                        false
+                    };
+                    (ObservationClassification::ResetAdvance, counted)
+                }
+                TotalChange::Unchanged => (ObservationClassification::UnchangedTotal, false),
+                TotalChange::Incomparable => {
+                    self.legacy.add_unattributed(last.as_ref());
+                    self.legacy.incomplete.add("cumulative-gap");
+                    (ObservationClassification::Incomplete, false)
+                }
+            },
+        };
+        self.push_series(
+            row(classification, counted),
+            ObservationBasis::TokenEventAdvance,
+            counted,
+        );
     }
 
-    fn apply(self, session: &mut Session) {
-        session.accounting = accounting_for(
+    fn push_series(&mut self, row: UsageObservation, basis: ObservationBasis, counted: bool) {
+        if let Some(series) = self.series.as_mut() {
+            series.push(row, basis, counted);
+        }
+    }
+
+    fn finish(self) -> CodexUsageFacts {
+        let basis = if self.modern_seen {
+            ObservationBasis::UsageRecord
+        } else {
+            ObservationBasis::TokenEventAdvance
+        };
+        let mut selected = if self.modern_seen {
+            self.modern
+        } else {
+            self.legacy
+        };
+        if self.read_window && !self.modern_seen {
+            selected
+                .incomplete
+                .add("modern-records-not-observed-in-read");
+        }
+        // Choosing the modern basis discards the legacy candidate whole. Where
+        // legacy observations came first, the requests behind them are not in
+        // the selected aggregate and summing the two would be worse, so the
+        // read names what its basis cannot account for.
+        if self.legacy_preceded_modern {
+            selected
+                .incomplete
+                .add("legacy-observations-before-modern-basis");
+        }
+        selected.resets = self.observed_resets;
+        if self.model_budget.exhausted {
+            selected.bounds.add("model-key-budget");
+        }
+        if self.response_id_budget_exhausted {
+            selected.bounds.add("response-id-budget");
+        }
+        let accounting_coverage = if self.reset_seen {
+            AccountingCoverage::SinceReset
+        } else if self.read_window || self.gap_seen {
+            AccountingCoverage::ReadWindow
+        } else {
+            AccountingCoverage::Session
+        };
+        let observation_coverage = if self.read_window || self.gap_seen {
+            AccountingCoverage::ReadWindow
+        } else {
+            AccountingCoverage::Session
+        };
+        let attribution =
+            (selected.observed > 0 || self.modern_seen || self.legacy_seen).then(|| {
+                selected.attribution(basis, observation_coverage, &self.incomplete, &self.bounds)
+            });
+        let by_model = selected.into_models();
+        let model_observation = (self.model_observed
+            || attribution
+                .as_ref()
+                .is_some_and(|attribution| attribution.unattributed > 0)
+            || !self.incomplete.0.is_empty()
+            || !self.bounds.0.is_empty())
+        .then_some(ModelObservationStatus {
+            mixed: self.mixed,
+            attribution_uncertain: attribution.as_ref().is_some_and(|attribution| {
+                attribution.unattributed > 0
+                    || !attribution.incomplete.is_empty()
+                    || !attribution.bounds.is_empty()
+            }) || !self.incomplete.0.is_empty()
+                || !self.bounds.0.is_empty(),
+            // Past the key budget the retained set is a floor rather than a
+            // count, so no number is published for it.
+            distinct_observed: (self.model_observed && !self.model_budget.exhausted)
+                .then(|| self.model_budget.retained()),
+        });
+        let accounting = accounting_for(
             self.tokens.as_ref(),
             None,
             AccountingBasis::RecordedTotal,
-            AccountingCoverage::Session,
+            accounting_coverage,
         );
-        session.tokens = self.tokens;
-        session.usage_detail = UsageDetail {
+        let usage_detail = UsageDetail {
             context_window: self.context_window,
             rate_limits: self.rate_limits,
-            ..UsageDetail::default()
+            durations_ms: None,
+            by_model,
+            attribution,
         }
         .into_option();
-        session.model = self.model;
-        self.activity.apply(session);
+        let series = self.series.map(|series| series.finish(basis));
+        CodexUsageFacts {
+            tokens: self.tokens,
+            accounting,
+            model: self.latest_model,
+            model_observation,
+            usage_detail,
+            activity: self.activity,
+            series,
+        }
+    }
+}
+
+struct CodexUsageFacts {
+    tokens: Option<Tokens>,
+    accounting: Option<crate::model::Accounting>,
+    model: Option<Model>,
+    model_observation: Option<ModelObservationStatus>,
+    usage_detail: Option<UsageDetail>,
+    activity: ActivityRange,
+    series: Option<UsageObservationSeries>,
+}
+
+fn add_counter(total: &mut Option<u64>, value: Option<u64>) {
+    if let Some(value) = value {
+        *total = Some(total.unwrap_or_default().saturating_add(value));
+    }
+}
+
+fn add_tokens(total: &mut Option<Tokens>, value: Option<&Tokens>) {
+    let Some(value) = value else {
+        return;
+    };
+    if total.is_none() {
+        *total = Some(Tokens {
+            input: None,
+            output: None,
+            reasoning: None,
+            cache_read: None,
+            cache_write: None,
+        });
+    }
+    let total = total.as_mut().expect("initialized above");
+    add_counter(&mut total.input, value.input);
+    add_counter(&mut total.output, value.output);
+    add_counter(&mut total.reasoning, value.reasoning);
+    add_counter(&mut total.cache_read, value.cache_read);
+    add_counter(&mut total.cache_write, value.cache_write);
+}
+
+fn tokens_from_object(value: &Value) -> Option<Tokens> {
+    let object = value.as_object()?;
+    let mut totals = TokenTotals::default();
+    totals.add(
+        object.get("input_tokens").and_then(Value::as_u64),
+        object.get("output_tokens").and_then(Value::as_u64),
+        object
+            .get("reasoning_output_tokens")
+            .and_then(Value::as_u64),
+        object.get("cached_input_tokens").and_then(Value::as_u64),
+        object
+            .get("cache_write_input_tokens")
+            .and_then(Value::as_u64),
+    );
+    totals.finish()
+}
+
+fn codex_last_tokens(value: &Value) -> Option<Tokens> {
+    if !is_token_count(value) {
+        return None;
+    }
+    tokens_from_object(&value["payload"]["info"]["last_token_usage"])
+}
+
+fn supports_single_legacy_request(total: &Tokens, last: Option<&Tokens>) -> bool {
+    last.is_some_and(|last| total == last)
+}
+
+enum TotalChange {
+    Advance,
+    Reset,
+    Unchanged,
+    Incomparable,
+}
+
+fn compare_totals(previous: &Tokens, current: &Tokens) -> TotalChange {
+    let pairs = [
+        (previous.input, current.input),
+        (previous.output, current.output),
+        (previous.reasoning, current.reasoning),
+        (previous.cache_read, current.cache_read),
+        (previous.cache_write, current.cache_write),
+    ];
+    let mut comparable = false;
+    let mut increased = false;
+    let mut decreased = false;
+    for (previous, current) in pairs {
+        if let (Some(previous), Some(current)) = (previous, current) {
+            comparable = true;
+            increased |= current > previous;
+            decreased |= current < previous;
+        }
+    }
+    if !comparable {
+        TotalChange::Incomparable
+    } else if decreased {
+        TotalChange::Reset
+    } else if increased {
+        TotalChange::Advance
+    } else {
+        TotalChange::Unchanged
+    }
+}
+
+struct CodexRecords {
+    observer: CodexUsageObserver,
+}
+
+impl CodexRecords {
+    fn new(path: &Path, read_window: bool) -> Self {
+        Self {
+            observer: CodexUsageObserver::new(path, read_window, None),
+        }
+    }
+
+    fn with_series(path: &Path, read_window: bool, options: UsageObservationOptions) -> Self {
+        Self {
+            observer: CodexUsageObserver::new(path, read_window, Some(options.limit)),
+        }
+    }
+
+    fn observe(&mut self, value: &Value, span: Option<ByteSpan>, revision: &str) {
+        self.observer.observe(value, span, revision);
+    }
+
+    fn set_read_window(&mut self, read_window: bool) {
+        self.observer.read_window = read_window;
+    }
+
+    fn observe_gap(&mut self, gap: &ReadGap) {
+        self.observer.observe_gap(gap);
+    }
+
+    fn observe_read_gap(&mut self, gap: &ReadGap) {
+        self.observer.observe_read_gap(gap);
+    }
+
+    fn observe_read(
+        &mut self,
+        values: &[Value],
+        spans: &[ByteSpan],
+        gaps: &[ReadGap],
+        revision: &str,
+    ) {
+        let mut gaps = gaps.iter().peekable();
+        for (value, span) in values.iter().zip(spans.iter().copied()) {
+            while gaps.peek().is_some_and(|gap| gap.span.end <= span.start) {
+                self.observe_gap(gaps.next().expect("peeked gap"));
+            }
+            self.observe(value, Some(span), revision);
+        }
+        for gap in gaps {
+            self.observe_read_gap(gap);
+        }
+    }
+
+    fn finish(self) -> CodexUsageFacts {
+        self.observer.finish()
+    }
+
+    fn apply(self, session: &mut Session) -> Option<UsageObservationSeries> {
+        let facts = self.finish();
+        session.accounting = facts.accounting;
+        session.tokens = facts.tokens;
+        session.usage_detail = facts.usage_detail;
+        session.model = facts.model;
+        session.model_observation = facts.model_observation;
+        facts.activity.apply(session);
+        facts.series
     }
 }
 

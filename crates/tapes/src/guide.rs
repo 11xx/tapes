@@ -179,7 +179,7 @@ READ A SUPPLIED EXPORT
 
 PROBE BEFORE EXPORTING
   tapes show <id> --tail 40      A window, costing no bundle.
-  tapes show <id> --json         The same turns as tapes-session/10, with bounded read, graph, artifact, and terminal evidence.
+  tapes show <id> --json         The same turns as tapes-session/11, with bounded read, graph, artifact, and terminal evidence.
   tapes show <id> --exchange     Operator and assistant turns only, timestamps and ordinals kept; the name for --only operator,assistant.
   tapes show <id> --omit tool    Every turn but tool calls and results; --only and --omit take kind labels, and export takes both.
   tapes show <id> --full         Every turn of a Claude, Codex, Pi, or OpenCode session, streamed past the read bounds; --json streams it too.
@@ -215,7 +215,7 @@ PROBE BEFORE EXPORTING
   Human output says the same in its closing notes, recommending only the
   recovery that works.
 
-  events projects harness-neutral tool records as tapes-events/6. Pairing is
+  events projects harness-neutral tool records as tapes-events/7. Pairing is
   exact within the bounded read; an incomplete call or result says whether its
   counterpart was not reached or not recorded. Event ordinals are the same
   turn coordinates show prints. With no --tail, every event the bounded reader
@@ -240,21 +240,28 @@ PROBE BEFORE EXPORTING
   Claude, Codex, or Pi recording twice, pairing past the read bound and
   writing each event as it pairs, with the same filters and counts.
 
-  usage answers where a session's quota went as tapes-usage/5: its recorded
-  tokens, cost, and accounting, and its turns counted by role. Read accounting
-  before adding anything up — basis says whether a figure is a recorded total
-  or a sum of per-request records, and coverage says how much of the session it
-  covers, which is the same coverage the turn counts carry. Cost is only what
-  the harness recorded, and quota is a separate fact about the account rather
-  than about this session. Facts beyond the counters appear only where a
-  harness records them: codex reports its context window and quota windows,
-  claude reports wall-clock durations and a per-model split, pi and opencode
-  report neither. Codex quota observations preserve credits balances and
-  reached-limit flags exactly as recorded, including false and string zero;
-  absent fields remain unknown. usage --full streams the whole recording and
-  folds every counter from it, so turns and accounting cover the session.
+  usage answers where a session's quota went as tapes-usage/6: its recorded
+  tokens, cost, accounting, turns, and any model-observation attribution the
+  source can support. Read accounting before adding anything up — basis says
+  whether a figure is a recorded total or an observed request sum, and
+  coverage says how much of the session it covers. An observed cumulative
+  counter restart is `since-reset`; the newest recorded total remains visible
+  without being rebuilt from request rows. Codex quota observations preserve
+  credits balances and reached-limit flags exactly as recorded, including false
+  and string zero; absent fields remain unknown. `usage --full` streams the
+  whole recording and folds every counter from it, so turns and accounting
+  cover the session.
 
-  stats counts what one recording holds as tapes-stats/6: turns by kind
+  `usage SESSION --series[=N]` opts into a recent bounded suffix of Codex raw
+  accounting observations: 200 rows by default, 1 through 10,000 explicitly.
+  Rows retain source coordinates, native ordinals when recorded, response IDs,
+  model context, counters, quota-only events, repeats, and reset/advance
+  classifications. They are observations, not guaranteed request identities;
+  aggregate attribution covers the actual read even when the suffix evicts
+  older rows. `--full --series` uses the pinned recording, while summaries,
+  supplied inputs, and unsupported harnesses refuse the option.
+
+  stats counts what one recording holds as tapes-stats/7: turns by kind
   beside the kinds the harness can record at all, so a zero for a kind it
   cannot record is not read as none observed, tool
   calls by name with their paired durations and error counts, unpaired calls
@@ -294,7 +301,7 @@ PROBE BEFORE EXPORTING
   the tail window is still named.
 
   Given a scope or a listing filter instead of a session, usage answers that
-  whole selection as tapes-usage-summary/3, using the flags list and export
+  whole selection as tapes-usage-summary/4, using the flags list and export
   take and grouping by --by (harness and model unless told otherwise). It sums
   the counters the listing already carries, so nothing is re-read. Read
   counted before a sum: it says how many of a group's sessions recorded that
@@ -465,7 +472,7 @@ CONTINUE A COLD SESSION
   tapes brief <id> --tail 20 --json
 
   A continuation has two halves. brief is the transcript's half, as
-  tapes-brief/6: where the session stopped, the directory it worked in and the
+  tapes-brief/7: where the session stopped, the directory it worked in and the
   commit that directory sits on, the tool calls the read never saw a result
   for, the children whose outcome its store does not record, and the last few
   operator and assistant turns, each cut at 600 characters. --tail sets how

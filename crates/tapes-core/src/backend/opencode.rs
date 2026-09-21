@@ -955,6 +955,7 @@ impl OpenCodeBackend {
             source_length: read,
             source_bounds: cuts.bounds(),
             source_revision: None,
+            source_prefix_sha256: None,
             skipped: 0,
             gaps: Vec::new(),
             trailing_record: None,
@@ -1043,6 +1044,7 @@ impl OpenCodeBackend {
             source_length: read,
             source_bounds: Vec::new(),
             source_revision: None,
+            source_prefix_sha256: None,
             skipped: 0,
             gaps: Vec::new(),
             trailing_record: None,
@@ -1751,6 +1753,7 @@ fn parse_database_session(value: &Value) -> Result<Session> {
         source: SourceDescriptor::installed("opencode", "opencode-database"),
         metadata: None,
         model,
+        model_observation: None,
         title: value["title"]
             .as_str()
             .filter(|title| !title.is_empty())
@@ -1828,6 +1831,7 @@ fn parse_session(value: &Value) -> Result<Session> {
         source: SourceDescriptor::installed("opencode", "opencode-api"),
         metadata: None,
         model,
+        model_observation: None,
         title: value["title"].as_str().map(str::to_owned),
         derived_title: None,
         derived_title_truncated: None,

@@ -10,7 +10,7 @@ use crate::content::{ContentCoverage, ContentPart};
 use crate::event::ToolEvent;
 use crate::usage::UsageDetail;
 
-pub const SESSION_SCHEMA: &str = "tapes-session/10";
+pub const SESSION_SCHEMA: &str = "tapes-session/11";
 /// Maximum length of a title derived from the first user turn.
 pub const DERIVED_TITLE_MAX_CHARS: usize = 96;
 
@@ -26,6 +26,12 @@ pub struct Session {
     pub metadata: Option<SessionMetadata>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<Model>,
+    /// Whether the recording observed more than one model/effort selection
+    /// and whether request attribution was incomplete. This is a compact
+    /// classification of the read, not a replacement for request-level
+    /// usage attribution.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_observation: Option<ModelObservationStatus>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
     /// A bounded human-facing hint derived from the first user turn when the
@@ -216,6 +222,18 @@ pub struct Model {
     pub variant: Option<String>,
 }
 
+/// Bounded status facts about model observations in one recording read.
+/// `mixed` and `attribution_uncertain` are independent: a recording may show
+/// several model selections and still have a readable, complete attribution,
+/// or it may have one selection whose request records begin behind a bound.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelObservationStatus {
+    pub mixed: bool,
+    pub attribution_uncertain: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub distinct_observed: Option<usize>,
+}
+
 impl Model {
     /// The identity shown in list output and used by model filters.
     pub fn identity(&self) -> String {
@@ -264,6 +282,7 @@ pub enum AccountingBasis {
 pub enum AccountingCoverage {
     Session,
     ReadWindow,
+    SinceReset,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -429,6 +448,11 @@ pub struct ReadEvidence {
     pub coordinate_domain: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_revision: Option<String>,
+    /// Internal pin evidence for file-backed whole reads. It is carried only
+    /// within one process so a replay can verify the observed prefix without
+    /// adding a public evidence field.
+    #[serde(skip)]
+    pub(crate) source_prefix_sha256: Option<[u8; 32]>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub producer: Option<String>,
     pub projection: String,
@@ -1466,6 +1490,7 @@ mod tests {
                 id: "gpt-5.6-sol".into(),
                 variant: Some("high".into()),
             }),
+            model_observation: None,
             title: Some("Build the model".into()),
             derived_title: None,
             derived_title_truncated: None,

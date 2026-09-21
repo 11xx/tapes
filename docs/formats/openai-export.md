@@ -192,8 +192,8 @@ also published from create-new partials, so a failed member copy leaves a
 manifest gap without a partial member. The input is only ever opened for
 reading.
 
-The normal output contracts remain versioned (`tapes-list/5`,
-`tapes-session/10`, `tapes-events/6`, `tapes-brief/6`, `tapes-endings/6`,
-`tapes-stats/6`, `tapes-usage/5`, and `tapes-export-manifest/5`). History-page
+The normal output contracts remain versioned (`tapes-list/6`,
+`tapes-session/11`, `tapes-events/7`, `tapes-brief/7`, `tapes-endings/6`,
+`tapes-stats/7`, `tapes-usage/6`, and `tapes-export-manifest/5`). History-page
 and child-qualified operations are installed-recording capabilities and
 refuse supplied exports rather than interpreting an export as JSONL history.

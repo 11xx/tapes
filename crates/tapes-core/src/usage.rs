@@ -15,12 +15,12 @@ use serde_json::Value;
 use crate::backend::{skipped_records_note, StreamedTranscript};
 use crate::content::ContentInventory;
 use crate::model::{
-    Accounting, AccountingBasis, AccountingCoverage, Cost, Model, ReadEvidence, Role, Session,
-    SessionMetadata, SourceBound, SourceDescriptor, TerminalObservation, TextTailEvidence, Tokens,
-    Transcript, Truncation, Turn,
+    Accounting, AccountingBasis, AccountingCoverage, Cost, Model, ModelObservationStatus,
+    ReadEvidence, ReadGap, RecordRef, Role, Session, SessionMetadata, SourceBound,
+    SourceDescriptor, TerminalObservation, TextTailEvidence, Tokens, Transcript, Truncation, Turn,
 };
 
-pub const USAGE_SCHEMA: &str = "tapes-usage/5";
+pub const USAGE_SCHEMA: &str = "tapes-usage/6";
 
 /// Usage facts a harness records that the normalized session model has no
 /// field for. Each member is present exactly when the harness recorded it.
@@ -36,6 +36,9 @@ pub struct UsageDetail {
     pub durations_ms: Option<Durations>,
     /// The session's counters split by the model that spent them.
     pub by_model: Option<Vec<ModelUsage>>,
+    /// Request-observation attribution kept separate from the session's
+    /// cumulative recorded total.
+    pub attribution: Option<UsageAttribution>,
 }
 
 impl UsageDetail {
@@ -44,6 +47,7 @@ impl UsageDetail {
             && self.rate_limits.is_none()
             && self.durations_ms.is_none()
             && self.by_model.is_none()
+            && self.attribution.is_none()
     }
 
     /// The detail, or nothing when the harness recorded none of it.
@@ -143,9 +147,143 @@ impl Durations {
 pub struct ModelUsage {
     pub model: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub variant: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub tokens: Option<Tokens>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cost: Option<Cost>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub request_count: Option<usize>,
+}
+
+/// The basis used for observed request accounting in one read. This is not a
+/// claim about the harness's whole history: a bounded read can only choose
+/// among the records it actually reached.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ObservationBasis {
+    UsageRecord,
+    TokenEventAdvance,
+}
+
+/// What an observation row represents. Rows are source observations; only
+/// rows with `counted: true` contribute to the selected attribution basis.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ObservationClassification {
+    Request,
+    Repeat,
+    Advance,
+    LeadingUncounted,
+    UnchangedTotal,
+    ResetAdvance,
+    QuotaOnly,
+    Unattributed,
+    Incomplete,
+}
+
+/// The model/effort request observations that a read could attribute, plus
+/// the bounded evidence that prevented false precision.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct UsageAttribution {
+    pub basis: ObservationBasis,
+    pub coverage: AccountingCoverage,
+    pub observed: usize,
+    pub counted: usize,
+    pub attributed: usize,
+    pub unattributed: usize,
+    pub leading_uncounted: usize,
+    pub resets: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unattributed_tokens: Option<Tokens>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub incomplete: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub bounds: Vec<String>,
+}
+
+/// One raw Codex accounting observation. A row is not necessarily a request:
+/// repeated modern records, unchanged legacy totals, and quota-only events are
+/// retained as observations but do not become counted requests.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct UsageObservation {
+    pub record_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub payload_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub native_ordinal: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub record_ref: Option<RecordRef>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timestamp: Option<DateTime<Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub response_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub variant: Option<String>,
+    pub classification: ObservationClassification,
+    pub counted: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub usage: Option<Tokens>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total_token_usage: Option<Tokens>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_token_usage: Option<Tokens>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_window: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rate_limits: Option<RateLimits>,
+}
+
+/// Reasons a bounded recent observation suffix omitted rows. The three
+/// counters are independent: a row can be evicted by the requested cap while
+/// another is rejected by the serialized byte budget.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct UsageObservationOmissions {
+    #[serde(skip_serializing_if = "is_zero")]
+    pub row_cap: usize,
+    #[serde(skip_serializing_if = "is_zero")]
+    pub byte_budget: usize,
+    #[serde(skip_serializing_if = "is_zero")]
+    pub oversized_row: usize,
+}
+
+/// The opt-in observation suffix and the read-side coverage around it.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct UsageObservationSeries {
+    pub rows: Vec<UsageObservation>,
+    pub observed: usize,
+    pub returned: usize,
+    pub omissions: UsageObservationOmissions,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub gaps: Vec<ReadGap>,
+    #[serde(skip_serializing_if = "is_zero")]
+    pub gaps_omitted: usize,
+}
+
+/// Options for the core usage-observation entry point. The CLI maps
+/// `--series` to this value; the core API does not depend on CLI arguments.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct UsageObservationOptions {
+    pub limit: usize,
+}
+
+/// Read options for the core usage entry point. `series` is deliberately
+/// separate from ordinary usage so the default path retains no row ring.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct UsageOptions {
+    pub full: bool,
+    pub series: Option<UsageObservationOptions>,
+}
+
+/// A backend's bounded, pinned observation result. The returned session owns
+/// the same recorded totals and attribution facts as the rows, while the
+/// optional ring contains only the requested suffix.
+#[derive(Debug)]
+pub struct UsageObservationResult {
+    pub session: Session,
+    pub series: UsageObservationSeries,
 }
 
 /// Normalized turns the bounded read reached, by role.
@@ -183,6 +321,8 @@ pub struct UsageSession {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<Model>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_observation: Option<ModelObservationStatus>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub started_at: Option<DateTime<Utc>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_activity_at: Option<DateTime<Utc>>,
@@ -215,6 +355,10 @@ pub struct UsageView {
     pub durations_ms: Option<Durations>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub by_model: Option<Vec<ModelUsage>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub attribution: Option<UsageAttribution>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub series: Option<UsageObservationSeries>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub read: Option<ReadEvidence>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -299,6 +443,7 @@ fn project(session: &Session, turns: TurnTally, facts: ReadFacts) -> UsageView {
             source: session.source.clone(),
             metadata: session.metadata.clone(),
             model: session.model.clone(),
+            model_observation: session.model_observation.clone(),
             started_at: session.started_at,
             last_activity_at: session.last_activity_at,
             directory: session.directory.clone(),
@@ -311,6 +456,8 @@ fn project(session: &Session, turns: TurnTally, facts: ReadFacts) -> UsageView {
         rate_limits: detail.rate_limits,
         durations_ms: detail.durations_ms,
         by_model: detail.by_model,
+        attribution: detail.attribution,
+        series: None,
         read: facts.read,
         terminal: facts.terminal,
         text_tail: facts.text_tail,
@@ -432,6 +579,7 @@ pub struct CoverageCounts {
     pub recorded_total: usize,
     pub summed_session: usize,
     pub summed_read_window: usize,
+    pub since_reset: usize,
     pub no_accounting: usize,
 }
 
@@ -442,6 +590,10 @@ pub struct CoverageCounts {
 pub struct UsageTally {
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub mixed_accounting: bool,
+    #[serde(skip_serializing_if = "is_zero")]
+    pub mixed_models: usize,
+    #[serde(skip_serializing_if = "is_zero")]
+    pub attribution_uncertain: usize,
     pub sessions: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tokens: Option<Tokens>,
@@ -538,6 +690,8 @@ struct Tally {
     cost_usd: f64,
     cost_counted: usize,
     coverage: CoverageCounts,
+    mixed_models: usize,
+    attribution_uncertain: usize,
 }
 
 impl Tally {
@@ -574,6 +728,21 @@ impl Tally {
                 }
             }
         }
+        if session
+            .accounting
+            .as_ref()
+            .is_some_and(|accounting| accounting.coverage == AccountingCoverage::SinceReset)
+        {
+            self.coverage.since_reset += 1;
+        }
+        if let Some(status) = &session.model_observation {
+            if status.mixed {
+                self.mixed_models += 1;
+            }
+            if status.attribution_uncertain {
+                self.attribution_uncertain += 1;
+            }
+        }
     }
 
     fn finish(self) -> UsageTally {
@@ -593,6 +762,8 @@ impl Tally {
             > 0;
         UsageTally {
             mixed_accounting: false,
+            mixed_models: self.mixed_models,
+            attribution_uncertain: self.attribution_uncertain,
             sessions: self.sessions,
             tokens: any_token_counted.then(|| Tokens {
                 input: self.input.sum(),
@@ -625,6 +796,7 @@ mod tests {
             source: SourceDescriptor::installed("fixture", "fixture-recording"),
             metadata: None,
             model: None,
+            model_observation: None,
             title: None,
             derived_title: None,
             derived_title_truncated: None,
@@ -737,6 +909,7 @@ mod tests {
             }),
             by_model: Some(vec![ModelUsage {
                 model: "fixture-model".to_owned(),
+                variant: None,
                 tokens: Some(Tokens {
                     input: Some(10),
                     output: Some(20),
@@ -745,7 +918,9 @@ mod tests {
                     cache_write: None,
                 }),
                 cost: Some(Cost { usd: 1.5 }),
+                request_count: None,
             }]),
+            attribution: None,
         });
         let transcript = Transcript::new(
             session,
@@ -838,6 +1013,7 @@ mod tests {
                 id: id.to_owned(),
                 variant: variant.map(str::to_owned),
             }),
+            model_observation: None,
             tokens,
             cost: cost.map(|usd| Cost { usd }),
             accounting: accounting.map(|(basis, coverage)| Accounting { basis, coverage }),
@@ -911,6 +1087,7 @@ mod tests {
                         "recorded_total": 0,
                         "summed_session": 1,
                         "summed_read_window": 0,
+                        "since_reset": 0,
                         "no_accounting": 0
                     },
                     "counted": {
@@ -931,6 +1108,7 @@ mod tests {
                         "recorded_total": 1,
                         "summed_session": 0,
                         "summed_read_window": 1,
+                        "since_reset": 0,
                         "no_accounting": 1
                     },
                     "counted": {
@@ -954,6 +1132,7 @@ mod tests {
                     "recorded_total": 1,
                     "summed_session": 1,
                     "summed_read_window": 1,
+                    "since_reset": 0,
                     "no_accounting": 1
                 },
                 "counted": {

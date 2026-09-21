@@ -139,6 +139,7 @@ impl ClaudeBackend {
             source: SourceDescriptor::installed("claude", path.display().to_string()),
             metadata: None,
             model,
+            model_observation: None,
             title,
             derived_title: None,
             derived_title_truncated: None,
@@ -517,6 +518,7 @@ impl Backend for ClaudeBackend {
             source_length: read.source_length,
             source_bounds: Vec::new(),
             source_revision: Some(read.revision),
+            source_prefix_sha256: Some(read.prefix_sha256),
             skipped: read.skipped,
             trailing_record: streamed_trailing_record(read.last.as_ref(), claude_trailing_kind),
             gaps: read.gaps,
@@ -611,6 +613,7 @@ impl Backend for ClaudeBackend {
             source: SourceDescriptor::installed("claude", path.display().to_string()),
             metadata: None,
             model: None,
+            model_observation: None,
             title: records.title.take(),
             derived_title: None,
             derived_title_truncated: None,
@@ -633,6 +636,7 @@ impl Backend for ClaudeBackend {
                 source_length: read.source_length,
                 source_bounds: Vec::new(),
                 source_revision: Some(read.revision),
+                source_prefix_sha256: Some(read.prefix_sha256),
                 skipped: read.skipped,
                 trailing_record: streamed_trailing_record(read.last.as_ref(), claude_trailing_kind),
                 gaps: read.gaps,
@@ -960,8 +964,10 @@ fn cost_state_detail(value: &Value) -> UsageDetail {
             .iter()
             .map(|(model, usage)| ModelUsage {
                 model: model.clone(),
+                variant: None,
                 tokens: model_usage_tokens(usage),
                 cost: usage["costUSD"].as_f64().map(|usd| Cost { usd }),
+                request_count: None,
             })
             .collect::<Vec<_>>();
         usage.sort_by(|left, right| left.model.cmp(&right.model));
@@ -972,6 +978,7 @@ fn cost_state_detail(value: &Value) -> UsageDetail {
         rate_limits: None,
         durations_ms: (!durations.is_empty()).then_some(durations),
         by_model: by_model.filter(|usage| !usage.is_empty()),
+        attribution: None,
     }
 }
 

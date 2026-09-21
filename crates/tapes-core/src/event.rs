@@ -12,7 +12,7 @@ use crate::model::{
     TextTailEvidence, Transcript, Truncation, Turn,
 };
 
-pub const EVENTS_SCHEMA: &str = "tapes-events/6";
+pub const EVENTS_SCHEMA: &str = "tapes-events/7";
 const PREVIEW_CHARS: usize = 200;
 pub const MAX_INVOCATION_TEXT_CHARS: usize = 64 * 1024;
 pub const MAX_INVOCATIONS: usize = 32;
@@ -1936,6 +1936,7 @@ mod tests {
             source: SourceDescriptor::installed("fixture", "fixture-recording"),
             metadata: None,
             model: None,
+            model_observation: None,
             title: None,
             derived_title: None,
             derived_title_truncated: None,
