@@ -491,8 +491,9 @@ at all, `tools` — calls, results, complete pairs,
 unpaired events by the boundary that left them unpaired, errors, and a
 `by_name` row per tool with its paired durations — the recorded clock in
 `durations_ms`, the distribution of assistant-turn wall clock in
-`assistant_turns_ms` (one sample per assistant source record, measured from
-the previous turn's source record: count, median, p90, max), the session's
+`assistant_turns_ms` (one sample per source record carrying a model response —
+its text, its reasoning, or a tool call — measured from the previous turn's
+source record: count, median, p90, max), the session's
 own counters
 with the share of
 `input + cache_read + cache_write` each cache counter accounts for, the model

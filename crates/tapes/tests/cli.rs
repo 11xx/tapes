@@ -8209,7 +8209,7 @@ fn pi_reports_its_model_and_effort_split_through_usage_and_stats() {
     let human = String::from_utf8(run(&["stats", "session-pi"])).unwrap();
     assert!(human.contains("model gpt-fixture (high):"), "{human}");
     assert!(
-        human.contains("assistant turns: 1 measured, median 1000ms, p90 1000ms, max 1000ms"),
+        human.contains("assistant turns: 3 measured, median 1000ms, p90 1000ms, max 1000ms"),
         "{human}"
     );
 }
@@ -8330,10 +8330,10 @@ fn stats_json_counts_a_chosen_recording_exactly() {
                 "count_with_timestamps": 12
             },
             "assistant_turns_ms": {
-                "count": 1,
+                "count": 7,
                 "median": 1_000,
-                "p90": 1_000,
-                "max": 1_000
+                "p90": 2_000,
+                "max": 2_000
             },
             "usage": {
                 "tokens": {

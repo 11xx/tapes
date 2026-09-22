@@ -1486,14 +1486,19 @@ fn pi_usage_reports_the_model_and_effort_split() {
 
 /// A turn's duration is the wall clock from the record before its own source
 /// record to that record, so a record that normalizes to several turns
-/// contributes one sample, at its assistant turn. A bounded read and a
-/// whole-recording read report the same distribution.
+/// contributes one sample. Every assistant record is a model response, whether
+/// it carried text, reasoning, or only a tool call, and a tool-result record
+/// is not one. A bounded read and a whole-recording read report the same
+/// distribution.
 #[test]
 fn stats_reports_the_assistant_turn_duration_distribution() {
     let backends: Vec<Box<dyn Backend>> = vec![Box::new(PiBackend::new(fixtures("pi")))];
     let id = "session-turn-durations";
+    // Eleven assistant records: ten carrying text, and one carrying only a
+    // thinking block and a tool call. The tool-result record after it is not a
+    // sample even though its interval would be the largest.
     let expected = serde_json::json!({
-        "count": 10,
+        "count": 11,
         "median": 5_000,
         "p90": 9_000,
         "max": 10_000,
@@ -1507,15 +1512,15 @@ fn stats_reports_the_assistant_turn_duration_distribution() {
     let value = serde_json::to_value(&whole).unwrap();
     assert_eq!(value["assistant_turns_ms"], expected, "{value}");
 
-    // A record that normalizes to turns but carries no assistant turn
-    // contributes no duration: the fixture's first assistant record is a
-    // thinking block and a tool call, and only its second assistant record is
-    // measured, from the tool result before it.
+    // A record that normalizes to turns but carries no model response
+    // contributes no duration, and every record that does carry one is a
+    // sample: the fixture's first assistant record is a thinking block and a
+    // tool call, its second is text, and its last is a tool call alone.
     let stats = stats_with_backends(&backends, Selection::Id("session-pi")).unwrap();
     let value = serde_json::to_value(&stats).unwrap();
     assert_eq!(
         value["assistant_turns_ms"],
-        serde_json::json!({"count": 1, "median": 1_000, "p90": 1_000, "max": 1_000}),
+        serde_json::json!({"count": 3, "median": 1_000, "p90": 1_000, "max": 1_000}),
         "{value}"
     );
 }

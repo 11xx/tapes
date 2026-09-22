@@ -679,9 +679,12 @@ from the first timestamped turn to the last and needs two of them;
 turns; `in_tool` sums the complete pairs' durations. Each is absent when the
 read holds nothing to measure it from.
 
-`assistant_turns_ms` measures an assistant turn's wall clock: one sample per
-source record that carries an assistant turn, being the interval from the
-previous turn's source record to its own. A record whose normalized turns
+`assistant_turns_ms` measures a model response's wall clock: one sample per
+source record that carries one — the model's text, its reasoning, or a tool
+call it made — being the interval from the previous turn's source record to
+its own. A tool call and a tool result both normalize to a tool turn, so the
+event kind decides: a record carrying only tool results is no sample, and one
+carrying a call together with its result is. A record whose normalized turns
 share one timestamp is one sample rather than several, and a turn with no
 previous source record, or one later than it, contributes none. `count` says how many intervals
 the figures cover, `median` and `p90` are the samples at rank `ceil(count / 2)`
@@ -768,10 +771,10 @@ order:
     "count_with_timestamps": 7
   },
   "assistant_turns_ms": {
-    "count": 1,
-    "median": 1000,
-    "p90": 1000,
-    "max": 1000
+    "count": 4,
+    "median": 12000,
+    "p90": 40000,
+    "max": 40000
   },
   "usage": {
     "tokens": { "input": 2500, "output": 400, "cache_read": 1000, "cache_write": 500 },

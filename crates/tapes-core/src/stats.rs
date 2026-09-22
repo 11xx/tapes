@@ -16,7 +16,7 @@ use crate::content::ContentInventory;
 use crate::event::{self, EventKind, EventRecord, Incomplete, PairIndex, PairRef};
 use crate::lineage::Lineage;
 use crate::model::{
-    Accounting, Cost, KindDeclaration, ReadEvidence, RecordRef, Session, TerminalObservation,
+    Accounting, Cost, KindDeclaration, ReadEvidence, RecordRef, Role, Session, TerminalObservation,
     TextTailEvidence, Tokens, Transcript, Truncation, Turn, TurnKind,
 };
 use crate::usage::{self, ModelUsage, TurnCoverage, UsageSession, UsageView};
@@ -48,7 +48,7 @@ pub struct StatsView {
     pub tools: ToolStats,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub durations_ms: Option<TimeStats>,
-    /// The wall clock of the assistant turns the read reached, absent when it
+    /// The wall clock of the model responses the read reached, absent when it
     /// holds no interval to measure one from.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub assistant_turns_ms: Option<AssistantTurnDurations>,
@@ -208,10 +208,10 @@ pub struct TimeStats {
 }
 
 /// The wall clock of assistant turns, in milliseconds. A sample is one source
-/// record that carries an assistant turn, measured from the previous turn's
-/// source record. A record whose normalized turns share one timestamp
-/// contributes once, at its first assistant turn, and a turn with no previous
-/// source record, or one later than it, contributes nothing.
+/// record that carries a model response — its text, its reasoning, or a tool
+/// call it made — measured from the previous turn's source record. A record
+/// whose normalized turns share one timestamp contributes once, and a
+/// tool-result record contributes no sample of its own.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
 pub struct AssistantTurnDurations {
     /// How many intervals the figures cover.
@@ -470,8 +470,26 @@ impl RecordKey {
     }
 }
 
-/// The assistant-turn wall clock, folded one turn at a time. A record
-/// contributes at most one sample, at its first assistant turn, because a
+/// Whether a turn evidences a model response: the model's own text, its
+/// reasoning, or a tool call it made. Role alone cannot say so, because a tool
+/// call and a tool result both normalize to a tool turn, and a harness that
+/// projects no event for one leaves its provenance unstated; the event kind
+/// separates them.
+fn is_model_response(turn: &Turn) -> bool {
+    match turn.role {
+        Role::Assistant | Role::Reasoning => true,
+        // One record carrying its own invocation and result is the model's
+        // call as much as a separate call record is.
+        Role::Tool => turn
+            .tool
+            .as_ref()
+            .is_some_and(|tool| tool.kind == EventKind::ToolCall || tool.self_contained),
+        Role::User | Role::System | Role::Developer => false,
+    }
+}
+
+/// The assistant-turn wall clock, folded one turn at a time. A source record
+/// contributes at most one sample, at its first model-response turn, because a
 /// record that normalizes to several turns is one record's wall clock rather
 /// than several.
 #[derive(Default)]
@@ -496,21 +514,27 @@ impl AssistantClock {
             self.sampled = false;
         }
         self.current_ts.get_or_insert(ts);
-        if self.sampled || turn.kind != TurnKind::Assistant {
+        if self.sampled || !is_model_response(turn) {
             return;
         }
         self.sampled = true;
         let Some(before) = self.previous_ts else {
             return;
         };
-        let duration = ts.signed_duration_since(before).num_milliseconds();
+        // The record's own stamp, not the turn's, so a record whose parts
+        // disagree about the time is still measured once.
+        let duration = self
+            .current_ts
+            .unwrap_or(ts)
+            .signed_duration_since(before)
+            .num_milliseconds();
         if duration >= 0 {
             self.samples.push(duration);
         }
     }
 
-    /// The distribution, or nothing when no assistant record had a
-    /// measurable preceding record.
+    /// The distribution, or nothing when no model response had a measurable
+    /// preceding record.
     fn finish(mut self) -> Option<AssistantTurnDurations> {
         if self.samples.is_empty() {
             return None;

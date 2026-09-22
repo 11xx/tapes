@@ -955,11 +955,13 @@ enum Command {
     /// harness wrote, and every total says what it covers: turn coverage is
     /// `read-window` when a source bound withheld turns, durations come from
     /// complete pairs only, and a cache ratio is a share of recorded token
-    /// counts rather than of cost. An assistant turn's duration is the
-    /// interval from the previous turn's source record to its own, so a
-    /// record that normalizes to several turns is one duration; the
-    /// distribution over those intervals is `assistant_turns_ms` with its
-    /// count, median, p90, and max. Nothing is judged, ranked, or explained.
+    /// counts rather than of cost. A model response is one source record —
+    /// the model's text, its reasoning, or a tool call it made — and its
+    /// duration is the interval from the previous turn's source record to its
+    /// own, so a record that normalizes to several turns is one duration and
+    /// a tool-result record is none; the distribution over those intervals is
+    /// `assistant_turns_ms` with its count, median, p90, and max. Nothing is
+    /// judged, ranked, or explained.
     /// A scope or listing filter selects multiple sessions and returns
     /// tapes-stats-summary/5: recorded tools grouped by harness and name,
     /// with per-session read coverage, pairing counts and failures, and per

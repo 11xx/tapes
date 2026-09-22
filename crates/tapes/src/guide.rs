@@ -271,9 +271,9 @@ PROBE BEFORE EXPORTING
   cannot record is not read as none observed, tool
   calls by name with their paired durations and error counts, unpaired calls
   by the boundary that left them unpaired, the recorded clock, the
-  distribution of assistant-turn wall clock — one sample per assistant
-  source record, from the previous turn's source record — as count, median,
-  p90, and max,
+  distribution of assistant-turn wall clock — one sample per source record
+  carrying a model response, from the previous turn's source record — as
+  count, median, p90, and max,
   the session's
   token counters with the share of input plus cache read plus cache write its
   cache accounts for, the model and effort split the source recorded, and the
