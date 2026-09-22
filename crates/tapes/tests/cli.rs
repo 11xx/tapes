@@ -8136,13 +8136,15 @@ fn stats_help_names_the_schema_and_what_the_figures_cover() {
     let output = tapes().args(["stats", "--help"]).output().unwrap();
     assert!(output.status.success());
     let help = String::from_utf8_lossy(&output.stdout);
-    assert!(help.contains("tapes-stats/8"), "{help}");
+    assert!(help.contains("tapes-stats/9"), "{help}");
     assert!(help.contains("complete pairs only"), "{help}");
     assert!(
         help.contains("share of recorded token counts rather than of cost"),
         "{help}"
     );
     assert!(help.contains("Nothing is judged"), "{help}");
+    assert!(help.contains("assistant_turns_ms"), "{help}");
+    assert!(help.contains("median"), "{help}");
 }
 
 /// pi records the model on every assistant message, so both `usage` and
@@ -8206,6 +8208,10 @@ fn pi_reports_its_model_and_effort_split_through_usage_and_stats() {
 
     let human = String::from_utf8(run(&["stats", "session-pi"])).unwrap();
     assert!(human.contains("model gpt-fixture (high):"), "{human}");
+    assert!(
+        human.contains("assistant turns: 1 measured, median 1000ms, p90 1000ms, max 1000ms"),
+        "{human}"
+    );
 }
 
 /// Every figure in the answer is a figure the recording chose, so the whole
@@ -8237,7 +8243,7 @@ fn stats_json_counts_a_chosen_recording_exactly() {
     assert_eq!(
         comparable,
         serde_json::json!({
-            "schema": "tapes-stats/8",
+            "schema": "tapes-stats/9",
             "session": {
                 "id": id,
                 "source": {
@@ -8322,6 +8328,12 @@ fn stats_json_counts_a_chosen_recording_exactly() {
                 "in_tool": 4_000,
                 "between_turns_max": 2_000,
                 "count_with_timestamps": 12
+            },
+            "assistant_turns_ms": {
+                "count": 1,
+                "median": 1_000,
+                "p90": 1_000,
+                "max": 1_000
             },
             "usage": {
                 "tokens": {

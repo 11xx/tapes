@@ -485,12 +485,16 @@ session whose read fails is named in `unread` with its diagnostic and does not
 stop the run. Human output is one line per session, the text tail indented
 beneath it when asked for, and the listing's own diagnostics.
 
-`stats` counts what one recording holds as `tapes-stats/8`: `turns` by the
+`stats` counts what one recording holds as `tapes-stats/9`: `turns` by the
 `kind` the harness recorded them as, beside the kinds that harness can record
 at all, `tools` — calls, results, complete pairs,
 unpaired events by the boundary that left them unpaired, errors, and a
 `by_name` row per tool with its paired durations — the recorded clock in
-`durations_ms`, the session's own counters with the share of
+`durations_ms`, the distribution of assistant-turn wall clock in
+`assistant_turns_ms` (one sample per assistant source record, measured from
+the previous turn's source record: count, median, p90, max), the session's
+own counters
+with the share of
 `input + cache_read + cache_write` each cache counter accounts for, the model
 and reasoning-level split its harness recorded, and the
 children its store names. It reads the same typed events
@@ -645,7 +649,7 @@ few endings that matter instead of every tail.
 
 **Contracts you can build on.** `tapes-list/6`, `tapes-session/11`,
 `tapes-events/7`, `tapes-usage/6`, `tapes-usage-summary/4`, `tapes-lineage/2`,
-`tapes-endings/6`, `tapes-child/4`, `tapes-stats/8`, `tapes-stats-summary/5`, `tapes-brief/7`,
+`tapes-endings/6`, `tapes-child/4`, `tapes-stats/9`, `tapes-stats-summary/5`, `tapes-brief/7`,
 `tapes-page/6`, `tapes-history-search/6`, `tapes-metadata-history/6`,
 and `tapes-export-manifest/5` are versioned
 JSON; a breaking shape change bumps the version. A single-session `export`

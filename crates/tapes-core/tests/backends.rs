@@ -1484,6 +1484,42 @@ fn pi_usage_reports_the_model_and_effort_split() {
     );
 }
 
+/// A turn's duration is the wall clock from the record before its own source
+/// record to that record, so a record that normalizes to several turns
+/// contributes one sample, at its assistant turn. A bounded read and a
+/// whole-recording read report the same distribution.
+#[test]
+fn stats_reports_the_assistant_turn_duration_distribution() {
+    let backends: Vec<Box<dyn Backend>> = vec![Box::new(PiBackend::new(fixtures("pi")))];
+    let id = "session-turn-durations";
+    let expected = serde_json::json!({
+        "count": 10,
+        "median": 5_000,
+        "p90": 9_000,
+        "max": 10_000,
+    });
+
+    let stats = stats_with_backends(&backends, Selection::Id(id)).unwrap();
+    let value = serde_json::to_value(&stats).unwrap();
+    assert_eq!(value["assistant_turns_ms"], expected, "{value}");
+
+    let whole = stats_full_with_backends(&backends, Selection::Id(id)).unwrap();
+    let value = serde_json::to_value(&whole).unwrap();
+    assert_eq!(value["assistant_turns_ms"], expected, "{value}");
+
+    // A record that normalizes to turns but carries no assistant turn
+    // contributes no duration: the fixture's first assistant record is a
+    // thinking block and a tool call, and only its second assistant record is
+    // measured, from the tool result before it.
+    let stats = stats_with_backends(&backends, Selection::Id("session-pi")).unwrap();
+    let value = serde_json::to_value(&stats).unwrap();
+    assert_eq!(
+        value["assistant_turns_ms"],
+        serde_json::json!({"count": 1, "median": 1_000, "p90": 1_000, "max": 1_000}),
+        "{value}"
+    );
+}
+
 #[test]
 fn codex_reads_model_and_effort_from_turn_context() {
     let backend = CodexBackend::new(fixtures("codex"));

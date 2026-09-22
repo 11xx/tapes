@@ -18,8 +18,8 @@ use tapes_core::model::{
     Tokens, Transcript, Truncation, Turn, TurnKind, TurnSelection,
 };
 use tapes_core::stats::{
-    Coverage, LineageStats, StatsView, TimeStats, ToolNameStats, ToolStats, TurnKindCounts,
-    UsageStats, Warning,
+    AssistantTurnDurations, Coverage, LineageStats, StatsView, TimeStats, ToolNameStats, ToolStats,
+    TurnKindCounts, UsageStats, Warning,
 };
 use tapes_core::stats_summary::SessionRead;
 use tapes_core::usage::{
@@ -955,7 +955,11 @@ enum Command {
     /// harness wrote, and every total says what it covers: turn coverage is
     /// `read-window` when a source bound withheld turns, durations come from
     /// complete pairs only, and a cache ratio is a share of recorded token
-    /// counts rather than of cost. Nothing is judged, ranked, or explained.
+    /// counts rather than of cost. An assistant turn's duration is the
+    /// interval from the previous turn's source record to its own, so a
+    /// record that normalizes to several turns is one duration; the
+    /// distribution over those intervals is `assistant_turns_ms` with its
+    /// count, median, p90, and max. Nothing is judged, ranked, or explained.
     /// A scope or listing filter selects multiple sessions and returns
     /// tapes-stats-summary/5: recorded tools grouped by harness and name,
     /// with per-session read coverage, pairing counts and failures, and per
@@ -976,7 +980,7 @@ enum Command {
         /// updated in place and a second read may not repeat the first.
         #[arg(long, conflicts_with = "read_bytes")]
         full: bool,
-        /// Render the versioned tapes-stats/8 object, or tapes-stats-summary/5
+        /// Render the versioned tapes-stats/9 object, or tapes-stats-summary/5
         /// for a selection, as JSON.
         #[arg(long)]
         json: bool,
@@ -2405,6 +2409,12 @@ fn render_stats(stats: &StatsView) -> String {
     if let Some(durations) = &stats.durations_ms {
         out.push_str(&format!("durations: {}\n", render_time(durations)));
     }
+    if let Some(turns) = &stats.assistant_turns_ms {
+        out.push_str(&format!(
+            "assistant turns: {}\n",
+            render_assistant_turns(turns)
+        ));
+    }
     if let Some(usage) = &stats.usage {
         render_usage_stats(&mut out, usage);
     }
@@ -2511,6 +2521,15 @@ fn render_time(durations: &TimeStats) -> String {
     )))
     .collect::<Vec<_>>()
     .join(", ")
+}
+
+/// One assistant record's wall clock against the record before it, counted
+/// into the distribution beside the read's tool clock.
+fn render_assistant_turns(durations: &AssistantTurnDurations) -> String {
+    format!(
+        "{} measured, median {}ms, p90 {}ms, max {}ms",
+        durations.count, durations.median, durations.p90, durations.max
+    )
 }
 
 fn render_usage_stats(out: &mut String, usage: &UsageStats) {

@@ -633,7 +633,7 @@ recorded.
 ## Stats view
 
 `tapes stats` counts what one session's recording holds and serializes as a
-`tapes-stats/8` object. Every figure is a count of records the harness wrote:
+`tapes-stats/9` object. Every figure is a count of records the harness wrote:
 nothing here labels a call useful, attributes a reason to a latency, classifies
 why a session ended, or recommends anything.
 
@@ -679,6 +679,16 @@ from the first timestamped turn to the last and needs two of them;
 turns; `in_tool` sums the complete pairs' durations. Each is absent when the
 read holds nothing to measure it from.
 
+`assistant_turns_ms` measures an assistant turn's wall clock: one sample per
+source record that carries an assistant turn, being the interval from the
+previous turn's source record to its own. A record whose normalized turns
+share one timestamp is one sample rather than several, and a turn with no
+previous source record, or one later than it, contributes none. `count` says how many intervals
+the figures cover, `median` and `p90` are the samples at rank `ceil(count / 2)`
+and `ceil(count * 9 / 10)` in ascending order — the lower middle sample when
+the count is even — and `max` is the largest. The object is absent when the
+read holds no measurable interval.
+
 `usage` repeats the session's own `tokens`, `cost`, and `accounting`, read
 exactly as the usage view states them, and adds `by_model`, the model and
 reasoning-level split the harness recorded, and `cache_read_ratio` and
@@ -711,7 +721,7 @@ order:
 
 ```json
 {
-  "schema": "tapes-stats/8",
+  "schema": "tapes-stats/9",
   "session": {
     "id": "session-1",
     "harness": "codex",
@@ -756,6 +766,12 @@ order:
     "in_tool": 5312,
     "between_turns_max": 40000,
     "count_with_timestamps": 7
+  },
+  "assistant_turns_ms": {
+    "count": 1,
+    "median": 1000,
+    "p90": 1000,
+    "max": 1000
   },
   "usage": {
     "tokens": { "input": 2500, "output": 400, "cache_read": 1000, "cache_write": 500 },
@@ -1411,7 +1427,7 @@ counters.
 `selection` records the listing query. `selected` counts its sessions, `read`
 counts successful transcript reads, and `failed` names each read failure with
 ID, harness, source and diagnostic. `sessions` holds each read session's identity,
-`coverage` and `tools` in the same shapes as `tapes-stats/8`. `by_harness` maps
+`coverage` and `tools` in the same shapes as `tapes-stats/9`. `by_harness` maps
 harness names to accumulated tool counters, including tool-name rows and
 complete-pair duration totals, maxima and contributing counts. Counters never
 cross-pair records from different sessions. `kinds_by_harness` maps each

@@ -266,11 +266,15 @@ PROBE BEFORE EXPORTING
   older rows. `--full --series` uses the pinned recording, while summaries,
   supplied inputs, and unsupported harnesses refuse the option.
 
-  stats counts what one recording holds as tapes-stats/8: turns by kind
+  stats counts what one recording holds as tapes-stats/9: turns by kind
   beside the kinds the harness can record at all, so a zero for a kind it
   cannot record is not read as none observed, tool
   calls by name with their paired durations and error counts, unpaired calls
-  by the boundary that left them unpaired, the recorded clock, the session's
+  by the boundary that left them unpaired, the recorded clock, the
+  distribution of assistant-turn wall clock — one sample per assistant
+  source record, from the previous turn's source record — as count, median,
+  p90, and max,
+  the session's
   token counters with the share of input plus cache read plus cache write its
   cache accounts for, the model and effort split the source recorded, and the
   children its store names. Every figure is a
