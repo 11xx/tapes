@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Result};
@@ -21,6 +21,7 @@ use crate::model::{
     SourceDescriptor, Tokens, TrailingRecord, Transcript, Turn, TurnKind, TurnSelection,
     UserDefault,
 };
+use crate::usage::{ModelUsage, UsageDetail};
 
 #[derive(Clone, Debug)]
 pub struct PiBackend {
@@ -97,7 +98,7 @@ impl PiBackend {
             .iter()
             .flat_map(|value| parse_turns(value))
             .collect::<Vec<_>>();
-        let (tokens, cost) = pi_usage(&active);
+        let (tokens, cost, by_model) = pi_usage(&active);
         let coverage = if read.truncated {
             AccountingCoverage::ReadWindow
         } else {
@@ -109,6 +110,11 @@ impl PiBackend {
             AccountingBasis::SummedRequests,
             coverage,
         );
+        let usage_detail = UsageDetail {
+            by_model,
+            ..UsageDetail::default()
+        }
+        .into_option();
 
         let session = Session {
             id,
@@ -128,7 +134,7 @@ impl PiBackend {
             accounting,
             start_uncertain: recording.start_uncertain(),
             occurrence: None,
-            usage_detail: None,
+            usage_detail,
         };
         // pi rewinds by appending a new branch, so the first user message in
         // the file may sit on a root the active path never reaches. The
@@ -455,12 +461,12 @@ impl Backend for PiBackend {
         }
         active.reverse();
 
-        let mut usage = PiUsage::new();
+        let mut usage = PiUsage::default();
         let mut model = None;
         let mut variant = None;
         for entry in active.iter().map(|position| &entries[*position]) {
             if let Some(request) = &entry.request {
-                usage.add(request);
+                usage.add(request, entry.model.as_deref(), variant.as_deref());
             }
             if entry.model.is_some() {
                 model.clone_from(&entry.model);
@@ -469,7 +475,7 @@ impl Backend for PiBackend {
                 variant.clone_from(&entry.thinking);
             }
         }
-        let (tokens, cost) = usage.finish();
+        let (tokens, cost, by_model) = usage.finish();
         let mut whole = session.clone();
         whole.accounting = accounting_for(
             tokens.as_ref(),
@@ -479,6 +485,11 @@ impl Backend for PiBackend {
         );
         whole.tokens = tokens;
         whole.cost = cost;
+        whole.usage_detail = UsageDetail {
+            by_model,
+            ..UsageDetail::default()
+        }
+        .into_option();
         whole.model = model.map(|id| Model { id, variant });
         activity.apply(&mut whole);
         Ok(whole)
@@ -612,10 +623,16 @@ fn pi_cwd(value: &Value) -> Option<&str> {
         .flatten()
 }
 
-fn pi_usage(entries: &[&Value]) -> (Option<Tokens>, Option<Cost>) {
-    let mut usage = PiUsage::new();
-    for request in entries.iter().filter_map(|entry| pi_request(entry)) {
-        usage.add(&request);
+fn pi_usage(entries: &[&Value]) -> (Option<Tokens>, Option<Cost>, Option<Vec<ModelUsage>>) {
+    let mut usage = PiUsage::default();
+    let mut variant = None;
+    for entry in entries {
+        if let Some(level) = pi_thinking(entry) {
+            variant = Some(level);
+        }
+        if let Some(request) = pi_request(entry) {
+            usage.add(&request, pi_model(entry), variant);
+        }
     }
     usage.finish()
 }
@@ -654,44 +671,99 @@ fn pi_request(entry: &Value) -> Option<PiRequest> {
     })
 }
 
-/// Requests summed in order. A request without a recorded cost leaves the
-/// sum's cost unknown rather than understated.
-struct PiUsage {
-    totals: TokenTotals,
+/// The counters one group of requests accumulated. `cost_missing` records
+/// that a request contributed no cost, so the group's sum is unknown rather
+/// than understated.
+#[derive(Default)]
+struct PiTotals {
+    tokens: TokenTotals,
     requests: usize,
-    cost: Option<f64>,
+    cost: f64,
+    cost_missing: bool,
 }
 
-impl PiUsage {
-    fn new() -> Self {
-        Self {
-            totals: TokenTotals::default(),
-            requests: 0,
-            cost: Some(0.0),
-        }
-    }
-
+impl PiTotals {
     fn add(&mut self, request: &PiRequest) {
         self.requests += 1;
-        self.totals.add(
+        self.tokens.add(
             request.input,
             request.output,
             request.reasoning,
             request.cache_read,
             request.cache_write,
         );
-        match (self.cost.as_mut(), request.cost) {
-            (Some(sum), Some(cost)) => *sum += cost,
-            _ => self.cost = None,
+        match request.cost {
+            Some(cost) => self.cost += cost,
+            None => self.cost_missing = true,
         }
     }
 
+    /// The counters, and the cost only when the group held at least one
+    /// request and every request in it recorded one.
     fn finish(self) -> (Option<Tokens>, Option<Cost>) {
-        let cost = (self.requests > 0)
-            .then_some(self.cost)
-            .flatten()
-            .map(|usd| Cost { usd });
-        (self.totals.finish(), cost)
+        let cost = (self.requests > 0 && !self.cost_missing).then_some(Cost { usd: self.cost });
+        (self.tokens.finish(), cost)
+    }
+}
+
+/// Requests summed in order, each attributed to the model its own message
+/// names and the reasoning level the latest `thinking_level_change` set. A
+/// request without a recorded cost leaves the sum's cost unknown rather than
+/// understated; a request without a recorded model leaves the split absent
+/// rather than partial.
+#[derive(Default)]
+struct PiUsage {
+    totals: PiTotals,
+    unattributed: usize,
+    by_model: BTreeMap<PiModelKey, PiTotals>,
+}
+
+/// The model and reasoning level one request is attributed to, ordered by
+/// model id and then level so one recording reads the same way twice.
+#[derive(PartialEq, Eq, PartialOrd, Ord)]
+struct PiModelKey {
+    model: String,
+    variant: Option<String>,
+}
+
+impl PiUsage {
+    fn add(&mut self, request: &PiRequest, model: Option<&str>, variant: Option<&str>) {
+        self.totals.add(request);
+        match model {
+            Some(model) => {
+                self.by_model
+                    .entry(PiModelKey {
+                        model: model.to_owned(),
+                        variant: variant.map(str::to_owned),
+                    })
+                    .or_default()
+                    .add(request);
+            }
+            None => self.unattributed += 1,
+        }
+    }
+
+    fn finish(self) -> (Option<Tokens>, Option<Cost>, Option<Vec<ModelUsage>>) {
+        let (tokens, cost) = self.totals.finish();
+        let by_model = (self.unattributed == 0)
+            .then(|| {
+                self.by_model
+                    .into_iter()
+                    .map(|(key, totals)| {
+                        let requests = totals.requests;
+                        let (tokens, cost) = totals.finish();
+                        ModelUsage {
+                            model: key.model,
+                            variant: key.variant,
+                            tokens,
+                            cost,
+                            request_count: Some(requests),
+                        }
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .filter(|models| !models.is_empty());
+        (tokens, cost, by_model)
     }
 }
 
@@ -906,7 +978,7 @@ fn pi_call_event(block: &Value) -> ToolEvent {
         name: block["name"].as_str().map(str::to_owned),
         call_id: block["id"].as_str().map(str::to_owned),
         status: None,
-        arguments: Bounded::from_value(&block["arguments"]),
+        arguments: Bounded::retaining_value(&block["arguments"]),
         output: None,
         completed_ts: None,
         invocations: crate::event::invocations_from_tool(

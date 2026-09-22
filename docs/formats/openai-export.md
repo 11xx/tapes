@@ -194,6 +194,6 @@ reading.
 
 The normal output contracts remain versioned (`tapes-list/6`,
 `tapes-session/11`, `tapes-events/7`, `tapes-brief/7`, `tapes-endings/6`,
-`tapes-stats/7`, `tapes-usage/6`, and `tapes-export-manifest/5`). History-page
+`tapes-stats/9`, `tapes-usage/6`, and `tapes-export-manifest/5`). History-page
 and child-qualified operations are installed-recording capabilities and
 refuse supplied exports rather than interpreting an export as JSONL history.

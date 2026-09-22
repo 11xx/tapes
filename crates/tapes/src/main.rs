@@ -18,8 +18,8 @@ use tapes_core::model::{
     Tokens, Transcript, Truncation, Turn, TurnKind, TurnSelection,
 };
 use tapes_core::stats::{
-    Coverage, LineageStats, StatsView, TimeStats, ToolNameStats, ToolStats, TurnKindCounts,
-    UsageStats, Warning,
+    AssistantTurnDurations, Coverage, LineageStats, StatsView, TimeStats, ToolNameStats, ToolStats,
+    TurnKindCounts, UsageStats, Warning,
 };
 use tapes_core::stats_summary::SessionRead;
 use tapes_core::usage::{
@@ -914,6 +914,13 @@ enum Command {
         /// Render the versioned tapes-events/7 object as JSON.
         #[arg(long)]
         json: bool,
+        /// Publish each tool call's complete recorded argument text in
+        /// `arguments.preview` instead of the 200-character prefix. Nothing
+        /// else changes: `arguments.chars` still states the whole length, the
+        /// object's members are the same, and so is its schema version. Apply
+        /// it to a bounded read or to --full.
+        #[arg(long)]
+        full_arguments: bool,
     },
     /// Which sessions a recording names as its relatives: the session it was
     /// spawned from or forked from, and the children its own store records,
@@ -942,12 +949,19 @@ enum Command {
     /// kinds its harness can record at all, tool calls
     /// by name with their paired durations and error counts, the recorded
     /// clock, the session's own token counters with the share of
-    /// `input + cache_read + cache_write` its cache accounts for, and the
+    /// `input + cache_read + cache_write` its cache accounts for, the model
+    /// and effort split its harness recorded, and the
     /// children its store names. Every figure is a count of records the
     /// harness wrote, and every total says what it covers: turn coverage is
     /// `read-window` when a source bound withheld turns, durations come from
     /// complete pairs only, and a cache ratio is a share of recorded token
-    /// counts rather than of cost. Nothing is judged, ranked, or explained.
+    /// counts rather than of cost. A model response is one source record —
+    /// the model's text, its reasoning, or a tool call it made — and its
+    /// duration is the interval from the previous turn's source record to its
+    /// own, so a record that normalizes to several turns is one duration and
+    /// a tool-result record is none; the distribution over those intervals is
+    /// `assistant_turns_ms` with its count, median, p90, and max. Nothing is
+    /// judged, ranked, or explained.
     /// A scope or listing filter selects multiple sessions and returns
     /// tapes-stats-summary/5: recorded tools grouped by harness and name,
     /// with per-session read coverage, pairing counts and failures, and per
@@ -968,7 +982,7 @@ enum Command {
         /// updated in place and a second read may not repeat the first.
         #[arg(long, conflicts_with = "read_bytes")]
         full: bool,
-        /// Render the versioned tapes-stats/7 object, or tapes-stats-summary/5
+        /// Render the versioned tapes-stats/9 object, or tapes-stats-summary/5
         /// for a selection, as JSON.
         #[arg(long)]
         json: bool,
@@ -1568,10 +1582,12 @@ fn dispatch(cli: Cli) -> Result<()> {
             program,
             full,
             json,
+            full_arguments,
         } => {
             selection.validate_input()?;
             read.refuse_supplied(&selection.input)?;
             let by_latest = selection.latest;
+            let options = tapes_core::event::EventOptions { full_arguments };
             let event_backends = if full {
                 tapes_core::backend::backends()
             } else {
@@ -1586,20 +1602,22 @@ fn dispatch(cli: Cli) -> Result<()> {
             };
             if full {
                 refuse_full_supplied(&selection.input)?;
-                return events_full(&selection, tail, &filter, json, by_latest);
+                return events_full(&selection, tail, &filter, json, by_latest, options);
             }
             let mut events = if selection.input.supplied() {
                 let backends = selection.input.backends()?;
-                tapes_core::events_with_backends(
+                tapes_core::events_with_options_with_backends(
                     &backends,
                     selection.selection(),
                     tail.unwrap_or(usize::MAX),
+                    options,
                 )?
             } else {
-                let mut events = tapes_core::events_with_backends(
+                let mut events = tapes_core::events_with_options_with_backends(
                     &event_backends,
                     selection.selection(),
                     tail.unwrap_or(usize::MAX),
+                    options,
                 )?;
                 liveness::annotate(std::slice::from_mut(&mut events.session));
                 events
@@ -2393,6 +2411,12 @@ fn render_stats(stats: &StatsView) -> String {
     if let Some(durations) = &stats.durations_ms {
         out.push_str(&format!("durations: {}\n", render_time(durations)));
     }
+    if let Some(turns) = &stats.assistant_turns_ms {
+        out.push_str(&format!(
+            "assistant turns: {}\n",
+            render_assistant_turns(turns)
+        ));
+    }
     if let Some(usage) = &stats.usage {
         render_usage_stats(&mut out, usage);
     }
@@ -2501,6 +2525,15 @@ fn render_time(durations: &TimeStats) -> String {
     .join(", ")
 }
 
+/// One assistant record's wall clock against the record before it, counted
+/// into the distribution beside the read's tool clock.
+fn render_assistant_turns(durations: &AssistantTurnDurations) -> String {
+    format!(
+        "{} measured, median {}ms, p90 {}ms, max {}ms",
+        durations.count, durations.median, durations.p90, durations.max
+    )
+}
+
 fn render_usage_stats(out: &mut String, usage: &UsageStats) {
     if let Some(tokens) = &usage.tokens {
         out.push_str(&format!("tokens: {}\n", render_tokens(tokens)));
@@ -2510,6 +2543,9 @@ fn render_usage_stats(out: &mut String, usage: &UsageStats) {
     }
     if let Some(accounting) = &usage.accounting {
         out.push_str(&format!("accounting: {}\n", render_accounting(accounting)));
+    }
+    for model in usage.by_model.iter().flatten() {
+        out.push_str(&render_model_usage(model));
     }
     let cache = [
         ("read", usage.cache_read_ratio),
@@ -3252,6 +3288,7 @@ fn events_full(
     filter: &tapes_core::event::EventFilter<'_>,
     json: bool,
     by_latest: bool,
+    options: tapes_core::event::EventOptions,
 ) -> Result<()> {
     let stdout = std::io::stdout();
     let mut sink = FullEvents {
@@ -3260,11 +3297,12 @@ fn events_full(
         json,
         writer: None,
     };
-    let streamed = tapes_core::events_full_with_backends(
+    let streamed = tapes_core::events_full_with_options_with_backends(
         &tapes_core::backend::backends(),
         selection.selection(),
         tail.unwrap_or(usize::MAX),
         filter,
+        options,
         &mut sink,
     )?;
     sink.finish(streamed)

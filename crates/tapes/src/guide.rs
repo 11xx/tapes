@@ -219,7 +219,10 @@ PROBE BEFORE EXPORTING
   exact within the bounded read; an incomplete call or result says whether its
   counterpart was not reached or not recorded. Event ordinals are the same
   turn coordinates show prints. With no --tail, every event the bounded reader
-  reaches is returned; --name and --call-id filter only after pairing. `--program`
+  reaches is returned; --name and --call-id filter only after pairing.
+  --full-arguments returns each tool call's complete recorded argument text in
+  place of the 200-character prefix, under the same members and schema
+  version. `--program`
   filters exact nested literal or structured-runtime declarations while
   `--name` continues to mean the recorded outer tool. JavaScript declarations
   require a complete direct literal `cmd`/`command` property; supported string
@@ -241,8 +244,10 @@ PROBE BEFORE EXPORTING
   writing each event as it pairs, with the same filters and counts.
 
   usage answers where a session's quota went as tapes-usage/6: its recorded
-  tokens, cost, accounting, turns, and any model-observation attribution the
-  source can support. Read accounting before adding anything up — basis says
+  tokens, cost, accounting, turns, and any by-model attribution the source can
+  support — Claude's recorded cost-state, Codex's request observations, or
+  pi's per-message model each qualified by the thinking level in effect. Read
+  accounting before adding anything up — basis says
   whether a figure is a recorded total or an observed request sum, and
   coverage says how much of the session it covers. An observed cumulative
   counter restart is `since-reset`; the newest recorded total remains visible
@@ -261,13 +266,18 @@ PROBE BEFORE EXPORTING
   older rows. `--full --series` uses the pinned recording, while summaries,
   supplied inputs, and unsupported harnesses refuse the option.
 
-  stats counts what one recording holds as tapes-stats/7: turns by kind
+  stats counts what one recording holds as tapes-stats/9: turns by kind
   beside the kinds the harness can record at all, so a zero for a kind it
   cannot record is not read as none observed, tool
   calls by name with their paired durations and error counts, unpaired calls
-  by the boundary that left them unpaired, the recorded clock, the session's
+  by the boundary that left them unpaired, the recorded clock, the
+  distribution of assistant-turn wall clock — one sample per source record
+  carrying a model response, from the previous turn's source record — as
+  count, median, p90, and max,
+  the session's
   token counters with the share of input plus cache read plus cache write its
-  cache accounts for, and the children its store names. Every figure is a
+  cache accounts for, the model and effort split the source recorded, and the
+  children its store names. Every figure is a
   count of records the harness wrote, and every total says what it covers:
   turn coverage is read-window when a source bound withheld turns, a duration
   comes from a pair the read holds both halves of, and a cache ratio divides

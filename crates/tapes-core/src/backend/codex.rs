@@ -2058,8 +2058,8 @@ fn is_codex_runtime_tool(item: &Value) -> bool {
 fn codex_tool_event(payload: &Value, subtype: &str) -> ToolEvent {
     let call = matches!(subtype, "function_call" | "custom_tool_call");
     let arguments = match subtype {
-        "function_call" => Bounded::from_value(&payload["arguments"]),
-        "custom_tool_call" => Bounded::from_value(&payload["input"]),
+        "function_call" => Bounded::retaining_value(&payload["arguments"]),
+        "custom_tool_call" => Bounded::retaining_value(&payload["input"]),
         _ => None,
     };
     let argument_value = match subtype {
@@ -2124,7 +2124,7 @@ fn codex_runtime_tool_event(item: &Value, completed: bool, completed_only: bool)
         call_id: item["id"].as_str().map(str::to_owned),
         status: item["status"].as_str().map(str::to_owned),
         arguments: (completed_only || !completed)
-            .then(|| arguments.and_then(|value| Bounded::from_value(&value)))
+            .then(|| arguments.and_then(|value| Bounded::retaining_value(&value)))
             .flatten(),
         output: completed
             .then(|| {

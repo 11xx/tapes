@@ -1385,17 +1385,24 @@ impl Backend for OpenCodeBackend {
         self.lineage(session)
     }
 
-    fn events(&self, session: &Session, tail: usize) -> Result<EventTranscript> {
+    fn events_with_options(
+        &self,
+        session: &Session,
+        tail: usize,
+        options: event::EventOptions,
+    ) -> Result<EventTranscript> {
         if self.uses_database() {
-            return Ok(event::project(
+            return Ok(event::project_with(
                 self.database_transcript(session.clone(), usize::MAX)?,
                 tail,
+                options,
             ));
         }
         let pages = paged_messages(&|path| self.request(path), &session.id, tail)?;
-        Ok(event::project(
+        Ok(event::project_with(
             paged_event_source(session.clone(), &pages, tail),
             tail,
+            options,
         ))
     }
 }
@@ -2267,7 +2274,7 @@ fn opencode_tool_event(part: &Value) -> ToolEvent {
             .or_else(|| part["id"].as_str())
             .map(str::to_owned),
         status,
-        arguments: Bounded::from_value(&state["input"]),
+        arguments: Bounded::retaining_value(&state["input"]),
         output,
         completed_ts: epoch_millis(&part["time"]["completed"]),
         invocations: crate::event::invocations_from_tool(

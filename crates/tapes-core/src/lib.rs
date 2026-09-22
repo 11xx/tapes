@@ -1341,8 +1341,21 @@ pub fn events_with_backends(
     selection: Selection,
     tail: usize,
 ) -> Result<event::EventTranscript> {
+    events_with_options_with_backends(backends, selection, tail, event::EventOptions::default())
+}
+
+/// Project one session's events with the caller's options: `full_arguments`
+/// publishes each tool call's complete recorded arguments rather than the
+/// bounded prefix.
+pub fn events_with_options_with_backends(
+    backends: &[Box<dyn Backend>],
+    selection: Selection,
+    tail: usize,
+    options: event::EventOptions,
+) -> Result<event::EventTranscript> {
     let resolved = selection.resolve(backends)?;
-    let mut events = backends[resolved.backend_index].events(&resolved.session, tail)?;
+    let mut events =
+        backends[resolved.backend_index].events_with_options(&resolved.session, tail, options)?;
     events
         .notes
         .extend(resolved.diagnostics.latest_warnings(&resolved.session));
@@ -1380,6 +1393,27 @@ pub fn events_full_with_backends(
     selection: Selection,
     tail: usize,
     filter: &event::EventFilter<'_>,
+    sink: &mut dyn EventSink,
+) -> Result<StreamedEvents> {
+    events_full_with_options_with_backends(
+        backends,
+        selection,
+        tail,
+        filter,
+        event::EventOptions::default(),
+        sink,
+    )
+}
+
+/// Stream a whole-recording event projection as `events_full_with_backends`
+/// does, honoring the caller's options: `full_arguments` publishes each kept
+/// tool call's complete recorded arguments rather than the bounded prefix.
+pub fn events_full_with_options_with_backends(
+    backends: &[Box<dyn Backend>],
+    selection: Selection,
+    tail: usize,
+    filter: &event::EventFilter<'_>,
+    options: event::EventOptions,
     sink: &mut dyn EventSink,
 ) -> Result<StreamedEvents> {
     let resolved = selection.resolve(backends)?;
@@ -1432,6 +1466,12 @@ pub fn events_full_with_backends(
                 && filter.keeps(&record, |call_id| selected.contains(call_id));
             pairs.add(&record, kept);
             if kept {
+                let mut record = record;
+                if options.full_arguments {
+                    if let Some(arguments) = record.event.arguments.as_mut() {
+                        arguments.widen();
+                    }
+                }
                 sink.record(record)?;
             }
         }

@@ -370,7 +370,9 @@ scope.
 `events` projects tool calls and results into the harness-neutral
 `tapes-events/7` schema. Each record keeps the turn ordinal and native id,
 bounded argument or output metadata, and an exact call/result pair when both
-halves occur in the bounded read. A Codex completed runtime item that carries
+halves occur in the bounded read. `--full-arguments` returns each call's
+complete recorded argument text in place of the 200-character prefix, under
+the same members and the same schema version. A Codex completed runtime item that carries
 both halves in one native record is projected as that pair with one shared
 source reference. Unpaired calls report `no-result-in-read`;
 an unpaired result reports `call-before-read-bound` when a file-tail or
@@ -398,7 +400,9 @@ compaction are not projected as tools; only verified `CommandExecution` and
 `usage` answers where one session's quota went as `tapes-usage/6`: the
 session's recorded `tokens`, cost, accounting, turn counts, Codex model
 observation status, and (where the source supports it) a by-model request
-observation split. The accounting `basis` and `coverage` decide whether
+split — Claude's `cost-state` `modelUsage`, Codex's request observations, or
+pi's per-message model each qualified by the thinking level in effect. The
+accounting `basis` and `coverage` decide whether
 figures may be summed — a recorded total and a sum of per-request records are
 both safe to add, while coverage says how much of each session a figure covers.
 An observed counter restart is `since-reset` for the newest recorded total;
@@ -440,7 +444,8 @@ it, pinned to the length and file revision the first observed, pairing each
 record and writing or counting it as it is emitted, so memory follows the
 calls awaiting a result rather than the file. `events --full` writes the same
 `tapes-events/7` object event by event; `--tail`, `--name`, `--call-id`, and
-`--program` select as they do over a bounded read, and `pairs` counts the
+`--program` select as they do over a bounded read, `--full-arguments` widens a
+kept call's arguments the same way it does there, and `pairs` counts the
 returned events. `stats --full` folds turns, tool calls, durations, and errors
 record by record, takes the counters from every record and the children from
 the read `lineage --full` takes, so `coverage.turns` is `session`; given a
@@ -480,13 +485,19 @@ session whose read fails is named in `unread` with its diagnostic and does not
 stop the run. Human output is one line per session, the text tail indented
 beneath it when asked for, and the listing's own diagnostics.
 
-`stats` counts what one recording holds as `tapes-stats/7`: `turns` by the
+`stats` counts what one recording holds as `tapes-stats/9`: `turns` by the
 `kind` the harness recorded them as, beside the kinds that harness can record
 at all, `tools` — calls, results, complete pairs,
 unpaired events by the boundary that left them unpaired, errors, and a
 `by_name` row per tool with its paired durations — the recorded clock in
-`durations_ms`, the session's own counters with the share of
-`input + cache_read + cache_write` each cache counter accounts for, and the
+`durations_ms`, the distribution of assistant-turn wall clock in
+`assistant_turns_ms` (one sample per source record carrying a model response —
+its text, its reasoning, or a tool call — measured from the previous turn's
+source record: count, median, p90, max), the session's
+own counters
+with the share of
+`input + cache_read + cache_write` each cache counter accounts for, the model
+and reasoning-level split its harness recorded, and the
 children its store names. It reads the same typed events
 `events` returns and the same reference read `lineage` answers with, so no
 transcript is parsed twice and no child is opened. Every total says what it
@@ -639,7 +650,7 @@ few endings that matter instead of every tail.
 
 **Contracts you can build on.** `tapes-list/6`, `tapes-session/11`,
 `tapes-events/7`, `tapes-usage/6`, `tapes-usage-summary/4`, `tapes-lineage/2`,
-`tapes-endings/6`, `tapes-child/4`, `tapes-stats/7`, `tapes-stats-summary/5`, `tapes-brief/7`,
+`tapes-endings/6`, `tapes-child/4`, `tapes-stats/9`, `tapes-stats-summary/5`, `tapes-brief/7`,
 `tapes-page/6`, `tapes-history-search/6`, `tapes-metadata-history/6`,
 and `tapes-export-manifest/5` are versioned
 JSON; a breaking shape change bumps the version. A single-session `export`

@@ -257,6 +257,11 @@ keep only facts the record supplies. Call arguments and result output use a
 `Bounded` value with the payload's Unicode character count and its first 200
 characters. A string is measured as written, while an object or array is first
 serialized as compact JSON. The preview always ends on a character boundary.
+`events --full-arguments` asks for a tool call's complete recorded argument
+text and receives it in the same two members: `chars` states the whole
+length and `preview` is that whole prefix, so the object's members and the
+schema version are unchanged. Only a tool call's arguments retain their
+complete text for this; result output keeps the bounded prefix.
 
 `invocations` are bounded declarations nested inside the outer recorded tool
 event. Structured runtime argv is marked `structured-runtime`; literal shell
@@ -413,11 +418,20 @@ The remaining objects are present exactly when the harness recorded them:
 | `context_window` | Codex `info.model_context_window` |
 | `rate_limits` | Codex `rate_limits`: optional `primary` and `secondary` windows with native `used_percent`, `window_minutes`, and an RFC 3339 `resets_at`, the account `plan`, native `credits`, reached-limit flags, and the observation timestamp |
 | `durations_ms` | Claude `cost-state` wall clock: `api`, `api_without_retries`, `tool`, `total` |
-| `by_model` | Claude `cost-state` `modelUsage`, or Codex request observations grouped by model and variant; Codex entries add `request_count` |
+| `by_model` | Claude `cost-state` `modelUsage`, Codex request observations grouped by model and variant, or pi request models each qualified by the thinking level in effect; Codex entries add `request_count`, and pi entries count the requests they sum |
 | `attribution` | Codex observation basis (`usage-record` or `token-event-advance`), coverage of the observations this read reached, observed reset count, counted and unattributed observations, actual unknown counters, and bounded incomplete/budget reasons |
 
-pi and OpenCode record none of them, and each stays absent rather than empty
-or null.
+Each row is one model, or one model at one reasoning level. pi reads the row
+from the model each assistant message names and the level the latest
+`thinking_level_change` set, so the split is the recording's own attribution
+rather than an inference from the session's last selection. A pi request whose
+message names no model leaves the split absent rather than partial, as an
+unrecorded cost leaves `cost` absent.
+
+OpenCode records none of them, and each stays absent rather than empty or
+null.
+
+Claude's recorded `cost-state` keeps its durations and model split unchanged.
 
 For Codex, `attribution.coverage` describes the observation read itself:
 `session` for a complete read and `read-window` for a bounded or gapped read.
@@ -619,7 +633,7 @@ recorded.
 ## Stats view
 
 `tapes stats` counts what one session's recording holds and serializes as a
-`tapes-stats/7` object. Every figure is a count of records the harness wrote:
+`tapes-stats/9` object. Every figure is a count of records the harness wrote:
 nothing here labels a call useful, attributes a reason to a latency, classifies
 why a session ended, or recommends anything.
 
@@ -665,8 +679,22 @@ from the first timestamped turn to the last and needs two of them;
 turns; `in_tool` sums the complete pairs' durations. Each is absent when the
 read holds nothing to measure it from.
 
+`assistant_turns_ms` measures a model response's wall clock: one sample per
+source record that carries one — the model's text, its reasoning, or a tool
+call it made — being the interval from the previous turn's source record to
+its own. A tool call and a tool result both normalize to a tool turn, so the
+event kind decides: a record carrying only tool results is no sample, and one
+carrying a call together with its result is. A record whose normalized turns
+share one timestamp is one sample rather than several, and a turn with no
+previous source record, or one later than it, contributes none. `count` says how many intervals
+the figures cover, `median` and `p90` are the samples at rank `ceil(count / 2)`
+and `ceil(count * 9 / 10)` in ascending order — the lower middle sample when
+the count is even — and `max` is the largest. The object is absent when the
+read holds no measurable interval.
+
 `usage` repeats the session's own `tokens`, `cost`, and `accounting`, read
-exactly as the usage view states them, and adds `cache_read_ratio` and
+exactly as the usage view states them, and adds `by_model`, the model and
+reasoning-level split the harness recorded, and `cache_read_ratio` and
 `cache_write_ratio`: the share of `input + cache_read + cache_write` that each
 cache counter accounts for. A ratio is a ratio of recorded token counts and
 never a share of cost, and it is present only when every counter in its
@@ -696,7 +724,7 @@ order:
 
 ```json
 {
-  "schema": "tapes-stats/7",
+  "schema": "tapes-stats/9",
   "session": {
     "id": "session-1",
     "harness": "codex",
@@ -741,6 +769,12 @@ order:
     "in_tool": 5312,
     "between_turns_max": 40000,
     "count_with_timestamps": 7
+  },
+  "assistant_turns_ms": {
+    "count": 4,
+    "median": 12000,
+    "p90": 40000,
+    "max": 40000
   },
   "usage": {
     "tokens": { "input": 2500, "output": 400, "cache_read": 1000, "cache_write": 500 },
@@ -1396,7 +1430,7 @@ counters.
 `selection` records the listing query. `selected` counts its sessions, `read`
 counts successful transcript reads, and `failed` names each read failure with
 ID, harness, source and diagnostic. `sessions` holds each read session's identity,
-`coverage` and `tools` in the same shapes as `tapes-stats/7`. `by_harness` maps
+`coverage` and `tools` in the same shapes as `tapes-stats/9`. `by_harness` maps
 harness names to accumulated tool counters, including tool-name rows and
 complete-pair duration totals, maxima and contributing counts. Counters never
 cross-pair records from different sessions. `kinds_by_harness` maps each

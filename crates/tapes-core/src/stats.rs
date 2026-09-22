@@ -16,12 +16,12 @@ use crate::content::ContentInventory;
 use crate::event::{self, EventKind, EventRecord, Incomplete, PairIndex, PairRef};
 use crate::lineage::Lineage;
 use crate::model::{
-    Accounting, Cost, KindDeclaration, ReadEvidence, Session, TerminalObservation,
+    Accounting, Cost, KindDeclaration, ReadEvidence, RecordRef, Role, Session, TerminalObservation,
     TextTailEvidence, Tokens, Transcript, Truncation, Turn, TurnKind,
 };
-use crate::usage::{self, TurnCoverage, UsageSession, UsageView};
+use crate::usage::{self, ModelUsage, TurnCoverage, UsageSession, UsageView};
 
-pub const STATS_SCHEMA: &str = "tapes-stats/7";
+pub const STATS_SCHEMA: &str = "tapes-stats/9";
 
 /// One session's counted facts, in the order a reader takes them: what the
 /// figures cover, the turns, the tool calls behind them, the recorded clock,
@@ -48,6 +48,10 @@ pub struct StatsView {
     pub tools: ToolStats,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub durations_ms: Option<TimeStats>,
+    /// The wall clock of the model responses the read reached, absent when it
+    /// holds no interval to measure one from.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub assistant_turns_ms: Option<AssistantTurnDurations>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub usage: Option<UsageStats>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -203,6 +207,23 @@ pub struct TimeStats {
     pub count_with_timestamps: usize,
 }
 
+/// The wall clock of assistant turns, in milliseconds. A sample is one source
+/// record that carries a model response — its text, its reasoning, or a tool
+/// call it made — measured from the previous turn's source record. A record
+/// whose normalized turns share one timestamp contributes once, and a
+/// tool-result record contributes no sample of its own.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct AssistantTurnDurations {
+    /// How many intervals the figures cover.
+    pub count: usize,
+    /// The sample at rank `ceil(count / 2)` in ascending order, which is the
+    /// lower of the two middle samples when the count is even.
+    pub median: i64,
+    /// The sample at rank `ceil(count * 9 / 10)` in ascending order.
+    pub p90: i64,
+    pub max: i64,
+}
+
 /// The session's own counters, repeated, with the share of
 /// `input + cache_read + cache_write` each cache counter accounts for. A
 /// ratio is a ratio of recorded token counts and never a share of cost, and
@@ -218,6 +239,10 @@ pub struct UsageStats {
     pub cost: Option<Cost>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub accounting: Option<Accounting>,
+    /// The session's counters split by the model, and the reasoning effort
+    /// qualifying it, that spent them, as the usage view states the split.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub by_model: Option<Vec<ModelUsage>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cache_read_ratio: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -360,6 +385,7 @@ impl Counted {
             kinds,
         } = self;
         let durations_ms = turns.clock.finish(tools.in_tool);
+        let assistant_turns_ms = turns.assistant.finish();
         let warnings = warnings(
             &coverage,
             &turns.kinds,
@@ -379,7 +405,8 @@ impl Counted {
             kinds,
             tools: tools.stats,
             durations_ms,
-            usage: usage_stats(usage.tokens, usage.cost, usage.accounting),
+            assistant_turns_ms,
+            usage: usage_stats(usage.tokens, usage.cost, usage.accounting, usage.by_model),
             lineage: lineage_stats(lineage),
             warnings,
             notes: usage.notes,
@@ -392,6 +419,7 @@ impl Counted {
 struct TurnFold {
     kinds: TurnKindCounts,
     clock: Clock,
+    assistant: AssistantClock,
 }
 
 impl TurnFold {
@@ -411,7 +439,117 @@ impl TurnFold {
         counts.total += 1;
         if let Some(ts) = turn.ts {
             self.clock.add(ts);
+            self.assistant.add(turn, ts);
         }
+    }
+}
+
+/// What makes two normalized turns the same source record: the reader's own
+/// record reference, else the harness's record id, else the turn on its own.
+#[derive(PartialEq, Eq)]
+enum RecordKey {
+    Reference(RecordRef),
+    Native(String),
+    Turn(usize),
+}
+
+impl RecordKey {
+    fn of(turn: &Turn) -> Self {
+        if let Some(reference) = &turn.record_ref {
+            // The record, not the turn or part inside it: the positions are
+            // what differ between the turns one record normalizes to.
+            let mut record = reference.clone();
+            record.part_index = 0;
+            record.content_part_index = None;
+            return Self::Reference(record);
+        }
+        if let Some(native_id) = &turn.native_id {
+            return Self::Native(native_id.clone());
+        }
+        Self::Turn(turn.ordinal)
+    }
+}
+
+/// Whether a turn evidences a model response: the model's own text, its
+/// reasoning, or a tool call it made. Role alone cannot say so, because a tool
+/// call and a tool result both normalize to a tool turn, and a harness that
+/// projects no event for one leaves its provenance unstated; the event kind
+/// separates them.
+fn is_model_response(turn: &Turn) -> bool {
+    match turn.role {
+        Role::Assistant | Role::Reasoning => true,
+        // One record carrying its own invocation and result is the model's
+        // call as much as a separate call record is.
+        Role::Tool => turn
+            .tool
+            .as_ref()
+            .is_some_and(|tool| tool.kind == EventKind::ToolCall || tool.self_contained),
+        Role::User | Role::System | Role::Developer => false,
+    }
+}
+
+/// The assistant-turn wall clock, folded one turn at a time. A source record
+/// contributes at most one sample, at its first model-response turn, because a
+/// record that normalizes to several turns is one record's wall clock rather
+/// than several.
+#[derive(Default)]
+struct AssistantClock {
+    current: Option<RecordKey>,
+    /// The first timestamp the current record carried.
+    current_ts: Option<DateTime<Utc>>,
+    /// The first timestamp the record before the current one carried.
+    previous_ts: Option<DateTime<Utc>>,
+    /// Whether the current record already contributed its sample.
+    sampled: bool,
+    samples: Vec<i64>,
+}
+
+impl AssistantClock {
+    fn add(&mut self, turn: &Turn, ts: DateTime<Utc>) {
+        let key = RecordKey::of(turn);
+        if self.current.as_ref() != Some(&key) {
+            self.previous_ts = self.current_ts;
+            self.current_ts = None;
+            self.current = Some(key);
+            self.sampled = false;
+        }
+        self.current_ts.get_or_insert(ts);
+        if self.sampled || !is_model_response(turn) {
+            return;
+        }
+        self.sampled = true;
+        let Some(before) = self.previous_ts else {
+            return;
+        };
+        // The record's own stamp, not the turn's, so a record whose parts
+        // disagree about the time is still measured once.
+        let duration = self
+            .current_ts
+            .unwrap_or(ts)
+            .signed_duration_since(before)
+            .num_milliseconds();
+        if duration >= 0 {
+            self.samples.push(duration);
+        }
+    }
+
+    /// The distribution, or nothing when no model response had a measurable
+    /// preceding record.
+    fn finish(mut self) -> Option<AssistantTurnDurations> {
+        if self.samples.is_empty() {
+            return None;
+        }
+        self.samples.sort_unstable();
+        let at = |percent: usize| {
+            let rank = (self.samples.len() * percent).div_ceil(100);
+            self.samples[rank - 1]
+        };
+        Some(AssistantTurnDurations {
+            count: self.samples.len(),
+            median: at(50),
+            p90: at(90),
+            max: *self.samples.last().expect("a non-empty distribution"),
+        })
     }
 }
 
@@ -596,6 +734,7 @@ fn usage_stats(
     tokens: Option<Tokens>,
     cost: Option<Cost>,
     accounting: Option<Accounting>,
+    by_model: Option<Vec<ModelUsage>>,
 ) -> Option<UsageStats> {
     if tokens.is_none() && cost.is_none() && accounting.is_none() {
         return None;
@@ -615,6 +754,7 @@ fn usage_stats(
         tokens,
         cost,
         accounting,
+        by_model,
     })
 }
 
