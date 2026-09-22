@@ -19,9 +19,9 @@ use crate::model::{
     Accounting, Cost, KindDeclaration, ReadEvidence, Session, TerminalObservation,
     TextTailEvidence, Tokens, Transcript, Truncation, Turn, TurnKind,
 };
-use crate::usage::{self, TurnCoverage, UsageSession, UsageView};
+use crate::usage::{self, ModelUsage, TurnCoverage, UsageSession, UsageView};
 
-pub const STATS_SCHEMA: &str = "tapes-stats/7";
+pub const STATS_SCHEMA: &str = "tapes-stats/8";
 
 /// One session's counted facts, in the order a reader takes them: what the
 /// figures cover, the turns, the tool calls behind them, the recorded clock,
@@ -218,6 +218,10 @@ pub struct UsageStats {
     pub cost: Option<Cost>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub accounting: Option<Accounting>,
+    /// The session's counters split by the model, and the reasoning effort
+    /// qualifying it, that spent them, as the usage view states the split.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub by_model: Option<Vec<ModelUsage>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cache_read_ratio: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -379,7 +383,7 @@ impl Counted {
             kinds,
             tools: tools.stats,
             durations_ms,
-            usage: usage_stats(usage.tokens, usage.cost, usage.accounting),
+            usage: usage_stats(usage.tokens, usage.cost, usage.accounting, usage.by_model),
             lineage: lineage_stats(lineage),
             warnings,
             notes: usage.notes,
@@ -596,6 +600,7 @@ fn usage_stats(
     tokens: Option<Tokens>,
     cost: Option<Cost>,
     accounting: Option<Accounting>,
+    by_model: Option<Vec<ModelUsage>>,
 ) -> Option<UsageStats> {
     if tokens.is_none() && cost.is_none() && accounting.is_none() {
         return None;
@@ -615,6 +620,7 @@ fn usage_stats(
         tokens,
         cost,
         accounting,
+        by_model,
     })
 }
 

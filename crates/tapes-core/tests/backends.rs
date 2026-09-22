@@ -26,8 +26,9 @@ use tapes_core::{
     export_selection_with_backends, export_with_backends, latest_with_backends, list_with_backends,
     list_with_backends_filtered, list_with_backends_filtered_and_search,
     list_with_backends_options, resolve_session, scope::Scope, show_with_backends,
-    stats_full_with_backends, usage_with_options_with_backends, ExportRead, ListFilters, ListSort,
-    ResolveError, Selection, SessionSelection, Where, EXPORT_MANIFEST_SCHEMA, LIST_SEARCH_TAIL,
+    stats_full_with_backends, stats_with_backends, usage_full_with_backends,
+    usage_with_options_with_backends, ExportRead, ListFilters, ListSort, ResolveError, Selection,
+    SessionSelection, Where, EXPORT_MANIFEST_SCHEMA, LIST_SEARCH_TAIL,
 };
 
 fn fixtures(harness: &str) -> PathBuf {
@@ -1399,6 +1400,88 @@ fn pi_reports_entries_outside_the_active_leaf_path() {
         })
     );
     assert_eq!(transcript.session.tokens, session.tokens);
+}
+
+/// Every pi assistant message names the model and provider that produced it,
+/// so the per-model split is read rather than inferred, and the reasoning
+/// level in effect is the latest one the recording changed to. A bounded read
+/// and a whole-recording read report the same split.
+#[test]
+fn pi_usage_reports_the_model_and_effort_split() {
+    let backends: Vec<Box<dyn Backend>> = vec![Box::new(PiBackend::new(fixtures("pi")))];
+    let id = "session-model-split";
+    let expected = Some(vec![
+        ModelUsage {
+            model: "pi-model-a".to_owned(),
+            variant: Some("low".to_owned()),
+            tokens: Some(Tokens {
+                input: Some(10),
+                output: Some(20),
+                reasoning: Some(3),
+                cache_read: Some(4),
+                cache_write: Some(5),
+            }),
+            cost: Some(Cost { usd: 0.5 }),
+            request_count: Some(1),
+        },
+        ModelUsage {
+            model: "pi-model-b".to_owned(),
+            variant: Some("high".to_owned()),
+            tokens: Some(Tokens {
+                input: Some(100),
+                output: Some(200),
+                reasoning: Some(30),
+                cache_read: Some(40),
+                cache_write: Some(50),
+            }),
+            cost: Some(Cost { usd: 0.25 }),
+            request_count: Some(1),
+        },
+        ModelUsage {
+            model: "pi-model-b".to_owned(),
+            variant: Some("medium".to_owned()),
+            tokens: Some(Tokens {
+                input: Some(1),
+                output: Some(2),
+                reasoning: Some(3),
+                cache_read: Some(4),
+                cache_write: Some(5),
+            }),
+            cost: Some(Cost { usd: 0.25 }),
+            request_count: Some(1),
+        },
+    ]);
+
+    let session = located(backends[0].as_ref(), id);
+    assert_eq!(session.model.as_ref().unwrap().id, "pi-model-b");
+    assert_eq!(
+        session.model.as_ref().unwrap().variant.as_deref(),
+        Some("medium")
+    );
+    let view = usage(&backends[0].transcript(&session, usize::MAX).unwrap());
+    assert_eq!(view.by_model, expected);
+
+    let whole = usage_full_with_backends(&backends, Selection::Id(id)).unwrap();
+    assert_eq!(whole.by_model, expected);
+    assert_eq!(whole.session.model.as_ref().unwrap().id, "pi-model-b");
+    assert_eq!(
+        whole.session.model.as_ref().unwrap().variant.as_deref(),
+        Some("medium")
+    );
+
+    let stats = stats_with_backends(&backends, Selection::Id(id)).unwrap();
+    let value = serde_json::to_value(&stats).unwrap();
+    assert_eq!(
+        value["usage"]["by_model"],
+        serde_json::to_value(&expected).unwrap()
+    );
+
+    let whole_stats = stats_full_with_backends(&backends, Selection::Id(id)).unwrap();
+    let value = serde_json::to_value(&whole_stats).unwrap();
+    assert_eq!(
+        value["usage"]["by_model"],
+        serde_json::to_value(&expected).unwrap()
+    );
 }
 
 #[test]
@@ -4763,24 +4846,27 @@ fn a_harness_without_usage_detail_omits_every_optional_object() {
     let pi = PiBackend::new(fixtures("pi"));
     let pi_session = located(&pi, "session-pi");
 
-    for (backend, session) in [
-        (&opencode as &dyn Backend, opencode_session),
-        (&pi as &dyn Backend, pi_session),
-    ] {
-        let view = usage(&backend.transcript(&session, usize::MAX).unwrap());
-        assert!(view.context_window.is_none(), "{}", session.harness());
-        assert!(view.rate_limits.is_none(), "{}", session.harness());
-        assert!(view.durations_ms.is_none(), "{}", session.harness());
-        assert!(view.by_model.is_none(), "{}", session.harness());
+    let view = usage(&opencode.transcript(&opencode_session, usize::MAX).unwrap());
+    assert!(view.context_window.is_none(), "opencode records no window");
+    assert!(view.rate_limits.is_none(), "opencode records no quota");
+    assert!(view.durations_ms.is_none(), "opencode records no durations");
+    assert!(view.by_model.is_none(), "opencode records no model split");
 
-        let value = serde_json::to_value(&view).unwrap();
-        for absent in ["context_window", "rate_limits", "durations_ms", "by_model"] {
-            assert!(value.get(absent).is_none(), "{absent} in {value}");
-        }
-        assert_eq!(
-            view.turns.total,
-            view.turns.user + view.turns.assistant + view.turns.tool + view.turns.reasoning
-        );
+    let value = serde_json::to_value(&view).unwrap();
+    for absent in ["context_window", "rate_limits", "durations_ms", "by_model"] {
+        assert!(value.get(absent).is_none(), "{absent} in {value}");
+    }
+    assert_eq!(
+        view.turns.total,
+        view.turns.user + view.turns.assistant + view.turns.tool + view.turns.reasoning
+    );
+
+    // pi records the model split and nothing else in `usage_detail`.
+    let view = usage(&pi.transcript(&pi_session, usize::MAX).unwrap());
+    let value = serde_json::to_value(&view).unwrap();
+    assert_eq!(value["by_model"][0]["model"], "gpt-fixture");
+    for absent in ["context_window", "rate_limits", "durations_ms"] {
+        assert!(value.get(absent).is_none(), "{absent} in {value}");
     }
 }
 

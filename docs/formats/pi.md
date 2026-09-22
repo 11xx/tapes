@@ -66,7 +66,14 @@ rather than dropped.
 `model_change` and `thinking_level_change` are timestamped state entries rather
 than turns. When either is the final entry on the active path after the newest
 rendered turn, the backend reports its kind and timestamp as
-`trailing_record`. The `session` header is not a trailing record.
+`trailing_record`. The `session` header is not a trailing record. The pair
+also supplies the per-model and effort split: a `model_change` names the model
+selection, and the latest `thinking_level_change` at a request's point on the
+active path is the effort in effect. The model written on an assistant message
+is authoritative over the selection chain — a provider fallback writes several
+`model_change` entries in a row and the message names the one that answered —
+so each request is attributed to its own message's model and to the level in
+effect, never to the last entry of the chain.
 
 A read counts the header and each active-path entry that produced no turn
 under `unmapped` in its read evidence, by `type`: `session`, `model_change`,
@@ -149,6 +156,12 @@ on abandoned branches are not counted. `cost.total` is summed only when every
 counted usage entry carries a numeric `cost.total`; otherwise normalized cost
 is absent. A zero is retained when pi recorded zero, while an omitted field
 remains absent. `totalTokens` has no normalized field.
+
+The same requests are reported split by the `model` their message names and
+the thinking level in effect, as `by_model` rows ordered by model and level.
+Each row carries the row's tokens, its summed `cost.total` when every request
+in it recorded one, and its request count. A request whose message records no
+model leaves the split absent rather than partitioned by guesswork.
 
 ## What pi does not record
 

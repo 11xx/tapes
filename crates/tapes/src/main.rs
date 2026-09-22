@@ -942,7 +942,8 @@ enum Command {
     /// kinds its harness can record at all, tool calls
     /// by name with their paired durations and error counts, the recorded
     /// clock, the session's own token counters with the share of
-    /// `input + cache_read + cache_write` its cache accounts for, and the
+    /// `input + cache_read + cache_write` its cache accounts for, the model
+    /// and effort split its harness recorded, and the
     /// children its store names. Every figure is a count of records the
     /// harness wrote, and every total says what it covers: turn coverage is
     /// `read-window` when a source bound withheld turns, durations come from
@@ -968,7 +969,7 @@ enum Command {
         /// updated in place and a second read may not repeat the first.
         #[arg(long, conflicts_with = "read_bytes")]
         full: bool,
-        /// Render the versioned tapes-stats/7 object, or tapes-stats-summary/5
+        /// Render the versioned tapes-stats/8 object, or tapes-stats-summary/5
         /// for a selection, as JSON.
         #[arg(long)]
         json: bool,
@@ -2510,6 +2511,9 @@ fn render_usage_stats(out: &mut String, usage: &UsageStats) {
     }
     if let Some(accounting) = &usage.accounting {
         out.push_str(&format!("accounting: {}\n", render_accounting(accounting)));
+    }
+    for model in usage.by_model.iter().flatten() {
+        out.push_str(&render_model_usage(model));
     }
     let cache = [
         ("read", usage.cache_read_ratio),

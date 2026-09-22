@@ -8135,13 +8135,76 @@ fn stats_help_names_the_schema_and_what_the_figures_cover() {
     let output = tapes().args(["stats", "--help"]).output().unwrap();
     assert!(output.status.success());
     let help = String::from_utf8_lossy(&output.stdout);
-    assert!(help.contains("tapes-stats/7"), "{help}");
+    assert!(help.contains("tapes-stats/8"), "{help}");
     assert!(help.contains("complete pairs only"), "{help}");
     assert!(
         help.contains("share of recorded token counts rather than of cost"),
         "{help}"
     );
     assert!(help.contains("Nothing is judged"), "{help}");
+}
+
+/// pi records the model on every assistant message, so both `usage` and
+/// `stats` report the per-model split the recording states, qualified by the
+/// effort in effect.
+#[test]
+fn pi_reports_its_model_and_effort_split_through_usage_and_stats() {
+    let root = TemporaryDirectory::new(
+        std::env::temp_dir().join(format!("tapes-cli-pi-split-{}", std::process::id())),
+    );
+    let home = root.path().join("home");
+    let pi_sessions = home.join(".pi/agent/sessions");
+    fs::create_dir_all(&pi_sessions).unwrap();
+    fs::write(
+        pi_sessions.join("2026-01-01T10-00-00-000Z_session-pi.jsonl"),
+        PI_SESSION,
+    )
+    .unwrap();
+
+    let run = |arguments: &[&str]| {
+        let mut command = tapes();
+        command.args(arguments);
+        with_fixture_env(
+            &mut command,
+            &root.path().join("codex"),
+            &home,
+            Path::new("/definitely/missing"),
+        );
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        output.stdout
+    };
+
+    for command in ["usage", "stats"] {
+        let value: Value =
+            serde_json::from_slice(&run(&[command, "session-pi", "--json"])).unwrap();
+        let by_model = if command == "usage" {
+            value["by_model"].clone()
+        } else {
+            value["usage"]["by_model"].clone()
+        };
+        assert_eq!(by_model[0]["model"], "gpt-fixture", "{command}: {value}");
+        assert_eq!(by_model[0]["variant"], "high", "{command}: {value}");
+        assert_eq!(by_model[0]["request_count"], 2, "{command}: {value}");
+        assert_eq!(
+            by_model[0]["tokens"],
+            serde_json::json!({
+                "input": 40,
+                "output": 60,
+                "reasoning": 10,
+                "cache_read": 12,
+                "cache_write": 14
+            }),
+            "{command}: {value}"
+        );
+    }
+
+    let human = String::from_utf8(run(&["stats", "session-pi"])).unwrap();
+    assert!(human.contains("model gpt-fixture (high):"), "{human}");
 }
 
 /// Every figure in the answer is a figure the recording chose, so the whole
@@ -8173,7 +8236,7 @@ fn stats_json_counts_a_chosen_recording_exactly() {
     assert_eq!(
         comparable,
         serde_json::json!({
-            "schema": "tapes-stats/7",
+            "schema": "tapes-stats/8",
             "session": {
                 "id": id,
                 "source": {

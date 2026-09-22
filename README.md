@@ -398,7 +398,9 @@ compaction are not projected as tools; only verified `CommandExecution` and
 `usage` answers where one session's quota went as `tapes-usage/6`: the
 session's recorded `tokens`, cost, accounting, turn counts, Codex model
 observation status, and (where the source supports it) a by-model request
-observation split. The accounting `basis` and `coverage` decide whether
+split — Claude's `cost-state` `modelUsage`, Codex's request observations, or
+pi's per-message model each qualified by the thinking level in effect. The
+accounting `basis` and `coverage` decide whether
 figures may be summed — a recorded total and a sum of per-request records are
 both safe to add, while coverage says how much of each session a figure covers.
 An observed counter restart is `since-reset` for the newest recorded total;
@@ -480,13 +482,14 @@ session whose read fails is named in `unread` with its diagnostic and does not
 stop the run. Human output is one line per session, the text tail indented
 beneath it when asked for, and the listing's own diagnostics.
 
-`stats` counts what one recording holds as `tapes-stats/7`: `turns` by the
+`stats` counts what one recording holds as `tapes-stats/8`: `turns` by the
 `kind` the harness recorded them as, beside the kinds that harness can record
 at all, `tools` — calls, results, complete pairs,
 unpaired events by the boundary that left them unpaired, errors, and a
 `by_name` row per tool with its paired durations — the recorded clock in
 `durations_ms`, the session's own counters with the share of
-`input + cache_read + cache_write` each cache counter accounts for, and the
+`input + cache_read + cache_write` each cache counter accounts for, the model
+and reasoning-level split its harness recorded, and the
 children its store names. It reads the same typed events
 `events` returns and the same reference read `lineage` answers with, so no
 transcript is parsed twice and no child is opened. Every total says what it
@@ -639,7 +642,7 @@ few endings that matter instead of every tail.
 
 **Contracts you can build on.** `tapes-list/6`, `tapes-session/11`,
 `tapes-events/7`, `tapes-usage/6`, `tapes-usage-summary/4`, `tapes-lineage/2`,
-`tapes-endings/6`, `tapes-child/4`, `tapes-stats/7`, `tapes-stats-summary/5`, `tapes-brief/7`,
+`tapes-endings/6`, `tapes-child/4`, `tapes-stats/8`, `tapes-stats-summary/5`, `tapes-brief/7`,
 `tapes-page/6`, `tapes-history-search/6`, `tapes-metadata-history/6`,
 and `tapes-export-manifest/5` are versioned
 JSON; a breaking shape change bumps the version. A single-session `export`
