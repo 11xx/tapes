@@ -219,7 +219,10 @@ PROBE BEFORE EXPORTING
   exact within the bounded read; an incomplete call or result says whether its
   counterpart was not reached or not recorded. Event ordinals are the same
   turn coordinates show prints. With no --tail, every event the bounded reader
-  reaches is returned; --name and --call-id filter only after pairing. `--program`
+  reaches is returned; --name and --call-id filter only after pairing.
+  --full-arguments returns each tool call's complete recorded argument text in
+  place of the 200-character prefix, under the same members and schema
+  version. `--program`
   filters exact nested literal or structured-runtime declarations while
   `--name` continues to mean the recorded outer tool. JavaScript declarations
   require a complete direct literal `cmd`/`command` property; supported string

@@ -978,7 +978,7 @@ fn pi_call_event(block: &Value) -> ToolEvent {
         name: block["name"].as_str().map(str::to_owned),
         call_id: block["id"].as_str().map(str::to_owned),
         status: None,
-        arguments: Bounded::from_value(&block["arguments"]),
+        arguments: Bounded::retaining_value(&block["arguments"]),
         output: None,
         completed_ts: None,
         invocations: crate::event::invocations_from_tool(

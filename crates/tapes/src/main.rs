@@ -914,6 +914,13 @@ enum Command {
         /// Render the versioned tapes-events/7 object as JSON.
         #[arg(long)]
         json: bool,
+        /// Publish each tool call's complete recorded argument text in
+        /// `arguments.preview` instead of the 200-character prefix. Nothing
+        /// else changes: `arguments.chars` still states the whole length, the
+        /// object's members are the same, and so is its schema version. Apply
+        /// it to a bounded read or to --full.
+        #[arg(long)]
+        full_arguments: bool,
     },
     /// Which sessions a recording names as its relatives: the session it was
     /// spawned from or forked from, and the children its own store records,
@@ -1569,10 +1576,12 @@ fn dispatch(cli: Cli) -> Result<()> {
             program,
             full,
             json,
+            full_arguments,
         } => {
             selection.validate_input()?;
             read.refuse_supplied(&selection.input)?;
             let by_latest = selection.latest;
+            let options = tapes_core::event::EventOptions { full_arguments };
             let event_backends = if full {
                 tapes_core::backend::backends()
             } else {
@@ -1587,20 +1596,22 @@ fn dispatch(cli: Cli) -> Result<()> {
             };
             if full {
                 refuse_full_supplied(&selection.input)?;
-                return events_full(&selection, tail, &filter, json, by_latest);
+                return events_full(&selection, tail, &filter, json, by_latest, options);
             }
             let mut events = if selection.input.supplied() {
                 let backends = selection.input.backends()?;
-                tapes_core::events_with_backends(
+                tapes_core::events_with_options_with_backends(
                     &backends,
                     selection.selection(),
                     tail.unwrap_or(usize::MAX),
+                    options,
                 )?
             } else {
-                let mut events = tapes_core::events_with_backends(
+                let mut events = tapes_core::events_with_options_with_backends(
                     &event_backends,
                     selection.selection(),
                     tail.unwrap_or(usize::MAX),
+                    options,
                 )?;
                 liveness::annotate(std::slice::from_mut(&mut events.session));
                 events
@@ -3256,6 +3267,7 @@ fn events_full(
     filter: &tapes_core::event::EventFilter<'_>,
     json: bool,
     by_latest: bool,
+    options: tapes_core::event::EventOptions,
 ) -> Result<()> {
     let stdout = std::io::stdout();
     let mut sink = FullEvents {
@@ -3264,11 +3276,12 @@ fn events_full(
         json,
         writer: None,
     };
-    let streamed = tapes_core::events_full_with_backends(
+    let streamed = tapes_core::events_full_with_options_with_backends(
         &tapes_core::backend::backends(),
         selection.selection(),
         tail.unwrap_or(usize::MAX),
         filter,
+        options,
         &mut sink,
     )?;
     sink.finish(streamed)

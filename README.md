@@ -370,7 +370,9 @@ scope.
 `events` projects tool calls and results into the harness-neutral
 `tapes-events/7` schema. Each record keeps the turn ordinal and native id,
 bounded argument or output metadata, and an exact call/result pair when both
-halves occur in the bounded read. A Codex completed runtime item that carries
+halves occur in the bounded read. `--full-arguments` returns each call's
+complete recorded argument text in place of the 200-character prefix, under
+the same members and the same schema version. A Codex completed runtime item that carries
 both halves in one native record is projected as that pair with one shared
 source reference. Unpaired calls report `no-result-in-read`;
 an unpaired result reports `call-before-read-bound` when a file-tail or
@@ -442,7 +444,8 @@ it, pinned to the length and file revision the first observed, pairing each
 record and writing or counting it as it is emitted, so memory follows the
 calls awaiting a result rather than the file. `events --full` writes the same
 `tapes-events/7` object event by event; `--tail`, `--name`, `--call-id`, and
-`--program` select as they do over a bounded read, and `pairs` counts the
+`--program` select as they do over a bounded read, `--full-arguments` widens a
+kept call's arguments the same way it does there, and `pairs` counts the
 returned events. `stats --full` folds turns, tool calls, durations, and errors
 record by record, takes the counters from every record and the children from
 the read `lineage --full` takes, so `coverage.turns` is `session`; given a

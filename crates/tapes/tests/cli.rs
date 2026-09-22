@@ -2860,6 +2860,7 @@ fn events_help_explains_pairing_filters_and_the_default_bound() {
     assert!(help.contains("--name <NAME>"), "{help}");
     assert!(help.contains("--call-id <ID>"), "{help}");
     assert!(help.contains("--program <PROGRAM>"), "{help}");
+    assert!(help.contains("--full-arguments"), "{help}");
     assert!(help.contains("tapes-events/7"), "{help}");
 }
 
@@ -9586,4 +9587,106 @@ fn single_file_input_evidence_reports_that_associations_are_out_of_scope() {
         serde_json::from_slice(&fs::read(evidence.join("manifest.json")).unwrap()).unwrap();
     assert_eq!(manifest["associations_resolvable"], false);
     assert!(manifest["associations"].as_array().unwrap().is_empty());
+}
+
+const PI_SESSION_LONG_ARGUMENTS: &str =
+    include_str!("fixtures/pi/2026-01-03T10-00-00-000Z_session-pi-arguments.jsonl");
+
+/// The complete argument text `PI_SESSION_LONG_ARGUMENTS` records for its
+/// `call-long` tool call, as the event layer serializes the native object.
+const PI_LONG_ARGUMENTS: &str = concat!(
+    r#"{"command":"cargo test --workspace --all-features --no-fail-fast -- --nocapture && "#,
+    r#"cargo clippy --workspace --all-targets --all-features -- -D warnings && "#,
+    r#"cargo fmt --check && cargo build --workspace --all-targets","path":"/fixtures/project"}"#,
+);
+
+/// A tool argument longer than the preview bound is reported as a bounded
+/// prefix by default. `--full-arguments` opts into the complete recorded text
+/// for every tool call, on the bounded and the streamed read alike, without
+/// changing the object's members or the schema version.
+#[test]
+fn events_full_arguments_opt_in_returns_the_complete_argument_text() {
+    let root = TemporaryDirectory::new(
+        std::env::temp_dir().join(format!("tapes-cli-full-arguments-{}", std::process::id())),
+    );
+    let home = root.path().join("home");
+    let pi_sessions = home.join(".pi/agent/sessions");
+    fs::create_dir_all(&pi_sessions).unwrap();
+    fs::write(
+        pi_sessions.join("2026-01-03T10-00-00-000Z_session-pi-arguments.jsonl"),
+        PI_SESSION_LONG_ARGUMENTS,
+    )
+    .unwrap();
+
+    let run = |arguments: &[&str]| {
+        let mut command = tapes();
+        command.args(arguments);
+        with_fixture_env(
+            &mut command,
+            &root.path().join("codex"),
+            &home,
+            Path::new("/definitely/missing"),
+        );
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "{arguments:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        output.stdout
+    };
+    let arguments_of = |value: &Value| {
+        value["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|record| record["call_id"] == "call-long")
+            .expect("the fixture's tool call")["arguments"]
+            .clone()
+    };
+
+    let total = PI_LONG_ARGUMENTS.chars().count();
+    assert!(total > 200, "the fixture argument must exceed the bound");
+
+    let bounded: Value =
+        serde_json::from_slice(&run(&["events", "session-pi-arguments", "--json"])).unwrap();
+    assert_eq!(bounded["schema"], "tapes-events/7");
+    let arguments = arguments_of(&bounded);
+    assert_eq!(arguments["chars"], total);
+    assert_eq!(
+        arguments["preview"].as_str().unwrap().chars().count(),
+        200,
+        "{arguments}"
+    );
+    assert!(
+        PI_LONG_ARGUMENTS.starts_with(arguments["preview"].as_str().unwrap()),
+        "{arguments}"
+    );
+    assert_eq!(
+        arguments.as_object().unwrap().keys().collect::<Vec<_>>(),
+        ["chars", "preview"],
+        "{arguments}"
+    );
+
+    for extra in [
+        vec!["--full-arguments", "--json"],
+        vec!["--full-arguments", "--full", "--json"],
+    ] {
+        let mut request = vec!["events", "session-pi-arguments"];
+        request.extend(extra.iter().copied());
+        let value: Value = serde_json::from_slice(&run(&request)).unwrap();
+        assert_eq!(value["schema"], "tapes-events/7", "{request:?}");
+        let arguments = arguments_of(&value);
+        assert_eq!(arguments["chars"], total, "{request:?}");
+        assert_eq!(
+            arguments["preview"].as_str().unwrap(),
+            PI_LONG_ARGUMENTS,
+            "{request:?}"
+        );
+        assert_eq!(
+            arguments.as_object().unwrap().keys().collect::<Vec<_>>(),
+            ["chars", "preview"],
+            "{request:?}"
+        );
+    }
 }

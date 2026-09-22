@@ -415,7 +415,22 @@ pub trait Backend {
     /// turn window is applied. Paged backends override this so the supplied
     /// tail also bounds how many source pages are fetched.
     fn events(&self, session: &Session, tail: usize) -> Result<EventTranscript> {
-        Ok(event::project(self.transcript(session, usize::MAX)?, tail))
+        self.events_with_options(session, tail, event::EventOptions::default())
+    }
+    /// Project tool events as `events` does, honoring the caller's options. A
+    /// backend with its own `events` read overrides this instead, so an
+    /// option is never silently dropped on one projection path.
+    fn events_with_options(
+        &self,
+        session: &Session,
+        tail: usize,
+        options: event::EventOptions,
+    ) -> Result<EventTranscript> {
+        Ok(event::project_with(
+            self.transcript(session, usize::MAX)?,
+            tail,
+            options,
+        ))
     }
     /// The relationships this session's store records for it. The default is
     /// the answer for a harness that records none: a backend reports only

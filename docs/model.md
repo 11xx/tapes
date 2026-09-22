@@ -257,6 +257,11 @@ keep only facts the record supplies. Call arguments and result output use a
 `Bounded` value with the payload's Unicode character count and its first 200
 characters. A string is measured as written, while an object or array is first
 serialized as compact JSON. The preview always ends on a character boundary.
+`events --full-arguments` asks for a tool call's complete recorded argument
+text and receives it in the same two members: `chars` states the whole
+length and `preview` is that whole prefix, so the object's members and the
+schema version are unchanged. Only a tool call's arguments retain their
+complete text for this; result output keeps the bounded prefix.
 
 `invocations` are bounded declarations nested inside the outer recorded tool
 event. Structured runtime argv is marked `structured-runtime`; literal shell

@@ -21,6 +21,17 @@ pub const MAX_INVOCATION_STRING_CHARS: usize = 2 * 1024;
 pub const MAX_INVOCATION_DEPTH: usize = 32;
 const MAX_ARTIFACT_REFERENCES: usize = 64;
 
+/// What a caller asks of an event projection beyond its bounded default. The
+/// options change what a record carries, never the object's members or its
+/// schema version.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct EventOptions {
+    /// Publish each tool call's complete recorded argument text in place of
+    /// the 200-character prefix. `chars` already states the whole length, so
+    /// the two agree and no member is added.
+    pub full_arguments: bool,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum InvocationOrigin {
@@ -89,15 +100,41 @@ pub enum EventKind {
     ToolResult,
 }
 
-/// A payload field represented by its character count and a short prefix.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+/// A payload field represented by its character count and a bounded prefix.
+/// A tool call's arguments retain their complete text, which is published
+/// instead of the prefix when a caller asks for complete arguments; every
+/// other payload retains only what it publishes.
+#[derive(Clone, Debug, Eq, Serialize)]
 pub struct Bounded {
     pub chars: usize,
     pub preview: String,
+    /// The complete recorded text, set only where the reader retained it, and
+    /// never a serialized member of its own: `widen` publishes it as the
+    /// prefix so the object's shape is the same either way.
+    #[serde(skip)]
+    full: Option<String>,
+}
+
+impl PartialEq for Bounded {
+    /// Retention is a capability rather than a published fact, so two values
+    /// stating the same count and prefix are the same value.
+    fn eq(&self, other: &Self) -> bool {
+        self.chars == other.chars && self.preview == other.preview
+    }
 }
 
 impl Bounded {
     pub fn from_value(value: &Value) -> Option<Self> {
+        Self::from_value_with(value, false)
+    }
+
+    /// As `from_value`, retaining the complete text so a caller that asks for
+    /// complete arguments can be handed more than the prefix.
+    pub fn retaining_value(value: &Value) -> Option<Self> {
+        Self::from_value_with(value, true)
+    }
+
+    fn from_value_with(value: &Value, retain: bool) -> Option<Self> {
         if value.is_null() {
             return None;
         }
@@ -105,13 +142,26 @@ impl Bounded {
             .as_str()
             .map(str::to_owned)
             .unwrap_or_else(|| value.to_string());
-        Some(Self::from_text(&text))
+        Some(Self::from_text_with(&text, retain))
     }
 
     pub fn from_text(text: &str) -> Self {
+        Self::from_text_with(text, false)
+    }
+
+    fn from_text_with(text: &str, retain: bool) -> Self {
         Self {
             chars: text.chars().count(),
             preview: text.chars().take(PREVIEW_CHARS).collect(),
+            full: retain.then(|| text.to_owned()),
+        }
+    }
+
+    /// Publish the complete retained text in place of the prefix. A value
+    /// that retained nothing keeps the prefix it has.
+    pub(crate) fn widen(&mut self) {
+        if let Some(full) = self.full.take() {
+            self.preview = full;
         }
     }
 }
@@ -364,6 +414,11 @@ fn truncation_is_empty(truncation: &Truncation) -> bool {
 /// window. Pair references therefore survive when their counterpart is
 /// outside the returned window.
 pub fn project(transcript: Transcript, tail: usize) -> EventTranscript {
+    project_with(transcript, tail, EventOptions::default())
+}
+
+/// Pair and project as `project` does, honoring a caller's options.
+pub fn project_with(transcript: Transcript, tail: usize, options: EventOptions) -> EventTranscript {
     let total_turns = transcript.turns.len();
     let unpaired = transcript
         .turns
@@ -384,6 +439,13 @@ pub fn project(transcript: Transcript, tail: usize) -> EventTranscript {
     let returned_turns = total_turns.min(tail);
     let first_ordinal = total_turns.saturating_sub(returned_turns);
     records.retain(|record| record.ordinal >= first_ordinal);
+    if options.full_arguments {
+        for record in &mut records {
+            if let Some(arguments) = record.event.arguments.as_mut() {
+                arguments.widen();
+            }
+        }
+    }
 
     let truncation = Truncation {
         window: transcript

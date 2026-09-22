@@ -1431,7 +1431,9 @@ fn claude_tool_event(block: &Value, subtype: &str) -> ToolEvent {
         }
         .map(str::to_owned),
         status: (!call && block["is_error"].as_bool() == Some(true)).then(|| "error".to_owned()),
-        arguments: call.then(|| Bounded::from_value(&block["input"])).flatten(),
+        arguments: call
+            .then(|| Bounded::retaining_value(&block["input"]))
+            .flatten(),
         output: (!call)
             .then(|| Bounded::from_value(&block["content"]))
             .flatten(),
