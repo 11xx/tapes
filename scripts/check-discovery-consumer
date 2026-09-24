@@ -604,6 +604,8 @@ def main() -> int:
         package_root = check_archive(archive, unpack_root, work)
         print(f"package_archive={archive.name} package_members={len(tarfile.open(archive, 'r:gz').getmembers())}")
 
+        package_codex_id = "60000000-0000-4000-8000-000000000006"
+        codex_record(codex_root, package_codex_id)
         run_package_consumer(
             package_root,
             work,
@@ -611,9 +613,8 @@ def main() -> int:
             package_env,
             logs,
             codex_root,
-            "60000000-0000-4000-8000-000000000006",
+            package_codex_id,
         )
-        codex_record(codex_root, "60000000-0000-4000-8000-000000000006")
         probe_consumer(consumer_binary, fixtures, consumer_env, logs)
 
         negative_project = work / "negative-core-consumer"
