@@ -1,0 +1,672 @@
+#!/usr/bin/env python3
+"""Build and exercise an external consumer; TAPES_DISCOVERY_LOG_DIR retains command logs."""
+from __future__ import annotations
+
+import json
+import os
+import shlex
+import shutil
+import subprocess
+import sys
+import tarfile
+import tempfile
+import tomllib
+from pathlib import Path
+
+FORBIDDEN_PACKAGES = {"tapes-core", "tapes-cli", "zip", "sha2"}
+
+
+class GateError(RuntimeError):
+    pass
+
+
+def checkout_root() -> Path:
+    here = Path(__file__).resolve().parent
+    result = subprocess.run(
+        ["git", "rev-parse", "--show-toplevel"],
+        cwd=here,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    if result.returncode:
+        raise GateError("cannot locate the candidate git checkout")
+    return Path(result.stdout.strip()).resolve()
+
+
+def below_home(path: Path) -> bool:
+    home = Path.home().resolve()
+    resolved = path.resolve()
+    return resolved == home or home in resolved.parents
+
+
+def command(
+    args: list[str],
+    cwd: Path,
+    env: dict[str, str],
+    logs: Path,
+    label: str,
+    expected: tuple[int, ...] = (0,),
+    timeout: int = 900,
+) -> subprocess.CompletedProcess[str]:
+    result = subprocess.run(
+        args,
+        cwd=cwd,
+        env=env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=timeout,
+        check=False,
+    )
+    log = logs / f"{label}.log"
+    log.parent.mkdir(parents=True, exist_ok=True)
+    log.write_text(result.stdout + result.stderr)
+    if result.returncode not in expected:
+        raise GateError(f"{label} exited {result.returncode}; log={log}")
+    return result
+
+
+def write_project(
+    project: Path,
+    crate_path: Path,
+    source_text: str,
+    include_core: bool = False,
+    core_path: Path | None = None,
+) -> Path:
+    source_dir = project / "src"
+    source_dir.mkdir(parents=True, exist_ok=True)
+    (source_dir / "main.rs").write_text(source_text)
+    discovery_line = f'tapes-discovery = {{ path = {json.dumps(str(crate_path))}, version = "0.1.0" }}'
+    dependency_lines = [discovery_line]
+    if include_core:
+        if core_path is None:
+            raise GateError("core path missing for the graph negative control")
+        dependency_lines.append(f"tapes-core = {{ path = {json.dumps(str(core_path))} }}")
+    manifest = project / "Cargo.toml"
+    manifest.write_text(
+        "[package]\n"
+        'name = "tapes-discovery-consumer-check"\n'
+        'version = "0.0.0"\n'
+        'edition = "2021"\n\n'
+        "[dependencies]\n"
+        + "\n".join(dependency_lines)
+        + "\n"
+    )
+    return manifest
+
+
+def normal_graph(
+    manifest: Path,
+    cwd: Path,
+    env: dict[str, str],
+    logs: Path,
+    label: str,
+    no_default_features: bool,
+) -> set[str]:
+    args = [
+        "cargo",
+        "metadata",
+        "--format-version",
+        "1",
+        "--manifest-path",
+        str(manifest),
+    ]
+    if no_default_features:
+        args.append("--no-default-features")
+    metadata = json.loads(command(args, cwd, env, logs, label).stdout)
+    resolve = metadata.get("resolve")
+    if not resolve or not resolve.get("root"):
+        raise GateError(f"{label} returned no resolved consumer root")
+    packages = {package["id"]: package for package in metadata["packages"]}
+    nodes = {node["id"]: node for node in resolve["nodes"]}
+    reachable: set[str] = set()
+    pending = [resolve["root"]]
+    while pending:
+        node_id = pending.pop()
+        if node_id in reachable:
+            continue
+        reachable.add(node_id)
+        node = nodes.get(node_id)
+        if node is None:
+            raise GateError(f"{label} has an unresolved Cargo metadata node")
+        for dependency in node["deps"]:
+            normal = any(
+                kind.get("kind") in (None, "normal")
+                for kind in dependency.get("dep_kinds", [])
+            )
+            if normal:
+                pending.append(dependency["pkg"])
+    names = {packages[node_id]["name"] for node_id in reachable}
+    if "tapes-discovery" not in names:
+        raise GateError(f"{label} graph omits tapes-discovery")
+    forbidden = sorted(name for name in names if name in FORBIDDEN_PACKAGES)
+    if forbidden:
+        raise GateError(f"{label} graph contains forbidden dependencies: {','.join(forbidden)}")
+    other_tapes = sorted(name for name in names if name.startswith("tapes-") and name != "tapes-discovery")
+    if other_tapes:
+        raise GateError(f"{label} graph contains another Tapes package: {','.join(other_tapes)}")
+    return names
+
+
+def parse_output(output: str) -> dict[str, str]:
+    fields: dict[str, str] = {}
+    for token in shlex.split(output.strip()):
+        if "=" in token:
+            key, value = token.split("=", 1)
+            fields[key] = value
+    return fields
+
+
+def invoke_consumer(
+    binary: Path,
+    args: list[str],
+    cwd: Path,
+    env: dict[str, str],
+    logs: Path,
+    label: str,
+) -> dict[str, str]:
+    result = command([str(binary), *args], cwd, env, logs, label, timeout=60)
+    return parse_output(result.stdout)
+
+
+def write_jsonl(path: Path, value: dict[str, object], modified: int | None = None) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(value, separators=(",", ":")) + "\n")
+    if modified is not None:
+        os.utime(path, (modified, modified))
+
+
+def codex_record(root: Path, session_id: str, modified: int | None = None) -> Path:
+    relative = Path("2026") / "09" / "24" / f"rollout-2026-09-24T12-00-00-000Z-{session_id}.jsonl"
+    path = root / relative
+    write_jsonl(
+        path,
+        {
+            "type": "session_meta",
+            "payload": {"id": session_id, "cwd": "/fixtures/project"},
+        },
+        modified,
+    )
+    return path
+
+
+def assert_status(result: dict[str, str], expected: str, label: str) -> None:
+    if result.get("status") != expected:
+        raise GateError(f"consumer probe {label} returned {result.get('status', 'no-status')}")
+
+
+def probe_consumer(binary: Path, root: Path, env: dict[str, str], logs: Path) -> None:
+    marker = root / "consumer-target-created"
+    env = dict(env)
+    env["TAPES_DISCOVERY_TARGET_MARKER"] = str(marker)
+
+    codex_id = "00000000-0000-4000-8000-000000000001"
+    codex_root = root / "fixtures/codex/sessions"
+    codex_record(codex_root, codex_id)
+    exact = invoke_consumer(
+        binary, [codex_id, f"codex={codex_root}"], root, env, logs, "consumer-codex-exact"
+    )
+    assert_status(exact, "target", "Codex exact")
+    if exact.get("id") != codex_id or exact.get("harness") != "codex" or exact.get("delivery") != "codex":
+        raise GateError("Codex exact identity or delivery projection did not match")
+
+    prefix = invoke_consumer(
+        binary,
+        ["00000000-0000-4000-8000-0000000000", f"codex={codex_root}"],
+        root,
+        env,
+        logs,
+        "consumer-codex-prefix",
+    )
+    assert_status(prefix, "target", "Codex prefix")
+    if prefix.get("id") != codex_id or prefix.get("harness") != "codex":
+        raise GateError("Codex prefix did not project the canonical full ID")
+
+    env_home = root / "from-env-home"
+    env_codex = env_home / "sessions"
+    env_id = "30000000-0000-4000-8000-000000000003"
+    codex_record(env_codex, env_id)
+    envs = dict(env)
+    envs.update(
+        {
+            "HOME": str(env_home),
+            "CODEX_HOME": str(env_home),
+            "CLAUDE_CONFIG_DIR": str(root / "absent-claude"),
+            "PI_CODING_AGENT_SESSION_DIR": str(root / "absent-pi"),
+            "XDG_DATA_HOME": str(root / "absent-xdg"),
+            "PATH": str(root / "empty-bin"),
+        }
+    )
+    (root / "empty-bin").mkdir(parents=True, exist_ok=True)
+    from_env = invoke_consumer(
+        binary, ["--from-env", env_id], root, envs, logs, "consumer-from-env"
+    )
+    assert_status(from_env, "target", "Discovery::from_env")
+    if from_env.get("id") != env_id or from_env.get("harness") != "codex":
+        raise GateError("Discovery::from_env did not preserve Codex identity")
+
+    claude_root = root / "fixtures/claude/projects"
+    claude_id = "claude-fixture-session"
+    write_jsonl(claude_root / "fixture-project/recording.jsonl", {"sessionId": claude_id})
+    claude = invoke_consumer(
+        binary, [claude_id, f"claude={claude_root}"], root, env, logs, "consumer-claude"
+    )
+    assert_status(claude, "unsupported-delivery", "Claude delivery refusal")
+    if claude.get("harness") != "claude" or claude.get("delivery") != "none":
+        raise GateError("Claude consumer projection did not refuse delivery")
+
+    pi_root = root / "fixtures/pi"
+    pi_id = "pi-fixture-session"
+    write_jsonl(pi_root / f"2026-09-24T12-00-00-000Z_{pi_id}.jsonl", {"type": "session", "id": pi_id})
+    pi = invoke_consumer(binary, [pi_id, f"pi={pi_root}"], root, env, logs, "consumer-pi")
+    assert_status(pi, "unsupported-delivery", "Pi delivery refusal")
+    if pi.get("harness") != "pi" or pi.get("delivery") != "none":
+        raise GateError("Pi consumer projection did not refuse delivery")
+
+    opencode_log = root / "opencode-requests.log"
+    opencode_program = root / "fake-bin/opencode2"
+    opencode_program.parent.mkdir(parents=True, exist_ok=True)
+    opencode_program.write_text(
+        "#!/usr/bin/python3\n"
+        "import json, os, sys\n"
+        "path=sys.argv[4]\n"
+        "with open(os.environ['TAPES_DISCOVERY_OPENCODE_LOG'],'a') as log: log.write(path+'\\n')\n"
+        "print(json.dumps({'data':{'id':'ses_opencode_consumer','title':'fixture'}}))\n"
+    )
+    opencode_program.chmod(0o700)
+    opencode_env = dict(env)
+    opencode_env["TAPES_DISCOVERY_OPENCODE_LOG"] = str(opencode_log)
+    opencode_id = "ses_opencode_consumer"
+    opencode = invoke_consumer(
+        binary,
+        [opencode_id, f"opencode-v2={opencode_program}"],
+        root,
+        opencode_env,
+        logs,
+        "consumer-opencode",
+    )
+    assert_status(opencode, "unsupported-delivery", "OpenCode delivery refusal")
+    if opencode.get("harness") != "opencode" or opencode.get("delivery") != "none":
+        raise GateError("OpenCode consumer projection did not refuse delivery")
+    requests = opencode_log.read_text().splitlines()
+    if not requests or any("/message" in request or "/part" in request for request in requests):
+        raise GateError("OpenCode consumer requested transcript or part routes")
+
+    ambiguous_claude_root = root / "fixtures/ambiguous-claude/projects"
+    write_jsonl(ambiguous_claude_root / f"fixture-project/{codex_id}.jsonl", {"sessionId": codex_id})
+    ambiguous = invoke_consumer(
+        binary,
+        [codex_id, f"claude={ambiguous_claude_root}", f"codex={codex_root}"],
+        root,
+        env,
+        logs,
+        "consumer-ambiguous",
+    )
+    assert_status(ambiguous, "refused", "cross-harness ambiguity")
+    if ambiguous.get("error") != "ambiguous":
+        raise GateError("cross-harness duplicate did not report ambiguity")
+
+    forged_id = "00000000-0000-4000-8000-00000000ffff"
+    forged_root = root / "fixtures/forged-codex/sessions"
+    write_jsonl(
+        forged_root / "2026/09/24/not-a-native-rollout.jsonl",
+        {"type": "session_meta", "payload": {"id": forged_id}},
+    )
+    forged = invoke_consumer(
+        binary, [forged_id, f"codex={forged_root}"], root, env, logs, "consumer-forged-uuid"
+    )
+    assert_status(forged, "refused", "UUID without native filename")
+    if forged.get("error") != "not-found":
+        raise GateError("UUID-shaped metadata outside Codex naming was accepted")
+
+    missing = invoke_consumer(
+        binary,
+        [codex_id, f"codex={root / 'missing-codex-root'}"],
+        root,
+        env,
+        logs,
+        "consumer-missing-store",
+    )
+    assert_status(missing, "refused", "missing store")
+    if missing.get("error") != "not-found":
+        raise GateError("missing native store did not remain absence")
+
+    malformed_root = root / "fixtures/malformed-claude/projects"
+    write_jsonl(malformed_root / "fixture-project/bad.jsonl", {"sessionId": None})
+    malformed = invoke_consumer(
+        binary, ["bad", f"claude={malformed_root}"], root, env, logs, "consumer-malformed"
+    )
+    assert_status(malformed, "refused", "malformed native identity")
+    if malformed.get("error") not in {"backend-failed", "store-failed"}:
+        raise GateError("malformed identity did not preserve its failure class")
+
+    unreadable_root = root / "fixtures/unreadable-codex/sessions"
+    unreadable_id = "40000000-0000-4000-8000-000000000004"
+    unreadable_file = codex_record(unreadable_root, unreadable_id)
+    unreadable_file.chmod(0)
+    try:
+        with unreadable_file.open("rb"):
+            raise GateError("unreadable store negative control lacks effective permissions")
+    except PermissionError:
+        pass
+    unreadable = invoke_consumer(
+        binary,
+        [unreadable_id, f"codex={unreadable_root}"],
+        root,
+        env,
+        logs,
+        "consumer-unreadable",
+    )
+    assert_status(unreadable, "refused", "unreadable store")
+    if unreadable.get("error") not in {"backend-failed", "store-failed"}:
+        raise GateError("unreadable identity did not preserve its failure class")
+    unreadable_file.chmod(0o644)
+
+    incomplete_root = root / "fixtures/incomplete-codex/sessions"
+    visible_id = "00000000-0000-4000-8000-000000000101"
+    hidden_id = "00000000-0000-4000-8000-000000000102"
+    codex_record(incomplete_root, visible_id, modified=20_000)
+    for index in range(999):
+        filler_id = f"10000000-0000-4000-8000-{index:012x}"
+        codex_record(incomplete_root, filler_id, modified=19_999 - index)
+    codex_record(incomplete_root, hidden_id, modified=1)
+    incomplete = invoke_consumer(
+        binary,
+        ["00000000-0000-4000-8000-0000000001", f"codex={incomplete_root}"],
+        root,
+        env,
+        logs,
+        "consumer-incomplete-prefix",
+    )
+    assert_status(incomplete, "refused", "one-hit incomplete prefix")
+    if incomplete.get("error") != "incomplete":
+        raise GateError("one candidate under incomplete coverage was accepted")
+
+    imported_root = root / "fixtures/imported-recordings"
+    write_jsonl(
+        imported_root / "imported.jsonl",
+        {"type": "session_meta", "payload": {"id": codex_id}},
+    )
+    native_only_root = root / "fixtures/native-only-codex/sessions"
+    codex_record(native_only_root, "50000000-0000-4000-8000-000000000005")
+    imported = invoke_consumer(
+        binary,
+        [codex_id, f"codex={native_only_root}"],
+        root,
+        env,
+        logs,
+        "consumer-imported-id",
+    )
+    assert_status(imported, "refused", "imported ID outside native root")
+    if imported.get("error") != "not-found":
+        raise GateError("copied imported identity entered native discovery")
+
+    if marker.exists():
+        raise GateError("consumer created a delivery target or queue marker")
+    print("consumer_positive=codex-exact,codex-prefix,from-env")
+    print("consumer_unsupported=claude,pi,opencode")
+    print("consumer_refused=ambiguous,forged-uuid,missing,malformed,unreadable,incomplete-prefix,imported-id")
+    print(f"opencode_metadata_requests={len(requests)} transcript_routes=0")
+    print("consumer_target_side_effects=none")
+
+
+def check_archive(archive_path: Path, unpack_root: Path, scratch: Path) -> Path:
+    with tarfile.open(archive_path, "r:gz") as archive:
+        members = archive.getmembers()
+        base = unpack_root.resolve()
+        for member in members:
+            destination = (unpack_root / member.name).resolve()
+            if destination != base and base not in destination.parents:
+                raise GateError("crate archive contains a path outside its root")
+        archive.extractall(unpack_root)
+        names = {member.name for member in members if member.isfile()}
+        package_prefix = "tapes-discovery-0.1.0/"
+        required = {
+            package_prefix + "Cargo.toml",
+            package_prefix + "README.md",
+            package_prefix + "src/lib.rs",
+            package_prefix + "src/error.rs",
+            package_prefix + "src/file.rs",
+            package_prefix + "src/opencode.rs",
+        }
+        if not required.issubset(names):
+            raise GateError("packaged crate omits required library or documentation files")
+        if any("fixtures/core" in name or "tapes-core" in name for name in names):
+            raise GateError("package contains a core fixture or core reference")
+        manifest_member = archive.extractfile(package_prefix + "Cargo.toml")
+        if manifest_member is None:
+            raise GateError("package manifest is missing")
+        package_manifest = tomllib.loads(manifest_member.read().decode())
+        for section in ("dependencies", "dev-dependencies", "build-dependencies"):
+            for dependency in package_manifest.get(section, {}):
+                if dependency in FORBIDDEN_PACKAGES or dependency.startswith("tapes-") and dependency != "tapes-discovery":
+                    raise GateError(f"packaged {section} unexpectedly depends on {dependency}")
+    package_root = unpack_root / "tapes-discovery-0.1.0"
+    if not (package_root / "src/lib.rs").is_file():
+        raise GateError("unpacked package has no library source")
+    return package_root
+
+
+def run_package_consumer(
+    package_root: Path,
+    root: Path,
+    source: str,
+    env: dict[str, str],
+    logs: Path,
+    codex_root: Path,
+    codex_id: str,
+) -> None:
+    project = root / "unpacked-consumer"
+    manifest = write_project(project, package_root, source)
+    for no_default in (False, True):
+        label = "unpacked-consumer-nodefault" if no_default else "unpacked-consumer-default"
+        command(
+            [
+                "cargo",
+                "build",
+                "--manifest-path",
+                str(manifest),
+                *( ["--no-default-features"] if no_default else [] ),
+            ],
+            project,
+            env,
+            logs,
+            label,
+        )
+        graph = normal_graph(manifest, project, env, logs, label + "-graph", no_default)
+        print(f"{label}_reachable=" + ",".join(sorted(graph)))
+    binary = env["CARGO_TARGET_DIR"]
+    binary_path = Path(binary) / "debug" / "tapes-discovery-consumer-check"
+    fixture_id = "60000000-0000-4000-8000-000000000006"
+    result = invoke_consumer(
+        binary_path,
+        [fixture_id, f"codex={codex_root}"],
+        project,
+        env,
+        logs,
+        "unpacked-consumer-codex",
+    )
+    assert_status(result, "target", "unpacked package consumer")
+    if result.get("id") != fixture_id or result.get("harness") != "codex":
+        raise GateError("unpacked package consumer did not resolve the Codex identity")
+    print("unpacked_package_consumer=pass")
+
+
+def main() -> int:
+    root = checkout_root()
+    crate = root / "crates/tapes-discovery"
+    source_path = crate / "tests/consumer/main.rs"
+    if not source_path.is_file():
+        raise GateError("checked-in standalone consumer source is missing")
+    source = source_path.read_text()
+    if "tapes_core" in source or "tapes-core" in source or "include!" in source:
+        raise GateError("consumer source is coupled to Tapes core or source inclusion")
+    if "std::fs" in source or "OpenOptions" in source:
+        raise GateError("consumer fixture source must not create delivery targets")
+
+    scratch_parent = Path(
+        os.environ.get(
+            "TAPES_DISCOVERY_CHECK_ROOT",
+            str(Path.home() / ".local/share/agent-work"),
+        )
+    ).expanduser().resolve()
+    if not below_home(scratch_parent):
+        raise GateError("consumer scratch root must be below the home directory")
+    scratch_parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="tapes-discovery-consumer-", dir=scratch_parent) as temporary:
+        work = Path(temporary).resolve()
+        target = work / "target"
+        temp = work / "tmp"
+        target.mkdir()
+        temp.mkdir()
+        free = shutil.disk_usage(target).free
+        print(f"scratch_free_mib={free // (1024 * 1024)}")
+        if free < 512 * 1024 * 1024:
+            raise GateError("consumer target filesystem has less than 512 MiB free")
+        configured_logs = os.environ.get("TAPES_DISCOVERY_LOG_DIR")
+        if configured_logs:
+            logs = Path(configured_logs).expanduser().resolve()
+            if not below_home(logs) or root == logs or root in logs.parents:
+                raise GateError("command logs must be outside the checkout and below the home directory")
+            logs.mkdir(parents=True, exist_ok=False)
+            print(f"command_logs={logs}")
+        else:
+            logs = work / "logs"
+            logs.mkdir()
+        consumer_env = dict(os.environ)
+        consumer_env["CARGO_TARGET_DIR"] = str(target)
+        consumer_env["TMPDIR"] = str(temp)
+        project = work / "external-consumer"
+        manifest = write_project(project, crate, source)
+
+        for no_default in (False, True):
+            label = "external-consumer-nodefault" if no_default else "external-consumer-default"
+            command(
+                [
+                    "cargo",
+                    "build",
+                    "--manifest-path",
+                    str(manifest),
+                    *( ["--no-default-features"] if no_default else [] ),
+                ],
+                project,
+                consumer_env,
+                logs,
+                label,
+            )
+            names = normal_graph(manifest, project, consumer_env, logs, label + "-graph", no_default)
+            print(f"{label}_reachable=" + ",".join(sorted(names)))
+        command(
+            ["cargo", "test", "--manifest-path", str(manifest)],
+            project,
+            consumer_env,
+            logs,
+            "external-consumer-tests",
+        )
+        consumer_binary = target / "debug" / "tapes-discovery-consumer-check"
+
+        fixtures = work / "fixtures"
+        codex_root = fixtures / "codex/sessions"
+        claude_root = fixtures / "claude/projects"
+        pi_root = fixtures / "pi"
+        for directory in (codex_root, claude_root, pi_root):
+            directory.mkdir(parents=True)
+        codex_id = "00000000-0000-4000-8000-000000000001"
+        codex_record(codex_root, codex_id)
+
+        package_target = work / "package-target"
+        package_env = dict(consumer_env)
+        package_env["CARGO_TARGET_DIR"] = str(package_target)
+        package_target.mkdir()
+        command(
+            [
+                "cargo",
+                "package",
+                "--manifest-path",
+                str(root / "Cargo.toml"),
+                "-p",
+                "tapes-discovery",
+                "--locked",
+                "--no-verify",
+            ],
+            root,
+            package_env,
+            logs,
+            "cargo-package",
+        )
+        archive = package_target / "package" / "tapes-discovery-0.1.0.crate"
+        if not archive.is_file():
+            raise GateError("cargo package did not produce the local crate archive")
+        unpack_root = work / "unpacked"
+        unpack_root.mkdir()
+        package_root = check_archive(archive, unpack_root, work)
+        print(f"package_archive={archive.name} package_members={len(tarfile.open(archive, 'r:gz').getmembers())}")
+
+        run_package_consumer(
+            package_root,
+            work,
+            source,
+            package_env,
+            logs,
+            codex_root,
+            "60000000-0000-4000-8000-000000000006",
+        )
+        codex_record(codex_root, "60000000-0000-4000-8000-000000000006")
+        probe_consumer(consumer_binary, fixtures, consumer_env, logs)
+
+        negative_project = work / "negative-core-consumer"
+        negative_manifest = write_project(
+            negative_project,
+            crate,
+            source,
+            include_core=True,
+            core_path=root / "crates/tapes-core",
+        )
+        try:
+            normal_graph(
+                negative_manifest,
+                negative_project,
+                consumer_env,
+                logs,
+                "negative-core-graph",
+                False,
+            )
+        except GateError as error:
+            if "tapes-core" not in str(error):
+                raise
+            print("negative_core_dependency=rejected")
+        else:
+            raise GateError("dependency graph control did not reject tapes-core")
+
+        mutated = source.replace(
+            "harness == Harness::Codex",
+            "matches!(harness, Harness::Codex | Harness::Claude)",
+            1,
+        )
+        if mutated == source:
+            raise GateError("consumer eligibility mutation point was not found")
+        mutant_project = work / "negative-claude-consumer"
+        mutant_manifest = write_project(mutant_project, crate, mutated)
+        mutant_test = command(
+            ["cargo", "test", "--manifest-path", str(mutant_manifest)],
+            mutant_project,
+            consumer_env,
+            logs,
+            "negative-claude-eligibility",
+            expected=(0, 101),
+        )
+        if mutant_test.returncode == 0 or "FAILED" not in mutant_test.stdout:
+            raise GateError("consumer eligibility control did not fail its Claude test")
+        print("negative_claude_eligibility=rejected")
+        print("package_and_external_consumer=pass")
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except (GateError, OSError, subprocess.TimeoutExpired, json.JSONDecodeError) as error:
+        print(f"discovery consumer gate failed: {error}", file=sys.stderr)
+        sys.exit(1)

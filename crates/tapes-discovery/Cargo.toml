@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Bounded metadata-only discovery of native coding-agent session stores."
+description = "Bounded discovery of native session identity and store metadata."
 keywords = ["sessions", "agents", "discovery"]
 categories = ["development-tools"]
 

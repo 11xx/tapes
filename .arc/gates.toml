@@ -17,3 +17,6 @@ command = "cargo test --features zip"
 
 [gates.lint-zip]
 command = "cargo clippy --all-targets --features zip -- -D warnings && cargo fmt --check"
+
+[gates.discovery-consumer]
+command = "scripts/check-discovery-consumer"
