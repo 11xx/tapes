@@ -63,8 +63,8 @@ fn run(arguments: &[String]) -> Result<(), String> {
         if arguments.len() < 2 {
             return Err("provide a query and at least one native store".to_owned());
         }
-        let query = arguments.last().expect("query was checked");
-        let stores = arguments[1..arguments.len() - 1]
+        let query = arguments.first().expect("query was checked");
+        let stores = arguments[1..]
             .iter()
             .map(|specification| store(specification))
             .collect::<Result<Vec<_>, _>>()?;

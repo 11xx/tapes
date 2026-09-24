@@ -479,17 +479,16 @@ def run_package_consumer(
         print(f"{label}_reachable=" + ",".join(sorted(graph)))
     binary = env["CARGO_TARGET_DIR"]
     binary_path = Path(binary) / "debug" / "discovery-consumer-check"
-    fixture_id = "60000000-0000-4000-8000-000000000006"
     result = invoke_consumer(
         binary_path,
-        [fixture_id, f"codex={codex_root}"],
+        [codex_id, f"codex={codex_root}"],
         project,
         env,
         logs,
         "unpacked-consumer-codex",
     )
     assert_status(result, "target", "unpacked package consumer")
-    if result.get("id") != fixture_id or result.get("harness") != "codex":
+    if result.get("id") != codex_id or result.get("harness") != "codex":
         raise GateError("unpacked package consumer did not resolve the Codex identity")
     print("unpacked_package_consumer=pass")
 
