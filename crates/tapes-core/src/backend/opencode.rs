@@ -109,7 +109,8 @@ impl Drop for OpenCodeApiServer {
 }
 
 impl OpenCodeApiServer {
-    fn start(program: &OsStr) -> Result<Self> {
+    fn start(store: &tapes_discovery::OpenCodeStore) -> Result<Self> {
+        let program = store.program();
         let listener = TcpListener::bind(("127.0.0.1", 0))
             .context("failed to reserve a local port for the opencode API")?;
         let port = listener
@@ -119,7 +120,9 @@ impl OpenCodeApiServer {
         drop(listener);
 
         let port_text = port.to_string();
-        let mut child = Command::new(program)
+        let mut command = Command::new(program);
+        store.configure_command(&mut command);
+        let mut child = command
             .args(["serve", "--hostname", "127.0.0.1", "--port", &port_text])
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -346,7 +349,13 @@ impl OpenCodeBackend {
     }
 
     fn command_bytes_with(&self, program: &OsStr, args: &[&str], source: &str) -> Result<Vec<u8>> {
-        let mut child = Command::new(program)
+        let store = self
+            .store
+            .opencode_store()
+            .expect("OpenCode backend has an OpenCode store");
+        let mut command = Command::new(program);
+        store.configure_command(&mut command);
+        let mut child = command
             .args(args)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -586,6 +595,13 @@ impl OpenCodeBackend {
         let metadata = native
             .metadata()
             .ok_or_else(|| anyhow!("opencode session {} has no metadata row", native.id()))?;
+        let metadata_id = required_string(metadata, "id")?;
+        if metadata_id != native.id() {
+            anyhow::bail!(
+                "opencode metadata identity {metadata_id} disagrees with selected native identity {}",
+                native.id()
+            );
+        }
         let session = match native.store_kind() {
             NativeStoreKind::OpenCode(OpenCodeFlavor::Stable) => parse_database_session(metadata)?,
             NativeStoreKind::OpenCode(OpenCodeFlavor::V2) => parse_session(metadata)?,
@@ -1102,7 +1118,11 @@ impl Backend for OpenCodeBackend {
 
     fn list_with_search(&self, query: &Query, needle: &str, tail: usize) -> Result<Listing> {
         if !self.uses_database() {
-            let api_fallback = match OpenCodeApiServer::start(&self.program) {
+            let store = self
+                .store
+                .opencode_store()
+                .expect("OpenCode backend has an OpenCode store");
+            let api_fallback = match OpenCodeApiServer::start(store) {
                 Ok(server) => match self.list(query) {
                     Ok(listing) => {
                         let listing_failure = if listing.scan_truncated

@@ -140,6 +140,14 @@ impl OpenCodeStore {
         self.data_directory.clone()
     }
 
+    /// Configure a metadata or transcript child process to use this store's
+    /// captured XDG data root when the store configuration owns that root.
+    pub fn configure_command(&self, command: &mut Command) {
+        if let Some(xdg_data_home) = self.captured_xdg_data_home() {
+            command.env("XDG_DATA_HOME", xdg_data_home);
+        }
+    }
+
     /// Resolve a database file within the configured OpenCode data directory.
     pub fn database_file(&self, name: &str) -> Option<PathBuf> {
         self.data_directory
@@ -271,7 +279,7 @@ impl OpenCodeStore {
 
     fn store_exists(&self) -> Result<bool, DiscoveryError> {
         if self.authority == StoreAuthority::Program {
-            return Ok(program_available(&self.program));
+            return program_available(&self.program);
         }
         let Some(directory) = self.data_directory.as_ref() else {
             return Ok(false);
@@ -320,8 +328,13 @@ impl OpenCodeStore {
         if self.authority == StoreAuthority::DefaultStore {
             self.sqlite_database_file(database_name)?;
         }
-        Ok(program_available(&self.program)
-            || (self.flavor == OpenCodeFlavor::Stable && program_available(OsStr::new("sqlite3"))))
+        if program_available(&self.program)? {
+            return Ok(true);
+        }
+        if self.flavor == OpenCodeFlavor::Stable {
+            return program_available(OsStr::new("sqlite3"));
+        }
+        Ok(false)
     }
 
     fn is_default_program(&self, name: &str) -> bool {
@@ -459,7 +472,7 @@ impl OpenCodeStore {
                     )
                     .map(Some);
             };
-            if program_available(OsStr::new("sqlite3")) {
+            if program_available(OsStr::new("sqlite3"))? {
                 let database =
                     database
                         .to_str()
@@ -686,8 +699,9 @@ impl OpenCodeStore {
 
 pub(crate) fn default_stores() -> Vec<OpenCodeStore> {
     let mut stores = vec![OpenCodeStore::default_stable()];
-    if program_available(OsStr::new("opencode2")) {
-        stores.push(OpenCodeStore::default_v2());
+    match program_available(OsStr::new("opencode2")) {
+        Ok(true) | Err(_) => stores.push(OpenCodeStore::default_v2()),
+        Ok(false) => {}
     }
     stores
 }
@@ -699,11 +713,58 @@ fn default_data_directory() -> Option<PathBuf> {
         .map(|path| path.join("opencode"))
 }
 
-fn program_available(program: &OsStr) -> bool {
-    Path::new(program).is_file()
-        || std::env::var_os("PATH").is_some_and(|path| {
-            std::env::split_paths(&path).any(|directory| directory.join(program).is_file())
-        })
+fn program_available(program: &OsStr) -> Result<bool, DiscoveryError> {
+    program_available_with(program, std::env::var_os("PATH").as_deref(), |path| {
+        fs::metadata(path).map(|metadata| metadata.is_file())
+    })
+    .map_err(|(path, error)| {
+        DiscoveryError::io(
+            path.display().to_string(),
+            "inspect OpenCode executable",
+            &error,
+        )
+    })
+}
+
+fn program_available_with(
+    program: &OsStr,
+    search_path: Option<&OsStr>,
+    mut inspect: impl FnMut(&Path) -> io::Result<bool>,
+) -> Result<bool, (PathBuf, io::Error)> {
+    let program_path = Path::new(program);
+    let explicit_path = program_path.is_absolute() || program_path.components().count() > 1;
+    if explicit_path {
+        return match inspect(program_path) {
+            Ok(available) => Ok(available),
+            Err(error) if executable_path_is_absent(&error) => Ok(false),
+            Err(error) => Err((program_path.to_path_buf(), error)),
+        };
+    }
+    let Some(search_path) = search_path else {
+        return Ok(false);
+    };
+    let mut first_error = None;
+    for directory in std::env::split_paths(search_path) {
+        let candidate = directory.join(program);
+        match inspect(&candidate) {
+            Ok(true) => return Ok(true),
+            Ok(false) => {}
+            Err(error) if executable_path_is_absent(&error) => {}
+            Err(error) => {
+                if first_error.is_none() {
+                    first_error = Some((candidate, error));
+                }
+            }
+        }
+    }
+    first_error.map_or(Ok(false), Err)
+}
+
+fn executable_path_is_absent(error: &io::Error) -> bool {
+    matches!(
+        error.kind(),
+        io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+    )
 }
 
 fn sql_literal(value: &str) -> String {
@@ -1047,7 +1108,7 @@ fn exit_status_label(status: ExitStatus) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::Harness;
+    use crate::{Harness, NativeStore};
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
     use std::path::PathBuf;
@@ -1438,6 +1499,74 @@ mod tests {
         assert!(missing_program.locate_exact("ses_x").unwrap().is_none());
         assert!(missing_program.candidates(100).records.is_empty());
         restore_xdg(old_xdg);
+    }
+
+    #[test]
+    fn unreadable_explicit_program_fails_and_path_search_keeps_looking() {
+        let _lock = XDG_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let old_path = std::env::var_os("PATH");
+        let temp = Temp::new();
+        let blocked = temp.path().join("blocked");
+        let usable = temp.path().join("usable");
+        fs::create_dir_all(&blocked).unwrap();
+        fs::create_dir_all(&usable).unwrap();
+        let blocked_program = fake_program(
+            &temp,
+            "blocked/opencode2",
+            "printf '{\"data\":{\"id\":\"ses_native\"}}\\n'",
+        );
+        let usable_program = fake_program(
+            &temp,
+            "usable/opencode2",
+            "printf '{\"data\":{\"id\":\"ses_native\"}}\\n'",
+        );
+
+        let injected = program_available_with(blocked_program.as_os_str(), None, |_| {
+            Err(io::Error::from(io::ErrorKind::PermissionDenied))
+        });
+        assert!(matches!(
+            injected,
+            Err((_, error)) if error.kind() == io::ErrorKind::PermissionDenied
+        ));
+
+        fs::set_permissions(&blocked, fs::Permissions::from_mode(0o000)).unwrap();
+        let meaningful_permissions = matches!(
+            fs::metadata(&blocked_program),
+            Err(ref error) if error.kind() == io::ErrorKind::PermissionDenied
+        );
+        let explicit_result = meaningful_permissions
+            .then(|| NativeStore::opencode_v2(&blocked_program).locate_exact("ses_native"));
+        let path = std::env::join_paths([blocked.as_os_str(), usable.as_os_str()]).unwrap();
+        std::env::set_var("PATH", &path);
+        let path_search =
+            program_available_with(OsStr::new("opencode2"), Some(&path), |candidate| {
+                if candidate.parent() == Some(blocked.as_path()) {
+                    Err(io::Error::from(io::ErrorKind::PermissionDenied))
+                } else if candidate == usable_program.as_path() {
+                    Ok(true)
+                } else {
+                    Err(io::Error::from(io::ErrorKind::NotFound))
+                }
+            });
+        let path_session = NativeStore::opencode_v2("opencode2")
+            .locate_exact("ses_native")
+            .unwrap();
+        fs::set_permissions(&blocked, fs::Permissions::from_mode(0o700)).unwrap();
+        if let Some(result) = explicit_result {
+            assert!(matches!(
+                result,
+                Err(DiscoveryError::Io {
+                    operation: "inspect OpenCode executable",
+                    kind: io::ErrorKind::PermissionDenied,
+                    ..
+                })
+            ));
+        }
+        assert!(matches!(path_search, Ok(true)));
+        let session = path_session.unwrap();
+        assert_eq!(session.id(), "ses_native");
+
+        restore_path(old_path);
     }
 
     #[test]

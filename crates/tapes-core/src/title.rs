@@ -3,7 +3,7 @@ use anyhow::{anyhow, Result};
 
 use crate::backend::{Backend, Query};
 use crate::scope::Scope;
-use crate::{ResolvedSession, StorePrecedence};
+use crate::{ResolvedSession, SharedStorePrecedence};
 
 const TITLE_SCAN_LIMIT: usize = 5_000;
 
@@ -27,7 +27,7 @@ pub fn resolve(
     );
     let mut matches = Vec::new();
     let mut incomplete = Vec::new();
-    let mut precedence = StorePrecedence::default();
+    let mut precedence = SharedStorePrecedence::default();
     for (origin, backend) in backends.iter().enumerate() {
         if harness.is_some_and(|name| name != backend.harness()) || !backend.available() {
             continue;
@@ -45,11 +45,23 @@ pub fn resolve(
                 backend.harness()
             ));
         }
-        precedence.unreadable(backend.as_ref(), origin, &listing.unavailable_ids);
+        for id in &listing.unavailable_ids {
+            precedence.record_unreadable(
+                backend.harness(),
+                backend.shares_session_ids(),
+                origin,
+                id,
+            );
+        }
         incomplete.extend(listing.unavailable);
         incomplete.extend(listing.unsearched);
         for session in listing.sessions {
-            if !precedence.admits(backend.as_ref(), origin, &session.id) {
+            if !precedence.admits(
+                backend.harness(),
+                backend.shares_session_ids(),
+                origin,
+                &session.id,
+            ) {
                 continue;
             }
             if session.title.as_deref() == Some(title) {

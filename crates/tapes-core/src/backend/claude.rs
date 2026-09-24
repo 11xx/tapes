@@ -26,7 +26,7 @@ use crate::model::{
     SourceDescriptor, Tokens, TrailingRecord, Transcript, Turn, TurnKind, TurnSelection,
 };
 use crate::usage::{Durations, ModelUsage, UsageDetail};
-use tapes_discovery::{Harness as NativeHarness, NativeStore};
+use tapes_discovery::{Harness as NativeHarness, IdentityBasis, NativeSession, NativeStore};
 
 #[derive(Clone, Debug)]
 pub struct ClaudeBackend {
@@ -55,31 +55,55 @@ impl ClaudeBackend {
         Self { read_bytes, ..self }
     }
 
-    fn parse(&self, path: &Path) -> Result<(Session, Vec<Turn>, Jsonl)> {
-        self.parse_with_parent(path, None)
+    fn parse(&self, native: &NativeSession, path: &Path) -> Result<(Session, Vec<Turn>, Jsonl)> {
+        self.parse_with_identity(
+            path,
+            native.id(),
+            native.identity_basis() == Some(IdentityBasis::Header),
+            None,
+        )
     }
 
     fn parse_with_parent(
         &self,
         path: &Path,
+        native_id: &str,
+        parent: Option<&str>,
+    ) -> Result<(Session, Vec<Turn>, Jsonl)> {
+        self.parse_with_identity(path, native_id, true, parent)
+    }
+
+    fn parse_with_identity(
+        &self,
+        path: &Path,
+        native_id: &str,
+        require_identity_record: bool,
         parent: Option<&str>,
     ) -> Result<(Session, Vec<Turn>, Jsonl)> {
         let recording = read_recording(path, self.read_bytes)?;
-        if let Some(parent) = parent {
-            let mut seen = false;
-            for value in recording.opening().iter().chain(&recording.tail.values) {
-                if let Some(id) = value.get("sessionId") {
-                    seen = true;
-                    if id.as_str() != Some(parent) {
+        let opening = recording.opening();
+        let read = &recording.tail;
+        let mut identity_seen = false;
+        for value in opening.iter().chain(&read.values) {
+            if let Some(id) = value.get("sessionId") {
+                identity_seen = true;
+                if id.as_str() != Some(native_id) {
+                    if parent.is_some() {
                         anyhow::bail!(
                             "child recording contains a different or invalid native parent ID"
                         );
                     }
+                    anyhow::bail!(
+                        "Claude record contains a different or invalid native session ID"
+                    );
                 }
             }
-            if !seen {
+        }
+        if require_identity_record && !identity_seen {
+            if parent.is_some() {
                 anyhow::bail!("child recording has no native parent identity evidence");
             }
+            anyhow::bail!("Claude recording has no native session identity evidence");
         }
         let (started_at, last_activity_at) = recording
             .time_range()
@@ -90,19 +114,6 @@ impl ClaudeBackend {
         // line. The opening is consulted first; it also covers a transcript
         // past the bounded read whose remaining tail is all tool output and
         // carries no `cwd`.
-        let opening = recording.opening();
-        let read = &recording.tail;
-        let id = opening
-            .iter()
-            .chain(&read.values)
-            .find_map(|value| value["sessionId"].as_str())
-            .map(str::to_owned)
-            .or_else(|| {
-                path.file_stem()
-                    .and_then(|stem| stem.to_str())
-                    .map(str::to_owned)
-            })
-            .ok_or_else(|| anyhow!("{} has no session id", path.display()))?;
         let directory = opening
             .iter()
             .chain(&read.values)
@@ -143,7 +154,7 @@ impl ClaudeBackend {
             .and_then(UsageDetail::into_option);
 
         let session = Session {
-            id,
+            id: native_id.to_owned(),
             source: SourceDescriptor::installed("claude", path.display().to_string()),
             metadata: None,
             model,
@@ -249,10 +260,8 @@ impl Backend for ClaudeBackend {
 
     fn child_transcript(&self, parent: &Session, reference: &str) -> Result<Transcript> {
         let path = child_recording(parent, reference)?;
-        let (mut session, turns, read) = self.parse_with_parent(&path, Some(&parent.id))?;
-        if session.id != parent.id {
-            anyhow::bail!("child recording does not name the selected parent");
-        }
+        let (mut session, turns, read) =
+            self.parse_with_parent(&path, &parent.id, Some(&parent.id))?;
         session.id = format!("{}::{reference}", parent.id);
         let last_turn = read
             .values
@@ -316,7 +325,7 @@ impl Backend for ClaudeBackend {
                 listing.unavailable_ids.push(native.id().to_owned());
                 continue;
             };
-            let (session, _, read) = match self.parse(path) {
+            let (session, _, read) = match self.parse(&native, path) {
                 Ok(parsed) => parsed,
                 Err(error) => {
                     listing
@@ -369,7 +378,7 @@ impl Backend for ClaudeBackend {
             store,
             query,
             |path| head_directory(path, claude_cwd),
-            |_, path| self.parse(path).map(|(session, _, _)| session),
+            |native, path| self.parse(native, path).map(|(session, _, _)| session),
         );
         listing
             .sessions
@@ -389,12 +398,13 @@ impl Backend for ClaudeBackend {
             tail,
             self.read_bytes,
             |path| head_directory(path, claude_cwd),
-            |_, path| {
-                self.parse(path).map(|(session, turns, read)| ParsedFile {
-                    session,
-                    turns,
-                    truncated: read.truncated,
-                })
+            |native, path| {
+                self.parse(native, path)
+                    .map(|(session, turns, read)| ParsedFile {
+                        session,
+                        turns,
+                        truncated: read.truncated,
+                    })
             },
         );
         listing
@@ -415,7 +425,7 @@ impl Backend for ClaudeBackend {
         let path = native
             .locator()
             .ok_or_else(|| anyhow!("Claude native session {} has no file locator", native.id()))?;
-        let (session, _, _) = self.parse(path)?;
+        let (session, _, _) = self.parse(&native, path)?;
         Ok(Some(enrich_native_session(&native, session)?))
     }
 

@@ -27,7 +27,7 @@ use crate::usage::{
     UsageAttribution, UsageDetail, UsageObservation, UsageObservationOmissions,
     UsageObservationOptions, UsageObservationResult, UsageObservationSeries,
 };
-use tapes_discovery::{Harness as NativeHarness, NativeStore};
+use tapes_discovery::{Harness as NativeHarness, IdentityBasis, NativeSession, NativeStore};
 
 #[derive(Clone, Debug)]
 pub struct CodexBackend {
@@ -64,7 +64,7 @@ impl CodexBackend {
         Self { read_bytes, ..self }
     }
 
-    fn parse(&self, path: &Path) -> Result<(Session, Vec<Turn>, Jsonl)> {
+    fn parse(&self, native: &NativeSession, path: &Path) -> Result<(Session, Vec<Turn>, Jsonl)> {
         let recording = read_recording(path, self.read_bytes)?;
         let (started_at, last_activity_at) = recording
             .time_range()
@@ -75,18 +75,28 @@ impl CodexBackend {
         // id and the recorded working directory live whatever the file's size.
         let opening = recording.opening();
         let read = &recording.tail;
-        let id = opening
+        let mut identity_seen = false;
+        for value in opening
             .iter()
-            .find(|value| value["type"] == "session_meta")
-            .and_then(|value| value["payload"]["id"].as_str())
-            .map(str::to_owned)
-            .or_else(|| {
-                path.file_stem()
-                    .and_then(|stem| stem.to_str())
-                    .and_then(|stem| stem.get(stem.len().saturating_sub(36)..))
-                    .map(str::to_owned)
-            })
-            .ok_or_else(|| anyhow!("{} has no session id", path.display()))?;
+            .filter(|value| value["type"] == "session_meta")
+        {
+            identity_seen = true;
+            let id = value["payload"]["id"].as_str().ok_or_else(|| {
+                anyhow!("{} has an invalid session_meta identity", path.display())
+            })?;
+            if id != native.id() {
+                anyhow::bail!(
+                    "Codex session_meta identity {id} disagrees with selected native identity {}",
+                    native.id()
+                );
+            }
+        }
+        if native.identity_basis() == Some(IdentityBasis::Header) && !identity_seen {
+            anyhow::bail!(
+                "{} no longer contains the native session_meta identity selected during discovery",
+                path.display()
+            );
+        }
         let directory = opening
             .iter()
             .find_map(codex_cwd)
@@ -109,7 +119,7 @@ impl CodexBackend {
         let facts = records.finish();
 
         let session = Session {
-            id,
+            id: native.id().to_owned(),
             source: SourceDescriptor::installed("codex", path.display().to_string()),
             metadata: None,
             model: facts.model,
@@ -262,7 +272,7 @@ impl Backend for CodexBackend {
             store,
             query,
             |path| head_directory(path, codex_cwd),
-            |_, path| self.parse(path).map(|(session, _, _)| session),
+            |native, path| self.parse(native, path).map(|(session, _, _)| session),
         );
         listing
             .sessions
@@ -282,12 +292,13 @@ impl Backend for CodexBackend {
             tail,
             self.read_bytes,
             |path| head_directory(path, codex_cwd),
-            |_, path| {
-                self.parse(path).map(|(session, turns, read)| ParsedFile {
-                    session,
-                    turns,
-                    truncated: read.truncated,
-                })
+            |native, path| {
+                self.parse(native, path)
+                    .map(|(session, turns, read)| ParsedFile {
+                        session,
+                        turns,
+                        truncated: read.truncated,
+                    })
             },
         );
         listing
@@ -309,7 +320,7 @@ impl Backend for CodexBackend {
         let path = native
             .locator()
             .ok_or_else(|| anyhow!("Codex native session {} has no file locator", native.id()))?;
-        let (session, _, _) = self.parse(path)?;
+        let (session, _, _) = self.parse(&native, path)?;
         Ok(Some(enrich_native_session(&native, session)?))
     }
 

@@ -23,7 +23,7 @@ use crate::model::{
     UserDefault,
 };
 use crate::usage::{ModelUsage, UsageDetail};
-use tapes_discovery::{Harness as NativeHarness, NativeStore};
+use tapes_discovery::{Harness as NativeHarness, IdentityBasis, NativeSession, NativeStore};
 
 #[derive(Clone, Debug)]
 pub struct PiBackend {
@@ -52,7 +52,11 @@ impl PiBackend {
         Self { read_bytes, ..self }
     }
 
-    fn parse(&self, path: &Path) -> Result<(Session, Vec<Turn>, Jsonl, usize)> {
+    fn parse(
+        &self,
+        native: &NativeSession,
+        path: &Path,
+    ) -> Result<(Session, Vec<Turn>, Jsonl, usize)> {
         let recording = read_recording(path, self.read_bytes)?;
         let (started_at, last_activity_at) = recording
             .time_range()
@@ -64,7 +68,25 @@ impl PiBackend {
         // only place either can be read on a file past the bounded tail.
         let opening = recording.opening();
         let read = &recording.tail;
-        let header = opening.iter().find(|value| value["type"] == "session");
+        let mut identity_seen = false;
+        for header in opening.iter().filter(|value| value["type"] == "session") {
+            identity_seen = true;
+            let id = header["id"]
+                .as_str()
+                .ok_or_else(|| anyhow!("{} has an invalid session identity", path.display()))?;
+            if id != native.id() {
+                anyhow::bail!(
+                    "Pi session header identity {id} disagrees with selected native identity {}",
+                    native.id()
+                );
+            }
+        }
+        if native.identity_basis() == Some(IdentityBasis::Header) && !identity_seen {
+            anyhow::bail!(
+                "{} no longer contains the native session identity selected during discovery",
+                path.display()
+            );
+        }
         let entries = read
             .values
             .iter()
@@ -83,16 +105,6 @@ impl PiBackend {
                     .is_some_and(|id| !active_ids.contains(id))
             })
             .count();
-        let id = header
-            .and_then(|value| value["id"].as_str())
-            .map(str::to_owned)
-            .or_else(|| {
-                path.file_stem()
-                    .and_then(|stem| stem.to_str())
-                    .and_then(|stem| stem.rsplit('_').next())
-                    .map(str::to_owned)
-            })
-            .ok_or_else(|| anyhow!("{} has no session id", path.display()))?;
         let directory = opening.iter().find_map(pi_cwd).map(PathBuf::from);
         let variant = active.iter().rev().find_map(|value| pi_thinking(value));
         let model = active
@@ -126,7 +138,7 @@ impl PiBackend {
         .into_option();
 
         let session = Session {
-            id,
+            id: native.id().to_owned(),
             source: SourceDescriptor::installed("pi", path.display().to_string()),
             metadata: None,
             model,
@@ -203,7 +215,7 @@ impl Backend for PiBackend {
             store,
             query,
             |path| head_directory(path, pi_cwd),
-            |_, path| self.parse(path).map(|(session, _, _, _)| session),
+            |native, path| self.parse(native, path).map(|(session, _, _, _)| session),
         );
         listing
             .sessions
@@ -223,8 +235,8 @@ impl Backend for PiBackend {
             tail,
             self.read_bytes,
             |path| head_directory(path, pi_cwd),
-            |_, path| {
-                self.parse(path)
+            |native, path| {
+                self.parse(native, path)
                     .map(|(session, turns, read, _)| ParsedFile {
                         session,
                         turns,
@@ -250,7 +262,7 @@ impl Backend for PiBackend {
         let path = native
             .locator()
             .ok_or_else(|| anyhow!("pi native session {} has no file locator", native.id()))?;
-        let (session, _, _, _) = self.parse(path)?;
+        let (session, _, _, _) = self.parse(&native, path)?;
         Ok(Some(enrich_native_session(&native, session)?))
     }
 

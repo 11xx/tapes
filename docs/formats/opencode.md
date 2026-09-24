@@ -19,6 +19,11 @@ prefix alone as proof that a recording is installed. A missing native store or
 required metadata reader is absence; unreadable metadata and incomplete scans
 remain explicit. Metadata responses are capped at 8 MiB, each command has a
 30-second deadline, and a candidate page contains at most 1,000 rows.
+The data root is captured when discovery is constructed. Metadata commands,
+transcript commands, and the local v2 search server use that same selected
+root even if the process environment changes later. Default programs run only
+when their corresponding database exists; an explicitly configured program
+does not depend on an unrelated default data root.
 
 ```
                  ┌─────────────────────────────┐

@@ -8,8 +8,6 @@ use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-pub use crate::IdentityBasis as FileIdentityBasis;
-
 const INITIAL_OPENING_BYTES: usize = 64 * 1024;
 const MAX_OPENING_BYTES: usize = 1024 * 1024;
 const MAX_EXACT_FILENAME_CANDIDATES: usize = 1_000;

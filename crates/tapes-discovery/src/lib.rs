@@ -8,9 +8,10 @@ mod file;
 mod opencode;
 
 pub use error::DiscoveryError;
-pub use file::{CandidatePage, FileIdentityBasis};
+pub use file::CandidatePage;
 pub use opencode::{OpenCodeFlavor, OpenCodeStore};
 
+use std::collections::{HashMap, HashSet};
 use std::env;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -425,6 +426,97 @@ pub trait IdentitySource<R: IdentityRecord> {
     }
 }
 
+/// Enforce first-store identity precedence for projections of one harness.
+///
+/// Callers retain their own listing, filtering, and diagnostic rules; this
+/// type only decides whether a later store may supply an identity.
+#[derive(Clone, Debug, Default)]
+pub struct SharedStorePrecedence {
+    listed: HashMap<(String, String), usize>,
+    unreadable: HashMap<(String, String), usize>,
+    failed: HashMap<String, usize>,
+    emitted: HashSet<(String, String)>,
+}
+
+impl SharedStorePrecedence {
+    /// Reserve an identity observed in an earlier shared-store listing.
+    pub fn record_listed(&mut self, harness: &str, shares_ids: bool, store: usize, id: &str) {
+        if !shares_ids {
+            return;
+        }
+        let index = self
+            .listed
+            .entry((harness.to_owned(), id.to_owned()))
+            .or_insert(store);
+        *index = (*index).min(store);
+    }
+
+    /// Reserve an identity an earlier shared store could not read.
+    pub fn record_unreadable(&mut self, harness: &str, shares_ids: bool, store: usize, id: &str) {
+        if !shares_ids {
+            return;
+        }
+        let index = self
+            .unreadable
+            .entry((harness.to_owned(), id.to_owned()))
+            .or_insert(store);
+        *index = (*index).min(store);
+    }
+
+    /// Mark a shared store whose failed listing may hide any identity.
+    pub fn record_store_failure(&mut self, harness: &str, shares_ids: bool, store: usize) {
+        if !shares_ids {
+            return;
+        }
+        let index = self.failed.entry(harness.to_owned()).or_insert(store);
+        *index = (*index).min(store);
+    }
+
+    /// Whether an earlier shared store failed before this projection.
+    pub fn has_prior_store_failure(&self, harness: &str, shares_ids: bool, store: usize) -> bool {
+        shares_ids
+            && self
+                .failed
+                .get(harness)
+                .is_some_and(|failed| *failed < store)
+    }
+
+    /// Whether an earlier shared store failed or had an unreadable matching ID.
+    pub fn blocks_later_store(
+        &self,
+        harness: &str,
+        shares_ids: bool,
+        store: usize,
+        id: &str,
+    ) -> bool {
+        if !shares_ids {
+            return false;
+        }
+        self.has_prior_store_failure(harness, true, store)
+            || self
+                .unreadable
+                .get(&(harness.to_owned(), id.to_owned()))
+                .is_some_and(|failed| *failed < store)
+    }
+
+    /// Admit one identity from its first shared store, once per harness.
+    pub fn admits(&mut self, harness: &str, shares_ids: bool, store: usize, id: &str) -> bool {
+        if !shares_ids {
+            return true;
+        }
+        if self.blocks_later_store(harness, true, store, id) {
+            return false;
+        }
+        let key = (harness.to_owned(), id.to_owned());
+        let index = self.listed.entry(key.clone()).or_insert(store);
+        if *index < store {
+            return false;
+        }
+        *index = (*index).min(store);
+        self.emitted.insert(key)
+    }
+}
+
 impl IdentitySource<NativeSession> for NativeStore {
     fn harness(&self) -> &str {
         self.harness().as_str()
@@ -472,44 +564,62 @@ pub fn resolve_with_sources<R: IdentityRecord + Clone>(
     }
     let mut exact = Vec::<Resolved<R>>::new();
     let mut failures = Vec::<(usize, String, String)>::new();
+    let mut precedence = SharedStorePrecedence::default();
     for (source_index, source) in sources.iter().enumerate() {
         match source.locate_exact(query) {
             Ok(Some(record)) if record.id() == query => exact.push(Resolved {
                 source_index,
                 record,
             }),
-            Ok(Some(_)) => failures.push((
-                source_index,
-                source.harness().to_owned(),
-                "exact lookup returned a nonmatching canonical ID".to_owned(),
-            )),
+            Ok(Some(_)) => {
+                if source.shares_session_ids() {
+                    precedence.record_store_failure(source.harness(), true, source_index);
+                }
+                failures.push((
+                    source_index,
+                    source.harness().to_owned(),
+                    "exact lookup returned a nonmatching canonical ID".to_owned(),
+                ));
+            }
             Ok(None) => {}
-            Err(error) => failures.push((source_index, source.harness().to_owned(), error)),
+            Err(error) => {
+                if source.shares_session_ids() {
+                    precedence.record_store_failure(source.harness(), true, source_index);
+                }
+                failures.push((source_index, source.harness().to_owned(), error));
+            }
         }
     }
 
-    for hit in &exact {
+    let mut admitted_exact = Vec::with_capacity(exact.len());
+    for hit in exact {
         let source = sources[hit.source_index];
-        if !source.shares_session_ids() {
-            continue;
+        if source.shares_session_ids() {
+            if precedence.has_prior_store_failure(source.harness(), true, hit.source_index) {
+                let prior = failures
+                    .iter()
+                    .filter(|(index, harness, _)| {
+                        *index < hit.source_index && harness == source.harness()
+                    })
+                    .map(|(_, _, failure)| failure.clone())
+                    .collect::<Vec<_>>();
+                return Err(ResolveError::StoreFailed {
+                    query: query.to_owned(),
+                    answered_by: hit
+                        .record
+                        .store_coordinate()
+                        .unwrap_or_else(|| source.harness())
+                        .to_owned(),
+                    failures: prior,
+                });
+            }
+            if !precedence.admits(source.harness(), true, hit.source_index, hit.record.id()) {
+                continue;
+            }
         }
-        let prior = failures
-            .iter()
-            .filter(|(index, harness, _)| *index < hit.source_index && harness == source.harness())
-            .map(|(_, _, failure)| failure.clone())
-            .collect::<Vec<_>>();
-        if !prior.is_empty() {
-            return Err(ResolveError::StoreFailed {
-                query: query.to_owned(),
-                answered_by: hit
-                    .record
-                    .store_coordinate()
-                    .unwrap_or_else(|| source.harness())
-                    .to_owned(),
-                failures: prior,
-            });
-        }
+        admitted_exact.push(hit);
     }
+    let mut exact = admitted_exact;
 
     if exact.len() == 1 {
         return Ok(exact.remove(0));
@@ -572,6 +682,18 @@ pub fn resolve_with_sources<R: IdentityRecord + Clone>(
         diagnostics.extend(page.failures.iter().cloned());
         pages.push(page);
     }
+    for (source_index, page) in pages.iter().enumerate() {
+        let source = sources[source_index];
+        if !source.shares_session_ids() {
+            continue;
+        }
+        if !page.failures.is_empty() {
+            precedence.record_store_failure(source.harness(), true, source_index);
+        }
+        for id in &page.unreadable_ids {
+            precedence.record_unreadable(source.harness(), true, source_index, id);
+        }
+    }
     let mut matches = Vec::<Resolved<R>>::new();
     for (source_index, page) in pages.iter().enumerate() {
         for record in &page.records {
@@ -580,44 +702,45 @@ pub fn resolve_with_sources<R: IdentityRecord + Clone>(
             }
             let source = sources[source_index];
             if source.shares_session_ids() {
-                let mut prior_failure = failures
-                    .iter()
-                    .filter(|(index, harness, _)| {
-                        *index < source_index && harness == source.harness()
-                    })
-                    .map(|(_, _, failure)| failure.clone())
-                    .collect::<Vec<_>>();
-                for earlier in 0..source_index {
-                    if sources[earlier].harness() != source.harness() {
-                        continue;
-                    }
-                    if pages[earlier]
-                        .unreadable_ids
+                if precedence.blocks_later_store(source.harness(), true, source_index, record.id())
+                {
+                    let mut prior_failure = failures
                         .iter()
-                        .any(|id| id == record.id())
-                    {
-                        prior_failure.push(format!(
-                            "{} store has an unreadable row for the same ID",
-                            sources[earlier].harness()
-                        ));
+                        .filter(|(index, harness, _)| {
+                            *index < source_index && harness == source.harness()
+                        })
+                        .map(|(_, _, failure)| failure.clone())
+                        .collect::<Vec<_>>();
+                    for earlier in 0..source_index {
+                        if sources[earlier].harness() != source.harness() {
+                            continue;
+                        }
+                        if pages[earlier]
+                            .unreadable_ids
+                            .iter()
+                            .any(|id| id == record.id())
+                        {
+                            prior_failure.push(format!(
+                                "{} store has an unreadable row for the same ID",
+                                sources[earlier].harness()
+                            ));
+                        }
+                        if !pages[earlier].failures.is_empty() {
+                            prior_failure.extend(pages[earlier].failures.iter().cloned());
+                        }
                     }
-                    if !pages[earlier].failures.is_empty() {
-                        prior_failure.extend(pages[earlier].failures.iter().cloned());
+                    if !prior_failure.is_empty() {
+                        return Err(ResolveError::StoreFailed {
+                            query: query.to_owned(),
+                            answered_by: record
+                                .store_coordinate()
+                                .unwrap_or_else(|| source.harness())
+                                .to_owned(),
+                            failures: prior_failure,
+                        });
                     }
                 }
-                if !prior_failure.is_empty() {
-                    return Err(ResolveError::StoreFailed {
-                        query: query.to_owned(),
-                        answered_by: record
-                            .store_coordinate()
-                            .unwrap_or_else(|| source.harness())
-                            .to_owned(),
-                        failures: prior_failure,
-                    });
-                }
-                if matches.iter().any(|prior| {
-                    prior.record.id() == record.id() && prior.record.harness() == record.harness()
-                }) {
+                if !precedence.admits(source.harness(), true, source_index, record.id()) {
                     continue;
                 }
             }

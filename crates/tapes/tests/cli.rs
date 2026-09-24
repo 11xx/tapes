@@ -3206,6 +3206,80 @@ fn native_file_read_failure_is_not_reported_as_not_found() {
 }
 
 #[test]
+fn listing_fills_its_result_limit_after_an_unreadable_native_candidate() {
+    let root = TemporaryDirectory::new(std::env::temp_dir().join(format!(
+        "tapes-list-unreadable-before-readable-{}",
+        std::process::id()
+    )));
+    let codex_home = root.path().join("codex");
+    let sessions = codex_home.join("sessions/2026/01/01");
+    fs::create_dir_all(&sessions).unwrap();
+    let unreadable_id = "10000000-0000-0000-0000-000000000001";
+    let readable_id = "20000000-0000-0000-0000-000000000002";
+    let write_recording = |id: &str| {
+        let path = sessions.join(format!("rollout-2026-01-01T00-00-00-{id}.jsonl"));
+        fs::write(
+            &path,
+            format!("{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"{id}\",\"cwd\":\"/fixtures/project\"}}}}\n"),
+        )
+        .unwrap();
+        path
+    };
+    let unreadable = write_recording(unreadable_id);
+    let readable = write_recording(readable_id);
+    for (path, modified) in [
+        (&unreadable, UNIX_EPOCH + Duration::from_secs(200)),
+        (&readable, UNIX_EPOCH + Duration::from_secs(100)),
+    ] {
+        fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_times(fs::FileTimes::new().set_modified(modified))
+            .unwrap();
+    }
+    fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o000)).unwrap();
+    assert!(matches!(
+        fs::File::open(&unreadable),
+        Err(ref error) if error.kind() == std::io::ErrorKind::PermissionDenied
+    ));
+
+    let mut command = tapes();
+    command.args([
+        "list",
+        "--harness",
+        "codex",
+        "--global",
+        "--limit",
+        "1",
+        "--json",
+    ]);
+    with_fixture_env(
+        &mut command,
+        &codex_home,
+        &root.path().join("home"),
+        root.path(),
+    );
+    let output = command.output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let sessions = value["sessions"].as_array().unwrap();
+    assert_eq!(sessions.len(), 1, "{value}");
+    assert_eq!(sessions[0]["id"], readable_id, "{value}");
+    assert!(
+        value["unreadable"].as_array().unwrap().iter().any(|row| {
+            let row = row.as_str().unwrap();
+            row.contains(unreadable_id) && row.contains("PermissionDenied")
+        }),
+        "{value}"
+    );
+}
+
+#[test]
 fn incomplete_native_prefix_refuses_but_a_full_id_still_resolves() {
     let root = TemporaryDirectory::new(std::env::temp_dir().join(format!(
         "tapes-incomplete-native-prefix-{}",

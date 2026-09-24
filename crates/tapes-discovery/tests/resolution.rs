@@ -1,5 +1,6 @@
 use tapes_discovery::{
     resolve_with_sources, CandidatePage, IdentityRecord, IdentitySource, ResolveError, Resolved,
+    SharedStorePrecedence,
 };
 
 #[derive(Clone, Debug, PartialEq)]
@@ -180,6 +181,24 @@ fn unreadable_higher_priority_open_code_row_reserves_its_identity() {
         resolve(&[&stable, &v2], "ses_"),
         Err(ResolveError::StoreFailed { .. })
     ));
+}
+
+#[test]
+fn shared_store_precedence_reserves_first_projection_and_unreadable_ids() {
+    let mut precedence = SharedStorePrecedence::default();
+    precedence.record_listed("opencode", true, 0, "ses_listed");
+    assert!(precedence.admits("opencode", true, 0, "ses_listed"));
+    assert!(!precedence.admits("opencode", true, 0, "ses_listed"));
+    assert!(!precedence.admits("opencode", true, 1, "ses_listed"));
+
+    precedence.record_unreadable("opencode", true, 0, "ses_unreadable");
+    assert!(precedence.blocks_later_store("opencode", true, 1, "ses_unreadable"));
+    assert!(!precedence.admits("opencode", true, 1, "ses_unreadable"));
+
+    precedence.record_store_failure("opencode", true, 0);
+    assert!(precedence.has_prior_store_failure("opencode", true, 1));
+    assert!(!precedence.admits("opencode", true, 1, "ses_unknown"));
+    assert!(precedence.admits("input", false, 1, "ses_listed"));
 }
 
 #[test]

@@ -484,7 +484,9 @@ impl IdentitySource<Session> for BackendIdentitySource<'_> {
     }
 
     fn candidates(&self, limit: usize) -> NativeCandidatePage<Session, String> {
-        match self.0.list(&Query::unscoped(limit)) {
+        let mut query = Query::unscoped(limit);
+        query.ceiling = limit;
+        match self.0.list(&query) {
             Ok(listing) => {
                 let failures = listing.unavailable;
                 let complete = !listing.scan_truncated
@@ -538,14 +540,6 @@ pub(crate) fn enrich_native_session(
     native: &NativeSession,
     mut session: Session,
 ) -> Result<Session> {
-    if session.id != native.id() {
-        anyhow::bail!(
-            "{} native identity {} disagrees with the normalized ID {}",
-            native.harness(),
-            native.id(),
-            session.id
-        );
-    }
     if session.harness() != native.harness().as_str() {
         anyhow::bail!(
             "{} native identity {} was normalized as {}",
@@ -554,6 +548,7 @@ pub(crate) fn enrich_native_session(
             session.harness()
         );
     }
+    session.id = native.id().to_owned();
     let locator = native
         .locator()
         .map(|path| path.display().to_string())
@@ -610,13 +605,8 @@ pub(crate) fn list_discovered_files(
         return Listing::default();
     }
     let intentional_result_limit =
-        query.scope.is_none() && !query.has_filters() && query.ceiling >= query.limit;
-    let candidate_limit = if intentional_result_limit {
-        query.limit
-    } else {
-        query.ceiling
-    };
-    let page = store.candidates(candidate_limit);
+        query.scope.is_none() && !query.has_filters() && query.ceiling > query.limit;
+    let page = store.candidates(query.ceiling);
     let mut by_path = HashMap::with_capacity(page.records.len());
     let mut files = Vec::with_capacity(page.records.len());
     let mut no_path = Vec::new();
