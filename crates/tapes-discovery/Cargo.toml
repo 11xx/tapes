@@ -1,0 +1,16 @@
+[package]
+name = "tapes-discovery"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Bounded metadata-only discovery of native coding-agent session stores."
+keywords = ["sessions", "agents", "discovery"]
+categories = ["development-tools"]
+
+[features]
+default = []
+opencode = []
+
+[dependencies]
+serde_json.workspace = true
