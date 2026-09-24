@@ -75,6 +75,11 @@ impl Source {
         self.terminal = true;
         self
     }
+
+    fn unavailable(mut self) -> Self {
+        self.available = false;
+        self
+    }
 }
 
 impl IdentitySource<Row> for Source {
@@ -185,6 +190,24 @@ fn a_complete_unique_prefix_resolves_to_the_canonical_id() {
     ));
     let resolved = resolve(&[&source], "prefix-").unwrap();
     assert_eq!(resolved.record.id(), "prefix-canonical-id");
+}
+
+#[test]
+fn failed_unavailable_source_makes_a_single_prefix_candidate_incomplete() {
+    let unreadable = Source::empty("claude")
+        .with_exact(Err("store inspection failed".to_owned()))
+        .unavailable();
+    let candidate = Source::empty("codex").with_page(page(
+        vec![Row::new("prefix-one", "codex", "codex-store")],
+        true,
+    ));
+    let error = resolve(&[&unreadable, &candidate], "prefix-").unwrap_err();
+    let ResolveError::Incomplete { diagnostics, .. } = error else {
+        panic!("expected incomplete coverage, got {error:?}");
+    };
+    assert!(diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.contains("store inspection failed")));
 }
 
 #[test]

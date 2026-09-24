@@ -5,9 +5,9 @@ use anyhow::{anyhow, Result};
 use serde_json::Value;
 
 use super::{
-    accounting_for, head_directory, head_jsonl, home_path, jsonl_files, list_files,
-    list_files_with_search, matching_session_file, read_bounds, read_recording, replay_pin,
-    session_file, skipped_records_note, stream_jsonl, stream_jsonl_with_gaps,
+    accounting_for, default_native_store, enrich_native_session, head_directory, head_jsonl,
+    list_discovered_files, list_discovered_files_with_search, read_bounds, read_recording,
+    replay_pin, skipped_records_note, stream_jsonl, stream_jsonl_with_gaps,
     streamed_trailing_record, terminal_from_values, timestamp, trailing_record,
     transcript_from_recording, ActivityRange, Backend, Jsonl, Listing, ParsedFile, Query, ReadPin,
     StreamedTranscript, TokenTotals, UnmappedTally,
@@ -27,10 +27,11 @@ use crate::usage::{
     UsageAttribution, UsageDetail, UsageObservation, UsageObservationOmissions,
     UsageObservationOptions, UsageObservationResult, UsageObservationSeries,
 };
+use tapes_discovery::{Harness as NativeHarness, NativeStore};
 
 #[derive(Clone, Debug)]
 pub struct CodexBackend {
-    root: Option<PathBuf>,
+    store: Option<NativeStore>,
     /// How much of a recording's end a transcript read takes.
     read_bytes: u64,
 }
@@ -46,7 +47,14 @@ type CodexTranscriptRead = (
 impl CodexBackend {
     pub fn new(root: impl Into<PathBuf>) -> Self {
         Self {
-            root: Some(root.into()),
+            store: Some(NativeStore::codex(root)),
+            read_bytes: super::DEFAULT_READ_BYTES,
+        }
+    }
+
+    pub(crate) fn from_store(store: Option<NativeStore>) -> Self {
+        Self {
+            store,
             read_bytes: super::DEFAULT_READ_BYTES,
         }
     }
@@ -193,14 +201,7 @@ impl CodexBackend {
 
 impl Default for CodexBackend {
     fn default() -> Self {
-        let root = std::env::var_os("CODEX_HOME")
-            .map(PathBuf::from)
-            .or_else(|| home_path(&[".codex"]))
-            .map(|path| path.join("sessions"));
-        Self {
-            root,
-            read_bytes: super::DEFAULT_READ_BYTES,
-        }
+        Self::from_store(default_native_store(NativeHarness::Codex))
     }
 }
 
@@ -245,7 +246,7 @@ impl Backend for CodexBackend {
     }
 
     fn available(&self) -> bool {
-        self.root.as_deref().is_some_and(Path::is_dir)
+        self.store.as_ref().is_some_and(NativeStore::available)
     }
 
     fn list_titles(&self, _query: &Query) -> Result<Listing> {
@@ -254,14 +255,14 @@ impl Backend for CodexBackend {
     }
 
     fn list(&self, query: &Query) -> Result<Listing> {
-        let Some(root) = self.root.as_deref() else {
+        let Some(store) = self.store.as_ref() else {
             return Ok(Listing::default());
         };
-        let mut listing = list_files(
-            jsonl_files(root),
+        let mut listing = list_discovered_files(
+            store,
             query,
             |path| head_directory(path, codex_cwd),
-            |path| self.parse(path).ok().map(|(session, _, _)| session),
+            |_, path| self.parse(path).map(|(session, _, _)| session),
         );
         listing
             .sessions
@@ -271,24 +272,22 @@ impl Backend for CodexBackend {
     }
 
     fn list_with_search(&self, query: &Query, needle: &str, tail: usize) -> Result<Listing> {
-        let Some(root) = self.root.as_deref() else {
+        let Some(store) = self.store.as_ref() else {
             return Ok(Listing::default());
         };
-        let mut listing = list_files_with_search(
-            jsonl_files(root),
+        let mut listing = list_discovered_files_with_search(
+            store,
             query,
             needle,
             tail,
             self.read_bytes,
             |path| head_directory(path, codex_cwd),
-            |path| {
-                self.parse(path)
-                    .ok()
-                    .map(|(session, turns, read)| ParsedFile {
-                        session,
-                        turns,
-                        truncated: read.truncated,
-                    })
+            |_, path| {
+                self.parse(path).map(|(session, turns, read)| ParsedFile {
+                    session,
+                    turns,
+                    truncated: read.truncated,
+                })
             },
         );
         listing
@@ -301,22 +300,24 @@ impl Backend for CodexBackend {
     /// Locate by filename: no other session file is parsed, though the store
     /// is still walked to find it.
     fn locate(&self, id: &str) -> Result<Option<Session>> {
-        let Some(root) = self.root.as_deref() else {
+        let Some(store) = self.store.as_ref() else {
             return Ok(None);
         };
-        let Some(path) = session_file(root, id) else {
+        let Some(native) = store.locate_exact(id)? else {
             return Ok(None);
         };
-        Ok(self.parse(&path).ok().map(|(session, _, _)| session))
+        let path = native
+            .locator()
+            .ok_or_else(|| anyhow!("Codex native session {} has no file locator", native.id()))?;
+        let (session, _, _) = self.parse(path)?;
+        Ok(Some(enrich_native_session(&native, session)?))
     }
 
     fn transcript(&self, session: &Session, tail: usize) -> Result<Transcript> {
-        let root = self
-            .root
-            .as_deref()
-            .ok_or_else(|| anyhow!("codex store is unavailable"))?;
-        let path = session_file(root, &session.id)
-            .ok_or_else(|| anyhow!("codex session {} is unavailable", session.id))?;
+        let path = session
+            .locator()
+            .map(PathBuf::from)
+            .ok_or_else(|| anyhow!("codex session {} has no file locator", session.id))?;
         let (turns, recording, trailing_record, terminal, unmapped) =
             read_transcript(&path, self.read_bytes)?;
         let mut transcript = transcript_from_recording(
@@ -340,12 +341,10 @@ impl Backend for CodexBackend {
         replay: Option<&StreamedTranscript>,
         turn: &mut dyn FnMut(Turn) -> Result<()>,
     ) -> Result<StreamedTranscript> {
-        let root = self
-            .root
-            .as_deref()
-            .ok_or_else(|| anyhow!("codex store is unavailable"))?;
-        let path = session_file(root, &session.id)
-            .ok_or_else(|| anyhow!("codex session {} is unavailable", session.id))?;
+        let path = session
+            .locator()
+            .map(PathBuf::from)
+            .ok_or_else(|| anyhow!("codex session {} has no file locator", session.id))?;
         let domain = format!("file:{}", path.display());
         let mut terminal = None;
         let mut reader = CodexTurns::default();
@@ -382,7 +381,7 @@ impl Backend for CodexBackend {
     /// parent, keyed by the agent path they name, and the headers of the
     /// store's own recordings. Only headers are read; no child's turns are.
     fn lineage(&self, session: &Session) -> Result<Lineage> {
-        let (files, path) = self.recording(session)?;
+        let (files, path, discovery_notes) = self.lineage_inputs(session)?;
         let recording = read_recording(&path, self.read_bytes)?;
         let header = recording
             .opening()
@@ -394,14 +393,15 @@ impl Backend for CodexBackend {
         for value in &recording.tail.values {
             agents.observe(value);
         }
-        Ok(Lineage {
+        let lineage = Lineage {
             truncation: read_bounds(&recording.tail),
-            ..self.relatives(&files, &path, session, &header, agents)
-        })
+            ..self.relatives(&files, &path, session, &header, agents, discovery_notes)
+        };
+        Ok(lineage)
     }
 
     fn stream_lineage(&self, session: &Session) -> Result<Lineage> {
-        let (files, path) = self.recording(session)?;
+        let (files, path, discovery_notes) = self.lineage_inputs(session)?;
         let mut header = None;
         let mut agents = SpawnedAgents::default();
         let read = stream_jsonl(&path, None, |value, _, _| {
@@ -412,13 +412,16 @@ impl Backend for CodexBackend {
             Ok(false)
         })?;
         let header = header.unwrap_or(Value::Null);
-        let mut lineage = self.relatives(&files, &path, session, &header, agents);
+        let mut lineage = self.relatives(&files, &path, session, &header, agents, discovery_notes);
         lineage.notes.extend(skipped_records_note(read.skipped));
         Ok(lineage)
     }
 
     fn stream_session(&self, session: &Session, read: &StreamedTranscript) -> Result<Session> {
-        let (_, path) = self.recording(session)?;
+        let path = session
+            .locator()
+            .map(PathBuf::from)
+            .ok_or_else(|| anyhow!("codex session {} has no file locator", session.id))?;
         let records = std::cell::RefCell::new(CodexRecords::new(&path, false));
         let streamed = stream_jsonl_with_gaps(
             &path,
@@ -446,7 +449,10 @@ impl Backend for CodexBackend {
         read: Option<&crate::model::ReadEvidence>,
         options: UsageObservationOptions,
     ) -> Result<UsageObservationResult> {
-        let (_, path) = self.recording(session)?;
+        let path = session
+            .locator()
+            .map(PathBuf::from)
+            .ok_or_else(|| anyhow!("codex session {} has no file locator", session.id))?;
         let read_window = read.is_none_or(|read| read.source_length > read.configured_bound);
         let records = CodexRecords::with_series(&path, read_window, options);
         let records = if let Some(evidence) = read {
@@ -509,16 +515,36 @@ impl Backend for CodexBackend {
 }
 
 impl CodexBackend {
-    /// The store's recordings, newest first, and this session's among them.
-    fn recording(&self, session: &Session) -> Result<(Vec<PathBuf>, PathBuf)> {
-        let root = self
-            .root
-            .as_deref()
+    /// Use discovery-owned native locators for sibling and parent joins.
+    fn lineage_inputs(&self, session: &Session) -> Result<(Vec<PathBuf>, PathBuf, Vec<String>)> {
+        let path = session
+            .locator()
+            .map(PathBuf::from)
+            .ok_or_else(|| anyhow!("codex session {} has no file locator", session.id))?;
+        let store = self
+            .store
+            .as_ref()
             .ok_or_else(|| anyhow!("codex store is unavailable"))?;
-        let files = jsonl_files(root);
-        let path = matching_session_file(files.iter().cloned(), &session.id)
-            .ok_or_else(|| anyhow!("codex session {} is unavailable", session.id))?;
-        Ok((files, path))
+        let page = store.candidates(100_000);
+        let files = page
+            .records
+            .iter()
+            .filter_map(|native| native.locator().map(Path::to_path_buf))
+            .collect();
+        let mut notes = page
+            .failures
+            .into_iter()
+            .map(|failure| format!("Codex lineage candidate: {failure}"))
+            .collect::<Vec<_>>();
+        notes.extend(
+            page.unreadable_ids
+                .into_iter()
+                .map(|id| format!("Codex lineage candidate {id} could not be identified")),
+        );
+        if !page.complete && notes.is_empty() {
+            notes.push("Codex lineage candidate coverage is incomplete".to_owned());
+        }
+        Ok((files, path, notes))
     }
 
     /// The relatives a rollout's header and spawned agents name, joined to the
@@ -530,14 +556,29 @@ impl CodexBackend {
         session: &Session,
         header: &Value,
         agents: SpawnedAgents,
+        mut notes: Vec<String>,
     ) -> Lineage {
-        let parent = header["parent_thread_id"]
-            .as_str()
-            .map(|native_id| ParentRef {
-                resolved: matching_session_file(files.iter().cloned(), native_id).is_some(),
+        let parent = header["parent_thread_id"].as_str().map(|native_id| {
+            let resolved = match self
+                .store
+                .as_ref()
+                .ok_or_else(|| anyhow!("codex store is unavailable"))
+                .and_then(|store| store.locate_exact(native_id).map_err(Into::into))
+            {
+                Ok(session) => session.is_some(),
+                Err(error) => {
+                    notes.push(format!(
+                        "Codex parent session {native_id} could not be resolved: {error:#}"
+                    ));
+                    false
+                }
+            };
+            ParentRef {
+                resolved,
                 native_id: native_id.to_owned(),
                 source: "session_meta.parent_thread_id".to_owned(),
-            });
+            }
+        });
 
         let mut agents = agents.agents;
         let (probed, probe_bound) = child_headers(files, path, &session.id);
@@ -566,7 +607,6 @@ impl CodexBackend {
             })
             .collect();
 
-        let mut notes = Vec::new();
         if let Some(inspected) = probe_bound {
             notes.push(format!(
                 "The lineage read inspected the newest {inspected} recordings in the store; \

@@ -207,6 +207,10 @@ impl Backend for InputBackend {
         true
     }
 
+    fn terminal_exact_failure(&self) -> bool {
+        true
+    }
+
     fn list(&self, query: &Query) -> Result<Listing> {
         let dataset = self.dataset()?;
         let mut listing = Listing {

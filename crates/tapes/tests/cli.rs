@@ -5,9 +5,10 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::Value;
+use tapes_core::ResolveError;
 
 const CODEX_SESSION_ONE: &str = include_str!(
     "fixtures/codex/rollout-2026-01-01T10-00-00-00000000-0000-0000-0000-000000000001.jsonl"
@@ -1080,7 +1081,7 @@ fn terminal_only_fixture_store(name: &str) -> (PathBuf, PathBuf) {
     let sessions = root.join("sessions/2026/01/01");
     fs::create_dir_all(&sessions).unwrap();
     fs::write(
-        sessions.join("rollout-2026-01-01T15-00000000-0000-0000-0000-000000000006.jsonl"),
+        sessions.join("rollout-2026-01-01T15-00-00-00000000-0000-0000-0000-000000000006.jsonl"),
         CODEX_SESSION_TERMINAL_ONLY,
     )
     .unwrap();
@@ -1111,7 +1112,7 @@ fn invocation_fixture_store(name: &str) -> (PathBuf, PathBuf) {
     let sessions = root.join("sessions/2026/01/01");
     fs::create_dir_all(&sessions).unwrap();
     fs::write(
-        sessions.join("rollout-2026-01-01T16-00000000-0000-0000-0000-000000000007.jsonl"),
+        sessions.join("rollout-2026-01-01T16-00-00-00000000-0000-0000-0000-000000000007.jsonl"),
         CODEX_SESSION_INVOCATIONS,
     )
     .unwrap();
@@ -1404,12 +1405,48 @@ fn assert_process_gone(pid_file: &Path) {
 }
 
 fn with_fixture_env(command: &mut Command, codex_home: &Path, home: &Path, bin: &Path) {
+    create_opencode_data_directory(home);
+    if bin.join("opencode2").is_file() {
+        create_opencode_v2_store(home);
+    }
+    if bin.join("opencode").is_file() {
+        create_opencode_sqlite_proxy(bin);
+    }
     command
         .env("CODEX_HOME", codex_home)
         .env("HOME", home)
         .env_remove("CLAUDE_CONFIG_DIR")
         .env_remove("XDG_DATA_HOME")
         .env("PATH", format!("{}:/usr/bin:/bin", bin.display()));
+}
+
+fn create_opencode_store(home: &Path) {
+    let opencode_data = create_opencode_data_directory(home);
+    fs::write(opencode_data.join("opencode.db"), b"SQLite format 3\0").unwrap();
+}
+
+fn create_opencode_v2_store(home: &Path) {
+    let opencode_data = create_opencode_data_directory(home);
+    fs::write(opencode_data.join("opencode-next.db"), b"SQLite format 3\0").unwrap();
+}
+
+fn create_opencode_sqlite_proxy(bin: &Path) {
+    let proxy = bin.join("sqlite3");
+    if proxy.exists() {
+        return;
+    }
+    fs::write(
+        &proxy,
+        "#!/bin/sh\nexec \"${0%/*}/opencode\" db --format tsv \"$6\"\n",
+    )
+    .unwrap();
+    fs::set_permissions(&proxy, fs::Permissions::from_mode(0o700)).unwrap();
+}
+
+fn create_opencode_data_directory(home: &Path) -> PathBuf {
+    let opencode_data = home.join(".local/share/opencode");
+    fs::create_dir_all(&opencode_data).unwrap();
+    opencode_data
 }
 
 fn write_claude_fixture(root: &Path, id: &str) {
@@ -1511,17 +1548,32 @@ fn titleless_opencode_program(root: &Path) -> OpenCodeAlias {
 }
 
 fn opencode_program(root: &Path, name: &str) -> OpenCodeAlias {
+    create_opencode_data_directory(root);
+    create_opencode_data_directory(&root.join("home"));
+    if name == "opencode" {
+        create_opencode_store(root);
+        create_opencode_store(&root.join("home"));
+    } else if name == "opencode2" {
+        create_opencode_v2_store(root);
+        create_opencode_v2_store(&root.join("home"));
+    }
     let program = root.join(name);
     let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/opencode/opencode2");
     std::os::unix::fs::symlink(fixture, &program).unwrap();
+    if name == "opencode" {
+        create_opencode_sqlite_proxy(root);
+    }
     OpenCodeAlias { path: program }
 }
 
 fn malformed_opencode_program(root: &Path) -> OpenCodeAlias {
+    create_opencode_store(root);
+    create_opencode_store(&root.join("home"));
     let program = root.join("opencode");
     let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures/opencode/opencode-malformed-row");
     std::os::unix::fs::symlink(fixture, &program).unwrap();
+    create_opencode_sqlite_proxy(root);
     OpenCodeAlias { path: program }
 }
 
@@ -3104,6 +3156,146 @@ fn terminal_only_recording_exposes_a_structured_stop_observation() {
         "zero-requested-tail"
     );
     fs::remove_dir_all(codex_home).unwrap();
+}
+
+#[test]
+fn native_file_read_failure_is_not_reported_as_not_found() {
+    let root = TemporaryDirectory::new(
+        std::env::temp_dir().join(format!("tapes-native-read-failure-{}", std::process::id())),
+    );
+    let codex_home = root.path().join("codex");
+    let sessions = codex_home.join("sessions/2026/09/24");
+    fs::create_dir_all(&sessions).unwrap();
+    let id = "00000000-0000-0000-0000-000000000099";
+    let recording = sessions.join(format!("rollout-2026-09-24T12-00-00-{id}.jsonl"));
+    fs::write(
+        &recording,
+        format!("{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"{id}\"}}}}\n"),
+    )
+    .unwrap();
+    fs::set_permissions(&recording, fs::Permissions::from_mode(0o000)).unwrap();
+    assert!(
+        matches!(
+            fs::File::open(&recording),
+            Err(ref error) if error.kind() == std::io::ErrorKind::PermissionDenied
+        ),
+        "the permission probe must deny reads for this process"
+    );
+
+    let backends: Vec<Box<dyn tapes_core::backend::Backend>> = vec![Box::new(
+        tapes_core::backend::codex::CodexBackend::new(codex_home.join("sessions")),
+    )];
+    let resolver_error = tapes_core::resolve_session(&backends, id).unwrap_err();
+    assert!(matches!(resolver_error, ResolveError::BackendFailed { .. }));
+    assert!(resolver_error.to_string().contains("PermissionDenied"));
+
+    let mut command = tapes();
+    command.args(["show", id, "--json"]);
+    with_fixture_env(
+        &mut command,
+        &codex_home,
+        &root.path().join("home"),
+        root.path(),
+    );
+    let output = command.output().unwrap();
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    let diagnostic = String::from_utf8_lossy(&output.stderr);
+    assert!(diagnostic.contains("PermissionDenied"), "{diagnostic}");
+    assert!(!diagnostic.contains("was not found"), "{diagnostic}");
+}
+
+#[test]
+fn incomplete_native_prefix_refuses_but_a_full_id_still_resolves() {
+    let root = TemporaryDirectory::new(std::env::temp_dir().join(format!(
+        "tapes-incomplete-native-prefix-{}",
+        std::process::id()
+    )));
+    let config = root.path().join("claude-config");
+    let projects = config.join("projects");
+    let project = projects.join("fixture-project");
+    fs::create_dir_all(&project).unwrap();
+    let visible = "native-prefix-visible";
+    let hidden = "native-prefix-hidden";
+    let visible_path = project.join("a-visible.jsonl");
+    fs::write(
+        &visible_path,
+        format!("{{\"sessionId\":\"{visible}\",\"cwd\":\"/fixtures/project\"}}\n"),
+    )
+    .unwrap();
+    fs::File::options()
+        .write(true)
+        .open(&visible_path)
+        .unwrap()
+        .set_times(
+            fs::FileTimes::new().set_modified(SystemTime::now() + Duration::from_secs(86_400)),
+        )
+        .unwrap();
+    for index in 0..999 {
+        let id = format!("middle-{index:04}");
+        fs::write(
+            project.join(format!("{id}.jsonl")),
+            format!("{{\"sessionId\":\"{id}\",\"cwd\":\"/fixtures/project\"}}\n"),
+        )
+        .unwrap();
+    }
+    fs::write(
+        project.join(format!("{hidden}.jsonl")),
+        format!("{{\"sessionId\":\"{hidden}\",\"cwd\":\"/fixtures/project\"}}\n"),
+    )
+    .unwrap();
+    fs::File::options()
+        .write(true)
+        .open(project.join(format!("{hidden}.jsonl")))
+        .unwrap()
+        .set_times(fs::FileTimes::new().set_modified(UNIX_EPOCH))
+        .unwrap();
+
+    let backends: Vec<Box<dyn tapes_core::backend::Backend>> = vec![Box::new(
+        tapes_core::backend::claude::ClaudeBackend::new(&projects),
+    )];
+    assert!(matches!(
+        tapes_core::resolve_session(&backends, "native-prefix"),
+        Err(ResolveError::Incomplete { .. })
+    ));
+    let selected = tapes_core::resolve_session(&backends, hidden).unwrap();
+    assert_eq!(selected.session.id, hidden);
+    assert_eq!(selected.session.harness(), "claude");
+    assert_eq!(
+        selected.session.locator(),
+        Some(project.join(format!("{hidden}.jsonl")).to_str().unwrap())
+    );
+
+    let (codex_home, home) = (root.path().join("codex"), root.path().join("home"));
+    let unresolved = run_claude(
+        &["show", "native-prefix"],
+        &codex_home,
+        &home,
+        root.path(),
+        Some(config.as_os_str()),
+    );
+    assert!(!unresolved.status.success());
+    assert!(String::from_utf8_lossy(&unresolved.stderr).contains("use the full ID"));
+
+    let resolved = run_claude(
+        &["show", hidden, "--tail", "0", "--json"],
+        &codex_home,
+        &home,
+        root.path(),
+        Some(config.as_os_str()),
+    );
+    assert!(
+        resolved.status.success(),
+        "{}",
+        String::from_utf8_lossy(&resolved.stderr)
+    );
+    let value: Value = serde_json::from_slice(&resolved.stdout).unwrap();
+    assert_eq!(value["session"]["id"], hidden);
+    assert_eq!(value["session"]["source"]["recorded_harness"], "claude");
+    assert_eq!(
+        value["session"]["source"]["location"]["locator"],
+        project.join(format!("{hidden}.jsonl")).to_str().unwrap()
+    );
 }
 
 #[test]
@@ -4730,7 +4922,7 @@ fn malformed_opencode_database_row_is_unreadable_without_breaking_listing() {
     assert!(unreadable[1]
         .as_str()
         .unwrap()
-        .contains("EOF while parsing a string"));
+        .contains("malformed row metadata"));
     // A corrupt row says nothing about the harness, which was read fine.
     assert!(
         value["unavailable"].as_array().unwrap().is_empty(),
@@ -4757,7 +4949,7 @@ fn malformed_opencode_database_row_is_unreadable_without_breaking_listing() {
         "{human_text}"
     );
     assert!(
-        human_text.contains("EOF while parsing a string"),
+        human_text.contains("malformed row metadata"),
         "{human_text}"
     );
     assert!(
@@ -4774,7 +4966,7 @@ fn malformed_opencode_database_row_is_unreadable_without_breaking_listing() {
     assert!(!show.status.success());
     let error = String::from_utf8_lossy(&show.stderr);
     assert!(error.contains("ses_truncated_fixture"), "{error}");
-    assert!(error.contains("EOF while parsing a string"), "{error}");
+    assert!(error.contains("malformed row metadata"), "{error}");
 }
 
 /// The stable store takes precedence for an id both OpenCode stores answer.
@@ -4795,6 +4987,9 @@ fn an_unreadable_stable_opencode_store_is_not_answered_from_opencode2() {
     )
     .unwrap();
     let _stable = OpenCodeAlias { path: stable };
+    create_opencode_store(root.path());
+    create_opencode_store(&root.path().join("home"));
+    create_opencode_sqlite_proxy(root.path());
     let _beta = opencode_program(root.path(), "opencode2");
     let shared = "ses_000000fixtureSharedSession";
     let bundle = root.path().join("bundle");
@@ -4827,7 +5022,10 @@ fn an_unreadable_stable_opencode_store_is_not_answered_from_opencode2() {
         assert!(!output.status.success(), "{args:?} answered: {stdout}");
         assert!(output.stdout.is_empty(), "{args:?} answered: {stdout}");
         assert!(error.contains(store), "{args:?}: {error}");
-        assert!(error.contains("EOF while parsing"), "{args:?}: {error}");
+        assert!(
+            error.contains("malformed row metadata"),
+            "{args:?}: {error}"
+        );
         assert!(
             error.contains(&format!("opencode2:/api/session/{shared}")),
             "{args:?}: {error}"
@@ -4886,6 +5084,9 @@ fn latest_names_unreadable_rows_beside_the_readable_choice() {
     )
     .unwrap();
     let _stable = OpenCodeAlias { path: stable };
+    create_opencode_store(root.path());
+    create_opencode_store(&root.path().join("home"));
+    create_opencode_sqlite_proxy(root.path());
     let _beta = opencode_program(root.path(), "opencode2");
     let output = tapes()
         .args([
@@ -4949,6 +5150,9 @@ fn a_listing_names_the_opencode_store_it_could_not_read() {
         )
         .unwrap();
         let _stable = OpenCodeAlias { path: stable };
+        create_opencode_store(root.path());
+        create_opencode_store(&root.path().join("home"));
+        create_opencode_sqlite_proxy(root.path());
         let _beta = opencode_program(root.path(), "opencode2");
         let home = root.path().join("home");
         let output = tapes()
@@ -5686,6 +5890,8 @@ fn use_sqlite3(root: &Path, sqlite3: &Path) {
 fn create_opencode_database(root: &Path, id: &str, inserts: &str) {
     let store = root.join("home/.local/share/opencode");
     fs::create_dir_all(&store).unwrap();
+    let database = store.join("opencode.db");
+    fs::remove_file(&database).unwrap();
     let schema = format!(
         r#"
 CREATE TABLE `session` (`id` text PRIMARY KEY, `parent_id` text, `directory` text NOT NULL,
@@ -5705,7 +5911,7 @@ INSERT INTO session VALUES ('{id}', NULL, '/fixtures/database', 'Database fixtur
 "#
     );
     let mut create = Command::new(&sqlite3_binaries()[0])
-        .arg(store.join("opencode.db"))
+        .arg(database)
         .stdin(Stdio::piped())
         .spawn()
         .unwrap();

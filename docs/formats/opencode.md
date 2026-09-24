@@ -12,6 +12,14 @@ when the source omits or malforms it; filesystem timestamps are never used as
 conversation activity. Paged reads carry a source revision, physical ranges,
 and `record_ref` coordinates for the native records they retain.
 
+Native metadata discovery owns stable and OpenCode2 store identity and the
+canonical session ID. It reads session rows or session API objects, retains
+their bounded metadata for core normalization, and never treats the `ses_`
+prefix alone as proof that a recording is installed. A missing native store or
+required metadata reader is absence; unreadable metadata and incomplete scans
+remain explicit. Metadata responses are capped at 8 MiB, each command has a
+30-second deadline, and a candidate page contains at most 1,000 rows.
+
 ```
                  ┌─────────────────────────────┐
                  │ opencode-next.db (event     │  ← canonical, WAL, safe to read
@@ -236,9 +244,10 @@ Notes:
 
 ## 5. Current database path
 
-For the default stable executable, `tapes` opens `opencode.db` through
-`sqlite3 -readonly` when that command is available. It otherwise uses
-`opencode db --format tsv`. Both routes issue SELECTs against the `session`,
+For the default stable executable, native metadata discovery reads a valid
+SQLite `opencode.db` through `sqlite3 -readonly` when that command is
+available. It otherwise uses `opencode db --format tsv` when the selected
+database and program exist. Both routes issue SELECTs against the `session`,
 `message`, and `part` tables. OpenCode2 uses its API as the authoritative read
 path. When both commands are installed, both stores are read and their
 sessions are merged under the `opencode` harness.

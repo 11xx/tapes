@@ -17,6 +17,13 @@ relative to that directory. The path is used as written: `tapes` does not
 canonicalize it, expand a tilde, require an absolute path, substitute `HOME`
 for an empty value, or scan another root.
 
+Native identity uses a valid opening `sessionId` when one is present; the
+project-level filename supplies the ID only when the opening has no identity
+field. A malformed or conflicting identity is unreadable and is not replaced
+with a UUID-shaped guess. Discovery reads at most 1 MiB from a file opening
+and enumerates only project-level recordings; nested subagent recordings stay
+child records.
+
 `<encoded-cwd>` is the absolute path with each `/` replaced by `-`, with a
 leading `-`. A `.` is replaced the same way, and other punctuation is assumed
 to be — the encoding has only been observed, never documented by the harness:

@@ -5,10 +5,11 @@ use anyhow::{anyhow, Result};
 use serde_json::Value;
 
 use super::{
-    accounting_for, head_directory, home_path, jsonl_files, list_files, list_files_with_search,
-    read_bounds, read_recording, replay_pin, session_file, skipped_records_note, stream_jsonl,
-    timestamp, trailing_record, transcript_from_recording, ActivityRange, Backend, Jsonl, Listing,
-    ParsedFile, Query, StreamedTranscript, TokenTotals, UnmappedTally,
+    accounting_for, default_native_store, enrich_native_session, head_directory,
+    list_discovered_files, list_discovered_files_with_search, read_bounds, read_recording,
+    replay_pin, skipped_records_note, stream_jsonl, timestamp, trailing_record,
+    transcript_from_recording, ActivityRange, Backend, Jsonl, Listing, ParsedFile, Query,
+    StreamedTranscript, TokenTotals, UnmappedTally,
 };
 use crate::content::{
     bounded_shape, text_part, tool_coverage, tool_part, ContentAvailability, ContentCarrier,
@@ -22,10 +23,11 @@ use crate::model::{
     UserDefault,
 };
 use crate::usage::{ModelUsage, UsageDetail};
+use tapes_discovery::{Harness as NativeHarness, NativeStore};
 
 #[derive(Clone, Debug)]
 pub struct PiBackend {
-    root: Option<PathBuf>,
+    store: Option<NativeStore>,
     /// How much of a recording's end a transcript read takes.
     read_bytes: u64,
 }
@@ -33,7 +35,14 @@ pub struct PiBackend {
 impl PiBackend {
     pub fn new(root: impl Into<PathBuf>) -> Self {
         Self {
-            root: Some(root.into()),
+            store: Some(NativeStore::pi(root)),
+            read_bytes: super::DEFAULT_READ_BYTES,
+        }
+    }
+
+    pub(crate) fn from_store(store: Option<NativeStore>) -> Self {
+        Self {
+            store,
             read_bytes: super::DEFAULT_READ_BYTES,
         }
     }
@@ -153,18 +162,7 @@ impl PiBackend {
 
 impl Default for PiBackend {
     fn default() -> Self {
-        let root = std::env::var_os("PI_CODING_AGENT_SESSION_DIR")
-            .map(PathBuf::from)
-            .or_else(|| {
-                std::env::var_os("PI_CODING_AGENT_DIR")
-                    .map(PathBuf::from)
-                    .map(|path| path.join("sessions"))
-            })
-            .or_else(|| home_path(&[".pi", "agent", "sessions"]));
-        Self {
-            root,
-            read_bytes: super::DEFAULT_READ_BYTES,
-        }
+        Self::from_store(default_native_store(NativeHarness::Pi))
     }
 }
 
@@ -189,7 +187,7 @@ impl Backend for PiBackend {
     }
 
     fn available(&self) -> bool {
-        self.root.as_deref().is_some_and(Path::is_dir)
+        self.store.as_ref().is_some_and(NativeStore::available)
     }
 
     fn list_titles(&self, _query: &Query) -> Result<Listing> {
@@ -198,14 +196,14 @@ impl Backend for PiBackend {
     }
 
     fn list(&self, query: &Query) -> Result<Listing> {
-        let Some(root) = self.root.as_deref() else {
+        let Some(store) = self.store.as_ref() else {
             return Ok(Listing::default());
         };
-        let mut listing = list_files(
-            jsonl_files(root),
+        let mut listing = list_discovered_files(
+            store,
             query,
             |path| head_directory(path, pi_cwd),
-            |path| self.parse(path).ok().map(|(session, _, _, _)| session),
+            |_, path| self.parse(path).map(|(session, _, _, _)| session),
         );
         listing
             .sessions
@@ -215,19 +213,18 @@ impl Backend for PiBackend {
     }
 
     fn list_with_search(&self, query: &Query, needle: &str, tail: usize) -> Result<Listing> {
-        let Some(root) = self.root.as_deref() else {
+        let Some(store) = self.store.as_ref() else {
             return Ok(Listing::default());
         };
-        let mut listing = list_files_with_search(
-            jsonl_files(root),
+        let mut listing = list_discovered_files_with_search(
+            store,
             query,
             needle,
             tail,
             self.read_bytes,
             |path| head_directory(path, pi_cwd),
-            |path| {
+            |_, path| {
                 self.parse(path)
-                    .ok()
                     .map(|(session, turns, read, _)| ParsedFile {
                         session,
                         turns,
@@ -242,25 +239,26 @@ impl Backend for PiBackend {
         Ok(listing)
     }
 
-    /// Locate by filename alone: no other session file is opened, so an exact
-    /// id costs one directory walk and one parse regardless of store size.
+    /// Resolve native identity before normalizing the bounded transcript.
     fn locate(&self, id: &str) -> Result<Option<Session>> {
-        let Some(root) = self.root.as_deref() else {
+        let Some(store) = self.store.as_ref() else {
             return Ok(None);
         };
-        let Some(path) = session_file(root, id) else {
+        let Some(native) = store.locate_exact(id)? else {
             return Ok(None);
         };
-        Ok(self.parse(&path).ok().map(|(session, _, _, _)| session))
+        let path = native
+            .locator()
+            .ok_or_else(|| anyhow!("pi native session {} has no file locator", native.id()))?;
+        let (session, _, _, _) = self.parse(path)?;
+        Ok(Some(enrich_native_session(&native, session)?))
     }
 
     fn transcript(&self, session: &Session, tail: usize) -> Result<Transcript> {
-        let root = self
-            .root
-            .as_deref()
-            .ok_or_else(|| anyhow!("pi store is unavailable"))?;
-        let path = session_file(root, &session.id)
-            .ok_or_else(|| anyhow!("pi session {} is unavailable", session.id))?;
+        let path = session
+            .locator()
+            .map(PathBuf::from)
+            .ok_or_else(|| anyhow!("pi session {} has no file locator", session.id))?;
         let (turns, recording, abandoned, trailing_record, unmapped) =
             read_transcript(&path, self.read_bytes)?;
         let mut transcript = transcript_from_recording(
@@ -284,12 +282,10 @@ impl Backend for PiBackend {
         replay: Option<&StreamedTranscript>,
         turn: &mut dyn FnMut(Turn) -> Result<()>,
     ) -> Result<StreamedTranscript> {
-        let root = self
-            .root
-            .as_deref()
-            .ok_or_else(|| anyhow!("pi store is unavailable"))?;
-        let path = session_file(root, &session.id)
-            .ok_or_else(|| anyhow!("pi session {} is unavailable", session.id))?;
+        let path = session
+            .locator()
+            .map(PathBuf::from)
+            .ok_or_else(|| anyhow!("pi session {} has no file locator", session.id))?;
         // The active branch is the last entry's ancestry. The first pass keeps
         // only each entry's position, id, and parent; the second emits the
         // active entries' turns in recording order.
@@ -383,14 +379,15 @@ impl Backend for PiBackend {
     /// names the session it came from. A recording names no children of its
     /// own, so a parent's list of them stays empty.
     fn lineage(&self, session: &Session) -> Result<Lineage> {
-        let (root, path) = self.recording(session)?;
+        let path = self.recording(session)?;
         let recording = read_recording(&path, self.read_bytes)?;
         let parent = recording
             .opening()
             .iter()
             .find(|value| value["type"] == "session")
             .and_then(|value| value["parentSession"].as_str())
-            .map(|native_id| parent_ref(root, native_id));
+            .map(|native_id| self.parent_ref(native_id))
+            .transpose()?;
         Ok(Lineage {
             parent,
             truncation: read_bounds(&recording.tail),
@@ -399,7 +396,7 @@ impl Backend for PiBackend {
     }
 
     fn stream_lineage(&self, session: &Session) -> Result<Lineage> {
-        let (root, path) = self.recording(session)?;
+        let path = self.recording(session)?;
         let mut header = None;
         let read = stream_jsonl(&path, None, |value, _, _| {
             if header.is_none() && value["type"] == "session" {
@@ -407,10 +404,12 @@ impl Backend for PiBackend {
             }
             Ok(false)
         })?;
+        let parent = header
+            .flatten()
+            .map(|native_id| self.parent_ref(&native_id))
+            .transpose()?;
         Ok(Lineage {
-            parent: header
-                .flatten()
-                .map(|native_id| parent_ref(root, &native_id)),
+            parent,
             notes: skipped_records_note(read.skipped).into_iter().collect(),
             ..Lineage::default()
         })
@@ -420,7 +419,7 @@ impl Backend for PiBackend {
     /// entry's ancestry. One pass keeps each entry's place in the tree and the
     /// facts it carries; the branch is walked once the last entry is known.
     fn stream_session(&self, session: &Session, read: &StreamedTranscript) -> Result<Session> {
-        let (_, path) = self.recording(session)?;
+        let path = self.recording(session)?;
         let mut entries = Vec::<PiEntry>::new();
         let mut positions = HashMap::<String, usize>::new();
         let mut activity = ActivityRange::default();
@@ -497,24 +496,25 @@ impl Backend for PiBackend {
 }
 
 impl PiBackend {
-    fn recording<'a>(&'a self, session: &Session) -> Result<(&'a Path, PathBuf)> {
-        let root = self
-            .root
-            .as_deref()
-            .ok_or_else(|| anyhow!("pi store is unavailable"))?;
-        let path = session_file(root, &session.id)
-            .ok_or_else(|| anyhow!("pi session {} is unavailable", session.id))?;
-        Ok((root, path))
+    fn recording(&self, session: &Session) -> Result<PathBuf> {
+        session
+            .locator()
+            .map(PathBuf::from)
+            .ok_or_else(|| anyhow!("pi session {} has no file locator", session.id))
     }
-}
 
-/// pi records a relationship on the session that has one: its header names
-/// the session it came from.
-fn parent_ref(root: &Path, native_id: &str) -> ParentRef {
-    ParentRef {
-        resolved: session_file(root, native_id).is_some(),
-        native_id: native_id.to_owned(),
-        source: "session.parentSession".to_owned(),
+    /// pi records a relationship on the session that has one: its header
+    /// names the session it came from.
+    fn parent_ref(&self, native_id: &str) -> Result<ParentRef> {
+        let store = self
+            .store
+            .as_ref()
+            .ok_or_else(|| anyhow!("pi store is unavailable"))?;
+        Ok(ParentRef {
+            resolved: store.locate_exact(native_id)?.is_some(),
+            native_id: native_id.to_owned(),
+            source: "session.parentSession".to_owned(),
+        })
     }
 }
 

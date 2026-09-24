@@ -434,7 +434,7 @@ impl Command {
 /// scope and harness restrictions.
 #[derive(Args)]
 struct SelectionArgs {
-    /// Session identifier, full or an unambiguous prefix, or `self` for the
+    /// Session identifier, full or a prefix whose bounded native discovery proves unique, or `self` for the
     /// session the caller runs in, as its harness's exported variable names it.
     #[arg(
         required_unless_present_any = ["latest", "title", "occurrence"],
@@ -521,7 +521,7 @@ impl SelectionArgs {
 #[derive(Args)]
 #[group(multiple = true)]
 struct SessionQueryArgs {
-    /// Session identifier, full or an unambiguous prefix, or `self` for the
+    /// Session identifier, full or a prefix whose bounded native discovery proves unique, or `self` for the
     /// session the caller runs in, as its harness's exported variable names it.
     #[arg(conflicts_with_all = ["title", "latest", "occurrence", "exclude", "harness", "here", "project", "global"])]
     session: Option<String>,

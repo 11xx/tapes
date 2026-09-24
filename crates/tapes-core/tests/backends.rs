@@ -6,6 +6,7 @@ use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::OnceLock;
 
 use chrono::{DateTime, TimeZone, Utc};
 use tapes_core::backend::claude::ClaudeBackend;
@@ -35,6 +36,19 @@ fn fixtures(harness: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures")
         .join(harness)
+}
+
+fn configure_opencode_fixture_store() {
+    static XDG: OnceLock<PathBuf> = OnceLock::new();
+    let root = XDG.get_or_init(|| {
+        let root = std::env::temp_dir().join(format!("tapes-opencode-xdg-{}", std::process::id()));
+        let opencode = root.join("opencode");
+        fs::create_dir_all(&opencode).unwrap();
+        File::create(opencode.join("opencode.db")).unwrap();
+        std::env::set_var("XDG_DATA_HOME", &root);
+        root
+    });
+    std::env::set_var("XDG_DATA_HOME", root);
 }
 
 fn file_fixture_backends() -> Vec<(Box<dyn Backend>, &'static str)> {
@@ -71,6 +85,7 @@ fn located(backend: &dyn Backend, id: &str) -> Session {
 }
 
 fn opencode_fixture_program() -> PathBuf {
+    configure_opencode_fixture_store();
     fixtures("opencode").join("opencode2")
 }
 
@@ -119,6 +134,7 @@ impl OpenCodeAlias {
     }
 
     fn link(path: PathBuf, target: PathBuf, cleanup_dir: Option<PathBuf>) -> Self {
+        configure_opencode_fixture_store();
         let _ = fs::remove_file(&path);
         std::os::unix::fs::symlink(target, &path).unwrap();
         Self {
@@ -1327,7 +1343,7 @@ fn malformed_opencode_database_rows_leave_other_sessions_and_a_diagnostic() {
     let backend = OpenCodeBackend::new(program.path());
     let listing = backend.list(&Query::unscoped(10)).unwrap();
 
-    assert_eq!(listing.scanned, 3);
+    assert_eq!(listing.scanned, 3, "{:?}", listing.unavailable);
     assert_eq!(
         listing
             .sessions
@@ -1342,7 +1358,7 @@ fn malformed_opencode_database_rows_leave_other_sessions_and_a_diagnostic() {
     assert_eq!(listing.unavailable.len(), 2, "{:?}", listing.unavailable);
     assert!(listing.unavailable[0].ends_with("1 of 3 session rows unreadable"));
     assert!(listing.unavailable[1].contains("ses_truncated_fixture"));
-    assert!(listing.unavailable[1].contains("EOF while parsing a string"));
+    assert!(listing.unavailable[1].contains("malformed row metadata"));
 }
 
 #[test]
@@ -1733,6 +1749,17 @@ fn metadata_filters_are_case_insensitive_and_keep_absent_values_absent() {
 #[test]
 fn metadata_filters_fill_the_limit_after_rejecting_candidates() {
     let root = filtered_store("before-limit");
+    let native_page = tapes_discovery::NativeStore::codex(&root).candidates(5_000);
+    assert_eq!(
+        native_page
+            .records
+            .iter()
+            .map(|session| session.id())
+            .collect::<Vec<_>>(),
+        vec!["other", "wanted-b", "wanted-a"],
+        "{native_page:?}"
+    );
+    assert!(native_page.complete);
     let backends: Vec<Box<dyn Backend>> = vec![Box::new(CodexBackend::new(&root))];
 
     let result =
@@ -2568,7 +2595,7 @@ fn a_capped_search_says_it_stopped_short() {
         truncated,
         "a capped search must report that it stopped short"
     );
-    assert!(error.to_string().contains("stopped at"));
+    assert!(error.to_string().contains("coverage is incomplete"));
 }
 
 #[test]
@@ -2606,7 +2633,7 @@ fn a_failing_opencode_call_surfaces_through_resolution_not_as_not_found() {
         panic!("a broken backend must not read as a missing session");
     };
     assert_eq!(failures.len(), 1);
-    assert_eq!(failures[0].0, "opencode");
+    assert!(failures[0].contains("opencode"));
 }
 
 #[test]

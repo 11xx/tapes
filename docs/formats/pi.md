@@ -18,6 +18,12 @@ harness's separator silently loses the other.
 pi's own CLI offers an interactive picker and no non-interactive read, so file
 discovery is the only retrieval path.
 
+Native identity uses the opening `session.id` when present, otherwise the ID
+suffix in a recognized timestamped filename. An observed malformed or
+conflicting header is unreadable rather than filename-fallback evidence. Each
+opening read is capped at 1 MiB; recursive discovery is bounded by 100,000
+entries, depth 64, and cycle detection for followed directory links.
+
 ## Entries are a tree, not a list
 
 Every line after the header is an entry with an `id` and a `parentId`. The

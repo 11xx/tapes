@@ -91,6 +91,20 @@ impl NativeStore {
         Self::OpenCode(OpenCodeStore::v2(program))
     }
 
+    pub fn opencode_stable_at(
+        program: impl Into<OsString>,
+        data_directory: impl Into<PathBuf>,
+    ) -> Self {
+        Self::OpenCode(OpenCodeStore::stable_at(program, data_directory))
+    }
+
+    pub fn opencode_v2_at(
+        program: impl Into<OsString>,
+        data_directory: impl Into<PathBuf>,
+    ) -> Self {
+        Self::OpenCode(OpenCodeStore::v2_at(program, data_directory))
+    }
+
     pub fn harness(&self) -> Harness {
         match self {
             Self::Claude { .. } => Harness::Claude,
@@ -122,6 +136,21 @@ impl NativeStore {
             Self::Codex { .. } => NativeStoreKind::CodexFiles,
             Self::Pi { .. } => NativeStoreKind::PiFiles,
             Self::OpenCode(store) => NativeStoreKind::OpenCode(store.flavor()),
+        }
+    }
+
+    pub fn opencode_store(&self) -> Option<&OpenCodeStore> {
+        match self {
+            Self::OpenCode(store) => Some(store),
+            _ => None,
+        }
+    }
+
+    /// Whether the selected native source has a store to inspect.
+    pub fn available(&self) -> bool {
+        match self {
+            Self::OpenCode(store) => store.available(),
+            _ => file::available(self),
         }
     }
 
@@ -317,9 +346,11 @@ impl std::fmt::Display for ResolveError {
         match self {
             Self::InvalidQuery => f.write_str("query must be non-empty and contain no NUL"),
             Self::NotFound { query, truncated } => {
-                write!(f, "no native session matches {query:?}")?;
+                write!(f, "session {query} was not found")?;
                 if *truncated {
-                    f.write_str("; candidate coverage is incomplete")?;
+                    f.write_str(
+                        " (candidate coverage is incomplete; pass the full ID for a direct lookup)",
+                    )?;
                 }
                 Ok(())
             }
@@ -514,14 +545,24 @@ pub fn resolve_with_sources<R: IdentityRecord + Clone>(
     let mut pages = Vec::with_capacity(sources.len());
     let mut diagnostics = Vec::new();
     let mut truncated = false;
-    for source in sources {
+    for (source_index, source) in sources.iter().enumerate() {
         if !source.available() {
+            let exact_failures = failures
+                .iter()
+                .filter(|(index, _, _)| *index == source_index)
+                .map(|(_, harness, failure)| format!("{harness}: {failure}"))
+                .collect::<Vec<_>>();
+            let complete = exact_failures.is_empty();
+            if !complete {
+                truncated = true;
+                diagnostics.extend(exact_failures.iter().cloned());
+            }
             pages.push(CandidatePage::<R, String> {
                 records: Vec::new(),
                 scanned: 0,
                 visited_entries: 0,
-                complete: true,
-                failures: Vec::new(),
+                complete,
+                failures: exact_failures,
                 unreadable_ids: Vec::new(),
             });
             continue;
@@ -635,6 +676,8 @@ pub fn resolve_with_sources<R: IdentityRecord + Clone>(
         0 if !diagnostics.is_empty() || !failures.is_empty() => {
             let mut failures = failure_messages(failures.iter());
             failures.extend(diagnostics);
+            failures.sort();
+            failures.dedup();
             Err(ResolveError::BackendFailed {
                 query: query.to_owned(),
                 failures,

@@ -12,10 +12,10 @@ pub use crate::IdentityBasis as FileIdentityBasis;
 
 const INITIAL_OPENING_BYTES: usize = 64 * 1024;
 const MAX_OPENING_BYTES: usize = 1024 * 1024;
+const MAX_EXACT_FILENAME_CANDIDATES: usize = 1_000;
 const MAX_VISITED_ENTRIES: usize = 100_000;
 const MAX_DEPTH: usize = 64;
 const MAX_RETAINED_BYTES: usize = 16 * 1024 * 1024;
-const MAX_PREFIX_CANDIDATES: usize = 1_000;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct CandidatePage<R = NativeSession, E = DiscoveryError> {
@@ -122,7 +122,7 @@ pub(crate) fn candidates(store: &NativeStore, limit: usize) -> CandidatePage {
         failures: walk.failures,
         unreadable_ids: Vec::new(),
     };
-    let limit = limit.min(MAX_PREFIX_CANDIDATES);
+    let limit = limit.min(MAX_VISITED_ENTRIES);
     let mut seen = HashSet::<String>::new();
     let entry_count = walk.entries.len();
     let mut inspected = 0;
@@ -135,7 +135,7 @@ pub(crate) fn candidates(store: &NativeStore, limit: usize) -> CandidatePage {
                 &mut retained,
                 DiscoveryError::BoundExhausted {
                     coordinate: store.coordinate(),
-                    bound: "1,000 prefix candidates",
+                    bound: "candidate enumeration limit",
                 },
             );
             break;
@@ -209,13 +209,24 @@ pub(crate) fn candidates(store: &NativeStore, limit: usize) -> CandidatePage {
             &mut retained,
             DiscoveryError::BoundExhausted {
                 coordinate: store.coordinate(),
-                bound: "1,000 prefix candidates",
+                bound: "candidate enumeration limit",
             },
         );
     }
     page.unreadable_ids.sort();
     page.unreadable_ids.dedup();
     page
+}
+
+pub(crate) fn available(store: &NativeStore) -> bool {
+    let Some(root) = store.root() else {
+        return false;
+    };
+    match fs::metadata(root) {
+        Ok(_) => true,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => false,
+        Err(_) => true,
+    }
 }
 
 fn page_failure(
@@ -270,14 +281,18 @@ fn locate_exact_using(
             .cmp(&left.modified)
             .then(left.path.cmp(&right.path))
     });
-    let mut first_failure = walked.failures.into_iter().next();
+    let first_failure = walked.failures.into_iter().next();
     let mut filename_matches = Vec::new();
     for (index, entry) in entries.iter().enumerate() {
-        if filename_id(store.harness(), &entry.path).as_deref() == Some(id)
-            || stem_matches(store.harness(), &entry.path, id)
-        {
+        if filename_id(store.harness(), &entry.path).as_deref() == Some(id) {
             filename_matches.push(index);
         }
+    }
+    if filename_matches.len() > MAX_EXACT_FILENAME_CANDIDATES {
+        return Err(DiscoveryError::BoundExhausted {
+            coordinate: store.coordinate(),
+            bound: "1,000 exact filename candidates",
+        });
     }
     for index in filename_matches {
         let path = &entries[index].path;
@@ -285,25 +300,6 @@ fn locate_exact_using(
             Ok(Some(session)) if session.id() == id => return Ok(Some(session)),
             Ok(_) => {}
             Err(error) => return Err(error),
-        }
-    }
-
-    // Native headers are authoritative and may differ from a rollout filename.
-    // Probe opening metadata only; never decode the recording body here.
-    for entry in &entries {
-        if filename_id(store.harness(), &entry.path).as_deref() == Some(id)
-            || stem_matches(store.harness(), &entry.path, id)
-        {
-            continue;
-        }
-        match inspect(store, &entry.path) {
-            Ok(Some(session)) if session.id() == id => return Ok(Some(session)),
-            Ok(_) => {}
-            Err(error) => {
-                if first_failure.is_none() {
-                    first_failure = Some(error);
-                }
-            }
         }
     }
     if let Some(error) = first_failure {
@@ -567,7 +563,7 @@ fn native_filename(harness: Harness, path: &Path) -> bool {
     };
     match harness {
         Harness::Claude => true,
-        Harness::Codex => stem.starts_with("rollout-") && stem.len() > 36,
+        Harness::Codex => codex_filename_id(stem).is_some(),
         Harness::Pi => pi_filename_id(stem).is_some(),
         Harness::OpenCode => false,
     }
@@ -577,13 +573,36 @@ fn filename_id(harness: Harness, path: &Path) -> Option<String> {
     let stem = path.file_stem()?.to_str()?;
     match harness {
         Harness::Claude => Some(stem.to_owned()),
-        Harness::Codex if stem.starts_with("rollout-") && stem.len() > 36 => {
-            let id = stem.get(stem.len() - 36..)?;
-            (!id.is_empty()).then(|| id.to_owned())
-        }
+        Harness::Codex => codex_filename_id(stem).map(str::to_owned),
         Harness::Pi => pi_filename_id(stem).map(str::to_owned),
-        Harness::OpenCode | Harness::Codex => None,
+        Harness::OpenCode => None,
     }
+}
+
+fn codex_filename_id(stem: &str) -> Option<&str> {
+    let rollout = stem.strip_prefix("rollout-")?;
+    let stamp = rollout.get(..19)?.as_bytes();
+    if !stamp[..4].iter().all(u8::is_ascii_digit)
+        || stamp[4] != b'-'
+        || !stamp[5..7].iter().all(u8::is_ascii_digit)
+        || stamp[7] != b'-'
+        || !stamp[8..10].iter().all(u8::is_ascii_digit)
+        || stamp[10] != b'T'
+        || !stamp[11..13].iter().all(u8::is_ascii_digit)
+        || stamp[13] != b'-'
+        || !stamp[14..16].iter().all(u8::is_ascii_digit)
+        || stamp[16] != b'-'
+        || !stamp[17..19].iter().all(u8::is_ascii_digit)
+    {
+        return None;
+    }
+    if stem.len() > 36 {
+        return stem.get(stem.len() - 36..);
+    }
+    rollout
+        .get(19..)?
+        .strip_prefix('-')
+        .filter(|id| !id.is_empty())
 }
 
 fn pi_filename_id(stem: &str) -> Option<&str> {
@@ -594,18 +613,6 @@ fn pi_filename_id(stem: &str) -> Option<&str> {
         && timestamp.contains('T')
         && !id.is_empty())
     .then_some(id)
-}
-
-fn stem_matches(harness: Harness, path: &Path, id: &str) -> bool {
-    let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) else {
-        return false;
-    };
-    if harness == Harness::Claude {
-        return stem == id;
-    }
-    stem.strip_suffix(id)
-        .and_then(|prefix| prefix.chars().next_back())
-        .is_some_and(|separator| !separator.is_alphanumeric())
 }
 
 fn probe(store: &NativeStore, path: &Path) -> Result<Option<NativeSession>, DiscoveryError> {
@@ -669,6 +676,12 @@ fn probe_with_open(
             IdentityBasis::Filename,
         ),
     };
+    if id.is_empty() || id.bytes().any(|byte| byte.is_ascii_control()) {
+        return Err(DiscoveryError::InvalidMetadata {
+            coordinate: path.display().to_string(),
+            reason: "native filename identity is empty or contains a control character",
+        });
+    }
     Ok(Some(NativeSession::file(
         id,
         store.harness(),
@@ -678,31 +691,49 @@ fn probe_with_open(
     )))
 }
 
-fn opening(file: &mut File, size: u64) -> io::Result<Vec<u8>> {
+struct Opening {
+    bytes: Vec<u8>,
+    reached_eof: bool,
+}
+
+fn opening(file: &mut File, size: u64) -> io::Result<Opening> {
     let first = size.min(INITIAL_OPENING_BYTES as u64) as usize;
     let mut bytes = vec![0; first];
     file.read_exact(&mut bytes)?;
-    if size <= first as u64 || bytes.contains(&b'\n') {
-        return Ok(bytes);
+    if size <= first as u64 {
+        return Ok(Opening {
+            bytes,
+            reached_eof: true,
+        });
+    }
+    if bytes.contains(&b'\n') {
+        return Ok(Opening {
+            bytes,
+            reached_eof: false,
+        });
     }
     let target = size.min(MAX_OPENING_BYTES as u64) as usize;
     bytes.resize(target, 0);
     file.read_exact(&mut bytes[first..])?;
-    Ok(bytes)
+    Ok(Opening {
+        bytes,
+        reached_eof: size <= MAX_OPENING_BYTES as u64,
+    })
 }
 
 fn native_identity(
     harness: Harness,
-    bytes: &[u8],
+    opening: &Opening,
     path: &Path,
 ) -> Result<Option<String>, DiscoveryError> {
-    let complete = if bytes.len() == MAX_OPENING_BYTES {
-        bytes
+    let complete = if opening.reached_eof {
+        opening.bytes.as_slice()
+    } else {
+        opening
+            .bytes
             .iter()
             .rposition(|byte| *byte == b'\n')
-            .map_or(&[][..], |index| &bytes[..=index])
-    } else {
-        bytes
+            .map_or(&[][..], |index| &opening.bytes[..=index])
     };
     let mut found: Option<String> = None;
     for line in complete.split(|byte| *byte == b'\n') {
@@ -749,7 +780,9 @@ fn identity_string(
     path: &Path,
 ) -> Result<String, DiscoveryError> {
     match value.and_then(Value::as_str) {
-        Some(value) if !value.is_empty() && !value.contains('\0') => Ok(value.to_owned()),
+        Some(value) if !value.is_empty() && !value.bytes().any(|byte| byte.is_ascii_control()) => {
+            Ok(value.to_owned())
+        }
         _ => Err(DiscoveryError::InvalidMetadata {
             coordinate: path.display().to_string(),
             reason: field,
@@ -796,6 +829,16 @@ mod tests {
         path
     }
 
+    fn padded_identity_record(size: usize, newline: bool) -> String {
+        let prefix = "{\"sessionId\":\"header-id\",\"padding\":\"";
+        let suffix = if newline { "\"}\n" } else { "\"}" };
+        assert!(size >= prefix.len() + suffix.len());
+        format!(
+            "{prefix}{}{suffix}",
+            "x".repeat(size - prefix.len() - suffix.len())
+        )
+    }
+
     #[test]
     fn headers_win_over_native_filenames_and_report_their_basis() {
         let temp = Temp::new();
@@ -804,9 +847,8 @@ mod tests {
             "claude/project/filename-id.jsonl",
             "{\"sessionId\":\"header-id\"}\n",
         );
-        let session = NativeStore::claude(temp.path().join("claude"))
-            .locate_exact("header-id")
-            .unwrap()
+        let session = Discovery::new([NativeStore::claude(temp.path().join("claude"))])
+            .resolve("header-id")
             .unwrap();
         assert_eq!(session.id(), "header-id");
         assert_eq!(session.identity_basis(), Some(IdentityBasis::Header));
@@ -861,24 +903,53 @@ mod tests {
     }
 
     #[test]
-    fn oversized_unterminated_opening_uses_the_native_filename_fallback() {
+    fn complete_unterminated_identity_at_the_opening_bound_wins_over_filename() {
         let temp = Temp::new();
         let root = temp.path().join("claude");
         let path = write(
             &root,
             "project/filename-id.jsonl",
-            &format!(
-                "{{\"sessionId\":\"header-id\",\"body\":\"{}",
-                "x".repeat(MAX_OPENING_BYTES)
-            ),
+            &padded_identity_record(MAX_OPENING_BYTES, false),
         );
-        let mut file = File::open(path).unwrap();
-        let bytes = opening(&mut file, (MAX_OPENING_BYTES + 32) as u64).unwrap();
-        assert_eq!(bytes.len(), MAX_OPENING_BYTES);
+        let session = probe(&NativeStore::claude(&root), &path).unwrap().unwrap();
+        assert_eq!(session.id(), "header-id");
+        assert_eq!(session.identity_basis(), Some(IdentityBasis::Header));
+    }
+
+    #[test]
+    fn newline_terminated_identity_at_the_opening_bound_is_complete() {
+        let temp = Temp::new();
+        let root = temp.path().join("claude");
+        let path = write(
+            &root,
+            "project/filename-id.jsonl",
+            &padded_identity_record(MAX_OPENING_BYTES, true),
+        );
+        let session = probe(&NativeStore::claude(&root), &path).unwrap().unwrap();
+        assert_eq!(session.id(), "header-id");
+        assert_eq!(session.identity_basis(), Some(IdentityBasis::Header));
+    }
+
+    #[test]
+    fn a_valid_identity_record_past_the_opening_bound_is_truncated() {
+        let temp = Temp::new();
+        let root = temp.path().join("claude");
+        let path = write(
+            &root,
+            "project/filename-id.jsonl",
+            &padded_identity_record(MAX_OPENING_BYTES + 1, false),
+        );
+        let mut file = File::open(&path).unwrap();
+        let opening = opening(&mut file, (MAX_OPENING_BYTES + 1) as u64).unwrap();
+        assert_eq!(opening.bytes.len(), MAX_OPENING_BYTES);
+        assert!(!opening.reached_eof);
         assert_eq!(
-            native_identity(Harness::Claude, &bytes, Path::new("filename-id.jsonl")).unwrap(),
+            native_identity(Harness::Claude, &opening, Path::new("filename-id.jsonl")).unwrap(),
             None
         );
+        let session = probe(&NativeStore::claude(&root), &path).unwrap().unwrap();
+        assert_eq!(session.id(), "filename-id");
+        assert_eq!(session.identity_basis(), Some(IdentityBasis::Filename));
     }
 
     #[test]
@@ -1020,13 +1091,71 @@ mod tests {
         for index in 0..1_005 {
             write(
                 &root,
-                &format!("project/{index:04}-session.jsonl"),
+                &format!("project/id-{index:04}.jsonl"),
                 &format!("{{\"sessionId\":\"id-{index:04}\"}}\n"),
             );
         }
         let store = NativeStore::claude(root);
         assert!(store.locate_exact("id-1004").unwrap().is_some());
         assert!(Discovery::new([store]).resolve("id-1004").is_ok());
+    }
+
+    #[test]
+    fn exact_lookup_opens_no_unrelated_files_and_finds_a_filename_after_the_prefix_cap() {
+        let temp = Temp::new();
+        let root = temp.path().join("codex");
+        let mut ids = Vec::new();
+        for index in 0..1_002 {
+            let id = format!("00000000-0000-4000-8000-{index:012x}");
+            ids.push(id.clone());
+            write(
+                &root,
+                &format!("2026/09/24/rollout-2026-09-24T12-00-00-000Z-{id}.jsonl"),
+                &format!("{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"{id}\"}}}}\n"),
+            );
+        }
+        let store = NativeStore::codex(root);
+        let mut prefix_openings = 0;
+        for query in ["00000000-0000", "000000000001"] {
+            assert!(locate_exact_using(&store, query, |_, _| {
+                prefix_openings += 1;
+                Ok(None)
+            })
+            .unwrap()
+            .is_none());
+        }
+        assert_eq!(prefix_openings, 0);
+
+        let target = ids.last().unwrap();
+        let mut exact_openings = 0;
+        let session = locate_exact_using(&store, target, |store, path| {
+            exact_openings += 1;
+            probe(store, path)
+        })
+        .unwrap()
+        .unwrap();
+        assert_eq!(session.id(), target);
+        assert_eq!(exact_openings, 1);
+        assert_eq!(
+            Discovery::new([store]).resolve(target).unwrap().id(),
+            target
+        );
+    }
+
+    #[test]
+    fn explicit_file_candidate_pages_can_exceed_the_prefix_resolution_cap() {
+        let temp = Temp::new();
+        let root = temp.path().join("claude");
+        for index in 0..1_005 {
+            write(
+                &root,
+                &format!("project/{index:04}-session.jsonl"),
+                &format!("{{\"sessionId\":\"page-{index:04}\"}}\n"),
+            );
+        }
+        let page = NativeStore::claude(root).candidates(1_500);
+        assert_eq!(page.records.len(), 1_005);
+        assert!(page.complete);
     }
 
     #[test]
@@ -1039,8 +1168,8 @@ mod tests {
         );
         let mut file = File::open(path).unwrap();
         let bytes = opening(&mut file, 4 * 1024 * 1024).unwrap();
-        assert_eq!(bytes.len(), INITIAL_OPENING_BYTES);
-        assert!(bytes.len() < 4 * 1024 * 1024);
+        assert_eq!(bytes.bytes.len(), INITIAL_OPENING_BYTES);
+        assert!(bytes.bytes.len() < 4 * 1024 * 1024);
     }
 
     #[test]

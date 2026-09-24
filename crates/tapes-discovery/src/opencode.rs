@@ -15,6 +15,15 @@ const MAX_RETAINED_BYTES: usize = 16 * 1024 * 1024;
 const COMMAND_DEADLINE: Duration = Duration::from_secs(30);
 const SESSION_ID_PREFIX: &str = "ses_";
 
+#[derive(Default)]
+struct DatabaseRows {
+    values: Vec<Value>,
+    scanned: usize,
+    complete: bool,
+    failures: Vec<DiscoveryError>,
+    unreadable_ids: Vec<String>,
+}
+
 /// OpenCode's stable database and v2 API are stores of the same harness.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OpenCodeFlavor {
@@ -31,11 +40,20 @@ impl OpenCodeFlavor {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StoreAuthority {
+    Program,
+    ExplicitStore,
+    DefaultStore,
+}
+
 /// A read-only OpenCode metadata source.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct OpenCodeStore {
     program: OsString,
     flavor: OpenCodeFlavor,
+    data_directory: Option<PathBuf>,
+    authority: StoreAuthority,
 }
 
 impl OpenCodeStore {
@@ -47,13 +65,20 @@ impl OpenCodeStore {
         } else {
             OpenCodeFlavor::V2
         };
-        Self { program, flavor }
+        Self {
+            program,
+            flavor,
+            data_directory: default_data_directory(),
+            authority: StoreAuthority::Program,
+        }
     }
 
     pub fn stable(program: impl Into<OsString>) -> Self {
         Self {
             program: program.into(),
             flavor: OpenCodeFlavor::Stable,
+            data_directory: default_data_directory(),
+            authority: StoreAuthority::Program,
         }
     }
 
@@ -61,6 +86,44 @@ impl OpenCodeStore {
         Self {
             program: program.into(),
             flavor: OpenCodeFlavor::V2,
+            data_directory: default_data_directory(),
+            authority: StoreAuthority::Program,
+        }
+    }
+
+    pub fn stable_at(program: impl Into<OsString>, data_directory: impl Into<PathBuf>) -> Self {
+        Self {
+            program: program.into(),
+            flavor: OpenCodeFlavor::Stable,
+            data_directory: Some(data_directory.into()),
+            authority: StoreAuthority::ExplicitStore,
+        }
+    }
+
+    pub fn v2_at(program: impl Into<OsString>, data_directory: impl Into<PathBuf>) -> Self {
+        Self {
+            program: program.into(),
+            flavor: OpenCodeFlavor::V2,
+            data_directory: Some(data_directory.into()),
+            authority: StoreAuthority::ExplicitStore,
+        }
+    }
+
+    fn default_stable() -> Self {
+        Self {
+            program: OsString::from("opencode"),
+            flavor: OpenCodeFlavor::Stable,
+            data_directory: default_data_directory(),
+            authority: StoreAuthority::DefaultStore,
+        }
+    }
+
+    fn default_v2() -> Self {
+        Self {
+            program: OsString::from("opencode2"),
+            flavor: OpenCodeFlavor::V2,
+            data_directory: default_data_directory(),
+            authority: StoreAuthority::DefaultStore,
         }
     }
 
@@ -72,14 +135,93 @@ impl OpenCodeStore {
         &self.program
     }
 
+    /// The data directory selected by XDG_DATA_HOME or the HOME fallback.
+    pub fn data_directory(&self) -> Option<PathBuf> {
+        self.data_directory.clone()
+    }
+
+    /// Resolve a database file within the configured OpenCode data directory.
+    pub fn database_file(&self, name: &str) -> Option<PathBuf> {
+        self.data_directory
+            .as_ref()
+            .map(|directory| directory.join(name))
+    }
+
+    /// Return a database file only when its read-only SQLite header is valid.
+    pub fn sqlite_database_file(&self, name: &str) -> Result<Option<PathBuf>, DiscoveryError> {
+        let Some(path) = self.database_file(name) else {
+            return Ok(None);
+        };
+        let metadata = match fs::metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => {
+                return Err(DiscoveryError::io(
+                    path.display().to_string(),
+                    "inspect OpenCode database",
+                    &error,
+                ));
+            }
+        };
+        if !metadata.is_file() {
+            return Err(DiscoveryError::InvalidMetadata {
+                coordinate: path.display().to_string(),
+                reason: "OpenCode database is not a regular file",
+            });
+        }
+        let mut file = fs::File::open(&path).map_err(|error| {
+            DiscoveryError::io(path.display().to_string(), "open OpenCode database", &error)
+        })?;
+        let mut header = [0_u8; 16];
+        match file.read_exact(&mut header) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => {
+                return Err(DiscoveryError::InvalidMetadata {
+                    coordinate: path.display().to_string(),
+                    reason: "OpenCode database has an incomplete SQLite header",
+                });
+            }
+            Err(error) => {
+                return Err(DiscoveryError::io(
+                    path.display().to_string(),
+                    "read OpenCode database header",
+                    &error,
+                ));
+            }
+        }
+        if header != *b"SQLite format 3\0" {
+            return Err(DiscoveryError::InvalidMetadata {
+                coordinate: path.display().to_string(),
+                reason: "OpenCode database has an invalid SQLite header",
+            });
+        }
+        Ok(Some(path))
+    }
+
     pub fn coordinate(&self) -> String {
         match self.flavor {
-            OpenCodeFlavor::Stable => database_path().map_or_else(
+            OpenCodeFlavor::Stable => self.database_file("opencode.db").map_or_else(
                 || format!("{} database", self.program.to_string_lossy()),
                 |path| path.display().to_string(),
             ),
-            OpenCodeFlavor::V2 => format!("{} API", self.program.to_string_lossy()),
+            OpenCodeFlavor::V2 => format!("{} api", self.program.to_string_lossy()),
         }
+    }
+
+    fn session_coordinate(&self, id: &str) -> String {
+        match self.flavor {
+            OpenCodeFlavor::Stable => self.coordinate(),
+            OpenCodeFlavor::V2 => format!(
+                "{}:/api/session/{}",
+                self.program.to_string_lossy(),
+                encode_path_component(id)
+            ),
+        }
+    }
+
+    /// Report absence without running a harness command that could create a store.
+    pub fn available(&self) -> bool {
+        self.store_exists().unwrap_or(true)
     }
 
     pub fn locate_exact(&self, id: &str) -> Result<Option<NativeSession>, DiscoveryError> {
@@ -128,10 +270,13 @@ impl OpenCodeStore {
     }
 
     fn store_exists(&self) -> Result<bool, DiscoveryError> {
-        let Some(directory) = data_directory() else {
+        if self.authority == StoreAuthority::Program {
+            return Ok(program_available(&self.program));
+        }
+        let Some(directory) = self.data_directory.as_ref() else {
             return Ok(false);
         };
-        let metadata = match fs::metadata(&directory) {
+        let metadata = match fs::metadata(directory) {
             Ok(metadata) => metadata,
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
             Err(error) => {
@@ -148,39 +293,63 @@ impl OpenCodeStore {
                 reason: "OpenCode data root is not a directory",
             });
         }
-        match self.flavor {
-            OpenCodeFlavor::Stable => {
-                let Some(database) = database_path() else {
-                    return Ok(false);
-                };
-                let metadata = match fs::metadata(&database) {
-                    Ok(metadata) => metadata,
-                    Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
-                    Err(error) => {
-                        return Err(DiscoveryError::io(
-                            database.display().to_string(),
-                            "inspect OpenCode database",
-                            &error,
-                        ));
-                    }
-                };
-                if !metadata.is_file() {
-                    return Err(DiscoveryError::InvalidMetadata {
-                        coordinate: database.display().to_string(),
-                        reason: "OpenCode database is not a regular file",
-                    });
-                }
-                Ok((self.is_default_program("opencode")
-                    && program_available(OsStr::new("sqlite3")))
-                    || program_available(&self.program))
+        let database_name = match self.flavor {
+            OpenCodeFlavor::Stable => "opencode.db",
+            OpenCodeFlavor::V2 => "opencode-next.db",
+        };
+        let Some(database) = self.database_file(database_name) else {
+            return Ok(false);
+        };
+        let metadata = match fs::metadata(&database) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => {
+                return Err(DiscoveryError::io(
+                    database.display().to_string(),
+                    "inspect OpenCode database",
+                    &error,
+                ));
             }
-            OpenCodeFlavor::V2 => Ok(program_available(&self.program)),
+        };
+        if !metadata.is_file() {
+            return Err(DiscoveryError::InvalidMetadata {
+                coordinate: database.display().to_string(),
+                reason: "OpenCode database is not a regular file",
+            });
         }
+        if self.authority == StoreAuthority::DefaultStore {
+            self.sqlite_database_file(database_name)?;
+        }
+        Ok(program_available(&self.program)
+            || (self.flavor == OpenCodeFlavor::Stable && program_available(OsStr::new("sqlite3"))))
     }
 
     fn is_default_program(&self, name: &str) -> bool {
         Path::new(&self.program).components().count() == 1
             && Path::new(&self.program).file_name() == Some(OsStr::new(name))
+    }
+
+    fn captured_xdg_data_home(&self) -> Option<&OsStr> {
+        if self.authority == StoreAuthority::Program
+            && !self.is_default_program("opencode")
+            && !self.is_default_program("opencode2")
+        {
+            return None;
+        }
+        self.data_directory
+            .as_deref()
+            .and_then(Path::parent)
+            .map(Path::as_os_str)
+    }
+
+    fn run_program(&self, program: &OsStr, args: &[OsString]) -> Result<Vec<u8>, DiscoveryError> {
+        run_command_with_xdg(
+            program,
+            args,
+            &self.coordinate(),
+            self.captured_xdg_data_home(),
+            COMMAND_DEADLINE,
+        )
     }
 
     fn database_locate(&self, id: &str) -> Result<Option<NativeSession>, DiscoveryError> {
@@ -193,7 +362,10 @@ impl OpenCodeStore {
             sql_literal(id)
         );
         let rows = self.database_rows(&query)?;
-        match rows.as_slice() {
+        if let Some(error) = rows.failures.into_iter().next() {
+            return Err(error);
+        }
+        match rows.values.as_slice() {
             [] => Ok(None),
             [row] => {
                 let record = self.record(row.clone())?;
@@ -222,12 +394,45 @@ impl OpenCodeStore {
              'tokens_cache_write', tokens_cache_write) AS row FROM session \
              ORDER BY time_updated DESC LIMIT {limit}"
         );
-        self.page_from_rows(self.database_rows(&query)?, limit)
+        let mut rows = self.database_rows(&query)?;
+        if !rows.failures.is_empty() {
+            let mut known = rows
+                .values
+                .iter()
+                .filter_map(|row| row.get("id").and_then(Value::as_str))
+                .chain(rows.unreadable_ids.iter().map(String::as_str))
+                .map(str::to_owned)
+                .collect::<std::collections::HashSet<_>>();
+            for id in self.database_ids(limit)? {
+                if known.insert(id.clone()) {
+                    rows.unreadable_ids.push(id);
+                }
+            }
+        }
+        Ok(self.page_from_rows(rows, limit))
     }
 
-    fn database_rows(&self, query: &str) -> Result<Vec<Value>, DiscoveryError> {
-        let Some(bytes) = self.database_text(query)? else {
+    fn database_ids(&self, limit: usize) -> Result<Vec<String>, DiscoveryError> {
+        let query = format!(
+            "SELECT id AS row FROM session ORDER BY time_updated DESC LIMIT {}",
+            limit.min(MAX_ROWS)
+        );
+        let Some(bytes) = self.database_text(&query)? else {
             return Ok(Vec::new());
+        };
+        let text = String::from_utf8(bytes).map_err(|_| DiscoveryError::InvalidMetadata {
+            coordinate: self.coordinate(),
+            reason: "OpenCode database ID response is not UTF-8",
+        })?;
+        parse_database_ids(&text, &self.coordinate(), limit.min(MAX_ROWS))
+    }
+
+    fn database_rows(&self, query: &str) -> Result<DatabaseRows, DiscoveryError> {
+        let Some(bytes) = self.database_text(query)? else {
+            return Ok(DatabaseRows {
+                complete: true,
+                ..DatabaseRows::default()
+            });
         };
         let text = String::from_utf8(bytes).map_err(|_| DiscoveryError::InvalidMetadata {
             coordinate: self.coordinate(),
@@ -237,32 +442,49 @@ impl OpenCodeStore {
     }
 
     fn database_text(&self, query: &str) -> Result<Option<Vec<u8>>, DiscoveryError> {
-        let Some(database) = database_path() else {
-            return Ok(None);
-        };
-        if self.is_default_program("opencode") && program_available(OsStr::new("sqlite3")) {
-            let database = database
-                .to_str()
-                .ok_or_else(|| DiscoveryError::InvalidMetadata {
-                    coordinate: self.coordinate(),
-                    reason: "OpenCode database path is not UTF-8",
-                })?;
-            return run_command(
-                OsStr::new("sqlite3"),
-                &[
-                    OsString::from("-readonly"),
-                    OsString::from("-batch"),
-                    OsString::from("-list"),
-                    OsString::from("-header"),
-                    OsString::from(database),
-                    OsString::from(query),
-                ],
-                &self.coordinate(),
-                COMMAND_DEADLINE,
-            )
-            .map(Some);
+        if self.flavor == OpenCodeFlavor::Stable && self.is_default_program("opencode") {
+            let Some(database) = self.sqlite_database_file("opencode.db")? else {
+                if self.authority == StoreAuthority::DefaultStore {
+                    return Ok(None);
+                }
+                return self
+                    .run_program(
+                        &self.program,
+                        &[
+                            OsString::from("db"),
+                            OsString::from("--format"),
+                            OsString::from("tsv"),
+                            OsString::from(query),
+                        ],
+                    )
+                    .map(Some);
+            };
+            if program_available(OsStr::new("sqlite3")) {
+                let database =
+                    database
+                        .to_str()
+                        .ok_or_else(|| DiscoveryError::InvalidMetadata {
+                            coordinate: self.coordinate(),
+                            reason: "OpenCode database path is not UTF-8",
+                        })?;
+                return run_command_with_xdg(
+                    OsStr::new("sqlite3"),
+                    &[
+                        OsString::from("-readonly"),
+                        OsString::from("-batch"),
+                        OsString::from("-list"),
+                        OsString::from("-header"),
+                        OsString::from(database),
+                        OsString::from(query),
+                    ],
+                    &self.coordinate(),
+                    self.captured_xdg_data_home(),
+                    COMMAND_DEADLINE,
+                )
+                .map(Some);
+            }
         }
-        run_command(
+        self.run_program(
             &self.program,
             &[
                 OsString::from("db"),
@@ -270,8 +492,6 @@ impl OpenCodeStore {
                 OsString::from("tsv"),
                 OsString::from(query),
             ],
-            &self.coordinate(),
-            COMMAND_DEADLINE,
         )
         .map(Some)
     }
@@ -339,7 +559,7 @@ impl OpenCodeStore {
     }
 
     fn api_request(&self, path: &str) -> Result<Value, DiscoveryError> {
-        let bytes = run_command(
+        let bytes = self.run_program(
             &self.program,
             &[
                 OsString::from("api"),
@@ -347,8 +567,6 @@ impl OpenCodeStore {
                 OsString::from("get"),
                 OsString::from(path),
             ],
-            &self.coordinate(),
-            COMMAND_DEADLINE,
         )?;
         serde_json::from_slice(&bytes).map_err(|_| DiscoveryError::InvalidMetadata {
             coordinate: self.coordinate(),
@@ -356,28 +574,40 @@ impl OpenCodeStore {
         })
     }
 
-    fn page_from_rows(
-        &self,
-        rows: Vec<Value>,
-        limit: usize,
-    ) -> Result<CandidatePage, DiscoveryError> {
+    fn page_from_rows(&self, rows: DatabaseRows, limit: usize) -> CandidatePage {
+        let values = rows.values;
         let mut page = CandidatePage {
             records: Vec::new(),
-            scanned: rows.len(),
+            scanned: rows.scanned,
             visited_entries: 0,
-            complete: rows.len() < limit,
-            failures: Vec::new(),
-            unreadable_ids: Vec::new(),
+            complete: rows.complete && rows.scanned < limit,
+            failures: rows.failures,
+            unreadable_ids: rows.unreadable_ids,
         };
-        self.retain_rows(rows.iter().take(limit), &mut page);
-        if rows.len() >= limit && limit == MAX_ROWS {
+        self.retain_rows(values.iter().take(limit), &mut page);
+        if rows.scanned > limit {
+            page.complete = false;
+            page.failures.push(DiscoveryError::BoundExhausted {
+                coordinate: self.coordinate(),
+                bound: "requested OpenCode candidate limit",
+            });
+        } else if rows.scanned == limit && limit == MAX_ROWS {
             page.complete = false;
         }
-        Ok(page)
+        page
     }
 
     fn retain_rows<'a>(&self, rows: impl Iterator<Item = &'a Value>, page: &mut CandidatePage) {
-        let mut retained = 0usize;
+        let mut retained = page
+            .failures
+            .iter()
+            .map(|failure| failure.to_string().len() + size_of::<DiscoveryError>())
+            .sum::<usize>()
+            + page
+                .unreadable_ids
+                .iter()
+                .map(|id| id.len() + size_of::<String>())
+                .sum::<usize>();
         for row in rows {
             match self.record(row.clone()) {
                 Ok(record) => {
@@ -443,38 +673,30 @@ impl OpenCodeStore {
         let id = metadata
             .get("id")
             .and_then(Value::as_str)
-            .filter(|id| !id.is_empty() && !id.contains('\0'))
+            .filter(|id| !id.is_empty() && !id.bytes().any(|byte| byte.is_ascii_control()))
             .ok_or_else(|| DiscoveryError::InvalidMetadata {
                 coordinate: self.coordinate(),
                 reason: "OpenCode session metadata has no valid ID",
             })?
             .to_owned();
-        Ok(NativeSession::opencode(
-            id,
-            self.coordinate(),
-            self.flavor,
-            metadata,
-        ))
+        let store = self.session_coordinate(&id);
+        Ok(NativeSession::opencode(id, store, self.flavor, metadata))
     }
 }
 
 pub(crate) fn default_stores() -> Vec<OpenCodeStore> {
-    let mut stores = vec![OpenCodeStore::stable("opencode")];
+    let mut stores = vec![OpenCodeStore::default_stable()];
     if program_available(OsStr::new("opencode2")) {
-        stores.push(OpenCodeStore::v2("opencode2"));
+        stores.push(OpenCodeStore::default_v2());
     }
     stores
 }
 
-fn data_directory() -> Option<PathBuf> {
+fn default_data_directory() -> Option<PathBuf> {
     std::env::var_os("XDG_DATA_HOME")
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/share")))
         .map(|path| path.join("opencode"))
-}
-
-fn database_path() -> Option<PathBuf> {
-    data_directory().map(|path| path.join("opencode.db"))
 }
 
 fn program_available(program: &OsStr) -> bool {
@@ -501,7 +723,13 @@ fn encode_path_component(value: &str) -> String {
     encoded
 }
 
-fn parse_database_rows(text: &str, coordinate: &str) -> Result<Vec<Value>, DiscoveryError> {
+fn parse_database_rows(text: &str, coordinate: &str) -> Result<DatabaseRows, DiscoveryError> {
+    if text.trim().is_empty() {
+        return Ok(DatabaseRows {
+            complete: true,
+            ..DatabaseRows::default()
+        });
+    }
     let mut lines = text.lines();
     let header = lines
         .next()
@@ -513,7 +741,10 @@ fn parse_database_rows(text: &str, coordinate: &str) -> Result<Vec<Value>, Disco
             reason: "OpenCode database response has an unexpected header",
         });
     }
-    let mut rows = Vec::new();
+    let mut rows = DatabaseRows {
+        complete: true,
+        ..DatabaseRows::default()
+    };
     for line in lines {
         if line.is_empty() {
             continue;
@@ -523,20 +754,100 @@ fn parse_database_rows(text: &str, coordinate: &str) -> Result<Vec<Value>, Disco
             .or_else(|| line.strip_prefix("row "))
             .unwrap_or(line)
             .trim_end_matches('\r');
-        let row: Value =
-            serde_json::from_str(json).map_err(|_| DiscoveryError::InvalidMetadata {
+        if rows.scanned >= MAX_ROWS {
+            rows.complete = false;
+            rows.failures.push(DiscoveryError::BoundExhausted {
                 coordinate: coordinate.to_owned(),
-                reason: "OpenCode database returned malformed row metadata",
-            })?;
-        rows.push(row);
-        if rows.len() > MAX_ROWS {
+                bound: "1,000 OpenCode metadata rows",
+            });
+            break;
+        }
+        rows.scanned += 1;
+        match serde_json::from_str::<Value>(json) {
+            Ok(row) => rows.values.push(row),
+            Err(_) => {
+                if let Some(id) = malformed_database_id(json) {
+                    rows.unreadable_ids.push(id);
+                }
+                rows.complete = false;
+                rows.failures.push(DiscoveryError::InvalidMetadata {
+                    coordinate: coordinate.to_owned(),
+                    reason: "OpenCode database returned malformed row metadata",
+                });
+            }
+        }
+    }
+    Ok(rows)
+}
+
+fn parse_database_ids(
+    text: &str,
+    coordinate: &str,
+    limit: usize,
+) -> Result<Vec<String>, DiscoveryError> {
+    if text.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut lines = text.lines();
+    if lines.next().map(|header| header.trim_end_matches('\r')) != Some("row") {
+        return Err(DiscoveryError::InvalidMetadata {
+            coordinate: coordinate.to_owned(),
+            reason: "OpenCode database ID response has an unexpected header",
+        });
+    }
+    let mut ids = Vec::new();
+    for line in lines.filter(|line| !line.is_empty()) {
+        let cell = line
+            .strip_prefix("row\t")
+            .or_else(|| line.strip_prefix("row "))
+            .unwrap_or(line)
+            .trim_end_matches('\r');
+        let id = decode_tsv_cell(cell).ok_or_else(|| DiscoveryError::InvalidMetadata {
+            coordinate: coordinate.to_owned(),
+            reason: "OpenCode database returned an invalid session ID cell",
+        })?;
+        if id.is_empty() || id.bytes().any(|byte| byte.is_ascii_control()) {
+            return Err(DiscoveryError::InvalidMetadata {
+                coordinate: coordinate.to_owned(),
+                reason: "OpenCode database returned an empty or invalid session ID",
+            });
+        }
+        ids.push(id);
+        if ids.len() > limit {
             return Err(DiscoveryError::BoundExhausted {
                 coordinate: coordinate.to_owned(),
                 bound: "1,000 OpenCode metadata rows",
             });
         }
     }
-    Ok(rows)
+    Ok(ids)
+}
+
+fn decode_tsv_cell(cell: &str) -> Option<String> {
+    if !cell.starts_with('"') {
+        return Some(cell.to_owned());
+    }
+    if !cell.ends_with('"') || cell.len() < 2 {
+        return None;
+    }
+    let mut decoded = String::with_capacity(cell.len() - 2);
+    let mut bytes = cell[1..cell.len() - 1].bytes().peekable();
+    while let Some(byte) = bytes.next() {
+        if byte == b'"' {
+            bytes.next_if_eq(&b'"')?;
+        }
+        decoded.push(byte as char);
+    }
+    Some(decoded)
+}
+
+fn malformed_database_id(line: &str) -> Option<String> {
+    let key_end = line.find("\"id\"")? + "\"id\"".len();
+    let remainder = line[key_end..].trim_start().strip_prefix(':')?.trim_start();
+    let value = remainder.strip_prefix('"')?;
+    let end = value.find('"')?;
+    (!value[..end].is_empty() && !value[..end].bytes().any(|byte| byte.is_ascii_control()))
+        .then(|| value[..end].to_owned())
 }
 
 struct ChildGuard {
@@ -571,14 +882,28 @@ impl Drop for ChildGuard {
     }
 }
 
+#[cfg(test)]
 fn run_command(
     program: &OsStr,
     args: &[OsString],
     coordinate: &str,
     deadline_after: Duration,
 ) -> Result<Vec<u8>, DiscoveryError> {
+    run_command_with_xdg(program, args, coordinate, None, deadline_after)
+}
+
+fn run_command_with_xdg(
+    program: &OsStr,
+    args: &[OsString],
+    coordinate: &str,
+    xdg_data_home: Option<&OsStr>,
+    deadline_after: Duration,
+) -> Result<Vec<u8>, DiscoveryError> {
     let deadline = Instant::now() + deadline_after;
     let mut command = Command::new(program);
+    if let Some(xdg_data_home) = xdg_data_home {
+        command.env("XDG_DATA_HOME", xdg_data_home);
+    }
     command
         .args(args)
         .stdin(Stdio::null())
@@ -715,7 +1040,7 @@ fn join_stdout(
 fn exit_status_label(status: ExitStatus) -> String {
     status
         .code()
-        .map(|code| format!("exit {code}"))
+        .map(|code| format!("exited with exit status: {code}"))
         .unwrap_or_else(|| "terminated by signal".to_owned())
 }
 
@@ -779,6 +1104,24 @@ mod tests {
         old
     }
 
+    fn path_with_first(first: &Path) -> Option<std::ffi::OsString> {
+        let previous = std::env::var_os("PATH");
+        let mut paths = vec![first.to_path_buf()];
+        if let Some(previous) = previous.as_ref() {
+            paths.extend(std::env::split_paths(previous));
+        }
+        std::env::set_var("PATH", std::env::join_paths(paths).unwrap());
+        previous
+    }
+
+    fn restore_path(previous: Option<std::ffi::OsString>) {
+        if let Some(value) = previous {
+            std::env::set_var("PATH", value);
+        } else {
+            std::env::remove_var("PATH");
+        }
+    }
+
     #[test]
     fn stable_metadata_query_uses_read_only_sql_and_canonical_row_identity() {
         let _lock = XDG_LOCK.lock().unwrap_or_else(|error| error.into_inner());
@@ -805,6 +1148,35 @@ mod tests {
     }
 
     #[test]
+    fn stable_listing_keeps_valid_rows_and_recovers_ids_for_malformed_rows() {
+        let _lock = XDG_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let temp = Temp::new();
+        let old_xdg = configure_xdg(&temp);
+        let log = temp.path().join("requests.log");
+        let fake = fake_program(
+            &temp,
+            "opencode-custom-rows",
+            &format!(
+                "printf '%s\\n' \"$4\" >> '{}'; case \"$4\" in *'SELECT id AS row FROM session'*) printf 'row\\nses_readable\\nses_hidden\\n' ;; *'ORDER BY time_updated DESC LIMIT'*) printf 'row\\nrow\\t{{\"id\":\"ses_readable\",\"title\":\"safe\"}}\\nrow\\t{{\"id\":\"ses_hidden\",\"title\":\"broken\\n' ;; *) printf 'row\\nrow\\t{{\"id\":\"ses_hidden\",\"title\":\"broken\\n' ;; esac",
+                log.display()
+            ),
+        );
+        let page = OpenCodeStore::stable(fake).candidates(10);
+        assert_eq!(page.records.len(), 1);
+        assert_eq!(page.records[0].id(), "ses_readable");
+        assert_eq!(page.unreadable_ids, vec!["ses_hidden"]);
+        assert!(!page.complete);
+        assert!(page
+            .failures
+            .iter()
+            .any(|failure| failure.to_string().contains("malformed row metadata")));
+        let requests = fs::read_to_string(log).unwrap();
+        assert!(requests.contains("SELECT id AS row FROM session ORDER BY"));
+        assert!(!requests.contains("message"));
+        restore_xdg(old_xdg);
+    }
+
+    #[test]
     fn stable_exact_query_escapes_sql_literal() {
         let id = "ses_'quoted";
         assert_eq!(sql_literal(id), "'ses_''quoted'");
@@ -820,14 +1192,23 @@ mod tests {
         std::env::set_var("HOME", &home);
         std::env::remove_var("XDG_DATA_HOME");
         assert_eq!(
-            database_path(),
+            OpenCodeStore::stable("opencode")
+                .data_directory()
+                .map(|directory| directory.join("opencode.db")),
             Some(home.join(".local/share/opencode/opencode.db"))
         );
         std::env::set_var("XDG_DATA_HOME", "");
-        assert_eq!(database_path(), Some(PathBuf::from("opencode/opencode.db")));
+        assert_eq!(
+            OpenCodeStore::stable("opencode")
+                .data_directory()
+                .map(|directory| directory.join("opencode.db")),
+            Some(PathBuf::from("opencode/opencode.db"))
+        );
         std::env::set_var("XDG_DATA_HOME", "relative-data");
         assert_eq!(
-            database_path(),
+            OpenCodeStore::stable("opencode")
+                .data_directory()
+                .map(|directory| directory.join("opencode.db")),
             Some(PathBuf::from("relative-data/opencode/opencode.db"))
         );
         if let Some(value) = previous_home {
@@ -836,6 +1217,175 @@ mod tests {
             std::env::remove_var("HOME");
         }
         restore_xdg(previous_xdg);
+    }
+
+    #[test]
+    fn opencode_store_captures_its_data_root_at_construction() {
+        let _lock = XDG_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let previous = std::env::var_os("XDG_DATA_HOME");
+        let first = Temp::new();
+        let second = Temp::new();
+        std::env::set_var("XDG_DATA_HOME", first.path());
+        let store = OpenCodeStore::default_stable();
+        std::env::set_var("XDG_DATA_HOME", second.path());
+        assert_eq!(store.data_directory(), Some(first.path().join("opencode")));
+        restore_xdg(previous);
+    }
+
+    #[test]
+    fn explicit_custom_v2_program_does_not_require_the_default_data_root() {
+        let _lock = XDG_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let previous = std::env::var_os("XDG_DATA_HOME");
+        let temp = Temp::new();
+        std::env::set_var("XDG_DATA_HOME", temp.path().join("absent-data"));
+        let program = fake_program(
+            &temp,
+            "opencode2-custom",
+            "printf '{\"data\":{\"id\":\"ses_native\"}}\\n'",
+        );
+        let store = OpenCodeStore::v2(program);
+        let session = store.locate_exact("ses_native").unwrap().unwrap();
+        assert_eq!(session.id(), "ses_native");
+        restore_xdg(previous);
+    }
+
+    #[test]
+    fn default_v2_command_uses_the_data_root_captured_at_construction() {
+        let _lock = XDG_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let old_xdg = std::env::var_os("XDG_DATA_HOME");
+        let temp = Temp::new();
+        let first = temp.path().join("first-data");
+        let second = temp.path().join("second-data");
+        fs::create_dir_all(first.join("opencode")).unwrap();
+        fs::write(
+            first.join("opencode/opencode-next.db"),
+            b"SQLite format 3\0",
+        )
+        .unwrap();
+        let log = temp.path().join("xdg-seen");
+        fake_program(
+            &temp,
+            "opencode2",
+            &format!(
+                "printf '%s' \"$XDG_DATA_HOME\" > '{}'; printf '{{\"data\":{{\"id\":\"ses_native\"}}}}\\n'",
+                log.display()
+            ),
+        );
+        std::env::set_var("XDG_DATA_HOME", &first);
+        let old_path = path_with_first(temp.path());
+        let v2 = default_stores()
+            .into_iter()
+            .find(|store| store.flavor() == OpenCodeFlavor::V2)
+            .unwrap();
+        std::env::set_var("XDG_DATA_HOME", &second);
+
+        assert_eq!(
+            v2.locate_exact("ses_native").unwrap().unwrap().id(),
+            "ses_native"
+        );
+        assert_eq!(fs::read_to_string(log).unwrap(), first.to_string_lossy());
+
+        restore_path(old_path);
+        restore_xdg(old_xdg);
+    }
+
+    #[test]
+    fn default_v2_program_is_not_invoked_without_its_store_file() {
+        let _lock = XDG_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let old_xdg = std::env::var_os("XDG_DATA_HOME");
+        let temp = Temp::new();
+        let data = temp.path().join("data");
+        fs::create_dir_all(data.join("opencode")).unwrap();
+        std::env::set_var("XDG_DATA_HOME", &data);
+        let marker = temp.path().join("v2-invoked");
+        fake_program(
+            &temp,
+            "opencode2",
+            &format!(
+                "printf invoked > '{}'; printf '{{\"data\":{{\"id\":\"ses_native\"}}}}\\n'",
+                marker.display()
+            ),
+        );
+        let test_path = path_with_first(temp.path());
+        let v2 = default_stores()
+            .into_iter()
+            .find(|store| store.flavor() == OpenCodeFlavor::V2)
+            .unwrap();
+        assert!(v2.locate_exact("ses_native").unwrap().is_none());
+        assert!(!marker.exists());
+
+        fs::write(data.join("opencode/opencode-next.db"), b"SQLite format 3\0").unwrap();
+        assert_eq!(
+            v2.locate_exact("ses_native").unwrap().unwrap().id(),
+            "ses_native"
+        );
+        assert!(marker.exists());
+        restore_path(test_path);
+        restore_xdg(old_xdg);
+    }
+
+    #[test]
+    fn empty_stable_query_is_absence_and_does_not_block_a_v2_exact_hit() {
+        let _lock = XDG_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let old_xdg = std::env::var_os("XDG_DATA_HOME");
+        let temp = Temp::new();
+        std::env::set_var("XDG_DATA_HOME", temp.path().join("absent-data"));
+        let stable = fake_program(&temp, "stable-empty", "exit 0");
+        let v2 = fake_program(
+            &temp,
+            "v2-hit",
+            "printf '{\"data\":{\"id\":\"ses_v2-only\"}}\\n'",
+        );
+        let discovery = crate::Discovery::new([
+            crate::NativeStore::opencode_stable(stable),
+            crate::NativeStore::opencode_v2(v2),
+        ]);
+        assert_eq!(
+            discovery.resolve("ses_v2-only").unwrap().id(),
+            "ses_v2-only"
+        );
+        restore_xdg(old_xdg);
+    }
+
+    #[test]
+    fn malformed_present_stable_database_does_not_fall_back_to_program() {
+        let _lock = XDG_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let old_xdg = std::env::var_os("XDG_DATA_HOME");
+        let temp = Temp::new();
+        let data = temp.path().join("data");
+        fs::create_dir_all(data.join("opencode")).unwrap();
+        fs::write(data.join("opencode/opencode.db"), b"not sqlite").unwrap();
+        std::env::set_var("XDG_DATA_HOME", &data);
+        let marker = temp.path().join("opencode-invoked");
+        fake_program(
+            &temp,
+            "opencode",
+            &format!("printf invoked > '{}'", marker.display()),
+        );
+        let path = path_with_first(temp.path());
+        let store = OpenCodeStore::stable("opencode");
+        for (header, reason) in [
+            (
+                b"not sqlite".as_slice(),
+                "OpenCode database has an incomplete SQLite header",
+            ),
+            (
+                b"not a sqlite db!".as_slice(),
+                "OpenCode database has an invalid SQLite header",
+            ),
+        ] {
+            fs::write(data.join("opencode/opencode.db"), header).unwrap();
+            assert!(matches!(
+                store.locate_exact("ses_any"),
+                Err(DiscoveryError::InvalidMetadata {
+                    reason: actual,
+                    ..
+                }) if actual == reason
+            ));
+        }
+        assert!(!marker.exists());
+        restore_path(path);
+        restore_xdg(old_xdg);
     }
 
     #[test]
@@ -978,7 +1528,8 @@ mod tests {
         .unwrap_err();
         assert!(matches!(
             error,
-            DiscoveryError::CommandFailed { ref status, .. } if status == "exit 17"
+            DiscoveryError::CommandFailed { ref status, .. }
+                if status == "exited with exit status: 17"
         ));
         assert!(!error.to_string().contains("private output"));
     }

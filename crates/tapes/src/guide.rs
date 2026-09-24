@@ -97,8 +97,9 @@ FIND IT
   whether the figures are a recorded total or a sum of requests and whether
   they cover the session or only the bounded read window.
 
-  A session is named by its full id or an unambiguous prefix; an ambiguous
-  prefix lists its candidates and fails rather than guessing. A harness whose
+  A full session id uses direct native lookup. A prefix is accepted only when
+  bounded candidate coverage proves it unique; an ambiguous prefix lists its
+  candidates, and incomplete coverage asks for the full id. A harness whose
   binary or store is absent reports itself unavailable and never fails a
   listing. If one stored session row cannot be read, listing keeps every other
   session and reports that one as unreadable, with its id and the diagnostic —

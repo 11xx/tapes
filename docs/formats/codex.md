@@ -17,6 +17,12 @@ separated from the timestamp by `-`.
 There is no non-interactive listing or reading command; file discovery is the
 only retrieval path.
 
+Native identity uses `session_meta.payload.id` from the opening when present,
+otherwise the session suffix of a recognized rollout filename. A malformed
+or conflicting header is an unreadable candidate. Discovery reads at most
+1 MiB from an opening, traverses at most 100,000 entries and depth 64, and
+reports a stopped scan instead of treating its candidates as the whole store.
+
 ## Line shape
 
 Every line is `{"type": …, "timestamp": …, "payload": {…}}` with an RFC 3339

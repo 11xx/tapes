@@ -2,17 +2,17 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
 
 use anyhow::{anyhow, Result};
 use serde_json::Value;
 
 use super::{
-    accounting_for, head_directory, home_path, list_files, list_files_with_search,
-    matching_session_file, read_bounds, read_jsonl, read_recording, replay_pin,
-    skipped_records_note, stream_jsonl, streamed_trailing_record, timestamp, trailing_record,
-    transcript, transcript_from_recording, ActivityRange, Backend, Jsonl, Listing, ParsedFile,
-    Query, StreamedChild, StreamedTranscript, TokenTotals, UnmappedTally,
+    accounting_for, default_native_store, enrich_native_session, head_directory,
+    list_discovered_files, list_discovered_files_with_search, read_bounds, read_jsonl,
+    read_recording, replay_pin, skipped_records_note, stream_jsonl, streamed_trailing_record,
+    timestamp, trailing_record, transcript, transcript_from_recording, ActivityRange, Backend,
+    Jsonl, Listing, ParsedFile, Query, StreamedChild, StreamedTranscript, TokenTotals,
+    UnmappedTally,
 };
 use crate::content::{
     bounded_shape, text_part, tool_coverage, tool_part, ContentAvailability, ContentCarrier,
@@ -26,10 +26,11 @@ use crate::model::{
     SourceDescriptor, Tokens, TrailingRecord, Transcript, Turn, TurnKind, TurnSelection,
 };
 use crate::usage::{Durations, ModelUsage, UsageDetail};
+use tapes_discovery::{Harness as NativeHarness, NativeStore};
 
 #[derive(Clone, Debug)]
 pub struct ClaudeBackend {
-    root: Option<PathBuf>,
+    store: Option<NativeStore>,
     /// How much of a recording's end a transcript read takes.
     read_bytes: u64,
 }
@@ -37,7 +38,14 @@ pub struct ClaudeBackend {
 impl ClaudeBackend {
     pub fn new(root: impl Into<PathBuf>) -> Self {
         Self {
-            root: Some(root.into()),
+            store: Some(NativeStore::claude(root)),
+            read_bytes: super::DEFAULT_READ_BYTES,
+        }
+    }
+
+    pub(crate) fn from_store(store: Option<NativeStore>) -> Self {
+        Self {
+            store,
             read_bytes: super::DEFAULT_READ_BYTES,
         }
     }
@@ -224,14 +232,7 @@ impl ClaudeBackend {
 
 impl Default for ClaudeBackend {
     fn default() -> Self {
-        let root = std::env::var_os("CLAUDE_CONFIG_DIR")
-            .map(PathBuf::from)
-            .map(|path| path.join("projects"))
-            .or_else(|| home_path(&[".claude", "projects"]));
-        Self {
-            root,
-            read_bytes: super::DEFAULT_READ_BYTES,
-        }
+        Self::from_store(default_native_store(NativeHarness::Claude))
     }
 }
 
@@ -291,128 +292,84 @@ impl Backend for ClaudeBackend {
     }
 
     fn available(&self) -> bool {
-        self.root.as_deref().is_some_and(Path::is_dir)
+        self.store.as_ref().is_some_and(NativeStore::available)
     }
 
     fn list_titles(&self, query: &Query) -> Result<Listing> {
-        let Some(root) = self.root.as_deref() else {
+        let Some(store) = self.store.as_ref() else {
             return Ok(Listing::default());
         };
-        let mut listing = Listing::default();
-        let mut entries_seen = 0;
-        let entry_limit = query.ceiling.saturating_mul(2);
-        for project in fs::read_dir(root)? {
-            entries_seen += 1;
-            if entries_seen > entry_limit {
-                listing.scan_truncated = true;
-                break;
-            }
-            let project = match project {
-                Ok(entry) => entry,
-                Err(error) => {
-                    listing
-                        .unavailable
-                        .push(format!("Claude project entry: {error}"));
-                    continue;
-                }
-            };
-            let kind = match project.file_type() {
-                Ok(kind) => kind,
-                Err(error) => {
-                    listing
-                        .unavailable
-                        .push(format!("{}: {error}", project.path().display()));
-                    continue;
-                }
-            };
-            if !kind.is_dir() {
+        let page = store.candidates(query.ceiling);
+        let mut listing = Listing {
+            scanned: page.scanned,
+            scan_truncated: !page.complete,
+            unavailable: page.failures.iter().map(ToString::to_string).collect(),
+            unavailable_ids: page.unreadable_ids.clone(),
+            ..Listing::default()
+        };
+        for native in page.records {
+            let Some(path) = native.locator() else {
+                listing.unavailable.push(format!(
+                    "Claude session {}: native file locator is missing",
+                    native.id()
+                ));
+                listing.unavailable_ids.push(native.id().to_owned());
                 continue;
-            }
-            let entries = match fs::read_dir(project.path()) {
-                Ok(entries) => entries,
+            };
+            let (session, _, read) = match self.parse(path) {
+                Ok(parsed) => parsed,
                 Err(error) => {
                     listing
                         .unavailable
-                        .push(format!("{}: {error}", project.path().display()));
+                        .push(format!("Claude session {}: {error:#}", native.id()));
+                    listing.unavailable_ids.push(native.id().to_owned());
                     continue;
                 }
             };
-            for entry in entries {
-                entries_seen += 1;
-                if entries_seen > entry_limit || listing.scanned >= query.ceiling {
-                    listing.scan_truncated = true;
-                    break;
-                }
-                let entry = match entry {
-                    Ok(entry) => entry,
-                    Err(error) => {
-                        listing
-                            .unavailable
-                            .push(format!("Claude session entry: {error}"));
-                        continue;
-                    }
-                };
-                let path = entry.path();
-                let kind = match entry.file_type() {
-                    Ok(kind) => kind,
-                    Err(error) => {
-                        listing
-                            .unavailable
-                            .push(format!("{}: {error}", path.display()));
-                        continue;
-                    }
-                };
-                if !kind.is_file()
-                    || path
-                        .extension()
-                        .is_none_or(|extension| extension != "jsonl")
-                {
+            let session = match enrich_native_session(&native, session) {
+                Ok(session) => session,
+                Err(error) => {
+                    listing
+                        .unavailable
+                        .push(format!("Claude session {}: {error:#}", native.id()));
+                    listing.unavailable_ids.push(native.id().to_owned());
                     continue;
                 }
-                listing.scanned += 1;
-                match self.parse(&path) {
-                    Ok((session, _, read)) => {
-                        if let Some(scope) = query.scope {
-                            match session.directory.as_deref() {
-                                Some(directory) if !scope.contains(directory) => continue,
-                                None => {
-                                    listing
-                                        .unavailable
-                                        .push(format!("{}: unknown project scope", path.display()));
-                                    continue;
-                                }
-                                _ => {}
-                            }
-                        }
-                        if read.skipped > 0 || (read.truncated && session.title.is_none()) {
-                            listing.unsearched.push(format!(
-                                "{} (claude): incomplete recorded-title evidence",
-                                session.id
-                            ));
-                        }
-                        listing.sessions.push(session);
+            };
+            if let Some(scope) = query.scope {
+                match session.directory.as_deref() {
+                    Some(directory) if !scope.contains(directory) => continue,
+                    None => {
+                        listing.unavailable.push(format!(
+                            "Claude session {}: unknown project scope",
+                            native.id()
+                        ));
+                        listing.unavailable_ids.push(native.id().to_owned());
+                        continue;
                     }
-                    Err(error) => listing
-                        .unavailable
-                        .push(format!("{}: {error:#}", path.display())),
+                    _ => {}
                 }
             }
-            if listing.scan_truncated {
-                break;
+            if read.skipped > 0 || (read.truncated && session.title.is_none()) {
+                listing.unsearched.push(format!(
+                    "{} (claude): incomplete recorded-title evidence",
+                    session.id
+                ));
             }
+            listing.sessions.push(session);
         }
         Ok(listing)
     }
 
     fn list(&self, query: &Query) -> Result<Listing> {
-        let Some(root) = self.root.as_deref() else {
+        let Some(store) = self.store.as_ref() else {
             return Ok(Listing::default());
         };
-        let mut listing = list_files(
-            session_files(root),
+        let mut listing = list_discovered_files(
+            store,
             query,
             |path| head_directory(path, claude_cwd),
-            |path| self.parse(path).ok().map(|(session, _, _)| session),
+            |_, path| self.parse(path).map(|(session, _, _)| session),
         );
         listing
             .sessions
@@ -422,24 +379,22 @@ impl Backend for ClaudeBackend {
     }
 
     fn list_with_search(&self, query: &Query, needle: &str, tail: usize) -> Result<Listing> {
-        let Some(root) = self.root.as_deref() else {
+        let Some(store) = self.store.as_ref() else {
             return Ok(Listing::default());
         };
-        let mut listing = list_files_with_search(
-            session_files(root),
+        let mut listing = list_discovered_files_with_search(
+            store,
             query,
             needle,
             tail,
             self.read_bytes,
             |path| head_directory(path, claude_cwd),
-            |path| {
-                self.parse(path)
-                    .ok()
-                    .map(|(session, turns, read)| ParsedFile {
-                        session,
-                        turns,
-                        truncated: read.truncated,
-                    })
+            |_, path| {
+                self.parse(path).map(|(session, turns, read)| ParsedFile {
+                    session,
+                    turns,
+                    truncated: read.truncated,
+                })
             },
         );
         listing
@@ -449,25 +404,26 @@ impl Backend for ClaudeBackend {
         Ok(listing)
     }
 
-    /// Locate by filename: no other session file is parsed, though the store
-    /// is still walked to find it.
+    /// Resolve native identity before reading normalized transcript metadata.
     fn locate(&self, id: &str) -> Result<Option<Session>> {
-        let Some(root) = self.root.as_deref() else {
+        let Some(store) = self.store.as_ref() else {
             return Ok(None);
         };
-        let Some(path) = matching_session_file(session_files(root), id) else {
+        let Some(native) = store.locate_exact(id)? else {
             return Ok(None);
         };
-        Ok(self.parse(&path).ok().map(|(session, _, _)| session))
+        let path = native
+            .locator()
+            .ok_or_else(|| anyhow!("Claude native session {} has no file locator", native.id()))?;
+        let (session, _, _) = self.parse(path)?;
+        Ok(Some(enrich_native_session(&native, session)?))
     }
 
     fn transcript(&self, session: &Session, tail: usize) -> Result<Transcript> {
-        let root = self
-            .root
-            .as_deref()
-            .ok_or_else(|| anyhow!("claude store is unavailable"))?;
-        let path = matching_session_file(session_files(root), &session.id)
-            .ok_or_else(|| anyhow!("claude session {} is unavailable", session.id))?;
+        let path = session
+            .locator()
+            .map(PathBuf::from)
+            .ok_or_else(|| anyhow!("claude session {} has no file locator", session.id))?;
         let (turns, recording, trailing_record, unmapped) =
             read_transcript(&path, self.read_bytes)?;
         let notes = subagent_notes(&path);
@@ -492,12 +448,10 @@ impl Backend for ClaudeBackend {
         replay: Option<&StreamedTranscript>,
         turn: &mut dyn FnMut(Turn) -> Result<()>,
     ) -> Result<StreamedTranscript> {
-        let root = self
-            .root
-            .as_deref()
-            .ok_or_else(|| anyhow!("claude store is unavailable"))?;
-        let path = matching_session_file(session_files(root), &session.id)
-            .ok_or_else(|| anyhow!("claude session {} is unavailable", session.id))?;
+        let path = session
+            .locator()
+            .map(PathBuf::from)
+            .ok_or_else(|| anyhow!("claude session {} has no file locator", session.id))?;
         let domain = format!("file:{}", path.display());
         let mut unmapped = UnmappedTally::default();
         let read = stream_jsonl(&path, replay_pin(replay)?, |value, span, revision| {
@@ -651,12 +605,10 @@ impl Backend for ClaudeBackend {
 
 impl ClaudeBackend {
     fn recording(&self, session: &Session) -> Result<PathBuf> {
-        let root = self
-            .root
-            .as_deref()
-            .ok_or_else(|| anyhow!("claude store is unavailable"))?;
-        matching_session_file(session_files(root), &session.id)
-            .ok_or_else(|| anyhow!("claude session {} is unavailable", session.id))
+        session
+            .locator()
+            .map(PathBuf::from)
+            .ok_or_else(|| anyhow!("claude session {} has no file locator", session.id))
     }
 
     /// A Claude session's children: the subagent transcripts under its own
@@ -1085,41 +1037,6 @@ fn claude_trailing_kind(value: &Value) -> Option<&'static str> {
 /// root reproduces. Narrowing on the name would hide it, and a filter that
 /// can produce false negatives is a wrong answer rather than a fast one.
 /// The per-file directory probe is cheap enough to make the trade unnecessary.
-fn session_files(root: &Path) -> Vec<PathBuf> {
-    let mut files = fs::read_dir(root)
-        .into_iter()
-        .flatten()
-        .flatten()
-        .filter_map(|project| {
-            project
-                .file_type()
-                .ok()
-                .filter(|kind| kind.is_dir())
-                .map(|_| project.path())
-        })
-        .flat_map(|project| fs::read_dir(project).into_iter().flatten().flatten())
-        .filter_map(|entry| {
-            let path = entry.path();
-            entry
-                .file_type()
-                .ok()
-                .filter(|kind| kind.is_file())
-                .and_then(|_| {
-                    path.extension()
-                        .is_some_and(|extension| extension == "jsonl")
-                        .then_some(path)
-                })
-        })
-        .collect::<Vec<_>>();
-    files.sort_by_cached_key(|path| {
-        fs::metadata(path)
-            .and_then(|metadata| metadata.modified())
-            .unwrap_or(SystemTime::UNIX_EPOCH)
-    });
-    files.reverse();
-    files
-}
-
 fn subagent_transcript_count(path: &Path) -> usize {
     subagent_files(path).len()
 }
