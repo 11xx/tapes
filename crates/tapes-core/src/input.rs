@@ -1782,6 +1782,7 @@ fn parse_record_spanning(
     source.producer_authority = producer_authority;
     source.location = Some(SourceLocation {
         locator: locator.to_owned(),
+        native_path: None,
         member: member.map(str::to_owned),
         container: container.map(|path| path.display().to_string()),
     });

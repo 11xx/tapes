@@ -116,6 +116,10 @@ pub struct SourceScope {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SourceLocation {
     pub locator: String,
+    /// The selected native file path stays lossless while a session is read.
+    /// The textual locator remains the serialized, human-readable coordinate.
+    #[serde(skip)]
+    pub(crate) native_path: Option<PathBuf>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub member: Option<String>,
     /// The supplied directory or archive the record was one member of.
@@ -157,6 +161,7 @@ impl SourceDescriptor {
             producer_authority: None,
             location: Some(SourceLocation {
                 locator: locator.into(),
+                native_path: None,
                 member: None,
                 container: None,
             }),
@@ -180,6 +185,7 @@ impl SourceDescriptor {
             producer_authority: None,
             location: Some(SourceLocation {
                 locator: locator.into(),
+                native_path: None,
                 member: None,
                 container: None,
             }),
@@ -1977,6 +1983,23 @@ mod tests {
         let decoded: Transcript = serde_json::from_value(value).unwrap();
         assert!(decoded.truncated);
         assert!(decoded.truncation.is_empty());
+    }
+
+    #[test]
+    fn a_native_source_path_is_runtime_only_in_the_serialized_location() {
+        let location = SourceLocation {
+            locator: "/native/recording.jsonl".into(),
+            native_path: Some(PathBuf::from("/native/recording.jsonl")),
+            member: None,
+            container: None,
+        };
+
+        let value = serde_json::to_value(&location).unwrap();
+        assert_eq!(value, json!({"locator": "/native/recording.jsonl"}));
+
+        let decoded: SourceLocation = serde_json::from_value(value).unwrap();
+        assert_eq!(decoded.locator, location.locator);
+        assert_eq!(decoded.native_path, None);
     }
 
     #[test]

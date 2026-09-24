@@ -191,12 +191,11 @@ impl ClaudeBackend {
         bytes: usize,
         projection: PageProjection,
     ) -> Result<crate::history::Page> {
-        let path = session
-            .locator()
+        let path = super::session_file_path(session)
             .ok_or_else(|| anyhow!("session has no source file"))?;
         crate::history::read_file(
             session,
-            Path::new(path),
+            path,
             cursor,
             bytes,
             projection,
@@ -209,7 +208,7 @@ impl ClaudeBackend {
                             let mut turns = parse_turns(value);
                             super::attach_record_refs(
                                 &mut turns,
-                                &format!("file:{}", path),
+                                &format!("file:{}", path.display()),
                                 Some(revision),
                                 Some(*span),
                             );
@@ -430,13 +429,10 @@ impl Backend for ClaudeBackend {
     }
 
     fn transcript(&self, session: &Session, tail: usize) -> Result<Transcript> {
-        let path = session
-            .locator()
-            .map(PathBuf::from)
+        let path = super::session_file_path(session)
             .ok_or_else(|| anyhow!("claude session {} has no file locator", session.id))?;
-        let (turns, recording, trailing_record, unmapped) =
-            read_transcript(&path, self.read_bytes)?;
-        let notes = subagent_notes(&path);
+        let (turns, recording, trailing_record, unmapped) = read_transcript(path, self.read_bytes)?;
+        let notes = subagent_notes(path);
         let mut transcript = transcript_from_recording(
             session.clone(),
             turns,
@@ -458,9 +454,7 @@ impl Backend for ClaudeBackend {
         replay: Option<&StreamedTranscript>,
         turn: &mut dyn FnMut(Turn) -> Result<()>,
     ) -> Result<StreamedTranscript> {
-        let path = session
-            .locator()
-            .map(PathBuf::from)
+        let path = super::session_file_path(session)
             .ok_or_else(|| anyhow!("claude session {} has no file locator", session.id))?;
         let domain = format!("file:{}", path.display());
         let mut unmapped = UnmappedTally::default();
@@ -486,7 +480,7 @@ impl Backend for ClaudeBackend {
             skipped: read.skipped,
             trailing_record: streamed_trailing_record(read.last.as_ref(), claude_trailing_kind),
             gaps: read.gaps,
-            notes: subagent_notes(&path),
+            notes: subagent_notes(path),
             unmapped: Some(unmapped.finish()),
             kinds: None,
         })
@@ -572,9 +566,13 @@ impl Backend for ClaudeBackend {
         if !identified {
             anyhow::bail!("child recording has no native parent identity evidence");
         }
+        let mut source = SourceDescriptor::installed("claude", path.display().to_string());
+        if let Some(location) = source.location.as_mut() {
+            location.native_path = Some(path.clone());
+        }
         let mut session = Session {
             id: format!("{}::{reference}", parent.id),
-            source: SourceDescriptor::installed("claude", path.display().to_string()),
+            source,
             metadata: None,
             model: None,
             model_observation: None,
@@ -615,9 +613,8 @@ impl Backend for ClaudeBackend {
 
 impl ClaudeBackend {
     fn recording(&self, session: &Session) -> Result<PathBuf> {
-        session
-            .locator()
-            .map(PathBuf::from)
+        super::session_file_path(session)
+            .map(Path::to_path_buf)
             .ok_or_else(|| anyhow!("claude session {} has no file locator", session.id))
     }
 
@@ -695,11 +692,8 @@ fn child_recording(parent: &Session, reference: &str) -> Result<PathBuf> {
     {
         anyhow::bail!("child reference must contain only letters, digits, hyphens or underscores");
     }
-    let parent_path = Path::new(
-        parent
-            .locator()
-            .ok_or_else(|| anyhow!("parent source unavailable"))?,
-    );
+    let parent_path =
+        super::session_file_path(parent).ok_or_else(|| anyhow!("parent source unavailable"))?;
     let directory = parent_path.with_extension("").join("subagents");
     Ok(directory.join(format!("agent-{reference}.jsonl")))
 }

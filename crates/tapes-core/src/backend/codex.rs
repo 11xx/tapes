@@ -160,12 +160,11 @@ impl CodexBackend {
         bytes: usize,
         projection: PageProjection,
     ) -> Result<crate::history::Page> {
-        let path = session
-            .locator()
+        let path = super::session_file_path(session)
             .ok_or_else(|| anyhow!("session has no source file"))?;
         crate::history::read_file(
             session,
-            Path::new(path),
+            path,
             cursor,
             bytes,
             projection,
@@ -179,7 +178,7 @@ impl CodexBackend {
                             let mut turns = reader.parse(value);
                             super::attach_record_refs(
                                 &mut turns,
-                                &format!("file:{}", path),
+                                &format!("file:{}", path.display()),
                                 Some(revision),
                                 Some(*span),
                             );
@@ -325,12 +324,10 @@ impl Backend for CodexBackend {
     }
 
     fn transcript(&self, session: &Session, tail: usize) -> Result<Transcript> {
-        let path = session
-            .locator()
-            .map(PathBuf::from)
+        let path = super::session_file_path(session)
             .ok_or_else(|| anyhow!("codex session {} has no file locator", session.id))?;
         let (turns, recording, trailing_record, terminal, unmapped) =
-            read_transcript(&path, self.read_bytes)?;
+            read_transcript(path, self.read_bytes)?;
         let mut transcript = transcript_from_recording(
             session.clone(),
             turns,
@@ -352,9 +349,7 @@ impl Backend for CodexBackend {
         replay: Option<&StreamedTranscript>,
         turn: &mut dyn FnMut(Turn) -> Result<()>,
     ) -> Result<StreamedTranscript> {
-        let path = session
-            .locator()
-            .map(PathBuf::from)
+        let path = super::session_file_path(session)
             .ok_or_else(|| anyhow!("codex session {} has no file locator", session.id))?;
         let domain = format!("file:{}", path.display());
         let mut terminal = None;
@@ -429,9 +424,7 @@ impl Backend for CodexBackend {
     }
 
     fn stream_session(&self, session: &Session, read: &StreamedTranscript) -> Result<Session> {
-        let path = session
-            .locator()
-            .map(PathBuf::from)
+        let path = super::session_file_path(session)
             .ok_or_else(|| anyhow!("codex session {} has no file locator", session.id))?;
         let records = std::cell::RefCell::new(CodexRecords::new(&path, false));
         let streamed = stream_jsonl_with_gaps(
@@ -460,12 +453,10 @@ impl Backend for CodexBackend {
         read: Option<&crate::model::ReadEvidence>,
         options: UsageObservationOptions,
     ) -> Result<UsageObservationResult> {
-        let path = session
-            .locator()
-            .map(PathBuf::from)
+        let path = super::session_file_path(session)
             .ok_or_else(|| anyhow!("codex session {} has no file locator", session.id))?;
         let read_window = read.is_none_or(|read| read.source_length > read.configured_bound);
-        let records = CodexRecords::with_series(&path, read_window, options);
+        let records = CodexRecords::with_series(path, read_window, options);
         let records = if let Some(evidence) = read {
             if evidence
                 .projection_options
@@ -528,9 +519,8 @@ impl Backend for CodexBackend {
 impl CodexBackend {
     /// Use discovery-owned native locators for sibling and parent joins.
     fn lineage_inputs(&self, session: &Session) -> Result<(Vec<PathBuf>, PathBuf, Vec<String>)> {
-        let path = session
-            .locator()
-            .map(PathBuf::from)
+        let path = super::session_file_path(session)
+            .map(Path::to_path_buf)
             .ok_or_else(|| anyhow!("codex session {} has no file locator", session.id))?;
         let store = self
             .store

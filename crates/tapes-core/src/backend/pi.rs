@@ -267,12 +267,10 @@ impl Backend for PiBackend {
     }
 
     fn transcript(&self, session: &Session, tail: usize) -> Result<Transcript> {
-        let path = session
-            .locator()
-            .map(PathBuf::from)
+        let path = super::session_file_path(session)
             .ok_or_else(|| anyhow!("pi session {} has no file locator", session.id))?;
         let (turns, recording, abandoned, trailing_record, unmapped) =
-            read_transcript(&path, self.read_bytes)?;
+            read_transcript(path, self.read_bytes)?;
         let mut transcript = transcript_from_recording(
             session.clone(),
             turns,
@@ -294,9 +292,7 @@ impl Backend for PiBackend {
         replay: Option<&StreamedTranscript>,
         turn: &mut dyn FnMut(Turn) -> Result<()>,
     ) -> Result<StreamedTranscript> {
-        let path = session
-            .locator()
-            .map(PathBuf::from)
+        let path = super::session_file_path(session)
             .ok_or_else(|| anyhow!("pi session {} has no file locator", session.id))?;
         // The active branch is the last entry's ancestry. The first pass keeps
         // only each entry's position, id, and parent; the second emits the
@@ -509,9 +505,8 @@ impl Backend for PiBackend {
 
 impl PiBackend {
     fn recording(&self, session: &Session) -> Result<PathBuf> {
-        session
-            .locator()
-            .map(PathBuf::from)
+        super::session_file_path(session)
+            .map(Path::to_path_buf)
             .ok_or_else(|| anyhow!("pi session {} has no file locator", session.id))
     }
 

@@ -549,16 +549,30 @@ pub(crate) fn enrich_native_session(
         );
     }
     session.id = native.id().to_owned();
-    let locator = native
-        .locator()
+    let native_path = native.locator().map(Path::to_path_buf);
+    let locator = native_path
+        .as_ref()
         .map(|path| path.display().to_string())
         .unwrap_or_else(|| native.store_coordinate().to_owned());
     session.source.location = Some(crate::model::SourceLocation {
         locator,
+        native_path,
         member: None,
         container: None,
     });
     Ok(session)
+}
+
+/// Resolve a session's file using the selected native path when discovery
+/// supplied one, while preserving the existing locator semantics for inputs.
+pub(crate) fn session_file_path(session: &Session) -> Option<&Path> {
+    let location = session.source.location.as_ref()?;
+    Some(
+        location
+            .native_path
+            .as_deref()
+            .unwrap_or_else(|| Path::new(&location.locator)),
+    )
 }
 
 fn is_candidate_page_limit(error: &DiscoveryError) -> bool {
