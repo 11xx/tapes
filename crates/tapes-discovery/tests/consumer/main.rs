@@ -51,7 +51,10 @@ fn error_class(error: &ResolveError) -> &'static str {
 }
 
 fn run(arguments: &[String]) -> Result<(), String> {
-    let (discovery, query) = if arguments.first().is_some_and(|argument| argument == "--from-env") {
+    let (discovery, query) = if arguments
+        .first()
+        .is_some_and(|argument| argument == "--from-env")
+    {
         let query = arguments
             .get(1)
             .ok_or_else(|| "environment query is missing".to_owned())?;

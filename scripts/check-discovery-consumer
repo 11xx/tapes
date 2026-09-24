@@ -87,7 +87,7 @@ def write_project(
     manifest = project / "Cargo.toml"
     manifest.write_text(
         "[package]\n"
-        'name = "tapes-discovery-consumer-check"\n'
+        'name = "discovery-consumer-check"\n'
         'version = "0.0.0"\n'
         'edition = "2021"\n\n'
         "[dependencies]\n"
@@ -478,7 +478,7 @@ def run_package_consumer(
         graph = normal_graph(manifest, project, env, logs, label + "-graph", no_default)
         print(f"{label}_reachable=" + ",".join(sorted(graph)))
     binary = env["CARGO_TARGET_DIR"]
-    binary_path = Path(binary) / "debug" / "tapes-discovery-consumer-check"
+    binary_path = Path(binary) / "debug" / "discovery-consumer-check"
     fixture_id = "60000000-0000-4000-8000-000000000006"
     result = invoke_consumer(
         binary_path,
@@ -565,7 +565,7 @@ def main() -> int:
             logs,
             "external-consumer-tests",
         )
-        consumer_binary = target / "debug" / "tapes-discovery-consumer-check"
+        consumer_binary = target / "debug" / "discovery-consumer-check"
 
         fixtures = work / "fixtures"
         codex_root = fixtures / "codex/sessions"
