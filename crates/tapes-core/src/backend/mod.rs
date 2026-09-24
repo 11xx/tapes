@@ -2303,6 +2303,7 @@ mod tests {
             "../../target/stream-jsonl-{}.jsonl",
             std::process::id()
         ));
+        fs::create_dir_all(path.parent().expect("fixture path has a parent")).unwrap();
         let long = format!("{{\"text\":\"{}\"}}", "x".repeat(64));
         fs::write(
             &path,
@@ -2347,6 +2348,7 @@ mod tests {
             "../../target/stream-jsonl-pin-{}.jsonl",
             std::process::id()
         ));
+        fs::create_dir_all(path.parent().expect("fixture path has a parent")).unwrap();
         fs::write(&path, "{\"n\":1}\n{\"n\":2}\n").unwrap();
         let spans = |pin: Option<ReadPin<'_>>| {
             let mut seen = Vec::new();
