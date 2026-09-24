@@ -5,11 +5,14 @@
 
 mod error;
 mod file;
+mod opencode;
 
 pub use error::DiscoveryError;
 pub use file::{CandidatePage, FileIdentityBasis};
+pub use opencode::{OpenCodeFlavor, OpenCodeStore};
 
 use std::env;
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 /// A native harness identity. OpenCode store generations share one harness.
@@ -45,20 +48,22 @@ pub enum IdentityBasis {
     Filename,
 }
 
+/// The native storage projection selected for a session.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NativeStoreKind {
+    ClaudeFiles,
+    CodexFiles,
+    OpenCode(OpenCodeFlavor),
+    PiFiles,
+}
+
 /// Store configuration captured at construction time.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum NativeStore {
-    Claude {
-        root: PathBuf,
-    },
-    Codex {
-        root: PathBuf,
-    },
-    Pi {
-        root: PathBuf,
-    },
-    #[cfg(feature = "opencode")]
-    OpenCode(crate::opencode::OpenCodeStore),
+    Claude { root: PathBuf },
+    Codex { root: PathBuf },
+    Pi { root: PathBuf },
+    OpenCode(OpenCodeStore),
 }
 
 impl NativeStore {
@@ -74,12 +79,23 @@ impl NativeStore {
         Self::Pi { root: root.into() }
     }
 
+    pub fn opencode(program: impl Into<OsString>) -> Self {
+        Self::OpenCode(OpenCodeStore::new(program))
+    }
+
+    pub fn opencode_stable(program: impl Into<OsString>) -> Self {
+        Self::OpenCode(OpenCodeStore::stable(program))
+    }
+
+    pub fn opencode_v2(program: impl Into<OsString>) -> Self {
+        Self::OpenCode(OpenCodeStore::v2(program))
+    }
+
     pub fn harness(&self) -> Harness {
         match self {
             Self::Claude { .. } => Harness::Claude,
             Self::Codex { .. } => Harness::Codex,
             Self::Pi { .. } => Harness::Pi,
-            #[cfg(feature = "opencode")]
             Self::OpenCode(_) => Harness::OpenCode,
         }
     }
@@ -87,7 +103,6 @@ impl NativeStore {
     pub fn root(&self) -> Option<&Path> {
         match self {
             Self::Claude { root } | Self::Codex { root } | Self::Pi { root } => Some(root),
-            #[cfg(feature = "opencode")]
             Self::OpenCode(_) => None,
         }
     }
@@ -97,17 +112,31 @@ impl NativeStore {
             Self::Claude { root } | Self::Codex { root } | Self::Pi { root } => {
                 format!("{}:{}", self.harness(), root.display())
             }
-            #[cfg(feature = "opencode")]
             Self::OpenCode(store) => store.coordinate(),
         }
     }
 
+    pub fn kind(&self) -> NativeStoreKind {
+        match self {
+            Self::Claude { .. } => NativeStoreKind::ClaudeFiles,
+            Self::Codex { .. } => NativeStoreKind::CodexFiles,
+            Self::Pi { .. } => NativeStoreKind::PiFiles,
+            Self::OpenCode(store) => NativeStoreKind::OpenCode(store.flavor()),
+        }
+    }
+
     pub fn locate_exact(&self, id: &str) -> Result<Option<NativeSession>, DiscoveryError> {
-        file::locate_exact(self, id)
+        match self {
+            Self::OpenCode(store) => store.locate_exact(id),
+            _ => file::locate_exact(self, id),
+        }
     }
 
     pub fn candidates(&self, limit: usize) -> CandidatePage {
-        file::candidates(self, limit)
+        match self {
+            Self::OpenCode(store) => store.candidates(limit),
+            _ => file::candidates(self, limit),
+        }
     }
 }
 
@@ -119,7 +148,7 @@ pub struct NativeSession {
     store: String,
     locator: Option<PathBuf>,
     identity_basis: Option<IdentityBasis>,
-    #[cfg(feature = "opencode")]
+    store_kind: NativeStoreKind,
     metadata: Option<serde_json::Value>,
 }
 
@@ -144,7 +173,10 @@ impl NativeSession {
         self.identity_basis
     }
 
-    #[cfg(feature = "opencode")]
+    pub fn store_kind(&self) -> NativeStoreKind {
+        self.store_kind
+    }
+
     pub fn metadata(&self) -> Option<&serde_json::Value> {
         self.metadata.as_ref()
     }
@@ -162,8 +194,30 @@ impl NativeSession {
             store,
             locator: Some(locator),
             identity_basis: Some(identity_basis),
-            #[cfg(feature = "opencode")]
+            store_kind: match harness {
+                Harness::Claude => NativeStoreKind::ClaudeFiles,
+                Harness::Codex => NativeStoreKind::CodexFiles,
+                Harness::OpenCode => NativeStoreKind::OpenCode(OpenCodeFlavor::Stable),
+                Harness::Pi => NativeStoreKind::PiFiles,
+            },
             metadata: None,
+        }
+    }
+
+    fn opencode(
+        id: String,
+        store: String,
+        flavor: OpenCodeFlavor,
+        metadata: serde_json::Value,
+    ) -> Self {
+        Self {
+            id,
+            harness: Harness::OpenCode,
+            store,
+            locator: None,
+            identity_basis: None,
+            store_kind: NativeStoreKind::OpenCode(flavor),
+            metadata: Some(metadata),
         }
     }
 }
@@ -209,8 +263,11 @@ impl Discovery {
         {
             stores.push(NativeStore::pi(root));
         }
-        #[cfg(feature = "opencode")]
-        stores.extend(crate::opencode::default_stores(home.as_deref()));
+        stores.extend(
+            opencode::default_stores()
+                .into_iter()
+                .map(NativeStore::OpenCode),
+        );
         Self::new(stores)
     }
 
@@ -219,7 +276,12 @@ impl Discovery {
     }
 
     pub fn resolve(&self, query: &str) -> Result<NativeSession, ResolveError> {
-        resolve_native(&self.stores, query)
+        let sources = self
+            .stores
+            .iter()
+            .map(|store| store as &dyn IdentitySource<NativeSession>)
+            .collect::<Vec<_>>();
+        resolve_with_sources(&sources, query).map(|resolved| resolved.record)
     }
 }
 
@@ -237,7 +299,7 @@ pub enum ResolveError {
     },
     Ambiguous {
         query: String,
-        candidates: Vec<NativeIdentity>,
+        candidates: Vec<IdentitySummary>,
     },
     BackendFailed {
         query: String,
@@ -287,104 +349,297 @@ impl std::error::Error for ResolveError {}
 
 /// Public identity projection for resolver ambiguity diagnostics.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct NativeIdentity {
+pub struct IdentitySummary {
     pub id: String,
-    pub harness: Harness,
-    pub store: String,
+    pub harness: String,
+    pub store: Option<String>,
 }
 
-fn resolve_native(stores: &[NativeStore], query: &str) -> Result<NativeSession, ResolveError> {
+/// Identity fields shared by installed stores and core's supplied-source rows.
+pub trait IdentityRecord {
+    fn id(&self) -> &str;
+    fn harness(&self) -> &str;
+    fn store_coordinate(&self) -> Option<&str> {
+        None
+    }
+}
+
+impl IdentityRecord for NativeSession {
+    fn id(&self) -> &str {
+        self.id()
+    }
+
+    fn harness(&self) -> &str {
+        self.harness.as_str()
+    }
+
+    fn store_coordinate(&self) -> Option<&str> {
+        Some(self.store_coordinate())
+    }
+}
+
+/// A source adapted to the shared exact/prefix selector.
+pub trait IdentitySource<R: IdentityRecord> {
+    fn harness(&self) -> &str;
+    fn locate_exact(&self, query: &str) -> Result<Option<R>, String>;
+    fn candidates(&self, limit: usize) -> CandidatePage<R, String>;
+    fn shares_session_ids(&self) -> bool {
+        false
+    }
+    fn terminal_exact_failure(&self) -> bool {
+        false
+    }
+    fn available(&self) -> bool {
+        true
+    }
+}
+
+impl IdentitySource<NativeSession> for NativeStore {
+    fn harness(&self) -> &str {
+        self.harness().as_str()
+    }
+
+    fn locate_exact(&self, query: &str) -> Result<Option<NativeSession>, String> {
+        NativeStore::locate_exact(self, query).map_err(|error| error.to_string())
+    }
+
+    fn candidates(&self, limit: usize) -> CandidatePage<NativeSession, String> {
+        let page = NativeStore::candidates(self, limit);
+        CandidatePage {
+            records: page.records,
+            scanned: page.scanned,
+            visited_entries: page.visited_entries,
+            complete: page.complete,
+            failures: page
+                .failures
+                .into_iter()
+                .map(|error| error.to_string())
+                .collect(),
+            unreadable_ids: page.unreadable_ids,
+        }
+    }
+
+    fn shares_session_ids(&self) -> bool {
+        self.harness() == Harness::OpenCode
+    }
+}
+
+/// A successful resolution carries the source that owns the selected record.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Resolved<R> {
+    pub source_index: usize,
+    pub record: R,
+}
+
+/// Resolve exact IDs before prefixes and preserve uncertainty across sources.
+pub fn resolve_with_sources<R: IdentityRecord + Clone>(
+    sources: &[&dyn IdentitySource<R>],
+    query: &str,
+) -> Result<Resolved<R>, ResolveError> {
     if query.trim().is_empty() || query.contains('\0') {
         return Err(ResolveError::InvalidQuery);
     }
-    let mut located = Vec::new();
-    let mut failures = Vec::new();
-    for (index, store) in stores.iter().enumerate() {
-        match store.locate_exact(query) {
-            Ok(Some(session)) if session.id() == query => located.push((index, session)),
-            Ok(_) => {}
-            Err(error) => failures.push((index, store.harness(), error.to_string())),
+    let mut exact = Vec::<Resolved<R>>::new();
+    let mut failures = Vec::<(usize, String, String)>::new();
+    for (source_index, source) in sources.iter().enumerate() {
+        match source.locate_exact(query) {
+            Ok(Some(record)) if record.id() == query => exact.push(Resolved {
+                source_index,
+                record,
+            }),
+            Ok(Some(_)) => failures.push((
+                source_index,
+                source.harness().to_owned(),
+                "exact lookup returned a nonmatching canonical ID".to_owned(),
+            )),
+            Ok(None) => {}
+            Err(error) => failures.push((source_index, source.harness().to_owned(), error)),
         }
     }
-    if let Some((index, session)) = located.iter().find(|(index, s)| {
-        s.harness() == Harness::OpenCode
-            && stores[..*index]
-                .iter()
-                .any(|earlier| earlier.harness() == s.harness())
-    }) {
+
+    for hit in &exact {
+        let source = sources[hit.source_index];
+        if !source.shares_session_ids() {
+            continue;
+        }
         let prior = failures
             .iter()
-            .filter(|(failed_index, harness, _)| {
-                *failed_index < *index && harness == &session.harness()
-            })
-            .map(|(_, _, message)| message.clone())
+            .filter(|(index, harness, _)| *index < hit.source_index && harness == source.harness())
+            .map(|(_, _, failure)| failure.clone())
             .collect::<Vec<_>>();
         if !prior.is_empty() {
             return Err(ResolveError::StoreFailed {
                 query: query.to_owned(),
-                answered_by: session.store_coordinate().to_owned(),
+                answered_by: hit
+                    .record
+                    .store_coordinate()
+                    .unwrap_or_else(|| source.harness())
+                    .to_owned(),
                 failures: prior,
             });
         }
     }
-    if located.len() == 1 {
-        return Ok(located.remove(0).1);
+
+    if exact.len() == 1 {
+        return Ok(exact.remove(0));
     }
-    if located.len() > 1 {
-        let mut candidates = located
-            .into_iter()
-            .map(|(_, session)| NativeIdentity {
-                id: session.id().to_owned(),
-                harness: session.harness(),
-                store: session.store_coordinate().to_owned(),
-            })
-            .collect::<Vec<_>>();
-        candidates.sort_by(|a, b| a.id.cmp(&b.id).then(a.harness.cmp(&b.harness)));
-        let shared = candidates
-            .iter()
-            .all(|candidate| candidate.harness == Harness::OpenCode);
-        if shared {
-            let selected_store = stores
-                .iter()
-                .position(|store| store.harness() == Harness::OpenCode)
-                .unwrap_or_default();
-            return stores[selected_store]
-                .locate_exact(query)
-                .map_err(|error| ResolveError::BackendFailed {
-                    query: query.to_owned(),
-                    failures: vec![error.to_string()],
-                })?
-                .ok_or_else(|| ResolveError::NotFound {
-                    query: query.to_owned(),
-                    truncated: false,
-                });
+    if exact.len() > 1 {
+        let all_shared = exact.iter().all(|hit| {
+            sources[hit.source_index].shares_session_ids()
+                && hit.record.harness() == exact[0].record.harness()
+        });
+        if all_shared {
+            exact.sort_by_key(|hit| hit.source_index);
+            return Ok(exact.remove(0));
         }
         return Err(ResolveError::Ambiguous {
             query: query.to_owned(),
-            candidates,
+            candidates: identity_summaries(
+                exact
+                    .iter()
+                    .map(|hit| (&hit.record as &dyn IdentityRecord, hit.source_index)),
+            ),
+        });
+    }
+    if failures
+        .iter()
+        .any(|(index, _, _)| sources[*index].terminal_exact_failure())
+    {
+        return Err(ResolveError::BackendFailed {
+            query: query.to_owned(),
+            failures: failure_messages(failures.iter()),
         });
     }
 
-    let mut matches = Vec::new();
+    let mut pages = Vec::with_capacity(sources.len());
     let mut diagnostics = Vec::new();
     let mut truncated = false;
-    for store in stores {
-        let page = store.candidates(1_000);
+    for source in sources {
+        if !source.available() {
+            pages.push(CandidatePage::<R, String> {
+                records: Vec::new(),
+                scanned: 0,
+                visited_entries: 0,
+                complete: true,
+                failures: Vec::new(),
+                unreadable_ids: Vec::new(),
+            });
+            continue;
+        }
+        let page = source.candidates(1_000);
         truncated |= !page.complete;
-        diagnostics.extend(page.failures.iter().map(ToString::to_string));
-        matches.extend(
-            page.records
-                .into_iter()
-                .filter(|session| session.id().starts_with(query)),
-        );
+        diagnostics.extend(page.failures.iter().cloned());
+        pages.push(page);
     }
-    matches.sort_by(|a, b| a.id().cmp(b.id()).then(a.harness().cmp(&b.harness())));
-    matches.dedup_by(|a, b| a.id() == b.id() && a.harness() == b.harness());
-    match matches.len() {
-        0 if !diagnostics.is_empty() => Err(ResolveError::BackendFailed {
+    let mut matches = Vec::<Resolved<R>>::new();
+    for (source_index, page) in pages.iter().enumerate() {
+        for record in &page.records {
+            if !record.id().starts_with(query) {
+                continue;
+            }
+            let source = sources[source_index];
+            if source.shares_session_ids() {
+                let mut prior_failure = failures
+                    .iter()
+                    .filter(|(index, harness, _)| {
+                        *index < source_index && harness == source.harness()
+                    })
+                    .map(|(_, _, failure)| failure.clone())
+                    .collect::<Vec<_>>();
+                for earlier in 0..source_index {
+                    if sources[earlier].harness() != source.harness() {
+                        continue;
+                    }
+                    if pages[earlier]
+                        .unreadable_ids
+                        .iter()
+                        .any(|id| id == record.id())
+                    {
+                        prior_failure.push(format!(
+                            "{} store has an unreadable row for the same ID",
+                            sources[earlier].harness()
+                        ));
+                    }
+                    if !pages[earlier].failures.is_empty() {
+                        prior_failure.extend(pages[earlier].failures.iter().cloned());
+                    }
+                }
+                if !prior_failure.is_empty() {
+                    return Err(ResolveError::StoreFailed {
+                        query: query.to_owned(),
+                        answered_by: record
+                            .store_coordinate()
+                            .unwrap_or_else(|| source.harness())
+                            .to_owned(),
+                        failures: prior_failure,
+                    });
+                }
+                if matches.iter().any(|prior| {
+                    prior.record.id() == record.id() && prior.record.harness() == record.harness()
+                }) {
+                    continue;
+                }
+            }
+            matches.push(Resolved {
+                source_index,
+                record: record.clone(),
+            });
+        }
+    }
+
+    matches.sort_by(|left, right| {
+        left.record
+            .id()
+            .cmp(right.record.id())
+            .then(left.record.harness().cmp(right.record.harness()))
+    });
+    let exact_matches = matches
+        .iter()
+        .filter(|hit| hit.record.id() == query)
+        .collect::<Vec<_>>();
+    if exact_matches.len() == 1 {
+        return Ok(exact_matches[0].clone());
+    }
+    if exact_matches.len() > 1 {
+        let shared = exact_matches.iter().all(|hit| {
+            sources[hit.source_index].shares_session_ids()
+                && hit.record.harness() == exact_matches[0].record.harness()
+        });
+        if shared {
+            return Ok(exact_matches
+                .into_iter()
+                .min_by_key(|hit| hit.source_index)
+                .expect("exact hits exist")
+                .clone());
+        }
+        return Err(ResolveError::Ambiguous {
             query: query.to_owned(),
-            failures: diagnostics,
-        }),
+            candidates: identity_summaries(
+                exact_matches
+                    .iter()
+                    .map(|hit| (&hit.record as &dyn IdentityRecord, hit.source_index)),
+            ),
+        });
+    }
+    if matches.len() > 1 {
+        return Err(ResolveError::Ambiguous {
+            query: query.to_owned(),
+            candidates: identity_summaries(
+                matches
+                    .iter()
+                    .map(|hit| (&hit.record as &dyn IdentityRecord, hit.source_index)),
+            ),
+        });
+    }
+    match matches.len() {
+        0 if !diagnostics.is_empty() || !failures.is_empty() => {
+            let mut failures = failure_messages(failures.iter());
+            failures.extend(diagnostics);
+            Err(ResolveError::BackendFailed {
+                query: query.to_owned(),
+                failures,
+            })
+        }
         0 => Err(ResolveError::NotFound {
             query: query.to_owned(),
             truncated,
@@ -394,16 +649,36 @@ fn resolve_native(stores: &[NativeStore], query: &str) -> Result<NativeSession, 
             diagnostics,
         }),
         1 => Ok(matches.remove(0)),
-        _ => Err(ResolveError::Ambiguous {
-            query: query.to_owned(),
-            candidates: matches
-                .into_iter()
-                .map(|session| NativeIdentity {
-                    id: session.id().to_owned(),
-                    harness: session.harness(),
-                    store: session.store_coordinate().to_owned(),
-                })
-                .collect(),
-        }),
+        _ => unreachable!("multiple matches returned above"),
     }
+}
+
+fn identity_summaries<'a>(
+    identities: impl Iterator<Item = (&'a dyn IdentityRecord, usize)>,
+) -> Vec<IdentitySummary> {
+    let mut candidates = identities
+        .map(|(record, index)| IdentitySummary {
+            id: record.id().to_owned(),
+            harness: record.harness().to_owned(),
+            store: record
+                .store_coordinate()
+                .map(str::to_owned)
+                .or_else(|| Some(format!("source {index}"))),
+        })
+        .collect::<Vec<_>>();
+    candidates.sort_by(|left, right| {
+        left.id
+            .cmp(&right.id)
+            .then(left.harness.cmp(&right.harness))
+            .then(left.store.cmp(&right.store))
+    });
+    candidates
+}
+
+fn failure_messages<'a>(
+    failures: impl Iterator<Item = &'a (usize, String, String)>,
+) -> Vec<String> {
+    failures
+        .map(|(_, harness, failure)| format!("{harness}: {failure}"))
+        .collect()
 }

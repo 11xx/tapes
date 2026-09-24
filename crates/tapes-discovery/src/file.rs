@@ -18,16 +18,16 @@ const MAX_RETAINED_BYTES: usize = 16 * 1024 * 1024;
 const MAX_PREFIX_CANDIDATES: usize = 1_000;
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct CandidatePage {
-    pub records: Vec<NativeSession>,
+pub struct CandidatePage<R = NativeSession, E = DiscoveryError> {
+    pub records: Vec<R>,
     pub scanned: usize,
     pub visited_entries: usize,
     pub complete: bool,
-    pub failures: Vec<DiscoveryError>,
+    pub failures: Vec<E>,
     pub unreadable_ids: Vec<String>,
 }
 
-impl CandidatePage {
+impl CandidatePage<NativeSession, DiscoveryError> {
     fn empty() -> Self {
         Self {
             records: Vec::new(),
@@ -53,16 +53,18 @@ struct Walk {
     complete: bool,
     failures: Vec<DiscoveryError>,
     retained: usize,
+    entry_limit: usize,
 }
 
 impl Walk {
-    fn new() -> Self {
+    fn new(entry_limit: usize) -> Self {
         Self {
             entries: Vec::new(),
             scanned: 0,
             complete: true,
             failures: Vec::new(),
             retained: 0,
+            entry_limit,
         }
     }
 
@@ -249,6 +251,14 @@ pub(crate) fn locate_exact(
     store: &NativeStore,
     id: &str,
 ) -> Result<Option<NativeSession>, DiscoveryError> {
+    locate_exact_using(store, id, probe)
+}
+
+fn locate_exact_using(
+    store: &NativeStore,
+    id: &str,
+    mut inspect: impl FnMut(&NativeStore, &Path) -> Result<Option<NativeSession>, DiscoveryError>,
+) -> Result<Option<NativeSession>, DiscoveryError> {
     let Some(root) = store.root() else {
         return Ok(None);
     };
@@ -271,7 +281,7 @@ pub(crate) fn locate_exact(
     }
     for index in filename_matches {
         let path = &entries[index].path;
-        match probe(store, path) {
+        match inspect(store, path) {
             Ok(Some(session)) if session.id() == id => return Ok(Some(session)),
             Ok(_) => {}
             Err(error) => return Err(error),
@@ -286,7 +296,7 @@ pub(crate) fn locate_exact(
         {
             continue;
         }
-        match probe(store, &entry.path) {
+        match inspect(store, &entry.path) {
             Ok(Some(session)) if session.id() == id => return Ok(Some(session)),
             Ok(_) => {}
             Err(error) => {
@@ -303,7 +313,11 @@ pub(crate) fn locate_exact(
 }
 
 fn walk(store: &NativeStore, root: &Path) -> Walk {
-    let mut walk = Walk::new();
+    walk_with_entry_limit(store, root, MAX_VISITED_ENTRIES)
+}
+
+fn walk_with_entry_limit(store: &NativeStore, root: &Path, entry_limit: usize) -> Walk {
+    let mut walk = Walk::new(entry_limit);
     let root_metadata = match fs::metadata(root) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return walk,
@@ -344,6 +358,9 @@ fn walk_claude(
         None => return,
     };
     for entry in projects {
+        if entry_limit_reached(root, walk) {
+            return;
+        }
         let Some((path, metadata)) = entry_metadata(store, entry, walk) else {
             continue;
         };
@@ -355,6 +372,9 @@ fn walk_claude(
             None => continue,
         };
         for entry in sessions {
+            if entry_limit_reached(&path, walk) {
+                return;
+            }
             let Some((path, metadata)) = entry_metadata(store, entry, walk) else {
                 continue;
             };
@@ -383,6 +403,9 @@ fn visit_tree(
         return;
     };
     for entry in entries {
+        if entry_limit_reached(directory, walk) {
+            return;
+        }
         let Some((path, metadata)) = entry_metadata(store, entry, walk) else {
             continue;
         };
@@ -393,6 +416,36 @@ fn visit_tree(
         } else if metadata.is_file() && is_jsonl(&path) && native_filename(store.harness(), &path) {
             retain_file(store, path, metadata, walk);
         }
+    }
+}
+
+fn entry_limit_reached(path: &Path, walk: &mut Walk) -> bool {
+    if walk.scanned < walk.entry_limit {
+        return false;
+    }
+    let bound = entry_limit_name(walk.entry_limit);
+    if !walk.failures.iter().any(|error| {
+        matches!(
+            error,
+            DiscoveryError::BoundExhausted {
+                bound: observed,
+                ..
+            } if *observed == bound
+        )
+    }) {
+        walk.fail(DiscoveryError::BoundExhausted {
+            coordinate: path.display().to_string(),
+            bound,
+        });
+    }
+    true
+}
+
+fn entry_limit_name(limit: usize) -> &'static str {
+    if limit == MAX_VISITED_ENTRIES {
+        "100,000 directory entries"
+    } else {
+        "injected directory-entry limit"
     }
 }
 
@@ -416,20 +469,21 @@ fn entry_metadata(
     entry: io::Result<fs::DirEntry>,
     walk: &mut Walk,
 ) -> Option<(PathBuf, fs::Metadata)> {
-    if walk.scanned >= MAX_VISITED_ENTRIES {
+    if walk.scanned >= walk.entry_limit {
         walk.complete = false;
+        let bound = entry_limit_name(walk.entry_limit);
         if !walk.failures.iter().any(|error| {
             matches!(
                 error,
                 DiscoveryError::BoundExhausted {
-                    bound: "100,000 directory entries",
+                    bound: observed,
                     ..
-                }
+                } if *observed == bound
             )
         }) {
             walk.fail(DiscoveryError::BoundExhausted {
                 coordinate: store.coordinate(),
-                bound: "100,000 directory entries",
+                bound,
             });
         }
         return None;
@@ -478,6 +532,17 @@ fn mark_directory(
 }
 
 fn retain_file(store: &NativeStore, path: PathBuf, metadata: fs::Metadata, walk: &mut Walk) {
+    let modified = match metadata.modified() {
+        Ok(modified) => modified,
+        Err(error) => {
+            walk.fail(DiscoveryError::io(
+                path.display().to_string(),
+                "read modification time",
+                &error,
+            ));
+            return;
+        }
+    };
     let charge = path.as_os_str().len() + size_of::<FileEntry>() + 80;
     if walk.retained.saturating_add(charge) > MAX_RETAINED_BYTES {
         walk.complete = false;
@@ -488,10 +553,7 @@ fn retain_file(store: &NativeStore, path: PathBuf, metadata: fs::Metadata, walk:
         return;
     }
     walk.retained += charge;
-    walk.entries.push(FileEntry {
-        path,
-        modified: metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH),
-    });
+    walk.entries.push(FileEntry { path, modified });
 }
 
 fn is_jsonl(path: &Path) -> bool {
@@ -700,7 +762,7 @@ mod tests {
     use super::*;
     use crate::{Discovery, ResolveError};
     use std::fs;
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     struct Temp(PathBuf);
 
@@ -780,6 +842,68 @@ mod tests {
     }
 
     #[test]
+    fn conflicting_native_identity_is_not_replaced_with_a_filename_id() {
+        let temp = Temp::new();
+        let root = temp.path().join("claude");
+        write(
+            &root,
+            "project/name.jsonl",
+            "{\"sessionId\":\"header-one\"}\n{\"sessionId\":\"header-two\"}\n",
+        );
+        let error = NativeStore::claude(root).locate_exact("name").unwrap_err();
+        assert!(matches!(
+            error,
+            DiscoveryError::InvalidMetadata {
+                reason: "conflicting native identity fields",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn oversized_unterminated_opening_uses_the_native_filename_fallback() {
+        let temp = Temp::new();
+        let root = temp.path().join("claude");
+        let path = write(
+            &root,
+            "project/filename-id.jsonl",
+            &format!(
+                "{{\"sessionId\":\"header-id\",\"body\":\"{}",
+                "x".repeat(MAX_OPENING_BYTES)
+            ),
+        );
+        let mut file = File::open(path).unwrap();
+        let bytes = opening(&mut file, (MAX_OPENING_BYTES + 32) as u64).unwrap();
+        assert_eq!(bytes.len(), MAX_OPENING_BYTES);
+        assert_eq!(
+            native_identity(Harness::Claude, &bytes, Path::new("filename-id.jsonl")).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn exact_filename_permission_failure_remains_a_read_error() {
+        let temp = Temp::new();
+        let root = temp.path().join("claude");
+        let path = write(&root, "project/id.jsonl", "{\"sessionId\":\"id\"}\n");
+        let store = NativeStore::claude(root);
+        let error = locate_exact_using(&store, "id", |store, path| {
+            probe_with_open(store, path, |_| {
+                Err(io::Error::from(io::ErrorKind::PermissionDenied))
+            })
+        })
+        .unwrap_err();
+        assert!(path.exists());
+        assert!(matches!(
+            error,
+            DiscoveryError::Io {
+                kind: io::ErrorKind::PermissionDenied,
+                ..
+            }
+        ));
+    }
+
+    #[test]
     fn malformed_unrelated_lines_are_ignored() {
         let temp = Temp::new();
         let root = temp.path().join("pi");
@@ -810,6 +934,29 @@ mod tests {
     }
 
     #[test]
+    fn injected_directory_entry_limit_stops_the_walk_and_marks_coverage() {
+        let temp = Temp::new();
+        let root = temp.path().join("claude");
+        for index in 0..20 {
+            write(
+                &root,
+                &format!("project/session-{index:02}.jsonl"),
+                &format!("{{\"sessionId\":\"session-{index:02}\"}}\n"),
+            );
+        }
+        let walk = walk_with_entry_limit(&NativeStore::claude(&root), &root, 3);
+        assert_eq!(walk.scanned, 3);
+        assert!(!walk.complete);
+        assert!(walk.failures.iter().any(|failure| matches!(
+            failure,
+            DiscoveryError::BoundExhausted {
+                bound: "injected directory-entry limit",
+                ..
+            }
+        )));
+    }
+
+    #[test]
     fn missing_root_is_absence_but_wrong_type_is_an_error() {
         let temp = Temp::new();
         let missing = NativeStore::pi(temp.path().join("missing"));
@@ -827,11 +974,19 @@ mod tests {
     fn one_prefix_hit_on_an_incomplete_page_is_not_unique() {
         let temp = Temp::new();
         let root = temp.path().join("claude");
-        write(
+        let first = write(
             &root,
             "project/a-needle-one.jsonl",
             "{\"sessionId\":\"needle-one\"}\n",
         );
+        File::options()
+            .write(true)
+            .open(first)
+            .unwrap()
+            .set_times(
+                fs::FileTimes::new().set_modified(SystemTime::now() + Duration::from_secs(86400)),
+            )
+            .unwrap();
         for index in 0..999 {
             write(
                 &root,
@@ -839,14 +994,23 @@ mod tests {
                 &format!("{{\"sessionId\":\"middle-{index:04}\"}}\n"),
             );
         }
-        write(
+        let last = write(
             &root,
             "project/z-needle-two.jsonl",
             "{\"sessionId\":\"needle-two\"}\n",
         );
+        File::options()
+            .write(true)
+            .open(last)
+            .unwrap()
+            .set_times(fs::FileTimes::new().set_modified(UNIX_EPOCH))
+            .unwrap();
         let store = NativeStore::claude(root);
         let resolution = Discovery::new([store]).resolve("needle");
-        assert!(matches!(resolution, Err(ResolveError::Incomplete { .. })));
+        assert!(
+            matches!(&resolution, Err(ResolveError::Incomplete { .. })),
+            "{resolution:?}"
+        );
     }
 
     #[test]
@@ -913,5 +1077,23 @@ mod tests {
         let page = NativeStore::pi(root).candidates(10);
         assert_eq!(page.records.len(), 1);
         assert!(page.complete);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_regular_native_names_are_ignored_without_opening_them() {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+
+        let temp = Temp::new();
+        let root = temp.path().join("claude");
+        let fifo = root.join("project/fifo.jsonl");
+        fs::create_dir_all(fifo.parent().unwrap()).unwrap();
+        let path = CString::new(fifo.as_os_str().as_bytes()).unwrap();
+        let result = unsafe { libc::mkfifo(path.as_ptr(), 0o600) };
+        assert_eq!(result, 0);
+        let page = NativeStore::claude(root).candidates(10);
+        assert!(page.complete);
+        assert!(page.records.is_empty());
     }
 }

@@ -8,9 +8,6 @@ description = "Bounded metadata-only discovery of native coding-agent session st
 keywords = ["sessions", "agents", "discovery"]
 categories = ["development-tools"]
 
-[features]
-default = []
-opencode = []
-
 [dependencies]
+libc.workspace = true
 serde_json.workspace = true

@@ -10,6 +10,10 @@ from the filename convention for a file inside a configured native root.
 Malformed or contradictory identity fields are errors. A UUID-shaped string
 alone never identifies a session.
 
+Each native session carries its harness, store coordinate, and storage kind.
+Stable OpenCode and opencode2 share the `opencode` harness while retaining
+distinct store kinds.
+
 Store absence is an empty observation. Read errors, malformed metadata, and
 exhausted bounds remain explicit. Prefix selection succeeds only when the
 relevant candidate scan proves uniqueness. File traversal visits at most
