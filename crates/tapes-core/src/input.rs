@@ -207,6 +207,10 @@ impl Backend for InputBackend {
         true
     }
 
+    fn terminal_exact_failure(&self) -> bool {
+        true
+    }
+
     fn list(&self, query: &Query) -> Result<Listing> {
         let dataset = self.dataset()?;
         let mut listing = Listing {
@@ -1778,6 +1782,7 @@ fn parse_record_spanning(
     source.producer_authority = producer_authority;
     source.location = Some(SourceLocation {
         locator: locator.to_owned(),
+        native_path: None,
         member: member.map(str::to_owned),
         container: container.map(|path| path.display().to_string()),
     });

@@ -38,8 +38,9 @@ guide. The published package is `tapes-cli` and installs the `tapes` binary.
 ZIP input support is default-off; install with `--features zip` when archive
 inputs or ZIP evidence are needed. Without that feature, plain JSON files and
 directories remain available and a ZIP input reports the enabling command.
-File-backed harnesses need only their recording stores. OpenCode access uses
-its installed CLI; absent harnesses remain optional. Development checks
+File-backed harnesses need only their recording stores. OpenCode reads its
+selected native store through bounded read-only metadata transports; absent
+harnesses remain optional. Development checks
 are `cargo build --all-targets`, `cargo test`, and
 `cargo clippy --all-targets -- -D warnings && cargo fmt --check`.
 
@@ -49,6 +50,31 @@ Released versions are the calendar date of publication, written `YYYY.M.D`.
 The command, the binary, and the repository are `tapes`; the published package
 name differs, because the bare name on crates.io belongs to an unrelated
 project.
+
+## Native discovery library
+
+The workspace includes `tapes-discovery`, a Rust library that resolves
+canonical identities in native Claude, Codex, Pi, and OpenCode stores. It
+returns native identity and store metadata; transcript normalization remains
+in `tapes-core`, and a resolved recording does not establish that a harness
+is live or that a consumer can deliver an action to it.
+
+A sibling checkout can depend on the unpublished library with an explicit
+path and version requirement:
+
+```toml
+tapes-discovery = { path = "../tapes/crates/tapes-discovery", version = "0.1.0" }
+```
+
+Cargo does not pin a path dependency's source revision. Record the exact Tapes
+checkout revision beside the consuming project's dependency change and rerun
+the independent consumer check there. Portable dependency distribution is
+separate release work; the local path does not select a registry package or
+remote branch.
+
+Run `scripts/check-discovery-consumer` from the Tapes checkout with Python
+3.11+ and Cargo available to build an independent consumer, inspect the crate
+archive, and verify its normal dependency graph.
 
 ## Fixture demo
 
@@ -78,7 +104,7 @@ Note: Showing the last 1 of 6 turns; 5 earlier turns fall outside the 1-turn win
 
 ## License
 
-The workspace and both crates declare `Unlicense`. The complete
+The workspace packages declare `Unlicense`. The complete
 [Unlicense text](LICENSE) accompanies the source.
 
 ## Orientation

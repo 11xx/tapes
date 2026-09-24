@@ -1,8 +1,8 @@
+use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
@@ -17,6 +17,10 @@ use crate::model::{
     TextTailEvidence, Tokens, TrailingRecord, Transcript, TranscriptEvidence, Truncation, Turn,
 };
 use crate::scope::Scope;
+use tapes_discovery::{
+    CandidatePage as NativeCandidatePage, Discovery, DiscoveryError, Harness as NativeHarness,
+    IdentityRecord, IdentitySource, NativeSession, NativeStore,
+};
 
 pub mod claude;
 pub mod codex;
@@ -307,6 +311,12 @@ pub trait Backend {
     fn locate_occurrence(&self, _occurrence: &str) -> Result<Option<Session>> {
         Ok(None)
     }
+    /// Whether an exact lookup failure must remain terminal instead of
+    /// falling through to prefix enumeration. Supplied sources use this to
+    /// preserve occurrence ambiguity and identity-coverage failures.
+    fn terminal_exact_failure(&self) -> bool {
+        false
+    }
     /// Read a transcript for a session already resolved by this backend.
     /// Implementations must use the supplied normalized session rather than
     /// locating it again; the transcript read may still need to open the
@@ -447,6 +457,302 @@ pub trait Backend {
     }
 }
 
+impl IdentityRecord for Session {
+    fn id(&self) -> &str {
+        &self.id
+    }
+
+    fn harness(&self) -> &str {
+        self.harness()
+    }
+
+    fn store_coordinate(&self) -> Option<&str> {
+        self.locator()
+    }
+}
+
+/// The core's rich backend adapted to the discovery crate's shared selector.
+pub(crate) struct BackendIdentitySource<'a>(pub &'a dyn Backend);
+
+impl IdentitySource<Session> for BackendIdentitySource<'_> {
+    fn harness(&self) -> &str {
+        self.0.harness()
+    }
+
+    fn locate_exact(&self, query: &str) -> std::result::Result<Option<Session>, String> {
+        self.0.locate(query).map_err(|error| format!("{error:#}"))
+    }
+
+    fn candidates(&self, limit: usize) -> NativeCandidatePage<Session, String> {
+        let mut query = Query::unscoped(limit);
+        query.ceiling = limit;
+        match self.0.list(&query) {
+            Ok(listing) => {
+                let failures = listing.unavailable;
+                let complete = !listing.scan_truncated
+                    && listing.sessions.len() < limit
+                    && listing.unavailable_ids.is_empty()
+                    && failures.is_empty();
+                NativeCandidatePage {
+                    records: listing.sessions,
+                    scanned: listing.scanned,
+                    visited_entries: listing.scanned,
+                    complete,
+                    failures,
+                    unreadable_ids: listing.unavailable_ids,
+                }
+            }
+            Err(error) => NativeCandidatePage {
+                records: Vec::new(),
+                scanned: 0,
+                visited_entries: 0,
+                complete: false,
+                failures: vec![format!("{error:#}")],
+                unreadable_ids: Vec::new(),
+            },
+        }
+    }
+
+    fn shares_session_ids(&self) -> bool {
+        self.0.shares_session_ids()
+    }
+
+    fn terminal_exact_failure(&self) -> bool {
+        self.0.terminal_exact_failure()
+    }
+
+    fn available(&self) -> bool {
+        self.0.available()
+    }
+}
+
+pub(crate) fn default_native_store(harness: NativeHarness) -> Option<NativeStore> {
+    Discovery::from_env()
+        .stores()
+        .iter()
+        .find(|store| store.harness() == harness)
+        .cloned()
+}
+
+/// Keep every native identity decision in discovery and use the normalized
+/// parser only to enrich the selected native record.
+pub(crate) fn enrich_native_session(
+    native: &NativeSession,
+    mut session: Session,
+) -> Result<Session> {
+    if session.harness() != native.harness().as_str() {
+        anyhow::bail!(
+            "{} native identity {} was normalized as {}",
+            native.harness(),
+            native.id(),
+            session.harness()
+        );
+    }
+    session.id = native.id().to_owned();
+    let native_path = native.locator().map(Path::to_path_buf);
+    let locator = native_path
+        .as_ref()
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|| native.store_coordinate().to_owned());
+    session.source.location = Some(crate::model::SourceLocation {
+        locator,
+        native_path,
+        member: None,
+        container: None,
+    });
+    Ok(session)
+}
+
+/// Resolve a session's file using the selected native path when discovery
+/// supplied one, while preserving the existing locator semantics for inputs.
+pub(crate) fn session_file_path(session: &Session) -> Option<&Path> {
+    let location = session.source.location.as_ref()?;
+    Some(
+        location
+            .native_path
+            .as_deref()
+            .unwrap_or_else(|| Path::new(&location.locator)),
+    )
+}
+
+fn is_candidate_page_limit(error: &DiscoveryError) -> bool {
+    matches!(
+        error,
+        DiscoveryError::BoundExhausted {
+            bound: "candidate enumeration limit",
+            ..
+        }
+    )
+}
+
+fn merge_discovery_coverage(
+    listing: &mut Listing,
+    failures: Vec<DiscoveryError>,
+    unreadable_ids: Vec<String>,
+    complete: bool,
+    intentional_result_limit: bool,
+) {
+    let candidate_limit_only = intentional_result_limit
+        && !complete
+        && !failures.is_empty()
+        && failures.iter().all(is_candidate_page_limit)
+        && unreadable_ids.is_empty();
+    for failure in failures {
+        if intentional_result_limit && is_candidate_page_limit(&failure) {
+            continue;
+        }
+        listing.unavailable.push(failure.to_string());
+    }
+    listing.unavailable_ids.extend(unreadable_ids);
+    if !complete && !candidate_limit_only {
+        listing.scan_truncated = true;
+    }
+}
+
+pub(crate) fn list_discovered_files(
+    store: &NativeStore,
+    query: &Query,
+    probe: impl Fn(&Path) -> Option<PathBuf>,
+    parse: impl Fn(&NativeSession, &Path) -> Result<Session>,
+) -> Listing {
+    if query.limit == 0 {
+        return Listing::default();
+    }
+    let intentional_result_limit =
+        query.scope.is_none() && !query.has_filters() && query.ceiling > query.limit;
+    let page = store.candidates(query.ceiling);
+    let mut by_path = HashMap::with_capacity(page.records.len());
+    let mut files = Vec::with_capacity(page.records.len());
+    let mut no_path = Vec::new();
+    for native in page.records {
+        let Some(path) = native.locator().map(Path::to_path_buf) else {
+            no_path.push(native.id().to_owned());
+            continue;
+        };
+        files.push(path.clone());
+        by_path.insert(path, native);
+    }
+    let parse_errors = std::cell::RefCell::new(Vec::<(String, String)>::new());
+    let mut listing = list_files(files, query, probe, |path| {
+        let native = by_path.get(path)?;
+        match parse(native, path) {
+            Ok(session) => match enrich_native_session(native, session) {
+                Ok(session) => Some(session),
+                Err(error) => {
+                    parse_errors
+                        .borrow_mut()
+                        .push((native.id().to_owned(), format!("{}", error)));
+                    None
+                }
+            },
+            Err(error) => {
+                parse_errors
+                    .borrow_mut()
+                    .push((native.id().to_owned(), format!("{error:#}")));
+                None
+            }
+        }
+    });
+    for (id, error) in parse_errors.into_inner() {
+        listing
+            .unavailable
+            .push(format!("native session {id}: {error}"));
+        listing.unavailable_ids.push(id);
+    }
+    for id in no_path {
+        listing
+            .unavailable
+            .push(format!("native session {id}: file locator is missing"));
+        listing.unavailable_ids.push(id);
+    }
+    merge_discovery_coverage(
+        &mut listing,
+        page.failures,
+        page.unreadable_ids,
+        page.complete,
+        intentional_result_limit,
+    );
+    listing
+}
+
+pub(crate) fn list_discovered_files_with_search(
+    store: &NativeStore,
+    query: &Query,
+    needle: &str,
+    tail: usize,
+    read_bytes: u64,
+    probe: impl Fn(&Path) -> Option<PathBuf>,
+    parse: impl Fn(&NativeSession, &Path) -> Result<ParsedFile> + Sync,
+) -> Listing {
+    if query.limit == 0 {
+        return Listing::default();
+    }
+    let page = store.candidates(query.ceiling);
+    let mut by_path = HashMap::with_capacity(page.records.len());
+    let mut files = Vec::with_capacity(page.records.len());
+    let mut no_path = Vec::new();
+    for native in page.records {
+        let Some(path) = native.locator().map(Path::to_path_buf) else {
+            no_path.push(native.id().to_owned());
+            continue;
+        };
+        files.push(path.clone());
+        by_path.insert(path, native);
+    }
+    let parse_errors = std::sync::Mutex::new(Vec::<(String, String)>::new());
+    let mut listing =
+        list_files_with_search(files, query, needle, tail, read_bytes, probe, |path| {
+            let native = by_path.get(path)?;
+            let parsed = match parse(native, path) {
+                Ok(parsed) => parsed,
+                Err(error) => {
+                    parse_errors
+                        .lock()
+                        .expect("parse diagnostic mutex poisoned")
+                        .push((native.id().to_owned(), format!("{error:#}")));
+                    return None;
+                }
+            };
+            match enrich_native_session(native, parsed.session) {
+                Ok(session) => Some(ParsedFile {
+                    session,
+                    turns: parsed.turns,
+                    truncated: parsed.truncated,
+                }),
+                Err(error) => {
+                    parse_errors
+                        .lock()
+                        .expect("parse diagnostic mutex poisoned")
+                        .push((native.id().to_owned(), error.to_string()));
+                    None
+                }
+            }
+        });
+    for (id, error) in parse_errors
+        .into_inner()
+        .expect("parse diagnostic mutex poisoned")
+    {
+        listing
+            .unavailable
+            .push(format!("native session {id}: {error}"));
+        listing.unavailable_ids.push(id);
+    }
+    for id in no_path {
+        listing
+            .unavailable
+            .push(format!("native session {id}: file locator is missing"));
+        listing.unavailable_ids.push(id);
+    }
+    merge_discovery_coverage(
+        &mut listing,
+        page.failures,
+        page.unreadable_ids,
+        page.complete,
+        false,
+    );
+    listing
+}
+
 /// Whether the searched tail contains the needle. A hit anywhere in the read
 /// is a match. A miss is a non-match only when the read covered the tail it
 /// was asked to search: fewer turns than that behind a bound that withheld
@@ -565,17 +871,35 @@ pub fn backends_with_read_bytes(read_bytes: u64) -> Result<Vec<Box<dyn Backend>>
 }
 
 fn backends_reading(read_bytes: u64) -> Vec<Box<dyn Backend>> {
+    let discovery = Discovery::from_env();
+    let store = |harness| {
+        discovery
+            .stores()
+            .iter()
+            .find(|store| store.harness() == harness)
+            .cloned()
+    };
     let mut backends: Vec<Box<dyn Backend>> = vec![
-        Box::new(claude::ClaudeBackend::default().with_read_bytes(read_bytes)),
-        Box::new(codex::CodexBackend::default().with_read_bytes(read_bytes)),
+        Box::new(
+            claude::ClaudeBackend::from_store(store(NativeHarness::Claude))
+                .with_read_bytes(read_bytes),
+        ),
+        Box::new(
+            codex::CodexBackend::from_store(store(NativeHarness::Codex))
+                .with_read_bytes(read_bytes),
+        ),
     ];
     backends.extend(
-        opencode::OpenCodeBackend::defaults()
-            .into_iter()
+        discovery
+            .stores()
+            .iter()
+            .filter(|store| store.harness() == NativeHarness::OpenCode)
+            .cloned()
+            .map(opencode::OpenCodeBackend::from_store)
             .map(|backend| Box::new(backend) as Box<dyn Backend>),
     );
     backends.push(Box::new(
-        pi::PiBackend::default().with_read_bytes(read_bytes),
+        pi::PiBackend::from_store(store(NativeHarness::Pi)).with_read_bytes(read_bytes),
     ));
     backends
 }
@@ -1980,63 +2304,6 @@ struct TranscriptFacts<'a> {
     read: &'a Jsonl,
 }
 
-pub(crate) fn home_path(parts: &[&str]) -> Option<PathBuf> {
-    std::env::var_os("HOME").map(PathBuf::from).map(|mut path| {
-        path.extend(parts);
-        path
-    })
-}
-
-pub(crate) fn jsonl_files(root: &Path) -> Vec<PathBuf> {
-    fn visit(path: &Path, files: &mut Vec<PathBuf>) {
-        let Ok(entries) = fs::read_dir(path) else {
-            return;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                visit(&path, files);
-            } else if path
-                .extension()
-                .is_some_and(|extension| extension == "jsonl")
-            {
-                files.push(path);
-            }
-        }
-    }
-
-    let mut files = Vec::new();
-    visit(root, &mut files);
-    files.sort_by_cached_key(|path| {
-        fs::metadata(path)
-            .and_then(|metadata| metadata.modified())
-            .unwrap_or(SystemTime::UNIX_EPOCH)
-    });
-    files.reverse();
-    files
-}
-
-pub(crate) fn session_file(root: &Path, id: &str) -> Option<PathBuf> {
-    matching_session_file(jsonl_files(root), id)
-}
-
-pub(crate) fn matching_session_file(
-    files: impl IntoIterator<Item = PathBuf>,
-    id: &str,
-) -> Option<PathBuf> {
-    files.into_iter().find(|path| {
-        path.file_stem()
-            .and_then(|stem| stem.to_str())
-            .is_some_and(|stem| {
-                stem == id
-                    || stem
-                        .strip_suffix(id)
-                        .and_then(|prefix| prefix.chars().next_back())
-                        .is_some_and(|separator| !separator.is_alphanumeric())
-            })
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use std::io::Write;
@@ -2050,6 +2317,7 @@ mod tests {
             "../../target/stream-jsonl-{}.jsonl",
             std::process::id()
         ));
+        fs::create_dir_all(path.parent().expect("fixture path has a parent")).unwrap();
         let long = format!("{{\"text\":\"{}\"}}", "x".repeat(64));
         fs::write(
             &path,
@@ -2094,6 +2362,7 @@ mod tests {
             "../../target/stream-jsonl-pin-{}.jsonl",
             std::process::id()
         ));
+        fs::create_dir_all(path.parent().expect("fixture path has a parent")).unwrap();
         fs::write(&path, "{\"n\":1}\n{\"n\":2}\n").unwrap();
         let spans = |pin: Option<ReadPin<'_>>| {
             let mut seen = Vec::new();

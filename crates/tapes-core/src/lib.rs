@@ -6,9 +6,12 @@ use anyhow::{anyhow, Context, Result};
 use chrono::{DateTime, NaiveDate, TimeZone, Utc};
 use serde::Serialize;
 
-use backend::{Backend, Listing, Query};
+use backend::{Backend, BackendIdentitySource, Listing, Query};
 use model::{Session, Transcript, Truncation};
 use scope::Scope;
+use tapes_discovery::{resolve_with_sources, IdentitySource, SharedStorePrecedence};
+
+pub use tapes_discovery::ResolveError;
 
 pub use event::{
     Bounded, EventKind, EventRecord, EventTranscript, Incomplete, PairCounts, PairRef, ToolEvent,
@@ -42,7 +45,6 @@ pub const USAGE_SUMMARY_SCHEMA: &str = "tapes-usage-summary/4";
 /// Keeping this fixed makes the listing's cost predictable for callers.
 pub const LIST_SEARCH_TAIL: usize = 32;
 pub(crate) const DEFAULT_LIST_LIMIT: usize = 20;
-const RESOLVE_LIMIT: usize = 1_000;
 /// Candidates a scoped listing may inspect per harness before it reports that
 /// it stopped looking. Well above any store seen in practice, so it bounds a
 /// pathological one without truncating a real search.
@@ -165,12 +167,6 @@ impl Unplaced {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct SessionCandidate {
-    pub id: String,
-    pub harness: String,
-}
-
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
 pub struct SelectionDiagnostics {
     /// Rows or stores a bounded candidate scan could not read. Unavailable
@@ -221,148 +217,10 @@ impl SelectionDiagnostics {
 }
 
 #[derive(Debug)]
-pub enum ResolveError {
-    NotFound {
-        query: String,
-        /// A backend returned exactly as many sessions as the enumeration cap
-        /// allows, so the search may have stopped short of the store. "I
-        /// stopped looking" is a different fact from "it is not there".
-        truncated: bool,
-    },
-    Ambiguous {
-        query: String,
-        candidates: Vec<SessionCandidate>,
-    },
-    /// Nothing resolved and at least one backend failed while being asked.
-    /// Reported instead of `NotFound` because "the store is broken" sends an
-    /// operator somewhere entirely different from "no such session".
-    BackendFailed {
-        query: String,
-        failures: Vec<(String, String)>,
-    },
-    /// The store that takes precedence for this id failed while a later store
-    /// of the same harness answered it. The later projection is not read in
-    /// its place: the stores project a session differently, so substituting
-    /// one would answer with a recording the caller did not ask for.
-    StoreFailed {
-        query: String,
-        failures: Vec<(String, String)>,
-        /// The store that answered, as the coordinate a session carries.
-        answered_by: String,
-    },
-}
-
-impl std::fmt::Display for ResolveError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::NotFound { query, truncated } => {
-                write!(formatter, "session {query} was not found")?;
-                if *truncated {
-                    write!(
-                        formatter,
-                        " (the search stopped at {RESOLVE_LIMIT} sessions per harness; pass the full id to look it up directly)"
-                    )?;
-                }
-                Ok(())
-            }
-            Self::BackendFailed { query, failures } => {
-                writeln!(formatter, "session {query} could not be resolved:")?;
-                for (harness, error) in failures {
-                    writeln!(formatter, "  {harness}: {error}")?;
-                }
-                Ok(())
-            }
-            Self::StoreFailed {
-                query,
-                failures,
-                answered_by,
-            } => {
-                writeln!(
-                    formatter,
-                    "session {query} could not be read from the store that takes precedence for it:"
-                )?;
-                for (harness, error) in failures {
-                    writeln!(formatter, "  {harness}: {error}")?;
-                }
-                writeln!(
-                    formatter,
-                    "  {answered_by} also answers this id; its projection is not read in place of the store that failed"
-                )?;
-                Ok(())
-            }
-            Self::Ambiguous { query, candidates } => {
-                writeln!(formatter, "session prefix {query} is ambiguous:")?;
-                for candidate in candidates {
-                    writeln!(formatter, "  {} ({})", candidate.id, candidate.harness)?;
-                }
-                Ok(())
-            }
-        }
-    }
-}
-
-impl std::error::Error for ResolveError {}
-
-#[derive(Debug)]
 pub struct ResolvedSession {
     pub backend_index: usize,
     pub session: Session,
     pub diagnostics: SelectionDiagnostics,
-}
-
-/// Which store answers for a session id when a harness keeps more than one
-/// that answer the same ids ([`Backend::shares_session_ids`]). The store
-/// listed first takes precedence: a later store's projection is kept only
-/// where no earlier store of that harness listed the id or reported it
-/// unreadable. A session an earlier store holds and could not read stays
-/// unreadable rather than being answered from the later projection, because
-/// the stores project the same session differently.
-#[derive(Default)]
-pub(crate) struct StorePrecedence {
-    listed: HashSet<(&'static str, String)>,
-    unreadable: HashMap<(&'static str, String), usize>,
-}
-
-impl StorePrecedence {
-    /// Record the ids the store at `store` could not read.
-    pub(crate) fn unreadable(&mut self, backend: &dyn Backend, store: usize, ids: &[String]) {
-        if !backend.shares_session_ids() {
-            return;
-        }
-        for id in ids {
-            let earliest = self
-                .unreadable
-                .entry((backend.harness(), id.clone()))
-                .or_insert(store);
-            *earliest = (*earliest).min(store);
-        }
-    }
-
-    /// Whether the store at `store` is the one to keep this session from.
-    pub(crate) fn admits(&mut self, backend: &dyn Backend, store: usize, id: &str) -> bool {
-        if !backend.shares_session_ids() {
-            return true;
-        }
-        let key = (backend.harness(), id.to_owned());
-        if self
-            .unreadable
-            .get(&key)
-            .is_some_and(|failed| *failed < store)
-        {
-            return false;
-        }
-        self.listed.insert(key)
-    }
-}
-
-/// The harness and diagnostic of each failure, as a resolution error states
-/// them.
-fn reported_failures<'a>(
-    failures: impl Iterator<Item = &'a (usize, String, String)>,
-) -> Vec<(String, String)> {
-    failures
-        .map(|(_, harness, error)| (harness.clone(), error.clone()))
-        .collect()
 }
 
 /// Where a command looks: one project, or every session on the machine.
@@ -593,10 +451,10 @@ pub(crate) fn list_scoped(
     );
     query.sort = sort;
     let mut found: Vec<(Session, usize)> = Vec::new();
-    let mut precedence = StorePrecedence::default();
+    let mut precedence = SharedStorePrecedence::default();
     // The earliest store of each harness whose stores answer the same ids
     // that could not be listed at all, and the name its diagnostics use.
-    let mut failed_stores = HashMap::<&'static str, (usize, String)>::new();
+    let mut failed_stores = HashMap::<&'static str, String>::new();
     let mut available_harnesses = HashSet::new();
     let mut unavailable_harnesses = Vec::new();
     let mut unreadable_sessions = Vec::new();
@@ -614,7 +472,6 @@ pub(crate) fn list_scoped(
                 .or_default() += 1;
         }
     }
-    let mut seen_search_candidates = HashMap::<String, HashSet<String>>::new();
     for (index, backend) in backends
         .iter()
         .enumerate()
@@ -628,30 +485,57 @@ pub(crate) fn list_scoped(
         // projection. Search obeys the same first-source rule as resolution:
         // a later projection cannot turn an earlier projection's non-match
         // into a match for the same global id.
-        let candidate_ids = if filters.search.is_some()
+        if filters.search.is_some()
             && selected_harness_counts
                 .get(backend.harness())
                 .is_some_and(|count| *count > 1)
         {
             match backend.list(&query) {
-                Ok(listing) => Some(
-                    listing
-                        .sessions
-                        .into_iter()
-                        .map(|session| session.id)
-                        .collect::<HashSet<_>>(),
-                ),
+                Ok(listing) => {
+                    if listing.scan_truncated
+                        || !listing.unavailable.is_empty()
+                        || !listing.unavailable_ids.is_empty()
+                    {
+                        let detail = if listing.unavailable.is_empty() {
+                            "candidate listing stopped before coverage was complete".to_owned()
+                        } else {
+                            listing.unavailable.join("; ")
+                        };
+                        unsearched_sessions.push(format!(
+                            "{} search could not reconcile duplicate projections: {detail}",
+                            backend.harness()
+                        ));
+                    }
+                    for session in &listing.sessions {
+                        precedence.record_listed(
+                            backend.harness(),
+                            backend.shares_session_ids(),
+                            index,
+                            &session.id,
+                        );
+                    }
+                    for id in &listing.unavailable_ids {
+                        precedence.record_unreadable(
+                            backend.harness(),
+                            backend.shares_session_ids(),
+                            index,
+                            id,
+                        );
+                    }
+                }
                 Err(error) => {
                     unsearched_sessions.push(format!(
                         "{} search could not reconcile duplicate projections: {error:#}",
                         backend.harness()
                     ));
-                    None
+                    precedence.record_store_failure(
+                        backend.harness(),
+                        backend.shares_session_ids(),
+                        index,
+                    );
                 }
             }
-        } else {
-            None
-        };
+        }
         let listing = if let Some(needle) = filters.search {
             backend.list_with_search(&query, needle, LIST_SEARCH_TAIL)
         } else {
@@ -659,7 +543,7 @@ pub(crate) fn list_scoped(
         };
         match listing {
             Ok(Listing {
-                mut sessions,
+                sessions,
                 artifacts: discovered_artifacts,
                 unavailable,
                 unavailable_ids,
@@ -667,15 +551,15 @@ pub(crate) fn list_scoped(
                 scanned: inspected,
                 scan_truncated: truncated,
             }) => {
-                if let Some(candidate_ids) = candidate_ids {
-                    let seen = seen_search_candidates
-                        .entry(backend.harness().to_owned())
-                        .or_default();
-                    sessions.retain(|session| !seen.contains(&session.id));
-                    seen.extend(candidate_ids);
-                }
                 available_harnesses.insert(backend.harness().to_owned());
-                precedence.unreadable(backend.as_ref(), index, &unavailable_ids);
+                for id in &unavailable_ids {
+                    precedence.record_unreadable(
+                        backend.harness(),
+                        backend.shares_session_ids(),
+                        index,
+                        id,
+                    );
+                }
                 unreadable_sessions.extend(unavailable);
                 unsearched_sessions.extend(unsearched);
                 scanned += inspected;
@@ -691,12 +575,6 @@ pub(crate) fn list_scoped(
                     unsearched_sessions
                         .push(format!("{} search failed: {error:#}", backend.harness()));
                 }
-                if let Some(candidate_ids) = candidate_ids {
-                    seen_search_candidates
-                        .entry(backend.harness().to_owned())
-                        .or_default()
-                        .extend(candidate_ids);
-                }
                 if backend.shares_session_ids() {
                     let store = backend
                         .store()
@@ -705,9 +583,8 @@ pub(crate) fn list_scoped(
                         "{} store {store} could not be listed: {error:#}",
                         backend.harness()
                     ));
-                    failed_stores
-                        .entry(backend.harness())
-                        .or_insert((index, store));
+                    precedence.record_store_failure(backend.harness(), true, index);
+                    failed_stores.entry(backend.harness()).or_insert(store);
                 }
                 unavailable_harnesses.push(backend.harness());
             }
@@ -718,24 +595,26 @@ pub(crate) fn list_scoped(
     // and its transcript origin instead of inventing ambiguity, and a session
     // it reported unreadable stays unreadable rather than being listed from
     // the later store's projection of it.
-    found.retain(|(session, origin)| {
-        precedence.admits(backends[*origin].as_ref(), *origin, &session.id)
-    });
-    // A store that could not be listed may hold any id a later store of its
-    // harness lists, and reading that session refuses for the same reason,
-    // so the later store's sessions are withheld and counted.
     let mut withheld = HashMap::<&'static str, usize>::new();
-    found.retain(|(_, origin)| {
+    found.retain(|(session, origin)| {
         let backend = backends[*origin].as_ref();
-        let behind_failure = failed_stores
-            .get(backend.harness())
-            .is_some_and(|(failed, _)| failed < origin);
+        let behind_failure = precedence.has_prior_store_failure(
+            backend.harness(),
+            backend.shares_session_ids(),
+            *origin,
+        );
         if behind_failure {
             *withheld.entry(backend.harness()).or_default() += 1;
+            return false;
         }
-        !behind_failure
+        precedence.admits(
+            backend.harness(),
+            backend.shares_session_ids(),
+            *origin,
+            &session.id,
+        )
     });
-    for (harness, (_, store)) in &failed_stores {
+    for (harness, store) in &failed_stores {
         if let Some(count) = withheld.get(harness) {
             let noun = if *count == 1 { "session" } else { "sessions" };
             unreadable_sessions.push(format!(
@@ -891,167 +770,20 @@ pub fn resolve_session(
     backends: &[Box<dyn Backend>],
     query: &str,
 ) -> std::result::Result<ResolvedSession, ResolveError> {
-    // Fast path: an exact id never consults a listing. A backend that errors
-    // here does not stop another from resolving, but the error is kept: if
-    // nothing resolves it surfaces as `BackendFailed`, because "the store is
-    // broken" and "no such session" send an operator to different places.
-    // No `available()` probe here on purpose. Availability is a listing
-    // concern — `list` reports which harnesses it could not reach. On an
-    // exact-id path a miss is a miss however it arises, and probing costs a
-    // second process spawn for API-backed harnesses.
-    let mut located = Vec::new();
-    let mut failures: Vec<(usize, String, String)> = Vec::new();
-    for (backend_index, backend) in backends.iter().enumerate() {
-        match backend.locate(query) {
-            Ok(Some(session)) if session.id == query => located.push(ResolvedSession {
-                backend_index,
-                session,
-                diagnostics: SelectionDiagnostics::default(),
-            }),
-            Ok(_) => {}
-            // Kept, not discarded: a hit elsewhere still wins, but if nothing
-            // resolves the real failure has to surface rather than hide behind
-            // "not found".
-            Err(error) => failures.push((
-                backend_index,
-                backend.harness().to_owned(),
-                format!("{error:#}"),
-            )),
-        }
-    }
-    // A store that failed may be the one holding this session: stable OpenCode
-    // and opencode2 answer many of the same ids, and the store that takes
-    // precedence projects a session its own way. Reading the later store's
-    // projection would answer with a recording the caller did not ask for, so
-    // the failure stands.
-    if let Some(hit) = located
+    let sources = backends
         .iter()
-        .find(|resolved| backends[resolved.backend_index].shares_session_ids())
-    {
-        let hit_harness = backends[hit.backend_index].harness();
-        let preceding =
-            reported_failures(failures.iter().filter(|(store, harness, _)| {
-                harness == hit_harness && *store < hit.backend_index
-            }));
-        if !preceding.is_empty() {
-            return Err(ResolveError::StoreFailed {
-                query: query.to_owned(),
-                failures: preceding,
-                answered_by: hit.session.locator().unwrap_or(hit_harness).to_owned(),
-            });
-        }
-    }
-    if located.len() > 1
-        && located
-            .iter()
-            .all(|resolved| backends[resolved.backend_index].shares_session_ids())
-    {
-        return Ok(located.remove(0));
-    }
-    if located.is_empty() && failures.iter().any(|(_, harness, _)| harness == "input") {
-        return Err(ResolveError::BackendFailed {
-            query: query.to_owned(),
-            failures: reported_failures(failures.iter()),
-        });
-    }
-    match located.len() {
-        1 => return Ok(located.pop().expect("one match is present")),
-        0 => {}
-        _ => {
-            let mut candidates = located
-                .into_iter()
-                .map(|resolved| SessionCandidate {
-                    id: resolved.session.id.clone(),
-                    harness: resolved.session.harness().to_owned(),
-                })
-                .collect::<Vec<_>>();
-            candidates.sort_by(|left, right| {
-                left.id
-                    .cmp(&right.id)
-                    .then(left.harness.cmp(&right.harness))
-            });
-            return Err(ResolveError::Ambiguous {
-                query: query.to_owned(),
-                candidates,
-            });
-        }
-    }
-
-    // Fallback: a prefix query genuinely needs enumeration, because ambiguity
-    // can only be seen across the whole set.
-    let mut matches = Vec::new();
-    let mut truncated = false;
-    let mut precedence = StorePrecedence::default();
-    for (backend_index, backend) in backends.iter().enumerate() {
-        if !backend.available() {
-            continue;
-        }
-        let Ok(listing) = backend.list(&Query::unscoped(RESOLVE_LIMIT)) else {
-            continue;
-        };
-        precedence.unreadable(backend.as_ref(), backend_index, &listing.unavailable_ids);
-        truncated |= listing.sessions.len() >= RESOLVE_LIMIT;
-        matches.extend(
-            listing
-                .sessions
-                .into_iter()
-                .filter(|session| session.id.starts_with(query))
-                .map(|session| ResolvedSession {
-                    backend_index,
-                    session,
-                    diagnostics: SelectionDiagnostics::default(),
-                }),
-        );
-    }
-
-    matches.retain(|resolved| {
-        precedence.admits(
-            backends[resolved.backend_index].as_ref(),
-            resolved.backend_index,
-            &resolved.session.id,
-        )
-    });
-
-    let exact = matches
-        .iter()
-        .enumerate()
-        .filter_map(|(index, resolved)| (resolved.session.id == query).then_some(index))
+        .map(|backend| BackendIdentitySource(backend.as_ref()))
         .collect::<Vec<_>>();
-    if exact.len() == 1 {
-        return Ok(matches.swap_remove(exact[0]));
-    }
-    if exact.len() > 1 {
-        matches.retain(|resolved| resolved.session.id == query);
-    }
-    match matches.len() {
-        0 if !failures.is_empty() => Err(ResolveError::BackendFailed {
-            query: query.to_owned(),
-            failures: reported_failures(failures.iter()),
-        }),
-        0 => Err(ResolveError::NotFound {
-            query: query.to_owned(),
-            truncated,
-        }),
-        1 => Ok(matches.pop().expect("one match is present")),
-        _ => {
-            let mut candidates = matches
-                .into_iter()
-                .map(|resolved| SessionCandidate {
-                    id: resolved.session.id.clone(),
-                    harness: resolved.session.harness().to_owned(),
-                })
-                .collect::<Vec<_>>();
-            candidates.sort_by(|left, right| {
-                left.id
-                    .cmp(&right.id)
-                    .then(left.harness.cmp(&right.harness))
-            });
-            Err(ResolveError::Ambiguous {
-                query: query.to_owned(),
-                candidates,
-            })
-        }
-    }
+    let sources = sources
+        .iter()
+        .map(|source| source as &dyn IdentitySource<Session>)
+        .collect::<Vec<_>>();
+    let resolved = resolve_with_sources(&sources, query)?;
+    Ok(ResolvedSession {
+        backend_index: resolved.source_index,
+        session: resolved.record,
+        diagnostics: SelectionDiagnostics::default(),
+    })
 }
 
 /// Select one session by ID, exact recorded title, or latest activity in scope.

@@ -53,6 +53,11 @@ source/container coordinate. `producer` is omitted when auto-detection cannot
 establish a producer for a structurally overlapping representation. An
 explicitly named input format marks its producer with
 `producer_authority: "declared"`; it is not an observation from the bytes.
+A native file's textual `locator` is a display coordinate. While the selected
+session is in memory, core readers retain the path returned by discovery and
+use it directly, preserving non-UTF-8 path bytes. Supplied-source readers keep
+their existing locator-based path semantics. The native path is runtime-only
+and is absent from serialized `SourceLocation` values.
 `id` is the native
 conversation or session identity; it is not a path, archive member, or global
 identity outside the descriptor's scope. Supplied sources also carry an opaque

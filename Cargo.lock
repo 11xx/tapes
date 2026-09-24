@@ -580,7 +580,16 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "tapes-discovery",
  "zip",
+]
+
+[[package]]
+name = "tapes-discovery"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "serde_json",
 ]
 
 [[package]]

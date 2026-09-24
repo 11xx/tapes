@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/tapes-core", "crates/tapes"]
+members = ["crates/tapes-core", "crates/tapes", "crates/tapes-discovery"]
 resolver = "2"
 
 [workspace.package]
@@ -18,3 +18,4 @@ serde_json = "1"
 sha2 = { version = "0.10", default-features = false }
 zip = { version = "2.2", default-features = false, features = ["deflate"] }
 tapes-core = { path = "crates/tapes-core", version = "0.1.0" }
+tapes-discovery = { path = "crates/tapes-discovery", version = "0.1.0" }

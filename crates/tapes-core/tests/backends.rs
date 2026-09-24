@@ -1,11 +1,14 @@
 use std::cell::Cell;
 use std::collections::HashSet;
+use std::ffi::OsString;
 use std::fs::{self, File};
 use std::io::{BufWriter, Write};
+use std::os::unix::ffi::OsStringExt;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::OnceLock;
 
 use chrono::{DateTime, TimeZone, Utc};
 use tapes_core::backend::claude::ClaudeBackend;
@@ -35,6 +38,19 @@ fn fixtures(harness: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures")
         .join(harness)
+}
+
+fn configure_opencode_fixture_store() {
+    static XDG: OnceLock<PathBuf> = OnceLock::new();
+    let root = XDG.get_or_init(|| {
+        let root = std::env::temp_dir().join(format!("tapes-opencode-xdg-{}", std::process::id()));
+        let opencode = root.join("opencode");
+        fs::create_dir_all(&opencode).unwrap();
+        File::create(opencode.join("opencode.db")).unwrap();
+        std::env::set_var("XDG_DATA_HOME", &root);
+        root
+    });
+    std::env::set_var("XDG_DATA_HOME", root);
 }
 
 fn file_fixture_backends() -> Vec<(Box<dyn Backend>, &'static str)> {
@@ -71,6 +87,7 @@ fn located(backend: &dyn Backend, id: &str) -> Session {
 }
 
 fn opencode_fixture_program() -> PathBuf {
+    configure_opencode_fixture_store();
     fixtures("opencode").join("opencode2")
 }
 
@@ -119,6 +136,7 @@ impl OpenCodeAlias {
     }
 
     fn link(path: PathBuf, target: PathBuf, cleanup_dir: Option<PathBuf>) -> Self {
+        configure_opencode_fixture_store();
         let _ = fs::remove_file(&path);
         std::os::unix::fs::symlink(target, &path).unwrap();
         Self {
@@ -1327,7 +1345,7 @@ fn malformed_opencode_database_rows_leave_other_sessions_and_a_diagnostic() {
     let backend = OpenCodeBackend::new(program.path());
     let listing = backend.list(&Query::unscoped(10)).unwrap();
 
-    assert_eq!(listing.scanned, 3);
+    assert_eq!(listing.scanned, 3, "{:?}", listing.unavailable);
     assert_eq!(
         listing
             .sessions
@@ -1342,7 +1360,7 @@ fn malformed_opencode_database_rows_leave_other_sessions_and_a_diagnostic() {
     assert_eq!(listing.unavailable.len(), 2, "{:?}", listing.unavailable);
     assert!(listing.unavailable[0].ends_with("1 of 3 session rows unreadable"));
     assert!(listing.unavailable[1].contains("ses_truncated_fixture"));
-    assert!(listing.unavailable[1].contains("EOF while parsing a string"));
+    assert!(listing.unavailable[1].contains("malformed row metadata"));
 }
 
 #[test]
@@ -1733,6 +1751,17 @@ fn metadata_filters_are_case_insensitive_and_keep_absent_values_absent() {
 #[test]
 fn metadata_filters_fill_the_limit_after_rejecting_candidates() {
     let root = filtered_store("before-limit");
+    let native_page = tapes_discovery::NativeStore::codex(&root).candidates(5_000);
+    assert_eq!(
+        native_page
+            .records
+            .iter()
+            .map(|session| session.id())
+            .collect::<Vec<_>>(),
+        vec!["other", "wanted-b", "wanted-a"],
+        "{native_page:?}"
+    );
+    assert!(native_page.complete);
     let backends: Vec<Box<dyn Backend>> = vec![Box::new(CodexBackend::new(&root))];
 
     let result =
@@ -2568,7 +2597,7 @@ fn a_capped_search_says_it_stopped_short() {
         truncated,
         "a capped search must report that it stopped short"
     );
-    assert!(error.to_string().contains("stopped at"));
+    assert!(error.to_string().contains("coverage is incomplete"));
 }
 
 #[test]
@@ -2606,7 +2635,7 @@ fn a_failing_opencode_call_surfaces_through_resolution_not_as_not_found() {
         panic!("a broken backend must not read as a missing session");
     };
     assert_eq!(failures.len(), 1);
-    assert_eq!(failures[0].0, "opencode");
+    assert!(failures[0].contains("opencode"));
 }
 
 #[test]
@@ -4185,6 +4214,315 @@ fn codex_token_count(ordinal: u64, total: u64, last: u64) -> serde_json::Value {
             "rate_limits": null
         }
     })
+}
+
+fn non_utf8_test_roots(tag: &str) -> (PathBuf, PathBuf) {
+    let mut name = OsString::from(format!("tapes-{tag}-{}", std::process::id()));
+    name.push(OsString::from_vec(vec![b'-', 0xff]));
+    let native = std::env::temp_dir().join(name);
+    let display_shadow = PathBuf::from(native.to_string_lossy().into_owned());
+    let _ = fs::remove_dir_all(&native);
+    let _ = fs::remove_dir_all(&display_shadow);
+    (native, display_shadow)
+}
+
+fn write_jsonl_records(path: &Path, records: &[serde_json::Value]) {
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let lines = records
+        .iter()
+        .map(serde_json::Value::to_string)
+        .collect::<Vec<_>>()
+        .join("\n");
+    fs::write(path, format!("{lines}\n")).unwrap();
+}
+
+#[test]
+fn codex_native_path_survives_transcript_history_full_usage_and_parent_reads() {
+    let id = "91000000-0000-0000-0000-000000000001";
+    let parent_id = "91000000-0000-0000-0000-000000000002";
+    let (root, shadow) = non_utf8_test_roots("codex-native-location");
+    let session_path = root
+        .join("sessions/2026/01/01")
+        .join(format!("rollout-2026-01-01T12-00-00-{id}.jsonl"));
+    let parent_path = root
+        .join("sessions/2026/01/01")
+        .join(format!("rollout-2026-01-01T11-00-00-{parent_id}.jsonl"));
+    let shadow_path = PathBuf::from(session_path.to_string_lossy().into_owned());
+
+    let mut header = codex_meta(id);
+    header["payload"]["parent_thread_id"] = parent_id.into();
+    write_jsonl_records(
+        &session_path,
+        &[
+            header,
+            codex_turn_context("gpt-native-location"),
+            codex_usage_record(2, "native-response", 10),
+            codex_token_count(3, 11, 11),
+            serde_json::json!({
+                "timestamp": "2026-01-01T12:00:04Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "selected Codex recording"}]
+                }
+            }),
+        ],
+    );
+    write_jsonl_records(&parent_path, &[codex_meta(parent_id)]);
+    write_jsonl_records(
+        &shadow_path,
+        &[
+            codex_meta(id),
+            serde_json::json!({
+                "timestamp": "2026-01-01T12:00:04Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "replacement-character shadow"}]
+                }
+            }),
+        ],
+    );
+
+    let backend = CodexBackend::new(&root);
+    let session = located(&backend, id);
+    assert_eq!(
+        session.locator(),
+        Some(session_path.display().to_string().as_str())
+    );
+    assert_ne!(session_path, shadow_path);
+
+    let transcript = backend.transcript(&session, 10).unwrap();
+    assert!(transcript
+        .turns
+        .iter()
+        .any(|turn| turn.text.contains("selected Codex recording")));
+
+    let page = backend.history_page(&session, None, 1024).unwrap();
+    assert!(page
+        .turns
+        .iter()
+        .any(|turn| turn.text.contains("selected Codex recording")));
+
+    let mut streamed_text = String::new();
+    let read = backend
+        .stream_transcript(&session, None, &mut |turn| {
+            streamed_text.push_str(&turn.text);
+            Ok(())
+        })
+        .unwrap();
+    assert!(streamed_text.contains("selected Codex recording"));
+    let whole = backend.stream_session(&session, &read).unwrap();
+    assert_eq!(
+        whole.tokens.as_ref().and_then(|tokens| tokens.input),
+        Some(11)
+    );
+
+    let usage = backend
+        .usage_observations(&session, None, UsageObservationOptions { limit: 20 })
+        .unwrap();
+    assert!(usage.series.returned > 0);
+
+    let lineage = backend.lineage(&session).unwrap();
+    assert_eq!(
+        lineage
+            .parent
+            .as_ref()
+            .map(|parent| parent.native_id.as_str()),
+        Some(parent_id)
+    );
+    assert!(lineage.parent.unwrap().resolved);
+
+    fs::remove_dir_all(root).unwrap();
+    fs::remove_dir_all(shadow).unwrap();
+}
+
+#[test]
+fn claude_native_parent_path_survives_history_full_and_child_joins() {
+    let id = "92000000-0000-4000-8000-000000000001";
+    let (root, shadow) = non_utf8_test_roots("claude-native-location");
+    let project = PathBuf::from("-fixtures-project");
+    let parent_path = root.join(&project).join(format!("{id}.jsonl"));
+    let shadow_parent = PathBuf::from(parent_path.to_string_lossy().into_owned());
+    let child_path = parent_path
+        .with_extension("")
+        .join("subagents/agent-agentx.jsonl");
+    let shadow_child = PathBuf::from(child_path.to_string_lossy().into_owned());
+    let parent_record = serde_json::json!({
+        "type": "user",
+        "sessionId": id,
+        "uuid": "parent-turn",
+        "timestamp": "2026-01-01T10:00:00Z",
+        "cwd": "/fixtures/project",
+        "isSidechain": false,
+        "message": {"role": "user", "content": "selected Claude parent"}
+    });
+    let child_record = serde_json::json!({
+        "type": "user",
+        "sessionId": id,
+        "uuid": "child-turn",
+        "timestamp": "2026-01-01T10:00:01Z",
+        "cwd": "/fixtures/project",
+        "isSidechain": true,
+        "agentId": "agentx",
+        "message": {"role": "user", "content": "selected Claude child"}
+    });
+    let shadow_parent_record = serde_json::json!({
+        "type": "user",
+        "sessionId": id,
+        "uuid": "shadow-parent-turn",
+        "timestamp": "2026-01-01T10:00:00Z",
+        "cwd": "/fixtures/project",
+        "isSidechain": false,
+        "message": {"role": "user", "content": "replacement-character shadow parent"}
+    });
+    let shadow_child_record = serde_json::json!({
+        "type": "user",
+        "sessionId": id,
+        "uuid": "shadow-child-turn",
+        "timestamp": "2026-01-01T10:00:01Z",
+        "cwd": "/fixtures/project",
+        "isSidechain": true,
+        "agentId": "agentx",
+        "message": {"role": "user", "content": "replacement-character shadow child"}
+    });
+    write_jsonl_records(&parent_path, &[parent_record]);
+    write_jsonl_records(&child_path, &[child_record]);
+    write_jsonl_records(&shadow_parent, &[shadow_parent_record]);
+    write_jsonl_records(&shadow_child, &[shadow_child_record]);
+
+    let backend = ClaudeBackend::new(&root);
+    let session = located(&backend, id);
+    let transcript = backend.transcript(&session, 10).unwrap();
+    assert!(transcript
+        .turns
+        .iter()
+        .any(|turn| turn.text.contains("selected Claude parent")));
+
+    let page = backend.history_page(&session, None, 1024).unwrap();
+    assert!(page
+        .turns
+        .iter()
+        .any(|turn| turn.text.contains("selected Claude parent")));
+
+    let mut streamed_parent = String::new();
+    let read = backend
+        .stream_transcript(&session, None, &mut |turn| {
+            streamed_parent.push_str(&turn.text);
+            Ok(())
+        })
+        .unwrap();
+    assert!(streamed_parent.contains("selected Claude parent"));
+    backend.stream_session(&session, &read).unwrap();
+
+    let child = backend.child_transcript(&session, "agentx").unwrap();
+    assert!(child
+        .turns
+        .iter()
+        .any(|turn| turn.text.contains("selected Claude child")));
+    let child_page = backend.history_page(&child.session, None, 1024).unwrap();
+    assert!(child_page
+        .turns
+        .iter()
+        .any(|turn| turn.text.contains("selected Claude child")));
+    assert!(!child_page
+        .turns
+        .iter()
+        .any(|turn| turn.text.contains("replacement-character shadow child")));
+    let child_transcript = backend.transcript(&child.session, 10).unwrap();
+    assert!(child_transcript
+        .turns
+        .iter()
+        .any(|turn| turn.text.contains("selected Claude child")));
+    assert!(!child_transcript
+        .turns
+        .iter()
+        .any(|turn| turn.text.contains("replacement-character shadow child")));
+
+    let mut streamed_child = String::new();
+    backend
+        .stream_child_transcript(&session, "agentx", &mut |turn| {
+            streamed_child.push_str(&turn.text);
+            Ok(())
+        })
+        .unwrap();
+    assert!(streamed_child.contains("selected Claude child"));
+    assert!(backend
+        .lineage(&session)
+        .unwrap()
+        .children
+        .iter()
+        .any(|child| child.resolved));
+
+    fs::remove_dir_all(root).unwrap();
+    fs::remove_dir_all(shadow).unwrap();
+}
+
+#[test]
+fn pi_native_path_survives_transcript_full_and_parent_reads() {
+    let id = "session-native-location";
+    let (root, shadow) = non_utf8_test_roots("pi-native-location");
+    let name = format!("2026-01-01T10-00-00-000Z_{id}.jsonl");
+    let session_path = root.join("fixture-project").join(&name);
+    let shadow_path = PathBuf::from(session_path.to_string_lossy().into_owned());
+    let records = |parent: &str, text: &str| {
+        vec![
+            serde_json::json!({
+                "type": "session",
+                "id": id,
+                "timestamp": "2026-01-01T10:00:00Z",
+                "cwd": "/fixtures/project",
+                "parentSession": parent
+            }),
+            serde_json::json!({
+                "type": "message",
+                "id": "entry-user",
+                "parentId": null,
+                "timestamp": "2026-01-01T10:00:01Z",
+                "message": {"role": "user", "content": text}
+            }),
+        ]
+    };
+    write_jsonl_records(
+        &session_path,
+        &records("selected-parent", "selected Pi recording"),
+    );
+    write_jsonl_records(
+        &shadow_path,
+        &records("shadow-parent", "replacement-character shadow"),
+    );
+
+    let backend = PiBackend::new(&root);
+    let session = located(&backend, id);
+    let transcript = backend.transcript(&session, 10).unwrap();
+    assert!(transcript
+        .turns
+        .iter()
+        .any(|turn| turn.text.contains("selected Pi recording")));
+
+    let mut streamed_text = String::new();
+    let read = backend
+        .stream_transcript(&session, None, &mut |turn| {
+            streamed_text.push_str(&turn.text);
+            Ok(())
+        })
+        .unwrap();
+    assert!(streamed_text.contains("selected Pi recording"));
+    backend.stream_session(&session, &read).unwrap();
+
+    let lineage = backend.lineage(&session).unwrap();
+    assert_eq!(
+        lineage
+            .parent
+            .as_ref()
+            .map(|parent| parent.native_id.as_str()),
+        Some("selected-parent")
+    );
+
+    fs::remove_dir_all(root).unwrap();
+    fs::remove_dir_all(shadow).unwrap();
 }
 
 fn codex_usage(root: &Path, id: &str) -> tapes_core::usage::UsageView {

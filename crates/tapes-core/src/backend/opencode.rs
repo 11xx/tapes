@@ -23,8 +23,12 @@ use crate::event::{self, Bounded, EventKind, EventTranscript, ToolEvent};
 use crate::lineage::{ChildRef, Lineage, ParentRef, SourceRef};
 use crate::model::{
     human_bytes, AccountingBasis, AccountingCoverage, Cost, KindDeclaration, Model, Role, Session,
-    SourceBound, SourceDescriptor, SourceLocation, Tokens, Transcript, Truncation, Turn, TurnKind,
-    TurnSelection, TurnWindow, UserDefault,
+    SourceBound, SourceDescriptor, Tokens, Transcript, Truncation, Turn, TurnKind, TurnSelection,
+    TurnWindow, UserDefault,
+};
+use tapes_discovery::{
+    DiscoveryError, Harness as NativeHarness, NativeSession, NativeStore, NativeStoreKind,
+    OpenCodeFlavor,
 };
 
 const MAX_COMMAND_BYTES: u64 = 8 * 1024 * 1024;
@@ -54,8 +58,6 @@ const MAX_V2_PREFILTER_MESSAGE_BYTES: usize = 64 * 1024;
 const API_SERVER_START_TIMEOUT: Duration = Duration::from_secs(5);
 const API_SERVER_RETRY_DELAY: Duration = Duration::from_millis(10);
 const API_RESPONSE_TIMEOUT: Duration = Duration::from_secs(30);
-/// Every OpenCode session id carries this prefix.
-const SESSION_ID_PREFIX: &str = "ses_";
 /// Child rows a lineage read returns before it reports that it stopped.
 const MAX_LINEAGE_CHILDREN: usize = 1_000;
 
@@ -86,7 +88,6 @@ struct DatabaseRows {
 
 #[derive(Debug)]
 struct InvalidDatabaseRow {
-    id: Option<String>,
     error: String,
 }
 
@@ -108,7 +109,8 @@ impl Drop for OpenCodeApiServer {
 }
 
 impl OpenCodeApiServer {
-    fn start(program: &OsStr) -> Result<Self> {
+    fn start(store: &tapes_discovery::OpenCodeStore) -> Result<Self> {
+        let program = store.program();
         let listener = TcpListener::bind(("127.0.0.1", 0))
             .context("failed to reserve a local port for the opencode API")?;
         let port = listener
@@ -118,7 +120,9 @@ impl OpenCodeApiServer {
         drop(listener);
 
         let port_text = port.to_string();
-        let mut child = Command::new(program)
+        let mut command = Command::new(program);
+        store.configure_command(&mut command);
+        let mut child = command
             .args(["serve", "--hostname", "127.0.0.1", "--port", &port_text])
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -201,11 +205,6 @@ impl OpenCodeApiClient {
         let pages = paged_messages(&|path| self.request(path), &session.id, tail)?;
         let transcript = paged_transcript(session.clone(), &pages, tail);
         search_turns(&transcript, needle, tail)
-    }
-
-    fn sessions(&self, limit: usize) -> Result<Vec<Session>> {
-        let response = self.request(&format!("/api/session?order=desc&limit={limit}"))?;
-        parse_sessions(&response)
     }
 }
 
@@ -324,13 +323,25 @@ fn filter_listing_search_api(
 #[derive(Clone, Debug)]
 pub struct OpenCodeBackend {
     program: OsString,
+    store: NativeStore,
 }
 
 impl OpenCodeBackend {
     pub fn new(program: impl Into<OsString>) -> Self {
+        let program = program.into();
         Self {
-            program: program.into(),
+            store: NativeStore::opencode(program.clone()),
+            program,
         }
+    }
+
+    pub(crate) fn from_store(store: NativeStore) -> Self {
+        let program = store
+            .opencode_store()
+            .expect("OpenCode backend requires an OpenCode native store")
+            .program()
+            .to_os_string();
+        Self { program, store }
     }
 
     fn command_bytes(&self, args: &[&str], source: &str) -> Result<Vec<u8>> {
@@ -338,7 +349,13 @@ impl OpenCodeBackend {
     }
 
     fn command_bytes_with(&self, program: &OsStr, args: &[&str], source: &str) -> Result<Vec<u8>> {
-        let mut child = Command::new(program)
+        let store = self
+            .store
+            .opencode_store()
+            .expect("OpenCode backend has an OpenCode store");
+        let mut command = Command::new(program);
+        store.configure_command(&mut command);
+        let mut child = command
             .args(args)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -396,7 +413,13 @@ impl OpenCodeBackend {
     /// it can reach the database file, or from `opencode db` otherwise.
     fn database_text(&self, query: &str) -> Result<String> {
         if self.is_default_program("opencode") && program_available(OsStr::new("sqlite3")) {
-            if let Some(database) = database_path("opencode.db").filter(|path| path.is_file()) {
+            let database = self
+                .store
+                .opencode_store()
+                .map(|store| store.sqlite_database_file("opencode.db"))
+                .transpose()?
+                .flatten();
+            if let Some(database) = database {
                 let database = database
                     .to_str()
                     .ok_or_else(|| anyhow!("opencode database path is not UTF-8"))?;
@@ -457,12 +480,15 @@ impl OpenCodeBackend {
         if !program_available(OsStr::new("sqlite3")) {
             return Ok(None);
         }
-        let Some(database) = database_path("opencode-next.db") else {
+        let database = self
+            .store
+            .opencode_store()
+            .map(|store| store.sqlite_database_file("opencode-next.db"))
+            .transpose()?
+            .flatten();
+        let Some(database) = database else {
             return Ok(None);
         };
-        if !database.is_file() {
-            return Ok(None);
-        }
         let candidate_ids = candidates
             .iter()
             .map(|session| session.id.clone())
@@ -543,20 +569,11 @@ fn parse_database_rows_lossy(text: &str) -> Result<DatabaseRows> {
         match serde_json::from_str(line) {
             Ok(value) => rows.values.push(value),
             Err(error) => rows.invalid.push(InvalidDatabaseRow {
-                id: database_row_id(line).map(str::to_owned),
                 error: error.to_string(),
             }),
         }
     }
     Ok(rows)
-}
-
-fn database_row_id(line: &str) -> Option<&str> {
-    let key_end = line.find("\"id\"")? + "\"id\"".len();
-    let remainder = line[key_end..].trim_start().strip_prefix(':')?.trim_start();
-    let value = remainder.strip_prefix('"')?;
-    let end = value.find('"')?;
-    Some(&value[..end])
 }
 
 fn session_diagnostic(id: Option<&str>, error: String) -> String {
@@ -568,145 +585,90 @@ fn session_diagnostic(id: Option<&str>, error: String) -> String {
 
 impl OpenCodeBackend {
     fn uses_database(&self) -> bool {
-        Path::new(&self.program)
-            .file_name()
-            .is_some_and(|name| name == "opencode")
+        matches!(
+            self.store.kind(),
+            NativeStoreKind::OpenCode(OpenCodeFlavor::Stable)
+        )
     }
 
-    fn sessions(&self, limit: usize) -> Result<Vec<Session>> {
-        let limit = limit.min(MAX_API_SESSIONS);
-        let response = self.request(&format!("/api/session?order=desc&limit={limit}"))?;
-        parse_sessions(&response)
-    }
-
-    fn session_listing(&self, limit: usize) -> Result<Listing> {
-        let limit = limit.min(MAX_API_SESSIONS);
-        if self.uses_database() {
-            return self.database_sessions(limit);
+    fn parse_native_session(&self, native: &NativeSession) -> Result<Session> {
+        let metadata = native
+            .metadata()
+            .ok_or_else(|| anyhow!("opencode session {} has no metadata row", native.id()))?;
+        let metadata_id = required_string(metadata, "id")?;
+        if metadata_id != native.id() {
+            anyhow::bail!(
+                "opencode metadata identity {metadata_id} disagrees with selected native identity {}",
+                native.id()
+            );
         }
-        Ok(Listing::from_sessions(self.sessions(limit)?))
+        let session = match native.store_kind() {
+            NativeStoreKind::OpenCode(OpenCodeFlavor::Stable) => parse_database_session(metadata)?,
+            NativeStoreKind::OpenCode(OpenCodeFlavor::V2) => parse_session(metadata)?,
+            _ => anyhow::bail!("opencode discovery returned a non-OpenCode store"),
+        };
+        super::enrich_native_session(native, session)
     }
 
-    fn database_sessions(&self, limit: usize) -> Result<Listing> {
-        let rows = self.database_rows(&format!(
-            "SELECT json_object( \
-                 'id', id, 'title', title, 'directory', directory, \
-                 'time_created', time_created, 'time_updated', time_updated, \
-                 'model', model, 'cost', cost, 'tokens_input', tokens_input, \
-                 'tokens_output', tokens_output, 'tokens_reasoning', tokens_reasoning, \
-                 'tokens_cache_read', tokens_cache_read, \
-                 'tokens_cache_write', tokens_cache_write) AS row \
-             FROM session ORDER BY time_updated DESC LIMIT {limit}"
-        ))?;
-        let scanned = rows.values.len() + rows.invalid.len();
+    fn session_listing(&self, limit: usize, intentional_result_limit: bool) -> Result<Listing> {
+        let page = self.store.candidates(limit.min(MAX_API_SESSIONS));
+        let unreadable_ids = page.unreadable_ids.clone();
+        if page.failures.len() > unreadable_ids.len() {
+            anyhow::bail!(
+                "opencode store {} could not be listed: {}",
+                self.store.coordinate(),
+                page.failures
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            );
+        }
         let mut listing = Listing {
-            scanned,
+            scanned: page.scanned,
+            scan_truncated: !page.complete && !intentional_result_limit,
+            unavailable_ids: unreadable_ids.clone(),
             ..Listing::default()
         };
-        for row in rows.values {
-            match parse_database_session(&row) {
-                Ok(mut session) => {
-                    session.source.location = Some(SourceLocation {
-                        locator: self.store_coordinate(&session.id),
-                        member: None,
-                        container: None,
-                    });
-                    listing.sessions.push(session);
-                }
+        for failure in page.failures {
+            if matches!(failure, DiscoveryError::InvalidMetadata { .. })
+                && !unreadable_ids.is_empty()
+            {
+                continue;
+            }
+            listing.unavailable.push(failure.to_string());
+        }
+        listing.unavailable.extend(unreadable_ids.iter().map(|id| {
+            session_diagnostic(
+                Some(id),
+                "OpenCode returned malformed row metadata".to_owned(),
+            )
+        }));
+        for native in page.records {
+            match self.parse_native_session(&native) {
+                Ok(session) => listing.sessions.push(session),
                 Err(error) => {
-                    if let Some(id) = row["id"].as_str() {
-                        listing.unavailable_ids.push(id.to_owned());
-                    }
-                    listing
-                        .unavailable
-                        .push(session_diagnostic(row["id"].as_str(), error.to_string()));
+                    listing.unavailable_ids.push(native.id().to_owned());
+                    listing.unavailable.push(session_diagnostic(
+                        Some(native.id()),
+                        format!("metadata normalization failed: {error:#}"),
+                    ));
+                    listing.scan_truncated = true;
                 }
             }
         }
-        let unidentified = rows.invalid.iter().any(|row| row.id.is_none());
-        for row in rows.invalid {
-            if let Some(id) = &row.id {
-                listing.unavailable_ids.push(id.clone());
-            }
-            listing.unavailable.push(session_diagnostic(
-                row.id.as_deref(),
-                format!("opencode database returned an invalid row: {}", row.error),
-            ));
-        }
-        // A row that failed before its id could be read still names a
-        // session this store holds. The ids alone survive any transport, so
-        // the ones the listing could not read are the ones it did not parse.
-        if unidentified {
-            let parsed = listing
-                .sessions
-                .iter()
-                .map(|session| session.id.as_str())
-                .chain(listing.unavailable_ids.iter().map(String::as_str))
-                .map(str::to_owned)
-                .collect::<HashSet<_>>();
-            let unread = self
-                .database_ids(&format!(
-                    "SELECT id AS row FROM session ORDER BY time_updated DESC LIMIT {limit}"
-                ))?
-                .into_iter()
-                .filter(|id| !parsed.contains(id))
-                .collect::<Vec<_>>();
-            listing.unavailable.extend(unread.iter().map(|id| {
-                session_diagnostic(Some(id), "its listing row could not be parsed".to_owned())
-            }));
-            listing.unavailable_ids.extend(unread);
-        }
-        let unreadable = scanned - listing.sessions.len();
+        let unreadable = listing.scanned.saturating_sub(listing.sessions.len());
         if unreadable > 0 {
             listing.unavailable.insert(
                 0,
                 format!(
-                    "opencode store {}: {unreadable} of {scanned} session rows unreadable",
-                    self.store().unwrap_or_default(),
+                    "opencode store {}: {unreadable} of {} session rows unreadable",
+                    self.store.coordinate(),
+                    listing.scanned
                 ),
             );
         }
         Ok(listing)
-    }
-
-    /// The bare values of a one-column query whose values need no quoting,
-    /// such as session ids, through the same transport as every other read.
-    fn database_ids(&self, query: &str) -> Result<Vec<String>> {
-        let text = self.database_text(query)?;
-        let mut lines = text.lines();
-        match lines.next() {
-            None => return Ok(Vec::new()),
-            Some("row") => {}
-            Some(_) => return Err(anyhow!("opencode database returned unexpected columns")),
-        }
-        Ok(lines
-            .map(str::trim)
-            .filter(|line| !line.is_empty())
-            .map(str::to_owned)
-            .collect())
-    }
-
-    fn database_locate(&self, id: &str) -> Result<Option<Session>> {
-        let rows = self.database(&format!(
-            "SELECT json_object( \
-                 'id', id, 'title', title, 'directory', directory, \
-                 'time_created', time_created, 'time_updated', time_updated, \
-                 'model', model, 'cost', cost, 'tokens_input', tokens_input, \
-                 'tokens_output', tokens_output, 'tokens_reasoning', tokens_reasoning, \
-                 'tokens_cache_read', tokens_cache_read, \
-                 'tokens_cache_write', tokens_cache_write) AS row \
-             FROM session WHERE id = {} LIMIT 1",
-            sql_literal(id)
-        ))?;
-        let mut session = rows.first().map(parse_database_session).transpose()?;
-        if let Some(session) = session.as_mut() {
-            session.source.location = Some(SourceLocation {
-                locator: self.store_coordinate(&session.id),
-                member: None,
-                container: None,
-            });
-        }
-        Ok(session)
     }
 
     /// The relationships the session table records. `parent_id` is the
@@ -729,7 +691,7 @@ impl OpenCodeBackend {
             .as_str()
             .map(|native_id| -> Result<ParentRef> {
                 Ok(ParentRef {
-                    resolved: self.database_locate(native_id)?.is_some(),
+                    resolved: self.store.locate_exact(native_id)?.is_some(),
                     native_id: native_id.to_owned(),
                     source: "session.parent_id".to_owned(),
                 })
@@ -838,20 +800,6 @@ impl OpenCodeBackend {
             notes,
             ..Lineage::default()
         })
-    }
-
-    /// The coordinate a consumer writes down beside the session id: the
-    /// database file for the stable store, the program and endpoint for the
-    /// API. Opaque by contract; only its stability matters.
-    fn store_coordinate(&self, id: &str) -> String {
-        if self.uses_database() {
-            database_path("opencode.db").map_or_else(
-                || format!("{} db", self.program.to_string_lossy()),
-                |path| path.display().to_string(),
-            )
-        } else {
-            format!("{}:/api/session/{id}", self.program.to_string_lossy())
-        }
     }
 
     fn database_transcript(&self, session: Session, tail: usize) -> Result<Transcript> {
@@ -1054,38 +1002,6 @@ impl OpenCodeBackend {
             kinds: None,
         })
     }
-
-    /// The session this store records under `id`, where it holds one.
-    fn locate_in_store(&self, id: &str) -> Result<Option<Session>> {
-        if self.uses_database() {
-            return self.database_locate(id);
-        }
-        // A genuine miss is `Ok(None)`; a broken API or malformed payload is an
-        // error and must stay one. Resolution lets another backend win over a
-        // failing one, but reports the failure when nothing resolves — so
-        // collapsing the two here would hide real breakage from `show` and
-        // `export`.
-        let response = self.request(&format!("/api/session/{id}"))?;
-        let data = &response["data"];
-        if !data.is_object() {
-            return Ok(None);
-        }
-        let mut session = parse_session(data)?;
-        session.source.location = Some(SourceLocation {
-            locator: self.store_coordinate(&session.id),
-            member: None,
-            container: None,
-        });
-        Ok(Some(session))
-    }
-}
-
-fn installed_programs() -> Vec<OsString> {
-    ["opencode", "opencode2"]
-        .into_iter()
-        .filter(|program| program_available(OsStr::new(program)))
-        .map(OsString::from)
-        .collect()
 }
 
 fn program_available(program: &OsStr) -> bool {
@@ -1095,70 +1011,27 @@ fn program_available(program: &OsStr) -> bool {
         })
 }
 
-fn default_program() -> OsString {
-    installed_programs()
-        .into_iter()
-        .next()
-        .unwrap_or_else(|| OsString::from("opencode"))
-}
-
 impl Default for OpenCodeBackend {
     fn default() -> Self {
-        Self::new(default_program())
+        Self::from_store(
+            super::default_native_store(NativeHarness::OpenCode)
+                .unwrap_or_else(|| NativeStore::opencode_stable("opencode")),
+        )
     }
 }
 
 impl OpenCodeBackend {
-    pub(crate) fn defaults() -> Vec<Self> {
-        let programs = installed_programs();
-        if programs.is_empty() {
-            vec![Self::default()]
-        } else {
-            programs.into_iter().map(Self::new).collect()
-        }
-    }
-
-    fn filter_sessions(&self, query: &Query, sessions: Vec<Session>) -> Listing {
-        let scanned = sessions.len();
-        let sessions = sessions
-            .into_iter()
-            .map(|mut session| {
-                session.source.location = Some(SourceLocation {
-                    locator: self.store_coordinate(&session.id),
-                    member: None,
-                    container: None,
-                });
+    fn filter_sessions(&self, query: &Query, mut listing: Listing) -> Listing {
+        listing.sessions.retain(|session| {
+            query.scope.is_none_or(|scope| {
                 session
-            })
-            .filter(|session| {
-                query.scope.is_none_or(|scope| {
-                    session
-                        .directory
-                        .as_deref()
-                        .is_some_and(|directory| scope.contains(directory))
-                })
-            })
-            .filter(|session| query.matches(session))
-            .take(query.limit)
-            .collect();
-        Listing {
-            sessions,
-            scanned,
-            scan_truncated: scanned >= MAX_API_SESSIONS,
-            ..Listing::default()
-        }
-    }
-
-    fn api_listing(&self, query: &Query, client: &OpenCodeApiClient) -> Result<Listing> {
-        let candidate_limit = if query.scope.is_some() || query.has_filters() {
-            MAX_API_SESSIONS
-        } else {
-            query.limit
-        };
-        Ok(self.filter_sessions(
-            query,
-            client.sessions(candidate_limit.min(MAX_API_SESSIONS))?,
-        ))
+                    .directory
+                    .as_deref()
+                    .is_some_and(|directory| scope.contains(directory))
+            }) && query.matches(session)
+        });
+        listing.sessions.truncate(query.limit);
+        listing
     }
 
     fn filter_v2_search(
@@ -1196,14 +1069,7 @@ impl Backend for OpenCodeBackend {
     }
 
     fn store(&self) -> Option<String> {
-        Some(if self.uses_database() {
-            database_path("opencode.db").map_or_else(
-                || format!("{} db", self.program.to_string_lossy()),
-                |path| path.display().to_string(),
-            )
-        } else {
-            format!("{} api", self.program.to_string_lossy())
-        })
+        Some(self.store.coordinate())
     }
 
     fn kinds(&self) -> KindDeclaration {
@@ -1226,10 +1092,7 @@ impl Backend for OpenCodeBackend {
     }
 
     fn available(&self) -> bool {
-        // This is only an executable-presence hint. Parsing here would turn a
-        // bad row into a false whole-backend absence before `list` can report
-        // it as a session-specific diagnostic.
-        program_available(&self.program)
+        self.store.available()
     }
 
     fn list(&self, query: &Query) -> Result<Listing> {
@@ -1237,35 +1100,52 @@ impl Backend for OpenCodeBackend {
         // so scope and metadata filters are applied to a full page rather
         // than to the caller's limit. Otherwise matching sessions could fall
         // off the end of a page spent on other projects or models.
-        let candidate_limit = if query.scope.is_some() || query.has_filters() {
+        if query.limit == 0 {
+            return Ok(Listing::default());
+        }
+        let intentional_result_limit =
+            query.scope.is_none() && !query.has_filters() && query.limit < MAX_API_SESSIONS;
+        let candidate_limit = if !intentional_result_limit {
             MAX_API_SESSIONS
         } else {
             query.limit
         };
-        let page = self.session_listing(candidate_limit)?;
-        let unavailable = page.unavailable;
-        let unavailable_ids = page.unavailable_ids;
-        let mut filtered = self.filter_sessions(query, page.sessions);
-        filtered.scanned = page.scanned;
-        filtered.scan_truncated = page.scanned >= MAX_API_SESSIONS;
-        filtered.unavailable = unavailable;
-        // The rows this store could not read keep their precedence: a filtered
-        // page still says which ids it holds and could not normalize.
-        filtered.unavailable_ids = unavailable_ids;
-        Ok(filtered)
+        Ok(self.filter_sessions(
+            query,
+            self.session_listing(candidate_limit, intentional_result_limit)?,
+        ))
     }
 
     fn list_with_search(&self, query: &Query, needle: &str, tail: usize) -> Result<Listing> {
         if !self.uses_database() {
-            let api_fallback = match OpenCodeApiServer::start(&self.program) {
-                Ok(server) => match self.api_listing(query, &server.client) {
+            let store = self
+                .store
+                .opencode_store()
+                .expect("OpenCode backend has an OpenCode store");
+            let api_fallback = match OpenCodeApiServer::start(store) {
+                Ok(server) => match self.list(query) {
                     Ok(listing) => {
-                        return Ok(self.filter_v2_search(
+                        let listing_failure = if listing.scan_truncated
+                            || !listing.unavailable.is_empty()
+                            || !listing.unavailable_ids.is_empty()
+                        {
+                            Some(format!(
+                                "opencode v2 search could not list candidates: {}",
+                                listing.unavailable.join("; ")
+                            ))
+                        } else {
+                            None
+                        };
+                        let mut searched = self.filter_v2_search(
                             listing,
                             needle,
                             tail,
                             Some(&server.client),
-                        ));
+                        );
+                        if let Some(listing_failure) = listing_failure {
+                            searched.unsearched.push(listing_failure);
+                        }
+                        return Ok(searched);
                     }
                     Err(error) => Some(format!(
                         "opencode v2 search could not use the local API server while listing candidates: \
@@ -1292,7 +1172,21 @@ impl Backend for OpenCodeBackend {
                     });
                 }
             };
+            let listing_failure = if listing.scan_truncated
+                || !listing.unavailable.is_empty()
+                || !listing.unavailable_ids.is_empty()
+            {
+                Some(format!(
+                    "opencode v2 search could not list candidates: {}",
+                    listing.unavailable.join("; ")
+                ))
+            } else {
+                None
+            };
             let mut searched = self.filter_v2_search(listing, needle, tail, None);
+            if let Some(listing_failure) = listing_failure {
+                searched.unsearched.push(listing_failure);
+            }
             if let Some(api_fallback) = api_fallback {
                 searched.unsearched.push(api_fallback);
             }
@@ -1319,19 +1213,17 @@ impl Backend for OpenCodeBackend {
         Ok(filter_listing_search(self, candidates, needle, tail))
     }
 
-    /// One session GET rather than a listing page, so an exact id costs a
-    /// single request regardless of how many sessions the store holds. A
-    /// failure names the store it came from, because two OpenCode stores
-    /// answer many of the same ids and resolution reports which one failed.
+    /// Resolve through the configured native store, then normalize its
+    /// metadata row without fetching that row a second time.
     fn locate(&self, id: &str) -> Result<Option<Session>> {
-        // OpenCode ids are self-identifying. Rejecting a foreign shape here
-        // avoids spawning OpenCode for every claude, codex, or pi lookup — each
-        // spawn costs about a second.
-        if !id.starts_with(SESSION_ID_PREFIX) {
+        let Some(native) = self
+            .store
+            .locate_exact(id)
+            .with_context(|| format!("opencode store {}", self.store.coordinate()))?
+        else {
             return Ok(None);
-        }
-        self.locate_in_store(id)
-            .with_context(|| format!("opencode store {}", self.store_coordinate(id)))
+        };
+        Ok(Some(self.parse_native_session(&native)?))
     }
 
     fn transcript(&self, session: &Session, tail: usize) -> Result<Transcript> {
@@ -1423,15 +1315,6 @@ fn sql_id_list(ids: &[String]) -> String {
         .map(|id| sql_literal(id))
         .collect::<Vec<_>>()
         .join(", ")
-}
-
-fn database_path(name: &str) -> Option<PathBuf> {
-    let data_home = std::env::var_os("XDG_DATA_HOME")
-        .map(PathBuf::from)
-        .or_else(|| {
-            std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/share"))
-        })?;
-    Some(data_home.join("opencode").join(name))
 }
 
 fn database_search_queries(needle: &str, candidate_ids: &[String]) -> Option<Vec<String>> {
@@ -1805,15 +1688,6 @@ fn database_tokens(value: &Value) -> Option<Tokens> {
         value["tokens_cache_write"].as_u64(),
     );
     totals.finish()
-}
-
-fn parse_sessions(response: &Value) -> Result<Vec<Session>> {
-    response["data"]
-        .as_array()
-        .ok_or_else(|| anyhow!("opencode session response has no data array"))?
-        .iter()
-        .map(parse_session)
-        .collect()
 }
 
 fn parse_session(value: &Value) -> Result<Session> {
@@ -2304,16 +2178,6 @@ fn epoch_millis(value: &Value) -> Option<chrono::DateTime<Utc>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn malformed_api_response_is_rejected() {
-        let fixture: Value = serde_json::from_str(include_str!(
-            "../../../../tests/fixtures/opencode/malformed.json"
-        ))
-        .unwrap();
-
-        assert!(parse_sessions(&fixture).is_err());
-    }
 
     #[test]
     fn empty_database_output_is_a_miss() {
