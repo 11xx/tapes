@@ -458,7 +458,7 @@ impl Backend for ClaudeBackend {
             .ok_or_else(|| anyhow!("claude session {} has no file locator", session.id))?;
         let domain = format!("file:{}", path.display());
         let mut unmapped = UnmappedTally::default();
-        let read = stream_jsonl(&path, replay_pin(replay)?, |value, span, revision| {
+        let read = stream_jsonl(path, replay_pin(replay)?, |value, span, revision| {
             let mut parsed = parse_turns(value);
             if parsed.is_empty() {
                 count_unmapped(&mut unmapped, value);

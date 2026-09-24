@@ -354,7 +354,7 @@ impl Backend for CodexBackend {
         let domain = format!("file:{}", path.display());
         let mut terminal = None;
         let mut reader = CodexTurns::default();
-        let read = stream_jsonl(&path, replay_pin(replay)?, |value, span, revision| {
+        let read = stream_jsonl(path, replay_pin(replay)?, |value, span, revision| {
             if let Some(observed) = codex_terminal(value) {
                 terminal = Some(observed);
             }
@@ -426,9 +426,9 @@ impl Backend for CodexBackend {
     fn stream_session(&self, session: &Session, read: &StreamedTranscript) -> Result<Session> {
         let path = super::session_file_path(session)
             .ok_or_else(|| anyhow!("codex session {} has no file locator", session.id))?;
-        let records = std::cell::RefCell::new(CodexRecords::new(&path, false));
+        let records = std::cell::RefCell::new(CodexRecords::new(path, false));
         let streamed = stream_jsonl_with_gaps(
-            &path,
+            path,
             Some(read.pin()?),
             |value, span, revision| {
                 records.borrow_mut().observe(value, Some(span), revision);
@@ -468,7 +468,7 @@ impl Backend for CodexBackend {
                 })?;
                 let records = std::cell::RefCell::new(records);
                 stream_jsonl_with_gaps(
-                    &path,
+                    path,
                     Some(ReadPin {
                         length: evidence.source_length,
                         revision: evidence
@@ -485,7 +485,7 @@ impl Backend for CodexBackend {
                 )?;
                 records.into_inner()
             } else {
-                let recording = super::read_recording_at(&path, evidence)?;
+                let recording = super::read_recording_at(path, evidence)?;
                 let mut records = records;
                 records.observe_read(
                     &recording.tail.values,
@@ -496,7 +496,7 @@ impl Backend for CodexBackend {
                 records
             }
         } else {
-            let recording = super::read_recording(&path, self.read_bytes)?;
+            let recording = super::read_recording(path, self.read_bytes)?;
             let mut records = records;
             records.set_read_window(recording.tail.truncated);
             records.observe_read(

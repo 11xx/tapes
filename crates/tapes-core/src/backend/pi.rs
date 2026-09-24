@@ -300,7 +300,7 @@ impl Backend for PiBackend {
         let mut positions = HashMap::<String, (usize, Option<String>)>::new();
         let mut last = None;
         let mut entries = 0;
-        let first = stream_jsonl(&path, replay_pin(replay)?, |value, _, _| {
+        let first = stream_jsonl(path, replay_pin(replay)?, |value, _, _| {
             if value["type"] == "session" {
                 return Ok(false);
             }
@@ -333,7 +333,7 @@ impl Backend for PiBackend {
         let mut abandoned = 0;
         let mut trailing_record = None;
         let mut unmapped = UnmappedTally::default();
-        let read = stream_jsonl(&path, Some(first.pin()), |value, span, revision| {
+        let read = stream_jsonl(path, Some(first.pin()), |value, span, revision| {
             if value["type"] == "session" {
                 count_unmapped(&mut unmapped, value);
                 return Ok(false);
