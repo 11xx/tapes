@@ -262,6 +262,9 @@ impl Backend for ClaudeBackend {
         let (mut session, turns, read) =
             self.parse_with_parent(&path, &parent.id, Some(&parent.id))?;
         session.id = format!("{}::{reference}", parent.id);
+        if let Some(location) = session.source.location.as_mut() {
+            location.native_path = Some(path);
+        }
         let last_turn = read
             .values
             .iter()

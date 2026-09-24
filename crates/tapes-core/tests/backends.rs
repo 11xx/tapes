@@ -4422,6 +4422,24 @@ fn claude_native_parent_path_survives_history_full_and_child_joins() {
         .turns
         .iter()
         .any(|turn| turn.text.contains("selected Claude child")));
+    let child_page = backend.history_page(&child.session, None, 1024).unwrap();
+    assert!(child_page
+        .turns
+        .iter()
+        .any(|turn| turn.text.contains("selected Claude child")));
+    assert!(!child_page
+        .turns
+        .iter()
+        .any(|turn| turn.text.contains("replacement-character shadow child")));
+    let child_transcript = backend.transcript(&child.session, 10).unwrap();
+    assert!(child_transcript
+        .turns
+        .iter()
+        .any(|turn| turn.text.contains("selected Claude child")));
+    assert!(!child_transcript
+        .turns
+        .iter()
+        .any(|turn| turn.text.contains("replacement-character shadow child")));
 
     let mut streamed_child = String::new();
     backend
