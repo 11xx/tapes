@@ -210,6 +210,86 @@ fn self_uses_pi_session_file_for_native_discovery() {
         .contains("self is pi session session-live, from PI_SESSION_ID"));
 }
 
+#[test]
+fn pi_session_file_adds_to_the_configured_directory() {
+    let root = TemporaryDirectory::new(std::env::temp_dir().join(format!(
+        "tapes-cli-pi-session-file-directory-{}",
+        std::process::id()
+    )));
+    let sessions = root.path().join("sessions");
+    fs::create_dir_all(&sessions).unwrap();
+
+    let ids = [
+        "pi-session-live",
+        "pi-session-1",
+        "pi-session-2",
+        "pi-session-3",
+        "pi-session-4",
+    ];
+    let mut live_file = None;
+    for (index, id) in ids.iter().enumerate() {
+        let file = sessions.join(format!("2026-09-25T10-0{index}-00-000Z_{id}.jsonl"));
+        fs::write(
+            &file,
+            format!(
+                "{{\"type\":\"session\",\"version\":3,\"id\":\"{id}\",\"timestamp\":\"2026-09-25T10:00:00Z\",\"cwd\":\"/fixtures/project\"}}\n"
+            ),
+        )
+        .unwrap();
+        if *id == "pi-session-live" {
+            live_file = Some(file);
+        }
+    }
+    let live_file = live_file.unwrap();
+
+    let run = |args: &[&str]| {
+        tapes()
+            .args(args)
+            .env("HOME", root.path().join("home"))
+            .env("PI_CODING_AGENT_SESSION_DIR", &sessions)
+            .env("PI_SESSION_FILE", &live_file)
+            .env("XDG_DATA_HOME", root.path().join("xdg"))
+            .env_remove("PI_CODING_AGENT_DIR")
+            .env_remove("CLAUDE_CONFIG_DIR")
+            .env_remove("CODEX_HOME")
+            .output()
+            .unwrap()
+    };
+
+    let listed = run(&[
+        "list",
+        "--global",
+        "--harness",
+        "pi",
+        "--limit",
+        "5",
+        "--json",
+    ]);
+    assert!(
+        listed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&listed.stderr)
+    );
+    let value: Value = serde_json::from_slice(&listed.stdout).unwrap();
+    let sessions = value["sessions"].as_array().unwrap();
+    assert_eq!(sessions.len(), 5, "{value}");
+    let listed_ids = sessions
+        .iter()
+        .map(|session| session["id"].as_str().unwrap())
+        .collect::<std::collections::HashSet<_>>();
+    assert_eq!(listed_ids.len(), 5, "{value}");
+    assert_eq!(listed_ids, ids.into_iter().collect());
+
+    let shown = run(&["show", "pi-session-1", "--json"]);
+    assert!(
+        shown.status.success(),
+        "{}",
+        String::from_utf8_lossy(&shown.stderr)
+    );
+    let value: Value = serde_json::from_slice(&shown.stdout).unwrap();
+    assert_eq!(value["session"]["id"], "pi-session-1");
+}
+
 /// Read evidence names the reader build that produced it, and a supplied
 /// record's span carries the SHA-256 of its source bytes, so a consumer can
 /// bind retained bytes without decoding the input again. The digest below is

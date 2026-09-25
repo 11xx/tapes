@@ -42,8 +42,8 @@ START WITHOUT AN ID
   already hold. self stands for your own session wherever an id does, read
   from the variable your harness exports (CLAUDE_SESSION_ID or
   CLAUDE_CODE_SESSION_ID, CODEX_THREAD_ID, OPENCODE_SESSION, PI_SESSION_ID);
-  Pi reads the active file from PI_SESSION_FILE when it is set, ahead of its
-  configured session directories;
+  Pi adds PI_SESSION_FILE as the active recording and prefers it for its own
+  id, while keeping configured session directories available for other ids;
   stderr says what it became, and it refuses when none is set or the store
   does not hold the id. Without one, read the first turns and check whose
   they are.

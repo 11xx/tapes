@@ -199,7 +199,7 @@ fn native_roots_keep_empty_and_relative_environment_overrides() {
 }
 
 #[test]
-fn live_pi_session_file_is_the_only_pi_source() {
+fn live_pi_session_file_adds_authoritative_identity_to_configured_directory() {
     let _guard = ENV_LOCK.lock().unwrap();
     let temp = Temp::new();
     let old_home = std::env::var_os("HOME");
@@ -222,6 +222,11 @@ fn live_pi_session_file_is_the_only_pi_source() {
         &selected_root,
         "2026-09-24T12-01-00-000Z_session-sibling.jsonl",
         "{\"type\":\"session\",\"id\":\"session-sibling\"}\n",
+    );
+    let configured_live = write(
+        &configured_root,
+        "2026-09-24T12-01-00-000Z_session-live.jsonl",
+        "{\"type\":\"session\",\"id\":\"session-live\"}\n",
     );
     let configured = write(
         &configured_root,
@@ -248,16 +253,29 @@ fn live_pi_session_file_is_the_only_pi_source() {
         .find(|store| store.harness().as_str() == "pi")
         .unwrap()
         .candidates(10);
-    assert_eq!(page.records.len(), 1);
-    assert_eq!(page.records[0].locator(), Some(selected.as_path()));
+    assert_eq!(page.records.len(), 2);
+    assert!(page.complete);
+    let live_record = page
+        .records
+        .iter()
+        .find(|record| record.id() == "session-live")
+        .unwrap();
+    let configured_record = page
+        .records
+        .iter()
+        .find(|record| record.id() == "session-configured")
+        .unwrap();
+    assert_eq!(live_record.locator(), Some(selected.as_path()));
+    assert_ne!(live_record.locator(), Some(configured_live.as_path()));
+    assert_eq!(configured_record.locator(), Some(configured.as_path()));
     assert!(matches!(
         discovery.resolve("session-sibling"),
         Err(ResolveError::NotFound { .. })
     ));
-    assert!(matches!(
-        discovery.resolve("session-configured"),
-        Err(ResolveError::NotFound { .. })
-    ));
+    assert_eq!(
+        discovery.resolve("session-configured").unwrap().locator(),
+        Some(configured.as_path())
+    );
 
     let malformed = write(
         temp.path(),
@@ -265,16 +283,22 @@ fn live_pi_session_file_is_the_only_pi_source() {
         "{\"type\":\"session\",\"id\":\"one\"}\n{\"type\":\"session\",\"id\":\"two\"}\n",
     );
     std::env::set_var("PI_SESSION_FILE", &malformed);
-    assert!(matches!(
-        Discovery::from_env().resolve("session-configured"),
-        Err(ResolveError::BackendFailed { .. }) | Err(ResolveError::Incomplete { .. })
-    ));
+    assert_eq!(
+        Discovery::from_env()
+            .resolve("session-configured")
+            .unwrap()
+            .locator(),
+        Some(configured.as_path())
+    );
 
     std::env::set_var("PI_SESSION_FILE", temp.path().join("missing.jsonl"));
-    assert!(matches!(
-        Discovery::from_env().resolve("session-configured"),
-        Err(ResolveError::NotFound { .. })
-    ));
+    assert_eq!(
+        Discovery::from_env()
+            .resolve("session-configured")
+            .unwrap()
+            .locator(),
+        Some(configured.as_path())
+    );
 
     std::env::remove_var("PI_SESSION_FILE");
     let fallback = Discovery::from_env().resolve("session-configured").unwrap();

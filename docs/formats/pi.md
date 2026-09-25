@@ -9,8 +9,11 @@ drifts; check a real session before trusting any row here.
 ~/.pi/agent/sessions/<project-slug>/<timestamp>_<session-uuid>.jsonl
 ```
 
-`PI_SESSION_FILE` selects the active recording as the complete Pi source.
-When it is unset, `PI_CODING_AGENT_SESSION_DIR` overrides the whole path and
+`PI_SESSION_FILE` adds the active recording alongside the configured session
+directory. When that recording and the directory contain the same id, the
+active file supplies the identity and the session appears once. Other Pi
+sessions remain available from the configured directory.
+`PI_CODING_AGENT_SESSION_DIR` overrides the whole directory path;
 `PI_CODING_AGENT_DIR` overrides its parent, with `sessions` appended. The
 session id is the part of the filename after the underscore — note that the
 separator is `_`, where codex uses `-`. A resolver that hardcodes one

@@ -18,15 +18,16 @@ println!("{} {} {}", session.id(), session.harness(), session.store_coordinate()
 ```
 
 Use `Discovery::new` with explicit `NativeStore::{claude,codex,pi,pi_file,
-opencode_stable,opencode_v2}` values when the caller owns a specific root or
-program. `NativeSession` is created only from those native sources. A copied
-UUID or imported recording alone does not establish native identity.
+pi_with_file,opencode_stable,opencode_v2}` values when the caller owns a
+specific root or program. `NativeSession` is created only from those native
+sources. A copied UUID or imported recording alone does not establish native
+identity.
 
-`Discovery::from_env` reads `PI_SESSION_FILE` as a one-file Pi source when it
-is set. The selected file must establish the queried Pi identity; nearby
-recordings and configured Pi directories are not searched as substitutes.
-When it is unset, discovery uses `PI_CODING_AGENT_SESSION_DIR`, then
-`PI_CODING_AGENT_DIR/sessions`, then the default Pi session directory.
+`Discovery::from_env` adds `PI_SESSION_FILE` alongside the configured Pi
+directory. An exact identity in that live recording takes precedence over the
+same identity in the directory; candidate pages include the identity once.
+Other Pi identities remain resolvable from `PI_CODING_AGENT_SESSION_DIR`,
+then `PI_CODING_AGENT_DIR/sessions`, then the default Pi session directory.
 
 The caller decides whether a resolved harness is eligible for its own action.
 A recorded session may be old, closed, or otherwise unsuitable for delivery.

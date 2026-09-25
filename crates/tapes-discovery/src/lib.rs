@@ -65,6 +65,7 @@ pub enum NativeStore {
     Codex { root: PathBuf },
     Pi { root: PathBuf },
     PiFile { path: PathBuf },
+    PiWithFile { root: PathBuf, path: PathBuf },
     OpenCode(OpenCodeStore),
 }
 
@@ -81,9 +82,17 @@ impl NativeStore {
         Self::Pi { root: root.into() }
     }
 
-    /// Use one runtime-selected Pi recording as the complete native source.
+    /// Use one explicit Pi recording without scanning a directory.
     pub fn pi_file(path: impl Into<PathBuf>) -> Self {
         Self::PiFile { path: path.into() }
+    }
+
+    /// Add one runtime-selected Pi recording ahead of a configured directory.
+    pub fn pi_with_file(root: impl Into<PathBuf>, path: impl Into<PathBuf>) -> Self {
+        Self::PiWithFile {
+            root: root.into(),
+            path: path.into(),
+        }
     }
 
     pub fn opencode(program: impl Into<OsString>) -> Self {
@@ -116,21 +125,24 @@ impl NativeStore {
         match self {
             Self::Claude { .. } => Harness::Claude,
             Self::Codex { .. } => Harness::Codex,
-            Self::Pi { .. } | Self::PiFile { .. } => Harness::Pi,
+            Self::Pi { .. } | Self::PiFile { .. } | Self::PiWithFile { .. } => Harness::Pi,
             Self::OpenCode(_) => Harness::OpenCode,
         }
     }
 
     pub fn root(&self) -> Option<&Path> {
         match self {
-            Self::Claude { root } | Self::Codex { root } | Self::Pi { root } => Some(root),
+            Self::Claude { root }
+            | Self::Codex { root }
+            | Self::Pi { root }
+            | Self::PiWithFile { root, .. } => Some(root),
             Self::PiFile { .. } | Self::OpenCode(_) => None,
         }
     }
 
     pub(crate) fn file(&self) -> Option<&Path> {
         match self {
-            Self::PiFile { path } => Some(path),
+            Self::PiFile { path } | Self::PiWithFile { path, .. } => Some(path),
             _ => None,
         }
     }
@@ -141,6 +153,14 @@ impl NativeStore {
                 format!("{}:{}", self.harness(), root.display())
             }
             Self::PiFile { path } => format!("{}:{}", self.harness(), path.display()),
+            Self::PiWithFile { root, path } => {
+                format!(
+                    "{}:{} plus {}",
+                    self.harness(),
+                    root.display(),
+                    path.display()
+                )
+            }
             Self::OpenCode(store) => store.coordinate(),
         }
     }
@@ -149,7 +169,9 @@ impl NativeStore {
         match self {
             Self::Claude { .. } => NativeStoreKind::ClaudeFiles,
             Self::Codex { .. } => NativeStoreKind::CodexFiles,
-            Self::Pi { .. } | Self::PiFile { .. } => NativeStoreKind::PiFiles,
+            Self::Pi { .. } | Self::PiFile { .. } | Self::PiWithFile { .. } => {
+                NativeStoreKind::PiFiles
+            }
             Self::OpenCode(store) => NativeStoreKind::OpenCode(store.flavor()),
         }
     }
@@ -296,18 +318,22 @@ impl Discovery {
         {
             stores.push(NativeStore::codex(root));
         }
-        if let Some(path) = env::var_os("PI_SESSION_FILE").filter(|path| !path.is_empty()) {
-            stores.push(NativeStore::pi_file(PathBuf::from(path)));
-        } else if let Some(root) = env::var_os("PI_CODING_AGENT_SESSION_DIR")
+        let pi_root = env::var_os("PI_CODING_AGENT_SESSION_DIR")
             .map(PathBuf::from)
             .or_else(|| {
                 env::var_os("PI_CODING_AGENT_DIR")
                     .map(PathBuf::from)
                     .map(|path| path.join("sessions"))
             })
-            .or_else(|| home.as_ref().map(|path| path.join(".pi/agent/sessions")))
-        {
-            stores.push(NativeStore::pi(root));
+            .or_else(|| home.as_ref().map(|path| path.join(".pi/agent/sessions")));
+        let pi_file = env::var_os("PI_SESSION_FILE").filter(|path| !path.is_empty());
+        match (pi_root, pi_file) {
+            (Some(root), Some(path)) => {
+                stores.push(NativeStore::pi_with_file(root, PathBuf::from(path)));
+            }
+            (Some(root), None) => stores.push(NativeStore::pi(root)),
+            (None, Some(path)) => stores.push(NativeStore::pi_file(PathBuf::from(path))),
+            (None, None) => {}
         }
         stores.extend(
             opencode::default_stores()
