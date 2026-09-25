@@ -38,7 +38,9 @@ Every line is `{"type": …, "timestamp": …, "payload": {…}}` with an RFC 33
 
 `turn_context` repeats whenever the model or effort changes, so the last one
 holds the session's final selection. `effort` is what the normalized model
-carries as the model variant.
+carries as the model variant; older rollouts wrote it as `reasoning_effort`,
+or as `collaboration_mode.settings.reasoning_effort`, and those are read when
+`effort` is absent.
 
 Real rollouts also contain timestamped non-turn records. The verified
 top-level kinds are `session_meta`, `turn_context`, `event_msg`, and

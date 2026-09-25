@@ -221,15 +221,8 @@ impl ClaudeBackend {
                 let models = values
                     .iter()
                     .filter_map(|value| {
-                        let message = &value["message"];
-                        if message["role"] != "assistant" {
-                            return None;
-                        }
                         Some(crate::history::ModelObservation {
-                            model: Model {
-                                id: message["model"].as_str()?.to_owned(),
-                                variant: None,
-                            },
+                            model: claude_model(value)?,
                             timestamp: timestamp(&value["timestamp"]),
                         })
                     })
@@ -753,16 +746,27 @@ impl ClaudeRecords {
     }
 }
 
-/// The model an assistant record names.
+/// The model an assistant record names, with the effort the turn ran at: the
+/// turn's own `perTurnEffort`, else the session-wide `effort`. Claude writes
+/// assistant records of its own for API errors under the model `<synthetic>`;
+/// they name no model a turn ran under.
 fn claude_model(value: &Value) -> Option<Model> {
     let message = value.get("message")?;
-    (message["role"].as_str()? == "assistant")
-        .then(|| message["model"].as_str())
-        .flatten()
-        .map(|id| Model {
-            id: id.to_owned(),
-            variant: None,
-        })
+    if message["role"].as_str()? != "assistant" {
+        return None;
+    }
+    let id = message["model"].as_str()?;
+    if id == "<synthetic>" {
+        return None;
+    }
+    Some(Model {
+        id: id.to_owned(),
+        variant: value["perTurnEffort"]
+            .as_str()
+            .or_else(|| value["effort"].as_str())
+            .filter(|effort| !effort.is_empty())
+            .map(str::to_owned),
+    })
 }
 
 fn read_transcript(
