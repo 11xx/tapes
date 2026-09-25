@@ -9992,10 +9992,12 @@ fn events_full_arguments_opt_in_returns_the_complete_argument_text() {
 struct RemoteReplica {
     root: PathBuf,
     bin: PathBuf,
+    home: PathBuf,
     codex_home: PathBuf,
     transport: PathBuf,
     commands: PathBuf,
     destinations: PathBuf,
+    argv: PathBuf,
 }
 
 impl RemoteReplica {
@@ -10011,31 +10013,55 @@ impl RemoteReplica {
         std::os::unix::fs::symlink(env!("CARGO_BIN_EXE_tapes"), bin.join("tapes")).unwrap();
         let commands = root.join("commands");
         let destinations = root.join("destinations");
+        let argv = root.join("argv");
         let transport = root.join("ssh");
-        fs::write(
-            &transport,
-            format!(
-                "#!/bin/sh\ndestination=$1\nshift\nprintf '%s\\n' \"$destination\" >> '{}'\n\
-                 printf '%s\\n' \"$1\" >> '{}'\nprintf '%s\\n' 'replica transport note' >&2\n\
-                 unset XDG_DATA_HOME\nexport HOME='{}'\nexport CODEX_HOME='{}'\n\
-                 export PATH='{}:/usr/bin:/bin'\nexec sh -c \"$1\"\n",
-                destinations.display(),
-                commands.display(),
-                home.display(),
-                codex_home.display(),
-                bin.display(),
-            ),
-        )
-        .unwrap();
-        fs::set_permissions(&transport, fs::Permissions::from_mode(0o700)).unwrap();
-        Self {
+        let replica = Self {
             root,
             bin,
+            home,
             codex_home,
             transport,
             commands,
             destinations,
-        }
+            argv,
+        };
+        replica.write_transport(&replica.transport);
+        replica
+    }
+
+    /// The same transport installed as the default `ssh` on a caller's PATH,
+    /// for the case where `TAPES_SSH` names nothing.
+    fn default_program(&self, bin: &Path) -> PathBuf {
+        let program = bin.join("ssh");
+        self.write_transport(&program);
+        program
+    }
+
+    /// The substituted program: it records every argument it was handed, sets
+    /// the replica's store environment, and runs the remote command through a
+    /// shell exactly as ssh hands a command to a remote shell. It accepts the
+    /// option prefix a caller may put before the destination, so the same
+    /// program serves both the default and the named-transport cases.
+    fn write_transport(&self, program: &Path) {
+        fs::write(
+            program,
+            format!(
+                "#!/bin/sh\nfor argument in \"$@\"; do printf '%s\\n' \"$argument\" >> '{}'; done\n\
+                 while [ \"$1\" = '-o' ]; do shift 2; done\n\
+                 destination=$1\nshift\nprintf '%s\\n' \"$destination\" >> '{}'\n\
+                 printf '%s\\n' \"$1\" >> '{}'\nprintf '%s\\n' 'replica transport note' >&2\n\
+                 unset XDG_DATA_HOME\nexport HOME='{}'\nexport CODEX_HOME='{}'\n\
+                 export PATH='{}:/usr/bin:/bin'\nexec sh -c \"$1\"\n",
+                self.argv.display(),
+                self.destinations.display(),
+                self.commands.display(),
+                self.home.display(),
+                self.codex_home.display(),
+                self.bin.display(),
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(program, fs::Permissions::from_mode(0o700)).unwrap();
     }
 
     /// Put a recording in the replica's codex store under the filename the
@@ -10067,6 +10093,12 @@ impl RemoteReplica {
 
     fn queried(&self) -> Vec<String> {
         read_lines(&self.commands)
+    }
+
+    /// Every argument the transport was invoked with, one per line, across
+    /// all invocations.
+    fn argv(&self) -> Vec<String> {
+        read_lines(&self.argv)
     }
 
     fn destinations(&self) -> Vec<String> {
@@ -10169,6 +10201,14 @@ fn list_remote_answers_from_the_replica_and_names_it() {
         "the replica was not asked with the caller's arguments"
     );
     assert_eq!(replica.destinations(), vec!["replica-host"]);
+    assert_eq!(
+        replica.argv(),
+        vec![
+            "replica-host",
+            "tapes 'list' '--global' '--sort' 'newest' --json"
+        ],
+        "a program named through TAPES_SSH received options it did not ask for"
+    );
 
     // The same listing asked locally returns this machine's session, and it
     // carries no replica.
@@ -10269,6 +10309,68 @@ fn show_remote_never_joins_the_local_liveness_registry() {
     assert!(!text.contains("[working]"), "{text}");
 
     let _ = fs::remove_dir_all(&replica.root);
+    let _ = fs::remove_dir_all(local_codex);
+}
+
+/// A remote query never prompts. The default ssh is invoked with
+/// `BatchMode=yes`, so an unknown host key or a missing key fails at once
+/// instead of stopping on a /dev/tty read until the deadline; a program named
+/// through `TAPES_SSH` is the operator's own and receives no options of its
+/// own.
+#[test]
+fn the_default_ssh_is_invoked_non_interactively() {
+    let replica = RemoteReplica::new("default-ssh");
+    replica.record(CODEX_ONE_FILE, CODEX_SESSION_ONE);
+    let (local_codex, local_home) = fixture_store("remote-default-ssh-local");
+    let local_bin = local_codex.join("bin");
+    fs::create_dir_all(&local_bin).unwrap();
+    replica.default_program(&local_bin);
+
+    let mut command = tapes();
+    command.args(["list", "--global", "--remote", "replica-host", "--json"]);
+    with_fixture_env(&mut command, &local_codex, &local_home, &local_bin);
+    command.env_remove("TAPES_SSH");
+    let output = command.output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["sessions"][0]["source"]["replica"], "replica-host");
+    assert_eq!(
+        replica.argv(),
+        vec![
+            "-o",
+            "BatchMode=yes",
+            "replica-host",
+            "tapes 'list' '--global' '--sort' 'newest' --json"
+        ]
+    );
+
+    // The same program named through TAPES_SSH is invoked as it stands.
+    let named = RemoteReplica::new("default-ssh-named");
+    named.record(CODEX_ONE_FILE, CODEX_SESSION_ONE);
+    let output = run_against_replica(
+        &named,
+        &local_codex,
+        &local_home,
+        &local_bin,
+        &["list", "--global", "--remote", "replica-host", "--json"],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        named.argv().first().map(String::as_str),
+        Some("replica-host"),
+        "a program named through TAPES_SSH received an option it did not ask for"
+    );
+
+    let _ = fs::remove_dir_all(&replica.root);
+    let _ = fs::remove_dir_all(&named.root);
     let _ = fs::remove_dir_all(local_codex);
 }
 

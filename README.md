@@ -635,8 +635,10 @@ only when every selected session failed, or when the listing itself did.
 `list`, `show`, and `export` take `--remote <ssh-destination>`: the named
 host's own `tapes` answers, and its sessions name that replica instead of
 being read here. Nothing is installed on the replica, and none of its store
-is copied. `ssh` carries the query; `TAPES_SSH` names a different program (a
-wrapper, a fixed configuration, a jump-host helper),
+is copied. `ssh` carries the query and runs with `BatchMode=yes`, so a
+query never prompts for a host key or a password; `TAPES_SSH` names a
+different program (a wrapper, a fixed configuration, a jump-host helper),
+which receives no added options,
 `TAPES_REMOTE_MAX_BYTES` bounds an accepted answer (64 MiB by default), and
 `TAPES_REMOTE_DEADLINE_MS` bounds the wait (60 s by default).
 

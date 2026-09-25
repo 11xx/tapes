@@ -75,13 +75,20 @@ impl std::error::Error for Unavailable {}
 #[derive(Debug, Clone)]
 pub struct Settings {
     program: OsString,
+    /// Whether the program is this tool's own default `ssh`. Only the default
+    /// is invoked with the option that keeps a prompt from stopping the query;
+    /// a program an operator named owns its own behavior.
+    batch_mode: bool,
     max_bytes: usize,
     deadline: Duration,
 }
 
 impl Settings {
     pub fn resolve() -> anyhow::Result<Self> {
-        let program = std::env::var_os(SSH_VARIABLE).unwrap_or_else(|| OsString::from("ssh"));
+        let (program, batch_mode) = match std::env::var_os(SSH_VARIABLE) {
+            Some(program) => (program, false),
+            None => (OsString::from("ssh"), true),
+        };
         if program.is_empty() {
             return Err(anyhow!("{SSH_VARIABLE} names no program"));
         }
@@ -106,6 +113,7 @@ impl Settings {
         };
         Ok(Self {
             program,
+            batch_mode,
             max_bytes,
             deadline,
         })
@@ -274,6 +282,14 @@ impl Replica {
 
     fn spawn(&self, remote_command: &str) -> std::result::Result<Child, Unavailable> {
         let mut command = Command::new(&self.settings.program);
+        if self.settings.batch_mode {
+            // Default ssh reads a host-key question or a password from
+            // /dev/tty. A query runs in the background with no terminal of
+            // its own, so that read stops the transport until the deadline
+            // and the prompt would be reported as the replica being slow.
+            // BatchMode turns the prompt into an immediate failure instead.
+            command.arg("-o").arg("BatchMode=yes");
+        }
         command
             .arg(&self.destination)
             .arg(remote_command)

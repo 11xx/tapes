@@ -194,7 +194,11 @@ READ A RECORDING ON ANOTHER MACHINE
   answer the arguments name, and this machine accepts at most 64 MiB over at
   most 60 seconds. TAPES_SSH names the program that carries the query;
   TAPES_REMOTE_MAX_BYTES and TAPES_REMOTE_DEADLINE_MS raise or lower the two
-  local bounds.
+  local bounds. The default ssh runs with BatchMode=yes, so a query never
+  prompts: an unknown host key or a missing key fails at once instead of
+  waiting out the deadline. A program named through TAPES_SSH is the
+  operator's own and receives no added options, so naming ssh there keeps
+  interactive prompts.
 
   export --remote runs the replica's own export, which writes the bundle on
   that machine through the reader that holds the recording. Every path it
