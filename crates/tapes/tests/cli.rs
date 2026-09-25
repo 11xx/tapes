@@ -60,7 +60,9 @@ const CODEX_SESSION_INVOCATIONS: &str = concat!(
 );
 
 fn tapes() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_tapes"))
+    let mut command = Command::new(env!("CARGO_BIN_EXE_tapes"));
+    command.env_remove("PI_SESSION_FILE");
+    command
 }
 
 fn fixture_store(name: &str) -> (PathBuf, PathBuf) {
@@ -162,6 +164,50 @@ fn self_names_the_session_its_harness_exports() {
         assert!(error.contains(expected), "{variables:?}: {error}");
     }
     let _ = fs::remove_dir_all(&codex_home);
+}
+
+#[test]
+fn self_uses_pi_session_file_for_native_discovery() {
+    let root = TemporaryDirectory::new(
+        std::env::temp_dir().join(format!("tapes-cli-pi-session-file-{}", std::process::id())),
+    );
+    let path = root.path().join("runtime-session.jsonl");
+    fs::write(
+        &path,
+        concat!(
+            "{\"type\":\"session\",\"version\":3,\"id\":\"session-live\",\"timestamp\":\"2026-01-01T10:00:00Z\",\"cwd\":\"/fixtures/project\"}\n",
+            "{\"type\":\"model_change\",\"id\":\"model-1\",\"parentId\":null,\"timestamp\":\"2026-01-01T10:00:01Z\",\"provider\":\"fixture-provider\",\"modelId\":\"pi-model-old\"}\n",
+            "{\"type\":\"thinking_level_change\",\"id\":\"thinking-1\",\"parentId\":\"model-1\",\"timestamp\":\"2026-01-01T10:00:02Z\",\"thinkingLevel\":\"high\"}\n",
+            "{\"type\":\"message\",\"id\":\"user-1\",\"parentId\":\"thinking-1\",\"timestamp\":\"2026-01-01T10:00:03Z\",\"message\":{\"role\":\"user\",\"timestamp\":1767261603000,\"content\":[{\"type\":\"text\",\"text\":\"Inspect the fixture.\"}]}}\n",
+            "{\"type\":\"message\",\"id\":\"assistant-1\",\"parentId\":\"user-1\",\"timestamp\":\"2026-01-01T10:00:04Z\",\"message\":{\"role\":\"assistant\",\"timestamp\":1767261604000,\"provider\":\"fixture-provider\",\"model\":\"pi-model-live\",\"content\":[{\"type\":\"text\",\"text\":\"Live Pi answer.\"}]}}\n"
+        ),
+    )
+    .unwrap();
+
+    let output = tapes()
+        .args(["show", "self", "--json"])
+        .env("HOME", root.path().join("home"))
+        .env("PI_SESSION_ID", "session-live")
+        .env("PI_SESSION_FILE", &path)
+        .env("XDG_DATA_HOME", root.path().join("xdg"))
+        .env_remove("PI_CODING_AGENT_DIR")
+        .env_remove("PI_CODING_AGENT_SESSION_DIR")
+        .env_remove("CLAUDE_SESSION_ID")
+        .env_remove("CLAUDE_CODE_SESSION_ID")
+        .env_remove("CODEX_THREAD_ID")
+        .env_remove("OPENCODE_SESSION")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["session"]["id"], "session-live");
+    assert_eq!(value["session"]["model"]["id"], "pi-model-live");
+    assert!(String::from_utf8_lossy(&output.stderr)
+        .contains("self is pi session session-live, from PI_SESSION_ID"));
 }
 
 /// Read evidence names the reader build that produced it, and a supplied
@@ -1416,6 +1462,7 @@ fn with_fixture_env(command: &mut Command, codex_home: &Path, home: &Path, bin: 
         .env("CODEX_HOME", codex_home)
         .env("HOME", home)
         .env_remove("CLAUDE_CONFIG_DIR")
+        .env_remove("PI_SESSION_FILE")
         .env_remove("XDG_DATA_HOME")
         .env("PATH", format!("{}:/usr/bin:/bin", bin.display()));
 }

@@ -64,6 +64,7 @@ pub enum NativeStore {
     Claude { root: PathBuf },
     Codex { root: PathBuf },
     Pi { root: PathBuf },
+    PiFile { path: PathBuf },
     OpenCode(OpenCodeStore),
 }
 
@@ -78,6 +79,11 @@ impl NativeStore {
 
     pub fn pi(root: impl Into<PathBuf>) -> Self {
         Self::Pi { root: root.into() }
+    }
+
+    /// Use one runtime-selected Pi recording as the complete native source.
+    pub fn pi_file(path: impl Into<PathBuf>) -> Self {
+        Self::PiFile { path: path.into() }
     }
 
     pub fn opencode(program: impl Into<OsString>) -> Self {
@@ -110,7 +116,7 @@ impl NativeStore {
         match self {
             Self::Claude { .. } => Harness::Claude,
             Self::Codex { .. } => Harness::Codex,
-            Self::Pi { .. } => Harness::Pi,
+            Self::Pi { .. } | Self::PiFile { .. } => Harness::Pi,
             Self::OpenCode(_) => Harness::OpenCode,
         }
     }
@@ -118,7 +124,14 @@ impl NativeStore {
     pub fn root(&self) -> Option<&Path> {
         match self {
             Self::Claude { root } | Self::Codex { root } | Self::Pi { root } => Some(root),
-            Self::OpenCode(_) => None,
+            Self::PiFile { .. } | Self::OpenCode(_) => None,
+        }
+    }
+
+    pub(crate) fn file(&self) -> Option<&Path> {
+        match self {
+            Self::PiFile { path } => Some(path),
+            _ => None,
         }
     }
 
@@ -127,6 +140,7 @@ impl NativeStore {
             Self::Claude { root } | Self::Codex { root } | Self::Pi { root } => {
                 format!("{}:{}", self.harness(), root.display())
             }
+            Self::PiFile { path } => format!("{}:{}", self.harness(), path.display()),
             Self::OpenCode(store) => store.coordinate(),
         }
     }
@@ -135,7 +149,7 @@ impl NativeStore {
         match self {
             Self::Claude { .. } => NativeStoreKind::ClaudeFiles,
             Self::Codex { .. } => NativeStoreKind::CodexFiles,
-            Self::Pi { .. } => NativeStoreKind::PiFiles,
+            Self::Pi { .. } | Self::PiFile { .. } => NativeStoreKind::PiFiles,
             Self::OpenCode(store) => NativeStoreKind::OpenCode(store.flavor()),
         }
     }
@@ -282,7 +296,9 @@ impl Discovery {
         {
             stores.push(NativeStore::codex(root));
         }
-        if let Some(root) = env::var_os("PI_CODING_AGENT_SESSION_DIR")
+        if let Some(path) = env::var_os("PI_SESSION_FILE").filter(|path| !path.is_empty()) {
+            stores.push(NativeStore::pi_file(PathBuf::from(path)));
+        } else if let Some(root) = env::var_os("PI_CODING_AGENT_SESSION_DIR")
             .map(PathBuf::from)
             .or_else(|| {
                 env::var_os("PI_CODING_AGENT_DIR")

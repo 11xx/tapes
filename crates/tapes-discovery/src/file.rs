@@ -90,6 +90,9 @@ impl Walk {
 }
 
 pub(crate) fn candidates(store: &NativeStore, limit: usize) -> CandidatePage {
+    if let Some(path) = store.file() {
+        return explicit_file_candidates(store, path, limit);
+    }
     let Some(root) = store.root() else {
         return CandidatePage::empty();
     };
@@ -217,6 +220,13 @@ pub(crate) fn candidates(store: &NativeStore, limit: usize) -> CandidatePage {
 }
 
 pub(crate) fn available(store: &NativeStore) -> bool {
+    if let Some(path) = store.file() {
+        return match fs::metadata(path) {
+            Ok(_) => true,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => false,
+            Err(_) => true,
+        };
+    }
     let Some(root) = store.root() else {
         return false;
     };
@@ -260,7 +270,36 @@ pub(crate) fn locate_exact(
     store: &NativeStore,
     id: &str,
 ) -> Result<Option<NativeSession>, DiscoveryError> {
+    if let Some(path) = store.file() {
+        return match probe_runtime_file(store, path)? {
+            Some(session) if session.id() == id => Ok(Some(session)),
+            _ => Ok(None),
+        };
+    }
     locate_exact_using(store, id, probe)
+}
+
+fn explicit_file_candidates(store: &NativeStore, path: &Path, limit: usize) -> CandidatePage {
+    let mut page = CandidatePage::empty();
+    if limit == 0 {
+        page.complete = false;
+        page.failures.push(DiscoveryError::BoundExhausted {
+            coordinate: store.coordinate(),
+            bound: "candidate enumeration limit",
+        });
+        return page;
+    }
+    page.visited_entries = 1;
+    page.scanned = 1;
+    match probe_runtime_file(store, path) {
+        Ok(Some(session)) => page.records.push(session),
+        Ok(None) => {}
+        Err(error) => {
+            page.complete = false;
+            page.failures.push(error);
+        }
+    }
+    page
 }
 
 fn locate_exact_using(
@@ -617,12 +656,28 @@ fn probe(store: &NativeStore, path: &Path) -> Result<Option<NativeSession>, Disc
     probe_with_open(store, path, |path| File::open(path))
 }
 
+fn probe_runtime_file(
+    store: &NativeStore,
+    path: &Path,
+) -> Result<Option<NativeSession>, DiscoveryError> {
+    probe_file(store, path, false, |path| File::open(path))
+}
+
 fn probe_with_open(
     store: &NativeStore,
     path: &Path,
     open: impl FnOnce(&Path) -> io::Result<File>,
 ) -> Result<Option<NativeSession>, DiscoveryError> {
-    if !native_filename(store.harness(), path) || !is_jsonl(path) {
+    probe_file(store, path, true, open)
+}
+
+fn probe_file(
+    store: &NativeStore,
+    path: &Path,
+    require_native_filename: bool,
+    open: impl FnOnce(&Path) -> io::Result<File>,
+) -> Result<Option<NativeSession>, DiscoveryError> {
+    if (require_native_filename && !native_filename(store.harness(), path)) || !is_jsonl(path) {
         return Ok(None);
     }
     let metadata = match fs::metadata(path) {
