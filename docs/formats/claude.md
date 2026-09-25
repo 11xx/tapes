@@ -62,7 +62,10 @@ last 4 MiB unless `--read-bytes` sets another bound. `sessionId`, `cwd`, the
 recorded start timestamp, and the first
 user turn come from the opening, so a transcript larger than the tail still
 reports the start and first prompt its opening recorded. The tail supplies the
-turns, the last activity, the `aiTitle`, and the final model. A turn's
+turns, the last activity, the `aiTitle`, and the final model. The model is the
+newest assistant record's `message.model`, with the record's `perTurnEffort`
+(else its session-wide `effort`) as the variant; records under the model
+`<synthetic>` are Claude's own API-error entries and name no model. A turn's
 `native_id` is the `uuid` of the line it came from; the text, thinking, and
 tool blocks of one assistant message share it.
 

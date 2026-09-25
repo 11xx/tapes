@@ -196,7 +196,7 @@ impl CodexBackend {
                         Some(crate::history::ModelObservation {
                             model: Model {
                                 id: payload["model"].as_str()?.to_owned(),
-                                variant: payload["effort"].as_str().map(str::to_owned),
+                                variant: turn_context_effort(payload).map(str::to_owned),
                             },
                             timestamp: timestamp(&value["timestamp"]),
                         })
@@ -1075,7 +1075,7 @@ impl CodexUsageObserver {
             self.bounds.add("model-identity-budget");
             return;
         }
-        let variant = payload["effort"].as_str().map(|effort| {
+        let variant = turn_context_effort(payload).map(|effort| {
             if effort.len() <= MAX_IDENTITY_BYTES {
                 effort.to_owned()
             } else {
@@ -2365,4 +2365,14 @@ fn agent_group(path: &str) -> Option<String> {
             group.to_owned()
         }
     })
+}
+
+/// The effort a `turn_context` names. Current rollouts write `effort`; older
+/// ones wrote `reasoning_effort`, or kept it in the collaboration mode's
+/// settings.
+fn turn_context_effort(payload: &Value) -> Option<&str> {
+    payload["effort"]
+        .as_str()
+        .or_else(|| payload["reasoning_effort"].as_str())
+        .or_else(|| payload["collaboration_mode"]["settings"]["reasoning_effort"].as_str())
 }

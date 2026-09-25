@@ -18,7 +18,7 @@ use tapes_core::backend::pi::PiBackend;
 use tapes_core::backend::{Backend, Listing, Query, StreamedTranscript, MIN_READ_BYTES};
 use tapes_core::event::{project, EventKind, Incomplete};
 use tapes_core::model::{
-    Accounting, AccountingBasis, AccountingCoverage, Cost, ReadEvidence, Role, Session,
+    Accounting, AccountingBasis, AccountingCoverage, Cost, Model, ReadEvidence, Role, Session,
     SourceBound, SourceDescriptor, Tokens, Transcript, Truncation, Turn, TurnKind,
 };
 use tapes_core::usage::{
@@ -5565,4 +5565,86 @@ fn title_resolution_retains_the_first_opencode_projection_even_for_a_nonmatch() 
         .unwrap_err()
         .to_string()
         .contains("was not found"));
+}
+
+/// Claude records a turn's effort beside the assistant message, and writes
+/// assistant records of its own under the model `<synthetic>` for API errors.
+/// The model a session ran under carries the effort and never the synthetic
+/// placeholder.
+#[test]
+fn claude_model_carries_the_turn_effort_and_skips_synthetic_records() {
+    let root = std::env::temp_dir().join(format!("tapes-claude-effort-{}", std::process::id()));
+    let project = root.join("project");
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&project).unwrap();
+    fs::write(
+        project.join("session-effort.jsonl"),
+        concat!(
+            r#"{"type":"user","sessionId":"session-effort","uuid":"user-1","timestamp":"2026-01-01T10:00:00Z","cwd":"/fixtures/project","message":{"role":"user","content":"Inspect the fixture."}}"#,
+            "\n",
+            r#"{"type":"assistant","sessionId":"session-effort","uuid":"assistant-1","timestamp":"2026-01-01T10:00:01Z","cwd":"/fixtures/project","effort":"medium","perTurnEffort":"high","message":{"role":"assistant","model":"claude-fixture","content":[{"type":"text","text":"Inspected."}]}}"#,
+            "\n",
+            r#"{"type":"assistant","sessionId":"session-effort","uuid":"assistant-2","timestamp":"2026-01-01T10:00:02Z","cwd":"/fixtures/project","message":{"role":"assistant","model":"<synthetic>","content":[{"type":"text","text":"API Error"}]}}"#,
+            "\n"
+        ),
+    )
+    .unwrap();
+
+    let backend = ClaudeBackend::new(&root);
+    let session = located(&backend, "session-effort");
+    let expected = Model {
+        id: "claude-fixture".to_owned(),
+        variant: Some("high".to_owned()),
+    };
+    assert_eq!(session.model.as_ref(), Some(&expected));
+    let transcript = backend.transcript(&session, 10).unwrap();
+    assert_eq!(transcript.session.model.as_ref(), Some(&expected));
+    let _ = fs::remove_dir_all(&root);
+}
+
+/// Older Codex rollouts name the effort as `reasoning_effort`, or inside the
+/// collaboration mode's settings, rather than as `effort`.
+#[test]
+fn codex_reads_effort_from_older_turn_context_fields() {
+    let root = std::env::temp_dir().join(format!("tapes-codex-effort-{}", std::process::id()));
+    let day = root.join("sessions/2026/01/01");
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&day).unwrap();
+    for (id, context) in [
+        (
+            "00000000-0000-4000-8000-00000000e001",
+            r#"{"model":"gpt-fixture","reasoning_effort":"medium"}"#,
+        ),
+        (
+            "00000000-0000-4000-8000-00000000e002",
+            r#"{"model":"gpt-fixture","collaboration_mode":{"settings":{"reasoning_effort":"low"}}}"#,
+        ),
+    ] {
+        fs::write(
+            day.join(format!("rollout-2026-01-01T10-00-00-{id}.jsonl")),
+            format!(
+                "{}\n{}\n",
+                format_args!(
+                    r#"{{"timestamp":"2026-01-01T10:00:00Z","type":"session_meta","payload":{{"id":"{id}","cwd":"/fixtures/project"}}}}"#
+                ),
+                format_args!(
+                    r#"{{"timestamp":"2026-01-01T10:00:01Z","type":"turn_context","payload":{context}}}"#
+                ),
+            ),
+        )
+        .unwrap();
+    }
+
+    let backend = CodexBackend::new(&root);
+    for (id, effort) in [
+        ("00000000-0000-4000-8000-00000000e001", "medium"),
+        ("00000000-0000-4000-8000-00000000e002", "low"),
+    ] {
+        let session = located(&backend, id);
+        let transcript = backend.transcript(&session, 10).unwrap();
+        let model = transcript.session.model.expect("a model");
+        assert_eq!(model.id, "gpt-fixture");
+        assert_eq!(model.variant.as_deref(), Some(effort), "{id}");
+    }
+    let _ = fs::remove_dir_all(&root);
 }
