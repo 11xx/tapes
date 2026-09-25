@@ -178,9 +178,38 @@ READ A SUPPLIED EXPORT
   associated reports retain bounded bodies and citation spans as artifacts,
   including when their backing conversation is unresolved.
 
+READ A RECORDING ON ANOTHER MACHINE
+  tapes list --remote <ssh-destination>
+  tapes show --latest --remote <ssh-destination> --tail 40
+  tapes export <id> --remote <ssh-destination> --bundle <remote-dir>
+
+  --remote asks the named host's own tapes over ssh and answers from that
+  replica; nothing is installed there and no store is copied. The replica
+  resolves its own scope paths and stores, and a session's live state is
+  whatever that machine reported: this machine's harness-status is never
+  consulted for a replica, so live is unknown unless the replica answered.
+  A replica that cannot answer is unavailable with the cause and the
+  destination — never an empty listing, and never a completed session.
+  Reads stay bounded on both sides: the replica is asked for the bounded
+  answer the arguments name, and this machine accepts at most 64 MiB over at
+  most 60 seconds. TAPES_SSH names the program that carries the query;
+  TAPES_REMOTE_MAX_BYTES and TAPES_REMOTE_DEADLINE_MS raise or lower the two
+  local bounds. The default ssh runs with BatchMode=yes, so a query never
+  prompts: an unknown host key or a missing key fails at once instead of
+  waiting out the deadline. A program named through TAPES_SSH is the
+  operator's own and receives no added options, so naming ssh there keeps
+  interactive prompts.
+
+  export --remote runs the replica's own export, which writes the bundle on
+  that machine through the reader that holds the recording. Every path it
+  prints is destination:path — the coordinate scp and rsync accept — and
+  --bundle names a directory on the replica. Read across machines with show
+  --remote; export --remote keeps the rescue beside the recording, and the
+  path it prints is how to fetch it.
+
 PROBE BEFORE EXPORTING
   tapes show <id> --tail 40      A window, costing no bundle.
-  tapes show <id> --json         The same turns as tapes-session/11, with bounded read, graph, artifact, and terminal evidence.
+  tapes show <id> --json         The same turns as tapes-session/12, with bounded read, graph, artifact, and terminal evidence.
   tapes show <id> --exchange     Operator and assistant turns only, timestamps and ordinals kept; the name for --only operator,assistant.
   tapes show <id> --omit tool    Every turn but tool calls and results; --only and --omit take kind labels, and export takes both.
   tapes show <id> --full         Every turn of a Claude, Codex, Pi, or OpenCode session, streamed past the read bounds; --json streams it too.

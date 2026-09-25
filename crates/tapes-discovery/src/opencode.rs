@@ -1583,6 +1583,10 @@ mod tests {
 
     #[test]
     fn deadline_covers_descendants_that_keep_the_response_pipes_open() {
+        // The shell resolves `sleep` through PATH, which another test replaces
+        // while it runs; the module's lock is what keeps the environment it
+        // inherited from changing underneath it.
+        let _lock = XDG_LOCK.lock().unwrap_or_else(|error| error.into_inner());
         let started = Instant::now();
         let error = run_command(
             OsStr::new("/bin/sh"),
@@ -1597,6 +1601,9 @@ mod tests {
 
     #[test]
     fn trickling_and_silent_commands_stop_at_the_deadline() {
+        // The shells below resolve `sleep` through PATH, which another test
+        // replaces while it runs.
+        let _lock = XDG_LOCK.lock().unwrap_or_else(|error| error.into_inner());
         for body in ["printf '{'; sleep 5", "sleep 5"] {
             let error = run_command(
                 OsStr::new("/bin/sh"),
@@ -1605,7 +1612,10 @@ mod tests {
                 Duration::from_millis(50),
             )
             .unwrap_err();
-            assert!(matches!(error, DiscoveryError::TimedOut { .. }));
+            assert!(
+                matches!(error, DiscoveryError::TimedOut { .. }),
+                "{body}: {error:?}"
+            );
         }
     }
 

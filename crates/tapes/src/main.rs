@@ -1,7 +1,9 @@
 mod guide;
 mod liveness;
+mod remote;
 mod self_token;
 
+use std::ffi::{OsStr, OsString};
 use std::path::PathBuf;
 
 use anyhow::{anyhow, Result};
@@ -364,15 +366,21 @@ trait SelfSelectable {
 }
 
 /// Replace `self` in a selector with the caller's own session id, reporting
-/// what it became. A supplied input holds no session of the caller's, so
-/// `self` refuses there.
-fn apply_self(selector: &mut dyn SelfSelectable) -> Result<()> {
+/// what it became. A supplied input holds no session of the caller's, and a
+/// replica holds sessions of the machine that answered, so `self` refuses
+/// there.
+fn apply_self(selector: &mut dyn SelfSelectable, remote: Option<&str>) -> Result<()> {
     let supplied = selector.input_supplied();
     let (session, exclude) = selector.ids_mut();
     let named = session.as_deref() == Some(self_token::TOKEN)
         || exclude.iter().any(|id| id == self_token::TOKEN);
     if !named {
         return Ok(());
+    }
+    if let Some(destination) = remote {
+        return Err(anyhow!(
+            "self names the caller's own session on this machine; replica {destination} holds the sessions of the machine that answered it, so name an id that replica lists"
+        ));
     }
     if supplied {
         return Err(anyhow!(
@@ -424,6 +432,16 @@ impl Command {
             Command::Stats { query, .. }
             | Command::Usage { query, .. }
             | Command::Export { query, .. } => Some(query),
+            _ => None,
+        }
+    }
+
+    /// The replica this command reads from, where it names one.
+    fn remote_destination(&self) -> Option<&str> {
+        match self {
+            Command::List { remote, .. }
+            | Command::Show { remote, .. }
+            | Command::Export { remote, .. } => remote.as_deref(),
             _ => None,
         }
     }
@@ -773,6 +791,14 @@ enum Command {
         /// coverage of any recorded cost or token counters.
         #[arg(long)]
         json: bool,
+        /// Answer from a named replica over ssh: run its own tapes with the
+        /// same arguments and read its JSON. Every session then names that
+        /// replica, its live state is whatever the replica reported, and
+        /// scope paths resolve on the replica. A replica that cannot answer
+        /// is reported unavailable with the cause and the destination, never
+        /// as an empty listing.
+        #[arg(long, value_name = "SSH-DESTINATION", conflicts_with = "input")]
+        remote: Option<String>,
     },
     /// Show one session. The session carries a source descriptor and optional
     /// activity timestamps; every turn carries a `kind` naming what the harness
@@ -811,6 +837,14 @@ enum Command {
         /// authorities.
         #[arg(long)]
         json: bool,
+        /// Read the session from a named replica over ssh: run its own tapes
+        /// with the same arguments and read its JSON. The session then names
+        /// that replica, its live state is whatever the replica reported, and
+        /// scope paths resolve on the replica. A replica that cannot answer
+        /// refuses with the cause and the destination, never as a completed
+        /// session.
+        #[arg(long, value_name = "SSH-DESTINATION", conflicts_with = "input")]
+        remote: Option<String>,
     },
     /// Read one bounded page of older Claude or Codex history as tapes-page/6,
     /// including absolute record references and read evidence. A page decodes
@@ -1163,6 +1197,15 @@ enum Command {
         /// name, as a bulk export records under `failed`.
         #[arg(long, conflicts_with = "read_bytes")]
         full: bool,
+        /// Export from a named replica over ssh: the replica runs its own
+        /// tapes with the same arguments and writes the bundles on its own
+        /// filesystem, and this command prints their paths as
+        /// `destination:path`, which `scp` and `rsync` accept. Every path in
+        /// the arguments, `--bundle` included, names the replica's own
+        /// filesystem. A replica that cannot answer refuses with the cause and
+        /// the destination.
+        #[arg(long, value_name = "SSH-DESTINATION", conflicts_with = "input")]
+        remote: Option<String>,
         /// Beside each supplied conversation's bundle, copy the source bytes
         /// behind it into `<bundle>.evidence/`: the conversation record's own
         /// span and each associated report's whole member, byte for byte and
@@ -1234,8 +1277,9 @@ fn dispatch(cli: Cli) -> Result<()> {
         guide::print();
         return Ok(());
     };
+    let remote = command.remote_destination().map(str::to_owned);
     if let Some(selector) = command.selector_mut() {
-        apply_self(selector)?;
+        apply_self(selector, remote.as_deref())?;
     }
     match command {
         Command::List {
@@ -1250,6 +1294,7 @@ fn dispatch(cli: Cli) -> Result<()> {
             search,
             input,
             json,
+            remote,
         } => {
             input.validate_bulk()?;
             reject_installed_selection(&input, harness.as_deref(), &scope)?;
@@ -1258,6 +1303,38 @@ fn dispatch(cli: Cli) -> Result<()> {
                 .is_some_and(|(since, until)| since >= until)
             {
                 return Err(anyhow!("--since must be earlier than --until"));
+            }
+            if let Some(destination) = remote.as_deref() {
+                let args = remote_list_args(&RemoteListQuery {
+                    harness: &harness,
+                    scope: &scope,
+                    limit,
+                    model: &model,
+                    directory: &directory,
+                    since,
+                    until,
+                    sort,
+                    search: &search,
+                });
+                let result = remote_list(destination, &args);
+                let (result, failure) = match result {
+                    Ok(result) => (result, None),
+                    Err(unavailable) => (
+                        unreachable_list(sort, since, until, &unavailable),
+                        Some(unavailable),
+                    ),
+                };
+                if json {
+                    print_json(&result, &input)?;
+                } else {
+                    println!("Replica: {destination}");
+                    print_session_list(&result.sessions);
+                    print_availability_note(&result);
+                }
+                if let Some(unavailable) = failure {
+                    return Err(unavailable.into());
+                }
+                return Ok(());
             }
             if search.is_some() {
                 eprintln!(
@@ -1307,10 +1384,27 @@ fn dispatch(cli: Cli) -> Result<()> {
             kinds,
             full,
             json,
+            remote,
         } => {
             selection.validate_input()?;
             read.refuse_supplied(&selection.input)?;
             let by_latest = selection.latest;
+            let turns = if exchange {
+                Some((TurnSelection::EXCHANGE, "--exchange"))
+            } else {
+                kinds.selection()
+            };
+            if let Some(destination) = remote.as_deref() {
+                let args = remote_show_args(&selection, &read, tail, exchange, &kinds, full);
+                let mut transcript = remote_show(destination, &args)?;
+                transcript.session.source.replica = Some(destination.to_owned());
+                if json {
+                    print_json(&transcript, &selection.input)?;
+                } else {
+                    print_transcript(&transcript, by_latest, turns.map(|(_, flag)| flag));
+                }
+                return Ok(());
+            }
             let installed_backends = (!selection.input.supplied())
                 .then(|| read.backends())
                 .transpose()?;
@@ -1319,11 +1413,6 @@ fn dispatch(cli: Cli) -> Result<()> {
                 |backends| selection.latest_warnings(backends),
             )?;
             print_selection_warnings(&latest_warnings);
-            let turns = if exchange {
-                Some((TurnSelection::EXCHANGE, "--exchange"))
-            } else {
-                kinds.selection()
-            };
             if full {
                 if selection.input.supplied() {
                     return Err(anyhow!(
@@ -1950,6 +2039,7 @@ fn dispatch(cli: Cli) -> Result<()> {
             kinds,
             full,
             evidence,
+            remote,
         } => {
             query.validate_input()?;
             read.refuse_supplied(&query.input)?;
@@ -1964,6 +2054,12 @@ fn dispatch(cli: Cli) -> Result<()> {
                     "--full reads installed recordings; a supplied input is bounded by \
                      --scan-bytes, --decoded-bytes, and --record-bytes"
                 ));
+            }
+            if let Some(destination) = remote.as_deref() {
+                let args = remote_export_args(&query, &read, &kinds, full, bundle.as_deref());
+                let manifest = remote_export(destination, &args)?;
+                print!("{manifest}");
+                return Ok(());
             }
             let view = kinds.selection().map(|(kept, _)| kept);
             let whole = if full {
@@ -2033,6 +2129,261 @@ fn dispatch(cli: Cli) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// The arguments a replica's own `tapes` is asked with. Flags are appended in
+/// one place per direction so a transport command can be read without opening
+/// the command that built it.
+#[derive(Default)]
+struct RemoteArgs(Vec<OsString>);
+
+impl RemoteArgs {
+    fn raw(&mut self, argument: impl AsRef<OsStr>) -> &mut Self {
+        self.0.push(argument.as_ref().to_os_string());
+        self
+    }
+
+    fn flag(&mut self, name: &str) -> &mut Self {
+        self.raw(name)
+    }
+
+    fn flag_if(&mut self, name: &str, present: bool) -> &mut Self {
+        if present {
+            self.flag(name);
+        }
+        self
+    }
+
+    fn value(&mut self, name: &str, value: impl AsRef<OsStr>) -> &mut Self {
+        self.raw(name).raw(value)
+    }
+
+    fn value_if(&mut self, name: &str, value: Option<impl AsRef<OsStr>>) -> &mut Self {
+        if let Some(value) = value {
+            self.value(name, value);
+        }
+        self
+    }
+
+    fn scope(&mut self, scope: &ScopeArgs) -> &mut Self {
+        self.flag_if("--here", scope.here);
+        self.value_if("--project", scope.project.as_ref());
+        self.flag_if("--global", scope.global)
+    }
+
+    fn into_vec(self) -> Vec<OsString> {
+        self.0
+    }
+}
+
+fn sort_label(sort: SortArg) -> &'static str {
+    match sort {
+        SortArg::Newest => "newest",
+        SortArg::Oldest => "oldest",
+    }
+}
+
+fn timestamp_arg(timestamp: tapes_core::ActivityTimestamp) -> String {
+    timestamp.to_rfc3339()
+}
+
+fn kind_labels(kinds: &[TurnKind]) -> String {
+    kinds
+        .iter()
+        .map(|kind| kind.label())
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+/// A listing asked of a replica: the same selection this machine would apply
+/// locally, resolved there, because the stores and the paths are the
+/// replica's.
+struct RemoteListQuery<'a> {
+    harness: &'a Option<String>,
+    scope: &'a ScopeArgs,
+    limit: Option<usize>,
+    model: &'a Option<String>,
+    directory: &'a Option<String>,
+    since: Option<tapes_core::ActivityTimestamp>,
+    until: Option<tapes_core::ActivityTimestamp>,
+    sort: SortArg,
+    search: &'a Option<String>,
+}
+
+fn remote_list_args(query: &RemoteListQuery<'_>) -> Vec<OsString> {
+    let mut args = RemoteArgs::default();
+    args.raw("list");
+    args.scope(query.scope);
+    args.value_if("--harness", query.harness.as_deref());
+    args.value_if("--limit", query.limit.map(|limit| limit.to_string()));
+    args.value_if("--model", query.model.as_deref());
+    args.value_if("--directory", query.directory.as_deref());
+    args.value_if("--since", query.since.map(timestamp_arg));
+    args.value_if("--until", query.until.map(timestamp_arg));
+    args.value("--sort", sort_label(query.sort));
+    args.value_if("--search", query.search.as_deref());
+    args.into_vec()
+}
+
+/// A transcript read asked of a replica. The remote command is `show`, which
+/// is the read `export` takes as well; the two differ only in the window and
+/// in what the local side does with the answer.
+fn remote_show_args(
+    selection: &SelectionArgs,
+    read: &ReadArgs,
+    tail: Option<usize>,
+    exchange: bool,
+    kinds: &TurnKindArgs,
+    full: bool,
+) -> Vec<OsString> {
+    let mut args = RemoteArgs::default();
+    args.raw("show");
+    if let Some(session) = selection.session.as_deref() {
+        args.raw(session);
+    }
+    args.value_if("--title", selection.title.as_deref());
+    args.flag_if("--latest", selection.latest);
+    for exclude in &selection.exclude {
+        args.value("--exclude", exclude);
+    }
+    args.value_if("--harness", selection.harness.as_deref());
+    args.scope(&selection.scope);
+    remote_read_args(&mut args, read, tail, kinds, full);
+    args.flag_if("--exchange", exchange);
+    args.into_vec()
+}
+
+/// The export asked of a replica. It is the replica's own `export` with the
+/// caller's arguments, so the replica writes the bundles, on its own
+/// filesystem, through the reader that holds the recording. A bundle
+/// assembled from a transcript answer would not be the same artifact: tool
+/// events are not part of the transcript wire contract, and a bundle that
+/// silently held none would be worse than the refusal. `--bundle` therefore
+/// names a directory on the replica.
+fn remote_export_args(
+    query: &SessionQueryArgs,
+    read: &ReadArgs,
+    kinds: &TurnKindArgs,
+    full: bool,
+    bundle: Option<&std::path::Path>,
+) -> Vec<OsString> {
+    let mut args = RemoteArgs::default();
+    args.raw("export");
+    if let Some(session) = query.session.as_deref() {
+        args.raw(session);
+    }
+    args.value_if("--title", query.title.as_deref());
+    args.flag_if("--latest", query.latest);
+    for exclude in &query.exclude {
+        args.value("--exclude", exclude);
+    }
+    args.value_if("--harness", query.harness.as_deref());
+    args.value_if("--limit", query.limit.map(|limit| limit.to_string()));
+    args.value_if("--model", query.model.as_deref());
+    args.value_if("--directory", query.directory.as_deref());
+    args.value_if("--since", query.since.map(timestamp_arg));
+    args.value_if("--until", query.until.map(timestamp_arg));
+    args.value_if("--sort", query.sort.map(sort_label));
+    args.value_if("--search", query.search.as_deref());
+    args.scope(&query.scope);
+    args.value_if("--bundle", bundle);
+    remote_read_args(&mut args, read, None, kinds, full);
+    args.into_vec()
+}
+
+fn remote_read_args(
+    args: &mut RemoteArgs,
+    read: &ReadArgs,
+    tail: Option<usize>,
+    kinds: &TurnKindArgs,
+    full: bool,
+) {
+    args.value_if(
+        "--read-bytes",
+        read.read_bytes.map(|bytes| bytes.get().to_string()),
+    );
+    args.value_if("--tail", tail.map(|tail| tail.to_string()));
+    if !kinds.only.is_empty() {
+        args.value("--only", kind_labels(&kinds.only));
+    }
+    if !kinds.omit.is_empty() {
+        args.value("--omit", kind_labels(&kinds.omit));
+    }
+    args.flag_if("--full", full);
+}
+
+fn remote_transport(
+    destination: &str,
+) -> std::result::Result<remote::Replica, remote::Unavailable> {
+    let settings = remote::Settings::resolve().map_err(|error| {
+        remote::Unavailable::new(
+            destination,
+            format!("the local transport cannot be configured: {error:#}"),
+        )
+    })?;
+    Ok(remote::Replica::new(destination, settings))
+}
+
+fn remote_list(
+    destination: &str,
+    args: &[OsString],
+) -> std::result::Result<tapes_core::SessionList, remote::Unavailable> {
+    let mut list: tapes_core::SessionList =
+        remote_transport(destination)?.json(args, tapes_core::LIST_SCHEMA)?;
+    for session in &mut list.sessions {
+        session.source.replica = Some(destination.to_owned());
+    }
+    Ok(list)
+}
+
+fn remote_show(destination: &str, args: &[OsString]) -> Result<Transcript> {
+    Ok(remote_transport(destination)?.json(args, tapes_core::model::SESSION_SCHEMA)?)
+}
+
+/// The replica's export manifest, with every path named as the path it is:
+/// one on the replica. `replica:/path` is the coordinate the caller can hand
+/// to `scp` or `rsync`, and it is never read as a path on this machine.
+fn remote_export(destination: &str, args: &[OsString]) -> Result<String> {
+    let output = remote_transport(destination)?.output(args)?;
+    let text = std::str::from_utf8(&output).map_err(|_| {
+        anyhow!("remote replica {destination} unavailable: the export manifest is not UTF-8")
+    })?;
+    let mut rendered = format!("Replica: {destination}\n");
+    for line in text.lines().filter(|line| !line.is_empty()) {
+        let Some((path, size)) = line.split_once('\t') else {
+            return Err(anyhow!(
+                "remote replica {destination} unavailable: the export answered a line that is \
+                 not a file manifest: {line}"
+            ));
+        };
+        rendered.push_str(&format!("{destination}:{path}\t{size}\n"));
+    }
+    Ok(rendered)
+}
+
+/// A listing a replica could not answer. The empty session set is never read
+/// as "the replica holds nothing": the cause and the destination are the
+/// answer's substance, and the caller exits unsuccessfully with them.
+fn unreachable_list(
+    sort: SortArg,
+    since: Option<tapes_core::ActivityTimestamp>,
+    until: Option<tapes_core::ActivityTimestamp>,
+    unavailable: &remote::Unavailable,
+) -> tapes_core::SessionList {
+    tapes_core::SessionList {
+        schema: tapes_core::LIST_SCHEMA,
+        sort: sort.into(),
+        activity: (since.is_some() || until.is_some())
+            .then_some(tapes_core::ActivityWindow { since, until }),
+        sessions: Vec::new(),
+        artifacts: Vec::new(),
+        unavailable: vec![unavailable.diagnostic()],
+        unreadable: Vec::new(),
+        unsearched: Vec::new(),
+        scanned: 0,
+        scan_truncated: false,
+        unplaced: None,
+    }
 }
 
 fn coverage_name(coverage: TurnCoverage) -> &'static str {
@@ -3498,12 +3849,13 @@ fn render_transcript(
 }
 
 fn render_header(session: &Session, by_latest: bool) -> String {
-    if session.live.is_some() || by_latest {
+    if session.live.is_some() || by_latest || session.source.replica.is_some() {
         format!(
-            "# {} {}{}\n",
+            "# {} {}{}{}\n",
             session.harness(),
             session.id,
-            live_marker(session)
+            live_marker(session),
+            replica_marker(session)
         )
     } else {
         String::new()
@@ -3732,6 +4084,18 @@ fn live_marker(session: &Session) -> String {
         Some(LiveState::Idle) => " [idle]".to_owned(),
         None => String::new(),
     }
+}
+
+/// A transcript read from another machine names it in the header, so a human
+/// reader cannot mistake a replica's recording for one of this machine's.
+fn replica_marker(session: &Session) -> String {
+    session
+        .source
+        .replica
+        .as_deref()
+        .map_or_else(String::new, |destination| {
+            format!(" [replica {destination}]")
+        })
 }
 
 fn reset_sigpipe() {

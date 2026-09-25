@@ -58,6 +58,13 @@ session is in memory, core readers retain the path returned by discovery and
 use it directly, preserving non-UTF-8 path bytes. Supplied-source readers keep
 their existing locator-based path semantics. The native path is runtime-only
 and is absent from serialized `SourceLocation` values.
+`source.replica` names the replica a read was answered by, when another
+machine's `tapes` answered it through `--remote`: the destination the caller
+reached, recorded as the caller wrote it. It is absent for a recording this
+machine read itself, and it is never inferred from a path, a store, or equal
+contents. A replica is a transport coordinate, not a resolved host name;
+two destinations may reach the same machine, and a renamed host is a
+different destination.
 `id` is the native
 conversation or session identity; it is not a path, archive member, or global
 identity outside the descriptor's scope. Supplied sources also carry an opaque
@@ -1160,11 +1167,11 @@ its `notes`, with the meanings they have on a transcript.
 
 ## JSON contract
 
-A serialized transcript is a `tapes-session/11` object:
+A serialized transcript is a `tapes-session/12` object:
 
 ```json
 {
-  "schema": "tapes-session/11",
+  "schema": "tapes-session/12",
   "session": {
     "id": "session-1",
     "source": {
@@ -1257,7 +1264,7 @@ A bundle's `.context.md` holds the exchange that `show --exchange` returns —
 the `operator` and `assistant` turns — of those a selection keeps; its `.json`
 and `.trace.md` hold every kept turn.
 
-A bundle's `.json` is one compact `tapes-session/11` object: the members `show
+A bundle's `.json` is one compact `tapes-session/12` object: the members `show
 --json` writes, in the same order, followed by `git` when the session
 directory resolves and `events`, the `tapes-events/7` records paired across
 every kept turn. `export --full` writes the object `show --full --json` writes,

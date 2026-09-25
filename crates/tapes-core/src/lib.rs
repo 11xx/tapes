@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Context, Result};
 use chrono::{DateTime, NaiveDate, TimeZone, Utc};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use backend::{Backend, BackendIdentitySource, Listing, Query};
 use model::{Session, Transcript, Truncation};
@@ -82,7 +82,7 @@ pub fn parse_activity_timestamp(value: &str) -> std::result::Result<ActivityTime
         })
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ListSort {
     #[default]
@@ -101,7 +101,7 @@ pub struct ListFilters<'a> {
     pub search: Option<&'a str>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct ActivityWindow {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub since: Option<DateTime<Utc>>,
@@ -141,11 +141,64 @@ pub struct SessionList {
     pub unplaced: Option<Unplaced>,
 }
 
+/// The wire form of a listing, so a serialized list can be read back. The
+/// schema member is validated rather than carried, because a list this reader
+/// did not produce must not be answered as one it did.
+#[derive(Deserialize)]
+struct SerializedList {
+    schema: String,
+    sort: ListSort,
+    #[serde(default)]
+    activity: Option<ActivityWindow>,
+    sessions: Vec<Session>,
+    #[serde(default)]
+    artifacts: Vec<crate::content::ArtifactReference>,
+    #[serde(default)]
+    unavailable: Vec<String>,
+    #[serde(default)]
+    unreadable: Vec<String>,
+    #[serde(default)]
+    unsearched: Vec<String>,
+    scanned: usize,
+    #[serde(default)]
+    scan_truncated: bool,
+    #[serde(default)]
+    unplaced: Option<Unplaced>,
+}
+
+impl<'de> Deserialize<'de> for SessionList {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let serialized = SerializedList::deserialize(deserializer)?;
+        if serialized.schema != LIST_SCHEMA {
+            return Err(serde::de::Error::custom(format!(
+                "unsupported schema: {}",
+                serialized.schema
+            )));
+        }
+        Ok(Self {
+            schema: LIST_SCHEMA,
+            sort: serialized.sort,
+            activity: serialized.activity,
+            sessions: serialized.sessions,
+            artifacts: serialized.artifacts,
+            unavailable: serialized.unavailable,
+            unreadable: serialized.unreadable,
+            unsearched: serialized.unsearched,
+            scanned: serialized.scanned,
+            scan_truncated: serialized.scan_truncated,
+            unplaced: serialized.unplaced,
+        })
+    }
+}
+
 /// Recorded directories a scoped listing could not place. A session recorded
 /// in a removed directory — a deleted per-change worktree, most often — may
 /// belong to the project, but nothing left on disk proves which repository it
 /// was, so it is excluded and counted rather than guessed at from its path.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Unplaced {
     /// Distinct directories excluded this way among the inspected candidates.
     pub directories: usize,
