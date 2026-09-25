@@ -2568,7 +2568,7 @@ fn supplied_citation_descriptors_are_bounded_in_show_and_export() {
         .unwrap();
     assert!(shown.status.success());
     let shown: Value = serde_json::from_slice(&shown.stdout).unwrap();
-    assert_eq!(shown["schema"], "tapes-session/11");
+    assert_eq!(shown["schema"], "tapes-session/12");
     let citation = &shown["artifacts"][0]["citations"][0];
     assert_eq!(citation["uri"]["chars"], 5_024);
     assert_eq!(
@@ -2609,7 +2609,7 @@ fn supplied_citation_descriptors_are_bounded_in_show_and_export() {
         })
         .unwrap();
     let bundle_json: Value = serde_json::from_slice(&fs::read(json_path).unwrap()).unwrap();
-    assert_eq!(bundle_json["schema"], "tapes-session/11");
+    assert_eq!(bundle_json["schema"], "tapes-session/12");
     assert_eq!(
         bundle_json["artifacts"][0]["citations"][0]["title"]["text"]
             .as_str()
@@ -6520,7 +6520,7 @@ fn show_full_streams_a_claude_recording_past_the_read_bound() {
 
     let json: Value =
         serde_json::from_str(&stdout(&["show", "full-claude", "--full", "--json"])).unwrap();
-    assert_eq!(json["schema"], "tapes-session/11");
+    assert_eq!(json["schema"], "tapes-session/12");
     assert_eq!(json["turns"].as_array().unwrap().len(), 50);
     assert_eq!(json["turns"][0]["text"], "opening request");
     assert_eq!(json["turns"][49]["ordinal"], 49);
@@ -9981,4 +9981,712 @@ fn events_full_arguments_opt_in_returns_the_complete_argument_text() {
             "{request:?}"
         );
     }
+}
+
+/// A replica to query and the transport that reaches it. The substituted
+/// program runs the same binary under the replica's own store environment
+/// through a shell, exactly as ssh hands a command to a remote shell, so a
+/// test crosses a machine boundary without opening a connection. Every
+/// invocation is recorded, so a test can read the exact query the replica was
+/// asked with.
+struct RemoteReplica {
+    root: PathBuf,
+    bin: PathBuf,
+    codex_home: PathBuf,
+    transport: PathBuf,
+    commands: PathBuf,
+    destinations: PathBuf,
+}
+
+impl RemoteReplica {
+    fn new(name: &str) -> Self {
+        let root = std::env::temp_dir().join(format!("tapes-remote-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let bin = root.join("bin");
+        let home = root.join("home");
+        let codex_home = root.join("codex");
+        fs::create_dir_all(&bin).unwrap();
+        fs::create_dir_all(&home).unwrap();
+        fs::create_dir_all(codex_home.join("sessions/2026/01/01")).unwrap();
+        std::os::unix::fs::symlink(env!("CARGO_BIN_EXE_tapes"), bin.join("tapes")).unwrap();
+        let commands = root.join("commands");
+        let destinations = root.join("destinations");
+        let transport = root.join("ssh");
+        fs::write(
+            &transport,
+            format!(
+                "#!/bin/sh\ndestination=$1\nshift\nprintf '%s\\n' \"$destination\" >> '{}'\n\
+                 printf '%s\\n' \"$1\" >> '{}'\nprintf '%s\\n' 'replica transport note' >&2\n\
+                 unset XDG_DATA_HOME\nexport HOME='{}'\nexport CODEX_HOME='{}'\n\
+                 export PATH='{}:/usr/bin:/bin'\nexec sh -c \"$1\"\n",
+                destinations.display(),
+                commands.display(),
+                home.display(),
+                codex_home.display(),
+                bin.display(),
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&transport, fs::Permissions::from_mode(0o700)).unwrap();
+        Self {
+            root,
+            bin,
+            codex_home,
+            transport,
+            commands,
+            destinations,
+        }
+    }
+
+    /// Put a recording in the replica's codex store under the filename the
+    /// reader discovers.
+    fn record(&self, filename: &str, contents: &str) {
+        fs::write(
+            self.codex_home.join("sessions/2026/01/01").join(filename),
+            contents,
+        )
+        .unwrap();
+    }
+
+    /// Answer the replica's own liveness query, recording each call. Without
+    /// one, the replica reports no liveness at all.
+    fn status(&self, snapshot: &str) -> PathBuf {
+        let calls = self.root.join("remote-status-calls");
+        let program = self.bin.join("harness-status");
+        fs::write(
+            &program,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' call >> '{}'\ncat <<'JSON'\n{snapshot}\nJSON\n",
+                calls.display()
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&program, fs::Permissions::from_mode(0o700)).unwrap();
+        calls
+    }
+
+    fn queried(&self) -> Vec<String> {
+        read_lines(&self.commands)
+    }
+
+    fn destinations(&self) -> Vec<String> {
+        read_lines(&self.destinations)
+    }
+}
+
+fn read_lines(path: &Path) -> Vec<String> {
+    fs::read_to_string(path)
+        .unwrap_or_default()
+        .lines()
+        .map(str::to_owned)
+        .collect()
+}
+
+/// Run one command against a replica while this machine keeps its own store
+/// and its own status authority, so a test can prove which one answered.
+fn run_against_replica(
+    replica: &RemoteReplica,
+    local_codex_home: &Path,
+    local_home: &Path,
+    local_bin: &Path,
+    args: &[&str],
+) -> Output {
+    let mut command = tapes();
+    command.args(args);
+    with_fixture_env(&mut command, local_codex_home, local_home, local_bin);
+    command.env("TAPES_SSH", &replica.transport);
+    command.output().unwrap()
+}
+
+/// A transport that fails without the replica ever running, for the failure
+/// a real ssh, a missing remote binary, or a wrong answer produces.
+fn failing_transport(name: &str, body: &str) -> PathBuf {
+    let path =
+        std::env::temp_dir().join(format!("tapes-transport-{name}-{}.sh", std::process::id()));
+    fs::write(&path, body).unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
+    path
+}
+
+const CODEX_ONE_FILE: &str =
+    "rollout-2026-01-01T10-00-00-00000000-0000-0000-0000-000000000001.jsonl";
+const CODEX_TWO_FILE: &str =
+    "rollout-2026-01-01T11-00-00-10000000-0000-0000-0000-000000000002.jsonl";
+const CODEX_ONE_ID: &str = "00000000-0000-0000-0000-000000000001";
+const CODEX_TWO_ID: &str = "10000000-0000-0000-0000-000000000002";
+
+/// A replica listing names the replica on every session, keeps the liveness
+/// the replica reported, and never consults this machine's registry: `live`
+/// is present-tense state of the machine that holds the process.
+#[test]
+fn list_remote_answers_from_the_replica_and_names_it() {
+    let replica = RemoteReplica::new("list");
+    replica.record(CODEX_ONE_FILE, CODEX_SESSION_ONE);
+    let remote_calls = replica
+        .status(r#"{"threads":[{"id":"00000000-0000-0000-0000-000000000001","state":"working"}]}"#);
+    let (local_codex, local_home) = fixture_store("remote-list-local");
+    // This machine holds only the other fixture: the replica's session is
+    // nowhere in the local store.
+    fs::remove_file(local_codex.join("sessions/2026/01/01").join(CODEX_ONE_FILE)).unwrap();
+    let (local_bin, local_calls) = fake_status(
+        &local_codex,
+        r#"{"threads":[{"id":"00000000-0000-0000-0000-000000000001","state":"working"},{"id":"10000000-0000-0000-0000-000000000002","state":"working"}]}"#,
+        0,
+    );
+
+    let output = run_against_replica(
+        &replica,
+        &local_codex,
+        &local_home,
+        &local_bin,
+        &["list", "--global", "--remote", "replica-host", "--json"],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["schema"], "tapes-list/6");
+    let sessions = value["sessions"].as_array().unwrap();
+    assert_eq!(sessions.len(), 1, "{value}");
+    assert_eq!(sessions[0]["id"], CODEX_ONE_ID);
+    assert_eq!(sessions[0]["source"]["replica"], "replica-host");
+    assert_eq!(sessions[0]["live"], "working");
+    assert_eq!(read_lines(&remote_calls).len(), 1);
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("replica transport note"),
+        "the replica's own stderr was dropped: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !local_calls.exists(),
+        "a replica's session joined this machine's status registry"
+    );
+    assert_eq!(
+        replica.queried(),
+        vec!["tapes 'list' '--global' '--sort' 'newest' --json"],
+        "the replica was not asked with the caller's arguments"
+    );
+    assert_eq!(replica.destinations(), vec!["replica-host"]);
+
+    // The same listing asked locally returns this machine's session, and it
+    // carries no replica.
+    let mut local = tapes();
+    local.args(["list", "--global", "--json"]);
+    with_fixture_env(&mut local, &local_codex, &local_home, &local_bin);
+    let local: Value = serde_json::from_slice(&local.output().unwrap().stdout).unwrap();
+    let sessions = local["sessions"].as_array().unwrap();
+    assert_eq!(sessions.len(), 1, "{local}");
+    assert_eq!(sessions[0]["id"], CODEX_TWO_ID);
+    assert!(sessions[0]["source"].get("replica").is_none(), "{local}");
+
+    let human = run_against_replica(
+        &replica,
+        &local_codex,
+        &local_home,
+        &local_bin,
+        &["list", "--global", "--remote", "replica-host"],
+    );
+    let text = String::from_utf8_lossy(&human.stdout);
+    assert!(text.starts_with("Replica: replica-host\n"), "{text}");
+    assert!(text.contains(CODEX_ONE_ID), "{text}");
+
+    let _ = fs::remove_dir_all(&replica.root);
+    let _ = fs::remove_dir_all(local_codex);
+}
+
+/// A replica that reports no liveness answers `unknown`, whatever this
+/// machine's registry says about the same id; the human header names the
+/// replica so a replica's recording is never read as a local one.
+#[test]
+fn show_remote_never_joins_the_local_liveness_registry() {
+    let replica = RemoteReplica::new("show");
+    replica.record(CODEX_ONE_FILE, CODEX_SESSION_ONE);
+    let (local_codex, local_home) = fixture_store("remote-show-local");
+    let (local_bin, local_calls) = fake_status(
+        &local_codex,
+        r#"{"threads":[{"id":"00000000-0000-0000-0000-000000000001","state":"working"}]}"#,
+        0,
+    );
+
+    let output = run_against_replica(
+        &replica,
+        &local_codex,
+        &local_home,
+        &local_bin,
+        &[
+            "show",
+            CODEX_ONE_ID,
+            "--remote",
+            "replica-host",
+            "--tail",
+            "1",
+            "--json",
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["schema"], "tapes-session/12");
+    assert_eq!(value["session"]["id"], CODEX_ONE_ID);
+    assert_eq!(value["session"]["source"]["replica"], "replica-host");
+    assert!(
+        value["session"].get("live").is_none(),
+        "a replica that reported no liveness was answered with this machine's: {value}"
+    );
+    assert!(
+        !local_calls.exists(),
+        "a replica's session joined this machine's status registry"
+    );
+    assert_eq!(
+        replica.queried(),
+        vec![format!("tapes 'show' '{CODEX_ONE_ID}' '--tail' '1' --json")]
+    );
+
+    let human = run_against_replica(
+        &replica,
+        &local_codex,
+        &local_home,
+        &local_bin,
+        &[
+            "show",
+            CODEX_ONE_ID,
+            "--remote",
+            "replica-host",
+            "--tail",
+            "1",
+        ],
+    );
+    let text = String::from_utf8_lossy(&human.stdout);
+    assert!(
+        text.starts_with(&format!("# codex {CODEX_ONE_ID} [replica replica-host]\n")),
+        "{text}"
+    );
+    assert!(!text.contains("[working]"), "{text}");
+
+    let _ = fs::remove_dir_all(&replica.root);
+    let _ = fs::remove_dir_all(local_codex);
+}
+
+/// Every way a replica can fail to answer is its own cause, named beside the
+/// destination. A listing carries the cause in `unavailable` and exits
+/// unsuccessfully, so an empty session set is never read as a store with
+/// nothing in it.
+#[test]
+fn a_replica_that_cannot_answer_names_the_cause_and_the_destination() {
+    let (local_codex, local_home) = fixture_store("remote-unavailable");
+    let local_bin = local_codex.join("bin");
+    fs::create_dir_all(&local_bin).unwrap();
+    let cases = [
+        (
+            "ssh",
+            "#!/bin/sh\necho 'ssh: connect to host replica-host port 22: Connection refused' >&2\nexit 255\n",
+            "the ssh transport failed",
+            "the ssh transport failed",
+        ),
+        (
+            "absent",
+            "#!/bin/sh\necho 'sh: 1: tapes: not found' >&2\nexit 127\n",
+            "no tapes command on the replica",
+            "no tapes command on the replica",
+        ),
+        (
+            "garbage",
+            "#!/bin/sh\necho 'this is not json'\nexit 0\n",
+            "the answer is not JSON",
+            "the answer is not JSON",
+        ),
+        (
+            "schema",
+            "#!/bin/sh\necho '{\"schema\":\"tapes-list/99\",\"sort\":\"newest\",\"sessions\":[],\"unavailable\":[],\"unreadable\":[],\"unsearched\":[],\"scanned\":0,\"scan_truncated\":false}'\nexit 0\n",
+            "unsupported remote schema tapes-list/99; this reader reads tapes-list/6",
+            "unsupported remote schema tapes-list/99; this reader reads tapes-session/12",
+        ),
+        (
+            "empty",
+            "#!/bin/sh\nexit 0\n",
+            "the replica returned no output",
+            "the replica returned no output",
+        ),
+    ];
+    for (name, body, listed, shown) in cases {
+        let transport = failing_transport(name, body);
+        let mut command = tapes();
+        command.args(["list", "--remote", "replica-host", "--json"]);
+        with_fixture_env(&mut command, &local_codex, &local_home, &local_bin);
+        command.env("TAPES_SSH", &transport);
+        let output = command.output().unwrap();
+        assert!(
+            !output.status.success(),
+            "{name}: a named replica that did not answer exited successfully"
+        );
+        let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(value["sessions"].as_array().unwrap().len(), 0, "{name}");
+        let diagnostic = value["unavailable"][0].as_str().unwrap();
+        assert!(
+            diagnostic.contains("replica replica-host") && diagnostic.contains(listed),
+            "{name}: {diagnostic}"
+        );
+        let error = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            error.contains("remote replica replica-host unavailable") && error.contains(listed),
+            "{name}: {error}"
+        );
+
+        // A session read has no listing to carry the diagnostic, so it writes
+        // nothing and refuses.
+        let mut command = tapes();
+        command.args(["show", CODEX_ONE_ID, "--remote", "replica-host", "--json"]);
+        with_fixture_env(&mut command, &local_codex, &local_home, &local_bin);
+        command.env("TAPES_SSH", &transport);
+        let output = command.output().unwrap();
+        assert!(!output.status.success(), "{name}");
+        assert!(output.stdout.is_empty(), "{name}");
+        let error = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            error.contains("remote replica replica-host unavailable") && error.contains(shown),
+            "{name}: {error}"
+        );
+        let _ = fs::remove_file(&transport);
+    }
+    let _ = fs::remove_dir_all(local_codex);
+}
+
+/// The local side caps what it accepts and how long it waits, so a replica
+/// that floods or never speaks cannot hold the caller. Both bounds name the
+/// variable that raises them.
+#[test]
+fn a_remote_answer_is_bounded_in_bytes_and_wall_clock() {
+    let (local_codex, local_home) = fixture_store("remote-bounds");
+    let local_bin = local_codex.join("bin");
+    fs::create_dir_all(&local_bin).unwrap();
+
+    let big = failing_transport(
+        "big",
+        "#!/bin/sh\nhead -c 200000 /dev/zero | tr '\\0' 'x'\nexit 0\n",
+    );
+    let mut command = tapes();
+    command.args(["list", "--remote", "replica-host", "--json"]);
+    with_fixture_env(&mut command, &local_codex, &local_home, &local_bin);
+    command.env("TAPES_SSH", &big);
+    command.env("TAPES_REMOTE_MAX_BYTES", "512");
+    let output = command.output().unwrap();
+    assert!(!output.status.success());
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        error.contains("exceeds the 512-byte local bound"),
+        "{error}"
+    );
+    assert!(error.contains("TAPES_REMOTE_MAX_BYTES"), "{error}");
+    let _ = fs::remove_file(&big);
+
+    let pid_file = std::env::temp_dir().join(format!("tapes-remote-hang-{}", std::process::id()));
+    let _ = fs::remove_file(&pid_file);
+    let hang = failing_transport(
+        "hang",
+        &format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$$\" > '{}'\nsleep 30\n",
+            pid_file.display()
+        ),
+    );
+    let mut command = tapes();
+    command.args(["list", "--remote", "replica-host", "--json"]);
+    with_fixture_env(&mut command, &local_codex, &local_home, &local_bin);
+    command.env("TAPES_SSH", &hang);
+    command.env("TAPES_REMOTE_DEADLINE_MS", "200");
+    let started = Instant::now();
+    let output = command.output().unwrap();
+    assert!(!output.status.success());
+    assert!(
+        started.elapsed() < Duration::from_secs(10),
+        "the caller waited on a transport that never spoke"
+    );
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert!(error.contains("no answer within 200ms"), "{error}");
+    assert!(error.contains("TAPES_REMOTE_DEADLINE_MS"), "{error}");
+    assert_process_gone(&pid_file);
+    let _ = fs::remove_file(&hang);
+    let _ = fs::remove_file(&pid_file);
+    let _ = fs::remove_dir_all(local_codex);
+}
+
+/// The transport hands the remote shell one quoted command, so an argument
+/// carrying quotes, a variable, or a substitution reaches the replica as the
+/// caller wrote it and is never interpreted on the way.
+#[test]
+fn a_remote_query_carries_the_callers_arguments_intact() {
+    let replica = RemoteReplica::new("quoting");
+    replica.record(CODEX_ONE_FILE, CODEX_SESSION_ONE);
+    let (local_codex, local_home) = fixture_store("remote-quoting-local");
+    let local_bin = local_codex.join("bin");
+    fs::create_dir_all(&local_bin).unwrap();
+    let title = "Title with 'quotes', $HOME, `ticks`, and \"double\"";
+
+    let output = run_against_replica(
+        &replica,
+        &local_codex,
+        &local_home,
+        &local_bin,
+        &[
+            "show",
+            "--title",
+            title,
+            "--remote",
+            "replica-host",
+            "--only",
+            "operator,assistant",
+            "--read-bytes",
+            "1MiB",
+        ],
+    );
+    assert!(!output.status.success());
+    assert_eq!(
+        replica.queried(),
+        vec![
+            "tapes 'show' '--title' 'Title with '\\''quotes'\\'', $HOME, `ticks`, and \"double\"' \
+             '--read-bytes' '1048576' '--only' 'operator,assistant' --json"
+                .to_owned()
+        ]
+    );
+    // The replica ran the quoted command and refused the title it was given:
+    // the value crossed the shell unexpanded.
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        error.contains("Title with 'quotes', $HOME, `ticks`, and")
+            && error.contains("was not found"),
+        "{error}"
+    );
+    assert!(
+        error.contains("$HOME"),
+        "the remote shell expanded a caller's argument: {error}"
+    );
+    assert!(!error.contains("/home/"), "{error}");
+
+    let _ = fs::remove_dir_all(&replica.root);
+    let _ = fs::remove_dir_all(local_codex);
+}
+
+/// An export is run by the replica, which writes the bundles on its own
+/// filesystem through the reader that holds the recording, and every printed
+/// path names that replica in the form `scp` and `rsync` accept.
+#[test]
+fn export_remote_runs_the_replica_export_and_tags_every_path() {
+    let replica = RemoteReplica::new("export");
+    replica.record(CODEX_ONE_FILE, CODEX_SESSION_ONE);
+    replica.record(CODEX_TWO_FILE, CODEX_SESSION_TWO);
+    let (local_codex, local_home) = fixture_store("remote-export-local");
+    let local_bin = local_codex.join("bin");
+    fs::create_dir_all(&local_bin).unwrap();
+    let bundles = replica.root.join("bundles");
+    fs::create_dir_all(&bundles).unwrap();
+
+    let output = run_against_replica(
+        &replica,
+        &local_codex,
+        &local_home,
+        &local_bin,
+        &[
+            "export",
+            CODEX_ONE_ID,
+            "--remote",
+            "replica-host",
+            "--bundle",
+            bundles.to_str().unwrap(),
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let text = String::from_utf8_lossy(&output.stdout);
+    let mut lines = text.lines();
+    assert_eq!(lines.next(), Some("Replica: replica-host"));
+    let mut manifest = Vec::new();
+    for line in lines {
+        let (path, size) = line.split_once('\t').unwrap_or_else(|| panic!("{line}"));
+        let path = path
+            .strip_prefix("replica-host:")
+            .unwrap_or_else(|| panic!("{line}"));
+        assert!(size.contains("iB") || size.contains("bytes"), "{line}");
+        manifest.push(PathBuf::from(path));
+    }
+    assert_eq!(manifest.len(), 3, "{text}");
+    for path in &manifest {
+        assert!(path.starts_with(&bundles), "{}", path.display());
+        assert!(path.is_file(), "{}", path.display());
+    }
+    let written: Value = serde_json::from_slice(
+        &fs::read(
+            manifest
+                .iter()
+                .find(|path| path.extension() == Some(OsStr::new("json")))
+                .unwrap(),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(written["schema"], "tapes-session/12");
+    assert!(
+        !written["events"].as_array().unwrap().is_empty(),
+        "the replica's export held no paired tool events: {written}"
+    );
+    assert_eq!(
+        replica.queried(),
+        vec![format!(
+            "tapes 'export' '{CODEX_ONE_ID}' '--bundle' '{}'",
+            bundles.display()
+        )]
+    );
+
+    // A selection keeps the listing form: one bundle per session plus the
+    // manifest that spans them.
+    let output = run_against_replica(
+        &replica,
+        &local_codex,
+        &local_home,
+        &local_bin,
+        &[
+            "export",
+            "--remote",
+            "replica-host",
+            "--global",
+            "--limit",
+            "2",
+            "--bundle",
+            bundles.to_str().unwrap(),
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(
+        text.lines()
+            .filter(|line| line.contains("manifest.json"))
+            .count(),
+        1,
+        "{text}"
+    );
+    let tagged = text
+        .lines()
+        .skip(1)
+        .filter(|line| line.starts_with("replica-host:"))
+        .count();
+    assert_eq!(
+        tagged, 7,
+        "two bundles, their tool-free manifest, and the manifest: {text}"
+    );
+
+    // A replica that cannot answer refuses and prints no path.
+    let unreachable = failing_transport(
+        "export-unreachable",
+        "#!/bin/sh\necho 'ssh: connect to host replica-host port 22: Connection refused' >&2\nexit 255\n",
+    );
+    let mut command = tapes();
+    command.args([
+        "export",
+        CODEX_ONE_ID,
+        "--remote",
+        "replica-host",
+        "--bundle",
+        bundles.to_str().unwrap(),
+    ]);
+    with_fixture_env(&mut command, &local_codex, &local_home, &local_bin);
+    command.env("TAPES_SSH", &unreachable);
+    let output = command.output().unwrap();
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty(), "a failed export printed a path");
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("remote replica replica-host unavailable: the ssh transport failed"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let _ = fs::remove_file(&unreachable);
+    let _ = fs::remove_dir_all(&replica.root);
+    let _ = fs::remove_dir_all(local_codex);
+}
+
+/// A replica answers for another machine's stores, so the flags that name
+/// this machine's data — a supplied input, the caller's own session — are
+/// refused by name rather than forwarded.
+#[test]
+fn remote_refuses_the_selectors_that_name_this_machine() {
+    let (local_codex, local_home) = fixture_store("remote-conflicts");
+    let local_bin = local_codex.join("bin");
+    fs::create_dir_all(&local_bin).unwrap();
+
+    let input = supplied_fixture("chatgpt-export.json");
+    for args in [
+        vec![
+            "show",
+            "supplied-1",
+            "--remote",
+            "replica-host",
+            "--input",
+            input.to_str().unwrap(),
+        ],
+        vec![
+            "list",
+            "--remote",
+            "replica-host",
+            "--input",
+            input.to_str().unwrap(),
+        ],
+        vec![
+            "export",
+            "supplied-1",
+            "--remote",
+            "replica-host",
+            "--input",
+            input.to_str().unwrap(),
+        ],
+    ] {
+        let mut command = tapes();
+        command.args(&args);
+        with_fixture_env(&mut command, &local_codex, &local_home, &local_bin);
+        let output = command.output().unwrap();
+        assert!(!output.status.success(), "{args:?}");
+        let error = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            error.contains("cannot be used with '--input"),
+            "{args:?}: {error}"
+        );
+    }
+
+    let mut command = tapes();
+    command.args(["show", "self", "--remote", "replica-host"]);
+    with_fixture_env(&mut command, &local_codex, &local_home, &local_bin);
+    command.env("CODEX_THREAD_ID", CODEX_ONE_ID);
+    let output = command.output().unwrap();
+    assert!(!output.status.success());
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        error.contains("self names the caller's own session on this machine")
+            && error.contains("replica replica-host"),
+        "{error}"
+    );
+
+    // `export` has no JSON rendering of its own; a replica export is the
+    // replica's own stdout, so --json is refused where it would be a
+    // different contract.
+    let mut command = tapes();
+    command.args(["export", CODEX_ONE_ID, "--remote", "replica-host", "--json"]);
+    with_fixture_env(&mut command, &local_codex, &local_home, &local_bin);
+    let output = command.output().unwrap();
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("unexpected argument '--json'"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let _ = fs::remove_dir_all(local_codex);
 }

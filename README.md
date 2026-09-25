@@ -328,7 +328,7 @@ disappear merely because it has no readable text. The turn's
 record. A part reference repeats that parent coordinate and adds
 `content_part_index` for its position within the turn; a source-native
 `pointer` remains the source pointer at both levels.
-JSON output uses the `tapes-session/11` transcript schema, with the optional
+JSON output uses the `tapes-session/12` transcript schema, with the optional
 `live` annotation when the authority answers. The human header marks the same
 state. Supplied mapping exports also carry bounded graph evidence with the
 selected canonical path, retained nodes, and retained parent-child edges.
@@ -357,7 +357,7 @@ as it is read, so memory follows one record rather than the file. Every turn
 is shown unless `--tail` keeps the newest, and `--exchange`, `--only`, and
 `--omit` apply as they do to a bounded read. It reads installed Claude, Codex,
 Pi, and OpenCode sessions, and `--read-bytes` is not available with it.
-`--full --json` writes the same `tapes-session/11` object turn by turn: its
+`--full --json` writes the same `tapes-session/12` object turn by turn: its
 `read` evidence is one range from byte 0 to the source length with
 `projection_options: ["full"]`, and each turn's `record_ref` carries its own
 record span. An OpenCode session is paged from its store oldest first, every
@@ -557,7 +557,7 @@ in one screen, in that reading order.
 - `.context.md` — the exchange `show --exchange` returns: exact operator turns
   and assistant-visible text, without the harness's own commands, notices,
   attached context, or user turns of unknown sender. Read first.
-- `.json` — the canonical `tapes-session/11` object plus turns, cost, tokens,
+- `.json` — the canonical `tapes-session/12` object plus turns, cost, tokens,
   their `accounting` basis and coverage when present, any verified
   `trailing_record`, retained graph/artifact evidence, and the session
   directory's git head and branch when they resolve. Query selectively with
@@ -630,6 +630,34 @@ the manifest's own path and size. A session whose store vanishes between the
 listing and the read costs its own bundle and nothing else; the command fails
 only when every selected session failed, or when the listing itself did.
 
+## Remote replicas
+
+`list`, `show`, and `export` take `--remote <ssh-destination>`: the named
+host's own `tapes` answers, and its sessions name that replica instead of
+being read here. Nothing is installed on the replica, and none of its store
+is copied. `ssh` carries the query; `TAPES_SSH` names a different program (a
+wrapper, a fixed configuration, a jump-host helper),
+`TAPES_REMOTE_MAX_BYTES` bounds an accepted answer (64 MiB by default), and
+`TAPES_REMOTE_DEADLINE_MS` bounds the wait (60 s by default).
+
+`list --remote host` and `show --remote host <id>` read the replica's JSON
+and tag every session with `source.replica`. The replica's own scope paths,
+stores, and liveness authority apply: `live` is what that machine reported,
+this machine's `harness-status` is never consulted, and a session the replica
+did not mark is `unknown` rather than idle. `export --remote host ...` runs
+the replica's own `export`, so the bundles are written through the reader
+that holds the recording, and every printed path is `host:path`, the
+coordinate `scp` and `rsync` accept; `--bundle` names a directory on the
+replica for that reason.
+
+Every failure to reach or run the replica — no `ssh`, no `tapes` there, a
+schema this build does not read, an answer past the byte bound, no answer
+within the deadline — is unavailable with its cause beside the destination:
+`list` carries it in `unavailable` and exits unsuccessfully, and `show` and
+`export` refuse without printing a session or a path. An empty listing is
+therefore never a replica that holds nothing, and a refusal is never a
+completed session.
+
 ## Integrating
 
 `tapes` is meant to be the one reader of transcript stores on a machine. If you
@@ -674,7 +702,15 @@ rather than a resent history. `tapes usage --here --since <date> --json` answers
 <date> --json` says what each of those sessions ends on, so a scan reads the
 few endings that matter instead of every tail.
 
-**Contracts you can build on.** `tapes-list/6`, `tapes-session/11`,
+**A query may name another machine.** `--remote <ssh-destination>` on
+`list`, `show`, and `export` asks that host's own `tapes` and returns its
+answer tagged with the replica. It is a transport, not a sync: nothing is
+installed there and no store is copied. A replica's sessions carry
+`source.replica`, and their `live` field is only ever what the replica
+reported — this machine's status authority never answers for another
+machine's processes.
+
+**Contracts you can build on.** `tapes-list/6`, `tapes-session/12`,
 `tapes-events/7`, `tapes-usage/6`, `tapes-usage-summary/4`, `tapes-lineage/2`,
 `tapes-endings/6`, `tapes-child/4`, `tapes-stats/9`, `tapes-stats-summary/5`, `tapes-brief/7`,
 `tapes-page/6`, `tapes-history-search/6`, `tapes-metadata-history/6`,

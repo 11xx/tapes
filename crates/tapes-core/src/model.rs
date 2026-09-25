@@ -10,7 +10,7 @@ use crate::content::{ContentCoverage, ContentPart};
 use crate::event::ToolEvent;
 use crate::usage::UsageDetail;
 
-pub const SESSION_SCHEMA: &str = "tapes-session/11";
+pub const SESSION_SCHEMA: &str = "tapes-session/12";
 /// Maximum length of a title derived from the first user turn.
 pub const DERIVED_TITLE_MAX_CHARS: usize = 96;
 
@@ -147,6 +147,12 @@ pub struct SourceDescriptor {
     pub producer_authority: Option<ScopeAuthority>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub location: Option<SourceLocation>,
+    /// The replica that holds the recording, named by the destination a
+    /// caller reached it through, when the read was answered by another
+    /// machine. Absent for a recording this machine read itself; a replica is
+    /// never inferred from a path, a store, or equal contents.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replica: Option<String>,
 }
 
 impl SourceDescriptor {
@@ -165,6 +171,7 @@ impl SourceDescriptor {
                 member: None,
                 container: None,
             }),
+            replica: None,
         }
     }
 
@@ -189,6 +196,7 @@ impl SourceDescriptor {
                 member: None,
                 container: None,
             }),
+            replica: None,
         }
     }
 }
