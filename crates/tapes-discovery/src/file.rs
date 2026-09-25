@@ -90,9 +90,20 @@ impl Walk {
 }
 
 pub(crate) fn candidates(store: &NativeStore, limit: usize) -> CandidatePage {
-    let Some(root) = store.root() else {
-        return CandidatePage::empty();
-    };
+    match (store.file(), store.root()) {
+        (Some(path), Some(root)) => merge_candidate_pages(
+            store,
+            explicit_file_candidates(store, path, limit),
+            candidates_from_root(store, root, limit),
+            limit,
+        ),
+        (Some(path), None) => explicit_file_candidates(store, path, limit),
+        (None, Some(root)) => candidates_from_root(store, root, limit),
+        (None, None) => CandidatePage::empty(),
+    }
+}
+
+fn candidates_from_root(store: &NativeStore, root: &Path, limit: usize) -> CandidatePage {
     let mut walk = walk(store, root);
     if walk.entries.is_empty() && walk.failures.is_empty() {
         return CandidatePage {
@@ -216,11 +227,76 @@ pub(crate) fn candidates(store: &NativeStore, limit: usize) -> CandidatePage {
     page
 }
 
-pub(crate) fn available(store: &NativeStore) -> bool {
-    let Some(root) = store.root() else {
-        return false;
+fn merge_candidate_pages(
+    store: &NativeStore,
+    mut primary: CandidatePage,
+    mut directory: CandidatePage,
+    limit: usize,
+) -> CandidatePage {
+    let mut page = CandidatePage {
+        records: Vec::new(),
+        scanned: primary.scanned.saturating_add(directory.scanned),
+        visited_entries: primary
+            .visited_entries
+            .saturating_add(directory.visited_entries),
+        complete: primary.complete && directory.complete,
+        failures: std::mem::take(&mut primary.failures),
+        unreadable_ids: std::mem::take(&mut primary.unreadable_ids),
     };
-    match fs::metadata(root) {
+    page.failures.append(&mut directory.failures);
+    page.unreadable_ids.append(&mut directory.unreadable_ids);
+
+    let mut seen = HashSet::new();
+    let mut records = primary
+        .records
+        .into_iter()
+        .chain(directory.records)
+        .filter(|session| seen.insert(session.id().to_owned()))
+        .collect::<Vec<_>>();
+    records.sort_by(|left, right| {
+        session_modified(right)
+            .cmp(&session_modified(left))
+            .then_with(|| left.locator().cmp(&right.locator()))
+    });
+
+    let limit = limit.min(MAX_VISITED_ENTRIES);
+    if records.len() > limit {
+        page.complete = false;
+        if !page.failures.iter().any(|failure| {
+            matches!(
+                failure,
+                DiscoveryError::BoundExhausted {
+                    bound: "candidate enumeration limit",
+                    ..
+                }
+            )
+        }) {
+            page.failures.push(DiscoveryError::BoundExhausted {
+                coordinate: store.coordinate(),
+                bound: "candidate enumeration limit",
+            });
+        }
+        records.truncate(limit);
+    }
+    page.records = records;
+    page.unreadable_ids.sort();
+    page.unreadable_ids.dedup();
+    page
+}
+
+fn session_modified(session: &NativeSession) -> Option<SystemTime> {
+    session
+        .locator()
+        .and_then(|path| fs::metadata(path).ok())
+        .and_then(|metadata| metadata.modified().ok())
+}
+
+pub(crate) fn available(store: &NativeStore) -> bool {
+    store.file().is_some_and(metadata_available) || store.root().is_some_and(metadata_available)
+}
+
+fn metadata_available(path: &Path) -> bool {
+    match fs::metadata(path) {
         Ok(_) => true,
         Err(error) if error.kind() == io::ErrorKind::NotFound => false,
         Err(_) => true,
@@ -260,17 +336,52 @@ pub(crate) fn locate_exact(
     store: &NativeStore,
     id: &str,
 ) -> Result<Option<NativeSession>, DiscoveryError> {
-    locate_exact_using(store, id, probe)
+    let live = store.file().map(|path| probe_runtime_file(store, path));
+    if let Some(Ok(Some(session))) = &live {
+        if session.id() == id {
+            return Ok(Some(session.clone()));
+        }
+    }
+    let directory = match store.root() {
+        Some(root) => locate_exact_using(store, root, id, probe),
+        None => Ok(None),
+    };
+    match (live, directory) {
+        (_, Ok(Some(session))) => Ok(Some(session)),
+        (Some(Err(error)), _) => Err(error),
+        (_, result) => result,
+    }
+}
+
+fn explicit_file_candidates(store: &NativeStore, path: &Path, limit: usize) -> CandidatePage {
+    let mut page = CandidatePage::empty();
+    if limit == 0 {
+        page.complete = false;
+        page.failures.push(DiscoveryError::BoundExhausted {
+            coordinate: store.coordinate(),
+            bound: "candidate enumeration limit",
+        });
+        return page;
+    }
+    page.visited_entries = 1;
+    page.scanned = 1;
+    match probe_runtime_file(store, path) {
+        Ok(Some(session)) => page.records.push(session),
+        Ok(None) => {}
+        Err(error) => {
+            page.complete = false;
+            page.failures.push(error);
+        }
+    }
+    page
 }
 
 fn locate_exact_using(
     store: &NativeStore,
+    root: &Path,
     id: &str,
     mut inspect: impl FnMut(&NativeStore, &Path) -> Result<Option<NativeSession>, DiscoveryError>,
 ) -> Result<Option<NativeSession>, DiscoveryError> {
-    let Some(root) = store.root() else {
-        return Ok(None);
-    };
     let walked = walk(store, root);
     let mut entries = walked.entries;
     entries.sort_by(|left, right| {
@@ -617,12 +728,28 @@ fn probe(store: &NativeStore, path: &Path) -> Result<Option<NativeSession>, Disc
     probe_with_open(store, path, |path| File::open(path))
 }
 
+fn probe_runtime_file(
+    store: &NativeStore,
+    path: &Path,
+) -> Result<Option<NativeSession>, DiscoveryError> {
+    probe_file(store, path, false, |path| File::open(path))
+}
+
 fn probe_with_open(
     store: &NativeStore,
     path: &Path,
     open: impl FnOnce(&Path) -> io::Result<File>,
 ) -> Result<Option<NativeSession>, DiscoveryError> {
-    if !native_filename(store.harness(), path) || !is_jsonl(path) {
+    probe_file(store, path, true, open)
+}
+
+fn probe_file(
+    store: &NativeStore,
+    path: &Path,
+    require_native_filename: bool,
+    open: impl FnOnce(&Path) -> io::Result<File>,
+) -> Result<Option<NativeSession>, DiscoveryError> {
+    if (require_native_filename && !native_filename(store.harness(), path)) || !is_jsonl(path) {
         return Ok(None);
     }
     let metadata = match fs::metadata(path) {
@@ -956,7 +1083,8 @@ mod tests {
         let root = temp.path().join("claude");
         let path = write(&root, "project/id.jsonl", "{\"sessionId\":\"id\"}\n");
         let store = NativeStore::claude(root);
-        let error = locate_exact_using(&store, "id", |store, path| {
+        let root = store.root().unwrap();
+        let error = locate_exact_using(&store, root, "id", |store, path| {
             probe_with_open(store, path, |_| {
                 Err(io::Error::from(io::ErrorKind::PermissionDenied))
             })
@@ -1113,9 +1241,10 @@ mod tests {
             );
         }
         let store = NativeStore::codex(root);
+        let root = store.root().unwrap();
         let mut prefix_openings = 0;
         for query in ["00000000-0000", "000000000001"] {
-            assert!(locate_exact_using(&store, query, |_, _| {
+            assert!(locate_exact_using(&store, root, query, |_, _| {
                 prefix_openings += 1;
                 Ok(None)
             })
@@ -1126,7 +1255,7 @@ mod tests {
 
         let target = ids.last().unwrap();
         let mut exact_openings = 0;
-        let session = locate_exact_using(&store, target, |store, path| {
+        let session = locate_exact_using(&store, root, target, |store, path| {
             exact_openings += 1;
             probe(store, path)
         })
