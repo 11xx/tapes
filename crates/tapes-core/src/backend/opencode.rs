@@ -22,9 +22,9 @@ use crate::content::{
 use crate::event::{self, Bounded, EventKind, EventTranscript, ToolEvent};
 use crate::lineage::{ChildRef, Lineage, ParentRef, SourceRef};
 use crate::model::{
-    human_bytes, AccountingBasis, AccountingCoverage, Cost, KindDeclaration, Model, Role, Session,
-    SourceBound, SourceDescriptor, Tokens, Transcript, Truncation, Turn, TurnKind, TurnSelection,
-    TurnWindow, UserDefault,
+    human_bytes, AccountingBasis, AccountingCoverage, Cost, KindDeclaration, Model, RecordRef,
+    Role, Session, SourceBound, SourceDescriptor, Tokens, Transcript, Truncation, Turn, TurnKind,
+    TurnSelection, TurnWindow, UserDefault,
 };
 use tapes_discovery::{
     DiscoveryError, Harness as NativeHarness, NativeSession, NativeStore, NativeStoreKind,
@@ -889,7 +889,7 @@ impl OpenCodeBackend {
                 read += rows.len() as u64;
                 let whole_page = rows.len() == MESSAGE_PAGE;
                 for message in database_messages(&rows, parts)? {
-                    for parsed in parse_message(&message) {
+                    for parsed in message_turns(&message, session) {
                         turn(parsed)?;
                     }
                 }
@@ -982,7 +982,7 @@ impl OpenCodeBackend {
             };
             read += page.len() as u64;
             for message in &page {
-                for parsed in parse_message(message) {
+                for parsed in message_turns(message, session) {
                     turn(parsed)?;
                 }
             }
@@ -1940,7 +1940,7 @@ fn paged_transcript(session: Session, pages: &MessagePages, tail: usize) -> Tran
 /// Keep every turn from the pages fetched for an event read. The event layer
 /// pairs this sequence before applying the same window metadata as `show`.
 fn paged_event_source(session: Session, pages: &MessagePages, tail: usize) -> Transcript {
-    let turns = normalized_turns(&pages.messages);
+    let turns = normalized_turns(&session, &pages.messages);
     let returned = turns.len().min(tail);
     let truncation = paged_truncation(pages, returned, turns.len(), tail);
     Transcript::new(session, turns, truncation, None, pages.notes.clone())
@@ -1959,7 +1959,7 @@ fn parse_transcript(
     notes: Vec<String>,
     truncation: impl FnOnce(usize, usize) -> Truncation,
 ) -> Transcript {
-    let mut turns = normalized_turns(messages);
+    let mut turns = normalized_turns(&session, messages);
     let total = turns.len();
     if total > tail {
         turns.drain(..total - tail);
@@ -1969,11 +1969,11 @@ fn parse_transcript(
     Transcript::new(session, turns, truncation, None, notes)
 }
 
-fn normalized_turns(messages: &[Value]) -> Vec<Turn> {
+fn normalized_turns(session: &Session, messages: &[Value]) -> Vec<Turn> {
     let mut turns = messages
         .iter()
         .rev()
-        .flat_map(parse_message)
+        .flat_map(|message| message_turns(message, session))
         .collect::<Vec<_>>();
     for (ordinal, turn) in turns.iter_mut().enumerate() {
         turn.ordinal = ordinal;
@@ -1985,6 +1985,29 @@ fn normalized_turns(messages: &[Value]) -> Vec<Turn> {
 /// assistant message, so every message of type `user` is one the operator sent.
 fn user_kind(role: &Role) -> TurnKind {
     role.kind().unwrap_or(TurnKind::Operator)
+}
+
+/// A message's turns, each carrying the message as its source record: the
+/// message id names the record under the session's store location, and a
+/// turn's position among the message's turns is its `part_index`. The parts
+/// of one message are therefore one record however many turns they yield.
+fn message_turns(message: &Value, session: &Session) -> Vec<Turn> {
+    let mut turns = parse_message(message);
+    let domain = session.locator().unwrap_or(&session.id);
+    let record = message["id"].as_str().map(str::to_owned);
+    for (part_index, turn) in turns.iter_mut().enumerate() {
+        let reference = RecordRef {
+            domain: domain.to_owned(),
+            revision: None,
+            span: None,
+            native_id: record.clone(),
+            pointer: None,
+            part_index,
+            content_part_index: None,
+        };
+        super::attach_record_ref(turn, reference);
+    }
+    turns
 }
 
 fn parse_message(message: &Value) -> Vec<Turn> {

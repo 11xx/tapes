@@ -8,7 +8,9 @@ use std::process::{Command, Output};
 use serde_json::{json, Value};
 
 fn tapes() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_tapes"))
+    let mut command = Command::new(env!("CARGO_BIN_EXE_tapes"));
+    command.env_remove("PI_SESSION_FILE");
+    command
 }
 
 fn run(arguments: &[String]) -> Output {

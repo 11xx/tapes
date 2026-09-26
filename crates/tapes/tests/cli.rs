@@ -166,6 +166,56 @@ fn self_names_the_session_its_harness_exports() {
     let _ = fs::remove_dir_all(&codex_home);
 }
 
+/// `show --json` on the bounded reader reports the effort a Claude assistant
+/// record ran at as the session model's variant, and a trailing synthetic
+/// record does not replace that model.
+#[test]
+fn show_carries_claude_effort_with_the_selected_model() {
+    let root = TemporaryDirectory::new(std::env::temp_dir().join(format!(
+        "tapes-cli-claude-model-effort-{}",
+        std::process::id()
+    )));
+    let id = "claude-cli-effort";
+    let projects = root.path().join("claude-config/projects/-fixtures-project");
+    fs::create_dir_all(&projects).unwrap();
+    fs::write(
+        projects.join(format!("{id}.jsonl")),
+        concat!(
+            r#"{"type":"user","sessionId":"claude-cli-effort","uuid":"user-1","timestamp":"2026-01-01T10:00:00Z","cwd":"/fixtures/project","message":{"role":"user","content":"Inspect the fixture."}}"#,
+            "\n",
+            r#"{"type":"assistant","sessionId":"claude-cli-effort","uuid":"assistant-1","timestamp":"2026-01-01T10:00:01Z","cwd":"/fixtures/project","effort":"low","perTurnEffort":"high","message":{"role":"assistant","model":"claude-fixture","content":[{"type":"text","text":"Fixture response."}]}}"#,
+            "\n",
+            r#"{"type":"assistant","sessionId":"claude-cli-effort","uuid":"assistant-2","timestamp":"2026-01-01T10:00:02Z","cwd":"/fixtures/project","message":{"role":"assistant","model":"<synthetic>","content":[{"type":"text","text":"API Error"}]}}"#,
+            "\n"
+        ),
+    )
+    .unwrap();
+
+    let output = tapes()
+        .args(["show", id, "--json"])
+        .env("HOME", root.path().join("home"))
+        .env("CLAUDE_CONFIG_DIR", root.path().join("claude-config"))
+        .env("XDG_DATA_HOME", root.path().join("xdg"))
+        .env("PATH", "/usr/bin:/bin")
+        .env_remove("CODEX_HOME")
+        .env_remove("PI_CODING_AGENT_DIR")
+        .env_remove("PI_CODING_AGENT_SESSION_DIR")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["session"]["id"], id);
+    assert_eq!(
+        value["session"]["model"],
+        serde_json::json!({"id": "claude-fixture", "variant": "high"}),
+        "{value}"
+    );
+}
+
 #[test]
 fn self_uses_pi_session_file_for_native_discovery() {
     let root = TemporaryDirectory::new(
