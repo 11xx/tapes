@@ -70,10 +70,15 @@ from the machine's Cargo configuration rather than from the consuming
 project's manifest, so no machine path enters the consumer's history:
 
 ```toml
-# ~/.cargo/config.toml — paths resolve from the directory holding .cargo
+# $CARGO_HOME/config.toml
 [patch.crates-io]
-tapes-discovery = { path = "code/tapes/crates/tapes-discovery" }
+tapes-discovery = { path = "/path/to/tapes/crates/tapes-discovery" }
 ```
+
+Cargo reads its user-wide configuration from `$CARGO_HOME/config.toml`, which
+is `~/.cargo/config.toml` only when `CARGO_HOME` is unset. A relative path in
+that file resolves from the parent of `CARGO_HOME`, so an absolute path is the
+unambiguous choice.
 
 A consumer built without that override fails to resolve the crate, which is
 the intended state until the tapes crates are published.
