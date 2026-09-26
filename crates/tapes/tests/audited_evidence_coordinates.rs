@@ -37,6 +37,7 @@ fn run(root: &Path, args: &[String]) -> Output {
         .env("HOME", root.join("home"))
         .env("CODEX_HOME", root.join("codex"))
         .env_remove("XDG_DATA_HOME")
+        .env_remove("PI_SESSION_FILE")
         .env("PATH", "/usr/bin:/bin")
         .output()
         .unwrap()
