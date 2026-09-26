@@ -61,8 +61,9 @@ server, no session *writing* — `tapes` never mutates a harness's store.
   no leading zero on the month or the day, and no fourth field, prerelease, or
   build metadata. One release is cut per date; a second waits for the next date
   rather than qualifying a version. The manifest, `tapes --version`, and the
-  changelog's top released heading carry the same string. A workspace that has
-  never been published stays at `0.1.0` until a release names its date.
+  changelog's top released heading carry the same string, and the release head
+  is tagged `v<version>`. A cut version is published later, unchanged, by the
+  operator.
 - The bare name `tapes` on crates.io belongs to an unrelated project, so the
   published package takes another name while the binary it installs, the
   repository, and the command stay `tapes`.

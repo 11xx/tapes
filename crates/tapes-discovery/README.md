@@ -72,16 +72,28 @@ and failures.
 
 ## Local dependency
 
-The workspace package is version `0.1.0` and has no default features. Its
+The package carries the workspace's calendar version and has no default features. Its
 normal dependencies are `libc` and `serde_json`; it has no dependency on
 `tapes-core`, `tapes-cli`, transcript, export, history, or usage code.
 
-A sibling checkout can use the unpublished library with an explicit path and
-version requirement:
+A consumer declares the library by version:
 
 ```toml
-tapes-discovery = { path = "../tapes/crates/tapes-discovery", version = "0.1.0" }
+tapes-discovery = "2026.9.25"
 ```
+
+and, until the crate is published, point that requirement at a local checkout
+from the machine's Cargo configuration rather than from the consuming
+project's manifest, so no machine path enters the consumer's history:
+
+```toml
+# ~/.cargo/config.toml — paths resolve from the directory holding .cargo
+[patch.crates-io]
+tapes-discovery = { path = "code/tapes/crates/tapes-discovery" }
+```
+
+A consumer built without that override fails to resolve the crate, which is
+the intended state until the tapes crates are published.
 
 `Cargo.lock` records the package version but does not pin a path dependency's
 git revision. Record the Tapes checkout revision alongside the consuming

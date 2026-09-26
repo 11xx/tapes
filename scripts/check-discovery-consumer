@@ -68,6 +68,15 @@ def command(
     return result
 
 
+def workspace_version() -> str:
+    """The version every workspace crate inherits, read where it is declared."""
+    manifest = tomllib.loads((Path(__file__).resolve().parents[1] / "Cargo.toml").read_text())
+    return manifest["workspace"]["package"]["version"]
+
+
+VERSION = workspace_version()
+
+
 def write_project(
     project: Path,
     crate_path: Path,
@@ -78,7 +87,7 @@ def write_project(
     source_dir = project / "src"
     source_dir.mkdir(parents=True, exist_ok=True)
     (source_dir / "main.rs").write_text(source_text)
-    discovery_line = f'tapes-discovery = {{ path = {json.dumps(str(crate_path))}, version = "0.1.0" }}'
+    discovery_line = f'tapes-discovery = {{ path = {json.dumps(str(crate_path))}, version = "{VERSION}" }}'
     dependency_lines = [discovery_line]
     if include_core:
         if core_path is None:
@@ -422,7 +431,7 @@ def check_archive(archive_path: Path, unpack_root: Path, scratch: Path) -> Path:
                 raise GateError("crate archive contains a path outside its root")
         archive.extractall(unpack_root)
         names = {member.name for member in members if member.isfile()}
-        package_prefix = "tapes-discovery-0.1.0/"
+        package_prefix = f"tapes-discovery-{VERSION}/"
         required = {
             package_prefix + "Cargo.toml",
             package_prefix + "README.md",
@@ -443,7 +452,7 @@ def check_archive(archive_path: Path, unpack_root: Path, scratch: Path) -> Path:
             for dependency in package_manifest.get(section, {}):
                 if dependency in FORBIDDEN_PACKAGES or dependency.startswith("tapes-") and dependency != "tapes-discovery":
                     raise GateError(f"packaged {section} unexpectedly depends on {dependency}")
-    package_root = unpack_root / "tapes-discovery-0.1.0"
+    package_root = unpack_root / f"tapes-discovery-{VERSION}"
     if not (package_root / "src/lib.rs").is_file():
         raise GateError("unpacked package has no library source")
     return package_root
@@ -595,7 +604,7 @@ def main() -> int:
             logs,
             "cargo-package",
         )
-        archive = package_target / "package" / "tapes-discovery-0.1.0.crate"
+        archive = package_target / "package" / f"tapes-discovery-{VERSION}.crate"
         if not archive.is_file():
             raise GateError("cargo package did not produce the local crate archive")
         unpack_root = work / "unpacked"
