@@ -2159,22 +2159,28 @@ pub(crate) fn attach_record_refs(
             part_index,
             content_part_index: None,
         };
-        turn.record_ref = Some(reference.clone());
-        for (content_part_index, part) in turn.parts.iter_mut().enumerate() {
-            part.set_record_ref_part(reference.clone(), content_part_index);
+        attach_record_ref(turn, reference);
+    }
+}
+
+/// Give a turn, its content parts, and its tool evidence one source record
+/// coordinate.
+pub(crate) fn attach_record_ref(turn: &mut Turn, reference: RecordRef) {
+    for (content_part_index, part) in turn.parts.iter_mut().enumerate() {
+        part.set_record_ref_part(reference.clone(), content_part_index);
+    }
+    if let Some(tool) = turn.tool.as_mut() {
+        for invocation in &mut tool.invocations {
+            invocation.record_ref = Some(reference.clone());
         }
-        if let Some(tool) = turn.tool.as_mut() {
-            for invocation in &mut tool.invocations {
-                invocation.record_ref = Some(reference.clone());
-            }
-            for artifact in &mut tool.artifact_references {
-                artifact.source = Some(reference.clone());
-            }
-            for consumption in &mut tool.artifact_consumptions {
-                consumption.reference.source = Some(reference.clone());
-            }
+        for artifact in &mut tool.artifact_references {
+            artifact.source = Some(reference.clone());
+        }
+        for consumption in &mut tool.artifact_consumptions {
+            consumption.reference.source = Some(reference.clone());
         }
     }
+    turn.record_ref = Some(reference);
 }
 
 pub(crate) fn transcript(

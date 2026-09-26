@@ -360,7 +360,10 @@ message written while the read streams may be part of it. Transport retries
 follow the bounded read, but a single message larger than the bound cannot be
 stepped over, so the whole read refuses there, naming the message's position.
 The read evidence counts message rows (`coordinate_domain:
-"opencode-message"`), and turns carry native ids rather than record spans.
+"opencode-message"`). Each turn's `record_ref` names its message: the
+session's store location as `domain`, the message `id` as `native_id`, and the
+turn's position among that message's turns as `part_index`, with no byte span
+or revision.
 
 OpenCode transcript reads render messages as turns and do not read a record kind
 that could follow the newest message. `Transcript.trailing_record` is therefore

@@ -1543,6 +1543,27 @@ fn stats_reports_the_assistant_turn_duration_distribution() {
     );
 }
 
+/// An OpenCode assistant message is one source record whatever number of
+/// parts it holds, so it contributes one sample: the interval between its own
+/// parts is inside one model response, not a response of its own.
+#[test]
+fn opencode_samples_one_assistant_turn_per_message() {
+    let backends: Vec<Box<dyn Backend>> =
+        vec![Box::new(OpenCodeBackend::new(opencode_fixture_program()))];
+    // Three assistant messages: one holding a reasoning part and a tool call
+    // 999 ms apart, and two holding a single part each. The first message's
+    // sample runs from the operator's message to its first part, and the
+    // second's from that first part to its own.
+    let stats =
+        stats_with_backends(&backends, Selection::Id("ses_000000fixtureSharedSession")).unwrap();
+    let value = serde_json::to_value(&stats).unwrap();
+    assert_eq!(
+        value["assistant_turns_ms"],
+        serde_json::json!({"count": 3, "median": 7_000, "p90": 71_002_987, "max": 71_002_987}),
+        "{value}"
+    );
+}
+
 #[test]
 fn codex_reads_model_and_effort_from_turn_context() {
     let backend = CodexBackend::new(fixtures("codex"));

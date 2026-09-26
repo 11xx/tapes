@@ -186,10 +186,11 @@ the window: a read that stopped with the window full reports
 and a wider request renumbers. Such a reference should carry the `native_id`,
 which OpenCode always records. `native_id` is
 the harness's own id for the record the turn came from, when the harness
-records one: Claude's message `uuid`, pi's entry `id`, OpenCode's message
-`id`, and Codex's `payload.id` where a response item carries one. Several
-turns share it when one record yields a message, its reasoning, and its tool
-calls.
+records one: Claude's message `uuid`, pi's entry `id`, OpenCode's part `id`
+(its message `id` where the read carries no part ids), and Codex's
+`payload.id` where a response item carries one. Several turns share it when
+one record yields a message, its reasoning, and its tool calls; the turns of
+one OpenCode message share its id as `record_ref.native_id` instead.
 
 `Turn.metadata` is an `EntryMetadata` object when a supplied provider records
 metadata for the native entry. It carries optional `engine`, `status`, and
@@ -696,8 +697,9 @@ source record that carries one — the model's text, its reasoning, or a tool
 call it made — being the interval from the previous turn's source record to
 its own. A tool call and a tool result both normalize to a tool turn, so the
 event kind decides: a record carrying only tool results is no sample, and one
-carrying a call together with its result is. A record whose normalized turns
-share one timestamp is one sample rather than several, and a turn with no
+carrying a call together with its result is. A record that normalizes to
+several turns is one sample, measured to the record's first timestamp, however
+many timestamps its turns carry, and a turn with no
 previous source record, or one later than it, contributes none. `count` says how many intervals
 the figures cover, `median` and `p90` are the samples at rank `ceil(count / 2)`
 and `ceil(count * 9 / 10)` in ascending order — the lower middle sample when
