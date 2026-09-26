@@ -5669,3 +5669,38 @@ fn codex_reads_effort_from_older_turn_context_fields() {
     }
     let _ = fs::remove_dir_all(&root);
 }
+
+/// Effort belongs to the assistant record that states it, so a newer real
+/// assistant record with no effort leaves the variant absent rather than
+/// inheriting an older record's.
+#[test]
+fn claude_model_variant_is_absent_when_the_newest_assistant_records_no_effort() {
+    let root =
+        std::env::temp_dir().join(format!("tapes-claude-effort-reset-{}", std::process::id()));
+    let project = root.join("project");
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&project).unwrap();
+    fs::write(
+        project.join("session-effort-reset.jsonl"),
+        concat!(
+            r#"{"type":"user","sessionId":"session-effort-reset","uuid":"user-1","timestamp":"2026-01-01T10:00:00Z","cwd":"/fixtures/project","message":{"role":"user","content":"Inspect the fixture."}}"#,
+            "\n",
+            r#"{"type":"assistant","sessionId":"session-effort-reset","uuid":"assistant-1","timestamp":"2026-01-01T10:00:01Z","cwd":"/fixtures/project","perTurnEffort":"high","message":{"role":"assistant","model":"claude-fixture","content":[{"type":"text","text":"Inspected."}]}}"#,
+            "\n",
+            r#"{"type":"assistant","sessionId":"session-effort-reset","uuid":"assistant-2","timestamp":"2026-01-01T10:00:02Z","cwd":"/fixtures/project","message":{"role":"assistant","model":"claude-fixture-next","content":[{"type":"text","text":"Inspected again."}]}}"#,
+            "\n"
+        ),
+    )
+    .unwrap();
+
+    let backend = ClaudeBackend::new(&root);
+    let session = located(&backend, "session-effort-reset");
+    let expected = Model {
+        id: "claude-fixture-next".to_owned(),
+        variant: None,
+    };
+    assert_eq!(session.model.as_ref(), Some(&expected));
+    let transcript = backend.transcript(&session, 10).unwrap();
+    assert_eq!(transcript.session.model.as_ref(), Some(&expected));
+    let _ = fs::remove_dir_all(&root);
+}
