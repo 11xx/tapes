@@ -2,6 +2,7 @@
 name = "tapes-core"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Normalized session model and per-harness backends for reading coding-agent recordings."
