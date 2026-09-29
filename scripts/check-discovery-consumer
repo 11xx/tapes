@@ -517,7 +517,7 @@ def main() -> int:
     scratch_parent = Path(
         os.environ.get(
             "TAPES_DISCOVERY_CHECK_ROOT",
-            str(Path.home() / ".local/share/agent-work"),
+            str(Path.home() / ".cache" / "tapes-discovery-check"),
         )
     ).expanduser().resolve()
     if not below_home(scratch_parent):

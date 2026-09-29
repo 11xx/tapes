@@ -11,32 +11,37 @@ tapes                           # the workflow guide
 tapes show --latest --tail 40   # this project's newest session, no id needed
 tapes list                      # every harness, newest first
 tapes list --harness opencode --here
-tapes show ses_07e16cc8 --tail 20
-tapes show ses_07e16cc8 --json
-tapes events ses_07e16cc8 --name wait_agent --json
-tapes usage ses_07e16cc8 --json
-tapes stats ses_07e16cc8 --json
+tapes show ses_example --tail 20
+tapes show ses_example --json
+tapes events ses_example --name wait_agent --json
+tapes usage ses_example --json
+tapes stats ses_example --json
 
-tapes brief ses_07e16cc8
+tapes brief ses_example
 tapes endings --here --since 2026-01-01 --json
-tapes export ses_07e16cc8 --bundle /tmp/
+tapes export ses_example --bundle /tmp/
 ```
 
 ## Install
 
-Build from a local checkout with a Rust toolchain and Cargo on a Unix-like host.
-The checkout's `rust-toolchain.toml` pins Rust 1.97.0, which rustup installs on
+Build with a Rust toolchain and Cargo on a Unix-like host. From a local
+checkout, whose `rust-toolchain.toml` pins Rust 1.97.0 for rustup to install on
 first use:
 
 ```sh
 cargo install --path crates/tapes --locked
 ```
 
-For a published install, use `cargo install tapes-cli --locked`; add
-`--features zip` to either command when ZIP input support is wanted.
+Without a checkout, install from Git; the workspace requires Rust 1.97 or newer:
+
+```sh
+cargo install --git https://github.com/11xx/tapes tapes-cli --locked
+```
+
+Add `--features zip` to either command when ZIP input support is wanted.
 
 Ensure Cargo's binary directory is on `PATH`, then run `tapes` for the workflow
-guide. The published package is `tapes-cli` and installs the `tapes` binary.
+guide. The package is `tapes-cli` and installs the `tapes` binary.
 ZIP input support is default-off; install with `--features zip` when archive
 inputs or ZIP evidence are needed. Without that feature, plain JSON files and
 directories remain available and a ZIP input reports the enabling command.
@@ -61,35 +66,15 @@ returns native identity and store metadata; transcript normalization remains
 in `tapes-core`, and a resolved recording does not establish that a harness
 is live or that a consumer can deliver an action to it.
 
-A consumer declares the library by version:
+A consumer declares the library as a Git dependency pinned to a full
+revision:
 
 ```toml
-tapes-discovery = "2026.9.25"
+tapes-discovery = { git = "https://github.com/11xx/tapes", rev = "<full revision>" }
 ```
 
-and, until the crate is published, point that requirement at a local checkout
-from the machine's Cargo configuration rather than from the consuming
-project's manifest, so no machine path enters the consumer's history:
-
-```toml
-# $CARGO_HOME/config.toml
-[patch.crates-io]
-tapes-discovery = { path = "/path/to/tapes/crates/tapes-discovery" }
-```
-
-Cargo reads its user-wide configuration from `$CARGO_HOME/config.toml`, which
-is `~/.cargo/config.toml` only when `CARGO_HOME` is unset. A relative path in
-that file resolves from the parent of `CARGO_HOME`, so an absolute path is the
-unambiguous choice.
-
-A consumer built without that override fails to resolve the crate, which is
-the intended state until the tapes crates are published.
-
-Cargo does not pin a path dependency's source revision. Record the exact Tapes
-checkout revision beside the consuming project's dependency change and rerun
-the independent consumer check there. Portable dependency distribution is
-separate release work; the local path does not select a registry package or
-remote branch.
+A consumer that also uses `tapes-core` must take both crates from the same Git
+source and revision, so its dependency graph holds one copy of each.
 
 Run `scripts/check-discovery-consumer` from the Tapes checkout with Python
 3.11+ and Cargo available to build an independent consumer, inspect the crate
@@ -102,7 +87,7 @@ home and empty executable search path, then removes the temporary files. It
 requires Python 3 and a built binary:
 
 ```sh
-cargo build -p tapes
+cargo build -p tapes-cli
 python3 scripts/fixture-demo
 ```
 

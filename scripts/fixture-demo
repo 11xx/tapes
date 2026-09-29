@@ -9,7 +9,7 @@ import tempfile
 repo = pathlib.Path(__file__).resolve().parents[1]
 binary = pathlib.Path(sys.argv[1]).resolve() if len(sys.argv) > 1 else repo / "target/debug/tapes"
 if not binary.is_file():
-    raise SystemExit("Build first with cargo build -p tapes, or pass the binary path.")
+    raise SystemExit("Build first with cargo build -p tapes-cli, or pass the binary path.")
 with tempfile.TemporaryDirectory(prefix="tapes-fixture-demo-") as directory:
     root = pathlib.Path(directory)
     sessions = root / "codex/sessions"

@@ -39,7 +39,7 @@ server, no session *writing* — `tapes` never mutates a harness's store.
 - Record behavior changes on their arc change via `arc changelog`. Never
   hand-edit `CHANGELOG.md`; the `[Unreleased]` block is generated.
 - `export GIT_EDITOR=true GIT_SEQUENCE_EDITOR=true` before any git command.
-  This machine's git editor is an emacsclient that blocks forever unattended.
+  An interactive editor blocks an unattended run.
 - Fixture-backed tests. Every backend passes the same normalization
   assertions against a per-harness fixture, including a malformed-line
   fixture per format. A parser that only works on one real session is not
