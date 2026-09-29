@@ -70,39 +70,21 @@ ambiguity, backend failures, and a failed higher-precedence shared store.
 `CandidatePage` carries its records, scan counts, completeness, unreadable IDs,
 and failures.
 
-## Local dependency
+## Dependency
 
 The package carries the workspace's calendar version and has no default features. Its
 normal dependencies are `libc` and `serde_json`; it has no dependency on
 `tapes-core`, `tapes-cli`, transcript, export, history, or usage code.
 
-A consumer declares the library by version:
+A consumer declares the library as a Git dependency pinned to a full
+revision:
 
 ```toml
-tapes-discovery = "2026.9.25"
+tapes-discovery = { git = "https://github.com/11xx/tapes", rev = "<full revision>" }
 ```
 
-and, until the crate is published, point that requirement at a local checkout
-from the machine's Cargo configuration rather than from the consuming
-project's manifest, so no machine path enters the consumer's history:
-
-```toml
-# $CARGO_HOME/config.toml
-[patch.crates-io]
-tapes-discovery = { path = "/path/to/tapes/crates/tapes-discovery" }
-```
-
-Cargo reads its user-wide configuration from `$CARGO_HOME/config.toml`, which
-is `~/.cargo/config.toml` only when `CARGO_HOME` is unset. A relative path in
-that file resolves from the parent of `CARGO_HOME`, so an absolute path is the
-unambiguous choice.
-
-A consumer built without that override fails to resolve the crate, which is
-the intended state until the tapes crates are published.
-
-`Cargo.lock` records the package version but does not pin a path dependency's
-git revision. Record the Tapes checkout revision alongside the consuming
-project's dependency change and rerun the external-consumer check there.
+A consumer that also uses `tapes-core` must take both crates from the same Git
+source and revision, so its dependency graph holds one copy of each.
 
 From the Tapes checkout, run `scripts/check-discovery-consumer` with Python
 3.11+ and Cargo available to build an external consumer, inspect the crate
