@@ -987,6 +987,8 @@ fn pi_call_event(block: &Value) -> ToolEvent {
         status: None,
         arguments: Bounded::retaining_value(&block["arguments"]),
         output: None,
+        read: crate::event::direct_read(block["name"].as_str(), &block["arguments"]),
+        returned_read: None,
         completed_ts: None,
         invocations: crate::event::invocations_from_tool(
             block["name"].as_str(),
@@ -1008,6 +1010,11 @@ fn pi_result_event(message: &Value) -> ToolEvent {
         status: (message["isError"].as_bool() == Some(true)).then(|| "error".to_owned()),
         arguments: None,
         output: Bounded::from_value(&message["content"]),
+        read: None,
+        returned_read: Some(crate::event::returned_read(
+            &message["content"],
+            message["isError"].as_bool().map(|error| !error),
+        )),
         completed_ts: None,
         invocations: Vec::new(),
         artifact_references: crate::event::artifact_references(&message["content"]),

@@ -734,6 +734,15 @@ impl SessionQueryArgs {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Report one recording's custody as tapes-capture/1. Installed harness
+    /// stores are unpinned; an export alone does not pin a native recording.
+    Capture {
+        /// Exact session id, an unambiguous prefix, or `self`.
+        session: String,
+        /// Render the versioned report as JSON.
+        #[arg(long)]
+        json: bool,
+    },
     /// List available sessions. Human output keeps the exact session id in
     /// the ID column and puts any present-tense state in a separate LIVE
     /// column. If harness-status is unavailable, malformed, oversized, or
@@ -937,7 +946,7 @@ enum Command {
         program: Vec<String>,
         /// Stream the whole recording instead of its bounded tail, writing
         /// each event as it is paired so memory follows the calls awaiting a
-        /// result rather than the file; with --json the same tapes-events/7
+        /// result rather than the file; with --json the same tapes-events/8
         /// object is written event by event. The recording is read twice, the
         /// second read replaying the first; --tail, --name, --call-id, and
         /// --program select as they do over a bounded read. Installed Claude,
@@ -945,7 +954,8 @@ enum Command {
         /// updated in place and a second read may not repeat the first.
         #[arg(long, conflicts_with = "read_bytes")]
         full: bool,
-        /// Render the versioned tapes-events/7 object as JSON.
+        /// Render the versioned tapes-events/8 object as JSON. Each read call
+        /// includes its recorded path and range, outcome, and returned-text digest.
         #[arg(long)]
         json: bool,
         /// Publish each tool call's complete recorded argument text in
@@ -1282,6 +1292,24 @@ fn dispatch(cli: Cli) -> Result<()> {
         apply_self(selector, remote.as_deref())?;
     }
     match command {
+        Command::Capture { session, json } => {
+            let session = if session == self_token::TOKEN {
+                let resolved = self_token::resolve(&agent_tapes_core::backend::backends())?;
+                eprintln!("Note: {}.", resolved.report());
+                resolved.id
+            } else {
+                session
+            };
+            let report = agent_tapes_core::capture(Selection::Id(&session))?;
+            if json {
+                println!("{}", serde_json::to_string(&report)?);
+            } else {
+                println!(
+                    "{} {} {} {}",
+                    report.harness, report.session, report.store_path_class, report.state
+                );
+            }
+        }
         Command::List {
             harness,
             scope,

@@ -2128,6 +2128,21 @@ fn codex_tool_event(payload: &Value, subtype: &str) -> ToolEvent {
         output: (!call)
             .then(|| Bounded::from_value(&payload["output"]))
             .flatten(),
+        read: call
+            .then(|| {
+                matches!(
+                    payload["name"].as_str(),
+                    Some("exec_command" | "shell_command")
+                )
+                .then(|| {
+                    argument_value["cmd"]
+                        .as_str()
+                        .and_then(crate::event::shell_read)
+                })
+                .flatten()
+            })
+            .flatten(),
+        returned_read: (!call).then(|| codex_returned_read(&payload["output"])),
         completed_ts: None,
         invocations: if call {
             crate::event::invocations_from_tool(
@@ -2150,6 +2165,29 @@ fn codex_tool_event(payload: &Value, subtype: &str) -> ToolEvent {
         artifact_consumptions: Vec::new(),
         self_contained: false,
     }
+}
+
+fn codex_returned_read(output: &Value) -> crate::event::ReturnedRead {
+    let Some(text) = output.as_str() else {
+        return crate::event::returned_read(output, None);
+    };
+    let status = text
+        .lines()
+        .find_map(|line| line.strip_prefix("Process exited with code "))
+        .and_then(|code| code.parse::<i64>().ok())
+        .map(|code| code == 0);
+    let bytes = text
+        .split_once("\nOutput:\n")
+        .or_else(|| text.split_once("\nFinal output:\n"))
+        .map(|(_, body)| body)
+        .or_else(|| (!text.starts_with("Chunk ID:")).then_some(text));
+    bytes.map_or(
+        crate::event::ReturnedRead {
+            succeeded: status,
+            sha256: None,
+        },
+        |bytes| crate::event::returned_read(&Value::String(bytes.to_owned()), status),
+    )
 }
 
 fn codex_runtime_tool_event(item: &Value, completed: bool, completed_only: bool) -> ToolEvent {
@@ -2182,6 +2220,20 @@ fn codex_runtime_tool_event(item: &Value, completed: bool, completed_only: bool)
                 .find_map(|key| Bounded::from_value(&item[key]))
             })
             .flatten(),
+        read: (completed_only || !completed)
+            .then(|| {
+                item["command"]
+                    .as_str()
+                    .or_else(|| item["cmd"].as_str())
+                    .and_then(crate::event::shell_read)
+            })
+            .flatten(),
+        returned_read: completed.then(|| {
+            crate::event::returned_read(
+                &item["stdout"],
+                item["exit_code"].as_i64().map(|code| code == 0),
+            )
+        }),
         completed_ts: completed
             .then(|| timestamp(&item["completed_at"]))
             .flatten(),

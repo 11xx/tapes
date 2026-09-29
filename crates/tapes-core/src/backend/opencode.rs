@@ -2159,6 +2159,14 @@ fn opencode_tool_event(part: &Value) -> ToolEvent {
             .into_iter()
             .find_map(|field| Bounded::from_value(&state[field]))
     };
+    let returned = if status.as_deref() == Some("error") {
+        [&state["error"], &state["output"], &state["content"]]
+    } else {
+        [&state["content"], &state["output"], &state["error"]]
+    }
+    .into_iter()
+    .find(|value| !value.is_null())
+    .unwrap_or(&Value::Null);
     ToolEvent {
         kind: EventKind::ToolCall,
         subtype: "tool".to_owned(),
@@ -2170,9 +2178,17 @@ fn opencode_tool_event(part: &Value) -> ToolEvent {
             .as_str()
             .or_else(|| part["id"].as_str())
             .map(str::to_owned),
-        status,
+        status: status.clone(),
         arguments: Bounded::retaining_value(&state["input"]),
         output,
+        read: crate::event::direct_read(
+            part["name"].as_str().or_else(|| part["tool"].as_str()),
+            &state["input"],
+        ),
+        returned_read: Some(crate::event::returned_read(
+            returned,
+            status.as_deref().map(|status| status == "completed"),
+        )),
         completed_ts: epoch_millis(&part["time"]["completed"]),
         invocations: crate::event::invocations_from_tool(
             part["name"].as_str().or_else(|| part["tool"].as_str()),

@@ -190,7 +190,14 @@ records one: Claude's message `uuid`, pi's entry `id`, OpenCode's part `id`
 (its message `id` where the read carries no part ids), and Codex's
 `payload.id` where a response item carries one. Several turns share it when
 one record yields a message, its reasoning, and its tool calls; the turns of
-one OpenCode message share its id as `record_ref.native_id` instead.
+one OpenCode message share its id as `record_ref.native_id` instead. A tool
+event whose record has no native id uses `record-sha256:<hex>`, derived from
+its source domain, byte span or pointer, and part index without the source
+revision or read ordinal. It is stable across repeated exports and different
+bounded windows of the same recording. `record_ref.native_id` remains absent
+in that case, so a consumer can distinguish derived identity from a native
+one. Multiple parts of a native message may share its recorded `native_id`;
+an event's `event_id` identifies the individual tool call or result.
 
 `Turn.metadata` is an `EntryMetadata` object when a supplied provider records
 metadata for the native entry. It carries optional `engine`, `status`, and
@@ -331,10 +338,27 @@ An unpaired event carries one `incomplete` reason:
 | `call-before-read-bound` | A `file-tail` or `record-page` source bound can hide the call for this result. |
 | `call-not-recorded` | The read reached the recording's start and contains no call for this result; a Codex completion record that carries its own invocation is a complete pair instead. |
 
-`tapes events` serializes the projection as `tapes-events/7`. The object holds
+`tapes events` serializes the projection as `tapes-events/8`. The object holds
 the same `Session` representation as `show`, the event records, complete and
 incomplete pair counts, and the transcript's truncation and notes. A
-`--tail N` window keeps events whose turn ordinals are in the final `N` turns;
+tool event's `event_id` is `sha256:` over its record's source domain, native
+id, span or pointer, part index, and call or result kind. It excludes the
+source revision and ordinal, so overlapping read windows give the same event
+the same identity. A recognized file read carries `read.path` exactly as the
+tool recorded it, `read.lines` when both bounds are recorded, and `read.whole`
+only for a whole-file form. Omitted range and whole fields mean unknown
+coverage. A paired result supplies `read.succeeded` when the tool recorded an
+outcome and `read.sha256` over the UTF-8 bytes of the returned text when that
+text is available and the call did not fail. The digest identifies the tool's
+returned text, which may contain line labels or formatting; it does not claim
+to hash the current file on disk. Only direct Claude and Pi read calls and
+literal Codex `cat` or `sed -n` shell reads are classified.
+`tapes capture <id> --json` returns `tapes-capture/1` with the session id,
+harness, harness store path class, and custody state. Harness recordings are
+`unpinned`; exporting a bundle does not retain native recording bytes under
+tapes' control.
+
+The `--tail N` window keeps events whose turn ordinals are in the final `N` turns;
 the window metadata therefore uses the same turn coordinates as `show` rather
 than counting event records. Name and call-id filters apply after pairing.
 `pairs.complete` counts distinct complete pairs represented by at least one
@@ -358,7 +382,7 @@ session, whose messages are updated in place.
 
 ```json
 {
-  "schema": "tapes-events/7",
+  "schema": "tapes-events/8",
   "session": {
     "id": "session-1",
     "source": {
@@ -1169,11 +1193,11 @@ its `notes`, with the meanings they have on a transcript.
 
 ## JSON contract
 
-A serialized transcript is a `tapes-session/12` object:
+A serialized transcript is a `tapes-session/13` object:
 
 ```json
 {
-  "schema": "tapes-session/12",
+  "schema": "tapes-session/13",
   "session": {
     "id": "session-1",
     "source": {
@@ -1266,9 +1290,9 @@ A bundle's `.context.md` holds the exchange that `show --exchange` returns —
 the `operator` and `assistant` turns — of those a selection keeps; its `.json`
 and `.trace.md` hold every kept turn.
 
-A bundle's `.json` is one compact `tapes-session/12` object: the members `show
+A bundle's `.json` is one compact `tapes-session/13` object: the members `show
 --json` writes, in the same order, followed by `git` when the session
-directory resolves and `events`, the `tapes-events/7` records paired across
+directory resolves and `events`, the `tapes-events/8` records paired across
 every kept turn. `export --full` writes the object `show --full --json` writes,
 with the same whole-read evidence, plus those two members; its `events` are
 the ones `events` pairs over a read that covers the whole file. The recording

@@ -1,0 +1,5 @@
+{"type":"session","version":3,"id":"session-read-pi","timestamp":"2026-01-01T10:00:00Z","cwd":"/fixture/project"}
+{"type":"message","id":"assistant-1","parentId":null,"timestamp":"2026-01-01T10:00:01Z","message":{"role":"assistant","content":[{"type":"toolCall","id":"tool-read-1","name":"read","arguments":{"path":"src/x.rs","offset":10,"limit":31}}]}}
+{"type":"message","id":"result-1","parentId":"assistant-1","timestamp":"2026-01-01T10:00:02Z","message":{"role":"toolResult","toolCallId":"tool-read-1","toolName":"read","content":[{"type":"text","text":"fixture line\n"}],"isError":false}}
+{"type":"message","id":"assistant-2","parentId":"result-1","timestamp":"2026-01-01T10:00:03Z","message":{"role":"assistant","content":[{"type":"toolCall","id":"tool-read-2","name":"read","arguments":{"path":"src/unknown.rs","offset":10}}]}}
+{"type":"message","id":"result-2","parentId":"assistant-2","timestamp":"2026-01-01T10:00:04Z","message":{"role":"toolResult","toolCallId":"tool-read-2","toolName":"read","content":[{"type":"text","text":"No such file"}],"isError":true}}

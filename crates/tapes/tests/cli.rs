@@ -83,6 +83,26 @@ fn fixture_store(name: &str) -> (PathBuf, PathBuf) {
     (root.clone(), root.join("home"))
 }
 
+#[test]
+fn capture_reports_the_selected_store_without_claiming_a_pin() {
+    let (codex_home, home) = fixture_store("capture");
+    let mut command = tapes();
+    command.args(["capture", "00000000-0000-0000-0000-000000000001", "--json"]);
+    with_fixture_env(&mut command, &codex_home, &home, &codex_home);
+    let output = command.output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["schema"], "tapes-capture/1");
+    assert_eq!(report["harness"], "codex");
+    assert_eq!(report["store_path_class"], "codex-session-jsonl");
+    assert_eq!(report["state"], "unpinned");
+    fs::remove_dir_all(codex_home).unwrap();
+}
+
 /// `self` is the caller's own session, named by the variable its harness
 /// exports: it is reported on stderr, it reaches the session before it under
 /// `--latest --exclude self`, and it refuses when no variable is set, when the
@@ -2748,7 +2768,7 @@ fn supplied_citation_descriptors_are_bounded_in_show_and_export() {
         .unwrap();
     assert!(shown.status.success());
     let shown: Value = serde_json::from_slice(&shown.stdout).unwrap();
-    assert_eq!(shown["schema"], "tapes-session/12");
+    assert_eq!(shown["schema"], "tapes-session/13");
     let citation = &shown["artifacts"][0]["citations"][0];
     assert_eq!(citation["uri"]["chars"], 5_024);
     assert_eq!(
@@ -2789,7 +2809,7 @@ fn supplied_citation_descriptors_are_bounded_in_show_and_export() {
         })
         .unwrap();
     let bundle_json: Value = serde_json::from_slice(&fs::read(json_path).unwrap()).unwrap();
-    assert_eq!(bundle_json["schema"], "tapes-session/12");
+    assert_eq!(bundle_json["schema"], "tapes-session/13");
     assert_eq!(
         bundle_json["artifacts"][0]["citations"][0]["title"]["text"]
             .as_str()
@@ -3093,7 +3113,7 @@ fn events_help_explains_pairing_filters_and_the_default_bound() {
     assert!(help.contains("--call-id <ID>"), "{help}");
     assert!(help.contains("--program <PROGRAM>"), "{help}");
     assert!(help.contains("--full-arguments"), "{help}");
-    assert!(help.contains("tapes-events/7"), "{help}");
+    assert!(help.contains("tapes-events/8"), "{help}");
 }
 
 #[test]
@@ -3146,7 +3166,7 @@ fn events_json_answers_call_counts_and_incomplete_calls_without_raw_text() {
     );
     let value: Value = serde_json::from_slice(&output.stdout).unwrap();
 
-    assert_eq!(value["schema"], "tapes-events/7");
+    assert_eq!(value["schema"], "tapes-events/8");
     assert_eq!(value["session"]["id"], id);
     assert!(value.get("truncation").is_none(), "{value}");
     assert_eq!(
@@ -3628,7 +3648,7 @@ fn events_expose_nested_declarations_and_qualified_artifact_consumption() {
         String::from_utf8_lossy(&output.stderr)
     );
     let value: Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(value["schema"], "tapes-events/7");
+    assert_eq!(value["schema"], "tapes-events/8");
     let events = value["events"].as_array().unwrap();
     let shell_call = events
         .iter()
@@ -6700,7 +6720,7 @@ fn show_full_streams_a_claude_recording_past_the_read_bound() {
 
     let json: Value =
         serde_json::from_str(&stdout(&["show", "full-claude", "--full", "--json"])).unwrap();
-    assert_eq!(json["schema"], "tapes-session/12");
+    assert_eq!(json["schema"], "tapes-session/13");
     assert_eq!(json["turns"].as_array().unwrap().len(), 50);
     assert_eq!(json["turns"][0]["text"], "opening request");
     assert_eq!(json["turns"][49]["ordinal"], 49);
@@ -10122,7 +10142,7 @@ fn events_full_arguments_opt_in_returns_the_complete_argument_text() {
 
     let bounded: Value =
         serde_json::from_slice(&run(&["events", "session-pi-arguments", "--json"])).unwrap();
-    assert_eq!(bounded["schema"], "tapes-events/7");
+    assert_eq!(bounded["schema"], "tapes-events/8");
     let arguments = arguments_of(&bounded);
     assert_eq!(arguments["chars"], total);
     assert_eq!(
@@ -10147,7 +10167,7 @@ fn events_full_arguments_opt_in_returns_the_complete_argument_text() {
         let mut request = vec!["events", "session-pi-arguments"];
         request.extend(extra.iter().copied());
         let value: Value = serde_json::from_slice(&run(&request)).unwrap();
-        assert_eq!(value["schema"], "tapes-events/7", "{request:?}");
+        assert_eq!(value["schema"], "tapes-events/8", "{request:?}");
         let arguments = arguments_of(&value);
         assert_eq!(arguments["chars"], total, "{request:?}");
         assert_eq!(
@@ -10451,7 +10471,7 @@ fn show_remote_never_joins_the_local_liveness_registry() {
         String::from_utf8_lossy(&output.stderr)
     );
     let value: Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(value["schema"], "tapes-session/12");
+    assert_eq!(value["schema"], "tapes-session/13");
     assert_eq!(value["session"]["id"], CODEX_ONE_ID);
     assert_eq!(value["session"]["source"]["replica"], "replica-host");
     assert!(
@@ -10586,7 +10606,7 @@ fn a_replica_that_cannot_answer_names_the_cause_and_the_destination() {
             "schema",
             "#!/bin/sh\necho '{\"schema\":\"tapes-list/99\",\"sort\":\"newest\",\"sessions\":[],\"unavailable\":[],\"unreadable\":[],\"unsearched\":[],\"scanned\":0,\"scan_truncated\":false}'\nexit 0\n",
             "unsupported remote schema tapes-list/99; this reader reads tapes-list/6",
-            "unsupported remote schema tapes-list/99; this reader reads tapes-session/12",
+            "unsupported remote schema tapes-list/99; this reader reads tapes-session/13",
         ),
         (
             "empty",
@@ -10812,7 +10832,7 @@ fn export_remote_runs_the_replica_export_and_tags_every_path() {
         .unwrap(),
     )
     .unwrap();
-    assert_eq!(written["schema"], "tapes-session/12");
+    assert_eq!(written["schema"], "tapes-session/13");
     assert!(
         !written["events"].as_array().unwrap().is_empty(),
         "the replica's export held no paired tool events: {written}"

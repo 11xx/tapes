@@ -1365,6 +1365,15 @@ fn claude_tool_event(block: &Value, subtype: &str) -> ToolEvent {
         output: (!call)
             .then(|| Bounded::from_value(&block["content"]))
             .flatten(),
+        read: call
+            .then(|| crate::event::direct_read(block["name"].as_str(), &block["input"]))
+            .flatten(),
+        returned_read: (!call).then(|| {
+            crate::event::returned_read(
+                &block["content"],
+                block["is_error"].as_bool().map(|error| !error),
+            )
+        }),
         completed_ts: None,
         invocations: if call {
             crate::event::invocations_from_tool(
