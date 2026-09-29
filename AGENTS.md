@@ -64,11 +64,11 @@ server, no session *writing* — `tapes` never mutates a harness's store.
   changelog's top released heading carry the same string, and the release head
   is tagged `v<version>`. A cut version is published later, unchanged, by the
   operator.
-- The bare name `tapes` on crates.io belongs to an unrelated project, so the
-  published package takes another name while the binary it installs, the
-  repository, and the command stay `tapes`.
-- `tapes-core` is published before `tapes`, which depends on it by version.
-  A path dependency without a version requirement cannot be published at all.
+- The packages are `agent-tapes`, `agent-tapes-core`, and
+  `agent-tapes-discovery`, distributed by Git; the command is `tapes`.
+- Every package is `publish = false`, inherited from the workspace, so
+  publishing takes a deliberate manifest edit. Workspace path dependencies
+  keep a version requirement, which publishing needs.
 - `cargo publish` is the operator's act and is never run from a session; a
   session may run `cargo publish --dry-run`.
 
