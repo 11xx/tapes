@@ -320,8 +320,7 @@ The format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Removed
 
-- The chain plan and per-slice briefs are no longer shipped in `docs/`;
-  they live in the project journal and the arc ledger.
+- The chain plan and per-slice briefs are no longer shipped in `docs/`.
 
 ### Fixed
 
