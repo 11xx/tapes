@@ -9,13 +9,13 @@
         "providerID": "opencode-go",
         "variant": "max"
       },
-      "cost": 2.9737362000000003,
+      "cost": 2.5,
       "tokens": {
-        "input": 132796,
-        "output": 36898,
-        "reasoning": 22925,
+        "input": 100000,
+        "output": 40000,
+        "reasoning": 20000,
         "cache": {
-          "read": 5593344,
+          "read": 5000000,
           "write": 0
         }
       },

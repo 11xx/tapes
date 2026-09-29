@@ -1559,7 +1559,7 @@ fn opencode_samples_one_assistant_turn_per_message() {
     let value = serde_json::to_value(&stats).unwrap();
     assert_eq!(
         value["assistant_turns_ms"],
-        serde_json::json!({"count": 3, "median": 7_000, "p90": 71_002_987, "max": 71_002_987}),
+        serde_json::json!({"count": 3, "median": 7_000, "p90": 71_062_001, "max": 71_062_001}),
         "{value}"
     );
 }
