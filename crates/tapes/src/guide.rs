@@ -27,6 +27,8 @@ START WITHOUT AN ID
   cannot read candidate rows or stores, the chosen readable session remains
   useful but every --latest view names the unreadable evidence and warns that
   newer activity may be hidden; a missing harness alone is not a warning.
+  A candidate with no recorded activity timestamp makes --latest refuse
+  rather than guess: file modification time is never substituted.
 
   "Most recent" is settled by recorded activity across the newest few sessions
   each store offers — but which ones those are is the store's own answer: file
@@ -88,9 +90,9 @@ FIND IT
   unsearched.
 
   File-backed harnesses may show a bounded first-meaningful-user-turn hint
-  prefixed with ~ when a harness recorded no title. JSON keeps that hint as
-  derived_title and leaves the recorded title absent; derived_title_truncated
-  says whether the hint was shortened. OpenCode's API-backed
+  prefixed with ~ when a harness recorded no title, cut at 96 characters. JSON
+  keeps that hint as derived_title and leaves the recorded title absent;
+  derived_title_truncated says whether the hint was shortened. OpenCode's API-backed
   listing does not fetch messages merely to invent titles, so title-less OpenCode
   title metadata stays absent in list, show, and export. Human timestamps use whole
   RFC 3339 seconds with Z; JSON keeps recorded precision. show compares store
@@ -98,6 +100,11 @@ FIND IT
   Whenever cost or tokens are present, JSON also carries accounting stating
   whether the figures are a recorded total or a sum of requests and whether
   they cover the session or only the bounded read window.
+
+  JSON omits a fact the harness did not record rather than writing it as
+  null, an empty string, or an invented default. A session
+  whose opening record the reader could not reach carries
+  start_uncertain: true: it began at or before its started_at.
 
   A full session id uses direct native lookup. A prefix is accepted only when
   bounded candidate coverage proves it unique; an ambiguous prefix lists its
@@ -115,6 +122,16 @@ FIND IT
   leaves model absent rather than inventing one.
   Show and export still fail when the session they were given cannot be
   resolved.
+
+  Each harness's store is found where the harness itself writes it, and the
+  harness's own variable moves it: claude under $CLAUDE_CONFIG_DIR/projects
+  (~/.claude/projects), codex under $CODEX_HOME/sessions (~/.codex/sessions),
+  pi under $PI_CODING_AGENT_SESSION_DIR or $PI_CODING_AGENT_DIR/sessions
+  (~/.pi/agent/sessions), and opencode in opencode.db and, when opencode2 is
+  installed, opencode-next.db under $XDG_DATA_HOME/opencode
+  (~/.local/share/opencode). A path is used as written, never expanded or
+  canonicalized, so an empty or relative one resolves from the current
+  directory.
 
   A session recorded in a directory that no longer exists cannot be placed in
   any project, so a scoped search will not find it. Its id still resolves.
@@ -161,6 +178,12 @@ READ A SUPPLIED EXPORT
   unread ID, which a record without a native ID cannot; an exact `--occurrence`
   can return the known projection with its gaps. Records parsed from a ZIP member that fails
   decompression or checksum verification are withheld rather than listed.
+
+  An occurrence and a supplied record_ref.domain identify one observation of
+  the input, keyed by the path as spelled and the file's identity, so they are
+  cursors and never a conversation's or record's persistent identity. What
+  survives the input moving is its bytes: read.record_sha256 holds the
+  SHA-256 of each span in read.records, in order.
 
   Source, member, pointer, and byte-span evidence stays attached to the
   normalized result. Scan, decoded, record, member, resident, and
@@ -230,7 +253,7 @@ PROBE BEFORE EXPORTING
   `truncation`: a `window` names how many turns were returned and how many
   earlier ones the --tail bound omitted, which a larger --tail or export
   recovers; `source` lists bounds the reader itself reached (a file tail, a
-  store page, cut turn text). Wider turn windows retain source bounds;
+  store page, cut turn text, gaps in a supplied input). Wider turn windows retain source bounds;
   `--read-bytes` widens the file tail (4MiB by default, at most 1GiB), `show
   --full` streams a whole session past it and past OpenCode's store page, and
   explicit page reads reach older Claude or Codex file history. `read`
@@ -240,7 +263,15 @@ PROBE BEFORE EXPORTING
   discharged only by a successful decode of that same record. A preceding
   newline lets an exact tail boundary retain its first record; a mid-record
   boundary records the discarded partial prefix. Alignment bytes are not
-  normalized coverage. A terminal observation records only native stop fields
+  normalized coverage. `read.unmapped` counts, by native record type, the
+  decoded records that became no turn: `declined` for types the reader leaves
+  out on purpose, such as accounting, headers, and records restating another
+  record's text, and `unrecognized` for every other type, whose content no
+  view shows. An empty object means every decoded record became a turn; an
+  absent one means that reader does not count. `read.reader` names the build
+  that produced the read, as `tapes --version` does on its second line: a
+  reader repair can change what the same source projects to under the same
+  schema version, and this is what tells the two apart. A terminal observation records only native stop fields
   reached by the read, including bounded nested Codex error fields, and never
   says that the session is stopped now or that the account is currently
   available. A later recorded token total remains independent. An empty text
@@ -573,6 +604,8 @@ CHILD RECORDINGS
   Read a Claude child's own transcript, usage and ending with its parent and
   reference retained. It is not an ordinary listed session; nested lineage
   remains uninspected and child activity is never added to parent totals.
+  The child's id is qualified as PARENT::CHILD, and a child whose recorded
+  native session ids do not name the parent, or name none, is refused.
   --full streams the child's whole recording: usage covers every turn, and the
   transcript and ending keep the newest --tail turns.
 HISTORICAL READS
