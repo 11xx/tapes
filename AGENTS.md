@@ -27,10 +27,11 @@ server, no session *writing* — `tapes` never mutates a harness's store.
 
 ## Working here
 
-- The CLI is the only workflow surface a caller needs: bare `tapes` teaches
-  the retrieval order and the judgment around it, and `--help` carries each
-  command's contract. Keep both accurate when behavior changes; there is no
-  external skill to fall back on. After integrating a CLI change, refresh the
+- The binary is the reference: bare `tapes` (the guide) teaches the
+  retrieval order and the judgment around it, and `tapes <command> --help`
+  carries each command's contract. There is no other documentation and no
+  external skill to fall back on, so a behaviour change updates the guide and
+  `--help` in the same change. After integrating a CLI change, refresh the
   installed binary: `cargo install --path crates/tapes --locked`.
 - The repo dogfoods arc: run non-trivial changes through
   `begin` → implement → `snapshot` → `review` → `verify --all` → `integrate`
@@ -48,8 +49,9 @@ server, no session *writing* — `tapes` never mutates a harness's store.
   named for the test rather than for the harness tests the parser and not the
   tool: pi's `<timestamp>_<uuid>.jsonl` is where its session id lives, and a
   fixture that skips that hid a resolver that could not read any pi session.
-- Verify a claim about a harness's format **before** writing it into code, a
-  comment, or `docs/formats/`. The formats are undocumented and drift.
+- Verify a claim about a harness's format against a real transcript
+  **before** writing it into a parser, a fixture, or a comment. The formats
+  are undocumented and drift.
 - **Build the binary and drive it before approving.** Every blocking defect
   this repo has had passed build, clippy, and the full test suite, and was
   visible only by running the thing against a real store.
@@ -75,8 +77,9 @@ server, no session *writing* — `tapes` never mutates a harness's store.
 
 ## Harness formats
 
-`docs/formats/` documents what each harness's store actually contains. The
-formats are undocumented by their harnesses and drift, so treat those files as
-a record of what was last verified, not as a spec — check a real transcript
-before relying on any claim in them, and update them in the change that
-learns something new.
+Each backend's parser and its synthetic fixtures under
+`crates/tapes-core/tests/fixtures/<harness>/` are the executable record of
+what that harness's store contains. The formats are undocumented by their
+harnesses and drift, so a fixture records what was last verified, not a spec.
+A change in a harness's format updates that harness's synthetic fixture and
+parser test in the same change.

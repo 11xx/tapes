@@ -955,7 +955,11 @@ enum Command {
         #[arg(long, conflicts_with = "read_bytes")]
         full: bool,
         /// Render the versioned tapes-events/8 object as JSON. Each read call
-        /// includes its recorded path and range, outcome, and returned-text digest.
+        /// includes its recorded path and range, outcome, and returned-text
+        /// digest. An unpaired event's `incomplete` is `no-result-in-read` when
+        /// the read ended before a result, `call-before-read-bound` when a
+        /// source bound can hide the call, or `call-not-recorded` when the read
+        /// reached the recording's start and holds no call.
         #[arg(long)]
         json: bool,
         /// Publish each tool call's complete recorded argument text in
@@ -1027,7 +1031,14 @@ enum Command {
         #[arg(long, conflicts_with = "read_bytes")]
         full: bool,
         /// Render the versioned tapes-stats/9 object, or tapes-stats-summary/5
-        /// for a selection, as JSON.
+        /// for a selection, as JSON. `warnings` names the limits of the read:
+        /// `read-window`, `tail-window`, `kind-unknown`, `kind-undeclared` (a
+        /// turn of a kind its harness declares it cannot record, so the
+        /// declaration or the reader is wrong), `incomplete-pairs`, and
+        /// `no-timestamps`. The median and p90 of `assistant_turns_ms` are the
+        /// samples at rank ceil(count / 2) and ceil(count * 9 / 10). A
+        /// selection none of whose sessions could be read still writes its
+        /// report, then exits non-zero.
         #[arg(long)]
         json: bool,
     },
@@ -1072,7 +1083,10 @@ enum Command {
         /// Retain a bounded recent suffix of Codex accounting observations.
         /// With no value, 200 rows are retained; the accepted range is 1..=10000.
         /// Rows are raw token observations, not guaranteed request identities;
-        /// source gaps are retained and counted once per distinct gap.
+        /// source gaps are retained and counted once per distinct gap. Rows
+        /// dropped by the row cap, the 8 MiB serialized budget, or their own
+        /// size are counted under `omissions`; aggregates and attribution still
+        /// cover the whole read.
         #[arg(
             long,
             value_name = "N",
@@ -1082,7 +1096,15 @@ enum Command {
         )]
         series: Option<Option<usize>>,
         /// Render the versioned tapes-usage/6 object, or tapes-usage-summary/4
-        /// for a selection, as JSON.
+        /// for a selection, as JSON. A Codex `session.model_observation` says
+        /// whether more than one model and effort was observed (`mixed`) and
+        /// whether a gap or budget kept the split incomplete
+        /// (`attribution_uncertain`); the session model is then only the latest
+        /// selection, not the owner of the whole total. A summary keeps one
+        /// `partitions` row per harness and accounting basis and coverage; a
+        /// group or total whose counters span more than one of them sets
+        /// `mixed_accounting: true` and omits `tokens` and `cost` rather than
+        /// add incomparable figures.
         #[arg(long)]
         json: bool,
     },
@@ -1103,7 +1125,8 @@ enum Command {
         /// out of the tail.
         #[arg(long, value_name = "N", default_value_t = DEFAULT_BRIEF_TAIL)]
         tail: usize,
-        /// Render the versioned tapes-brief/7 object as JSON.
+        /// Render the versioned tapes-brief/7 object as JSON. Each `in_flight`
+        /// list holds at most 20 entries, with a note when the bound cut it.
         #[arg(long)]
         json: bool,
     },
@@ -1168,7 +1191,10 @@ enum Command {
         /// attached context stay out of it.
         #[arg(long)]
         text: bool,
-        /// Render the versioned tapes-endings/6 object as JSON.
+        /// Render the versioned tapes-endings/6 object as JSON. An ending's
+        /// `source.coverage` is `read-window` when a source bound withheld
+        /// turns, `window` when only the --tail window omitted any, and
+        /// `session` otherwise.
         #[arg(long)]
         json: bool,
     },
