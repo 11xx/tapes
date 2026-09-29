@@ -24,7 +24,9 @@ tapes export ses_07e16cc8 --bundle /tmp/
 
 ## Install
 
-Build from a local checkout with a Rust toolchain and Cargo on a Unix-like host:
+Build from a local checkout with a Rust toolchain and Cargo on a Unix-like host.
+The checkout's `rust-toolchain.toml` pins Rust 1.97.0, which rustup installs on
+first use:
 
 ```sh
 cargo install --path crates/tapes --locked
