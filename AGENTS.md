@@ -66,11 +66,12 @@ server, no session *writing* — `tapes` never mutates a harness's store.
   operator.
 - The packages are `agent-tapes`, `agent-tapes-core`, and
   `agent-tapes-discovery`, distributed by Git; the command is `tapes`.
-- Every package is `publish = false`, inherited from the workspace, so
-  publishing takes a deliberate manifest edit. Workspace path dependencies
-  keep a version requirement, which publishing needs.
-- `cargo publish` is the operator's act and is never run from a session; a
-  session may run `cargo publish --dry-run`.
+- The packages are not published: every package inherits `publish = false`
+  from `[workspace.package]`, and publishing is turned on only by a deliberate
+  edit of `publish` there. Workspace path dependencies keep a version
+  requirement, which publishing needs.
+- `cargo publish` is the operator's act and is never run from a session.
+  `cargo package` remains the local check that a crate archive builds.
 
 ## Harness formats
 
