@@ -9,6 +9,26 @@ The format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [2026.9.29] - 2026-09-29
+
+### Changed
+
+- The packages are renamed `agent-tapes`, `agent-tapes-core` and
+  `agent-tapes-discovery`, with library paths `agent_tapes_core` and
+  `agent_tapes_discovery`. The command and binary stay `tapes`. Install
+  from a release tag (tags are `vYYYY.M.D`) with `cargo install --git`
+  and the package name `agent-tapes`. The reader identity in reads,
+  export manifests and `tapes --version` now names `agent-tapes-core`.
+  Every package is `publish = false`.
+
+- tapes installs from its Git repository with `cargo install --git`, and
+  consumers of the discovery library pin it as a Git dependency at a full
+  revision. Every workspace crate declares `rust-version = "1.97"`, so an
+  older toolchain is refused up front.
+- `scripts/check-discovery-consumer` defaults its scratch root to
+  `~/.cache/tapes-discovery-check`; `TAPES_DISCOVERY_CHECK_ROOT` still
+  overrides it.
+
 ## [2026.9.25] - 2026-09-25
 
 ### Added
