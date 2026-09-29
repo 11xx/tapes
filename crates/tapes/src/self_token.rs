@@ -6,8 +6,8 @@
 //! unasked. What it became is always reported, it fails when no variable
 //! answers, and the id it names must be one an installed store holds.
 
+use agent_tapes_core::backend::Backend;
 use anyhow::{anyhow, Result};
-use tapes_core::backend::Backend;
 
 /// The token a caller writes in place of its own session id.
 pub const TOKEN: &str = "self";
@@ -75,7 +75,7 @@ pub fn detect(var: impl Fn(&str) -> Option<String>) -> Result<SelfSession> {
 /// store holds as a session of the harness that exported it is refused.
 pub fn resolve(backends: &[Box<dyn Backend>]) -> Result<SelfSession> {
     let detected = detect(|variable| std::env::var(variable).ok())?;
-    let held = tapes_core::resolve_session(backends, &detected.id)
+    let held = agent_tapes_core::resolve_session(backends, &detected.id)
         .ok()
         .filter(|resolved| {
             resolved.session.id == detected.id && resolved.session.harness() == detected.harness

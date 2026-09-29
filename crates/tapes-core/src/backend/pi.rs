@@ -23,7 +23,7 @@ use crate::model::{
     UserDefault,
 };
 use crate::usage::{ModelUsage, UsageDetail};
-use tapes_discovery::{Harness as NativeHarness, IdentityBasis, NativeSession, NativeStore};
+use agent_tapes_discovery::{Harness as NativeHarness, IdentityBasis, NativeSession, NativeStore};
 
 #[derive(Clone, Debug)]
 pub struct PiBackend {

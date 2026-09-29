@@ -6,34 +6,34 @@ mod self_token;
 use std::ffi::{OsStr, OsString};
 use std::path::PathBuf;
 
-use anyhow::{anyhow, Result};
-use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
-use serde::Serialize;
-use tapes_core::brief::{Brief, OpenCall, OpenChild, DEFAULT_BRIEF_TAIL, TAIL_TEXT_CHARS};
-use tapes_core::bundle::{Bundle, BundleFile, GitContext};
-use tapes_core::endings::{Ending, EndingsReport, DEFAULT_ENDINGS_TAIL};
-use tapes_core::event::{EventKind, EventRecord, EventTranscript, Incomplete};
-use tapes_core::lineage::{ChildRef, LineageView};
-use tapes_core::model::{
+use agent_tapes_core::brief::{Brief, OpenCall, OpenChild, DEFAULT_BRIEF_TAIL, TAIL_TEXT_CHARS};
+use agent_tapes_core::bundle::{Bundle, BundleFile, GitContext};
+use agent_tapes_core::endings::{Ending, EndingsReport, DEFAULT_ENDINGS_TAIL};
+use agent_tapes_core::event::{EventKind, EventRecord, EventTranscript, Incomplete};
+use agent_tapes_core::lineage::{ChildRef, LineageView};
+use agent_tapes_core::model::{
     human_bytes, human_speaker, human_timestamp, human_title, speaker, Accounting, AccountingBasis,
     AccountingCoverage, Cost, LiveState, Projection, Session, SourceBound, SourceDescriptor,
     Tokens, Transcript, Truncation, Turn, TurnKind, TurnSelection,
 };
-use tapes_core::stats::{
+use agent_tapes_core::stats::{
     AssistantTurnDurations, Coverage, LineageStats, StatsView, TimeStats, ToolNameStats, ToolStats,
     TurnKindCounts, UsageStats, Warning,
 };
-use tapes_core::stats_summary::SessionRead;
-use tapes_core::usage::{
+use agent_tapes_core::stats_summary::SessionRead;
+use agent_tapes_core::usage::{
     Durations, GroupBy, GroupKey, ModelUsage, ObservationClassification, RateLimits, RateWindow,
     TurnCoverage, UsageAttribution, UsageObservation, UsageObservationOptions, UsageOptions,
     UsageTally, UsageView,
 };
-use tapes_core::{BulkExport, Selection, UsageSummary, Where};
+use agent_tapes_core::{BulkExport, Selection, UsageSummary, Where};
+use anyhow::{anyhow, Result};
+use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
+use serde::Serialize;
 
-use tapes_core::backend::Backend;
-use tapes_core::byte_size::ByteSize;
-use tapes_core::input::{
+use agent_tapes_core::backend::Backend;
+use agent_tapes_core::byte_size::ByteSize;
+use agent_tapes_core::input::{
     InputBackend, InputFormat, InputOptions, DEFAULT_DECODED_BYTES, DEFAULT_OUTPUT_BYTES,
     DEFAULT_RECORD_BYTES, DEFAULT_RESIDENT_BYTES, DEFAULT_SCAN_BYTES,
 };
@@ -44,7 +44,7 @@ enum SortArg {
     Oldest,
 }
 
-impl From<SortArg> for tapes_core::ListSort {
+impl From<SortArg> for agent_tapes_core::ListSort {
     fn from(sort: SortArg) -> Self {
         match sort {
             SortArg::Newest => Self::Newest,
@@ -239,7 +239,7 @@ impl InputArgs {
 
     fn backends(&self) -> Result<Vec<Box<dyn Backend>>> {
         if !self.supplied() {
-            return Ok(tapes_core::backend::backends());
+            return Ok(agent_tapes_core::backend::backends());
         }
         Ok(vec![Box::new(InputBackend::new(self.options()?)?)])
     }
@@ -317,8 +317,8 @@ impl ReadArgs {
 
     fn backends(&self) -> Result<Vec<Box<dyn Backend>>> {
         match self.read_bytes {
-            Some(bytes) => tapes_core::backend::backends_with_read_bytes(bytes.get()),
-            None => Ok(tapes_core::backend::backends()),
+            Some(bytes) => agent_tapes_core::backend::backends_with_read_bytes(bytes.get()),
+            None => Ok(agent_tapes_core::backend::backends()),
         }
     }
 }
@@ -387,7 +387,7 @@ fn apply_self(selector: &mut dyn SelfSelectable, remote: Option<&str>) -> Result
             "self names the caller's own installed session and selects nothing from a supplied input"
         ));
     }
-    let resolved = self_token::resolve(&tapes_core::backend::backends())?;
+    let resolved = self_token::resolve(&agent_tapes_core::backend::backends())?;
     eprintln!("Note: {}.", resolved.report());
     for id in session.iter_mut().chain(exclude.iter_mut()) {
         if id == self_token::TOKEN {
@@ -531,7 +531,7 @@ impl SelectionArgs {
         if !self.latest {
             return Ok(Vec::new());
         }
-        tapes_core::selection_warnings_with_backends(backends, self.selection())
+        agent_tapes_core::selection_warnings_with_backends(backends, self.selection())
     }
 }
 
@@ -580,20 +580,20 @@ struct SessionQueryArgs {
     #[arg(
         long,
         value_name = "TIMESTAMP",
-        value_parser = tapes_core::parse_activity_timestamp,
+        value_parser = agent_tapes_core::parse_activity_timestamp,
         conflicts_with_all = ["session", "latest", "title", "occurrence"]
     )]
-    since: Option<tapes_core::ActivityTimestamp>,
+    since: Option<agent_tapes_core::ActivityTimestamp>,
     /// Keep sessions whose newest recorded activity, `last_activity_at`,
     /// is before this timestamp. RFC 3339 timestamps with an offset and
     /// bare YYYY-MM-DD dates are accepted.
     #[arg(
         long,
         value_name = "TIMESTAMP",
-        value_parser = tapes_core::parse_activity_timestamp,
+        value_parser = agent_tapes_core::parse_activity_timestamp,
         conflicts_with_all = ["session", "latest", "title", "occurrence"]
     )]
-    until: Option<tapes_core::ActivityTimestamp>,
+    until: Option<agent_tapes_core::ActivityTimestamp>,
     /// Order the selection by `last_activity_at` before --limit takes
     /// from it: newest first by default, or oldest first.
     #[arg(long, value_enum, value_name = "ORDER", conflicts_with_all = ["session", "latest", "title", "occurrence"])]
@@ -671,7 +671,7 @@ impl SessionQueryArgs {
         if !self.latest {
             return Ok(Vec::new());
         }
-        tapes_core::selection_warnings_with_backends(backends, selection)
+        agent_tapes_core::selection_warnings_with_backends(backends, selection)
     }
 
     fn has_set_selection(&self) -> bool {
@@ -690,8 +690,8 @@ impl SessionQueryArgs {
             || self.search.is_some()
     }
 
-    fn set(&self) -> tapes_core::SessionSelection<'_> {
-        tapes_core::SessionSelection {
+    fn set(&self) -> agent_tapes_core::SessionSelection<'_> {
+        agent_tapes_core::SessionSelection {
             within: if self.input.supplied() {
                 Where::Global
             } else {
@@ -703,7 +703,7 @@ impl SessionQueryArgs {
                 self.harness.as_deref()
             },
             limit: self.limit,
-            filters: tapes_core::ListFilters {
+            filters: agent_tapes_core::ListFilters {
                 model: self.model.as_deref(),
                 directory: self.directory.as_deref(),
                 since: self.since,
@@ -761,13 +761,13 @@ enum Command {
         /// Keep sessions whose newest recorded activity, `last_activity_at`,
         /// is at or after this timestamp. RFC 3339 timestamps with an offset
         /// and bare YYYY-MM-DD dates are accepted.
-        #[arg(long, value_name = "TIMESTAMP", value_parser = tapes_core::parse_activity_timestamp)]
-        since: Option<tapes_core::ActivityTimestamp>,
+        #[arg(long, value_name = "TIMESTAMP", value_parser = agent_tapes_core::parse_activity_timestamp)]
+        since: Option<agent_tapes_core::ActivityTimestamp>,
         /// Keep sessions whose newest recorded activity, `last_activity_at`,
         /// is before this timestamp. RFC 3339 timestamps with an offset and
         /// bare YYYY-MM-DD dates are accepted.
-        #[arg(long, value_name = "TIMESTAMP", value_parser = tapes_core::parse_activity_timestamp)]
-        until: Option<tapes_core::ActivityTimestamp>,
+        #[arg(long, value_name = "TIMESTAMP", value_parser = agent_tapes_core::parse_activity_timestamp)]
+        until: Option<agent_tapes_core::ActivityTimestamp>,
         /// Order by `last_activity_at`: newest first by default, or oldest
         /// first. The order decides which sessions --limit keeps: each
         /// harness's newest matches, or its oldest, which inspects every
@@ -857,7 +857,7 @@ enum Command {
         cursor: Option<String>,
         /// Maximum payload bytes per page, between 1KiB and 4MiB.
         /// The one alignment byte read before the page is counted separately.
-        #[arg(long, default_value_t = ByteSize::new(tapes_core::history::DEFAULT_BYTES as u64))]
+        #[arg(long, default_value_t = ByteSize::new(agent_tapes_core::history::DEFAULT_BYTES as u64))]
         bytes: ByteSize,
         #[arg(long)]
         json: bool,
@@ -868,7 +868,7 @@ enum Command {
         selection: SelectionArgs,
         #[arg(long)]
         cursor: Option<String>,
-        #[arg(long, default_value_t = ByteSize::new(tapes_core::history::DEFAULT_BYTES as u64))]
+        #[arg(long, default_value_t = ByteSize::new(agent_tapes_core::history::DEFAULT_BYTES as u64))]
         bytes: ByteSize,
         /// Maximum pages to read, between 1 and 32.
         #[arg(long, default_value_t = 1)]
@@ -885,7 +885,7 @@ enum Command {
         selection: SelectionArgs,
         #[arg(long)]
         cursor: Option<String>,
-        #[arg(long, default_value_t = ByteSize::new(tapes_core::history::DEFAULT_BYTES as u64))]
+        #[arg(long, default_value_t = ByteSize::new(agent_tapes_core::history::DEFAULT_BYTES as u64))]
         bytes: ByteSize,
         #[arg(long, default_value_t = 1)]
         pages: usize,
@@ -1128,13 +1128,13 @@ enum Command {
         /// Keep sessions whose newest recorded activity, `last_activity_at`,
         /// is at or after this timestamp. RFC 3339 timestamps with an offset
         /// and bare YYYY-MM-DD dates are accepted.
-        #[arg(long, value_name = "TIMESTAMP", value_parser = tapes_core::parse_activity_timestamp)]
-        since: Option<tapes_core::ActivityTimestamp>,
+        #[arg(long, value_name = "TIMESTAMP", value_parser = agent_tapes_core::parse_activity_timestamp)]
+        since: Option<agent_tapes_core::ActivityTimestamp>,
         /// Keep sessions whose newest recorded activity, `last_activity_at`,
         /// is before this timestamp. RFC 3339 timestamps with an offset and
         /// bare YYYY-MM-DD dates are accepted.
-        #[arg(long, value_name = "TIMESTAMP", value_parser = tapes_core::parse_activity_timestamp)]
-        until: Option<tapes_core::ActivityTimestamp>,
+        #[arg(long, value_name = "TIMESTAMP", value_parser = agent_tapes_core::parse_activity_timestamp)]
+        until: Option<agent_tapes_core::ActivityTimestamp>,
         /// Order the selection by `last_activity_at` before --limit takes from
         /// it: newest first by default, or oldest first.
         #[arg(long, value_enum, value_name = "ORDER", default_value_t = SortArg::Newest)]
@@ -1228,7 +1228,7 @@ fn main() -> Result<()> {
         format!(
             "{}\nreader: {}",
             env!("CARGO_PKG_VERSION"),
-            tapes_core::reader::describe()
+            agent_tapes_core::reader::describe()
         )
         .into_boxed_str(),
     );
@@ -1341,7 +1341,7 @@ fn dispatch(cli: Cli) -> Result<()> {
                     "Searching the last 32 normalized turns of each candidate session before applying --limit."
                 );
             }
-            let filters = tapes_core::ListFilters {
+            let filters = agent_tapes_core::ListFilters {
                 model: model.as_deref(),
                 directory: directory.as_deref(),
                 since,
@@ -1350,7 +1350,7 @@ fn dispatch(cli: Cli) -> Result<()> {
             };
             let result = if input.supplied() {
                 let backends = input.backends()?;
-                tapes_core::list_with_backends_options(
+                agent_tapes_core::list_with_backends_options(
                     &backends,
                     None,
                     None,
@@ -1359,7 +1359,7 @@ fn dispatch(cli: Cli) -> Result<()> {
                     sort.into(),
                 )?
             } else {
-                let mut result = tapes_core::list_with_options(
+                let mut result = agent_tapes_core::list_with_options(
                     harness.as_deref(),
                     scope.within(),
                     limit,
@@ -1431,13 +1431,13 @@ fn dispatch(cli: Cli) -> Result<()> {
             };
             let transcript = if selection.input.supplied() {
                 let backends = selection.input.backends()?;
-                tapes_core::show_with_backends(
+                agent_tapes_core::show_with_backends(
                     &backends,
                     selection.selection(),
                     read_tail.unwrap_or(100),
                 )?
             } else {
-                let mut transcript = tapes_core::show_with_backends(
+                let mut transcript = agent_tapes_core::show_with_backends(
                     installed_backends
                         .as_deref()
                         .expect("installed backends are present for an installed selection"),
@@ -1469,9 +1469,10 @@ fn dispatch(cli: Cli) -> Result<()> {
                     "--input is not supported by page; supplied exports have no installed history cursor"
                 ));
             }
-            let latest_warnings = selection.latest_warnings(&tapes_core::backend::backends())?;
+            let latest_warnings =
+                selection.latest_warnings(&agent_tapes_core::backend::backends())?;
             print_selection_warnings(&latest_warnings);
-            let page = tapes_core::history::page(
+            let page = agent_tapes_core::history::page(
                 selection.selection(),
                 cursor.as_deref(),
                 bytes.get_usize(),
@@ -1511,9 +1512,10 @@ fn dispatch(cli: Cli) -> Result<()> {
                     "--input is not supported by history-search; supplied exports have no installed history cursor"
                 ));
             }
-            let latest_warnings = selection.latest_warnings(&tapes_core::backend::backends())?;
+            let latest_warnings =
+                selection.latest_warnings(&agent_tapes_core::backend::backends())?;
             print_selection_warnings(&latest_warnings);
-            let report = tapes_core::history::search(
+            let report = agent_tapes_core::history::search(
                 selection.selection(),
                 cursor.as_deref(),
                 bytes.get_usize(),
@@ -1557,9 +1559,10 @@ fn dispatch(cli: Cli) -> Result<()> {
                     "--input is not supported by metadata; supplied exports have no installed history cursor"
                 ));
             }
-            let latest_warnings = selection.latest_warnings(&tapes_core::backend::backends())?;
+            let latest_warnings =
+                selection.latest_warnings(&agent_tapes_core::backend::backends())?;
             print_selection_warnings(&latest_warnings);
-            let report = tapes_core::history::metadata(
+            let report = agent_tapes_core::history::metadata(
                 selection.selection(),
                 cursor.as_deref(),
                 bytes.get_usize(),
@@ -1597,7 +1600,7 @@ fn dispatch(cli: Cli) -> Result<()> {
         } => {
             selection.validate_input()?;
             let latest_warnings = if full {
-                selection.latest_warnings(&tapes_core::backend::backends())?
+                selection.latest_warnings(&agent_tapes_core::backend::backends())?
             } else {
                 selection.latest_warnings(&read.backends()?)?
             };
@@ -1611,14 +1614,14 @@ fn dispatch(cli: Cli) -> Result<()> {
                 ));
             }
             let child = if full {
-                tapes_core::child::read_full_with_backends(
-                    &tapes_core::backend::backends(),
+                agent_tapes_core::child::read_full_with_backends(
+                    &agent_tapes_core::backend::backends(),
                     selection.selection(),
                     &reference,
                     tail,
                 )?
             } else {
-                tapes_core::child::read_with_backends(
+                agent_tapes_core::child::read_with_backends(
                     &read.backends()?,
                     selection.selection(),
                     &reference,
@@ -1676,15 +1679,15 @@ fn dispatch(cli: Cli) -> Result<()> {
             selection.validate_input()?;
             read.refuse_supplied(&selection.input)?;
             let by_latest = selection.latest;
-            let options = tapes_core::event::EventOptions { full_arguments };
+            let options = agent_tapes_core::event::EventOptions { full_arguments };
             let event_backends = if full {
-                tapes_core::backend::backends()
+                agent_tapes_core::backend::backends()
             } else {
                 read.backends()?
             };
             let latest_warnings = selection.latest_warnings(&event_backends)?;
             print_selection_warnings(&latest_warnings);
-            let filter = tapes_core::event::EventFilter {
+            let filter = agent_tapes_core::event::EventFilter {
                 names: &name,
                 call_ids: &call_id,
                 programs: &program,
@@ -1695,14 +1698,14 @@ fn dispatch(cli: Cli) -> Result<()> {
             }
             let mut events = if selection.input.supplied() {
                 let backends = selection.input.backends()?;
-                tapes_core::events_with_options_with_backends(
+                agent_tapes_core::events_with_options_with_backends(
                     &backends,
                     selection.selection(),
                     tail.unwrap_or(usize::MAX),
                     options,
                 )?
             } else {
-                let mut events = tapes_core::events_with_options_with_backends(
+                let mut events = agent_tapes_core::events_with_options_with_backends(
                     &event_backends,
                     selection.selection(),
                     tail.unwrap_or(usize::MAX),
@@ -1727,7 +1730,7 @@ fn dispatch(cli: Cli) -> Result<()> {
             selection.validate_input()?;
             read.refuse_supplied(&selection.input)?;
             let lineage_backends = if full {
-                tapes_core::backend::backends()
+                agent_tapes_core::backend::backends()
             } else {
                 read.backends()?
             };
@@ -1735,15 +1738,15 @@ fn dispatch(cli: Cli) -> Result<()> {
             print_selection_warnings(&latest_warnings);
             let lineage = if full {
                 refuse_full_supplied(&selection.input)?;
-                tapes_core::lineage_full_with_backends(
-                    &tapes_core::backend::backends(),
+                agent_tapes_core::lineage_full_with_backends(
+                    &agent_tapes_core::backend::backends(),
                     selection.selection(),
                 )?
             } else if selection.input.supplied() {
                 let backends = selection.input.backends()?;
-                tapes_core::lineage_with_backends(&backends, selection.selection())?
+                agent_tapes_core::lineage_with_backends(&backends, selection.selection())?
             } else {
-                tapes_core::lineage_with_backends(&lineage_backends, selection.selection())?
+                agent_tapes_core::lineage_with_backends(&lineage_backends, selection.selection())?
             };
             if json {
                 print_json(&lineage, &selection.input)?;
@@ -1763,7 +1766,7 @@ fn dispatch(cli: Cli) -> Result<()> {
                 refuse_full_supplied(&query.input)?;
             }
             let single_backends = if full {
-                tapes_core::backend::backends()
+                agent_tapes_core::backend::backends()
             } else {
                 read.backends()?
             };
@@ -1771,12 +1774,15 @@ fn dispatch(cli: Cli) -> Result<()> {
             print_selection_warnings(&latest_warnings);
             if let Some(one) = query.single() {
                 let stats = if full {
-                    tapes_core::stats_full_with_backends(&tapes_core::backend::backends(), one)?
+                    agent_tapes_core::stats_full_with_backends(
+                        &agent_tapes_core::backend::backends(),
+                        one,
+                    )?
                 } else if query.input.supplied() {
                     let backends = query.input.backends()?;
-                    tapes_core::stats_with_backends(&backends, one)?
+                    agent_tapes_core::stats_with_backends(&backends, one)?
                 } else {
-                    tapes_core::stats_with_backends(&single_backends, one)?
+                    agent_tapes_core::stats_with_backends(&single_backends, one)?
                 };
                 if json {
                     print_json_with_selection_warnings(&stats, &query.input, &latest_warnings)?;
@@ -1788,20 +1794,20 @@ fn dispatch(cli: Cli) -> Result<()> {
                     return Err(anyhow!("stats needs a session ID, --latest, or an explicit selection such as --here"));
                 }
                 let summary = if full {
-                    tapes_core::stats_summary::with_backends(
-                        &tapes_core::backend::backends(),
+                    agent_tapes_core::stats_summary::with_backends(
+                        &agent_tapes_core::backend::backends(),
                         &query.set(),
                         SessionRead::Whole,
                     )?
                 } else if query.input.supplied() {
                     let backends = query.input.backends()?;
-                    tapes_core::stats_summary::with_backends(
+                    agent_tapes_core::stats_summary::with_backends(
                         &backends,
                         &query.set(),
                         SessionRead::Bounded,
                     )?
                 } else {
-                    tapes_core::stats_summary::with_backends(
+                    agent_tapes_core::stats_summary::with_backends(
                         &read.backends()?,
                         &query.set(),
                         SessionRead::Bounded,
@@ -1843,7 +1849,7 @@ fn dispatch(cli: Cli) -> Result<()> {
                 refuse_full_supplied(&query.input)?;
             }
             let single_backends = if full {
-                tapes_core::backend::backends()
+                agent_tapes_core::backend::backends()
             } else {
                 read.backends()?
             };
@@ -1852,8 +1858,8 @@ fn dispatch(cli: Cli) -> Result<()> {
             if let Some(one) = query.single() {
                 let usage = if full {
                     if let Some(series) = series {
-                        tapes_core::usage_with_options_with_backends(
-                            &tapes_core::backend::backends(),
+                        agent_tapes_core::usage_with_options_with_backends(
+                            &agent_tapes_core::backend::backends(),
                             one,
                             UsageOptions {
                                 full: true,
@@ -1861,13 +1867,16 @@ fn dispatch(cli: Cli) -> Result<()> {
                             },
                         )?
                     } else {
-                        tapes_core::usage_full_with_backends(&tapes_core::backend::backends(), one)?
+                        agent_tapes_core::usage_full_with_backends(
+                            &agent_tapes_core::backend::backends(),
+                            one,
+                        )?
                     }
                 } else if query.input.supplied() {
                     let backends = query.input.backends()?;
-                    tapes_core::usage_with_backends(&backends, one)?
+                    agent_tapes_core::usage_with_backends(&backends, one)?
                 } else if let Some(series) = series {
-                    tapes_core::usage_with_options_with_backends(
+                    agent_tapes_core::usage_with_options_with_backends(
                         &single_backends,
                         one,
                         UsageOptions {
@@ -1876,7 +1885,7 @@ fn dispatch(cli: Cli) -> Result<()> {
                         },
                     )?
                 } else {
-                    tapes_core::usage_with_backends(&single_backends, one)?
+                    agent_tapes_core::usage_with_backends(&single_backends, one)?
                 };
                 if json {
                     print_json_with_selection_warnings(&usage, &query.input, &latest_warnings)?;
@@ -1903,9 +1912,13 @@ fn dispatch(cli: Cli) -> Result<()> {
                 let by = grouping(&by);
                 let summary = if query.input.supplied() {
                     let backends = query.input.backends()?;
-                    tapes_core::usage_summary_with_backends(&backends, &query.set(), &by)?
+                    agent_tapes_core::usage_summary_with_backends(&backends, &query.set(), &by)?
                 } else {
-                    tapes_core::usage_summary_with_backends(&read.backends()?, &query.set(), &by)?
+                    agent_tapes_core::usage_summary_with_backends(
+                        &read.backends()?,
+                        &query.set(),
+                        &by,
+                    )?
                 };
                 if json {
                     print_json(&summary, &query.input)?;
@@ -1935,10 +1948,13 @@ fn dispatch(cli: Cli) -> Result<()> {
             print_selection_warnings(&latest_warnings);
             let brief = if selection.input.supplied() {
                 let backends = selection.input.backends()?;
-                tapes_core::brief_with_backends(&backends, selection.selection(), tail)?
+                agent_tapes_core::brief_with_backends(&backends, selection.selection(), tail)?
             } else {
-                let mut brief =
-                    tapes_core::brief_with_backends(&brief_backends, selection.selection(), tail)?;
+                let mut brief = agent_tapes_core::brief_with_backends(
+                    &brief_backends,
+                    selection.selection(),
+                    tail,
+                )?;
                 liveness::annotate_brief(&mut brief);
                 brief
             };
@@ -1978,7 +1994,7 @@ fn dispatch(cli: Cli) -> Result<()> {
                     "Searching the last 32 normalized turns of each candidate session before applying --limit."
                 );
             }
-            let selection = tapes_core::SessionSelection {
+            let selection = agent_tapes_core::SessionSelection {
                 within: if input.supplied() {
                     Where::Global
                 } else {
@@ -1990,7 +2006,7 @@ fn dispatch(cli: Cli) -> Result<()> {
                     harness.as_deref()
                 },
                 limit,
-                filters: tapes_core::ListFilters {
+                filters: agent_tapes_core::ListFilters {
                     model: model.as_deref(),
                     directory: directory.as_deref(),
                     since,
@@ -2001,9 +2017,9 @@ fn dispatch(cli: Cli) -> Result<()> {
             };
             let report = if input.supplied() {
                 let backends = input.backends()?;
-                tapes_core::endings::endings_with_backends(&backends, &selection, tail, text)?
+                agent_tapes_core::endings::endings_with_backends(&backends, &selection, tail, text)?
             } else {
-                let mut report = tapes_core::endings::endings_with_backends(
+                let mut report = agent_tapes_core::endings::endings_with_backends(
                     &read.backends()?,
                     &selection,
                     tail,
@@ -2063,14 +2079,14 @@ fn dispatch(cli: Cli) -> Result<()> {
             }
             let view = kinds.selection().map(|(kept, _)| kept);
             let whole = if full {
-                tapes_core::ExportRead::Whole
+                agent_tapes_core::ExportRead::Whole
             } else if evidence {
-                tapes_core::ExportRead::Evidence
+                agent_tapes_core::ExportRead::Evidence
             } else {
-                tapes_core::ExportRead::Bounded
+                agent_tapes_core::ExportRead::Bounded
             };
             let single_backends = if full {
-                tapes_core::backend::backends()
+                agent_tapes_core::backend::backends()
             } else {
                 read.backends()?
             };
@@ -2079,7 +2095,7 @@ fn dispatch(cli: Cli) -> Result<()> {
             if let Some(one) = query.single() {
                 let bundle = if query.input.supplied() {
                     let backends = query.input.backends()?;
-                    tapes_core::export_with_backends(
+                    agent_tapes_core::export_with_backends(
                         &backends,
                         one,
                         bundle.as_deref(),
@@ -2087,7 +2103,7 @@ fn dispatch(cli: Cli) -> Result<()> {
                         whole,
                     )?
                 } else {
-                    tapes_core::export_with_backends(
+                    agent_tapes_core::export_with_backends(
                         &single_backends,
                         one,
                         bundle.as_deref(),
@@ -2101,7 +2117,7 @@ fn dispatch(cli: Cli) -> Result<()> {
                 query.describe_search();
                 let export = if query.input.supplied() {
                     let backends = query.input.backends()?;
-                    tapes_core::export_selection_with_backends(
+                    agent_tapes_core::export_selection_with_backends(
                         &backends,
                         &query.set(),
                         bundle.as_deref(),
@@ -2109,7 +2125,7 @@ fn dispatch(cli: Cli) -> Result<()> {
                         whole,
                     )?
                 } else {
-                    tapes_core::export_selection_with_backends(
+                    agent_tapes_core::export_selection_with_backends(
                         &read.backends()?,
                         &query.set(),
                         bundle.as_deref(),
@@ -2183,7 +2199,7 @@ fn sort_label(sort: SortArg) -> &'static str {
     }
 }
 
-fn timestamp_arg(timestamp: tapes_core::ActivityTimestamp) -> String {
+fn timestamp_arg(timestamp: agent_tapes_core::ActivityTimestamp) -> String {
     timestamp.to_rfc3339()
 }
 
@@ -2204,8 +2220,8 @@ struct RemoteListQuery<'a> {
     limit: Option<usize>,
     model: &'a Option<String>,
     directory: &'a Option<String>,
-    since: Option<tapes_core::ActivityTimestamp>,
-    until: Option<tapes_core::ActivityTimestamp>,
+    since: Option<agent_tapes_core::ActivityTimestamp>,
+    until: Option<agent_tapes_core::ActivityTimestamp>,
     sort: SortArg,
     search: &'a Option<String>,
 }
@@ -2327,9 +2343,9 @@ fn remote_transport(
 fn remote_list(
     destination: &str,
     args: &[OsString],
-) -> std::result::Result<tapes_core::SessionList, remote::Unavailable> {
-    let mut list: tapes_core::SessionList =
-        remote_transport(destination)?.json(args, tapes_core::LIST_SCHEMA)?;
+) -> std::result::Result<agent_tapes_core::SessionList, remote::Unavailable> {
+    let mut list: agent_tapes_core::SessionList =
+        remote_transport(destination)?.json(args, agent_tapes_core::LIST_SCHEMA)?;
     for session in &mut list.sessions {
         session.source.replica = Some(destination.to_owned());
     }
@@ -2337,7 +2353,7 @@ fn remote_list(
 }
 
 fn remote_show(destination: &str, args: &[OsString]) -> Result<Transcript> {
-    Ok(remote_transport(destination)?.json(args, tapes_core::model::SESSION_SCHEMA)?)
+    Ok(remote_transport(destination)?.json(args, agent_tapes_core::model::SESSION_SCHEMA)?)
 }
 
 /// The replica's export manifest, with every path named as the path it is:
@@ -2366,15 +2382,15 @@ fn remote_export(destination: &str, args: &[OsString]) -> Result<String> {
 /// answer's substance, and the caller exits unsuccessfully with them.
 fn unreachable_list(
     sort: SortArg,
-    since: Option<tapes_core::ActivityTimestamp>,
-    until: Option<tapes_core::ActivityTimestamp>,
+    since: Option<agent_tapes_core::ActivityTimestamp>,
+    until: Option<agent_tapes_core::ActivityTimestamp>,
     unavailable: &remote::Unavailable,
-) -> tapes_core::SessionList {
-    tapes_core::SessionList {
-        schema: tapes_core::LIST_SCHEMA,
+) -> agent_tapes_core::SessionList {
+    agent_tapes_core::SessionList {
+        schema: agent_tapes_core::LIST_SCHEMA,
         sort: sort.into(),
         activity: (since.is_some() || until.is_some())
-            .then_some(tapes_core::ActivityWindow { since, until }),
+            .then_some(agent_tapes_core::ActivityWindow { since, until }),
         sessions: Vec::new(),
         artifacts: Vec::new(),
         unavailable: vec![unavailable.diagnostic()],
@@ -2393,7 +2409,7 @@ fn coverage_name(coverage: TurnCoverage) -> &'static str {
     }
 }
 
-fn print_stats_summary(summary: &tapes_core::stats_summary::StatsSummary) {
+fn print_stats_summary(summary: &agent_tapes_core::stats_summary::StatsSummary) {
     println!(
         "Recorded tool usage: {} selected, {} read, {} failed",
         summary.selected,
@@ -2928,7 +2944,7 @@ fn render_children(lineage: &LineageStats) -> String {
 
 /// The kinds a harness cannot record, so their zeros are not read as
 /// observations, and the default its reader gives a user turn.
-fn render_declaration(kinds: &tapes_core::model::KindDeclaration) -> String {
+fn render_declaration(kinds: &agent_tapes_core::model::KindDeclaration) -> String {
     let mut out = String::new();
     let unrecordable = TurnKind::ALL
         .into_iter()
@@ -3192,8 +3208,8 @@ fn render_model_usage(model: &ModelUsage) -> String {
 
 fn render_attribution(attribution: &UsageAttribution) -> String {
     let basis = match attribution.basis {
-        tapes_core::usage::ObservationBasis::UsageRecord => "usage-record",
-        tapes_core::usage::ObservationBasis::TokenEventAdvance => "token-event-advance",
+        agent_tapes_core::usage::ObservationBasis::UsageRecord => "usage-record",
+        agent_tapes_core::usage::ObservationBasis::TokenEventAdvance => "token-event-advance",
     };
     let coverage = match attribution.coverage {
         AccountingCoverage::Session => "the whole session",
@@ -3509,7 +3525,7 @@ fn live_label(session: &Session) -> &'static str {
     }
 }
 
-fn print_availability_note(result: &tapes_core::SessionList) {
+fn print_availability_note(result: &agent_tapes_core::SessionList) {
     print_diagnostics(
         result.scan_truncated,
         result.scanned,
@@ -3520,7 +3536,7 @@ fn print_availability_note(result: &tapes_core::SessionList) {
     print_unplaced_note(result.unplaced.as_ref(), result.scanned);
 }
 
-fn print_unplaced_note(unplaced: Option<&tapes_core::Unplaced>, scanned: usize) {
+fn print_unplaced_note(unplaced: Option<&agent_tapes_core::Unplaced>, scanned: usize) {
     let Some(unplaced) = unplaced else {
         return;
     };
@@ -3623,8 +3639,8 @@ fn show_full(
         last: None,
         total: 0,
     };
-    let read = tapes_core::show_full_with_backends(
-        &tapes_core::backend::backends(),
+    let read = agent_tapes_core::show_full_with_backends(
+        &agent_tapes_core::backend::backends(),
         selection.selection(),
         &mut sink,
     )?;
@@ -3636,10 +3652,10 @@ fn show_full(
 fn events_full(
     selection: &SelectionArgs,
     tail: Option<usize>,
-    filter: &tapes_core::event::EventFilter<'_>,
+    filter: &agent_tapes_core::event::EventFilter<'_>,
     json: bool,
     by_latest: bool,
-    options: tapes_core::event::EventOptions,
+    options: agent_tapes_core::event::EventOptions,
 ) -> Result<()> {
     let stdout = std::io::stdout();
     let mut sink = FullEvents {
@@ -3648,8 +3664,8 @@ fn events_full(
         json,
         writer: None,
     };
-    let streamed = tapes_core::events_full_with_options_with_backends(
-        &tapes_core::backend::backends(),
+    let streamed = agent_tapes_core::events_full_with_options_with_backends(
+        &agent_tapes_core::backend::backends(),
         selection.selection(),
         tail.unwrap_or(usize::MAX),
         filter,
@@ -3664,15 +3680,15 @@ struct FullEvents<W: std::io::Write> {
     by_latest: bool,
     json: bool,
     /// The events object being written, under `--json`.
-    writer: Option<tapes_core::event::StreamedEventsJson>,
+    writer: Option<agent_tapes_core::event::StreamedEventsJson>,
 }
 
-impl<W: std::io::Write> tapes_core::EventSink for FullEvents<W> {
+impl<W: std::io::Write> agent_tapes_core::EventSink for FullEvents<W> {
     fn session(&mut self, session: &Session) -> Result<()> {
         let mut session = session.clone();
         liveness::annotate(std::slice::from_mut(&mut session));
         if self.json {
-            self.writer = Some(tapes_core::event::StreamedEventsJson::open(
+            self.writer = Some(agent_tapes_core::event::StreamedEventsJson::open(
                 &mut self.out,
                 &session,
             )?);
@@ -3696,7 +3712,7 @@ impl<W: std::io::Write> tapes_core::EventSink for FullEvents<W> {
 }
 
 impl<W: std::io::Write> FullEvents<W> {
-    fn finish(mut self, streamed: tapes_core::StreamedEvents) -> Result<()> {
+    fn finish(mut self, streamed: agent_tapes_core::StreamedEvents) -> Result<()> {
         let events = &streamed.events;
         if let Some(writer) = self.writer.take() {
             writer.close(&mut self.out, events)?;
@@ -3731,7 +3747,7 @@ struct FullShow<W: std::io::Write> {
     projection: Option<(Projection, &'static str)>,
     json: bool,
     /// The session object being written, under `--json`.
-    writer: Option<tapes_core::model::StreamedSessionJson>,
+    writer: Option<agent_tapes_core::model::StreamedSessionJson>,
     session: Option<Session>,
     /// The newest turns, under `--tail`.
     window: std::collections::VecDeque<Turn>,
@@ -3740,12 +3756,12 @@ struct FullShow<W: std::io::Write> {
     total: usize,
 }
 
-impl<W: std::io::Write> tapes_core::TurnSink for FullShow<W> {
+impl<W: std::io::Write> agent_tapes_core::TurnSink for FullShow<W> {
     fn session(&mut self, session: &Session) -> Result<()> {
         let mut session = session.clone();
         liveness::annotate(std::slice::from_mut(&mut session));
         if self.json {
-            self.writer = Some(tapes_core::model::StreamedSessionJson::open(
+            self.writer = Some(agent_tapes_core::model::StreamedSessionJson::open(
                 &mut self.out,
                 &session,
             )?);
@@ -3790,7 +3806,7 @@ impl<W: std::io::Write> FullShow<W> {
         Ok(())
     }
 
-    fn finish(mut self, read: tapes_core::backend::StreamedTranscript) -> Result<()> {
+    fn finish(mut self, read: agent_tapes_core::backend::StreamedTranscript) -> Result<()> {
         let session = self
             .session
             .take()
@@ -3926,13 +3942,13 @@ fn render_read_notes(out: &mut String, transcript: &Transcript) {
     if let Some(text_tail) = &transcript.text_tail {
         if let Some(reason) = text_tail.empty_reason {
             let reason = match reason {
-                tapes_core::model::EmptyTextTailReason::NoOperatorAssistantTextInRead => {
+                agent_tapes_core::model::EmptyTextTailReason::NoOperatorAssistantTextInRead => {
                     "the bounded read held no operator or assistant text"
                 }
-                tapes_core::model::EmptyTextTailReason::ZeroRequestedTail => {
+                agent_tapes_core::model::EmptyTextTailReason::ZeroRequestedTail => {
                     "the requested text tail was zero"
                 }
-                tapes_core::model::EmptyTextTailReason::EmptyCompleteProjection => {
+                agent_tapes_core::model::EmptyTextTailReason::EmptyCompleteProjection => {
                     "the complete projection held no operator or assistant text"
                 }
             };
@@ -4114,10 +4130,10 @@ fn reset_sigpipe() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::{DateTime, Utc};
-    use tapes_core::model::{
+    use agent_tapes_core::model::{
         End, OrdinalRange, Role, SourceDescriptor, TrailingRecord, Turn, TurnKind, TurnWindow,
     };
+    use chrono::{DateTime, Utc};
 
     fn transcript(truncated: bool) -> Transcript {
         Transcript {

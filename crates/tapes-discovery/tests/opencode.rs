@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use tapes_discovery::{
+use agent_tapes_discovery::{
     Discovery, NativeStore, NativeStoreKind, OpenCodeFlavor, OpenCodeStore, ResolveError,
 };
 

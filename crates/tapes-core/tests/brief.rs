@@ -4,13 +4,13 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use agent_tapes_core::backend::claude::ClaudeBackend;
+use agent_tapes_core::backend::codex::CodexBackend;
+use agent_tapes_core::backend::Backend;
+use agent_tapes_core::brief::{Brief, BRIEF_SCHEMA};
+use agent_tapes_core::model::TurnKind;
+use agent_tapes_core::Selection;
 use serde_json::{json, Value};
-use tapes_core::backend::claude::ClaudeBackend;
-use tapes_core::backend::codex::CodexBackend;
-use tapes_core::backend::Backend;
-use tapes_core::brief::{Brief, BRIEF_SCHEMA};
-use tapes_core::model::TurnKind;
-use tapes_core::Selection;
 
 static STORE_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
@@ -85,7 +85,7 @@ fn codex_store(
 }
 
 fn brief(backends: &[Box<dyn Backend>], id: &str, tail: usize) -> Brief {
-    tapes_core::brief_with_backends(backends, Selection::Id(id), tail).unwrap()
+    agent_tapes_core::brief_with_backends(backends, Selection::Id(id), tail).unwrap()
 }
 
 fn strip_record_refs(value: &mut Value) {
@@ -330,7 +330,7 @@ fn brief_tail(
     backends: &[Box<dyn Backend>],
     id: &str,
     tail: usize,
-) -> Vec<tapes_core::endings::TailEntry> {
+) -> Vec<agent_tapes_core::endings::TailEntry> {
     brief(backends, id, tail).tail
 }
 

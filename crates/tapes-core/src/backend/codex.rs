@@ -27,7 +27,7 @@ use crate::usage::{
     UsageAttribution, UsageDetail, UsageObservation, UsageObservationOmissions,
     UsageObservationOptions, UsageObservationResult, UsageObservationSeries,
 };
-use tapes_discovery::{Harness as NativeHarness, IdentityBasis, NativeSession, NativeStore};
+use agent_tapes_discovery::{Harness as NativeHarness, IdentityBasis, NativeSession, NativeStore};
 
 #[derive(Clone, Debug)]
 pub struct CodexBackend {

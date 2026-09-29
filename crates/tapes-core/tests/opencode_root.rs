@@ -4,7 +4,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use tapes_core::backend::{backends, Query};
+use agent_tapes_core::backend::{backends, Query};
 
 struct Temp(PathBuf);
 

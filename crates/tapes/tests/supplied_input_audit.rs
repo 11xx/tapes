@@ -412,7 +412,7 @@ fn evidence_export_copies_the_record_and_its_reports_verbatim() {
     let manifest: Value =
         serde_json::from_slice(&fs::read(evidence.join("manifest.json")).unwrap()).unwrap();
     assert_eq!(manifest["schema"], "tapes-evidence/2");
-    assert_eq!(manifest["reader"]["package"], "tapes-core");
+    assert_eq!(manifest["reader"]["package"], "agent-tapes-core");
     assert_eq!(manifest["associations_resolvable"], true);
     let zip_bytes = fs::read(&zip_path).unwrap();
     assert_eq!(manifest["input"]["bytes"], zip_bytes.len());

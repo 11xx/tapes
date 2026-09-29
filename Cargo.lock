@@ -9,6 +9,43 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 
 [[package]]
+name = "agent-tapes"
+version = "2026.9.25"
+dependencies = [
+ "agent-tapes-core",
+ "anyhow",
+ "chrono",
+ "clap",
+ "libc",
+ "serde",
+ "serde_json",
+ "sha2",
+ "zip",
+]
+
+[[package]]
+name = "agent-tapes-core"
+version = "2026.9.25"
+dependencies = [
+ "agent-tapes-discovery",
+ "anyhow",
+ "chrono",
+ "libc",
+ "serde",
+ "serde_json",
+ "sha2",
+ "zip",
+]
+
+[[package]]
+name = "agent-tapes-discovery"
+version = "2026.9.25"
+dependencies = [
+ "libc",
+ "serde_json",
+]
+
+[[package]]
 name = "android_system_properties"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -553,43 +590,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "unicode-ident",
-]
-
-[[package]]
-name = "tapes-cli"
-version = "2026.9.25"
-dependencies = [
- "anyhow",
- "chrono",
- "clap",
- "libc",
- "serde",
- "serde_json",
- "sha2",
- "tapes-core",
- "zip",
-]
-
-[[package]]
-name = "tapes-core"
-version = "2026.9.25"
-dependencies = [
- "anyhow",
- "chrono",
- "libc",
- "serde",
- "serde_json",
- "sha2",
- "tapes-discovery",
- "zip",
-]
-
-[[package]]
-name = "tapes-discovery"
-version = "2026.9.25"
-dependencies = [
- "libc",
- "serde_json",
 ]
 
 [[package]]

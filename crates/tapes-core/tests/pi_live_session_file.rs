@@ -2,7 +2,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use tapes_core::backend;
+use agent_tapes_core::backend;
 
 struct Temp(PathBuf);
 

@@ -10,22 +10,21 @@ use std::rc::Rc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::OnceLock;
 
-use chrono::{DateTime, TimeZone, Utc};
-use tapes_core::backend::claude::ClaudeBackend;
-use tapes_core::backend::codex::CodexBackend;
-use tapes_core::backend::opencode::OpenCodeBackend;
-use tapes_core::backend::pi::PiBackend;
-use tapes_core::backend::{Backend, Listing, Query, StreamedTranscript, MIN_READ_BYTES};
-use tapes_core::event::{project, EventKind, Incomplete};
-use tapes_core::model::{
+use agent_tapes_core::backend::claude::ClaudeBackend;
+use agent_tapes_core::backend::codex::CodexBackend;
+use agent_tapes_core::backend::opencode::OpenCodeBackend;
+use agent_tapes_core::backend::pi::PiBackend;
+use agent_tapes_core::backend::{Backend, Listing, Query, StreamedTranscript, MIN_READ_BYTES};
+use agent_tapes_core::event::{project, EventKind, Incomplete};
+use agent_tapes_core::model::{
     Accounting, AccountingBasis, AccountingCoverage, Cost, Model, ReadEvidence, Role, Session,
     SourceBound, SourceDescriptor, Tokens, Transcript, Truncation, Turn, TurnKind,
 };
-use tapes_core::usage::{
+use agent_tapes_core::usage::{
     usage, Durations, ModelUsage, ObservationBasis, ObservationClassification, RateWindow,
     TurnCoverage, UsageObservationOptions, UsageOptions,
 };
-use tapes_core::{
+use agent_tapes_core::{
     export_selection_with_backends, export_with_backends, latest_with_backends, list_with_backends,
     list_with_backends_filtered, list_with_backends_filtered_and_search,
     list_with_backends_options, resolve_session, scope::Scope, show_with_backends,
@@ -33,6 +32,7 @@ use tapes_core::{
     usage_with_options_with_backends, ExportRead, ListFilters, ListSort, ResolveError, Selection,
     SessionSelection, Where, EXPORT_MANIFEST_SCHEMA, LIST_SEARCH_TAIL,
 };
+use chrono::{DateTime, TimeZone, Utc};
 
 fn fixtures(harness: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -1772,7 +1772,7 @@ fn metadata_filters_are_case_insensitive_and_keep_absent_values_absent() {
 #[test]
 fn metadata_filters_fill_the_limit_after_rejecting_candidates() {
     let root = filtered_store("before-limit");
-    let native_page = tapes_discovery::NativeStore::codex(&root).candidates(5_000);
+    let native_page = agent_tapes_discovery::NativeStore::codex(&root).candidates(5_000);
     assert_eq!(
         native_page
             .records
@@ -2137,9 +2137,9 @@ struct SearchFixture {
 }
 
 impl Backend for SearchFixture {
-    fn kinds(&self) -> tapes_core::model::KindDeclaration {
-        tapes_core::model::KindDeclaration {
-            recordable: tapes_core::model::TurnSelection::only(TurnKind::ALL),
+    fn kinds(&self) -> agent_tapes_core::model::KindDeclaration {
+        agent_tapes_core::model::KindDeclaration {
+            recordable: agent_tapes_core::model::TurnSelection::only(TurnKind::ALL),
             user_default: None,
         }
     }
@@ -2342,9 +2342,9 @@ impl ResolverFixture {
 }
 
 impl Backend for ResolverFixture {
-    fn kinds(&self) -> tapes_core::model::KindDeclaration {
-        tapes_core::model::KindDeclaration {
-            recordable: tapes_core::model::TurnSelection::only(TurnKind::ALL),
+    fn kinds(&self) -> agent_tapes_core::model::KindDeclaration {
+        agent_tapes_core::model::KindDeclaration {
+            recordable: agent_tapes_core::model::TurnSelection::only(TurnKind::ALL),
             user_default: None,
         }
     }
@@ -2884,7 +2884,7 @@ fn every_backend_gives_turns_stable_ordinals_and_names_its_store() {
         );
         assert_eq!(
             windowed.truncation.window.as_ref().unwrap().ordinals,
-            Some(tapes_core::model::OrdinalRange { first: last, last }),
+            Some(agent_tapes_core::model::OrdinalRange { first: last, last }),
             "{harness}: the window names its ordinals"
         );
 
@@ -3021,7 +3021,7 @@ fn codex_reads_cumulative_token_totals_from_the_latest_event_with_usage() {
     let session = located(&backend, "00000000-0000-0000-0000-000000000001");
     assert_eq!(
         session.tokens,
-        Some(tapes_core::model::Tokens {
+        Some(agent_tapes_core::model::Tokens {
             input: Some(1200),
             output: Some(300),
             reasoning: None,
@@ -3880,7 +3880,7 @@ fn a_bundle_context_keeps_operator_turns_and_drops_harness_records() {
         std::process::id(),
         OPENCODE_ALIAS_COUNTER.fetch_add(1, Ordering::Relaxed)
     ));
-    let bundle = tapes_core::bundle::export(&transcript, &directory).unwrap();
+    let bundle = agent_tapes_core::bundle::export(&transcript, &directory).unwrap();
 
     let context = fs::read_to_string(&bundle.context.path).unwrap();
     assert!(context.contains("Check the ending."), "{context}");
@@ -4546,7 +4546,7 @@ fn pi_native_path_survives_transcript_full_and_parent_reads() {
     fs::remove_dir_all(shadow).unwrap();
 }
 
-fn codex_usage(root: &Path, id: &str) -> tapes_core::usage::UsageView {
+fn codex_usage(root: &Path, id: &str) -> agent_tapes_core::usage::UsageView {
     codex_usage_with_options(root, id, false, None).unwrap()
 }
 
@@ -4555,7 +4555,7 @@ fn codex_usage_with_options(
     id: &str,
     full: bool,
     series_limit: Option<usize>,
-) -> anyhow::Result<tapes_core::usage::UsageView> {
+) -> anyhow::Result<agent_tapes_core::usage::UsageView> {
     let backends: Vec<Box<dyn Backend>> = vec![Box::new(CodexBackend::new(root))];
     usage_with_options_with_backends(
         &backends,
@@ -4662,16 +4662,16 @@ impl Backend for MutatingCodexBackend {
         Ok(read)
     }
 
-    fn kinds(&self) -> tapes_core::model::KindDeclaration {
+    fn kinds(&self) -> agent_tapes_core::model::KindDeclaration {
         self.inner.kinds()
     }
 
     fn usage_observations(
         &self,
         session: &Session,
-        read: Option<&tapes_core::model::ReadEvidence>,
+        read: Option<&agent_tapes_core::model::ReadEvidence>,
         options: UsageObservationOptions,
-    ) -> anyhow::Result<tapes_core::usage::UsageObservationResult> {
+    ) -> anyhow::Result<agent_tapes_core::usage::UsageObservationResult> {
         self.inner.usage_observations(session, read, options)
     }
 }
@@ -5305,9 +5305,9 @@ struct BulkExportFixture {
 }
 
 impl Backend for BulkExportFixture {
-    fn kinds(&self) -> tapes_core::model::KindDeclaration {
-        tapes_core::model::KindDeclaration {
-            recordable: tapes_core::model::TurnSelection::only(TurnKind::ALL),
+    fn kinds(&self) -> agent_tapes_core::model::KindDeclaration {
+        agent_tapes_core::model::KindDeclaration {
+            recordable: agent_tapes_core::model::TurnSelection::only(TurnKind::ALL),
             user_default: None,
         }
     }
@@ -5403,7 +5403,7 @@ fn a_selection_exports_every_readable_session_and_records_the_rest() {
         &selection(),
         Some(&directory),
         None,
-        tapes_core::ExportRead::Bounded,
+        agent_tapes_core::ExportRead::Bounded,
     )
     .unwrap();
 
@@ -5459,7 +5459,7 @@ fn a_selection_whose_every_session_failed_says_so() {
         &selection(),
         Some(&directory),
         None,
-        tapes_core::ExportRead::Bounded,
+        agent_tapes_core::ExportRead::Bounded,
     )
     .unwrap();
 
@@ -5489,7 +5489,7 @@ fn an_empty_selection_writes_a_manifest_and_no_bundle() {
         &selection(),
         Some(&directory),
         None,
-        tapes_core::ExportRead::Bounded,
+        agent_tapes_core::ExportRead::Bounded,
     )
     .unwrap();
 
@@ -5507,10 +5507,10 @@ fn selection_stats_preserve_read_failures_without_counting_them_as_zero_activity
         sessions: vec![resolver_session("readable"), resolver_session("gone")],
         unreadable: "gone",
     })];
-    let summary = tapes_core::stats_summary::with_backends(
+    let summary = agent_tapes_core::stats_summary::with_backends(
         &backends,
         &selection(),
-        tapes_core::stats_summary::SessionRead::Bounded,
+        agent_tapes_core::stats_summary::SessionRead::Bounded,
     )
     .unwrap();
     assert_eq!(summary.selected, 2);
@@ -5530,9 +5530,9 @@ impl Backend for TitleProjection {
         true
     }
 
-    fn kinds(&self) -> tapes_core::model::KindDeclaration {
-        tapes_core::model::KindDeclaration {
-            recordable: tapes_core::model::TurnSelection::only(TurnKind::ALL),
+    fn kinds(&self) -> agent_tapes_core::model::KindDeclaration {
+        agent_tapes_core::model::KindDeclaration {
+            recordable: agent_tapes_core::model::TurnSelection::only(TurnKind::ALL),
             user_default: None,
         }
     }

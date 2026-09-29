@@ -39,7 +39,7 @@ pub fn identity() -> ReaderIdentity {
     }
 }
 
-/// The identity as one line: `tapes-core 2026.9.19 (git 1a2b3c4d5e6f, modified)`.
+/// The identity as one line: `agent-tapes-core 2026.9.19 (git 1a2b3c4d5e6f, modified)`.
 pub fn describe() -> String {
     let identity = identity();
     let build = match &identity.build {

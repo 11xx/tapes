@@ -1,4 +1,4 @@
-use tapes_discovery::{
+use agent_tapes_discovery::{
     resolve_with_sources, CandidatePage, IdentityRecord, IdentitySource, ResolveError, Resolved,
     SharedStorePrecedence,
 };

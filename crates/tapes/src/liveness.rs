@@ -5,10 +5,10 @@ use std::os::unix::process::CommandExt;
 use std::process::{Child, ChildStdout, Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 
+use agent_tapes_core::brief::Brief;
+use agent_tapes_core::endings::Ending;
+use agent_tapes_core::model::{LiveState, Session};
 use serde::Deserialize;
-use tapes_core::brief::Brief;
-use tapes_core::endings::Ending;
-use tapes_core::model::{LiveState, Session};
 
 const MAX_STATUS_BYTES: usize = 64 * 1024;
 const STATUS_TIMEOUT: Duration = Duration::from_millis(250);

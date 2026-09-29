@@ -26,7 +26,7 @@ use crate::model::{
     Role, Session, SourceBound, SourceDescriptor, Tokens, Transcript, Truncation, Turn, TurnKind,
     TurnSelection, TurnWindow, UserDefault,
 };
-use tapes_discovery::{
+use agent_tapes_discovery::{
     DiscoveryError, Harness as NativeHarness, NativeSession, NativeStore, NativeStoreKind,
     OpenCodeFlavor,
 };
@@ -109,7 +109,7 @@ impl Drop for OpenCodeApiServer {
 }
 
 impl OpenCodeApiServer {
-    fn start(store: &tapes_discovery::OpenCodeStore) -> Result<Self> {
+    fn start(store: &agent_tapes_discovery::OpenCodeStore) -> Result<Self> {
         let program = store.program();
         let listener = TcpListener::bind(("127.0.0.1", 0))
             .context("failed to reserve a local port for the opencode API")?;

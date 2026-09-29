@@ -26,7 +26,7 @@ use crate::model::{
     SourceDescriptor, Tokens, TrailingRecord, Transcript, Turn, TurnKind, TurnSelection,
 };
 use crate::usage::{Durations, ModelUsage, UsageDetail};
-use tapes_discovery::{Harness as NativeHarness, IdentityBasis, NativeSession, NativeStore};
+use agent_tapes_discovery::{Harness as NativeHarness, IdentityBasis, NativeSession, NativeStore};
 
 #[derive(Clone, Debug)]
 pub struct ClaudeBackend {
