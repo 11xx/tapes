@@ -35,13 +35,15 @@ cargo install --path crates/tapes --locked
 Without a checkout, install from Git; the workspace requires Rust 1.97 or newer:
 
 ```sh
-cargo install --git https://github.com/11xx/tapes tapes-cli --locked
+cargo install --git https://github.com/11xx/tapes --tag <release tag> agent-tapes --locked
 ```
+
+Release tags are the CalVer versions, written `vYYYY.M.D`.
 
 Add `--features zip` to either command when ZIP input support is wanted.
 
 Ensure Cargo's binary directory is on `PATH`, then run `tapes` for the workflow
-guide. The package is `tapes-cli` and installs the `tapes` binary.
+guide. The package is `agent-tapes` and installs the `tapes` binary.
 ZIP input support is default-off; install with `--features zip` when archive
 inputs or ZIP evidence are needed. Without that feature, plain JSON files and
 directories remain available and a ZIP input reports the enabling command.
@@ -54,26 +56,26 @@ are `cargo build --all-targets`, `cargo test`, and
 ## Versioning
 
 Released versions are the calendar date of publication, written `YYYY.M.D`.
-The command, the binary, and the repository are `tapes`; the published package
-name differs, because the bare name on crates.io belongs to an unrelated
-project.
+Each release is tagged `v<version>`. The packages are `agent-tapes`,
+`agent-tapes-core`, and `agent-tapes-discovery`, distributed by Git; the
+command is `tapes`.
 
 ## Native discovery library
 
-The workspace includes `tapes-discovery`, a Rust library that resolves
+The workspace includes `agent-tapes-discovery`, a Rust library that resolves
 canonical identities in native Claude, Codex, Pi, and OpenCode stores. It
 returns native identity and store metadata; transcript normalization remains
-in `tapes-core`, and a resolved recording does not establish that a harness
+in `agent-tapes-core`, and a resolved recording does not establish that a harness
 is live or that a consumer can deliver an action to it.
 
 A consumer declares the library as a Git dependency pinned to a full
 revision:
 
 ```toml
-tapes-discovery = { git = "https://github.com/11xx/tapes", rev = "<full revision>" }
+agent-tapes-discovery = { git = "https://github.com/11xx/tapes", rev = "<full revision>" }
 ```
 
-A consumer that also uses `tapes-core` must take both crates from the same Git
+A consumer that also uses `agent-tapes-core` must take both crates from the same Git
 source and revision, so its dependency graph holds one copy of each.
 
 Run `scripts/check-discovery-consumer` from the Tapes checkout with Python
@@ -87,7 +89,7 @@ home and empty executable search path, then removes the temporary files. It
 requires Python 3 and a built binary:
 
 ```sh
-cargo build -p tapes-cli
+cargo build -p agent-tapes
 python3 scripts/fixture-demo
 ```
 

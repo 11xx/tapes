@@ -1,7 +1,7 @@
+use agent_tapes_discovery::{Discovery, Harness, NativeSession, NativeStore, ResolveError};
 use std::env;
 use std::ffi::OsString;
 use std::path::PathBuf;
-use tapes_discovery::{Discovery, Harness, NativeSession, NativeStore, ResolveError};
 
 enum DeliveryProjection {
     Codex { session_id: String },
@@ -101,7 +101,7 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::delivery_supported;
-    use tapes_discovery::Harness;
+    use agent_tapes_discovery::Harness;
 
     #[test]
     fn codex_is_the_only_supported_delivery_target() {

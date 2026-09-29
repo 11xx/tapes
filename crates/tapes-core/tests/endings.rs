@@ -4,15 +4,15 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use tapes_core::backend::claude::ClaudeBackend;
-use tapes_core::backend::codex::CodexBackend;
-use tapes_core::backend::pi::PiBackend;
-use tapes_core::backend::Backend;
-use tapes_core::endings::{
+use agent_tapes_core::backend::claude::ClaudeBackend;
+use agent_tapes_core::backend::codex::CodexBackend;
+use agent_tapes_core::backend::pi::PiBackend;
+use agent_tapes_core::backend::Backend;
+use agent_tapes_core::endings::{
     endings_with_backends, Coverage, EndingsReport, Fact, Incomplete, ENDINGS_SCHEMA,
 };
-use tapes_core::model::{Role, TurnKind};
-use tapes_core::SessionSelection;
+use agent_tapes_core::model::{Role, TurnKind};
+use agent_tapes_core::SessionSelection;
 
 static STORE_COUNTER: AtomicUsize = AtomicUsize::new(0);
 

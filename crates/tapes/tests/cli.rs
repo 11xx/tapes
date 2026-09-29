@@ -7,8 +7,8 @@ use std::process::{Command, Output, Stdio};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use agent_tapes_core::ResolveError;
 use serde_json::Value;
-use tapes_core::ResolveError;
 
 const CODEX_SESSION_ONE: &str = include_str!(
     "fixtures/codex/rollout-2026-01-01T10-00-00-00000000-0000-0000-0000-000000000001.jsonl"
@@ -374,7 +374,7 @@ fn supplied_reads_name_the_reader_and_digest_each_record() {
         read["record_sha256"],
         serde_json::json!(["aa7816abb18408864856f85b2afb710ece96edc2d69169eca804479a2b2c115d"])
     );
-    assert_eq!(read["reader"]["package"], "tapes-core");
+    assert_eq!(read["reader"]["package"], "agent-tapes-core");
     assert_eq!(read["reader"]["version"], env!("CARGO_PKG_VERSION"));
     assert!(read["reader"]["build"]["from"].is_string(), "{read}");
 
@@ -388,7 +388,7 @@ fn supplied_reads_name_the_reader_and_digest_each_record() {
     assert!(
         lines
             .next()
-            .is_some_and(|line| line.starts_with("reader: tapes-core ")),
+            .is_some_and(|line| line.starts_with("reader: agent-tapes-core ")),
         "{version}"
     );
 }
@@ -972,7 +972,10 @@ fn export_omit_narrows_every_bundle_file_and_counts_the_omitted_turns() {
         serde_json::from_str(&fs::read_to_string(bulk.join("manifest.json")).unwrap()).unwrap();
     let sessions = manifest["sessions"].as_array().unwrap();
     assert_eq!(sessions.len(), 2, "{manifest}");
-    assert_eq!(manifest["reader"]["package"], "tapes-core", "{manifest}");
+    assert_eq!(
+        manifest["reader"]["package"], "agent-tapes-core",
+        "{manifest}"
+    );
     for session in sessions {
         let bundle: Value = serde_json::from_str(
             &fs::read_to_string(session["files"]["json"].as_str().unwrap()).unwrap(),
@@ -3359,10 +3362,10 @@ fn native_file_read_failure_is_not_reported_as_not_found() {
         "the permission probe must deny reads for this process"
     );
 
-    let backends: Vec<Box<dyn tapes_core::backend::Backend>> = vec![Box::new(
-        tapes_core::backend::codex::CodexBackend::new(codex_home.join("sessions")),
+    let backends: Vec<Box<dyn agent_tapes_core::backend::Backend>> = vec![Box::new(
+        agent_tapes_core::backend::codex::CodexBackend::new(codex_home.join("sessions")),
     )];
-    let resolver_error = tapes_core::resolve_session(&backends, id).unwrap_err();
+    let resolver_error = agent_tapes_core::resolve_session(&backends, id).unwrap_err();
     assert!(matches!(resolver_error, ResolveError::BackendFailed { .. }));
     assert!(resolver_error.to_string().contains("PermissionDenied"));
 
@@ -3502,14 +3505,14 @@ fn incomplete_native_prefix_refuses_but_a_full_id_still_resolves() {
         .set_times(fs::FileTimes::new().set_modified(UNIX_EPOCH))
         .unwrap();
 
-    let backends: Vec<Box<dyn tapes_core::backend::Backend>> = vec![Box::new(
-        tapes_core::backend::claude::ClaudeBackend::new(&projects),
+    let backends: Vec<Box<dyn agent_tapes_core::backend::Backend>> = vec![Box::new(
+        agent_tapes_core::backend::claude::ClaudeBackend::new(&projects),
     )];
     assert!(matches!(
-        tapes_core::resolve_session(&backends, "native-prefix"),
+        agent_tapes_core::resolve_session(&backends, "native-prefix"),
         Err(ResolveError::Incomplete { .. })
     ));
-    let selected = tapes_core::resolve_session(&backends, hidden).unwrap();
+    let selected = agent_tapes_core::resolve_session(&backends, hidden).unwrap();
     assert_eq!(selected.session.id, hidden);
     assert_eq!(selected.session.harness(), "claude");
     assert_eq!(

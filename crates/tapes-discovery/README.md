@@ -1,6 +1,6 @@
-# tapes-discovery
+# agent-tapes-discovery
 
-`tapes-discovery` is a small library for finding canonical identities in
+`agent-tapes-discovery` is a small library for finding canonical identities in
 native Claude, Codex, Pi, and OpenCode stores. It returns an identity, harness,
 store coordinate, native locator, and bounded session metadata. It does not
 normalize transcript turns, read supplied exports, determine liveness, or
@@ -9,7 +9,7 @@ select a delivery adapter.
 ## Resolve a native session
 
 ```rust,no_run
-use tapes_discovery::Discovery;
+use agent_tapes_discovery::Discovery;
 
 let discovery = Discovery::from_env();
 let session = discovery.resolve("session-id-or-prefix")?;
@@ -74,16 +74,16 @@ and failures.
 
 The package carries the workspace's calendar version and has no default features. Its
 normal dependencies are `libc` and `serde_json`; it has no dependency on
-`tapes-core`, `tapes-cli`, transcript, export, history, or usage code.
+`agent-tapes-core`, `agent-tapes`, transcript, export, history, or usage code.
 
 A consumer declares the library as a Git dependency pinned to a full
 revision:
 
 ```toml
-tapes-discovery = { git = "https://github.com/11xx/tapes", rev = "<full revision>" }
+agent-tapes-discovery = { git = "https://github.com/11xx/tapes", rev = "<full revision>" }
 ```
 
-A consumer that also uses `tapes-core` must take both crates from the same Git
+A consumer that also uses `agent-tapes-core` must take both crates from the same Git
 source and revision, so its dependency graph holds one copy of each.
 
 From the Tapes checkout, run `scripts/check-discovery-consumer` with Python

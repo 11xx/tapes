@@ -6,12 +6,12 @@ use anyhow::{anyhow, Context, Result};
 use chrono::{DateTime, NaiveDate, TimeZone, Utc};
 use serde::{Deserialize, Serialize};
 
+use agent_tapes_discovery::{resolve_with_sources, IdentitySource, SharedStorePrecedence};
 use backend::{Backend, BackendIdentitySource, Listing, Query};
 use model::{Session, Transcript, Truncation};
 use scope::Scope;
-use tapes_discovery::{resolve_with_sources, IdentitySource, SharedStorePrecedence};
 
-pub use tapes_discovery::ResolveError;
+pub use agent_tapes_discovery::ResolveError;
 
 pub use event::{
     Bounded, EventKind, EventRecord, EventTranscript, Incomplete, PairCounts, PairRef, ToolEvent,

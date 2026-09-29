@@ -17,7 +17,7 @@ use crate::model::{
     TextTailEvidence, Tokens, TrailingRecord, Transcript, TranscriptEvidence, Truncation, Turn,
 };
 use crate::scope::Scope;
-use tapes_discovery::{
+use agent_tapes_discovery::{
     CandidatePage as NativeCandidatePage, Discovery, DiscoveryError, Harness as NativeHarness,
     IdentityRecord, IdentitySource, NativeSession, NativeStore,
 };

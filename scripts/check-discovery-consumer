@@ -13,7 +13,7 @@ import tempfile
 import tomllib
 from pathlib import Path
 
-FORBIDDEN_PACKAGES = {"tapes-core", "tapes-cli", "zip", "sha2"}
+FORBIDDEN_PACKAGES = {"agent-tapes-core", "agent-tapes", "zip", "sha2"}
 
 
 class GateError(RuntimeError):
@@ -87,12 +87,12 @@ def write_project(
     source_dir = project / "src"
     source_dir.mkdir(parents=True, exist_ok=True)
     (source_dir / "main.rs").write_text(source_text)
-    discovery_line = f'tapes-discovery = {{ path = {json.dumps(str(crate_path))}, version = "{VERSION}" }}'
+    discovery_line = f'agent-tapes-discovery = {{ path = {json.dumps(str(crate_path))}, version = "{VERSION}" }}'
     dependency_lines = [discovery_line]
     if include_core:
         if core_path is None:
             raise GateError("core path missing for the graph negative control")
-        dependency_lines.append(f"tapes-core = {{ path = {json.dumps(str(core_path))} }}")
+        dependency_lines.append(f"agent-tapes-core = {{ path = {json.dumps(str(core_path))} }}")
     manifest = project / "Cargo.toml"
     manifest.write_text(
         "[package]\n"
@@ -148,12 +148,12 @@ def normal_graph(
             if normal:
                 pending.append(dependency["pkg"])
     names = {packages[node_id]["name"] for node_id in reachable}
-    if "tapes-discovery" not in names:
-        raise GateError(f"{label} graph omits tapes-discovery")
+    if "agent-tapes-discovery" not in names:
+        raise GateError(f"{label} graph omits agent-tapes-discovery")
     forbidden = sorted(name for name in names if name in FORBIDDEN_PACKAGES)
     if forbidden:
         raise GateError(f"{label} graph contains forbidden dependencies: {','.join(forbidden)}")
-    other_tapes = sorted(name for name in names if name.startswith("tapes-") and name != "tapes-discovery")
+    other_tapes = sorted(name for name in names if name.startswith("agent-tapes") and name != "agent-tapes-discovery")
     if other_tapes:
         raise GateError(f"{label} graph contains another Tapes package: {','.join(other_tapes)}")
     return names
@@ -431,7 +431,7 @@ def check_archive(archive_path: Path, unpack_root: Path, scratch: Path) -> Path:
                 raise GateError("crate archive contains a path outside its root")
         archive.extractall(unpack_root)
         names = {member.name for member in members if member.isfile()}
-        package_prefix = f"tapes-discovery-{VERSION}/"
+        package_prefix = f"agent-tapes-discovery-{VERSION}/"
         required = {
             package_prefix + "Cargo.toml",
             package_prefix + "README.md",
@@ -442,7 +442,7 @@ def check_archive(archive_path: Path, unpack_root: Path, scratch: Path) -> Path:
         }
         if not required.issubset(names):
             raise GateError("packaged crate omits required library or documentation files")
-        if any("fixtures/core" in name or "tapes-core" in name for name in names):
+        if any("fixtures/core" in name or "agent-tapes-core" in name for name in names):
             raise GateError("package contains a core fixture or core reference")
         manifest_member = archive.extractfile(package_prefix + "Cargo.toml")
         if manifest_member is None:
@@ -450,9 +450,9 @@ def check_archive(archive_path: Path, unpack_root: Path, scratch: Path) -> Path:
         package_manifest = tomllib.loads(manifest_member.read().decode())
         for section in ("dependencies", "dev-dependencies", "build-dependencies"):
             for dependency in package_manifest.get(section, {}):
-                if dependency in FORBIDDEN_PACKAGES or dependency.startswith("tapes-") and dependency != "tapes-discovery":
+                if dependency in FORBIDDEN_PACKAGES or dependency.startswith("agent-tapes") and dependency != "agent-tapes-discovery":
                     raise GateError(f"packaged {section} unexpectedly depends on {dependency}")
-    package_root = unpack_root / f"tapes-discovery-{VERSION}"
+    package_root = unpack_root / f"agent-tapes-discovery-{VERSION}"
     if not (package_root / "src/lib.rs").is_file():
         raise GateError("unpacked package has no library source")
     return package_root
@@ -509,7 +509,7 @@ def main() -> int:
     if not source_path.is_file():
         raise GateError("checked-in standalone consumer source is missing")
     source = source_path.read_text()
-    if "tapes_core" in source or "tapes-core" in source or "include!" in source:
+    if "agent_tapes_core" in source or "agent-tapes-core" in source or "include!" in source:
         raise GateError("consumer source is coupled to Tapes core or source inclusion")
     if "std::fs" in source or "OpenOptions" in source:
         raise GateError("consumer fixture source must not create delivery targets")
@@ -595,7 +595,7 @@ def main() -> int:
                 "--manifest-path",
                 str(root / "Cargo.toml"),
                 "-p",
-                "tapes-discovery",
+                "agent-tapes-discovery",
                 "--locked",
                 "--no-verify",
             ],
@@ -604,7 +604,7 @@ def main() -> int:
             logs,
             "cargo-package",
         )
-        archive = package_target / "package" / f"tapes-discovery-{VERSION}.crate"
+        archive = package_target / "package" / f"agent-tapes-discovery-{VERSION}.crate"
         if not archive.is_file():
             raise GateError("cargo package did not produce the local crate archive")
         unpack_root = work / "unpacked"
@@ -643,11 +643,11 @@ def main() -> int:
                 False,
             )
         except GateError as error:
-            if "tapes-core" not in str(error):
+            if "agent-tapes-core" not in str(error):
                 raise
             print("negative_core_dependency=rejected")
         else:
-            raise GateError("dependency graph control did not reject tapes-core")
+            raise GateError("dependency graph control did not reject agent-tapes-core")
 
         mutated = source.replace(
             "harness == Harness::Codex",

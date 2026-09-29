@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use tapes_discovery::{Discovery, DiscoveryError, IdentityBasis, NativeStore, ResolveError};
+use agent_tapes_discovery::{Discovery, DiscoveryError, IdentityBasis, NativeStore, ResolveError};
 
 static ENV_LOCK: Mutex<()> = Mutex::new(());
 

@@ -1,6 +1,6 @@
 # Session model
 
-Every harness backend translates its records into the same `tapes-core`
+Every harness backend translates its records into the same `agent-tapes-core`
 types. Consumers can therefore list sessions and read transcripts without
 knowing which harness stored them.
 
