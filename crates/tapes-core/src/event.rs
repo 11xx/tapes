@@ -5,6 +5,7 @@ use std::hash::{Hash, Hasher};
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 use crate::content::{self, ArtifactReference, ContentCoverage, ContentInventory, ContentPart};
 use crate::model::{
@@ -12,7 +13,7 @@ use crate::model::{
     TextTailEvidence, Transcript, Truncation, Turn,
 };
 
-pub const EVENTS_SCHEMA: &str = "tapes-events/7";
+pub const EVENTS_SCHEMA: &str = "tapes-events/8";
 const PREVIEW_CHARS: usize = 200;
 pub const MAX_INVOCATION_TEXT_CHARS: usize = 64 * 1024;
 pub const MAX_INVOCATIONS: usize = 32;
@@ -181,6 +182,10 @@ pub struct ToolEvent {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub output: Option<Bounded>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub read: Option<ReadLocator>,
+    #[serde(skip)]
+    pub(crate) returned_read: Option<ReturnedRead>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub completed_ts: Option<DateTime<Utc>>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub invocations: Vec<InvocationEvidence>,
@@ -192,6 +197,107 @@ pub struct ToolEvent {
     /// This is internal pairing state, not another wire field.
     #[serde(skip)]
     pub(crate) self_contained: bool,
+}
+
+/// A file read declared by the recorded tool call. Missing range means the
+/// tool did not establish one; `whole` is emitted only by a whole-file form.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct ReadLocator {
+    pub path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lines: Option<ReadLines>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub whole: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub succeeded: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sha256: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct ReadLines {
+    pub start: u64,
+    pub end: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ReturnedRead {
+    pub succeeded: Option<bool>,
+    pub sha256: Option<String>,
+}
+
+pub(crate) fn returned_text(value: &Value) -> Option<&str> {
+    value.as_str().or_else(|| {
+        let parts = value.as_array()?;
+        (parts.len() == 1 && parts[0]["type"] == "text")
+            .then(|| parts[0]["text"].as_str())
+            .flatten()
+    })
+}
+
+pub(crate) fn returned_read(value: &Value, succeeded: Option<bool>) -> ReturnedRead {
+    ReturnedRead {
+        succeeded,
+        sha256: (succeeded != Some(false))
+            .then(|| returned_text(value))
+            .flatten()
+            .map(|text| format!("sha256:{:x}", Sha256::digest(text.as_bytes()))),
+    }
+}
+
+pub(crate) fn direct_read(name: Option<&str>, input: &Value) -> Option<ReadLocator> {
+    if !matches!(name, Some("Read" | "read")) {
+        return None;
+    }
+    let path = input["file_path"]
+        .as_str()
+        .or_else(|| input["path"].as_str())?;
+    let offset = input["offset"].as_u64();
+    let limit = input["limit"].as_u64();
+    let lines = offset.zip(limit).and_then(|(start, count)| {
+        (start > 0 && count > 0).then(|| ReadLines {
+            start,
+            end: start.saturating_add(count - 1),
+        })
+    });
+    Some(ReadLocator {
+        path: path.to_owned(),
+        lines,
+        whole: (input["whole"].as_bool() == Some(true)).then_some(true),
+        succeeded: None,
+        sha256: None,
+    })
+}
+
+pub(crate) fn shell_read(command: &str) -> Option<ReadLocator> {
+    let words = command.split_whitespace().collect::<Vec<_>>();
+    let (path, lines, whole) = match words.as_slice() {
+        ["cat", path] => (*path, None, Some(true)),
+        ["sed", "-n", range, path] => {
+            let range = range.trim_matches(|c| c == '\'' || c == '"');
+            let lines = range
+                .strip_suffix('p')
+                .and_then(|range| range.split_once(','))
+                .and_then(|(start, end)| {
+                    Some((start.parse::<u64>().ok()?, end.parse::<u64>().ok()?))
+                })
+                .and_then(|(start, end)| {
+                    (start > 0 && end >= start).then_some(ReadLines { start, end })
+                });
+            (*path, lines, None)
+        }
+        _ => return None,
+    };
+    if path.is_empty() || path.contains(['|', ';', '&', '$', '*', '?', '`', '<', '>']) {
+        return None;
+    }
+    Some(ReadLocator {
+        path: path.trim_matches(|c| c == '\'' || c == '"').to_owned(),
+        lines,
+        whole,
+        succeeded: None,
+        sha256: None,
+    })
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize)]
@@ -214,6 +320,8 @@ pub enum Incomplete {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct EventRecord {
     pub ordinal: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub event_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub native_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -487,17 +595,24 @@ pub fn read_was_bounded(source: &[SourceBound]) -> bool {
 /// event, then the result a call part carries when it already records its
 /// own completion.
 pub fn turn_records(turn: &Turn) -> impl Iterator<Item = EventRecord> {
-    let call = turn.tool.clone().map(|event| EventRecord {
-        ordinal: turn.ordinal,
-        native_id: turn.native_id.clone(),
-        record_ref: turn.record_ref.clone(),
-        parts: turn.parts.clone(),
-        coverage: turn.coverage.clone(),
-        ts: turn.ts,
-        event,
-        pair: None,
-        duration_ms: None,
-        incomplete: None,
+    let call = turn.tool.clone().map(|event| {
+        let event_id = event_identity(turn, &event.kind);
+        EventRecord {
+            ordinal: turn.ordinal,
+            native_id: turn
+                .native_id
+                .clone()
+                .or_else(|| event_id.as_ref().map(|id| format!("record-{id}"))),
+            event_id,
+            record_ref: turn.record_ref.clone(),
+            parts: turn.parts.clone(),
+            coverage: turn.coverage.clone(),
+            ts: turn.ts,
+            event,
+            pair: None,
+            duration_ms: None,
+            incomplete: None,
+        }
     });
     let result = call
         .as_ref()
@@ -516,13 +631,35 @@ pub fn turn_records(turn: &Turn) -> impl Iterator<Item = EventRecord> {
             let mut result = call.clone();
             result.ts = result.event.completed_ts;
             result.event.kind = EventKind::ToolResult;
+            result.event_id = event_identity(turn, &EventKind::ToolResult);
+            if turn.native_id.is_none() {
+                result.native_id = result.event_id.as_ref().map(|id| format!("record-{id}"));
+            }
             result.event.arguments = None;
+            result.event.read = None;
             result.event.invocations.clear();
             result.event.artifact_references.clear();
             result.event.artifact_consumptions.clear();
             result
         });
     call.into_iter().chain(result)
+}
+
+fn event_identity(turn: &Turn, kind: &EventKind) -> Option<String> {
+    let reference = turn.record_ref.as_ref()?;
+    let coordinate = format!(
+        "{}\0{:?}\0{:?}\0{:?}\0{}\0{:?}",
+        reference.domain,
+        reference.span,
+        reference.native_id,
+        reference.pointer,
+        reference.part_index,
+        kind
+    );
+    Some(format!(
+        "sha256:{:x}",
+        Sha256::digest(coordinate.as_bytes())
+    ))
 }
 
 /// The first of two pairing passes over one sequence of unpaired records.
@@ -571,6 +708,7 @@ struct ResultFacts {
     reference: PairRef,
     ts: Option<DateTime<Utc>>,
     artifact_references: Vec<ArtifactReference>,
+    returned_read: Option<ReturnedRead>,
 }
 
 /// The identity of a record sequence, so a replay can be checked against the
@@ -628,6 +766,7 @@ impl PairIndex {
                         } else {
                             Vec::new()
                         },
+                        returned_read: record.event.returned_read.clone(),
                     },
                 );
             }
@@ -724,6 +863,10 @@ fn pop_open<T>(open: &mut HashMap<String, Vec<T>>, call_id: &str) -> Option<T> {
 }
 
 fn complete_call(call: &mut EventRecord, result: ResultFacts) {
+    if let (Some(read), Some(returned)) = (&mut call.event.read, &result.returned_read) {
+        read.succeeded = returned.succeeded;
+        read.sha256 = returned.sha256.clone();
+    }
     call.event.artifact_consumptions = artifact_consumptions(
         &call.event.artifact_references,
         &result.artifact_references,
@@ -2024,6 +2167,8 @@ mod tests {
             status: None,
             arguments: None,
             output: None,
+            read: None,
+            returned_read: None,
             completed_ts: None,
             invocations: Vec::new(),
             artifact_references: Vec::new(),
@@ -2139,6 +2284,8 @@ mod tests {
             status: Some("completed".to_owned()),
             arguments: Some(Bounded::from_text("{}")),
             output: Some(Bounded::from_text("done")),
+            read: None,
+            returned_read: None,
             completed_ts: None,
             invocations: Vec::new(),
             artifact_references: Vec::new(),
@@ -2204,6 +2351,13 @@ mod tests {
                     };
                     records[call_index].pair = Some(reference(&records[index]));
                     records[index].pair = Some(reference(&records[call_index]));
+                    if let (Some(read), Some(returned)) = (
+                        &mut records[call_index].event.read,
+                        &records[index].event.returned_read,
+                    ) {
+                        read.succeeded = returned.succeeded;
+                        read.sha256 = returned.sha256.clone();
+                    }
                     records[call_index].event.artifact_consumptions = artifact_consumptions(
                         &records[call_index].event.artifact_references,
                         &records[index].event.artifact_references,

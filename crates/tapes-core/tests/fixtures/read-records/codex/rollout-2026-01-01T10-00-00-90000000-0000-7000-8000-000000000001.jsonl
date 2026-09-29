@@ -1,0 +1,5 @@
+{"timestamp":"2026-01-01T10:00:00Z","type":"session_meta","payload":{"id":"90000000-0000-7000-8000-000000000001","cwd":"/fixture/project"}}
+{"timestamp":"2026-01-01T10:00:01Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","call_id":"call-read-1","arguments":"{\"cmd\":\"sed -n '10,40p' src/x.rs\"}"}}
+{"timestamp":"2026-01-01T10:00:02Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call-read-1","output":"Chunk ID: fixture\nWall time: 0.0 seconds\nProcess exited with code 0\nOriginal token count: 3\nOutput:\nfixture line\n"}}
+{"timestamp":"2026-01-01T10:00:03Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","call_id":"call-read-2","arguments":"{\"cmd\":\"cat src/whole.rs\"}"}}
+{"timestamp":"2026-01-01T10:00:04Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call-read-2","output":"Chunk ID: fixture\nWall time: 0.0 seconds\nProcess exited with code 0\nOriginal token count: 3\nOutput:\nwhole fixture\n"}}

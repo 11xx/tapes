@@ -79,6 +79,49 @@ fn fixture_backends() -> Vec<(Box<dyn Backend>, &'static str)> {
     backends
 }
 
+#[test]
+fn opencode_event_identity_and_capture_state_are_stable() {
+    let backends: Vec<Box<dyn Backend>> =
+        vec![Box::new(OpenCodeBackend::new(opencode_fixture_program()))];
+    let id = "ses_000000fixtureSharedSession";
+    let report = agent_tapes_core::capture_with_backends(&backends, Selection::Id(id)).unwrap();
+    assert_eq!(report.schema, "tapes-capture/1");
+    assert_eq!(report.harness, "opencode");
+    assert_eq!(report.store_path_class, "opencode-api");
+    assert_eq!(report.state, "unpinned");
+    let session = located(backends[0].as_ref(), id);
+    let projected = |tail| {
+        project(backends[0].transcript(&session, tail).unwrap(), usize::MAX)
+            .events
+            .into_iter()
+            .filter(|record| record.event.kind == EventKind::ToolCall)
+            .map(|record| (record.native_id.unwrap(), record.event_id.unwrap()))
+            .collect::<Vec<_>>()
+    };
+    let narrow = projected(10);
+    let wide = projected(100);
+    assert!(!narrow.is_empty());
+    for identity in narrow {
+        assert!(wide.contains(&identity));
+    }
+    let read = project(backends[0].transcript(&session, 100).unwrap(), usize::MAX)
+        .events
+        .into_iter()
+        .find(|record| record.event.read.is_some())
+        .unwrap()
+        .event
+        .read
+        .unwrap();
+    assert_eq!(read.path, "fixture");
+    assert_eq!(read.lines, None);
+    assert_eq!(read.whole, None);
+    assert_eq!(read.succeeded, Some(true));
+    assert!(read
+        .sha256
+        .as_deref()
+        .is_some_and(|digest| digest.starts_with("sha256:")));
+}
+
 fn located(backend: &dyn Backend, id: &str) -> Session {
     backend
         .locate(id)

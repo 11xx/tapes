@@ -839,6 +839,54 @@ pub fn resolve_session(
     })
 }
 
+/// Capture reports describe custody of the native recording, not whether a
+/// caller saved an export. This reader owns no recording snapshots.
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct CaptureReport {
+    pub schema: &'static str,
+    pub session: String,
+    pub harness: String,
+    pub store_path_class: &'static str,
+    pub state: &'static str,
+}
+
+pub fn capture(selection: Selection<'_>) -> Result<CaptureReport> {
+    capture_with_backends(&backend::backends(), selection)
+}
+
+pub fn capture_with_backends(
+    backends: &[Box<dyn Backend>],
+    selection: Selection<'_>,
+) -> Result<CaptureReport> {
+    let resolved = selection.resolve(backends)?;
+    let session = resolved.session;
+    if session.source.kind != model::SourceKind::InstalledRecording {
+        anyhow::bail!("capture state is available only for installed recordings");
+    }
+    let store_path_class = match session.harness() {
+        "claude" => "claude-project-jsonl",
+        "codex" => "codex-session-jsonl",
+        "pi" => "pi-session-jsonl",
+        "opencode"
+            if session
+                .locator()
+                .is_some_and(|locator| locator.contains(":/api/session/")) =>
+        {
+            "opencode-api"
+        }
+        "opencode" => "opencode-database",
+        _ => "harness-store",
+    };
+    let harness = session.harness().to_owned();
+    Ok(CaptureReport {
+        schema: "tapes-capture/1",
+        session: session.id,
+        harness,
+        store_path_class,
+        state: "unpinned",
+    })
+}
+
 /// Select one session by ID, exact recorded title, or latest activity in scope.
 #[derive(Clone, Debug)]
 pub enum Selection<'a> {

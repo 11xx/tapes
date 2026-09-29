@@ -211,11 +211,12 @@ READ A RECORDING ON ANOTHER MACHINE
 
 PROBE BEFORE EXPORTING
   tapes show <id> --tail 40      A window, costing no bundle.
-  tapes show <id> --json         The same turns as tapes-session/12, with bounded read, graph, artifact, and terminal evidence.
+  tapes show <id> --json         The same turns as tapes-session/13, with bounded read, graph, artifact, and terminal evidence.
   tapes show <id> --exchange     Operator and assistant turns only, timestamps and ordinals kept; the name for --only operator,assistant.
   tapes show <id> --omit tool    Every turn but tool calls and results; --only and --omit take kind labels, and export takes both.
   tapes show <id> --full         Every turn of a Claude, Codex, Pi, or OpenCode session, streamed past the read bounds; --json streams it too.
   tapes events <id> --json       Typed tool calls, results, pairs, and content parts.
+  tapes capture <id> --json      The recording's store class and custody state.
   tapes usage <id> --json        Tokens, cost, quota observations, and turn counts.
   tapes stats <id> --json        The same recording, counted with its read evidence.
   tapes lineage <id> --json      The sessions this one names as relatives.
@@ -247,10 +248,16 @@ PROBE BEFORE EXPORTING
   Human output says the same in its closing notes, recommending only the
   recovery that works.
 
-  events projects harness-neutral tool records as tapes-events/7. Pairing is
+  events projects harness-neutral tool records as tapes-events/8. Pairing is
   exact within the bounded read; an incomplete call or result says whether its
   counterpart was not reached or not recorded. Event ordinals are the same
-  turn coordinates show prints. With no --tail, every event the bounded reader
+  turn coordinates show prints. event_id stays stable across read windows;
+  native_id is the harness record id where recorded, or a coordinate-derived
+  record-sha256 id for a tool turn without one. A recognized file read has
+  its recorded path, recorded line range or explicit whole-file scope, outcome
+  when known, and sha256 of returned UTF-8 text. Missing scope is unknown.
+  capture reports unpinned for harness-store recordings; exporting does not
+  pin native bytes. With no --tail, every event the bounded reader
   reaches is returned; --name and --call-id filter only after pairing.
   --full-arguments returns each tool call's complete recorded argument text in
   place of the 200-character prefix, under the same members and schema
