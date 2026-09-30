@@ -176,10 +176,16 @@ fn a_brief_states_where_the_session_stopped_and_what_it_left_open() {
                 "model": { "id": "gpt-fixture" },
                 "model_observation": {
                     "mixed": false,
+                    "head_read": true,
                     "attribution_uncertain": false,
                     "distinct_observed": 1
                 },
                 "derived_title": "Inspect the fixture.",
+                "model_selections": [{
+                    "model": { "id": "gpt-fixture" },
+                    "first": { "timestamp": "2026-01-01T10:00:01Z" },
+                    "last": { "timestamp": "2026-01-01T10:00:01Z" }
+                }],
                 "started_at": "2026-01-01T10:00:00Z",
                 "last_activity_at": "2026-01-01T10:00:06Z",
                 "directory": "/fixtures/project",
