@@ -101,7 +101,7 @@ def write_project(
         'edition = "2021"\n\n'
         "[dependencies]\n"
         + "\n".join(dependency_lines)
-        + "\n"
+        + "\n\n[workspace]\n"
     )
     return manifest
 
