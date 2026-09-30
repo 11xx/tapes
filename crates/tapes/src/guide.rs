@@ -234,7 +234,7 @@ READ A RECORDING ON ANOTHER MACHINE
 
 PROBE BEFORE EXPORTING
   tapes show <id> --tail 40      A window, costing no bundle.
-  tapes show <id> --json         The same turns as tapes-session/13, with bounded read, graph, artifact, and terminal evidence.
+  tapes show <id> --json         The same turns as tapes-session/14, with bounded read, graph, artifact, and terminal evidence.
   tapes show <id> --exchange     Operator and assistant turns only, timestamps and ordinals kept; the name for --only operator,assistant.
   tapes show <id> --omit tool    Every turn but tool calls and results; --only and --omit take kind labels, and export takes both.
   tapes show <id> --full         Every turn of a Claude, Codex, Pi, or OpenCode session, streamed past the read bounds; --json streams it too.
@@ -279,7 +279,28 @@ PROBE BEFORE EXPORTING
   Human output says the same in its closing notes, recommending only the
   recovery that works.
 
-  events projects harness-neutral tool records as tapes-events/8. Pairing is
+  Claude, Pi and Codex report `session.model_observation`: `mixed` means
+  more than one model/effort pair was observed, `distinct_observed` counts
+  those pairs, and `attribution_uncertain` marks gaps, partial reads or
+  exhausted evidence budgets. `head_read: false` means the selection read
+  did not reach the recording head; the opening metadata probe does not
+  count. A single observed pair in that tail is not a whole-session claim.
+  `session.model_selections` holds consecutive selection spans in recording
+  order, each with `model`, `first` and `last` record coordinates (`timestamp`
+  and `native_id` when recorded). A selection that returns after a switch
+  has another span. Endpoints prove the selection at observed records;
+  they do not prove it between records. At most the newest 1024 spans and
+  32 distinct keys are retained; exhaustion marks attribution uncertain
+  and withholds the count. Claude and Pi endpoints are assistant records;
+  Codex endpoints are turn-context records. Claude and Pi assistant turns
+  carry their own `model` with effort in `variant`; Pi uses the active
+  branch's preceding `thinking_level_change`, leaving effort absent when
+  that setting was not reached. The session model remains the newest
+  selection. Library consumers use `Session::newest_model_selection()` to
+  obtain a `ModelSelectionSpan` and its `last: ModelSelectionRecord` without
+  decoding the native records.
+
+  events projects harness-neutral tool records as tapes-events/9. Pairing is
   exact within the bounded read; an incomplete call or result says whether its
   counterpart was not reached or not recorded. Event ordinals are the same
   turn coordinates show prints. event_id stays stable across read windows;
@@ -313,7 +334,7 @@ PROBE BEFORE EXPORTING
   Claude, Codex, or Pi recording twice, pairing past the read bound and
   writing each event as it pairs, with the same filters and counts.
 
-  usage answers where a session's quota went as tapes-usage/6: its recorded
+  usage answers where a session's quota went as tapes-usage/7: its recorded
   tokens, cost, accounting, turns, and any by-model attribution the source can
   support — Claude's recorded cost-state, Codex's request observations, or
   pi's per-message model each qualified by the thinking level in effect. Read
@@ -336,7 +357,7 @@ PROBE BEFORE EXPORTING
   older rows. `--full --series` uses the pinned recording, while summaries,
   supplied inputs, and unsupported harnesses refuse the option.
 
-  stats counts what one recording holds as tapes-stats/9: turns by kind
+  stats counts what one recording holds as tapes-stats/10: turns by kind
   beside the kinds the harness can record at all, so a zero for a kind it
   cannot record is not read as none observed, tool
   calls by name with their paired durations and error counts, unpaired calls
@@ -552,7 +573,7 @@ CONTINUE A COLD SESSION
   tapes brief <id> --tail 20 --json
 
   A continuation has two halves. brief is the transcript's half, as
-  tapes-brief/7: where the session stopped, the directory it worked in and the
+  tapes-brief/8: where the session stopped, the directory it worked in and the
   commit that directory sits on, the tool calls the read never saw a result
   for, the children whose outcome its store does not record, and the last few
   operator and assistant turns, each cut at 600 characters. --tail sets how

@@ -32,7 +32,7 @@ use crate::model::{
 };
 use crate::usage;
 
-pub const BRIEF_SCHEMA: &str = "tapes-brief/7";
+pub const BRIEF_SCHEMA: &str = "tapes-brief/8";
 /// Newest operator and assistant turns rendered when the caller names no
 /// window. Wide enough to hold the exchange that ended the session, narrow
 /// enough that the brief stays one screen.
@@ -55,6 +55,8 @@ pub struct BriefSession {
     pub model: Option<Model>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model_observation: Option<ModelObservationStatus>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub model_selections: Vec<crate::model::ModelSelectionSpan>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -246,6 +248,7 @@ pub fn brief(transcript: Transcript, lineage: Result<Lineage>, tail: usize) -> B
         metadata: transcript.session.metadata.clone(),
         model: transcript.session.model.clone(),
         model_observation: transcript.session.model_observation.clone(),
+        model_selections: transcript.session.model_selections.clone(),
         title: transcript.session.title.clone(),
         derived_title: transcript.session.derived_title.clone(),
         started_at: transcript.session.started_at,

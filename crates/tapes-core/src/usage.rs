@@ -20,7 +20,7 @@ use crate::model::{
     SourceDescriptor, TerminalObservation, TextTailEvidence, Tokens, Transcript, Truncation, Turn,
 };
 
-pub const USAGE_SCHEMA: &str = "tapes-usage/6";
+pub const USAGE_SCHEMA: &str = "tapes-usage/7";
 
 /// Usage facts a harness records that the normalized session model has no
 /// field for. Each member is present exactly when the harness recorded it.
@@ -322,6 +322,8 @@ pub struct UsageSession {
     pub model: Option<Model>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model_observation: Option<ModelObservationStatus>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub model_selections: Vec<crate::model::ModelSelectionSpan>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub started_at: Option<DateTime<Utc>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -444,6 +446,7 @@ fn project(session: &Session, turns: TurnTally, facts: ReadFacts) -> UsageView {
             metadata: session.metadata.clone(),
             model: session.model.clone(),
             model_observation: session.model_observation.clone(),
+            model_selections: session.model_selections.clone(),
             started_at: session.started_at,
             last_activity_at: session.last_activity_at,
             directory: session.directory.clone(),
@@ -797,6 +800,7 @@ mod tests {
             metadata: None,
             model: None,
             model_observation: None,
+            model_selections: Vec::new(),
             title: None,
             derived_title: None,
             derived_title_truncated: None,
@@ -815,6 +819,7 @@ mod tests {
 
     fn turn(role: Role) -> Turn {
         Turn {
+            model: None,
             kind: role.kind().unwrap_or(TurnKind::Operator),
             role,
             text: "fixture".to_owned(),
@@ -1014,6 +1019,7 @@ mod tests {
                 variant: variant.map(str::to_owned),
             }),
             model_observation: None,
+            model_selections: Vec::new(),
             tokens,
             cost: cost.map(|usd| Cost { usd }),
             accounting: accounting.map(|(basis, coverage)| Accounting { basis, coverage }),

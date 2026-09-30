@@ -1837,6 +1837,7 @@ fn parse_record_spanning(
         metadata,
         model,
         model_observation: None,
+        model_selections: Vec::new(),
         title,
         derived_title: None,
         derived_title_truncated: None,
@@ -2120,6 +2121,7 @@ fn mapping_message(
     let native_id = message.get("id").and_then(Value::as_str).map(str::to_owned);
     let kind = imported_kind(&role);
     Some(Turn {
+        model: None,
         role,
         kind,
         text,
@@ -2263,6 +2265,7 @@ fn normalize_chatgpt_exporter(value: &Value) -> Result<NormalizedConversation> {
             .map(str::to_owned);
         let kind = imported_kind(&role);
         turns.push(Turn {
+            model: None,
             role,
             kind,
             text,
@@ -2451,6 +2454,7 @@ fn perplexity_turn(
     };
     let text = content::project_text(&parts);
     Turn {
+        model: None,
         role: role.clone(),
         kind,
         text,

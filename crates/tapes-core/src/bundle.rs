@@ -776,6 +776,7 @@ mod tests {
                     variant: Some("max".into()),
                 }),
                 model_observation: None,
+                model_selections: Vec::new(),
                 title: Some("A rescue".into()),
                 derived_title: None,
                 derived_title_truncated: None,
@@ -792,6 +793,7 @@ mod tests {
             },
             turns: vec![
                 Turn {
+                    model: None,
                     role: Role::User,
                     kind: TurnKind::Operator,
                     text: "fix the parser".into(),
@@ -808,6 +810,7 @@ mod tests {
                     tool: None,
                 },
                 Turn {
+                    model: None,
                     role: Role::Reasoning,
                     kind: TurnKind::Reasoning,
                     text: "the parser drops empty lines".into(),
@@ -824,6 +827,7 @@ mod tests {
                     tool: None,
                 },
                 Turn {
+                    model: None,
                     role: Role::Tool,
                     kind: TurnKind::Tool,
                     text: r#"{"name":"shell","input":{"command":"cargo test"}}"#.into(),
@@ -840,6 +844,7 @@ mod tests {
                     tool: None,
                 },
                 Turn {
+                    model: None,
                     role: Role::Assistant,
                     kind: TurnKind::Assistant,
                     text: "fixed it".into(),
@@ -1317,6 +1322,7 @@ mod tests {
     #[test]
     fn tool_labels_come_from_whichever_key_the_harness_uses() {
         let turn = |text: &str| Turn {
+            model: None,
             role: Role::Tool,
             kind: TurnKind::Tool,
             text: text.to_owned(),

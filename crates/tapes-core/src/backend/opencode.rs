@@ -1644,6 +1644,7 @@ fn parse_database_session(value: &Value) -> Result<Session> {
         metadata: None,
         model,
         model_observation: None,
+        model_selections: Vec::new(),
         title: value["title"]
             .as_str()
             .filter(|title| !title.is_empty())
@@ -1713,6 +1714,7 @@ fn parse_session(value: &Value) -> Result<Session> {
         metadata: None,
         model,
         model_observation: None,
+        model_selections: Vec::new(),
         title: value["title"].as_str().map(str::to_owned),
         derived_title: None,
         derived_title_truncated: None,
@@ -2028,6 +2030,7 @@ fn parse_message(message: &Value) -> Vec<Turn> {
             .as_str()
             .filter(|text| !text.is_empty())
             .map(|text| Turn {
+                model: None,
                 kind: user_kind(&role),
                 role,
                 text: text.to_owned(),
@@ -2128,6 +2131,7 @@ fn parse_message(message: &Value) -> Vec<Turn> {
                 .map(str::to_owned)
                 .or_else(|| message_id.clone());
             ((!text.is_empty()) || !parts.is_empty()).then_some(Turn {
+                model: None,
                 kind: user_kind(&role),
                 role,
                 text,

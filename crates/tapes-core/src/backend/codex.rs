@@ -124,6 +124,7 @@ impl CodexBackend {
             metadata: None,
             model: facts.model,
             model_observation: facts.model_observation,
+            model_selections: facts.model_selections,
             title: None,
             derived_title: None,
             derived_title_truncated: None,
@@ -975,6 +976,7 @@ struct CodexUsageObserver {
     rate_limits: Option<RateLimits>,
     latest_model: Option<Model>,
     current_model: Option<Model>,
+    selections: crate::model_observation::Selections,
     model_budget: ModelBudget,
     model_observed: bool,
     mixed: bool,
@@ -1007,6 +1009,7 @@ impl CodexUsageObserver {
             rate_limits: None,
             latest_model: None,
             current_model: None,
+            selections: crate::model_observation::Selections::default(),
             model_budget: ModelBudget::default(),
             model_observed: false,
             mixed: false,
@@ -1032,6 +1035,7 @@ impl CodexUsageObserver {
 
     fn observe_gap(&mut self, gap: &ReadGap) {
         self.gap_seen = true;
+        self.selections.interrupt();
         self.current_model = None;
         self.previous_total = None;
         self.incomplete.add("source-gap");
@@ -1103,6 +1107,11 @@ impl CodexUsageObserver {
         if !self.model_budget.reserve(&key) {
             self.bounds.add("model-key-budget");
         }
+        self.selections.observe(
+            model.clone(),
+            timestamp(&value["timestamp"]),
+            payload["id"].as_str(),
+        );
         self.current_model = Some(model.clone());
         self.latest_model = Some(model);
     }
@@ -1385,6 +1394,7 @@ impl CodexUsageObserver {
                 selected.attribution(basis, observation_coverage, &self.incomplete, &self.bounds)
             });
         let by_model = selected.into_models();
+        let (selection_status, model_selections) = self.selections.finish(!self.read_window);
         let model_observation = (self.model_observed
             || attribution
                 .as_ref()
@@ -1393,16 +1403,25 @@ impl CodexUsageObserver {
             || !self.bounds.0.is_empty())
         .then_some(ModelObservationStatus {
             mixed: self.mixed,
-            attribution_uncertain: attribution.as_ref().is_some_and(|attribution| {
-                attribution.unattributed > 0
-                    || !attribution.incomplete.is_empty()
-                    || !attribution.bounds.is_empty()
-            }) || !self.incomplete.0.is_empty()
+            head_read: !self.read_window,
+            attribution_uncertain: selection_status
+                .as_ref()
+                .is_some_and(|s| s.attribution_uncertain)
+                || attribution.as_ref().is_some_and(|attribution| {
+                    attribution.unattributed > 0
+                        || !attribution.incomplete.is_empty()
+                        || !attribution.bounds.is_empty()
+                })
+                || !self.incomplete.0.is_empty()
                 || !self.bounds.0.is_empty(),
             // Past the key budget the retained set is a floor rather than a
             // count, so no number is published for it.
-            distinct_observed: (self.model_observed && !self.model_budget.exhausted)
-                .then(|| self.model_budget.retained()),
+            distinct_observed: (self.model_observed
+                && !self.model_budget.exhausted
+                && selection_status
+                    .as_ref()
+                    .is_some_and(|s| s.distinct_observed.is_some()))
+            .then(|| self.model_budget.retained()),
         });
         let accounting = accounting_for(
             self.tokens.as_ref(),
@@ -1424,6 +1443,7 @@ impl CodexUsageObserver {
             accounting,
             model: self.latest_model,
             model_observation,
+            model_selections,
             usage_detail,
             activity: self.activity,
             series,
@@ -1436,6 +1456,7 @@ struct CodexUsageFacts {
     accounting: Option<crate::model::Accounting>,
     model: Option<Model>,
     model_observation: Option<ModelObservationStatus>,
+    model_selections: Vec<crate::model::ModelSelectionSpan>,
     usage_detail: Option<UsageDetail>,
     activity: ActivityRange,
     series: Option<UsageObservationSeries>,
@@ -1595,6 +1616,7 @@ impl CodexRecords {
         session.usage_detail = facts.usage_detail;
         session.model = facts.model;
         session.model_observation = facts.model_observation;
+        session.model_selections = facts.model_selections;
         facts.activity.apply(session);
         facts.series
     }
@@ -1947,6 +1969,7 @@ fn parse_turns(value: &Value, completed_only: bool) -> Vec<Turn> {
         let completed = payload["type"] == "item_completed";
         let event = codex_runtime_tool_event(item, completed, completed_only);
         return vec![Turn {
+            model: None,
             role: Role::Tool,
             kind: TurnKind::Tool,
             text: item.to_string(),
@@ -2053,6 +2076,7 @@ fn parse_turns(value: &Value, completed_only: bool) -> Vec<Turn> {
     };
     ((!text.is_empty()) || !parts.is_empty())
         .then_some(Turn {
+            model: None,
             role,
             kind,
             text,

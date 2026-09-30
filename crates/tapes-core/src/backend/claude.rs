@@ -126,6 +126,7 @@ impl ClaudeBackend {
             .find_map(|value| value["aiTitle"].as_str())
             .map(str::to_owned);
         let model = read.values.iter().rev().find_map(claude_model);
+        let (model_observation, model_selections) = claude_selections(read);
         let mut turns = Vec::new();
         for (index, value) in read.values.iter().enumerate() {
             let mut parsed = parse_turns(value);
@@ -158,7 +159,8 @@ impl ClaudeBackend {
             source: SourceDescriptor::installed("claude", path.display().to_string()),
             metadata: None,
             model,
-            model_observation: None,
+            model_observation,
+            model_selections,
             title,
             derived_title: None,
             derived_title_truncated: None,
@@ -429,8 +431,11 @@ impl Backend for ClaudeBackend {
             .ok_or_else(|| anyhow!("claude session {} has no file locator", session.id))?;
         let (turns, recording, trailing_record, unmapped) = read_transcript(path, self.read_bytes)?;
         let notes = subagent_notes(path);
+        let mut session = session.clone();
+        session.model = recording.tail.values.iter().rev().find_map(claude_model);
+        (session.model_observation, session.model_selections) = claude_selections(&recording.tail);
         let mut transcript = transcript_from_recording(
-            session.clone(),
+            session,
             turns,
             tail,
             &recording,
@@ -513,10 +518,18 @@ impl Backend for ClaudeBackend {
     fn stream_session(&self, session: &Session, read: &StreamedTranscript) -> Result<Session> {
         let path = self.recording(session)?;
         let mut records = ClaudeRecords::default();
-        stream_jsonl(&path, Some(read.pin()?), |value, _, _| {
+        let mut last_end = 0;
+        stream_jsonl(&path, Some(read.pin()?), |value, span, _| {
+            if span.start != last_end {
+                records.selections.interrupt();
+            }
+            last_end = span.end;
             records.observe(value);
             Ok(false)
         })?;
+        if !read.gaps.is_empty() {
+            records.selections.interrupt();
+        }
         let mut whole = session.clone();
         records.apply(&mut whole);
         Ok(whole)
@@ -535,6 +548,7 @@ impl Backend for ClaudeBackend {
         // The first user turn that yields a title, which is all a derived
         // title needs from the turns streamed past.
         let mut title_turn = None::<Turn>;
+        let mut last_end = 0;
         let read = stream_jsonl(&path, None, |value, span, revision| {
             if let Some(id) = value.get("sessionId") {
                 if id.as_str() != Some(parent.id.as_str()) {
@@ -544,6 +558,10 @@ impl Backend for ClaudeBackend {
                 }
                 identified = true;
             }
+            if span.start != last_end {
+                records.selections.interrupt();
+            }
+            last_end = span.end;
             records.observe(value);
             let mut parsed = parse_turns(value);
             super::attach_record_refs(&mut parsed, &domain, Some(revision), Some(span));
@@ -572,6 +590,7 @@ impl Backend for ClaudeBackend {
             metadata: None,
             model: None,
             model_observation: None,
+            model_selections: Vec::new(),
             title: records.title.take(),
             derived_title: None,
             derived_title_truncated: None,
@@ -586,6 +605,9 @@ impl Backend for ClaudeBackend {
             occurrence: None,
             usage_detail: None,
         };
+        if !read.gaps.is_empty() {
+            records.selections.interrupt();
+        }
         records.apply(&mut session);
         Ok(StreamedChild {
             session: session.with_derived_title(title_turn.as_slice()),
@@ -701,6 +723,7 @@ struct ClaudeRecords {
     cost_state: Option<Value>,
     requests: RequestTokens,
     model: Option<Model>,
+    selections: crate::model_observation::Selections,
     title: Option<String>,
     directory: Option<String>,
     activity: ActivityRange,
@@ -713,7 +736,16 @@ impl ClaudeRecords {
         }
         self.requests.add(value);
         if let Some(model) = claude_model(value) {
+            self.selections.observe(
+                model.clone(),
+                timestamp(&value["timestamp"]),
+                value["uuid"].as_str(),
+            );
             self.model = Some(model);
+        } else if value["message"]["role"] == "assistant"
+            && value["message"]["model"] != "<synthetic>"
+        {
+            self.selections.interrupt();
         }
         if let Some(title) = value["aiTitle"].as_str() {
             self.title = Some(title.to_owned());
@@ -742,6 +774,7 @@ impl ClaudeRecords {
         session.tokens = tokens;
         session.cost = cost;
         session.model = self.model;
+        (session.model_observation, session.model_selections) = self.selections.finish(true);
         self.activity.apply(session);
     }
 }
@@ -1053,6 +1086,44 @@ fn subagent_transcript_count(path: &Path) -> usize {
 }
 
 fn parse_turns(value: &Value) -> Vec<Turn> {
+    let model = claude_model(value);
+    let mut turns = parse_turns_raw(value);
+    for turn in &mut turns {
+        turn.model = model.clone();
+    }
+    turns
+}
+
+fn claude_selections(
+    read: &Jsonl,
+) -> (
+    Option<crate::model::ModelObservationStatus>,
+    Vec<crate::model::ModelSelectionSpan>,
+) {
+    let mut selections = crate::model_observation::Selections::default();
+    for (index, value) in read.values.iter().enumerate() {
+        if index > 0 && read.spans[index - 1].end != read.spans[index].start {
+            selections.interrupt();
+        }
+        if let Some(model) = claude_model(value) {
+            selections.observe(
+                model,
+                timestamp(&value["timestamp"]),
+                value["uuid"].as_str(),
+            );
+        } else if value["message"]["role"] == "assistant"
+            && value["message"]["model"] != "<synthetic>"
+        {
+            selections.interrupt();
+        }
+    }
+    if read.skipped > 0 {
+        selections.interrupt();
+    }
+    selections.finish(!read.truncated)
+}
+
+fn parse_turns_raw(value: &Value) -> Vec<Turn> {
     let Some(message) = value.get("message") else {
         return Vec::new();
     };
@@ -1183,6 +1254,7 @@ fn turn(
     content: TurnContent,
 ) -> Option<Turn> {
     ((!text.is_empty()) || !content.parts.is_empty()).then_some(Turn {
+        model: None,
         kind: role.kind().unwrap_or(user_kind),
         role,
         text,
