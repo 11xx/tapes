@@ -15,55 +15,6 @@ pub(crate) struct Selections {
     interrupted: bool,
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn model(index: usize) -> Model {
-        Model {
-            id: format!("model-{index}"),
-            variant: None,
-        }
-    }
-
-    #[test]
-    fn evidence_budgets_keep_the_newest_coordinate_and_withhold_exact_counts() {
-        for distinct in [2, 40] {
-            let mut selections = Selections::default();
-            for index in 0..1100 {
-                selections.observe(
-                    model(index % distinct),
-                    None,
-                    Some(&format!("record-{index}")),
-                );
-            }
-            let (status, spans) = selections.finish(true);
-            let status = status.unwrap();
-            assert!(status.mixed && status.attribution_uncertain && status.head_read);
-            assert_eq!(status.distinct_observed, None);
-            assert_eq!(spans.len(), 1024);
-            assert_eq!(
-                spans.last().unwrap().last.native_id.as_deref(),
-                Some("record-1099")
-            );
-        }
-    }
-
-    #[test]
-    fn unreadable_record_separates_equal_selections() {
-        let mut selections = Selections::default();
-        selections.observe(model(0), None, Some("before"));
-        selections.interrupt();
-        selections.observe(model(0), None, Some("after"));
-        let (status, spans) = selections.finish(true);
-        let status = status.unwrap();
-        assert!(status.attribution_uncertain);
-        assert!(!status.mixed);
-        assert_eq!(status.distinct_observed, Some(1));
-        assert_eq!(spans.len(), 2);
-    }
-}
-
 impl Selections {
     pub fn interrupt(&mut self) {
         self.uncertain = true;
@@ -121,5 +72,54 @@ impl Selections {
             },
         );
         (status, self.spans)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn model(index: usize) -> Model {
+        Model {
+            id: format!("model-{index}"),
+            variant: None,
+        }
+    }
+
+    #[test]
+    fn evidence_budgets_keep_the_newest_coordinate_and_withhold_exact_counts() {
+        for distinct in [2, 40] {
+            let mut selections = Selections::default();
+            for index in 0..1100 {
+                selections.observe(
+                    model(index % distinct),
+                    None,
+                    Some(&format!("record-{index}")),
+                );
+            }
+            let (status, spans) = selections.finish(true);
+            let status = status.unwrap();
+            assert!(status.mixed && status.attribution_uncertain && status.head_read);
+            assert_eq!(status.distinct_observed, None);
+            assert_eq!(spans.len(), 1024);
+            assert_eq!(
+                spans.last().unwrap().last.native_id.as_deref(),
+                Some("record-1099")
+            );
+        }
+    }
+
+    #[test]
+    fn unreadable_record_separates_equal_selections() {
+        let mut selections = Selections::default();
+        selections.observe(model(0), None, Some("before"));
+        selections.interrupt();
+        selections.observe(model(0), None, Some("after"));
+        let (status, spans) = selections.finish(true);
+        let status = status.unwrap();
+        assert!(status.attribution_uncertain);
+        assert!(!status.mixed);
+        assert_eq!(status.distinct_observed, Some(1));
+        assert_eq!(spans.len(), 2);
     }
 }

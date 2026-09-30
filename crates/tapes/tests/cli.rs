@@ -8743,9 +8743,15 @@ fn stats_json_counts_a_chosen_recording_exactly() {
                 "model": { "id": "gpt-fixture", "variant": "high" },
                 "model_observation": {
                     "mixed": false,
+                    "head_read": true,
                     "attribution_uncertain": true,
                     "distinct_observed": 1
                 },
+                "model_selections": [{
+                    "model": { "id": "gpt-fixture", "variant": "high" },
+                    "first": { "timestamp": "2026-02-02T09:00:01Z" },
+                    "last": { "timestamp": "2026-02-02T09:00:01Z" }
+                }],
                 "started_at": "2026-02-02T09:00:00Z",
                 "last_activity_at": "2026-02-02T09:00:16.500Z",
                 "directory": "/fixtures/project",
