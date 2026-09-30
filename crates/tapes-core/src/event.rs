@@ -13,7 +13,7 @@ use crate::model::{
     TextTailEvidence, Transcript, Truncation, Turn,
 };
 
-pub const EVENTS_SCHEMA: &str = "tapes-events/8";
+pub const EVENTS_SCHEMA: &str = "tapes-events/9";
 const PREVIEW_CHARS: usize = 200;
 pub const MAX_INVOCATION_TEXT_CHARS: usize = 64 * 1024;
 pub const MAX_INVOCATIONS: usize = 32;
@@ -2142,6 +2142,7 @@ mod tests {
             metadata: None,
             model: None,
             model_observation: None,
+            model_selections: Vec::new(),
             title: None,
             derived_title: None,
             derived_title_truncated: None,
@@ -2179,6 +2180,7 @@ mod tests {
 
     fn turn(ordinal: usize, seconds: i64, event: ToolEvent) -> Turn {
         Turn {
+            model: None,
             role: Role::Tool,
             kind: TurnKind::Tool,
             text: "fixture envelope".to_owned(),

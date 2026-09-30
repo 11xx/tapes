@@ -843,7 +843,10 @@ enum Command {
         full: bool,
         /// Render the session as JSON. The session may include optional
         /// `live`, `accounting`, and `trailing_record` fields supplied by its
-        /// authorities.
+        /// authorities. Claude, Pi and Codex include `model_observation` and
+        /// ordered `model_selections` with first/last timestamp and native id.
+        /// `head_read: false` marks partial selection coverage. Claude and Pi
+        /// assistant turns carry their record's model and effort (`variant`).
         #[arg(long)]
         json: bool,
         /// Read the session from a named replica over ssh: run its own tapes
@@ -855,7 +858,7 @@ enum Command {
         #[arg(long, value_name = "SSH-DESTINATION", conflicts_with = "input")]
         remote: Option<String>,
     },
-    /// Read one bounded page of older Claude or Codex history as tapes-page/6,
+    /// Read one bounded page of older Claude or Codex history as tapes-page/7,
     /// including absolute record references and read evidence. A page decodes
     /// only the records inside its byte range, so a turn's kind matches the one
     /// a whole read gives it. Resume with the returned cursor.
@@ -888,7 +891,7 @@ enum Command {
         json: bool,
     },
     /// Recover recorded model observations outside the usual source tail as a
-    /// models-only tapes-page/6 projection, with explicit history coverage.
+    /// models-only tapes-page/7 projection, with explicit history coverage.
     Metadata {
         #[command(flatten)]
         selection: SelectionArgs,
@@ -901,7 +904,7 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Read a Claude child's own transcript, accounting and ending as tapes-child/4 under its parent session.
+    /// Read a Claude child's own transcript, accounting and ending as tapes-child/5 under its parent session.
     Child {
         #[command(flatten)]
         selection: SelectionArgs,
@@ -946,7 +949,7 @@ enum Command {
         program: Vec<String>,
         /// Stream the whole recording instead of its bounded tail, writing
         /// each event as it is paired so memory follows the calls awaiting a
-        /// result rather than the file; with --json the same tapes-events/8
+        /// result rather than the file; with --json the same tapes-events/9
         /// object is written event by event. The recording is read twice, the
         /// second read replaying the first; --tail, --name, --call-id, and
         /// --program select as they do over a bounded read. Installed Claude,
@@ -954,7 +957,7 @@ enum Command {
         /// updated in place and a second read may not repeat the first.
         #[arg(long, conflicts_with = "read_bytes")]
         full: bool,
-        /// Render the versioned tapes-events/8 object as JSON. Each read call
+        /// Render the versioned tapes-events/9 object as JSON. Each read call
         /// includes its recorded path and range, outcome, and returned-text
         /// digest. An unpaired event's `incomplete` is `no-result-in-read` when
         /// the read ended before a result, `call-before-read-bound` when a
@@ -1030,7 +1033,7 @@ enum Command {
         /// updated in place and a second read may not repeat the first.
         #[arg(long, conflicts_with = "read_bytes")]
         full: bool,
-        /// Render the versioned tapes-stats/9 object, or tapes-stats-summary/5
+        /// Render the versioned tapes-stats/10 object, or tapes-stats-summary/5
         /// for a selection, as JSON. `warnings` names the limits of the read:
         /// `read-window`, `tail-window`, `kind-unknown`, `kind-undeclared` (a
         /// turn of a kind its harness declares it cannot record, so the
@@ -1043,7 +1046,7 @@ enum Command {
         json: bool,
     },
     /// Where quota went. A session named by id or reached with --latest
-    /// answers that session as tapes-usage/6: its recorded tokens, cost, and
+    /// answers that session as tapes-usage/7: its recorded tokens, cost, and
     /// turn counts, plus whatever else its harness recorded — a context
     /// window, a provider quota window, wall-clock durations, a per-model
     /// split. A scope or listing filter instead answers the whole selection
@@ -1095,10 +1098,10 @@ enum Command {
             conflicts_with = "read_bytes"
         )]
         series: Option<Option<usize>>,
-        /// Render the versioned tapes-usage/6 object, or tapes-usage-summary/4
-        /// for a selection, as JSON. A Codex `session.model_observation` says
+        /// Render the versioned tapes-usage/7 object, or tapes-usage-summary/4
+        /// for a selection, as JSON. `session.model_observation` says
         /// whether more than one model and effort was observed (`mixed`) and
-        /// whether a gap or budget kept the split incomplete
+        /// whether a gap, partial read or budget kept the split incomplete
         /// (`attribution_uncertain`); the session model is then only the latest
         /// selection, not the owner of the whole total. A summary keeps one
         /// `partitions` row per harness and accounting basis and coverage; a
@@ -1109,7 +1112,7 @@ enum Command {
         json: bool,
     },
     /// What a continuation of one session needs from its recording, as
-    /// tapes-brief/7: where the work stopped, the working directory and the
+    /// tapes-brief/8: where the work stopped, the working directory and the
     /// commit it sits on, the calls the read never saw a result for, the
     /// children whose outcome the store does not record, and a bounded tail
     /// of the exchange. It reads the recording alone and judges nothing —
@@ -1125,7 +1128,7 @@ enum Command {
         /// out of the tail.
         #[arg(long, value_name = "N", default_value_t = DEFAULT_BRIEF_TAIL)]
         tail: usize,
-        /// Render the versioned tapes-brief/7 object as JSON. Each `in_flight`
+        /// Render the versioned tapes-brief/8 object as JSON. Each `in_flight`
         /// list holds at most 20 entries, with a note when the bound cut it.
         #[arg(long)]
         json: bool,
@@ -4197,6 +4200,7 @@ mod tests {
                 metadata: None,
                 model: None,
                 model_observation: None,
+                model_selections: Vec::new(),
                 title: None,
                 derived_title: None,
                 derived_title_truncated: None,
@@ -4212,6 +4216,7 @@ mod tests {
                 usage_detail: None,
             },
             turns: vec![Turn {
+                model: None,
                 role: Role::User,
                 kind: TurnKind::Operator,
                 text: "fix the parser".to_owned(),

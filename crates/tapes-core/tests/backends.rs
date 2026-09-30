@@ -2216,6 +2216,7 @@ impl Backend for SearchFixture {
         Ok(Transcript {
             session: session.clone(),
             turns: vec![Turn {
+                model: None,
                 role: Role::User,
                 kind: TurnKind::Operator,
                 text: "needle".into(),
@@ -2434,6 +2435,7 @@ fn resolver_session(id: &str) -> Session {
         metadata: None,
         model: None,
         model_observation: None,
+        model_selections: Vec::new(),
         title: None,
         derived_title: None,
         derived_title_truncated: None,
@@ -4117,7 +4119,7 @@ fn codex_modern_usage_records_choose_the_modern_basis_and_keep_native_rows() {
     )
     .unwrap();
 
-    assert_eq!(view.schema, "tapes-usage/6");
+    assert_eq!(view.schema, "tapes-usage/7");
     assert_eq!(
         view.tokens.as_ref().and_then(|tokens| tokens.input),
         Some(60)
@@ -5380,6 +5382,7 @@ impl Backend for BulkExportFixture {
         Ok(Transcript {
             session: session.clone(),
             turns: vec![Turn {
+                model: None,
                 role: Role::User,
                 kind: TurnKind::Operator,
                 text: "rescue me".into(),

@@ -203,6 +203,7 @@ mod tests {
             metadata: None,
             model: None,
             model_observation: None,
+            model_selections: Vec::new(),
             title: None,
             derived_title: None,
             derived_title_truncated: None,

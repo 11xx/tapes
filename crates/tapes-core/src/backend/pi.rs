@@ -115,10 +115,12 @@ impl PiBackend {
                 id: id.to_owned(),
                 variant: variant.map(str::to_owned),
             });
+        let mut thinking = None;
         let turns = active
             .iter()
-            .flat_map(|value| parse_turns(value))
+            .flat_map(|value| pi_turns(value, &mut thinking))
             .collect::<Vec<_>>();
+        let (model_observation, model_selections) = pi_selections(&active, read);
         let (tokens, cost, by_model) = pi_usage(&active);
         let coverage = if read.truncated {
             AccountingCoverage::ReadWindow
@@ -142,7 +144,8 @@ impl PiBackend {
             source: SourceDescriptor::installed("pi", path.display().to_string()),
             metadata: None,
             model,
-            model_observation: None,
+            model_observation,
+            model_selections,
             title: None,
             derived_title: None,
             derived_title_truncated: None,
@@ -271,8 +274,30 @@ impl Backend for PiBackend {
             .ok_or_else(|| anyhow!("pi session {} has no file locator", session.id))?;
         let (turns, recording, abandoned, trailing_record, unmapped) =
             read_transcript(path, self.read_bytes)?;
+        let entries = recording
+            .tail
+            .values
+            .iter()
+            .filter(|v| v["type"] != "session")
+            .collect::<Vec<_>>();
+        let active = active_path(&entries);
+        let mut session = session.clone();
+        (session.model_observation, session.model_selections) =
+            pi_selections(&active, &recording.tail);
+        session.model = active
+            .iter()
+            .rev()
+            .find_map(|v| pi_model(v))
+            .map(|id| Model {
+                id: id.to_owned(),
+                variant: active
+                    .iter()
+                    .rev()
+                    .find_map(|v| pi_thinking(v))
+                    .map(str::to_owned),
+            });
         let mut transcript = transcript_from_recording(
-            session.clone(),
+            session,
             turns,
             tail,
             &recording,
@@ -333,6 +358,7 @@ impl Backend for PiBackend {
         let mut abandoned = 0;
         let mut trailing_record = None;
         let mut unmapped = UnmappedTally::default();
+        let mut thinking = None;
         let read = stream_jsonl(path, Some(first.pin()), |value, span, revision| {
             if value["type"] == "session" {
                 count_unmapped(&mut unmapped, value);
@@ -349,7 +375,7 @@ impl Backend for PiBackend {
             if !active.contains(&entry) {
                 return Ok(false);
             }
-            let mut parsed = parse_turns(value);
+            let mut parsed = pi_turns(value, &mut thinking);
             if parsed.is_empty() {
                 count_unmapped(&mut unmapped, value);
             }
@@ -446,6 +472,7 @@ impl Backend for PiBackend {
                 request: pi_request(value),
                 model: pi_model(value).map(str::to_owned),
                 thinking: pi_thinking(value).map(str::to_owned),
+                timestamp: timestamp(&value["timestamp"]),
             });
             Ok(false)
         })?;
@@ -471,11 +498,20 @@ impl Backend for PiBackend {
         let mut usage = PiUsage::default();
         let mut model = None;
         let mut variant = None;
+        let mut selections = crate::model_observation::Selections::default();
         for entry in active.iter().map(|position| &entries[*position]) {
             if let Some(request) = &entry.request {
                 usage.add(request, entry.model.as_deref(), variant.as_deref());
             }
-            if entry.model.is_some() {
+            if let Some(id) = &entry.model {
+                selections.observe(
+                    Model {
+                        id: id.clone(),
+                        variant: variant.clone(),
+                    },
+                    entry.timestamp,
+                    entry.id.as_deref(),
+                );
                 model.clone_from(&entry.model);
             }
             if entry.thinking.is_some() {
@@ -498,6 +534,10 @@ impl Backend for PiBackend {
         }
         .into_option();
         whole.model = model.map(|id| Model { id, variant });
+        if !read.gaps.is_empty() {
+            selections.interrupt();
+        }
+        (whole.model_observation, whole.model_selections) = selections.finish(true);
         activity.apply(&mut whole);
         Ok(whole)
     }
@@ -532,6 +572,7 @@ struct PiEntry {
     request: Option<PiRequest>,
     model: Option<String>,
     thinking: Option<String>,
+    timestamp: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 type PiTranscriptRead = (
@@ -573,8 +614,9 @@ fn read_transcript(path: &Path, read_bytes: u64) -> Result<PiTranscriptRead> {
         .count();
     let mut turns = Vec::new();
     let mut last_turn = None;
+    let mut thinking = None;
     for (index, value) in active.iter().enumerate() {
-        let mut parsed = parse_turns(value);
+        let mut parsed = pi_turns(value, &mut thinking);
         if parsed.is_empty() {
             count_unmapped(&mut unmapped, value);
         }
@@ -827,6 +869,51 @@ fn user_kind(role: &Role) -> TurnKind {
     role.kind().unwrap_or(TurnKind::Operator)
 }
 
+fn pi_turns(value: &Value, thinking: &mut Option<String>) -> Vec<Turn> {
+    if let Some(level) = pi_thinking(value) {
+        *thinking = Some(level.to_owned());
+    }
+    let model = pi_model(value).map(|id| Model {
+        id: id.to_owned(),
+        variant: thinking.clone(),
+    });
+    let mut turns = parse_turns(value);
+    for turn in &mut turns {
+        turn.model = model.clone();
+    }
+    turns
+}
+
+fn pi_selections(
+    active: &[&Value],
+    read: &Jsonl,
+) -> (
+    Option<crate::model::ModelObservationStatus>,
+    Vec<crate::model::ModelSelectionSpan>,
+) {
+    let mut selections = crate::model_observation::Selections::default();
+    let mut thinking = None;
+    for value in active {
+        if let Some(level) = pi_thinking(value) {
+            thinking = Some(level.to_owned());
+        }
+        if let Some(id) = pi_model(value) {
+            selections.observe(
+                Model {
+                    id: id.to_owned(),
+                    variant: thinking.clone(),
+                },
+                timestamp(&value["timestamp"]),
+                value["id"].as_str(),
+            );
+        }
+    }
+    if read.skipped > 0 {
+        selections.interrupt();
+    }
+    selections.finish(!read.truncated)
+}
+
 fn parse_turns(value: &Value) -> Vec<Turn> {
     if value["type"] != "message" {
         return Vec::new();
@@ -844,6 +931,7 @@ fn parse_turns(value: &Value) -> Vec<Turn> {
         "developer" => Role::Developer,
         "toolResult" => {
             return vec![Turn {
+                model: None,
                 role: Role::Tool,
                 kind: TurnKind::Tool,
                 text: message.to_string(),
@@ -866,6 +954,7 @@ fn parse_turns(value: &Value) -> Vec<Turn> {
     if let Some(text) = content.as_str() {
         return (!text.is_empty())
             .then(|| Turn {
+                model: None,
                 kind: user_kind(&role),
                 role,
                 text: text.to_owned(),
@@ -959,6 +1048,7 @@ fn parse_turns(value: &Value) -> Vec<Turn> {
                 ),
             };
             ((!text.is_empty()) || !parts.is_empty()).then_some(Turn {
+                model: None,
                 kind: user_kind(&role),
                 role,
                 text,

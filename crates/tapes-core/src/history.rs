@@ -19,9 +19,9 @@ use crate::Selection;
 
 pub const DEFAULT_BYTES: usize = 64 * 1024;
 pub const MAX_BYTES: usize = 4 * 1024 * 1024;
-pub const PAGE_SCHEMA: &str = "tapes-page/6";
-pub const HISTORY_SEARCH_SCHEMA: &str = "tapes-history-search/6";
-pub const METADATA_HISTORY_SCHEMA: &str = "tapes-metadata-history/6";
+pub const PAGE_SCHEMA: &str = "tapes-page/7";
+pub const HISTORY_SEARCH_SCHEMA: &str = "tapes-history-search/7";
+pub const METADATA_HISTORY_SCHEMA: &str = "tapes-metadata-history/7";
 const MAX_CURSOR_BYTES: usize = 16 * 1024;
 const MAX_PAGES: usize = 32;
 const MAX_RESULTS: usize = 100;

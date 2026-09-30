@@ -1,0 +1,7 @@
+{"type":"session","version":3,"id":"b0000000-0000-4000-8000-000000000003","timestamp":"2026-01-05T10:00:00Z","cwd":"/fixtures/project"}
+{"type":"thinking_level_change","id":"thinking-1","parentId":null,"timestamp":"2026-01-05T10:00:01Z","thinkingLevel":"high"}
+{"type":"message","timestamp":"2026-01-05T10:00:02Z","message":{"role":"assistant","model":"model-fixture","content":[{"type":"text","text":"Reply 1."}]},"id":"assistant-1","parentId":"thinking-1"}
+{"type":"thinking_level_change","id":"thinking-2","parentId":"assistant-1","timestamp":"2026-01-05T10:00:03Z","thinkingLevel":"xhigh"}
+{"type":"message","timestamp":"2026-01-05T10:00:04Z","message":{"role":"assistant","model":"model-fixture","content":[{"type":"text","text":"Reply 2."}]},"id":"assistant-2","parentId":"thinking-2"}
+{"type":"thinking_level_change","id":"thinking-3","parentId":"assistant-2","timestamp":"2026-01-05T10:00:05Z","thinkingLevel":"high"}
+{"type":"message","timestamp":"2026-01-05T10:00:06Z","message":{"role":"assistant","model":"model-fixture","content":[{"type":"text","text":"Reply 3."}]},"id":"assistant-3","parentId":"thinking-3"}

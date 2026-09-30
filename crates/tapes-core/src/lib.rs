@@ -31,6 +31,7 @@ pub mod history;
 pub mod input;
 pub mod lineage;
 pub mod model;
+mod model_observation;
 pub mod reader;
 pub mod scope;
 pub mod stats;
@@ -38,7 +39,7 @@ pub mod stats_summary;
 pub mod title;
 pub mod usage;
 
-pub const LIST_SCHEMA: &str = "tapes-list/6";
+pub const LIST_SCHEMA: &str = "tapes-list/7";
 pub const EXPORT_MANIFEST_SCHEMA: &str = "tapes-export-manifest/5";
 pub const USAGE_SUMMARY_SCHEMA: &str = "tapes-usage-summary/4";
 /// Number of normalized turns a `list --search` query inspects per session.

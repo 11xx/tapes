@@ -10,7 +10,7 @@ use crate::content::{ContentCoverage, ContentPart};
 use crate::event::ToolEvent;
 use crate::usage::UsageDetail;
 
-pub const SESSION_SCHEMA: &str = "tapes-session/13";
+pub const SESSION_SCHEMA: &str = "tapes-session/14";
 /// Maximum length of a title derived from the first user turn.
 pub const DERIVED_TITLE_MAX_CHARS: usize = 96;
 
@@ -32,6 +32,10 @@ pub struct Session {
     /// usage attribution.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_observation: Option<ModelObservationStatus>,
+    /// Consecutive selections in recording order. Repeated selections after a
+    /// switch have separate spans; endpoints describe observed records only.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub model_selections: Vec<ModelSelectionSpan>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
     /// A bounded human-facing hint derived from the first user turn when the
@@ -243,9 +247,39 @@ pub struct Model {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModelObservationStatus {
     pub mixed: bool,
+    /// Whether the selection read reached the recording head. A separate
+    /// opening probe for session metadata does not make a tail read complete.
+    pub head_read: bool,
     pub attribution_uncertain: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub distinct_observed: Option<usize>,
+}
+
+/// One native record carrying an observed model selection.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelSelectionRecord {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timestamp: Option<DateTime<Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub native_id: Option<String>,
+}
+
+/// Endpoints of a consecutive model/effort selection in a read. An endpoint
+/// is evidence at that record, not proof of the selection between records.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelSelectionSpan {
+    pub model: Model,
+    pub first: ModelSelectionRecord,
+    pub last: ModelSelectionRecord,
+}
+
+impl Session {
+    /// The newest observed selection and its last native record coordinate.
+    /// Claude and Pi endpoints are assistant records; Codex endpoints are
+    /// turn-context records. Absence means this read observed no selection.
+    pub fn newest_model_selection(&self) -> Option<&ModelSelectionSpan> {
+        self.model_selections.last()
+    }
 }
 
 impl Model {
@@ -301,6 +335,9 @@ pub enum AccountingCoverage {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Turn {
+    /// Model and effort associated with the native assistant record.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<Model>,
     pub role: Role,
     /// What the record the turn came from is, beyond the role that carries
     /// it. Filled from the harness's own fields, never from the text.
@@ -1505,6 +1542,7 @@ mod tests {
                 variant: Some("high".into()),
             }),
             model_observation: None,
+            model_selections: Vec::new(),
             title: Some("Build the model".into()),
             derived_title: None,
             derived_title_truncated: None,
@@ -1549,6 +1587,7 @@ mod tests {
             coverage: AccountingCoverage::Session,
         };
         let turn = Turn {
+            model: None,
             role: Role::Assistant,
             kind: TurnKind::Assistant,
             text: "Done".into(),
@@ -1683,6 +1722,7 @@ mod tests {
         session.title = None;
         let session = session.with_derived_title(&[
             Turn {
+                model: None,
                 role: Role::User,
                 kind: TurnKind::Operator,
                 text: "# AGENTS.md instructions for /work\n<INSTRUCTIONS>rules</INSTRUCTIONS>\n<recommended_plugins>plugins</recommended_plugins>".into(),
@@ -1699,6 +1739,7 @@ mod tests {
                 tool: None,
             },
             Turn {
+                model: None,
                 role: Role::User,
                 kind: TurnKind::Operator,
                 text: "Implement the readable title.".into(),
@@ -1736,6 +1777,7 @@ mod tests {
         let mut complete = session();
         complete.title = None;
         let complete = complete.with_derived_title(&[Turn {
+            model: None,
             role: Role::User,
             kind: TurnKind::Operator,
             text: "A short request".into(),
@@ -1758,6 +1800,7 @@ mod tests {
         let mut shortened = session();
         shortened.title = None;
         let shortened = shortened.with_derived_title(&[Turn {
+            model: None,
             role: Role::User,
             kind: TurnKind::Operator,
             text: "word ".repeat(DERIVED_TITLE_MAX_CHARS),
@@ -1786,6 +1829,7 @@ mod tests {
         let mut session = session();
         session.title = None;
         let session = session.with_derived_title(&[Turn {
+            model: None,
             role: Role::User,
             kind: TurnKind::Operator,
             text: "A complete request…".into(),
@@ -1812,6 +1856,7 @@ mod tests {
     #[test]
     fn derived_title_does_not_replace_recorded_title() {
         let session = session().with_derived_title(&[Turn {
+            model: None,
             role: Role::User,
             kind: TurnKind::Operator,
             text: "A different request".into(),
@@ -1922,6 +1967,7 @@ mod tests {
     #[test]
     fn a_turn_carries_its_ordinal_and_omits_an_absent_native_id() {
         let turn = Turn {
+            model: None,
             role: Role::User,
             kind: TurnKind::Operator,
             text: "hello".into(),
