@@ -79,10 +79,11 @@ FIND IT
   is interactive, `print` and `json` are headless, `rpc` says neither, any
   `tui` entry makes the session interactive, and entries a fork copied from
   its parent are ignored. Pi sessions recorded without the extension, and
-  OpenCode sessions, carry no marker. A bounded read that stops short of a
-  recording keeps interactive evidence it reached but never concludes
-  headless, since the unread part may hold interactive records; `show --full`
-  settles it. Unknown or absent markers never match. These filters apply
+  OpenCode sessions, carry no marker. For Claude and Pi, a bounded read that
+  stops short of a recording keeps interactive evidence it reached but never
+  concludes headless, since the unread part may hold interactive records;
+  `show --full` settles it. Codex's source is its opening record, so a bounded
+  read settles it. Unknown or absent markers never match. These filters apply
   before the per-harness limit and compose with --harness and the scope flags.
 
   --since and --until filter `last_activity_at`, the newest recorded activity,
