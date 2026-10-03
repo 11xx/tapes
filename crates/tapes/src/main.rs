@@ -2049,12 +2049,10 @@ fn dispatch(cli: Cli) -> Result<()> {
             if full {
                 refuse_full_supplied(&query.input)?;
             }
-            let backends = if query.input.supplied() {
+            let backends = if query.input.supplied() || full {
                 query.input.backends()?
-            } else if full {
-                agent_tapes_core::backend::backends()
             } else {
-                read.backends()?
+                read.backends(&query.input)?
             };
             let warnings = query.latest_warnings(&backends)?;
             print_selection_warnings(&warnings);
