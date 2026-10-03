@@ -13,14 +13,15 @@ use chrono::Utc;
 
 use crate::content::{self, ContentInventory};
 use crate::model::{
-    ByteSpan, Model, ReadEvidence, ReadGap, ReadRange, ReadRangeKind, Session, Turn,
+    ByteSpan, Model, ReadEvidence, ReadGap, ReadRange, ReadRangeKind, RecordRef, Session, Turn,
+    TurnKind,
 };
 use crate::Selection;
 
 pub const DEFAULT_BYTES: usize = 64 * 1024;
 pub const MAX_BYTES: usize = 4 * 1024 * 1024;
 pub const PAGE_SCHEMA: &str = "tapes-page/8";
-pub const HISTORY_SEARCH_SCHEMA: &str = "tapes-history-search/8";
+pub const HISTORY_SEARCH_SCHEMA: &str = "tapes-history-search/9";
 pub const METADATA_HISTORY_SCHEMA: &str = "tapes-metadata-history/8";
 const MAX_CURSOR_BYTES: usize = 16 * 1024;
 const MAX_PAGES: usize = 32;
@@ -383,9 +384,18 @@ fn visit_pages(
 
 #[derive(Debug, Serialize)]
 pub struct SearchMatch {
+    /// Byte bounds of the page containing the match.
     pub page_start: u64,
     pub page_end: u64,
+    /// Zero-based position within this page, not the full session.
     pub ordinal: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub record_ref: Option<RecordRef>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub native_id: Option<String>,
+    pub kind: TurnKind,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ts: Option<chrono::DateTime<Utc>>,
     pub text: String,
     pub text_truncated: bool,
 }
@@ -443,6 +453,10 @@ pub fn search(
                             page_start: page.start,
                             page_end: page.end,
                             ordinal: turn.ordinal,
+                            record_ref: turn.record_ref,
+                            native_id: turn.native_id,
+                            kind: turn.kind,
+                            ts: turn.ts,
                             text: turn.text.chars().take(EXCERPT_CHARS).collect(),
                             text_truncated: turn.text.chars().count() > EXCERPT_CHARS,
                         });
