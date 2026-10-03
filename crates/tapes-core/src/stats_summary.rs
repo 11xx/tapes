@@ -22,7 +22,7 @@ pub enum SessionRead {
     Whole,
 }
 
-pub const SCHEMA: &str = "tapes-stats-summary/7";
+pub const SCHEMA: &str = "tapes-stats-summary/8";
 
 #[derive(Debug, Serialize)]
 pub struct SessionStats {
@@ -60,6 +60,7 @@ pub struct StatsSummary {
     pub unavailable: Vec<String>,
     pub unreadable: Vec<String>,
     pub unsearched: Vec<String>,
+    pub partial_search: Vec<String>,
     pub scanned: usize,
     pub scan_truncated: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -120,6 +121,7 @@ pub fn with_backends_and_idle(
         unavailable: listed.unavailable,
         unreadable: listed.unreadable,
         unsearched: listed.unsearched,
+        partial_search: listed.partial_search,
         scanned: listed.scanned,
         scan_truncated: listed.scan_truncated,
         unplaced: crate::Unplaced::from_directories(listed.unplaced.clone()),

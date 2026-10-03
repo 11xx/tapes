@@ -292,6 +292,7 @@ pub struct EndingsReport {
     pub unavailable: Vec<String>,
     pub unreadable: Vec<String>,
     pub unsearched: Vec<String>,
+    pub partial_search: Vec<String>,
     pub scanned: usize,
     pub scan_truncated: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -354,6 +355,7 @@ pub fn endings_with_backends(
         unavailable: listed.unavailable,
         unreadable: listed.unreadable,
         unsearched: listed.unsearched,
+        partial_search: listed.partial_search,
         scanned: listed.scanned,
         scan_truncated: listed.scan_truncated,
         unplaced,

@@ -2678,6 +2678,24 @@ fn file_search_does_not_match_before_the_fixed_recent_turn_window() {
     assert_eq!(recent.sessions.len(), 1);
     assert_eq!(recent.sessions[0].id, id);
 
+    for depth in [33, usize::MAX] {
+        let wider = list_with_backends_options(
+            &backend,
+            Some("codex"),
+            None,
+            10,
+            &ListFilters {
+                search: Some("old needle"),
+                search_turns: Some(depth),
+                ..ListFilters::default()
+            },
+            ListSort::Newest,
+        )
+        .unwrap();
+        assert_eq!(wider.sessions.len(), 1);
+        assert!(wider.partial_search.is_empty());
+    }
+
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -3635,10 +3653,10 @@ fn codex_terminal_prefers_nested_native_error_fields_and_keeps_later_accounting(
 }
 
 /// A read that reached fewer turns than the searched tail because of a source
-/// bound cannot say the needle is absent; the session is unsearched, not a
+/// bound cannot say the needle is absent; the session has partial coverage, not a
 /// non-match. A hit inside the reached turns is still a match.
 #[test]
-fn a_source_bounded_read_short_of_the_tail_is_unsearched_not_a_non_match() {
+fn a_source_bounded_read_short_of_the_tail_reports_partial_coverage() {
     let requested_tail = Rc::new(Cell::new(0));
     let backends: Vec<Box<dyn Backend>> = vec![Box::new(SearchFixture {
         session: resolver_session("bounded-session"),
@@ -3658,9 +3676,10 @@ fn a_source_bounded_read_short_of_the_tail_is_unsearched_not_a_non_match() {
     )
     .unwrap();
     assert!(miss.sessions.is_empty());
-    assert_eq!(miss.unsearched.len(), 1, "{:?}", miss.unsearched);
+    assert!(miss.unsearched.is_empty());
+    assert_eq!(miss.partial_search.len(), 1, "{:?}", miss.partial_search);
     assert!(
-        miss.unsearched[0].contains("reached 1 of the last 32 turns"),
+        miss.partial_search[0].contains("partial coverage"),
         "{:?}",
         miss.unsearched
     );
@@ -3677,6 +3696,7 @@ fn a_source_bounded_read_short_of_the_tail_is_unsearched_not_a_non_match() {
     .unwrap();
     assert_eq!(hit.sessions.len(), 1);
     assert!(hit.unsearched.is_empty());
+    assert_eq!(hit.partial_search.len(), 1);
 }
 
 /// The message ceiling is exact: a store with more messages than the ceiling
@@ -3795,9 +3815,9 @@ fn a_first_line_past_the_probe_ceiling_marks_the_start_uncertain() {
 
 /// The fast JSONL search path applies the same rule as the bounded read: a
 /// file past the reader's bound whose retained tail holds fewer turns than
-/// the search covers is unsearched on a miss, and still a match on a hit.
+/// the search covers has partial coverage on a miss and on a hit.
 #[test]
-fn file_search_short_of_the_tail_behind_the_file_bound_is_unsearched() {
+fn file_search_short_of_the_tail_reports_partial_coverage() {
     let root = std::env::temp_dir().join(format!("tapes-search-file-bound-{}", std::process::id()));
     let _ = fs::remove_dir_all(&root);
     let day = root.join("2026/01/01");
@@ -3838,9 +3858,10 @@ fn file_search_short_of_the_tail_behind_the_file_bound_is_unsearched() {
     )
     .unwrap();
     assert!(miss.sessions.is_empty());
-    assert_eq!(miss.unsearched.len(), 1, "{:?}", miss.unsearched);
+    assert!(miss.unsearched.is_empty());
+    assert_eq!(miss.partial_search.len(), 1, "{:?}", miss.partial_search);
     assert!(
-        miss.unsearched[0].contains(id) && miss.unsearched[0].contains("of the last 32 turns"),
+        miss.partial_search[0].contains(id) && miss.partial_search[0].contains("partial coverage"),
         "{:?}",
         miss.unsearched
     );
@@ -3857,6 +3878,7 @@ fn file_search_short_of_the_tail_behind_the_file_bound_is_unsearched() {
     .unwrap();
     assert_eq!(hit.sessions.len(), 1);
     assert!(hit.unsearched.is_empty());
+    assert_eq!(hit.partial_search.len(), 1);
 
     // A candidate the metadata filters exclude was never asked about, so it
     // is neither returned nor reported as unsearched.
@@ -3872,7 +3894,7 @@ fn file_search_short_of_the_tail_behind_the_file_bound_is_unsearched() {
     .unwrap();
     assert!(filtered_out.sessions.is_empty());
     assert!(
-        filtered_out.unsearched.is_empty(),
+        filtered_out.unsearched.is_empty() && filtered_out.partial_search.is_empty(),
         "{:?}",
         filtered_out.unsearched
     );

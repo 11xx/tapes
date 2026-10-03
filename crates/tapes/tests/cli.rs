@@ -1846,7 +1846,8 @@ fn list_help_exits_successfully() {
         help.contains("RFC 3339 timestamps with an offset"),
         "{help}"
     );
-    assert!(help.contains("last 32 normalized turns"), "{help}");
+    assert!(help.contains("--search-turns <N|all>"), "{help}");
+    assert!(help.contains("Partial reads are searched"), "{help}");
     assert!(help.contains("unsearched"), "{help}");
     assert!(help.contains("--input <PATH>"), "{help}");
     assert!(help.contains("chatgpt-exporter"), "{help}");
@@ -4649,7 +4650,7 @@ fn list_searches_recent_fixture_turns_before_the_limit_and_survives_a_bad_line()
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(
-        String::from_utf8_lossy(&output.stderr).contains("last 32 normalized turns"),
+        String::from_utf8_lossy(&output.stderr).contains("bounded window of normalized turns"),
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
@@ -7829,7 +7830,7 @@ fn usage_help_names_the_schema_and_what_the_figures_mean() {
         "{help}"
     );
     assert!(help.contains("quota is a separate fact"), "{help}");
-    assert!(help.contains("tapes-usage-summary/5"), "{help}");
+    assert!(help.contains("tapes-usage-summary/6"), "{help}");
     assert!(help.contains("--by"), "{help}");
 }
 
@@ -8221,7 +8222,7 @@ fn usage_summary_sums_the_listings_own_counters_and_counts_the_sessions_behind_t
     );
     let value: Value = serde_json::from_slice(&output.stdout).unwrap();
 
-    assert_eq!(value["schema"], "tapes-usage-summary/5");
+    assert_eq!(value["schema"], "tapes-usage-summary/6");
     assert_eq!(value["selection"]["scope"], "global");
     assert_eq!(value["selection"]["harness"], "codex");
     assert_eq!(value["scanned"], 4);
@@ -9327,7 +9328,7 @@ fn selection_stats_agree_with_individual_reads() {
         }
     }
     let summary = run(&["stats", "--global", "--harness", "codex", "--json"]);
-    assert_eq!(summary["schema"], "tapes-stats-summary/7");
+    assert_eq!(summary["schema"], "tapes-stats-summary/8");
     assert_eq!(summary["selected"], 2);
     assert_eq!(summary["read"], 2);
     let mut active = 0;

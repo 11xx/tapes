@@ -277,6 +277,7 @@ pub struct Listing {
     /// Candidates whose bounded content search could not be answered, plus
     /// diagnostics from a search stage that had to fall back.
     pub unsearched: Vec<String>,
+    pub partial_search: Vec<String>,
     pub scanned: usize,
     pub scan_truncated: bool,
 }
@@ -290,6 +291,7 @@ impl Listing {
             unavailable: Vec::new(),
             unavailable_ids: Vec::new(),
             unsearched: Vec::new(),
+            partial_search: Vec::new(),
             scan_truncated: false,
         }
     }
@@ -495,7 +497,16 @@ pub trait Backend {
     /// this path aligned with each backend's existing transcript reader, so a
     /// backend cannot accidentally grow a second unbounded parser for search.
     fn search(&self, session: &Session, needle: &str, tail: usize) -> Result<bool> {
-        search_turns(&self.transcript(session, tail)?, needle, tail)
+        Ok(self.search_coverage(session, needle, tail)?.matched)
+    }
+
+    fn search_coverage(
+        &self,
+        session: &Session,
+        needle: &str,
+        tail: usize,
+    ) -> Result<SearchCoverage> {
+        Ok(search_turns(&self.transcript(session, tail)?, needle, tail))
     }
 }
 
@@ -798,21 +809,27 @@ pub(crate) fn list_discovered_files_with_search(
     listing
 }
 
-/// Whether the searched tail contains the needle. A hit anywhere in the read
-/// is a match. A miss is a non-match only when the read covered the tail it
-/// was asked to search: fewer turns than that behind a bound that withheld
-/// turns means the answer is unknown, and an unknown reported as a miss would
-/// hide exactly the sessions a search exists to find. A bound that only cut
-/// text within turns the read did reach leaves the turn count whole.
-pub(crate) fn search_turns(transcript: &Transcript, needle: &str, tail: usize) -> Result<bool> {
-    let needle = needle.to_lowercase();
-    if transcript
-        .turns
-        .iter()
-        .any(|turn| turn.text.to_lowercase().contains(&needle))
-    {
-        return Ok(true);
+/// The match and coverage of the requested bounded turn window.
+#[derive(Debug)]
+pub struct SearchCoverage {
+    pub matched: bool,
+    pub partial: bool,
+}
+
+impl SearchCoverage {
+    fn diagnostic(&self, session: &Session) -> String {
+        format!(
+            "{} session {}: partial coverage of the requested turn window",
+            session.harness(),
+            session.id
+        )
     }
+}
+
+/// Search every retained turn and report whether source bounds withheld part
+/// of the requested window. A partial miss describes only the retained turns.
+pub(crate) fn search_turns(transcript: &Transcript, needle: &str, tail: usize) -> SearchCoverage {
+    let needle = needle.to_lowercase();
     let turns_withheld = transcript.truncation.source.iter().any(|bound| {
         matches!(
             bound,
@@ -821,13 +838,15 @@ pub(crate) fn search_turns(transcript: &Transcript, needle: &str, tail: usize) -
                 | SourceBound::InputCoverage { .. }
         )
     });
-    if transcript.turns.len() < tail && turns_withheld {
-        anyhow::bail!(
-            "the bounded read reached {} of the last {tail} turns, so a miss is not a non-match",
-            transcript.turns.len()
-        );
+    SearchCoverage {
+        matched: transcript
+            .turns
+            .iter()
+            .rev()
+            .take(tail)
+            .any(|turn| turn.text.to_lowercase().contains(&needle)),
+        partial: transcript.turns.len() < tail && turns_withheld,
     }
-    Ok(false)
 }
 
 pub(crate) fn filter_listing_search<B: Backend + ?Sized>(
@@ -838,9 +857,15 @@ pub(crate) fn filter_listing_search<B: Backend + ?Sized>(
 ) -> Listing {
     let mut matching = Vec::new();
     for session in listing.sessions {
-        match backend.search(&session, needle, tail) {
-            Ok(true) => matching.push(session),
-            Ok(false) => {}
+        match backend.search_coverage(&session, needle, tail) {
+            Ok(coverage) => {
+                if coverage.partial {
+                    listing.partial_search.push(coverage.diagnostic(&session));
+                }
+                if coverage.matched {
+                    matching.push(session);
+                }
+            }
             Err(error) => listing.unsearched.push(format!(
                 "{} session {}: {error:#}",
                 backend.harness(),
@@ -874,7 +899,7 @@ pub(crate) fn filter_listing_search_parallel<B: Backend + Sync + ?Sized>(
                 scope.spawn(|| {
                     chunk
                         .iter()
-                        .map(|session| (session, backend.search(session, needle, tail)))
+                        .map(|session| (session, backend.search_coverage(session, needle, tail)))
                         .collect::<Vec<_>>()
                 })
             })
@@ -886,8 +911,14 @@ pub(crate) fn filter_listing_search_parallel<B: Backend + Sync + ?Sized>(
     });
     for (session, result) in searched {
         match result {
-            Ok(true) => listing.sessions.push(session.clone()),
-            Ok(false) => {}
+            Ok(coverage) => {
+                if coverage.partial {
+                    listing.partial_search.push(coverage.diagnostic(session));
+                }
+                if coverage.matched {
+                    listing.sessions.push(session.clone());
+                }
+            }
             Err(error) => listing.unsearched.push(format!(
                 "{} session {}: {error:#}",
                 backend.harness(),
@@ -1012,13 +1043,8 @@ pub(crate) struct ParsedFile {
 
 /// What a bounded content search concluded about one file.
 enum SearchOutcome {
-    Matched(Box<Session>),
+    Searched(Box<Session>, SearchCoverage),
     Miss,
-    /// The read reached fewer turns than it was asked to search and the file
-    /// holds older ones, so a miss is unknown rather than a non-match. The
-    /// session travels with the diagnostic so the listing's filters decide
-    /// whether the candidate was asked about at all.
-    Unsearched(Box<Session>, String),
 }
 
 /// A JSONL recording seen through two bounded windows. The tail holds the
@@ -1844,7 +1870,7 @@ pub(crate) fn list_files(
 /// by the content search. A file past the parser's bound is always parsed,
 /// because only the parse can tell whether the retained tail holds enough
 /// turns for a miss to mean anything; when it does not, the candidate is
-/// reported as unsearched by the same rule `search_turns` applies. Worker
+/// reported as partial coverage by the same rule `search_turns` applies. Worker
 /// reads preserve candidate order before the caller applies scope and result
 /// limits.
 pub(crate) fn list_files_with_search(
@@ -1905,20 +1931,13 @@ pub(crate) fn list_files_with_search(
                                 .rev()
                                 .take(tail)
                                 .any(|turn| turn.text.to_lowercase().contains(&needle));
-                            if matched {
-                                SearchOutcome::Matched(Box::new(parsed.session))
-                            } else if parsed.truncated && parsed.turns.len() < tail {
-                                let diagnostic = format!(
-                                    "{} session {}: the bounded read reached {} of the last {tail} \
-                                     turns, so a miss is not a non-match",
-                                    parsed.session.harness(),
-                                    parsed.session.id,
-                                    parsed.turns.len()
-                                );
-                                SearchOutcome::Unsearched(Box::new(parsed.session), diagnostic)
-                            } else {
-                                SearchOutcome::Miss
-                            }
+                            SearchOutcome::Searched(
+                                Box::new(parsed.session),
+                                SearchCoverage {
+                                    matched,
+                                    partial: parsed.truncated && parsed.turns.len() < tail,
+                                },
+                            )
                         })
                         .collect::<Vec<_>>()
                 })
@@ -1938,10 +1957,9 @@ pub(crate) fn list_files_with_search(
     // asked about; a match outside them is not returned, and an unsearched
     // candidate outside them is not reported either.
     for outcome in parsed {
-        let (session, diagnostic) = match outcome {
-            SearchOutcome::Matched(session) => (*session, None),
+        let (session, coverage) = match outcome {
+            SearchOutcome::Searched(session, coverage) => (*session, coverage),
             SearchOutcome::Miss => continue,
-            SearchOutcome::Unsearched(session, diagnostic) => (*session, Some(diagnostic)),
         };
         let placed = query.scope.is_none_or(|scope| {
             session
@@ -1952,10 +1970,11 @@ pub(crate) fn list_files_with_search(
         if !placed || !query.matches(&session) {
             continue;
         }
-        match diagnostic {
-            Some(diagnostic) => listing.unsearched.push(diagnostic),
-            None if listing.sessions.len() < query.limit => listing.sessions.push(session),
-            None => {}
+        if coverage.partial {
+            listing.partial_search.push(coverage.diagnostic(&session));
+        }
+        if coverage.matched && listing.sessions.len() < query.limit {
+            listing.sessions.push(session);
         }
     }
     listing

@@ -93,16 +93,19 @@ FIND IT
   which inspects every candidate the scan reaches as --search does. Ties use
   session id ascending, then harness ascending.
 
-  --search <text> matches case-insensitively against the last 32 normalized
-  turns in each candidate session. The fixed tail keeps a listing bounded, so
-  a non-match means only that those recent turns did not contain the text. It
-  is applied before the per-harness limit. A session whose bounded read fails
-  is omitted from sessions and named in unsearched instead of being treated as
-  a non-match; a preflight notice is written to stderr before scanning, and a
-  stopped candidate scan is still reported as scan_truncated.
-  If the local OpenCode2 API server cannot start or list candidates, search
-  falls back to CLI API GETs and records the failed stage and diagnostic in
-  unsearched.
+  --search <text> matches case-insensitively against normalized turns in each
+  bounded read. --search-turns <N> selects the last N turns (default 32);
+  --search-turns all searches every retained turn. Byte and record bounds still
+  apply. Search precedes the per-harness limit. Partial reads are searched:
+  hits remain matches, and partial_search names sessions whose requested turn
+  window was withheld by a source bound, including partial misses. A miss
+  describes only the searched window. Read failures are named in unsearched.
+  Human search diagnostics group by harness and reason with counts; JSON
+  preserves per-session diagnostics. OpenCode API refusals name the store once
+  with their reason. A preflight notice goes to stderr, and a stopped candidate
+  scan is reported as scan_truncated. If the local OpenCode2 API server cannot
+  start or list candidates, search falls back to CLI API GETs and records the
+  failed stage and diagnostic in unsearched.
 
   File-backed harnesses may show a bounded first-meaningful-user-turn hint
   prefixed with ~ when a harness recorded no title, cut at 96 characters. JSON
@@ -462,7 +465,7 @@ PROBE BEFORE EXPORTING
   the tail window is still named.
 
   Given a scope or a listing filter instead of a session, usage answers that
-  whole selection as tapes-usage-summary/5, using the flags list and export
+  whole selection as tapes-usage-summary/6, using the flags list and export
   take and grouping by --by (harness and model unless told otherwise). It sums
   the counters the listing already carries, so nothing is re-read. Read
   counted before a sum: it says how many of a group's sessions recorded that

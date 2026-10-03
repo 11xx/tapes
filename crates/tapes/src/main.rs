@@ -748,6 +748,7 @@ impl SessionQueryArgs {
                 since: self.since,
                 until: self.until,
                 search: self.search.as_deref(),
+                search_turns: None,
             },
             sort: self.sort.unwrap_or(SortArg::Newest).into(),
         }
@@ -766,7 +767,7 @@ impl SessionQueryArgs {
 
     fn describe_search(&self) {
         if self.search.is_some() {
-            eprintln!("Searching the last 32 normalized turns of each candidate session before applying --limit.");
+            eprintln!("Searching a bounded window of normalized turns in each candidate session before applying --limit.");
         }
     }
 }
@@ -830,15 +831,17 @@ enum Command {
         /// session id, then harness.
         #[arg(long, value_enum, default_value_t = SortArg::Newest)]
         sort: SortArg,
-        /// Match case-insensitively against the last 32 normalized turns in
-        /// each candidate session. The fixed tail keeps listing bounded; a
-        /// match outside it is not considered. Search is applied before
-        /// --limit, and a failed bounded read is reported as unsearched. A
-        /// short preflight notice is written to stderr before scanning. If the
-        /// local OpenCode2 API server cannot start or list candidates, search
-        /// falls back to CLI API GETs and records that stage's diagnostic.
+        /// Match case-insensitively against normalized turns in each bounded
+        /// read, before --limit. --search-turns selects the turn window.
+        /// Partial reads are searched and reported as partial coverage; read
+        /// failures are reported as unsearched. A preflight notice goes to stderr.
         #[arg(long, value_name = "SUBSTRING")]
         search: Option<String>,
+        /// Number of normalized turns to search in each bounded read. `all`
+        /// searches every retained turn; source byte and record bounds apply.
+        #[arg(long, value_name = "N|all", default_value = "32", requires = "search", value_parser = parse_search_turns)]
+        search_turns: usize,
+
         #[command(flatten)]
         input: InputArgs,
         /// Render results as JSON. Matching sessions may include optional
@@ -1105,7 +1108,7 @@ enum Command {
     /// `assistant_turns_ms` with its count, median, p90, and max. Nothing is
     /// judged, ranked, or explained.
     /// A scope or listing filter selects multiple sessions and returns
-    /// tapes-stats-summary/7: recorded tools grouped by harness and name,
+    /// tapes-stats-summary/8: recorded tools grouped by harness and name,
     /// with per-session read coverage, pairing counts and failures, and per
     /// harness the recordable kinds no session read held. Children are not
     /// read through their parents.
@@ -1128,7 +1131,7 @@ enum Command {
         /// updated in place and a second read may not repeat the first.
         #[arg(long, conflicts_with = "read_bytes")]
         full: bool,
-        /// Render the versioned tapes-stats/13 object, or tapes-stats-summary/7
+        /// Render the versioned tapes-stats/13 object, or tapes-stats-summary/8
         /// for a selection, as JSON. `warnings` names the limits of the read:
         /// `read-window`, `tail-window`, `kind-unknown`, `kind-undeclared` (a
         /// turn of a kind its harness declares it cannot record, so the
@@ -1145,7 +1148,7 @@ enum Command {
     /// turn counts, plus whatever else its harness recorded — a context
     /// window, a provider quota window, wall-clock durations, a per-model
     /// split. A scope or listing filter instead answers the whole selection
-    /// as tapes-usage-summary/5, grouped by --by and summing each counter
+    /// as tapes-usage-summary/6, grouped by --by and summing each counter
     /// over the sessions that recorded it. The accounting basis and coverage
     /// decide whether figures may be summed; cost is only what the harness
     /// recorded, and quota is a separate fact about the account rather than
@@ -1193,7 +1196,7 @@ enum Command {
             conflicts_with = "read_bytes"
         )]
         series: Option<Option<usize>>,
-        /// Render the versioned tapes-usage/10 object, or tapes-usage-summary/5
+        /// Render the versioned tapes-usage/10 object, or tapes-usage-summary/6
         /// for a selection, as JSON. `session.model_observation` says
         /// whether more than one model and effort was observed (`mixed`) and
         /// whether a gap, partial read or budget kept the split incomplete
@@ -1476,6 +1479,7 @@ fn dispatch(cli: Cli) -> Result<()> {
             until,
             sort,
             search,
+            search_turns,
             input,
             json,
             remote,
@@ -1500,6 +1504,7 @@ fn dispatch(cli: Cli) -> Result<()> {
                     until,
                     sort,
                     search: &search,
+                    search_turns,
                 });
                 let result = remote_list(destination, &args);
                 let (result, failure) = match result {
@@ -1523,7 +1528,7 @@ fn dispatch(cli: Cli) -> Result<()> {
             }
             if search.is_some() {
                 eprintln!(
-                    "Searching the last 32 normalized turns of each candidate session before applying --limit."
+                    "Searching a bounded window of normalized turns in each candidate session before applying --limit."
                 );
             }
             let filters = agent_tapes_core::ListFilters {
@@ -1533,6 +1538,7 @@ fn dispatch(cli: Cli) -> Result<()> {
                 since,
                 until,
                 search: search.as_deref(),
+                search_turns: Some(search_turns),
             };
             let result = if input.supplied() {
                 let backends = input.backends()?;
@@ -2178,6 +2184,7 @@ fn dispatch(cli: Cli) -> Result<()> {
                         summary.scanned,
                         &summary.unreadable,
                         &summary.unsearched,
+                        &summary.partial_search,
                         &summary.unavailable,
                     );
                     print_unplaced_note(summary.unplaced.as_ref(), summary.scanned);
@@ -2241,7 +2248,7 @@ fn dispatch(cli: Cli) -> Result<()> {
             }
             if search.is_some() {
                 eprintln!(
-                    "Searching the last 32 normalized turns of each candidate session before applying --limit."
+                    "Searching a bounded window of normalized turns in each candidate session before applying --limit."
                 );
             }
             let selection = agent_tapes_core::SessionSelection {
@@ -2263,6 +2270,7 @@ fn dispatch(cli: Cli) -> Result<()> {
                     since,
                     until,
                     search: search.as_deref(),
+                    search_turns: None,
                 },
                 sort: sort.into(),
             };
@@ -2294,6 +2302,7 @@ fn dispatch(cli: Cli) -> Result<()> {
                     report.scanned,
                     &report.unreadable,
                     &report.unsearched,
+                    &report.partial_search,
                     &report.unavailable,
                 );
                 print_unplaced_note(report.unplaced.as_ref(), report.scanned);
@@ -2482,6 +2491,7 @@ struct RemoteListQuery<'a> {
     until: Option<agent_tapes_core::ActivityTimestamp>,
     sort: SortArg,
     search: &'a Option<String>,
+    search_turns: usize,
 }
 
 fn remote_list_args(query: &RemoteListQuery<'_>) -> Vec<OsString> {
@@ -2497,6 +2507,16 @@ fn remote_list_args(query: &RemoteListQuery<'_>) -> Vec<OsString> {
     args.value_if("--until", query.until.map(timestamp_arg));
     args.value("--sort", sort_label(query.sort));
     args.value_if("--search", query.search.as_deref());
+    if query.search.is_some() {
+        args.value(
+            "--search-turns",
+            if query.search_turns == usize::MAX {
+                "all".to_owned()
+            } else {
+                query.search_turns.to_string()
+            },
+        );
+    }
     args.into_vec()
 }
 
@@ -2563,6 +2583,7 @@ fn remote_export_args(
     args.value_if("--until", query.until.map(timestamp_arg));
     args.value_if("--sort", query.sort.map(sort_label));
     args.value_if("--search", query.search.as_deref());
+
     args.scope(&query.scope);
     args.value_if("--bundle", bundle);
     remote_read_args(&mut args, read, None, kinds, full);
@@ -2658,6 +2679,7 @@ fn unreachable_list(
         unavailable: vec![unavailable.diagnostic()],
         unreadable: Vec::new(),
         unsearched: Vec::new(),
+        partial_search: Vec::new(),
         scanned: 0,
         scan_truncated: false,
         unplaced: None,
@@ -2730,6 +2752,7 @@ fn print_stats_summary(summary: &agent_tapes_core::stats_summary::StatsSummary) 
         summary.scanned,
         &summary.unreadable,
         &summary.unsearched,
+        &summary.partial_search,
         &summary.unavailable,
     );
 }
@@ -3810,6 +3833,7 @@ fn print_availability_note(result: &agent_tapes_core::SessionList) {
         result.scanned,
         &result.unreadable,
         &result.unsearched,
+        &result.partial_search,
         &result.unavailable,
     );
     print_unplaced_note(result.unplaced.as_ref(), result.scanned);
@@ -3848,6 +3872,7 @@ fn print_diagnostics(
     scanned: usize,
     unreadable: &[String],
     unsearched: &[String],
+    partial_search: &[String],
     unavailable: &[String],
 ) {
     if scan_truncated {
@@ -3859,9 +3884,8 @@ fn print_diagnostics(
     for session in unreadable {
         println!("Unreadable: {session}");
     }
-    for session in unsearched {
-        println!("Unsearched: {session}");
-    }
+    print_search_diagnostics("Unsearched", unsearched);
+    print_search_diagnostics("Partial search", partial_search);
     if unavailable.is_empty() {
         return;
     }
@@ -4751,5 +4775,32 @@ mod tests {
 
         let named = render_transcript(&transcript(false), false, None);
         assert!(!named.contains("--exclude"), "{named}");
+    }
+}
+
+fn parse_search_turns(value: &str) -> std::result::Result<usize, String> {
+    if value == "all" {
+        return Ok(usize::MAX);
+    }
+    value
+        .parse::<usize>()
+        .ok()
+        .filter(|value| *value > 0)
+        .ok_or_else(|| "expected a positive number of turns or all".to_owned())
+}
+
+fn print_search_diagnostics(label: &str, diagnostics: &[String]) {
+    let mut groups = std::collections::BTreeMap::<(String, String), usize>::new();
+    for diagnostic in diagnostics {
+        let (harness, reason) = diagnostic
+            .split_once(" session ")
+            .and_then(|(harness, rest)| rest.split_once(": ").map(|(_, reason)| (harness, reason)))
+            .unwrap_or_else(|| diagnostic.split_once(' ').unwrap_or((diagnostic, "")));
+        *groups
+            .entry((harness.to_owned(), reason.to_owned()))
+            .or_default() += 1;
+    }
+    for ((harness, reason), count) in groups {
+        println!("{label}: {harness}: {reason} ({count})");
     }
 }
