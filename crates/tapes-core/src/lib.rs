@@ -11,7 +11,7 @@ use backend::{Backend, BackendIdentitySource, Listing, Query};
 use model::{Session, Transcript, Truncation};
 use scope::Scope;
 
-pub use agent_tapes_discovery::ResolveError;
+pub use agent_tapes_discovery::{NativeStore, ResolveError};
 
 pub use event::{
     Bounded, EventKind, EventRecord, EventTranscript, Incomplete, PairCounts, PairRef, ToolEvent,
