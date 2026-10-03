@@ -974,6 +974,7 @@ mod tests {
             invocations: Vec::new(),
             artifact_references: Vec::new(),
             artifact_consumptions: Vec::new(),
+            exit: None,
             self_contained: false,
         }
     }
@@ -993,6 +994,7 @@ mod tests {
             invocations: Vec::new(),
             artifact_references: Vec::new(),
             artifact_consumptions: Vec::new(),
+            exit: None,
             self_contained: false,
         }
     }

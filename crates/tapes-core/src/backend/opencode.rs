@@ -2209,6 +2209,7 @@ fn opencode_tool_event(part: &Value) -> ToolEvent {
         ),
         artifact_references: crate::event::artifact_references(&state["input"]),
         artifact_consumptions: Vec::new(),
+        exit: None,
         self_contained: false,
     }
 }

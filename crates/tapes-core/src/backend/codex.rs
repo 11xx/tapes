@@ -2206,6 +2206,7 @@ fn codex_tool_event(payload: &Value, subtype: &str) -> ToolEvent {
             crate::event::artifact_references(&payload_json(&payload["output"]))
         },
         artifact_consumptions: Vec::new(),
+        exit: None,
         self_contained: false,
     }
 }
@@ -2289,6 +2290,9 @@ fn codex_runtime_tool_event(item: &Value, completed: bool, completed_only: bool)
             Vec::new()
         },
         artifact_consumptions: Vec::new(),
+        exit: (completed && item["type"] == "CommandExecution")
+            .then(|| item["exit_code"].as_i64())
+            .flatten(),
         self_contained: completed_only,
     }
 }

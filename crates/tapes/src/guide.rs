@@ -328,9 +328,12 @@ PROBE BEFORE EXPORTING
   obtain a `ModelSelectionSpan` and its `last: ModelSelectionRecord` without
   decoding the native records.
 
-  events projects harness-neutral tool records as tapes-events/11. Pairing is
+  events projects harness-neutral tool records as tapes-events/12. Pairing is
   exact within the bounded read; an incomplete call or result says whether its
-  counterpart was not reached or not recorded. Event ordinals are the same
+  counterpart was not reached or not recorded. `exit` is an integer process
+  status on completed Codex CommandExecution events when exit_code is recorded.
+  Claude Bash and Pi bash results omit it because their recordings supply no
+  structured process status. Output text never supplies an exit status. Event ordinals are the same
   turn coordinates show prints. event_id stays stable across read windows;
   native_id is the harness record id where recorded, or a coordinate-derived
   record-sha256 id for a tool turn without one. A recognized file read has

@@ -1609,6 +1609,7 @@ fn claude_tool_event(block: &Value, subtype: &str, structured: Option<&Value>) -
             crate::event::artifact_references(&block["content"])
         },
         artifact_consumptions: Vec::new(),
+        exit: None,
         self_contained: false,
     }
 }

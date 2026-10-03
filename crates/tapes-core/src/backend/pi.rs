@@ -1132,6 +1132,7 @@ fn pi_call_event(block: &Value) -> ToolEvent {
         ),
         artifact_references: crate::event::artifact_references(&block["arguments"]),
         artifact_consumptions: Vec::new(),
+        exit: None,
         self_contained: false,
     }
 }
@@ -1154,6 +1155,7 @@ fn pi_result_event(message: &Value) -> ToolEvent {
         invocations: Vec::new(),
         artifact_references: crate::event::artifact_references(&message["content"]),
         artifact_consumptions: Vec::new(),
+        exit: None,
         self_contained: false,
     }
 }
