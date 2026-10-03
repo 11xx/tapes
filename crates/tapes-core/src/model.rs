@@ -588,6 +588,7 @@ pub enum ReadRangeKind {
     Head,
     Tail,
     Alignment,
+    Verification,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
