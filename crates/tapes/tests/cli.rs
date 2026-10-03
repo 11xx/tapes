@@ -11522,3 +11522,97 @@ fn claude_content_digests_survive_bounded_and_streamed_events_and_exports() {
         }
     }
 }
+
+#[test]
+fn install_pi_writes_a_managed_extension_once_and_uninstall_removes_only_it() {
+    let root = std::env::temp_dir().join(format!("tapes-cli-install-pi-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&root);
+    let home = root.join("home");
+    let run = |agent_dir: &str, args: &[&str]| {
+        tapes()
+            .args(args)
+            .env("PI_CODING_AGENT_DIR", agent_dir)
+            .env("HOME", &home)
+            .output()
+            .unwrap()
+    };
+
+    // A file URL is refused rather than resolved, so nothing lands where pi
+    // would not look.
+    let url = format!("file://{}/url-agent", root.display());
+    let refused = run(&url, &["install", "pi"]);
+    assert!(!refused.status.success());
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("file URL"));
+    assert!(!root.join("url-agent").exists());
+
+    // pi expands a leading `~/`, so tapes installs where pi loads.
+    let agent_dir = "~/pi agent";
+    let expected = home.join("pi agent");
+    let extension = expected.join("extensions/tapes-launch.ts");
+    let installed = run(agent_dir, &["install", "pi"]);
+    assert!(
+        installed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&installed.stderr)
+    );
+    let source = fs::read_to_string(&extension).unwrap();
+    assert!(source.starts_with("// Managed by tapes."));
+    assert!(source.contains("appendEntry(\"tapes.launch\""));
+
+    let again = run(agent_dir, &["install", "pi"]);
+    assert!(again.status.success());
+    assert!(String::from_utf8_lossy(&again.stdout).contains("already installed"));
+    assert_eq!(fs::read_to_string(&extension).unwrap(), source);
+
+    let removed = run(agent_dir, &["uninstall", "pi"]);
+    assert!(removed.status.success());
+    assert!(!extension.exists());
+    let absent = run(agent_dir, &["uninstall", "pi"]);
+    assert!(absent.status.success());
+
+    let agent = root.join("agent");
+    let agent_dir = agent.to_str().unwrap();
+    let extension = agent.join("extensions/tapes-launch.ts");
+    fs::create_dir_all(agent.join("extensions")).unwrap();
+    let foreign = "export default function () {}\n";
+    fs::write(&extension, foreign).unwrap();
+    let refused = run(agent_dir, &["install", "pi"]);
+    assert!(!refused.status.success());
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("not managed by tapes"));
+    let kept = run(agent_dir, &["uninstall", "pi"]);
+    assert!(!kept.status.success());
+    assert_eq!(fs::read_to_string(&extension).unwrap(), foreign);
+
+    // A symbolic link, even a dangling one, is never replaced or removed.
+    fs::remove_file(&extension).unwrap();
+    std::os::unix::fs::symlink(root.join("nowhere.ts"), &extension).unwrap();
+    let refused = run(agent_dir, &["install", "pi"]);
+    assert!(!refused.status.success());
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("symbolic link"));
+    let kept = run(agent_dir, &["uninstall", "pi"]);
+    assert!(!kept.status.success());
+    assert!(fs::symlink_metadata(&extension)
+        .unwrap()
+        .file_type()
+        .is_symlink());
+    assert!(!root.join("nowhere.ts").exists());
+
+    // A directory at the path is neither replaced nor removed.
+    fs::remove_file(&extension).unwrap();
+    fs::create_dir(&extension).unwrap();
+    let refused = run(agent_dir, &["install", "pi"]);
+    assert!(!refused.status.success());
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("not a regular file"));
+    assert!(!run(agent_dir, &["uninstall", "pi"]).status.success());
+    assert!(extension.is_dir());
+    fs::remove_dir(&extension).unwrap();
+
+    assert!(fs::read_dir(agent.join("extensions"))
+        .unwrap()
+        .all(|entry| !entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with('.')));
+    let _ = fs::remove_dir_all(&root);
+}

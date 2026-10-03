@@ -46,6 +46,7 @@ carries whatever the transcript holds, including anything pasted into it;
 ```sh
 tapes list --here                         # this project's sessions, every harness, newest first
 tapes list --search "rate limit"          # sessions whose recent turns mention it
+tapes list --launch interactive           # sessions a person drove, not headless runs
 tapes endings --here --since 2026-09-01   # what each session ended on
 tapes usage --here --by model             # where the tokens and the cost went
 tapes stats <id> --idle 45m               # active time, stretches, tools, cache share
@@ -53,8 +54,10 @@ tapes list --remote build-box             # sessions on another machine, read ov
 ```
 
 Without `--here`, a listing covers every session on the machine. Every command
-except `export` takes `--json`, and each JSON answer names its versioned
-schema.
+that reads sessions, except `export`, takes `--json`, and each JSON answer
+names its versioned schema. Claude Code and Codex record how each session was launched; Pi does
+once `tapes install pi` adds a small extension that records it, the one file
+`tapes` writes outside its own output.
 
 ## Where the rest is
 

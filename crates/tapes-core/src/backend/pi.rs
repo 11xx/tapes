@@ -5,9 +5,9 @@ use anyhow::{anyhow, Result};
 use serde_json::Value;
 
 use super::{
-    accounting_for, default_native_store, enrich_native_session, head_directory,
-    list_discovered_files, list_discovered_files_with_search, read_bounds, read_recording,
-    replay_pin, skipped_records_note, stream_jsonl, timestamp, trailing_record,
+    accounting_for, bounded_launch, default_native_store, enrich_native_session, head_directory,
+    list_discovered_files, list_discovered_files_with_search, merge_launch, read_bounds,
+    read_recording, replay_pin, skipped_records_note, stream_jsonl, timestamp, trailing_record,
     transcript_from_recording, ActivityRange, Backend, Jsonl, Listing, ParsedFile, Query,
     StreamedTranscript, TokenTotals, UnmappedTally,
 };
@@ -18,7 +18,7 @@ use crate::content::{
 use crate::event::{Bounded, EventKind, ToolEvent};
 use crate::lineage::{Lineage, ParentRef};
 use crate::model::{
-    AccountingBasis, AccountingCoverage, Cost, KindDeclaration, Model, Role, Session,
+    AccountingBasis, AccountingCoverage, Cost, KindDeclaration, Launch, Model, Role, Session,
     SourceDescriptor, Tokens, TrailingRecord, Transcript, Turn, TurnKind, TurnSelection,
     UserDefault,
 };
@@ -146,7 +146,7 @@ impl PiBackend {
             model,
             model_observation,
             model_selections,
-            launch: None,
+            launch: recording_launch(&recording, native.id()),
             title: None,
             derived_title: None,
             derived_title_truncated: None,
@@ -283,6 +283,7 @@ impl Backend for PiBackend {
             .collect::<Vec<_>>();
         let active = active_path(&entries);
         let mut session = session.clone();
+        session.launch = recording_launch(&recording, &session.id);
         (session.model_observation, session.model_selections) =
             pi_selections(&active, &recording.tail);
         session.model = active
@@ -458,8 +459,10 @@ impl Backend for PiBackend {
         let mut entries = Vec::<PiEntry>::new();
         let mut positions = HashMap::<String, usize>::new();
         let mut activity = ActivityRange::default();
+        let mut launch = None;
         stream_jsonl(&path, Some(read.pin()?), |value, _, _| {
             activity.observe(value);
+            launch = merge_launch(launch, pi_launch_entry(value, &session.id));
             if value["type"] == "session" {
                 return Ok(false);
             }
@@ -539,6 +542,7 @@ impl Backend for PiBackend {
             selections.interrupt();
         }
         (whole.model_observation, whole.model_selections) = selections.finish(true);
+        whole.launch = launch;
         activity.apply(&mut whole);
         Ok(whole)
     }
@@ -654,8 +658,45 @@ fn read_transcript(path: &Path, read_bytes: u64) -> Result<PiTranscriptRead> {
 /// type carries content no view holds.
 fn count_unmapped(tally: &mut UnmappedTally, value: &Value) {
     let kind = value["type"].as_str().unwrap_or("(untyped)");
-    let declined = matches!(kind, "session" | "model_change" | "thinking_level_change");
+    let declined = matches!(kind, "session" | "model_change" | "thinking_level_change")
+        || is_launch_entry(value);
     tally.add(kind.to_owned(), declined);
+}
+
+/// The `customType` of the entry tapes' pi extension appends each time a pi
+/// process opens a session. Its `data.mode` is pi's run mode and its
+/// `data.session` the session it was written for.
+pub const LAUNCH_ENTRY_TYPE: &str = "tapes.launch";
+
+fn is_launch_entry(value: &Value) -> bool {
+    value["type"] == "custom" && value["customType"] == LAUNCH_ENTRY_TYPE
+}
+
+/// The terminal UI is a person at the keyboard; print and JSON modes are a
+/// program. RPC serves editor front ends and programs alike, so it is no
+/// evidence either way. An entry written for another session is a fork's
+/// inheritance from its parent and says nothing about this one.
+fn pi_launch_entry(value: &Value, session_id: &str) -> Option<Launch> {
+    if !is_launch_entry(value) || value["data"]["session"].as_str()? != session_id {
+        return None;
+    }
+    match value["data"]["mode"].as_str()? {
+        "tui" => Some(Launch::Interactive),
+        "print" | "json" => Some(Launch::Headless),
+        _ => None,
+    }
+}
+
+/// Launch evidence from both bounded windows of a recording.
+fn recording_launch(recording: &super::Recording, session_id: &str) -> Option<Launch> {
+    let launch = recording
+        .opening()
+        .iter()
+        .chain(&recording.tail.values)
+        .fold(None, |current, value| {
+            merge_launch(current, pi_launch_entry(value, session_id))
+        });
+    bounded_launch(launch, recording.tail.truncated)
 }
 
 fn abandoned_notes(abandoned: usize) -> Vec<String> {
