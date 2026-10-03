@@ -438,7 +438,99 @@ fn codex_launch_modes_use_only_the_first_session_meta_source() {
 }
 
 #[test]
-fn pi_and_opencode_leave_launch_absent() {
+fn pi_launch_modes_match_listing_full_and_streamed_reads() {
+    let backend = PiBackend::new(fixtures("launch/pi"));
+    let sessions = backend.list(&Query::unscoped(20)).unwrap().sessions;
+    let expected = [
+        ("launch-pi-tui", Some(Launch::Interactive)),
+        ("launch-pi-print", Some(Launch::Headless)),
+        ("launch-pi-json", Some(Launch::Headless)),
+        ("launch-pi-rpc", None),
+        ("launch-pi-resumed", Some(Launch::Interactive)),
+        ("launch-pi-none", None),
+        ("launch-pi-other", None),
+    ];
+
+    for (id, launch) in expected {
+        let listed = sessions
+            .iter()
+            .find(|session| session.id == id)
+            .unwrap_or_else(|| panic!("pi launch fixture {id} is missing"));
+        assert_eq!(listed.launch, launch, "listing {id}");
+        assert_eq!(located(&backend, id).launch, launch, "located {id}");
+
+        let mut discard = |_| Ok(());
+        let mut stream_input = listed.clone();
+        stream_input.launch = None;
+        let read = backend
+            .stream_transcript(&stream_input, None, &mut discard)
+            .unwrap();
+        assert_eq!(
+            backend.stream_session(&stream_input, &read).unwrap().launch,
+            launch,
+            "streamed read {id}"
+        );
+    }
+}
+
+#[test]
+fn pi_launch_entries_are_declined_records_and_other_custom_entries_stay_unrecognized() {
+    let backend = PiBackend::new(fixtures("launch/pi"));
+    let unmapped = |id: &str| {
+        backend
+            .transcript(&located(&backend, id), usize::MAX)
+            .unwrap()
+            .read
+            .and_then(|read| read.unmapped)
+            .unwrap()
+    };
+
+    let print = unmapped("launch-pi-print");
+    assert_eq!(print.declined.get("custom"), Some(&1));
+    assert_eq!(print.unrecognized.get("custom"), None);
+
+    let other = unmapped("launch-pi-other");
+    assert_eq!(other.declined.get("custom"), None);
+    assert_eq!(other.unrecognized.get("custom"), Some(&1));
+}
+
+#[test]
+fn pi_launch_survives_a_tail_that_no_longer_reaches_the_opening() {
+    let root = std::env::temp_dir().join(format!("tapes-pi-launch-tail-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    let mut recording = String::from(concat!(
+        r#"{"type":"session","version":3,"id":"launch-pi-long","timestamp":"2026-01-08T10:00:00Z","cwd":"/fixtures/project"}"#,
+        "\n",
+        r#"{"type":"custom","id":"launch-1","parentId":null,"timestamp":"2026-01-08T10:00:01Z","customType":"tapes.launch","data":{"mode":"tui"}}"#,
+        "\n",
+    ));
+    let filler = "x".repeat(1024);
+    let mut parent = "launch-1".to_owned();
+    for index in 0..256 {
+        let id = format!("user-{index}");
+        recording.push_str(&format!(
+            r#"{{"type":"message","id":"{id}","parentId":"{parent}","timestamp":"2026-01-08T10:01:00Z","message":{{"role":"user","timestamp":0,"content":[{{"type":"text","text":"{filler}"}}]}}}}"#
+        ));
+        recording.push('\n');
+        parent = id;
+    }
+    std::fs::write(
+        root.join("2026-01-08T10-00-00-000Z_launch-pi-long.jsonl"),
+        recording,
+    )
+    .unwrap();
+
+    let backend = PiBackend::new(&root).with_read_bytes(agent_tapes_core::backend::MIN_READ_BYTES);
+    let session = located(&backend, "launch-pi-long");
+    let transcript = backend.transcript(&session, usize::MAX).unwrap();
+    assert!(transcript.truncated, "the read must not reach the opening");
+    assert_eq!(session.launch, Some(Launch::Interactive));
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn pi_without_the_extension_and_opencode_leave_launch_absent() {
     let pi = PiBackend::new(fixtures("pi"));
     assert_eq!(located(&pi, "session-pi").launch, None);
 

@@ -1,0 +1,8 @@
+{"type":"session","version":3,"id":"launch-pi-resumed","timestamp":"2026-01-05T10:00:00Z","cwd":"/fixtures/project"}
+{"type":"model_change","id":"model-1","parentId":null,"timestamp":"2026-01-05T10:00:01Z","provider":"fixture","modelId":"pi-fixture"}
+{"type":"custom","id":"custom-2","parentId":"model-1","timestamp":"2026-01-05T10:00:02Z","customType":"tapes.launch","data":{"mode":"print"}}
+{"type":"message","id":"user-3","parentId":"custom-2","timestamp":"2026-01-05T10:00:03Z","message":{"role":"user","timestamp":0,"content":[{"type":"text","text":"Fixture request."}]}}
+{"type":"message","id":"assistant-4","parentId":"user-3","timestamp":"2026-01-05T10:00:04Z","message":{"role":"assistant","timestamp":0,"provider":"fixture","model":"pi-fixture","content":[{"type":"text","text":"Fixture reply."}]}}
+{"type":"custom","id":"custom-5","parentId":"assistant-4","timestamp":"2026-01-05T10:00:05Z","customType":"tapes.launch","data":{"mode":"tui"}}
+{"type":"message","id":"user-6","parentId":"custom-5","timestamp":"2026-01-05T10:00:06Z","message":{"role":"user","timestamp":0,"content":[{"type":"text","text":"Fixture request."}]}}
+{"type":"message","id":"assistant-7","parentId":"user-6","timestamp":"2026-01-05T10:00:07Z","message":{"role":"assistant","timestamp":0,"provider":"fixture","model":"pi-fixture","content":[{"type":"text","text":"Fixture reply."}]}}
