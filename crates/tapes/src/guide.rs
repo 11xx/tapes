@@ -544,7 +544,7 @@ EXPORT, THEN INGEST PROGRESSIVELY
      assistant-visible text — the session's argument, and the small part of
      it. The harness's own commands, notices, attached context, and user turns
      of unknown sender stay out of it and remain in the trace. --only and
-     --omit narrow all three files.
+     --omit and --origin narrow all three files.
   2. .json, narrowly, with jq. The canonical object plus turns, cost, tokens,
      and the session directory's git head and branch when they resolve. Query
      it for facts; do not print it.

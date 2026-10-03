@@ -1201,7 +1201,11 @@ impl TurnKind {
 /// than an operator's message names what the harness recorded it as, so a
 /// reader judging an ending is not told a command was an unanswered prompt.
 pub fn human_speaker(turn: &Turn) -> String {
-    speaker(&turn.role, turn.kind)
+    let name = speaker(&turn.role, turn.kind);
+    turn.origin.map_or_else(
+        || name.clone(),
+        |origin| format!("{name} [origin: {}]", origin.label()),
+    )
 }
 
 /// The same naming for a turn a projection carries by its role and kind
@@ -1486,7 +1490,11 @@ impl Projection {
         if kept.is_empty() {
             return "none".to_owned();
         }
-        kept.join(", ")
+        let summary = kept.join(", ");
+        self.origin.map_or_else(
+            || summary.clone(),
+            |origin| format!("{summary} with origin {}", origin.label()),
+        )
     }
 
     /// The omitted counts for a human reader, e.g. `3 tool, 1 reasoning`.

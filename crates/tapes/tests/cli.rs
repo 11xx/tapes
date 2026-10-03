@@ -12097,3 +12097,104 @@ JSON
         1
     );
 }
+
+#[test]
+fn origin_selection_agrees_in_show_and_export() {
+    let (codex_home, home) = fixture_store("operator-origin");
+    let pi_root = home.join(".pi/agent/sessions/project");
+    fs::create_dir_all(&pi_root).unwrap();
+    let fixtures =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../tapes-core/tests/fixtures/origin/pi");
+    for entry in fs::read_dir(fixtures).unwrap() {
+        let entry = entry.unwrap();
+        fs::copy(entry.path(), pi_root.join(entry.file_name())).unwrap();
+    }
+    let invoke = |args: &[&str]| {
+        let output = tapes()
+            .args(args)
+            .env("CODEX_HOME", &codex_home)
+            .env("HOME", &home)
+            .env("PI_CODING_AGENT_SESSION_DIR", &pi_root)
+            .env_remove("PI_CODING_AGENT_DIR")
+            .env("PATH", "/definitely/missing")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        output
+    };
+    for full in [false, true] {
+        for (mode, origin, expected) in [
+            ("interactive", "person", 1),
+            ("interactive", "harness", 1),
+            ("interactive", "program", 0),
+            ("headless", "program", 2),
+            ("headless", "harness", 0),
+            ("absent", "person", 0),
+        ] {
+            let id = format!("origin-pi-{mode}");
+            let mut args = vec![
+                "show", &id, "--only", "operator", "--origin", origin, "--json",
+            ];
+            if full {
+                args.push("--full");
+            }
+            let shown: Value = serde_json::from_slice(&invoke(&args).stdout).unwrap();
+            let turns = shown["turns"].as_array().unwrap();
+            assert_eq!(turns.len(), expected);
+            assert!(turns
+                .iter()
+                .all(|turn| turn["origin"] == origin && turn["kind"] == "operator"));
+            assert_eq!(shown["projection"]["origin"], origin);
+            let bundle = codex_home.join(format!("bundles-{mode}-{origin}-{full}"));
+            let mut args = vec![
+                "export",
+                &id,
+                "--only",
+                "operator",
+                "--origin",
+                origin,
+                "--bundle",
+                bundle.to_str().unwrap(),
+            ];
+            if full {
+                args.push("--full");
+            }
+            invoke(&args);
+            let file = fs::read_dir(bundle)
+                .unwrap()
+                .map(|entry| entry.unwrap().path())
+                .find(|path| path.extension().is_some_and(|ext| ext == "json"))
+                .unwrap();
+            let exported: Value = serde_json::from_slice(&fs::read(file).unwrap()).unwrap();
+            assert_eq!(exported["turns"], shown["turns"]);
+            assert_eq!(exported["projection"], shown["projection"]);
+        }
+    }
+    let output = invoke(&[
+        "show",
+        "origin-pi-interactive",
+        "--origin",
+        "harness",
+        "--exchange",
+        "--json",
+    ]);
+    let view: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(view["turns"].as_array().unwrap().len(), 1);
+    let output = invoke(&[
+        "show",
+        "origin-pi-headless",
+        "--origin",
+        "program",
+        "--tail",
+        "1",
+        "--json",
+    ]);
+    let view: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(view["turns"].as_array().unwrap().len(), 1);
+    assert_eq!(view["turns"][0]["ordinal"], 1);
+    let _ = fs::remove_dir_all(codex_home);
+}
