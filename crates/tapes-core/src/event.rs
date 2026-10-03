@@ -412,12 +412,24 @@ pub struct EventFilter<'a> {
 }
 
 impl EventFilter<'_> {
-    /// Whether a call matches the requested program and command, selecting its call id.
+    /// Whether a record matches the requested call selectors, selecting its call id.
     pub fn selects_call(&self, record: &EventRecord) -> bool {
-        if self.command.is_none() {
+        if self.command.is_none() && self.names.is_empty() {
             return !self.programs.is_empty() && program_matches(record, self.programs);
         }
         record.event.kind == EventKind::ToolCall
+            && (self.names.is_empty()
+                || record
+                    .event
+                    .name
+                    .as_ref()
+                    .is_some_and(|name| self.names.contains(name)))
+            && (self.call_ids.is_empty()
+                || record
+                    .event
+                    .call_id
+                    .as_ref()
+                    .is_some_and(|id| self.call_ids.contains(id)))
             && (self.programs.is_empty() || program_matches(record, self.programs))
             && self.command_matches(record)
     }
@@ -473,7 +485,8 @@ impl EventFilter<'_> {
                 .event
                 .name
                 .as_ref()
-                .is_some_and(|name| self.names.contains(name));
+                .is_some_and(|name| self.names.contains(name))
+            || record.event.call_id.as_deref().is_some_and(&selected);
         let call_ids = self.call_ids.is_empty()
             || record
                 .event

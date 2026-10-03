@@ -377,7 +377,8 @@ PROBE BEFORE EXPORTING
   matches a case-insensitive substring of a shell call's recorded command
   field (command or cmd), or the serialized input for other tools. Matching
   uses complete retained input, including text beyond arguments.preview;
-  paired results and recorded exit status remain attached to selected calls.
+  paired results and recorded exit status remain attached to selected calls,
+  including results whose recordings omit the tool name.
   events --here or --global accepts the session filters and limits of stats.
   Selection JSON uses tapes-events-selection/1: each sessions row contains
   session, count of matching calls, partial, truncation, and a nested events

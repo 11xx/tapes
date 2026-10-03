@@ -3623,7 +3623,7 @@ fn events_command_matches_serialized_non_shell_input() {
         String::from_utf8_lossy(&output.stderr)
     );
     let value: Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(value["events"].as_array().unwrap().len(), 1);
+    assert_eq!(value["events"].as_array().unwrap().len(), 2);
     assert_eq!(value["events"][0]["kind"], "tool-call");
 }
 
@@ -3635,7 +3635,7 @@ fn events_filters_after_pairing_and_tail_uses_show_ordinals() {
         &["events", id, "--name", "fixture_tool", "--json"],
     );
     let named: Value = serde_json::from_slice(&named.stdout).unwrap();
-    assert_eq!(named["events"].as_array().unwrap().len(), 1);
+    assert_eq!(named["events"].as_array().unwrap().len(), 2);
     assert_eq!(named["events"][0]["kind"], "tool-call");
     assert_eq!(
         named["pairs"],
@@ -3858,6 +3858,42 @@ fn events_expose_nested_declarations_and_qualified_artifact_consumption() {
         .unwrap()
         .iter()
         .any(|event| event["kind"] == "tool-call" && event["call_id"] == "call-shell"));
+
+    for full in [false, true] {
+        let mut paired = tapes();
+        paired.args([
+            "events",
+            id,
+            "--tool",
+            "exec",
+            "--command",
+            "CARGO TEST",
+            "--json",
+        ]);
+        if full {
+            paired.arg("--full");
+        }
+        with_fixture_env(
+            &mut paired,
+            &codex_home,
+            &home,
+            Path::new("/definitely/missing"),
+        );
+        let output = paired.output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+        let records = value["events"].as_array().unwrap();
+        assert_eq!(records.len(), 2);
+        assert!(records.iter().all(|r| r["call_id"] == "call-shell"));
+        assert!(records.iter().all(|r| r["pair"].is_object()));
+        assert!(records
+            .iter()
+            .any(|r| r["kind"] == "tool-result" && r.get("name").is_none()));
+    }
 
     let mut wrong_name = tapes();
     wrong_name.args(["events", id, "--name", "git", "--json"]);
@@ -7414,7 +7450,7 @@ fn events_and_stats_full_stream_claude_and_codex_recordings_past_the_read_bound(
             assert_eq!(comparable(full), comparable(wide), "{id} {selection:?}");
         }
         let full = json(&["events", id, "--full", "--name", "fixture_tool", "--json"]);
-        assert_eq!(full["events"].as_array().unwrap().len(), 1, "{id}: {full}");
+        assert_eq!(full["events"].as_array().unwrap().len(), 2, "{id}: {full}");
         assert_eq!(
             full["pairs"],
             serde_json::json!({"complete": 1, "incomplete": 0})

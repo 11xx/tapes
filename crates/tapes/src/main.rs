@@ -1082,7 +1082,9 @@ enum Command {
         /// Match the recorded tool name exactly. Repeatable.
         #[arg(long, visible_alias = "tool", value_name = "NAME")]
         name: Vec<String>,
-        /// Match a case-insensitive substring of the recorded command, or serialized input.
+        /// Match a case-insensitive substring of the recorded shell command,
+        /// or serialized input for other tools. Uses complete retained input,
+        /// including text beyond the argument preview, and keeps paired results.
         #[arg(long, value_name = "SUBSTRING")]
         command: Option<String>,
         /// Return tapes-events-selection/1 per-session call counts and partial-read
