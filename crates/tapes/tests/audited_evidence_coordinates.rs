@@ -103,7 +103,7 @@ fn claude_coordinates_survive_show_export_and_page() {
     );
 
     let show = json_command(root.path(), &["show".into(), id.into(), "--json".into()]);
-    assert_eq!(show["schema"], "tapes-session/17");
+    assert_eq!(show["schema"], "tapes-session/18");
     let turns = show["turns"].as_array().unwrap();
     assert_eq!(turns.len(), 2);
     for (index, turn) in turns.iter().enumerate() {
@@ -145,7 +145,7 @@ fn claude_coordinates_survive_show_export_and_page() {
         })
         .unwrap();
     let bundle: Value = serde_json::from_slice(&fs::read(bundle_json_path).unwrap()).unwrap();
-    assert_eq!(bundle["schema"], "tapes-session/17");
+    assert_eq!(bundle["schema"], "tapes-session/18");
     assert!(show["read"].get("source_prefix_digest").is_none());
     let full = json_command(
         root.path(),
@@ -171,7 +171,7 @@ fn claude_coordinates_survive_show_export_and_page() {
         ],
     );
     assert!(page["read"].get("source_prefix_digest").is_none());
-    assert_eq!(page["schema"], "tapes-page/10");
+    assert_eq!(page["schema"], "tapes-page/11");
     assert_eq!(page["read"]["projection"], page["schema"]);
     assert_eq!(page["read"]["projection_options"], json!(["transcript"]));
     assert_content_reference(&page["turns"][0]["parts"][0]["record_ref"], 0, 0, None);
@@ -227,7 +227,7 @@ fn supplied_graph_coordinates_keep_source_pointers_and_part_levels() {
             "--json".into(),
         ],
     );
-    assert_eq!(shown["schema"], "tapes-session/17");
+    assert_eq!(shown["schema"], "tapes-session/18");
     assert_eq!(shown["turns"].as_array().unwrap().len(), 2);
     let a = shown["turns"]
         .as_array()
@@ -344,7 +344,7 @@ fn codex_history_events_and_metadata_report_their_actual_reads() {
         cursor = candidate["next_cursor"].as_str().map(str::to_owned);
         assert!(cursor.is_some(), "history ended before the older operator");
     };
-    assert_eq!(older_small["schema"], "tapes-page/10");
+    assert_eq!(older_small["schema"], "tapes-page/11");
     assert_eq!(older_small["read"]["projection"], older_small["schema"]);
     assert_eq!(
         older_small["read"]["projection_options"],
@@ -410,7 +410,7 @@ fn codex_history_events_and_metadata_report_their_actual_reads() {
         ],
     );
     assert_eq!(metadata["schema"], "tapes-metadata-history/10");
-    assert_eq!(metadata["reads"][0]["projection"], "tapes-page/10");
+    assert_eq!(metadata["reads"][0]["projection"], "tapes-page/11");
     assert_eq!(
         metadata["reads"][0]["projection_options"],
         json!(["models-only"])
@@ -432,7 +432,7 @@ fn codex_history_events_and_metadata_report_their_actual_reads() {
     );
 
     let shown = json_command(root.path(), &["show".into(), id.into(), "--json".into()]);
-    assert_eq!(shown["schema"], "tapes-session/17");
+    assert_eq!(shown["schema"], "tapes-session/18");
     assert_eq!(shown["session"]["accounting"]["coverage"], "session");
     assert_eq!(shown["session"]["tokens"]["input"], 7);
 

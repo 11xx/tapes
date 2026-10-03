@@ -85,7 +85,7 @@ fn opencode_event_identity_and_capture_state_are_stable() {
         vec![Box::new(OpenCodeBackend::new(opencode_fixture_program()))];
     let id = "ses_000000fixtureSharedSession";
     let report = agent_tapes_core::capture_with_backends(&backends, Selection::Id(id)).unwrap();
-    assert_eq!(report.schema, "tapes-capture/1");
+    assert_eq!(report.schema, "tapes-capture/2");
     assert_eq!(report.harness, "opencode");
     assert_eq!(report.store_path_class, "opencode-api");
     assert_eq!(report.state, "unpinned");

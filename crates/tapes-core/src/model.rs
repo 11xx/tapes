@@ -10,7 +10,7 @@ use crate::content::{ContentCoverage, ContentPart};
 use crate::event::ToolEvent;
 use crate::usage::UsageDetail;
 
-pub const SESSION_SCHEMA: &str = "tapes-session/17";
+pub const SESSION_SCHEMA: &str = "tapes-session/18";
 /// How the recording identifies the session's launch mode.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -112,12 +112,13 @@ pub struct SessionMetadata {
     pub label: Option<String>,
 }
 
-/// Whether a normalized session came from a harness-owned recording or from a
-/// caller-supplied export.
+/// Whether a session came from installed discovery, an explicitly selected
+/// native store, or a supplied export.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum SourceKind {
     InstalledRecording,
+    ExplicitNativeStore,
     SuppliedExport,
 }
 
@@ -145,9 +146,8 @@ pub struct SourceLocation {
     pub(crate) native_path: Option<PathBuf>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub member: Option<String>,
-    /// The supplied directory or archive the record was one member of.
-    /// Absent when the input was a single file, which holds one record and
-    /// no siblings.
+    /// The selected native configuration root, or the supplied directory or
+    /// archive containing this record. Single-file supplied inputs omit it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub container: Option<String>,
 }

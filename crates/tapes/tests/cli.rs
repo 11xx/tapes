@@ -96,7 +96,7 @@ fn capture_reports_the_selected_store_without_claiming_a_pin() {
         String::from_utf8_lossy(&output.stderr)
     );
     let report: Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(report["schema"], "tapes-capture/1");
+    assert_eq!(report["schema"], "tapes-capture/2");
     assert_eq!(report["harness"], "codex");
     assert_eq!(report["store_path_class"], "codex-session-jsonl");
     assert_eq!(report["state"], "unpinned");
@@ -170,11 +170,11 @@ fn self_names_the_session_its_harness_exports() {
         ),
         (
             vec![("CODEX_THREAD_ID", "20000000-0000-0000-0000-000000000009")],
-            "no installed store holds that codex session",
+            "no selected store holds that codex session",
         ),
         (
             vec![("CLAUDE_SESSION_ID", newest)],
-            "no installed store holds that claude session",
+            "no selected store holds that claude session",
         ),
     ] {
         let refused = run(&["show", "self"], &variables);
@@ -2796,7 +2796,7 @@ fn supplied_citation_descriptors_are_bounded_in_show_and_export() {
         .unwrap();
     assert!(shown.status.success());
     let shown: Value = serde_json::from_slice(&shown.stdout).unwrap();
-    assert_eq!(shown["schema"], "tapes-session/17");
+    assert_eq!(shown["schema"], "tapes-session/18");
     let citation = &shown["artifacts"][0]["citations"][0];
     assert_eq!(citation["uri"]["chars"], 5_024);
     assert_eq!(
@@ -2837,7 +2837,7 @@ fn supplied_citation_descriptors_are_bounded_in_show_and_export() {
         })
         .unwrap();
     let bundle_json: Value = serde_json::from_slice(&fs::read(json_path).unwrap()).unwrap();
-    assert_eq!(bundle_json["schema"], "tapes-session/17");
+    assert_eq!(bundle_json["schema"], "tapes-session/18");
     assert_eq!(
         bundle_json["artifacts"][0]["citations"][0]["title"]["text"]
             .as_str()
@@ -6866,7 +6866,7 @@ fn show_full_streams_a_claude_recording_past_the_read_bound() {
 
     let json: Value =
         serde_json::from_str(&stdout(&["show", "full-claude", "--full", "--json"])).unwrap();
-    assert_eq!(json["schema"], "tapes-session/17");
+    assert_eq!(json["schema"], "tapes-session/18");
     assert_eq!(json["turns"].as_array().unwrap().len(), 50);
     assert_eq!(json["turns"][0]["text"], "opening request");
     assert_eq!(json["turns"][49]["ordinal"], 49);
@@ -7610,7 +7610,7 @@ fn lineage_help_names_the_schema_and_the_rule_it_follows() {
     let output = tapes().args(["lineage", "--help"]).output().unwrap();
     assert!(output.status.success());
     let help = String::from_utf8_lossy(&output.stdout);
-    assert!(help.contains("tapes-lineage/3"), "{help}");
+    assert!(help.contains("tapes-lineage/4"), "{help}");
     assert!(
         help.contains("A relationship exists only where a record states it"),
         "{help}"
@@ -7666,7 +7666,7 @@ fn lineage_reports_a_subagent_reference_and_an_unresolved_parent() {
 
     let value: Value =
         serde_json::from_slice(&run(&["lineage", "session-claude", "--json"])).unwrap();
-    assert_eq!(value["schema"], "tapes-lineage/3");
+    assert_eq!(value["schema"], "tapes-lineage/4");
     assert_eq!(value["session"]["id"], "session-claude");
     let children = value["lineage"]["children"].as_array().unwrap();
     assert_eq!(children.len(), 1, "{value}");
@@ -9327,7 +9327,7 @@ fn selection_stats_agree_with_individual_reads() {
         }
     }
     let summary = run(&["stats", "--global", "--harness", "codex", "--json"]);
-    assert_eq!(summary["schema"], "tapes-stats-summary/7");
+    assert_eq!(summary["schema"], "tapes-stats-summary/8");
     assert_eq!(summary["selected"], 2);
     assert_eq!(summary["read"], 2);
     let mut active = 0;
@@ -10080,7 +10080,7 @@ fn child_reads_are_qualified_and_never_become_parent_activity() {
         String::from_utf8_lossy(&output.stderr)
     );
     let view: Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(view["schema"], "tapes-child/8");
+    assert_eq!(view["schema"], "tapes-child/9");
     assert_eq!(view["parent"]["id"], "session-claude");
     assert_eq!(
         view["transcript"]["session"]["id"],
@@ -10215,7 +10215,7 @@ fn child_full_streams_a_subagent_recording_past_the_read_bound() {
     assert!(bounded["usage"]["turns"]["total"].as_u64().unwrap() < 50);
 
     let full = json(&[&child[..], &["--full", "--tail", "2", "--json"]].concat());
-    assert_eq!(full["schema"], "tapes-child/8");
+    assert_eq!(full["schema"], "tapes-child/9");
     assert_eq!(full["usage"]["turns"]["total"], 50, "{}", full["usage"]);
     assert_eq!(full["usage"]["turns"]["coverage"], "session");
     assert_eq!(full["usage"]["read"]["projection_options"][0], "full");
@@ -10804,7 +10804,7 @@ fn show_remote_never_joins_the_local_liveness_registry() {
         String::from_utf8_lossy(&output.stderr)
     );
     let value: Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(value["schema"], "tapes-session/17");
+    assert_eq!(value["schema"], "tapes-session/18");
     assert_eq!(value["session"]["id"], CODEX_ONE_ID);
     assert_eq!(value["session"]["source"]["replica"], "replica-host");
     assert!(
@@ -10937,9 +10937,9 @@ fn a_replica_that_cannot_answer_names_the_cause_and_the_destination() {
         ),
         (
             "schema",
-            "#!/bin/sh\necho '{\"schema\":\"tapes-list/99\",\"sort\":\"newest\",\"sessions\":[],\"unavailable\":[],\"unreadable\":[],\"unsearched\":[],\"scanned\":0,\"scan_truncated\":false}'\nexit 0\n",
-            "unsupported remote schema tapes-list/99; this reader reads tapes-list/9",
-            "unsupported remote schema tapes-list/99; this reader reads tapes-session/17",
+            "#!/bin/sh\necho '{\"schema\":\"tapes-list/999\",\"sort\":\"newest\",\"sessions\":[],\"unavailable\":[],\"unreadable\":[],\"unsearched\":[],\"scanned\":0,\"scan_truncated\":false}'\nexit 0\n",
+            "unsupported remote schema tapes-list/999; this reader reads tapes-list/9",
+            "unsupported remote schema tapes-list/999; this reader reads tapes-session/18",
         ),
         (
             "empty",
@@ -11165,7 +11165,7 @@ fn export_remote_runs_the_replica_export_and_tags_every_path() {
         .unwrap(),
     )
     .unwrap();
-    assert_eq!(written["schema"], "tapes-session/17");
+    assert_eq!(written["schema"], "tapes-session/18");
     assert!(
         !written["events"].as_array().unwrap().is_empty(),
         "the replica's export held no paired tool events: {written}"

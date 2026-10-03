@@ -206,7 +206,9 @@ fn terminate_child(child: &mut Child) {
 pub fn annotate(sessions: &mut [Session]) {
     let live = snapshot();
     for session in sessions {
-        session.live = live.get(&session.id).cloned();
+        if session.source.kind == agent_tapes_core::model::SourceKind::InstalledRecording {
+            session.live = live.get(&session.id).cloned();
+        }
     }
 }
 
@@ -215,11 +217,15 @@ pub fn annotate(sessions: &mut [Session]) {
 pub fn annotate_endings(endings: &mut [Ending]) {
     let live = snapshot();
     for ending in endings {
-        ending.session.live = live.get(&ending.session.id).cloned();
+        if ending.session.source.kind == agent_tapes_core::model::SourceKind::InstalledRecording {
+            ending.session.live = live.get(&ending.session.id).cloned();
+        }
     }
 }
 
 /// The same join onto the one session a brief is about.
 pub fn annotate_brief(brief: &mut Brief) {
-    brief.session.live = snapshot().get(&brief.session.id).cloned();
+    if brief.session.source.kind == agent_tapes_core::model::SourceKind::InstalledRecording {
+        brief.session.live = snapshot().get(&brief.session.id).cloned();
+    }
 }

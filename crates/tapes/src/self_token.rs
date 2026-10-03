@@ -4,7 +4,7 @@
 //! The token is the caller's claim about itself, not an inference from
 //! recency, so it is accepted wherever a session id is and is never applied
 //! unasked. What it became is always reported, it fails when no variable
-//! answers, and the id it names must be one an installed store holds.
+//! answers, and the id it names must be one the selected stores hold.
 
 use agent_tapes_core::backend::Backend;
 use anyhow::{anyhow, Result};
@@ -82,7 +82,7 @@ pub fn resolve(backends: &[Box<dyn Backend>]) -> Result<SelfSession> {
         });
     if held.is_none() {
         return Err(anyhow!(
-            "{}, but no installed store holds that {} session",
+            "{}, but no selected store holds that {} session",
             detected.report(),
             detected.harness
         ));

@@ -27,6 +27,7 @@ use agent_tapes_discovery::{Harness as NativeHarness, IdentityBasis, NativeSessi
 
 #[derive(Clone, Debug)]
 pub struct PiBackend {
+    native_root: Option<PathBuf>,
     store: Option<NativeStore>,
     /// How much of a recording's end a transcript read takes.
     read_bytes: u64,
@@ -37,6 +38,7 @@ impl PiBackend {
         Self {
             store: Some(NativeStore::pi(root)),
             read_bytes: super::DEFAULT_READ_BYTES,
+            native_root: None,
         }
     }
 
@@ -44,7 +46,24 @@ impl PiBackend {
         Self {
             store,
             read_bytes: super::DEFAULT_READ_BYTES,
+            native_root: None,
         }
+    }
+
+    pub(crate) fn with_native_root(mut self, root: PathBuf) -> Self {
+        self.native_root = Some(root);
+        self
+    }
+
+    fn source(&self, path: &Path) -> SourceDescriptor {
+        let mut source = SourceDescriptor::installed("pi", path.display().to_string());
+        if let Some(root) = &self.native_root {
+            source.kind = crate::model::SourceKind::ExplicitNativeStore;
+            if let Some(location) = &mut source.location {
+                location.container = Some(root.display().to_string());
+            }
+        }
+        source
     }
 
     /// Read at most `read_bytes` from the end of each recording.
@@ -141,7 +160,7 @@ impl PiBackend {
 
         let session = Session {
             id: native.id().to_owned(),
-            source: SourceDescriptor::installed("pi", path.display().to_string()),
+            source: self.source(path),
             metadata: None,
             model,
             model_observation,

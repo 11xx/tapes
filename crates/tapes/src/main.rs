@@ -141,7 +141,7 @@ struct Cli {
 }
 
 /// Which project's sessions a command may see.
-#[derive(Args)]
+#[derive(Args, Default)]
 struct ScopeArgs {
     /// Restrict to the project containing the current directory: every
     /// worktree of its repository, or the directory's subtree when it is not
@@ -203,6 +203,22 @@ impl From<InputFormatArg> for InputFormat {
 /// required whenever one native id occurs more than once.
 #[derive(Args, Clone, Debug, Default)]
 struct InputArgs {
+    /// Select exactly one materialized native store; never consult installed stores.
+    /// Conflicts with --input, --remote, and --harness naming another harness.
+    /// OpenCode uses an API or database and cannot be selected by a root.
+    #[arg(
+        long,
+        value_name = "claude|codex|pi",
+        requires = "native_root",
+        conflicts_with = "input"
+    )]
+    native_store: Option<String>,
+    /// Harness configuration root: Claude reads PATH/projects; Codex and Pi read
+    /// PATH/sessions. No harness environment is read or changed. `self` resolves
+    /// only within this store; --latest and --title default to this store unless
+    /// --here, --project, or --global gives a scope. No live state is attached.
+    #[arg(long, value_name = "PATH", requires = "native_store")]
+    native_root: Option<PathBuf>,
     /// Read one or more files, directories, or ZIP archives as supplied
     /// conversation exports. Supplying this option never consults installed
     /// harness stores.
@@ -260,7 +276,30 @@ impl InputArgs {
         Ok(options)
     }
 
+    fn native(&self) -> bool {
+        self.native_store.is_some()
+    }
+
+    fn native_backends(&self, bytes: u64) -> Result<Vec<Box<dyn Backend>>> {
+        let root = self
+            .native_root
+            .as_ref()
+            .ok_or_else(|| anyhow!("--native-store requires --native-root"))?;
+        use agent_tapes_core::NativeStore;
+        let store = match self.native_store.as_deref() {
+            Some("claude") => NativeStore::claude(root.join("projects")),
+            Some("codex") => NativeStore::codex(root.join("sessions")),
+            Some("pi") => NativeStore::pi(root.join("sessions")),
+            Some("opencode") => return Err(anyhow!("OpenCode uses an API or database, not a configuration root; --native-store opencode is unsupported")),
+            _ => return Err(anyhow!("--native-store must be claude, codex, or pi")),
+        };
+        agent_tapes_core::backend::backends_from_native_root(store, root.clone(), bytes)
+    }
+
     fn backends(&self) -> Result<Vec<Box<dyn Backend>>> {
+        if self.native() {
+            return self.native_backends(agent_tapes_core::backend::DEFAULT_READ_BYTES);
+        }
         if !self.supplied() {
             return Ok(agent_tapes_core::backend::backends());
         }
@@ -306,6 +345,11 @@ fn reject_installed_selection(
     harness: Option<&str>,
     scope: &ScopeArgs,
 ) -> Result<()> {
+    if input.native() && harness.is_some_and(|h| Some(h) != input.native_store.as_deref()) {
+        return Err(anyhow!(
+            "--native-store conflicts with --harness naming another harness"
+        ));
+    }
     if !input.supplied() {
         return Ok(());
     }
@@ -338,7 +382,13 @@ impl ReadArgs {
         Ok(())
     }
 
-    fn backends(&self) -> Result<Vec<Box<dyn Backend>>> {
+    fn backends(&self, input: &InputArgs) -> Result<Vec<Box<dyn Backend>>> {
+        if input.native() {
+            return input.native_backends(
+                self.read_bytes
+                    .map_or(agent_tapes_core::backend::DEFAULT_READ_BYTES, ByteSize::get),
+            );
+        }
         match self.read_bytes {
             Some(bytes) => agent_tapes_core::backend::backends_with_read_bytes(bytes.get()),
             None => Ok(agent_tapes_core::backend::backends()),
@@ -386,6 +436,7 @@ fn turn_kind_parser() -> impl clap::builder::TypedValueParser<Value = TurnKind> 
 trait SelfSelectable {
     fn ids_mut(&mut self) -> (&mut Option<String>, &mut Vec<String>);
     fn input_supplied(&self) -> bool;
+    fn input(&self) -> &InputArgs;
 }
 
 /// Replace `self` in a selector with the caller's own session id, reporting
@@ -410,7 +461,9 @@ fn apply_self(selector: &mut dyn SelfSelectable, remote: Option<&str>) -> Result
             "self names the caller's own installed session and selects nothing from a supplied input"
         ));
     }
-    let resolved = self_token::resolve(&agent_tapes_core::backend::backends())?;
+    let backends = selector.input().backends()?;
+    let resolved = self_token::resolve(&backends)?;
+    let (session, exclude) = selector.ids_mut();
     eprintln!("Note: {}.", resolved.report());
     for id in session.iter_mut().chain(exclude.iter_mut()) {
         if id == self_token::TOKEN {
@@ -428,6 +481,10 @@ impl SelfSelectable for SelectionArgs {
     fn input_supplied(&self) -> bool {
         self.input.supplied()
     }
+
+    fn input(&self) -> &InputArgs {
+        &self.input
+    }
 }
 
 impl SelfSelectable for SessionQueryArgs {
@@ -437,6 +494,10 @@ impl SelfSelectable for SessionQueryArgs {
 
     fn input_supplied(&self) -> bool {
         self.input.supplied()
+    }
+
+    fn input(&self) -> &InputArgs {
+        &self.input
     }
 }
 
@@ -530,7 +591,9 @@ impl SelectionArgs {
     }
 
     fn within_or_here(&self) -> Where<'_> {
-        if self.input.supplied() {
+        if self.input.supplied()
+            || (self.input.native() && !self.scope.here && self.scope.project.is_none())
+        {
             Where::Global
         } else {
             self.scope.within_or_here()
@@ -673,7 +736,9 @@ impl SessionQueryArgs {
     }
 
     fn within_or_here(&self) -> Where<'_> {
-        if self.input.supplied() {
+        if self.input.supplied()
+            || (self.input.native() && !self.scope.here && self.scope.project.is_none())
+        {
             Where::Global
         } else {
             self.scope.within_or_here()
@@ -716,6 +781,7 @@ impl SessionQueryArgs {
             || self.scope.global
             || self.scope.project.is_some()
             || self.input.supplied()
+            || self.input.native()
             || self.input.after_occurrence.is_some()
             || self.harness.is_some()
             || self.limit.is_some()
@@ -773,9 +839,12 @@ impl SessionQueryArgs {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Report one recording's custody as tapes-capture/1. Installed harness
-    /// stores are unpinned; an export alone does not pin a native recording.
+    /// Report one recording's custody as tapes-capture/2. Installed harness
+    /// stores are unpinned; explicit native sources report caller-selected-native-store.
+    /// Selection and export do not assert immutable native bytes.
     Capture {
+        #[command(flatten)]
+        input: InputArgs,
         /// Exact session id, an unambiguous prefix, or `self`.
         session: String,
         /// Restrict ID or prefix lookup to one harness.
@@ -923,7 +992,7 @@ enum Command {
         #[arg(long, value_name = "SSH-DESTINATION", conflicts_with = "input")]
         remote: Option<String>,
     },
-    /// Read one bounded page of older Claude or Codex history as tapes-page/10,
+    /// Read one bounded page of older Claude or Codex history as tapes-page/11,
     /// including absolute record references and read evidence. A page decodes
     /// only the records inside its byte range, so a turn's kind matches the one
     /// a whole read gives it. Resume with the returned cursor.
@@ -958,7 +1027,7 @@ enum Command {
         json: bool,
     },
     /// Recover recorded model observations outside the usual source tail as a
-    /// models-only tapes-page/10 projection, with explicit history coverage.
+    /// models-only tapes-page/11 projection, with explicit history coverage.
     Metadata {
         #[command(flatten)]
         selection: SelectionArgs,
@@ -971,7 +1040,7 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Read a Claude child's own transcript, accounting and ending as tapes-child/8 under its parent session.
+    /// Read a Claude child's own transcript, accounting and ending as tapes-child/9 under its parent session.
     Child {
         #[command(flatten)]
         selection: SelectionArgs,
@@ -1067,7 +1136,7 @@ enum Command {
         /// Installed Claude, Codex, Pi, and OpenCode sessions.
         #[arg(long, conflicts_with = "read_bytes")]
         full: bool,
-        /// Render the versioned tapes-lineage/3 object as JSON.
+        /// Render the versioned tapes-lineage/4 object as JSON.
         #[arg(long)]
         json: bool,
     },
@@ -1105,7 +1174,7 @@ enum Command {
     /// `assistant_turns_ms` with its count, median, p90, and max. Nothing is
     /// judged, ranked, or explained.
     /// A scope or listing filter selects multiple sessions and returns
-    /// tapes-stats-summary/7: recorded tools grouped by harness and name,
+    /// tapes-stats-summary/8: recorded tools grouped by harness and name,
     /// with per-session read coverage, pairing counts and failures, and per
     /// harness the recordable kinds no session read held. Children are not
     /// read through their parents.
@@ -1128,7 +1197,7 @@ enum Command {
         /// updated in place and a second read may not repeat the first.
         #[arg(long, conflicts_with = "read_bytes")]
         full: bool,
-        /// Render the versioned tapes-stats/13 object, or tapes-stats-summary/7
+        /// Render the versioned tapes-stats/13 object, or tapes-stats-summary/8
         /// for a selection, as JSON. `warnings` names the limits of the read:
         /// `read-window`, `tail-window`, `kind-unknown`, `kind-undeclared` (a
         /// turn of a kind its harness declares it cannot record, so the
@@ -1447,15 +1516,22 @@ fn dispatch(cli: Cli) -> Result<()> {
             session,
             harness,
             json,
+            input,
         } => {
+            input.validate_collection()?;
+            reject_installed_selection(&input, harness.as_deref(), &ScopeArgs::default())?;
+            let backends = input.backends()?;
             let session = if session == self_token::TOKEN {
-                let resolved = self_token::resolve(&agent_tapes_core::backend::backends())?;
+                let resolved = self_token::resolve(&input.backends()?)?;
                 eprintln!("Note: {}.", resolved.report());
                 resolved.id
             } else {
                 session
             };
-            let report = agent_tapes_core::capture(id_selection(&session, harness.as_deref()))?;
+            let report = agent_tapes_core::capture_with_backends(
+                &backends,
+                id_selection(&session, harness.as_deref()),
+            )?;
             if json {
                 println!("{}", serde_json::to_string(&report)?);
             } else {
@@ -1487,6 +1563,9 @@ fn dispatch(cli: Cli) -> Result<()> {
                 .is_some_and(|(since, until)| since >= until)
             {
                 return Err(anyhow!("--since must be earlier than --until"));
+            }
+            if remote.is_some() && input.native() {
+                return Err(anyhow!("--native-store conflicts with --remote"));
             }
             if let Some(destination) = remote.as_deref() {
                 let args = remote_list_args(&RemoteListQuery {
@@ -1545,11 +1624,12 @@ fn dispatch(cli: Cli) -> Result<()> {
                     sort.into(),
                 )?
             } else {
-                let mut result = agent_tapes_core::list_with_options(
+                let mut result = agent_tapes_core::list_with_backends_options(
+                    &input.backends()?,
                     harness.as_deref(),
-                    scope.within(),
-                    limit,
-                    filters,
+                    scope.within().resolve()?.as_ref(),
+                    limit.unwrap_or(20),
+                    &filters,
                     sort.into(),
                 )?;
                 liveness::annotate(&mut result.sessions);
@@ -1581,6 +1661,9 @@ fn dispatch(cli: Cli) -> Result<()> {
             } else {
                 kinds.selection()
             };
+            if remote.is_some() && selection.input.native() {
+                return Err(anyhow!("--native-store conflicts with --remote"));
+            }
             if let Some(destination) = remote.as_deref() {
                 let args =
                     remote_show_args(&selection, &read, tail, exchange, &kinds, full, turn_chars);
@@ -1594,7 +1677,7 @@ fn dispatch(cli: Cli) -> Result<()> {
                 return Ok(());
             }
             let installed_backends = (!selection.input.supplied())
-                .then(|| read.backends())
+                .then(|| read.backends(&selection.input))
                 .transpose()?;
             let latest_warnings = installed_backends.as_deref().map_or_else(
                 || Ok(Vec::new()),
@@ -1662,10 +1745,10 @@ fn dispatch(cli: Cli) -> Result<()> {
                     "--input is not supported by page; supplied exports have no installed history cursor"
                 ));
             }
-            let latest_warnings =
-                selection.latest_warnings(&agent_tapes_core::backend::backends())?;
+            let latest_warnings = selection.latest_warnings(&selection.input.backends()?)?;
             print_selection_warnings(&latest_warnings);
-            let page = agent_tapes_core::history::page(
+            let page = agent_tapes_core::history::page_with_backends(
+                &selection.input.backends()?,
                 selection.selection(),
                 cursor.as_deref(),
                 bytes.get_usize(),
@@ -1705,10 +1788,10 @@ fn dispatch(cli: Cli) -> Result<()> {
                     "--input is not supported by history-search; supplied exports have no installed history cursor"
                 ));
             }
-            let latest_warnings =
-                selection.latest_warnings(&agent_tapes_core::backend::backends())?;
+            let latest_warnings = selection.latest_warnings(&selection.input.backends()?)?;
             print_selection_warnings(&latest_warnings);
-            let report = agent_tapes_core::history::search(
+            let report = agent_tapes_core::history::search_with_backends(
+                &selection.input.backends()?,
                 selection.selection(),
                 cursor.as_deref(),
                 bytes.get_usize(),
@@ -1760,10 +1843,10 @@ fn dispatch(cli: Cli) -> Result<()> {
                     "--input is not supported by metadata; supplied exports have no installed history cursor"
                 ));
             }
-            let latest_warnings =
-                selection.latest_warnings(&agent_tapes_core::backend::backends())?;
+            let latest_warnings = selection.latest_warnings(&selection.input.backends()?)?;
             print_selection_warnings(&latest_warnings);
-            let report = agent_tapes_core::history::metadata(
+            let report = agent_tapes_core::history::metadata_with_backends(
+                &selection.input.backends()?,
                 selection.selection(),
                 cursor.as_deref(),
                 bytes.get_usize(),
@@ -1801,9 +1884,9 @@ fn dispatch(cli: Cli) -> Result<()> {
         } => {
             selection.validate_input()?;
             let latest_warnings = if full {
-                selection.latest_warnings(&agent_tapes_core::backend::backends())?
+                selection.latest_warnings(&selection.input.backends()?)?
             } else {
-                selection.latest_warnings(&read.backends()?)?
+                selection.latest_warnings(&read.backends(&selection.input)?)?
             };
             print_selection_warnings(&latest_warnings);
             if full {
@@ -1816,14 +1899,14 @@ fn dispatch(cli: Cli) -> Result<()> {
             }
             let child = if full {
                 agent_tapes_core::child::read_full_with_backends(
-                    &agent_tapes_core::backend::backends(),
+                    &selection.input.backends()?,
                     selection.selection(),
                     &reference,
                     tail,
                 )?
             } else {
                 agent_tapes_core::child::read_with_backends(
-                    &read.backends()?,
+                    &read.backends(&selection.input)?,
                     selection.selection(),
                     &reference,
                     tail,
@@ -1882,9 +1965,9 @@ fn dispatch(cli: Cli) -> Result<()> {
             let by_latest = selection.latest;
             let options = agent_tapes_core::event::EventOptions { full_arguments };
             let event_backends = if full {
-                agent_tapes_core::backend::backends()
+                selection.input.backends()?
             } else {
-                read.backends()?
+                read.backends(&selection.input)?
             };
             let latest_warnings = selection.latest_warnings(&event_backends)?;
             print_selection_warnings(&latest_warnings);
@@ -1931,16 +2014,16 @@ fn dispatch(cli: Cli) -> Result<()> {
             selection.validate_input()?;
             read.refuse_supplied(&selection.input)?;
             let lineage_backends = if full {
-                agent_tapes_core::backend::backends()
+                selection.input.backends()?
             } else {
-                read.backends()?
+                read.backends(&selection.input)?
             };
             let latest_warnings = selection.latest_warnings(&lineage_backends)?;
             print_selection_warnings(&latest_warnings);
             let lineage = if full {
                 refuse_full_supplied(&selection.input)?;
                 agent_tapes_core::lineage_full_with_backends(
-                    &agent_tapes_core::backend::backends(),
+                    &selection.input.backends()?,
                     selection.selection(),
                 )?
             } else if selection.input.supplied() {
@@ -2011,16 +2094,16 @@ fn dispatch(cli: Cli) -> Result<()> {
                 refuse_full_supplied(&query.input)?;
             }
             let single_backends = if full {
-                agent_tapes_core::backend::backends()
+                query.input.backends()?
             } else {
-                read.backends()?
+                read.backends(&query.input)?
             };
             let latest_warnings = query.latest_warnings(&single_backends)?;
             print_selection_warnings(&latest_warnings);
             if let Some(one) = query.single() {
                 let stats = if full {
                     agent_tapes_core::stats_full_with_backends_and_idle(
-                        &agent_tapes_core::backend::backends(),
+                        &query.input.backends()?,
                         one,
                         idle,
                     )?
@@ -2041,7 +2124,7 @@ fn dispatch(cli: Cli) -> Result<()> {
                 }
                 let summary = if full {
                     agent_tapes_core::stats_summary::with_backends_and_idle(
-                        &agent_tapes_core::backend::backends(),
+                        &query.input.backends()?,
                         &query.set(),
                         SessionRead::Whole,
                         idle,
@@ -2056,7 +2139,7 @@ fn dispatch(cli: Cli) -> Result<()> {
                     )?
                 } else {
                     agent_tapes_core::stats_summary::with_backends_and_idle(
-                        &read.backends()?,
+                        &read.backends(&query.input)?,
                         &query.set(),
                         SessionRead::Bounded,
                         idle,
@@ -2098,9 +2181,9 @@ fn dispatch(cli: Cli) -> Result<()> {
                 refuse_full_supplied(&query.input)?;
             }
             let single_backends = if full {
-                agent_tapes_core::backend::backends()
+                query.input.backends()?
             } else {
-                read.backends()?
+                read.backends(&query.input)?
             };
             let latest_warnings = query.latest_warnings(&single_backends)?;
             print_selection_warnings(&latest_warnings);
@@ -2108,7 +2191,7 @@ fn dispatch(cli: Cli) -> Result<()> {
                 let usage = if full {
                     if let Some(series) = series {
                         agent_tapes_core::usage_with_options_with_backends(
-                            &agent_tapes_core::backend::backends(),
+                            &query.input.backends()?,
                             one,
                             UsageOptions {
                                 full: true,
@@ -2116,10 +2199,7 @@ fn dispatch(cli: Cli) -> Result<()> {
                             },
                         )?
                     } else {
-                        agent_tapes_core::usage_full_with_backends(
-                            &agent_tapes_core::backend::backends(),
-                            one,
-                        )?
+                        agent_tapes_core::usage_full_with_backends(&query.input.backends()?, one)?
                     }
                 } else if query.input.supplied() {
                     let backends = query.input.backends()?;
@@ -2164,7 +2244,7 @@ fn dispatch(cli: Cli) -> Result<()> {
                     agent_tapes_core::usage_summary_with_backends(&backends, &query.set(), &by)?
                 } else {
                     agent_tapes_core::usage_summary_with_backends(
-                        &read.backends()?,
+                        &read.backends(&query.input)?,
                         &query.set(),
                         &by,
                     )?
@@ -2192,7 +2272,7 @@ fn dispatch(cli: Cli) -> Result<()> {
         } => {
             selection.validate_input()?;
             read.refuse_supplied(&selection.input)?;
-            let brief_backends = read.backends()?;
+            let brief_backends = read.backends(&selection.input)?;
             let latest_warnings = selection.latest_warnings(&brief_backends)?;
             print_selection_warnings(&latest_warnings);
             let brief = if selection.input.supplied() {
@@ -2271,7 +2351,7 @@ fn dispatch(cli: Cli) -> Result<()> {
                 agent_tapes_core::endings::endings_with_backends(&backends, &selection, tail, text)?
             } else {
                 let mut report = agent_tapes_core::endings::endings_with_backends(
-                    &read.backends()?,
+                    &read.backends(&input)?,
                     &selection,
                     tail,
                     text,
@@ -2328,6 +2408,9 @@ fn dispatch(cli: Cli) -> Result<()> {
                      --scan-bytes, --decoded-bytes, and --record-bytes"
                 ));
             }
+            if remote.is_some() && query.input.native() {
+                return Err(anyhow!("--native-store conflicts with --remote"));
+            }
             if let Some(destination) = remote.as_deref() {
                 let args = remote_export_args(&query, &read, &kinds, full, bundle.as_deref());
                 let manifest = remote_export(destination, &args)?;
@@ -2343,9 +2426,9 @@ fn dispatch(cli: Cli) -> Result<()> {
                 agent_tapes_core::ExportRead::Bounded
             };
             let single_backends = if full {
-                agent_tapes_core::backend::backends()
+                query.input.backends()?
             } else {
-                read.backends()?
+                read.backends(&query.input)?
             };
             let latest_warnings = query.latest_warnings(&single_backends)?;
             print_selection_warnings(&latest_warnings);
@@ -2383,7 +2466,7 @@ fn dispatch(cli: Cli) -> Result<()> {
                     )?
                 } else {
                     agent_tapes_core::export_selection_with_backends(
-                        &read.backends()?,
+                        &read.backends(&query.input)?,
                         &query.set(),
                         bundle.as_deref(),
                         view,
@@ -3921,7 +4004,7 @@ fn show_full(
         total: 0,
     };
     let read = agent_tapes_core::show_full_with_backends(
-        &agent_tapes_core::backend::backends(),
+        &selection.input.backends()?,
         selection.selection(),
         &mut sink,
     )?;
@@ -3946,7 +4029,7 @@ fn events_full(
         writer: None,
     };
     let streamed = agent_tapes_core::events_full_with_options_with_backends(
-        &agent_tapes_core::backend::backends(),
+        &selection.input.backends()?,
         selection.selection(),
         tail.unwrap_or(usize::MAX),
         filter,

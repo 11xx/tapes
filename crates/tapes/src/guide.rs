@@ -14,6 +14,30 @@ API, pi as an append-only tree. tapes finds one, normalizes it into a single mod
 hands it back. It never writes to a harness store, so no command here can
 disturb a live session.
 
+SELECT A MATERIALIZED NATIVE STORE
+  tapes list --native-store claude --native-root archive/claude --limit 5
+  tapes show --native-store codex --native-root archive/codex --latest --tail 10
+
+  --native-store <claude|codex|pi> requires --native-root <PATH>. PATH is the
+  harness configuration root: Claude reads PATH/projects, Codex and Pi read
+  PATH/sessions. Every session-reading command accepts the pair, including
+  capture, child, full reads, history paging, aggregates, and export. Only this
+  store participates; missing or unreadable roots never fall back to installed
+  stores. Harness configuration environment is neither read nor changed.
+  --input and --remote conflict with the pair. --harness may name the selected
+  harness and refuses another. OpenCode uses an API or database, not a root,
+  so --native-store opencode refuses.
+  IDs and prefixes resolve only in the selected store. `self` uses the caller's
+  exported identity but must resolve within that store. --latest and --title
+  default to the selected store across all recorded projects; --here,
+  --project, and --global give an explicit scope. A removed recorded working
+  directory does not prevent direct ID or global-store reads.
+  source.kind is explicit-native-store, source.location.container names PATH,
+  and source.location.locator names the exact recording. This is a selected
+  occurrence, with no live annotation or claim of immutable bytes. capture
+  reports caller-selected-native-store: the caller selected the native source,
+  and tapes has not pinned its bytes.
+
 START WITHOUT AN ID
   tapes show --latest --tail 40  The newest session of this project.
   tapes show --latest --exclude self
@@ -255,7 +279,7 @@ READ A RECORDING ON ANOTHER MACHINE
 PROBE BEFORE EXPORTING
   tapes show <id> --tail 40      A window, costing no bundle.
   tapes show <id> --turn-chars 2000  Cap each turn’s readable text, naming omitted characters.
-  tapes show <id> --json         tapes-session/17 turns, typed context events, and bounded read, graph, artifact, terminal, and recorded launch evidence.
+  tapes show <id> --json         tapes-session/18 turns, typed context events, and bounded read, graph, artifact, terminal, and recorded launch evidence.
   tapes show <id> --exchange     Operator and assistant turns only, timestamps and ordinals kept; the name for --only operator,assistant.
   tapes show <id> --omit tool    Every turn but tool calls and results; --only and --omit take kind labels, and export takes both.
   tapes show <id> --full         Every turn of a Claude, Codex, Pi, or OpenCode session, streamed past the read bounds; --json streams it too.
@@ -362,7 +386,7 @@ PROBE BEFORE EXPORTING
   truncation and any unmatched line leave it absent. Partial reads digest the
   returned range and carry its line coordinates. Unknown formats omit
   content_sha256. Missing scope is unknown.
-  capture reports unpinned for harness-store recordings; exporting does not
+  capture reports unpinned for installed recordings; exporting does not
   pin native bytes. With no --tail, every event the bounded reader
   reaches is returned; --name and --call-id filter only after pairing.
   --full-arguments returns each tool call's complete recorded argument text in
@@ -443,7 +467,7 @@ PROBE BEFORE EXPORTING
   selection that is the shape of a reader that stopped recognizing a kind.
 
   lineage answers which sessions a recording names as relatives, as
-  tapes-lineage/3: the session it was spawned or forked from, and the children
+  tapes-lineage/4: the session it was spawned or forked from, and the children
   its own store records, each with the role, model, spawn and completion
   stamps, and outcome its harness wrote. A relationship exists only where a
   record states it — a child header naming a parent, a spawn or completion
@@ -704,7 +728,7 @@ ONE READER PER MACHINE
 CHILD RECORDINGS
   tapes lineage PARENT --json
   tapes child PARENT --reference CHILD --tail 40 --json
-  Read a Claude child's own transcript, usage and ending as tapes-child/8,
+  Read a Claude child's own transcript, usage and ending as tapes-child/9,
   retaining its parent and reference. It is not an ordinary listed session; nested lineage
   remains uninspected and child activity is never added to parent totals.
   The child's id is qualified as PARENT::CHILD, and a child whose recorded
