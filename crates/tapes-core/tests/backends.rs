@@ -2549,6 +2549,8 @@ impl Backend for SearchFixture {
         Ok(Transcript {
             session: session.clone(),
             turns: vec![Turn {
+                text_truncated: None,
+                text_chars: None,
                 context_event: None,
                 model: None,
                 role: Role::User,
@@ -5726,6 +5728,8 @@ impl Backend for BulkExportFixture {
         Ok(Transcript {
             session: session.clone(),
             turns: vec![Turn {
+                text_truncated: None,
+                text_chars: None,
                 context_event: None,
                 model: None,
                 role: Role::User,
@@ -6296,4 +6300,25 @@ fn native_prefix_digest_identifies_bytes_and_retains_the_replay_prefix() {
     );
     fs::remove_dir_all(root).unwrap();
     fs::remove_dir_all(copy_root).unwrap();
+}
+
+#[test]
+fn codex_exit_status_requires_a_completed_command_and_an_integer() {
+    let backend = CodexBackend::new(fixtures("tool-exit/codex"));
+    let session = located(&backend, "70000000-0000-4000-8000-000000000001");
+    let events = backend.events(&session, usize::MAX).unwrap();
+    let exits = events
+        .events
+        .iter()
+        .filter(|record| record.event.kind == agent_tapes_core::EventKind::ToolResult)
+        .map(|record| record.event.exit)
+        .collect::<Vec<_>>();
+    assert_eq!(exits, vec![Some(0), Some(7), Some(-1), None, None, None]);
+    let wire = serde_json::to_value(&events).unwrap();
+    assert_eq!(wire["events"][1]["exit"], 0);
+    assert!(wire["events"][6].get("exit").is_none());
+    let transcript = backend.transcript(&session, usize::MAX).unwrap();
+    assert!(serde_json::to_value(transcript).unwrap()["turns"][0]
+        .get("tool")
+        .is_none());
 }

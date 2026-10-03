@@ -13,7 +13,7 @@ use crate::model::{
     TextTailEvidence, Transcript, Truncation, Turn,
 };
 
-pub const EVENTS_SCHEMA: &str = "tapes-events/11";
+pub const EVENTS_SCHEMA: &str = "tapes-events/12";
 const PREVIEW_CHARS: usize = 200;
 pub const MAX_INVOCATION_TEXT_CHARS: usize = 64 * 1024;
 pub const MAX_INVOCATIONS: usize = 32;
@@ -169,6 +169,9 @@ impl Bounded {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct ToolEvent {
+    /// Process exit status recorded by the harness, absent without structured evidence.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exit: Option<i64>,
     pub kind: EventKind,
     pub subtype: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -651,6 +654,12 @@ pub fn turn_records(turn: &Turn) -> impl Iterator<Item = EventRecord> {
             result.event.artifact_consumptions.clear();
             result
         });
+    let call = call.map(|mut call| {
+        if call.event.kind == EventKind::ToolCall {
+            call.event.exit = None;
+        }
+        call
+    });
     call.into_iter().chain(result)
 }
 
@@ -2188,12 +2197,15 @@ mod tests {
             invocations: Vec::new(),
             artifact_references: Vec::new(),
             artifact_consumptions: Vec::new(),
+            exit: None,
             self_contained: false,
         }
     }
 
     fn turn(ordinal: usize, seconds: i64, event: ToolEvent) -> Turn {
         Turn {
+            text_truncated: None,
+            text_chars: None,
             context_event: None,
             model: None,
             role: Role::Tool,
@@ -2307,6 +2319,7 @@ mod tests {
             invocations: Vec::new(),
             artifact_references: Vec::new(),
             artifact_consumptions: Vec::new(),
+            exit: None,
             self_contained: false,
         };
         let projected = project(

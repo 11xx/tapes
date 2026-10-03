@@ -823,6 +823,8 @@ mod tests {
 
     fn turn(role: Role) -> Turn {
         Turn {
+            text_truncated: None,
+            text_chars: None,
             context_event: None,
             model: None,
             kind: role.kind().unwrap_or(TurnKind::Operator),

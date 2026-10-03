@@ -973,6 +973,8 @@ fn parse_turns(value: &Value) -> Vec<Turn> {
         "developer" => Role::Developer,
         "toolResult" => {
             return vec![Turn {
+                text_truncated: None,
+                text_chars: None,
                 context_event: None,
                 model: None,
                 role: Role::Tool,
@@ -997,6 +999,8 @@ fn parse_turns(value: &Value) -> Vec<Turn> {
     if let Some(text) = content.as_str() {
         return (!text.is_empty())
             .then(|| Turn {
+                text_truncated: None,
+                text_chars: None,
                 context_event: None,
                 model: None,
                 kind: user_kind(&role),
@@ -1092,6 +1096,8 @@ fn parse_turns(value: &Value) -> Vec<Turn> {
                 ),
             };
             ((!text.is_empty()) || !parts.is_empty()).then_some(Turn {
+                text_truncated: None,
+                text_chars: None,
                 context_event: None,
                 model: None,
                 kind: user_kind(&role),
@@ -1132,6 +1138,7 @@ fn pi_call_event(block: &Value) -> ToolEvent {
         ),
         artifact_references: crate::event::artifact_references(&block["arguments"]),
         artifact_consumptions: Vec::new(),
+        exit: None,
         self_contained: false,
     }
 }
@@ -1154,6 +1161,7 @@ fn pi_result_event(message: &Value) -> ToolEvent {
         invocations: Vec::new(),
         artifact_references: crate::event::artifact_references(&message["content"]),
         artifact_consumptions: Vec::new(),
+        exit: None,
         self_contained: false,
     }
 }

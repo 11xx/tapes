@@ -1986,6 +1986,8 @@ fn parse_turns(value: &Value, completed_only: bool) -> Vec<Turn> {
         let completed = payload["type"] == "item_completed";
         let event = codex_runtime_tool_event(item, completed, completed_only);
         return vec![Turn {
+            text_truncated: None,
+            text_chars: None,
             context_event: None,
             model: None,
             role: Role::Tool,
@@ -2094,6 +2096,8 @@ fn parse_turns(value: &Value, completed_only: bool) -> Vec<Turn> {
     };
     ((!text.is_empty()) || !parts.is_empty())
         .then_some(Turn {
+            text_truncated: None,
+            text_chars: None,
             context_event: None,
             model: None,
             role,
@@ -2206,6 +2210,7 @@ fn codex_tool_event(payload: &Value, subtype: &str) -> ToolEvent {
             crate::event::artifact_references(&payload_json(&payload["output"]))
         },
         artifact_consumptions: Vec::new(),
+        exit: None,
         self_contained: false,
     }
 }
@@ -2289,6 +2294,9 @@ fn codex_runtime_tool_event(item: &Value, completed: bool, completed_only: bool)
             Vec::new()
         },
         artifact_consumptions: Vec::new(),
+        exit: (completed && item["type"] == "CommandExecution")
+            .then(|| item["exit_code"].as_i64())
+            .flatten(),
         self_contained: completed_only,
     }
 }

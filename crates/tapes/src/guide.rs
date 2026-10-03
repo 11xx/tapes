@@ -254,7 +254,8 @@ READ A RECORDING ON ANOTHER MACHINE
 
 PROBE BEFORE EXPORTING
   tapes show <id> --tail 40      A window, costing no bundle.
-  tapes show <id> --json         tapes-session/16 turns, typed context events, and bounded read, graph, artifact, terminal, and recorded launch evidence.
+  tapes show <id> --turn-chars 2000  Cap each turn’s readable text, naming omitted characters.
+  tapes show <id> --json         tapes-session/17 turns, typed context events, and bounded read, graph, artifact, terminal, and recorded launch evidence.
   tapes show <id> --exchange     Operator and assistant turns only, timestamps and ordinals kept; the name for --only operator,assistant.
   tapes show <id> --omit tool    Every turn but tool calls and results; --only and --omit take kind labels, and export takes both.
   tapes show <id> --full         Every turn of a Claude, Codex, Pi, or OpenCode session, streamed past the read bounds; --json streams it too.
@@ -328,9 +329,19 @@ PROBE BEFORE EXPORTING
   obtain a `ModelSelectionSpan` and its `last: ModelSelectionRecord` without
   decoding the native records.
 
-  events projects harness-neutral tool records as tapes-events/11. Pairing is
+  show --turn-chars N caps each turn's text at N Unicode characters after
+  selecting turns. Capped JSON turns carry text_truncated: true and text_chars
+  with the original length; human turns end with the omitted character count.
+  Without the flag text is unchanged. Zero keeps no text. This presentation
+  bound applies to full, supplied-input, and remote reads; native content
+  parts and other metadata retain their own bounds.
+
+  events projects harness-neutral tool records as tapes-events/12. Pairing is
   exact within the bounded read; an incomplete call or result says whether its
-  counterpart was not reached or not recorded. Event ordinals are the same
+  counterpart was not reached or not recorded. `exit` is an integer process
+  status on completed Codex CommandExecution events when exit_code is recorded.
+  Claude Bash and Pi bash results omit it because their recordings supply no
+  structured process status. Output text never supplies an exit status. Event ordinals are the same
   turn coordinates show prints. event_id stays stable across read windows;
   native_id is the harness record id where recorded, or a coordinate-derived
   record-sha256 id for a tool turn without one. A recognized file read has
@@ -664,8 +675,8 @@ ONE READER PER MACHINE
 CHILD RECORDINGS
   tapes lineage PARENT --json
   tapes child PARENT --reference CHILD --tail 40 --json
-  Read a Claude child's own transcript, usage and ending with its parent and
-  reference retained. It is not an ordinary listed session; nested lineage
+  Read a Claude child's own transcript, usage and ending as tapes-child/8,
+  retaining its parent and reference. It is not an ordinary listed session; nested lineage
   remains uninspected and child activity is never added to parent totals.
   The child's id is qualified as PARENT::CHILD, and a child whose recorded
   native session ids do not name the parent, or name none, is refused.

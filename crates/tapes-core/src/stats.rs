@@ -928,6 +928,8 @@ mod tests {
 
     fn turn(ordinal: usize, kind: TurnKind, seconds: Option<i64>) -> Turn {
         Turn {
+            text_truncated: None,
+            text_chars: None,
             context_event: None,
             model: None,
             role: match kind {
@@ -974,6 +976,7 @@ mod tests {
             invocations: Vec::new(),
             artifact_references: Vec::new(),
             artifact_consumptions: Vec::new(),
+            exit: None,
             self_contained: false,
         }
     }
@@ -993,6 +996,7 @@ mod tests {
             invocations: Vec::new(),
             artifact_references: Vec::new(),
             artifact_consumptions: Vec::new(),
+            exit: None,
             self_contained: false,
         }
     }

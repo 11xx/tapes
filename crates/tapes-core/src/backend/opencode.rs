@@ -2036,6 +2036,8 @@ fn parse_message(message: &Value) -> Vec<Turn> {
             .as_str()
             .filter(|text| !text.is_empty())
             .map(|text| Turn {
+                text_truncated: None,
+                text_chars: None,
                 context_event: None,
                 model: None,
                 kind: user_kind(&role),
@@ -2138,6 +2140,8 @@ fn parse_message(message: &Value) -> Vec<Turn> {
                 .map(str::to_owned)
                 .or_else(|| message_id.clone());
             ((!text.is_empty()) || !parts.is_empty()).then_some(Turn {
+                text_truncated: None,
+                text_chars: None,
                 context_event: None,
                 model: None,
                 kind: user_kind(&role),
@@ -2209,6 +2213,7 @@ fn opencode_tool_event(part: &Value) -> ToolEvent {
         ),
         artifact_references: crate::event::artifact_references(&state["input"]),
         artifact_consumptions: Vec::new(),
+        exit: None,
         self_contained: false,
     }
 }

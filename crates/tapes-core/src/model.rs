@@ -10,7 +10,7 @@ use crate::content::{ContentCoverage, ContentPart};
 use crate::event::ToolEvent;
 use crate::usage::UsageDetail;
 
-pub const SESSION_SCHEMA: &str = "tapes-session/16";
+pub const SESSION_SCHEMA: &str = "tapes-session/17";
 /// How the recording identifies the session's launch mode.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -389,6 +389,12 @@ pub struct Compaction {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Turn {
+    /// Whether presentation omitted a suffix of the normalized text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text_truncated: Option<bool>,
+    /// Original Unicode scalar count when presentation caps the text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text_chars: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_event: Option<ContextEvent>,
     /// Model and effort associated with the native assistant record.
@@ -438,6 +444,23 @@ pub struct Turn {
     /// keeps the harness envelope in `text` as its stable wire contract.
     #[serde(skip)]
     pub tool: Option<ToolEvent>,
+}
+
+impl Turn {
+    /// Cap the readable text at a Unicode scalar boundary, retaining its original size.
+    pub fn cap_text(&mut self, limit: usize) {
+        let chars = self.text.chars().count();
+        if chars > limit {
+            self.text_chars.get_or_insert(chars);
+            self.text_truncated = Some(true);
+            let end = self
+                .text
+                .char_indices()
+                .nth(limit)
+                .map_or(self.text.len(), |(i, _)| i);
+            self.text.truncate(end);
+        }
+    }
 }
 
 /// Metadata attached to one native provider entry rather than promoted to the
@@ -1673,6 +1696,8 @@ mod tests {
             coverage: AccountingCoverage::Session,
         };
         let turn = Turn {
+            text_truncated: None,
+            text_chars: None,
             context_event: None,
             model: None,
             role: Role::Assistant,
@@ -1826,6 +1851,8 @@ mod tests {
         session.title = None;
         let session = session.with_derived_title(&[
             Turn {
+                text_truncated: None,
+                text_chars: None,
                 context_event: None,
                 model: None,
                 role: Role::User,
@@ -1844,6 +1871,8 @@ mod tests {
                 tool: None,
             },
             Turn {
+                text_truncated: None,
+                text_chars: None,
                 context_event: None,
                 model: None,
                 role: Role::User,
@@ -1883,6 +1912,8 @@ mod tests {
         let mut complete = session();
         complete.title = None;
         let complete = complete.with_derived_title(&[Turn {
+            text_truncated: None,
+            text_chars: None,
             context_event: None,
             model: None,
             role: Role::User,
@@ -1907,6 +1938,8 @@ mod tests {
         let mut shortened = session();
         shortened.title = None;
         let shortened = shortened.with_derived_title(&[Turn {
+            text_truncated: None,
+            text_chars: None,
             context_event: None,
             model: None,
             role: Role::User,
@@ -1937,6 +1970,8 @@ mod tests {
         let mut session = session();
         session.title = None;
         let session = session.with_derived_title(&[Turn {
+            text_truncated: None,
+            text_chars: None,
             context_event: None,
             model: None,
             role: Role::User,
@@ -1965,6 +2000,8 @@ mod tests {
     #[test]
     fn derived_title_does_not_replace_recorded_title() {
         let session = session().with_derived_title(&[Turn {
+            text_truncated: None,
+            text_chars: None,
             context_event: None,
             model: None,
             role: Role::User,
@@ -2077,6 +2114,8 @@ mod tests {
     #[test]
     fn a_turn_carries_its_ordinal_and_omits_an_absent_native_id() {
         let turn = Turn {
+            text_truncated: None,
+            text_chars: None,
             context_event: None,
             model: None,
             role: Role::User,
