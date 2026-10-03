@@ -651,7 +651,8 @@ READ THE ENDING
   reads only the named body beside that recording. The budget is 1 byte to
   4 MiB. tapes-artifact/1 reports bytes returned, truncated, SHA-256 over those
   bytes, encoding (utf-8 or lossless hex), and body. Tokens bind the native
-  recording and originating result; changed results and other sources refuse.
+  session ID, source descriptor and originating result; changed results and
+  other sources refuse. The envelope must name the selected session directory.
   Session directory, tool-results and file symlinks refuse, as do non-regular
   files. Platforms without confined no-follow opens refuse retrieval.
   Ordinary transcript and event reads never open the body. Malformed envelopes

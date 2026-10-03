@@ -974,7 +974,8 @@ enum Command {
     /// ranges; compact references have no body. Referenced files are never opened.
     /// Instructions, environment and prompt snapshots remain unrecognized.
     /// Complete persisted-output tool results show their preview and a reference-only
-    /// file with its recorded size label; the external body is never read.
+    /// file with its recorded size label and opaque artifact reference; this view
+    /// never reads the external body. Use artifact for an explicit confined read.
     /// Every turn carries a
     /// `kind` naming what the harness
     /// recorded it as, and a user turn holding a harness command, notice, or

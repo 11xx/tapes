@@ -160,6 +160,9 @@ impl ClaudeBackend {
                 Some(&read.source_revision),
                 read.spans.get(index).copied(),
             );
+            for turn in &mut parsed {
+                crate::artifact::attach_tokens(turn, native_id, &self.source(path));
+            }
             turns.extend(parsed);
         }
         let requests = claude_request_tokens(&read.values);
@@ -239,6 +242,9 @@ impl ClaudeBackend {
                                 Some(revision),
                                 Some(*span),
                             );
+                            for turn in &mut turns {
+                                crate::artifact::attach_tokens(turn, &session.id, &session.source);
+                            }
                             turns
                         })
                         .collect()
@@ -454,7 +460,8 @@ impl Backend for ClaudeBackend {
     fn transcript(&self, session: &Session, tail: usize) -> Result<Transcript> {
         let path = super::session_file_path(session)
             .ok_or_else(|| anyhow!("claude session {} has no file locator", session.id))?;
-        let (turns, recording, trailing_record, unmapped) = read_transcript(path, self.read_bytes)?;
+        let (turns, recording, trailing_record, unmapped) =
+            read_transcript(path, self.read_bytes, session)?;
         let notes = subagent_notes(path);
         let mut session = session.clone();
         session.model = recording.tail.values.iter().rev().find_map(claude_model);
@@ -500,6 +507,9 @@ impl Backend for ClaudeBackend {
                 count_unmapped(&mut unmapped, value);
             }
             super::attach_record_refs(&mut parsed, &domain, Some(revision), Some(span));
+            for parsed_turn in &mut parsed {
+                crate::artifact::attach_tokens(parsed_turn, &session.id, &session.source);
+            }
             let produced = !parsed.is_empty();
             for mut parsed_turn in parsed {
                 parsed_turn.establish_origin(launch);
@@ -606,6 +616,9 @@ impl Backend for ClaudeBackend {
             records.observe(value);
             let mut parsed = parse_turns(value);
             super::attach_record_refs(&mut parsed, &domain, Some(revision), Some(span));
+            for parsed_turn in &mut parsed {
+                crate::artifact::attach_tokens(parsed_turn, &parent.id, &self.source(&path));
+            }
             let produced = !parsed.is_empty();
             for mut parsed_turn in parsed {
                 parsed_turn.establish_origin(launch);
@@ -871,6 +884,7 @@ fn claude_model(value: &Value) -> Option<Model> {
 fn read_transcript(
     path: &Path,
     read_bytes: u64,
+    session: &Session,
 ) -> Result<(
     Vec<Turn>,
     super::Recording,
@@ -893,6 +907,9 @@ fn read_transcript(
             Some(&read.source_revision),
             read.spans.get(index).copied(),
         );
+        for turn in &mut parsed {
+            crate::artifact::attach_tokens(turn, &session.id, &session.source);
+        }
         if !parsed.is_empty() {
             last_turn = Some(index);
         }
@@ -1722,6 +1739,7 @@ fn claude_read_content(
 }
 
 struct PersistedOutput<'a> {
+    session: &'a str,
     preview: &'a str,
     reference: ArtifactReference,
 }
@@ -1784,6 +1802,7 @@ fn persisted_tool_output(block: &Value) -> Option<PersistedOutput<'_>> {
         .as_str()
         .map(|id| bounded_text(id, crate::content::MAX_DESCRIPTOR_CHARS));
     Some(PersistedOutput {
+        session,
         preview,
         reference: ArtifactReference {
             kind: "claude-persisted-tool-output".to_owned(),
@@ -1795,6 +1814,16 @@ fn persisted_tool_output(block: &Value) -> Option<PersistedOutput<'_>> {
             ..ArtifactReference::default()
         },
     })
+}
+
+pub(crate) fn persisted_mapping_matches(value: &Value, session: &str) -> bool {
+    value["message"]["content"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|block| block["type"] == "tool_result")
+        .filter_map(persisted_tool_output)
+        .all(|output| output.session == session)
 }
 
 fn persisted_size(size: &str) -> bool {

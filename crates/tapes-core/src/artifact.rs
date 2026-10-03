@@ -15,6 +15,8 @@ pub const MAX_BYTES: usize = 4 * 1024 * 1024;
 
 #[derive(Serialize, Deserialize)]
 struct Coordinate {
+    session: String,
+    source: String,
     record: RecordRef,
     path: String,
 }
@@ -23,13 +25,19 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
-fn token(artifact: &ArtifactReference) -> Option<String> {
+fn token(
+    artifact: &ArtifactReference,
+    session: &str,
+    source: &crate::model::SourceDescriptor,
+) -> Option<String> {
     if artifact.kind != "claude-persisted-tool-output" || artifact.descriptor_truncated {
         return None;
     }
     let mut record = artifact.source.clone()?;
     record.content_part_index = None;
     let coordinate = Coordinate {
+        session: session.to_owned(),
+        source: hex(&Sha256::digest(serde_json::to_vec(source).ok()?)),
         record,
         path: artifact.path.clone()?,
     };
@@ -39,15 +47,19 @@ fn token(artifact: &ArtifactReference) -> Option<String> {
     ))
 }
 
-pub(crate) fn attach_tokens(turn: &mut Turn) {
+pub(crate) fn attach_tokens(
+    turn: &mut Turn,
+    session: &str,
+    source: &crate::model::SourceDescriptor,
+) {
     for part in &mut turn.parts {
         if let ContentPart::FileReference { reference, .. } = part {
-            reference.reference = token(reference);
+            reference.reference = token(reference, session, source);
         }
     }
     if let Some(tool) = &mut turn.tool {
         for reference in &mut tool.artifact_references {
-            reference.reference = token(reference);
+            reference.reference = token(reference, session, source);
         }
     }
 }
@@ -85,7 +97,9 @@ pub fn read(session: &Session, reference: &str, budget: usize) -> Result<Artifac
         serde_json::from_slice(&decoded).context("invalid artifact reference")?;
     let recording =
         crate::backend::session_file_path(session).context("session has no native recording")?;
-    if session.source.origin != "claude"
+    if coordinate.session != session.id
+        || coordinate.source != hex(&Sha256::digest(serde_json::to_vec(&session.source)?))
+        || session.source.origin != "claude"
         || coordinate.record.domain != format!("file:{}", recording.display())
     {
         bail!("artifact reference belongs to another session or source");
@@ -116,6 +130,9 @@ pub fn read(session: &Session, reference: &str, budget: usize) -> Result<Artifac
     if value["sessionId"].as_str() != Some(session.id.as_str()) {
         bail!("artifact reference belongs to another session");
     }
+    if !crate::backend::claude::persisted_mapping_matches(&value, &session.id) {
+        bail!("persisted envelope has no verified session-relative mapping");
+    }
     let mut turns = crate::backend::claude::parse_turns(&value);
     crate::backend::attach_record_refs(
         &mut turns,
@@ -123,6 +140,9 @@ pub fn read(session: &Session, reference: &str, budget: usize) -> Result<Artifac
         coordinate.record.revision.as_deref(),
         Some(span),
     );
+    for turn in &mut turns {
+        attach_tokens(turn, &session.id, &session.source);
+    }
     if !turns
         .iter()
         .filter_map(|turn| turn.tool.as_ref())

@@ -12392,6 +12392,37 @@ fn artifact_reads_only_confined_persisted_results() {
         .unwrap()
         .status
         .success());
+    let installed = tapes()
+        .env("CLAUDE_CONFIG_DIR", root.path())
+        .args(["show", id, "--harness", "claude", "--json"])
+        .output()
+        .unwrap();
+    assert!(installed.status.success());
+    let installed: Value = serde_json::from_slice(&installed.stdout).unwrap();
+    let installed_turn = installed["turns"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|turn| turn["native_id"] == "result-present")
+        .unwrap();
+    let installed_token = installed_turn["parts"][1]["reference"]["reference"]
+        .as_str()
+        .unwrap();
+    assert_ne!(token, installed_token);
+    assert!(!read(installed_token, "6").status.success());
+    fs::write(&file, vec![b'x'; 65537]).unwrap();
+    let default_budget = run(&["artifact", id, "--reference", token, "--json"]);
+    let default_budget: Value = serde_json::from_slice(&default_budget.stdout).unwrap();
+    assert_eq!(default_budget["bytes"], 65536);
+    assert_eq!(default_budget["truncated"], true);
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&file, fs::Permissions::from_mode(0)).unwrap();
+        if fs::File::open(&file).is_err() {
+            assert!(!read(token, "6").status.success());
+        }
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o600)).unwrap();
+    }
     let encoded = token.strip_prefix("ta1:").unwrap();
     let bytes: Vec<u8> = (0..encoded.len())
         .step_by(2)

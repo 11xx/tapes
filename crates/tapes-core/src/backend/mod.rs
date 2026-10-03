@@ -2323,7 +2323,6 @@ pub(crate) fn attach_record_ref(turn: &mut Turn, reference: RecordRef) {
             consumption.reference.source = Some(reference.clone());
         }
     }
-    crate::artifact::attach_tokens(turn);
     turn.record_ref = Some(reference);
 }
 
