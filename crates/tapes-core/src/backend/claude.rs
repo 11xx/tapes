@@ -487,16 +487,22 @@ impl Backend for ClaudeBackend {
     ) -> Result<StreamedTranscript> {
         let path = super::session_file_path(session)
             .ok_or_else(|| anyhow!("claude session {} has no file locator", session.id))?;
+        let mut launch = None;
+        let opening = stream_jsonl(path, replay_pin(replay)?, |value, _, _| {
+            launch = merge_launch(launch, claude_entrypoint(value));
+            Ok(false)
+        })?;
         let domain = format!("file:{}", path.display());
         let mut unmapped = UnmappedTally::default();
-        let read = stream_jsonl(path, replay_pin(replay)?, |value, span, revision| {
+        let read = stream_jsonl(path, Some(opening.pin()), |value, span, revision| {
             let mut parsed = parse_turns(value);
             if parsed.is_empty() {
                 count_unmapped(&mut unmapped, value);
             }
             super::attach_record_refs(&mut parsed, &domain, Some(revision), Some(span));
             let produced = !parsed.is_empty();
-            for parsed_turn in parsed {
+            for mut parsed_turn in parsed {
+                parsed_turn.establish_origin(launch);
                 turn(parsed_turn)?;
             }
             Ok(produced)
@@ -572,6 +578,11 @@ impl Backend for ClaudeBackend {
         turn: &mut dyn FnMut(Turn) -> Result<()>,
     ) -> Result<StreamedChild> {
         let path = child_recording(parent, reference)?;
+        let mut launch = None;
+        let opening = stream_jsonl(&path, None, |value, _, _| {
+            launch = merge_launch(launch, claude_entrypoint(value));
+            Ok(false)
+        })?;
         let domain = format!("file:{}", path.display());
         let mut identified = false;
         let mut records = ClaudeRecords::default();
@@ -579,7 +590,7 @@ impl Backend for ClaudeBackend {
         // title needs from the turns streamed past.
         let mut title_turn = None::<Turn>;
         let mut last_end = 0;
-        let read = stream_jsonl(&path, None, |value, span, revision| {
+        let read = stream_jsonl(&path, Some(opening.pin()), |value, span, revision| {
             if let Some(id) = value.get("sessionId") {
                 if id.as_str() != Some(parent.id.as_str()) {
                     anyhow::bail!(
@@ -596,7 +607,8 @@ impl Backend for ClaudeBackend {
             let mut parsed = parse_turns(value);
             super::attach_record_refs(&mut parsed, &domain, Some(revision), Some(span));
             let produced = !parsed.is_empty();
-            for parsed_turn in parsed {
+            for mut parsed_turn in parsed {
+                parsed_turn.establish_origin(launch);
                 if title_turn.is_none()
                     && parsed_turn.role == Role::User
                     && derive_title(&parsed_turn.text).is_some()
@@ -1144,6 +1156,9 @@ fn parse_turns(value: &Value) -> Vec<Turn> {
     let mut turns = parse_turns_raw(value);
     for turn in &mut turns {
         turn.model = model.clone();
+        if turn.kind == TurnKind::Operator && value["isMeta"].as_bool() == Some(true) {
+            turn.origin = Some(crate::model::OperatorOrigin::Harness);
+        }
     }
     turns
 }
@@ -1184,6 +1199,7 @@ fn parse_turns_raw(value: &Value) -> Vec<Turn> {
         let segment = &metadata["preservedSegment"];
         let string = |value: &Value| value.as_str().map(str::to_owned);
         return vec![Turn {
+            origin: None,
             text_truncated: None,
             text_chars: None,
             context_event: Some(crate::model::ContextEvent::Compaction(
@@ -1393,6 +1409,7 @@ fn turn(
     content: TurnContent,
 ) -> Option<Turn> {
     ((!text.is_empty()) || !content.parts.is_empty()).then_some(Turn {
+        origin: None,
         text_truncated: None,
         text_chars: None,
         context_event: None,

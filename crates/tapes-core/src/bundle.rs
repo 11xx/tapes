@@ -794,6 +794,7 @@ mod tests {
             },
             turns: vec![
                 Turn {
+                    origin: None,
                     text_truncated: None,
                     text_chars: None,
                     context_event: None,
@@ -814,6 +815,7 @@ mod tests {
                     tool: None,
                 },
                 Turn {
+                    origin: None,
                     text_truncated: None,
                     text_chars: None,
                     context_event: None,
@@ -834,6 +836,7 @@ mod tests {
                     tool: None,
                 },
                 Turn {
+                    origin: None,
                     text_truncated: None,
                     text_chars: None,
                     context_event: None,
@@ -854,6 +857,7 @@ mod tests {
                     tool: None,
                 },
                 Turn {
+                    origin: None,
                     text_truncated: None,
                     text_chars: None,
                     context_event: None,
@@ -1335,6 +1339,7 @@ mod tests {
     #[test]
     fn tool_labels_come_from_whichever_key_the_harness_uses() {
         let turn = |text: &str| Turn {
+            origin: None,
             text_truncated: None,
             text_chars: None,
             context_event: None,

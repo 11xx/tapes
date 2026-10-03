@@ -350,8 +350,10 @@ impl Backend for CodexBackend {
             .ok_or_else(|| anyhow!("codex session {} has no file locator", session.id))?;
         let (turns, recording, trailing_record, terminal, unmapped) =
             read_transcript(path, self.read_bytes)?;
+        let mut session = session.clone();
+        session.launch = recording.opening().first().and_then(codex_launch);
         let mut transcript = transcript_from_recording(
-            session.clone(),
+            session,
             turns,
             tail,
             &recording,
@@ -375,15 +377,20 @@ impl Backend for CodexBackend {
             .ok_or_else(|| anyhow!("codex session {} has no file locator", session.id))?;
         let domain = format!("file:{}", path.display());
         let mut terminal = None;
+        let mut launch = None;
         let mut reader = CodexTurns::default();
         let read = stream_jsonl(path, replay_pin(replay)?, |value, span, revision| {
+            if value["type"] == "session_meta" {
+                launch = codex_launch(value);
+            }
             if let Some(observed) = codex_terminal(value) {
                 terminal = Some(observed);
             }
             let mut parsed = reader.parse(value);
             super::attach_record_refs(&mut parsed, &domain, Some(revision), Some(span));
             let produced = !parsed.is_empty();
-            for parsed_turn in parsed {
+            for mut parsed_turn in parsed {
+                parsed_turn.establish_origin(launch);
                 turn(parsed_turn)?;
             }
             Ok(produced)
@@ -2005,6 +2012,7 @@ fn parse_turns(value: &Value, completed_only: bool) -> Vec<Turn> {
         let completed = payload["type"] == "item_completed";
         let event = codex_runtime_tool_event(item, completed, completed_only);
         return vec![Turn {
+            origin: None,
             text_truncated: None,
             text_chars: None,
             context_event: None,
@@ -2115,6 +2123,7 @@ fn parse_turns(value: &Value, completed_only: bool) -> Vec<Turn> {
     };
     ((!text.is_empty()) || !parts.is_empty())
         .then_some(Turn {
+            origin: None,
             text_truncated: None,
             text_chars: None,
             context_event: None,

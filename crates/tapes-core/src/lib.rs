@@ -1605,7 +1605,7 @@ fn export_whole(
     let mut projection = turns.map(model::Projection::new);
     let read = stream_numbered(backend, session, None, &mut |turn| {
         if let Some(projection) = &mut projection {
-            if !projection.admit(turn.kind) {
+            if !projection.admit_turn(&turn) {
                 return Ok(());
             }
         }
@@ -1616,7 +1616,7 @@ fn export_whole(
     facts.projection = projection;
     let mut second = first.close(&facts)?;
     stream_numbered(backend, session, Some(&read), &mut |turn| {
-        if turns.is_some_and(|kept| !kept.keeps(turn.kind)) {
+        if turns.is_some_and(|kept| !kept.keeps_turn(&turn)) {
             return Ok(());
         }
         second.turn(&turn)

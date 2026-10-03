@@ -2123,6 +2123,7 @@ fn mapping_message(
     let native_id = message.get("id").and_then(Value::as_str).map(str::to_owned);
     let kind = imported_kind(&role);
     Some(Turn {
+        origin: None,
         text_truncated: None,
         text_chars: None,
         context_event: None,
@@ -2270,6 +2271,7 @@ fn normalize_chatgpt_exporter(value: &Value) -> Result<NormalizedConversation> {
             .map(str::to_owned);
         let kind = imported_kind(&role);
         turns.push(Turn {
+            origin: None,
             text_truncated: None,
             text_chars: None,
             context_event: None,
@@ -2462,6 +2464,7 @@ fn perplexity_turn(
     };
     let text = content::project_text(&parts);
     Turn {
+        origin: None,
         text_truncated: None,
         text_chars: None,
         context_event: None,

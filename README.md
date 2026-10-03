@@ -50,6 +50,7 @@ carries whatever the transcript holds, including anything pasted into it;
 tapes list --here                         # this project's sessions, every harness, newest first
 tapes list --search "rate limit"          # sessions whose recent turns mention it
 tapes list --search "rate limit" --search-turns all  # every turn in the bounded read
+tapes show <id> --only operator --origin person # input with recorded person origin
 tapes list --launch interactive           # sessions a person drove, not headless runs
 tapes endings --here --since 2026-09-01   # what each session ended on
 tapes usage --here --by model             # where the tokens and the cost went
@@ -72,6 +73,10 @@ in `unsearched`. Human
 search diagnostics group by harness and reason with counts. JSON retains
 per-session details; OpenCode API refusals describe the store once.
 
+Operator turns carry `origin` when launch evidence establishes their sender:
+`program` in headless sessions, and `person` or marked `harness` input in
+interactive sessions. Without launch evidence, origin is absent. `show` and
+`export` accept `--origin person|program|harness`; absent origins never match.
 
 ## Where the rest is
 

@@ -1,0 +1,4 @@
+{"type":"session","version":3,"id":"origin-pi-headless","timestamp":"2026-01-01T10:00:00Z","cwd":"/fixtures/project"}
+{"type":"custom","id":"launch","parentId":null,"timestamp":"2026-01-01T10:00:01Z","customType":"tapes.launch","data":{"session":"origin-pi-headless","mode":"print"}}
+{"type":"message","id":"user","parentId":"launch","timestamp":"2026-01-01T10:00:02Z","message":{"role":"user","content":[{"type":"text","text":"Synthetic request."}]}}
+{"type":"custom_message","id":"injected","parentId":"user","timestamp":"2026-01-01T10:00:03Z","customType":"fixture-extension","display":false,"content":[{"type":"text","text":"Synthetic extension request."}]}

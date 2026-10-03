@@ -233,6 +233,7 @@ pub(crate) fn read_file(
     let (mut turns, models) = normalize(&values, &spans, &revision);
     for (ordinal, turn) in turns.iter_mut().enumerate() {
         turn.ordinal = ordinal;
+        turn.establish_origin(session.launch);
     }
     let after = std::fs::metadata(path)?;
     if !state.matches_file(&after) {

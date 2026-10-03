@@ -2390,6 +2390,7 @@ fn transcript_with_facts(
     let text_count_in_read = turns.iter().filter(|turn| turn.kind.in_exchange()).count();
     for (ordinal, turn) in turns.iter_mut().enumerate() {
         turn.ordinal = ordinal;
+        turn.establish_origin(session.launch);
     }
     if total > tail {
         turns.drain(..total - tail);

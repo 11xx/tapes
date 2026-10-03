@@ -6382,3 +6382,93 @@ fn opencode_api_refusal_is_reported_once_for_the_store() {
         vec!["opencode store: opencode API server returned HTTP 401"]
     );
 }
+
+#[test]
+fn operator_origins_follow_launch_and_native_injection_evidence() {
+    use agent_tapes_core::model::{OperatorOrigin, TurnKind, TurnSelection};
+    for (mode, idx) in [("interactive", 1), ("headless", 2), ("absent", 3)] {
+        let cases: Vec<(Box<dyn Backend>, String, bool)> = vec![
+            (
+                Box::new(ClaudeBackend::new(fixtures("origin/claude"))),
+                format!("71000000-0000-4000-8000-{idx:012}"),
+                true,
+            ),
+            (
+                Box::new(CodexBackend::new(fixtures("origin/codex"))),
+                format!("72000000-0000-7000-8000-{idx:012}"),
+                false,
+            ),
+            (
+                Box::new(PiBackend::new(fixtures("origin/pi"))),
+                format!("origin-pi-{mode}"),
+                true,
+            ),
+        ];
+        for (backend, id, injected) in cases {
+            let session = located(backend.as_ref(), &id);
+            let mut stale = session.clone();
+            stale.launch = None;
+            let transcript = backend.transcript(&stale, usize::MAX).unwrap();
+            let expected = match mode {
+                "interactive" if injected => {
+                    vec![Some(OperatorOrigin::Person), Some(OperatorOrigin::Harness)]
+                }
+                "interactive" => vec![Some(OperatorOrigin::Person)],
+                "headless" => vec![Some(OperatorOrigin::Program); if injected { 2 } else { 1 }],
+                _ => vec![None; if injected { 2 } else { 1 }],
+            };
+            assert_eq!(
+                transcript
+                    .turns
+                    .iter()
+                    .map(|t| t.origin)
+                    .collect::<Vec<_>>(),
+                expected,
+                "{id}"
+            );
+            let mut streamed = Vec::new();
+            backend
+                .stream_transcript(&stale, None, &mut |turn| {
+                    streamed.push(turn);
+                    Ok(())
+                })
+                .unwrap();
+            assert_eq!(
+                streamed.iter().map(|t| t.origin).collect::<Vec<_>>(),
+                expected,
+                "stream {id}"
+            );
+            for origin in [
+                OperatorOrigin::Person,
+                OperatorOrigin::Program,
+                OperatorOrigin::Harness,
+            ] {
+                let selected = transcript.clone().project(
+                    TurnSelection::only([TurnKind::Operator]).with_origin(origin),
+                    1,
+                );
+                assert!(
+                    selected.turns.iter().all(|t| t.origin == Some(origin)),
+                    "{id}"
+                );
+                assert_eq!(
+                    selected.turns.len(),
+                    expected
+                        .iter()
+                        .filter(|o| **o == Some(origin))
+                        .count()
+                        .min(1)
+                );
+                assert_eq!(selected.projection.unwrap().origin, Some(origin));
+            }
+            if session.harness() != "pi" {
+                let page = backend.history_page(&session, None, 64 * 1024).unwrap();
+                assert_eq!(
+                    page.turns.iter().map(|t| t.origin).collect::<Vec<_>>(),
+                    expected,
+                    "page {id}"
+                );
+            }
+        }
+    }
+}

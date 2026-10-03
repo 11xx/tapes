@@ -285,6 +285,7 @@ PROBE BEFORE EXPORTING
   tapes show <id> --turn-chars 2000  Cap each turn’s readable text, naming omitted characters.
   tapes show <id> --json         tapes-session/18 turns, typed context events, and bounded read, graph, artifact, terminal, and recorded launch evidence.
   tapes show <id> --exchange     Operator and assistant turns only, timestamps and ordinals kept; the name for --only operator,assistant.
+  tapes show <id> --only operator --origin person  Operator turns with recorded person origin.
   tapes show <id> --omit tool    Every turn but tool calls and results; --only and --omit take kind labels, and export takes both.
   tapes show <id> --full         Every turn of a Claude, Codex, Pi, or OpenCode session, streamed past the read bounds; --json streams it too.
   tapes events <id> --json       Typed tool calls, results, pairs, and content parts.
@@ -657,6 +658,18 @@ READ THE ENDING
   reasoning, and tool turns. A user turn the harness left no evidence for is
   `unknown`, which is an answer rather than a gap — read its text before
   deciding what it was.
+
+  Operator turns carry an orthogonal `origin` only when `launch` is known.
+  Headless sessions assign `program` to every operator turn. Interactive
+  sessions assign `person`, or `harness` when the native entry establishes
+  injection: Claude's `isMeta: true` or pi's extension `custom_message`.
+  Codex metadata, Claude queue fields, and message text do not establish
+  injection. Without launch evidence, origin is absent. `show` and `export`
+  accept --origin person|program|harness alongside --only; absent origins never
+  match. The projection records the origin selector and counts rejected turns
+  by kind. Origin does not identify a launcher or resolve agent-delegate
+  handles; agent-delegate status names its session, and a pi handle is already
+  the session id.
 
   A session the user deliberately aborted is a frozen handoff whatever its
   last turn looks like: report what was abandoned, and do not resume it on
