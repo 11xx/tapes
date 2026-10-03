@@ -1063,6 +1063,10 @@ impl OpenCodeBackend {
 }
 
 impl Backend for OpenCodeBackend {
+    fn store_label(&self) -> Option<&str> {
+        self.store.store_label()
+    }
+
     /// Stable OpenCode and opencode2 project many of the same sessions.
     fn shares_session_ids(&self) -> bool {
         true

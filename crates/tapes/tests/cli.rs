@@ -3165,7 +3165,6 @@ fn selection_and_scope_flags_are_mutually_exclusive() {
         vec!["show", "some-id", "--latest"],
         vec!["show", "some-id", "--project", "/tmp"],
         vec!["show", "some-id", "--exclude", "other-id"],
-        vec!["show", "some-id", "--harness", "codex"],
         vec!["export", "some-id", "--global"],
         vec!["events", "some-id", "--latest"],
         vec!["show", "--exclude", "some-id"],
@@ -11319,4 +11318,53 @@ fn remote_refuses_the_selectors_that_name_this_machine() {
     );
 
     let _ = fs::remove_dir_all(local_codex);
+}
+
+#[test]
+fn session_commands_accept_harness_scoped_prefixes() {
+    let (codex_home, home) = fixture_store("harness-prefix");
+    for view in [
+        "show", "brief", "usage", "stats", "lineage", "events", "capture",
+    ] {
+        let mut command = tapes();
+        command.args([view, "00000000-0000", "--harness", "codex", "--json"]);
+        with_fixture_env(&mut command, &codex_home, &home, &codex_home);
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "{view}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert!(value.is_object(), "{view}");
+    }
+    let mut command = tapes();
+    command.args(["capture", "00000000-0000", "--harness", "claude", "--json"]);
+    with_fixture_env(&mut command, &codex_home, &home, &codex_home);
+    let output = command.output().unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("was not found"));
+    fs::remove_dir_all(codex_home).unwrap();
+}
+
+#[test]
+fn id_lookup_refuses_an_unknown_harness() {
+    let (codex_home, home) = fixture_store("unknown-harness");
+    for view in ["show", "stats", "capture"] {
+        let mut command = tapes();
+        command.args([view, "synthetic-prefix", "--harness", "foo", "--json"]);
+        with_fixture_env(&mut command, &codex_home, &home, &codex_home);
+        let output = command.output().unwrap();
+        assert!(!output.status.success(), "{view}");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("unknown harness: foo"),
+            "{view}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            !String::from_utf8_lossy(&output.stderr).contains("was not found"),
+            "{view}"
+        );
+    }
+    fs::remove_dir_all(codex_home).unwrap();
 }

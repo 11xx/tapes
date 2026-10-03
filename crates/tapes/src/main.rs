@@ -469,16 +469,23 @@ impl Command {
     }
 }
 
+fn id_selection<'a>(id: &'a str, harness: Option<&'a str>) -> Selection<'a> {
+    match harness {
+        Some(harness) => Selection::IdInHarness { id, harness },
+        None => Selection::Id(id),
+    }
+}
+
 /// Select one session by ID, exact recorded title, or latest activity.
-/// ID resolution crosses stores; title and latest selection honor explicit
-/// scope and harness restrictions.
+/// ID resolution honors harness restrictions; title and latest selection also
+/// honor project scope.
 #[derive(Args)]
 struct SelectionArgs {
     /// Session identifier, full or a prefix whose bounded native discovery proves unique, or `self` for the
     /// session the caller runs in, as its harness's exported variable names it.
     #[arg(
         required_unless_present_any = ["latest", "title", "occurrence"],
-        conflicts_with_all = ["latest", "title", "occurrence", "exclude", "harness", "here", "project", "global"]
+        conflicts_with_all = ["latest", "title", "occurrence", "exclude", "here", "project", "global"]
     )]
     session: Option<String>,
     /// Match the recorded title exactly in scope; incomplete or ambiguous lookup refuses.
@@ -494,7 +501,7 @@ struct SelectionArgs {
     /// asking from inside its own session passes `self` here.
     #[arg(long, requires = "latest")]
     exclude: Vec<String>,
-    /// Restrict title or latest lookup to one harness.
+    /// Restrict ID, prefix, title, or latest lookup to one harness.
     #[arg(long)]
     harness: Option<String>,
     #[command(flatten)]
@@ -535,7 +542,7 @@ impl SelectionArgs {
             self.title.as_deref(),
         ) {
             (Some(occurrence), _, _) => Selection::Occurrence(occurrence),
-            (None, Some(session), _) => Selection::Id(session),
+            (None, Some(session), _) => id_selection(session, self.harness.as_deref()),
             (None, _, Some(title)) => Selection::Title {
                 title,
                 within: self.within_or_here(),
@@ -563,7 +570,7 @@ impl SelectionArgs {
 struct SessionQueryArgs {
     /// Session identifier, full or a prefix whose bounded native discovery proves unique, or `self` for the
     /// session the caller runs in, as its harness's exported variable names it.
-    #[arg(conflicts_with_all = ["title", "latest", "occurrence", "exclude", "harness", "here", "project", "global"])]
+    #[arg(conflicts_with_all = ["title", "latest", "occurrence", "exclude", "here", "project", "global"])]
     session: Option<String>,
     /// Match the recorded title exactly in scope; incomplete or ambiguous lookup refuses.
     #[arg(long, conflicts_with_all = ["session", "latest", "occurrence", "exclude", "limit", "model", "launch", "directory", "since", "until", "sort", "search"])]
@@ -578,8 +585,8 @@ struct SessionQueryArgs {
     /// asking from inside its own session passes `self` here.
     #[arg(long, requires = "latest")]
     exclude: Vec<String>,
-    /// Restrict title, latest, or set selection to one harness.
-    #[arg(long, conflicts_with = "session")]
+    /// Restrict ID, prefix, title, latest, or set selection to one harness.
+    #[arg(long)]
     harness: Option<String>,
     #[command(flatten)]
     scope: ScopeArgs,
@@ -676,7 +683,7 @@ impl SessionQueryArgs {
             return Some(Selection::Occurrence(occurrence));
         }
         if let Some(id) = self.session.as_deref() {
-            return Some(Selection::Id(id));
+            return Some(id_selection(id, self.harness.as_deref()));
         }
         if let Some(title) = self.title.as_deref() {
             return Some(Selection::Title {
@@ -769,6 +776,9 @@ enum Command {
     Capture {
         /// Exact session id, an unambiguous prefix, or `self`.
         session: String,
+        /// Restrict ID or prefix lookup to one harness.
+        #[arg(long)]
+        harness: Option<String>,
         /// Render the versioned report as JSON.
         #[arg(long)]
         json: bool,
@@ -1369,7 +1379,11 @@ fn dispatch(cli: Cli) -> Result<()> {
         apply_self(selector, remote.as_deref())?;
     }
     match command {
-        Command::Capture { session, json } => {
+        Command::Capture {
+            session,
+            harness,
+            json,
+        } => {
             let session = if session == self_token::TOKEN {
                 let resolved = self_token::resolve(&agent_tapes_core::backend::backends())?;
                 eprintln!("Note: {}.", resolved.report());
@@ -1377,7 +1391,7 @@ fn dispatch(cli: Cli) -> Result<()> {
             } else {
                 session
             };
-            let report = agent_tapes_core::capture(Selection::Id(&session))?;
+            let report = agent_tapes_core::capture(id_selection(&session, harness.as_deref()))?;
             if json {
                 println!("{}", serde_json::to_string(&report)?);
             } else {
@@ -4280,6 +4294,33 @@ fn reset_sigpipe() {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn every_session_command_accepts_a_harness_with_an_id() {
+        use clap::Parser;
+        for command in [
+            "show",
+            "page",
+            "history-search",
+            "metadata",
+            "child",
+            "events",
+            "lineage",
+            "brief",
+            "usage",
+            "stats",
+            "export",
+            "capture",
+        ] {
+            let mut args = vec!["tapes", command, "synthetic-prefix", "--harness", "claude"];
+            if command == "child" {
+                args.extend(["--reference", "synthetic-child"]);
+            }
+            if command == "history-search" {
+                args.extend(["--search", "synthetic"]);
+            }
+            assert!(super::Cli::try_parse_from(args).is_ok(), "{command}");
+        }
+    }
     use super::*;
     use agent_tapes_core::model::{
         End, OrdinalRange, Role, SourceDescriptor, TrailingRecord, Turn, TurnKind, TurnWindow,

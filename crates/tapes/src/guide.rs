@@ -116,7 +116,10 @@ FIND IT
 
   A full session id uses direct native lookup. A prefix is accepted only when
   bounded candidate coverage proves it unique; an ambiguous prefix lists its
-  candidates, and incomplete coverage asks for the full id. A harness whose
+  candidates. --harness <h> restricts ID and prefix lookup to that harness's
+  stores. Incomplete coverage names incomplete and completely searched harness
+  stores and asks for the full id or --harness <h>; a single observed prefix
+  match cannot prove uniqueness across incomplete stores. A harness whose
   binary or store is absent reports itself unavailable and never fails a
   listing. If one stored session row cannot be read, listing keeps every other
   session and reports that one as unreadable, with its id and the diagnostic —

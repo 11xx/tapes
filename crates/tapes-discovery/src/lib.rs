@@ -130,6 +130,17 @@ impl NativeStore {
         }
     }
 
+    /// Distinguish store generations that share one harness.
+    pub fn store_label(&self) -> Option<&'static str> {
+        match self {
+            Self::OpenCode(store) => Some(match store.flavor() {
+                OpenCodeFlavor::Stable => "stable",
+                OpenCodeFlavor::V2 => "v2",
+            }),
+            _ => None,
+        }
+    }
+
     pub fn root(&self) -> Option<&Path> {
         match self {
             Self::Claude { root }
@@ -364,6 +375,7 @@ pub enum ResolveError {
     NotFound {
         query: String,
         truncated: bool,
+        diagnostics: Vec<String>,
     },
     Incomplete {
         query: String,
@@ -388,18 +400,21 @@ impl std::fmt::Display for ResolveError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::InvalidQuery => f.write_str("query must be non-empty and contain no NUL"),
-            Self::NotFound { query, truncated } => {
+            Self::NotFound { query, truncated, diagnostics } => {
                 write!(f, "session {query} was not found")?;
                 if *truncated {
                     f.write_str(
-                        " (candidate coverage is incomplete; pass the full ID for a direct lookup)",
+                        " (candidate coverage is incomplete; pass the full ID or --harness <h> for a direct lookup)",
                     )?;
+                }
+                if !diagnostics.is_empty() {
+                    write!(f, " ({})", diagnostics.join("; "))?;
                 }
                 Ok(())
             }
             Self::Incomplete { query, diagnostics } => write!(
                 f,
-                "cannot prove a unique native session for {query:?}; use the full ID ({})",
+                "cannot prove a unique native session for {query:?}; use the full ID or --harness <h> ({})",
                 diagnostics.join("; ")
             ),
             Self::Ambiguous { query, candidates } => {
@@ -455,6 +470,10 @@ impl IdentityRecord for NativeSession {
 /// A source adapted to the shared exact/prefix selector.
 pub trait IdentitySource<R: IdentityRecord> {
     fn harness(&self) -> &str;
+    /// A human-readable distinction between stores of the same harness.
+    fn store_label(&self) -> Option<&str> {
+        None
+    }
     fn locate_exact(&self, query: &str) -> Result<Option<R>, String>;
     fn candidates(&self, limit: usize) -> CandidatePage<R, String>;
     fn shares_session_ids(&self) -> bool {
@@ -560,6 +579,10 @@ impl SharedStorePrecedence {
 }
 
 impl IdentitySource<NativeSession> for NativeStore {
+    fn store_label(&self) -> Option<&str> {
+        NativeStore::store_label(self)
+    }
+
     fn harness(&self) -> &str {
         self.harness().as_str()
     }
@@ -724,6 +747,43 @@ pub fn resolve_with_sources<R: IdentityRecord + Clone>(
         diagnostics.extend(page.failures.iter().cloned());
         pages.push(page);
     }
+    let mut coverage = Vec::new();
+    if truncated {
+        for (complete, label) in [
+            (false, "incomplete harness stores"),
+            (true, "completely searched harness stores"),
+        ] {
+            let stores = pages
+                .iter()
+                .enumerate()
+                .filter(|(index, page)| {
+                    page.complete == complete && (!complete || sources[*index].available())
+                })
+                .map(|(index, _)| {
+                    let source = sources[index];
+                    let harness = source.harness();
+                    let shared_harness = sources
+                        .iter()
+                        .filter(|source| source.harness() == harness)
+                        .count()
+                        > 1;
+                    match source.store_label().filter(|_| shared_harness) {
+                        Some(label) => format!("{harness} ({label})"),
+                        None => harness.to_owned(),
+                    }
+                })
+                .collect::<Vec<_>>();
+            coverage.push(format!(
+                "{label}: {}",
+                if stores.is_empty() {
+                    "none".to_owned()
+                } else {
+                    stores.join(", ")
+                }
+            ));
+        }
+        coverage.push("use the full ID or --harness <h> to scope native lookup".to_owned());
+    }
     for (source_index, page) in pages.iter().enumerate() {
         let source = sources[source_index];
         if !source.shares_session_ids() {
@@ -841,6 +901,7 @@ pub fn resolve_with_sources<R: IdentityRecord + Clone>(
         0 if !diagnostics.is_empty() || !failures.is_empty() => {
             let mut failures = failure_messages(failures.iter());
             failures.extend(diagnostics);
+            failures.extend(coverage);
             failures.sort();
             failures.dedup();
             Err(ResolveError::BackendFailed {
@@ -851,11 +912,15 @@ pub fn resolve_with_sources<R: IdentityRecord + Clone>(
         0 => Err(ResolveError::NotFound {
             query: query.to_owned(),
             truncated,
+            diagnostics: coverage,
         }),
-        1 if truncated || !diagnostics.is_empty() => Err(ResolveError::Incomplete {
-            query: query.to_owned(),
-            diagnostics,
-        }),
+        1 if truncated || !diagnostics.is_empty() => {
+            diagnostics.extend(coverage);
+            Err(ResolveError::Incomplete {
+                query: query.to_owned(),
+                diagnostics,
+            })
+        }
         1 => Ok(matches.remove(0)),
         _ => unreachable!("multiple matches returned above"),
     }
