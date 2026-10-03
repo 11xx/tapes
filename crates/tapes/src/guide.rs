@@ -602,6 +602,12 @@ READ THE ENDING
                                  and whether it landed.
   A closing summary, nothing open  Finished. A post-mortem, not a rescue.
 
+  Claude attachment records carry context outside `message`: file attachments
+  name paths in `displayPath` and `filename`, with text in
+  `content.file.content` under `content.type = text`. Compact file references
+  name paths without a body. Instructions, environment and prompt snapshots
+  remain unrecognized records; their bodies are not projected as turns.
+
   Every turn carries a `kind`, filled only from what the harness itself
   wrote, a field beside the text or an element it wraps its own text in:
   `operator` for a message addressed to the agent, `control` for a harness
