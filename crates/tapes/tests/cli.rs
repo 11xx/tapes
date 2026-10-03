@@ -4969,7 +4969,10 @@ fn exporting_an_unknown_session_writes_no_bundle_and_fails() {
         .args(["export", "definitely-not-a-session"])
         .arg("--bundle")
         .arg(&directory)
-        .env("HOME", std::env::temp_dir().join("tapes-cli-empty-home"))
+        .env(
+            "HOME",
+            std::env::temp_dir().join(format!("tapes-cli-empty-home-{}", std::process::id())),
+        )
         .output()
         .unwrap();
 
