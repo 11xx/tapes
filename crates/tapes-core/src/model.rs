@@ -545,6 +545,33 @@ pub struct ReadGap {
     pub reason: String,
 }
 
+/// Portable identity of an established source byte prefix.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SourcePrefixDigest {
+    pub algorithm: DigestAlgorithm,
+    pub value: String,
+    pub span: ByteSpan,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DigestAlgorithm {
+    Sha256,
+}
+
+impl SourcePrefixDigest {
+    pub(crate) fn sha256(bytes: [u8; 32], source_length: u64) -> Self {
+        Self {
+            algorithm: DigestAlgorithm::Sha256,
+            value: bytes.iter().map(|byte| format!("{byte:02x}")).collect(),
+            span: ByteSpan {
+                start: 0,
+                end: source_length,
+            },
+        }
+    }
+}
+
 /// What one bounded source observation actually inspected. A source length is
 /// not a claim that the source is append-only, and a file validator remains a
 /// local observation rather than a portable content identity.
@@ -555,9 +582,11 @@ pub struct ReadEvidence {
     pub coordinate_domain: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_revision: Option<String>,
-    /// Internal pin evidence for file-backed whole reads. It is carried only
-    /// within one process so a replay can verify the observed prefix without
-    /// adding a public evidence field.
+    /// SHA-256 of the exact observed prefix, including malformed records.
+    /// Absent unless a streaming file read established the pin.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_prefix_digest: Option<SourcePrefixDigest>,
+    /// Internal pin bytes used to verify same-process replay.
     #[serde(skip)]
     pub(crate) source_prefix_sha256: Option<[u8; 32]>,
     #[serde(skip_serializing_if = "Option::is_none")]

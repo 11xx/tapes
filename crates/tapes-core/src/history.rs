@@ -22,7 +22,7 @@ pub const DEFAULT_BYTES: usize = 64 * 1024;
 pub const MAX_BYTES: usize = 4 * 1024 * 1024;
 pub const PAGE_SCHEMA: &str = "tapes-page/9";
 pub const HISTORY_SEARCH_SCHEMA: &str = "tapes-history-search/9";
-pub const METADATA_HISTORY_SCHEMA: &str = "tapes-metadata-history/8";
+pub const METADATA_HISTORY_SCHEMA: &str = "tapes-metadata-history/9";
 const MAX_CURSOR_BYTES: usize = 16 * 1024;
 const MAX_PAGES: usize = 32;
 const MAX_RESULTS: usize = 100;
@@ -255,6 +255,7 @@ pub(crate) fn read_file(
         configured_bound: bytes as u64,
         coordinate_domain: "file-byte-range".to_owned(),
         source_revision: Some(revision),
+        source_prefix_digest: None,
         source_prefix_sha256: None,
         producer: session.source.producer.clone(),
         projection: PAGE_SCHEMA.to_owned(),

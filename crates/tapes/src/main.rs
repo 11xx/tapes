@@ -883,7 +883,9 @@ enum Command {
         /// Read the whole recording instead of its bounded tail, writing each
         /// turn as it is read so memory follows one record rather than the
         /// file. Every turn is shown unless --tail is given; with --json the
-        /// same tapes-session object is written turn by turn. Installed Claude,
+        /// same tapes-session object is written turn by turn. Its read evidence
+        /// includes a SHA-256 source_prefix_digest of bytes [0, source_length)
+        /// when a native file streaming pin is established. Installed Claude,
         /// Codex, Pi, and OpenCode sessions; OpenCode pages every message
         /// oldest first, and its stable database keeps cutting part text at
         /// 4000 characters (2000 for tool payloads), reported as a source bound.
@@ -1102,7 +1104,7 @@ enum Command {
         json: bool,
     },
     /// Where quota went. A session named by id or reached with --latest
-    /// answers that session as tapes-usage/8: its recorded tokens, cost, and
+    /// answers that session as tapes-usage/9: its recorded tokens, cost, and
     /// turn counts, plus whatever else its harness recorded — a context
     /// window, a provider quota window, wall-clock durations, a per-model
     /// split. A scope or listing filter instead answers the whole selection
@@ -1154,7 +1156,7 @@ enum Command {
             conflicts_with = "read_bytes"
         )]
         series: Option<Option<usize>>,
-        /// Render the versioned tapes-usage/8 object, or tapes-usage-summary/5
+        /// Render the versioned tapes-usage/9 object, or tapes-usage-summary/5
         /// for a selection, as JSON. `session.model_observation` says
         /// whether more than one model and effort was observed (`mixed`) and
         /// whether a gap, partial read or budget kept the split incomplete
@@ -1168,7 +1170,7 @@ enum Command {
         json: bool,
     },
     /// What a continuation of one session needs from its recording, as
-    /// tapes-brief/9: where the work stopped, the working directory and the
+    /// tapes-brief/10: where the work stopped, the working directory and the
     /// commit it sits on, the calls the read never saw a result for, the
     /// children whose outcome the store does not record, and a bounded tail
     /// of the exchange. It reads the recording alone and judges nothing —
@@ -1184,13 +1186,13 @@ enum Command {
         /// out of the tail.
         #[arg(long, value_name = "N", default_value_t = DEFAULT_BRIEF_TAIL)]
         tail: usize,
-        /// Render the versioned tapes-brief/9 object as JSON. Each `in_flight`
+        /// Render the versioned tapes-brief/10 object as JSON. Each `in_flight`
         /// list holds at most 20 entries, with a note when the bound cut it.
         #[arg(long)]
         json: bool,
     },
     /// What each session of a selection ends on, one bounded record each, as
-    /// tapes-endings/7, including a session's recognized launch mode when one
+    /// tapes-endings/8, including a session's recognized launch mode when one
     /// was recorded. The selection uses the flags `list` and `export` take,
     /// applied before any transcript is opened; each selected session then
     /// costs one bounded read of its newest turns and one lineage read. Every
@@ -1256,7 +1258,7 @@ enum Command {
         /// attached context stay out of it.
         #[arg(long)]
         text: bool,
-        /// Render the versioned tapes-endings/7 object as JSON. An ending's
+        /// Render the versioned tapes-endings/8 object as JSON. An ending's
         /// `source.coverage` is `read-window` when a source bound withheld
         /// turns, `window` when only the --tail window omitted any, and
         /// `session` otherwise.

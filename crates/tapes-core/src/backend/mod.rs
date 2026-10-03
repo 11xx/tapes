@@ -1128,6 +1128,9 @@ impl StreamedTranscript {
             configured_bound: self.source_length,
             coordinate_domain: self.coordinates.domain().to_owned(),
             source_revision: self.source_revision.clone(),
+            source_prefix_digest: self
+                .source_prefix_sha256
+                .map(|digest| crate::model::SourcePrefixDigest::sha256(digest, self.source_length)),
             source_prefix_sha256: self.source_prefix_sha256,
             producer,
             projection: crate::model::SESSION_SCHEMA.to_owned(),
@@ -2010,6 +2013,7 @@ pub(crate) fn read_evidence(read: &Jsonl) -> ReadEvidence {
         configured_bound: read.configured_bound,
         coordinate_domain: "file-byte-range".to_owned(),
         source_revision: Some(read.source_revision.clone()),
+        source_prefix_digest: None,
         source_prefix_sha256: None,
         producer: None,
         projection: crate::model::SESSION_SCHEMA.to_owned(),
@@ -2063,6 +2067,7 @@ pub(crate) fn recording_evidence(recording: &Recording) -> ReadEvidence {
         configured_bound: recording.tail.configured_bound,
         coordinate_domain: "file-byte-range".to_owned(),
         source_revision: Some(recording.tail.source_revision.clone()),
+        source_prefix_digest: None,
         source_prefix_sha256: None,
         producer: None,
         projection: crate::model::SESSION_SCHEMA.to_owned(),

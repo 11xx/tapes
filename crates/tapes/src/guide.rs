@@ -268,7 +268,14 @@ PROBE BEFORE EXPORTING
   `--read-bytes` widens the file tail (4MiB by default, at most 1GiB), `show
   --full` streams a whole session past it and past OpenCode's store page, and
   explicit page reads reach older Claude or Codex file history. `read`
-  records the source length, configured bound, physical head/tail/alignment
+  includes `source_prefix_digest` only when a streaming file read establishes
+  a pin: algorithm `sha256`, lowercase hex `value`, and `span` from byte zero
+  to `source_length` (exclusive). It hashes source bytes, including malformed
+  records and newline-less tails. Identical copies share the digest even when
+  their stat-based `source_revision` differs. Replays retain the pinned prefix
+  identity after appends. Bounded, page, and API reads omit it and read no
+  extra bytes to establish it. Absence means no digest was established.
+  `read` records the source length, configured bound, physical head/tail/alignment
   ranges, decoded record spans, context-only record spans, and gaps;
   physical coverage does not erase malformed records, and a partial gap is
   discharged only by a successful decode of that same record. A preceding
@@ -350,7 +357,7 @@ PROBE BEFORE EXPORTING
   Claude, Codex, or Pi recording twice, pairing past the read bound and
   writing each event as it pairs, with the same filters and counts.
 
-  usage answers where a session's quota went as tapes-usage/8: its recorded
+  usage answers where a session's quota went as tapes-usage/9: its recorded
   launch mode when known, tokens, cost, accounting, turns, and any by-model attribution the source can
   support — Claude's recorded cost-state, Codex's request observations, or
   pi's per-message model each qualified by the thinking level in effect. Read
@@ -512,7 +519,7 @@ READ MANY ENDINGS
   tapes endings --global --harness codex --limit 50 --text
 
   endings answers what each session of a selection ends on, as
-  tapes-endings/7, including a session's recorded launch mode when known, so
+  tapes-endings/8, including a session's recorded launch mode when known, so
   choosing which few endings deserve reading costs one
   bounded read each instead of a transcript apiece. The selection is the one
   list and export take, and the scope and filters apply before any transcript
@@ -598,7 +605,7 @@ CONTINUE A COLD SESSION
   tapes brief <id> --tail 20 --json
 
   A continuation has two halves. brief is the transcript's half, as
-  tapes-brief/9: where the session stopped, the directory it worked in and the
+  tapes-brief/10: where the session stopped, the directory it worked in and the
   commit that directory sits on, the tool calls the read never saw a result
   for, the children whose outcome its store does not record, and the last few
   operator and assistant turns, each cut at 600 characters. --tail sets how
