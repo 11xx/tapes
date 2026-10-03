@@ -365,7 +365,13 @@ PROBE BEFORE EXPORTING
   older rows. `--full --series` uses the pinned recording, while summaries,
   supplied inputs, and unsupported harnesses refuse the option.
 
-  stats counts what one recording holds as tapes-stats/11: turns by kind
+  stats --idle 45m sets the gap above which timestamped records start another
+  working stretch. Active milliseconds sum nonnegative gaps at or below the
+  threshold; fewer than two timestamped records omit active, stretches and
+  idle_threshold. These figures cover the same read window as recorded span.
+  Selection totals sum active milliseconds and stretches across readable sessions.
+
+  stats counts what one recording holds as tapes-stats/12: turns by kind
   beside the kinds the harness can record at all, so a zero for a kind it
   cannot record is not read as none observed, tool
   calls by name with their paired durations and error counts, unpaired calls

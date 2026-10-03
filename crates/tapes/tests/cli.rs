@@ -8757,7 +8757,7 @@ fn stats_help_names_the_schema_and_what_the_figures_cover() {
     let output = tapes().args(["stats", "--help"]).output().unwrap();
     assert!(output.status.success());
     let help = String::from_utf8_lossy(&output.stdout);
-    assert!(help.contains("tapes-stats/11"), "{help}");
+    assert!(help.contains("tapes-stats/12"), "{help}");
     assert!(help.contains("complete pairs only"), "{help}");
     assert!(
         help.contains("share of recorded token counts rather than of cost"),
@@ -8864,7 +8864,7 @@ fn stats_json_counts_a_chosen_recording_exactly() {
     assert_eq!(
         comparable,
         serde_json::json!({
-            "schema": "tapes-stats/11",
+            "schema": "tapes-stats/12",
             "session": {
                 "id": id,
                 "source": {
@@ -8951,6 +8951,9 @@ fn stats_json_counts_a_chosen_recording_exactly() {
                 "errors": 1
             },
             "durations_ms": {
+                "active": 14_000,
+                "stretches": 1,
+                "idle_threshold": 2_700_000,
                 "recorded_span": 14_000,
                 "in_tool": 4_000,
                 "between_turns_max": 2_000,
@@ -9137,7 +9140,7 @@ fn stats_human_output_prints_no_absent_group() {
         "{rendered}"
     );
     assert!(
-        rendered.contains("durations: recorded span 2000ms, longest gap between turns 1000ms, 3 turns with timestamps\n"),
+        rendered.contains("durations: recorded span 2000ms, active 2000ms, idle threshold 2700000ms, longest gap between turns 1000ms, 1 stretches, 3 turns with timestamps\n"),
         "{rendered}"
     );
     for absent in [
@@ -9275,19 +9278,70 @@ fn selection_stats_agree_with_individual_reads() {
         );
         serde_json::from_slice::<Value>(&output.stdout).unwrap()
     };
+    for (idle, milliseconds) in [
+        ("90s", 90_000),
+        ("45m", 2_700_000),
+        ("2h", 7_200_000),
+        ("0s", 0),
+    ] {
+        for full in [false, true] {
+            let mut args = vec![
+                "stats",
+                "--global",
+                "--harness",
+                "codex",
+                "--idle",
+                idle,
+                "--json",
+            ];
+            if full {
+                args.push("--full");
+            }
+            let summary = run(&args);
+            assert_eq!(summary["idle_threshold"], milliseconds);
+            let mut active = 0;
+            let mut stretches = 0;
+            for row in summary["sessions"].as_array().unwrap() {
+                let mut args = vec![
+                    "stats",
+                    row["session"]["id"].as_str().unwrap(),
+                    "--idle",
+                    idle,
+                    "--json",
+                ];
+                if full {
+                    args.push("--full");
+                }
+                let one = run(&args);
+                assert_eq!(row["durations_ms"], one["durations_ms"]);
+                active += one["durations_ms"]["active"].as_i64().unwrap_or(0);
+                stretches += one["durations_ms"]["stretches"].as_u64().unwrap_or(0);
+            }
+            assert_eq!(summary["active"], active);
+            assert_eq!(summary["stretches"], stretches);
+        }
+    }
     let summary = run(&["stats", "--global", "--harness", "codex", "--json"]);
-    assert_eq!(summary["schema"], "tapes-stats-summary/6");
+    assert_eq!(summary["schema"], "tapes-stats-summary/7");
     assert_eq!(summary["selected"], 2);
     assert_eq!(summary["read"], 2);
+    let mut active = 0;
+    let mut stretches = 0;
     let mut totals = [0_u64; 4];
     for row in summary["sessions"].as_array().unwrap() {
         let one = run(&["stats", row["session"]["id"].as_str().unwrap(), "--json"]);
+        active += one["durations_ms"]["active"].as_i64().unwrap_or(0);
+        stretches += one["durations_ms"]["stretches"].as_u64().unwrap_or(0);
         assert_eq!(row["tools"], one["tools"]);
         assert_eq!(row["coverage"], one["coverage"]);
+        assert_eq!(row["durations_ms"], one["durations_ms"]);
         for (index, key) in ["calls", "results", "paired", "errors"].iter().enumerate() {
             totals[index] += one["tools"][key].as_u64().unwrap();
         }
     }
+    assert_eq!(summary["active"], active);
+    assert_eq!(summary["stretches"], stretches);
+    assert_eq!(summary["idle_threshold"], 2_700_000);
     for (index, key) in ["calls", "results", "paired", "errors"].iter().enumerate() {
         assert_eq!(summary["by_harness"]["codex"][key], totals[index]);
     }

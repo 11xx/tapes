@@ -21,7 +21,9 @@ use crate::model::{
 };
 use crate::usage::{self, ModelUsage, TurnCoverage, UsageSession, UsageView};
 
-pub const STATS_SCHEMA: &str = "tapes-stats/11";
+pub const DEFAULT_IDLE_MS: i64 = 45 * 60 * 1000;
+
+pub const STATS_SCHEMA: &str = "tapes-stats/12";
 
 /// One session's counted facts, in the order a reader takes them: what the
 /// figures cover, the turns, the tool calls behind them, the recorded clock,
@@ -132,6 +134,7 @@ pub(crate) struct SessionCount {
     pub(crate) session: UsageSession,
     pub(crate) coverage: Coverage,
     pub(crate) tools: ToolStats,
+    pub(crate) durations_ms: Option<TimeStats>,
     pub(crate) turns: TurnKindCounts,
     pub(crate) kinds: Option<KindDeclaration>,
 }
@@ -195,6 +198,14 @@ pub struct DurationStats {
 /// covers.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
 pub struct TimeStats {
+    /// Sum of nonnegative consecutive timestamp gaps at or below the idle threshold.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active: Option<i64>,
+    /// Timestamped stretches separated by gaps above the idle threshold.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stretches: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub idle_threshold: Option<i64>,
     /// From the first timestamped turn to the last.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub recorded_span: Option<i64>,
@@ -301,9 +312,14 @@ impl Counted {
     /// Count a read held whole, folding its turns and the records its event
     /// projection pairs.
     pub(crate) fn bounded(transcript: Transcript) -> Self {
+        Self::bounded_with_idle(transcript, DEFAULT_IDLE_MS)
+    }
+
+    pub(crate) fn bounded_with_idle(transcript: Transcript, idle: i64) -> Self {
         let usage = usage::usage(&transcript);
         let kinds = transcript.kinds.clone();
         let mut turns = TurnFold::default();
+        turns.clock.idle_threshold = idle;
         for turn in &transcript.turns {
             turns.add(turn);
         }
@@ -325,9 +341,14 @@ impl Counted {
     /// replaying the first, pairs each record and folds it as it is emitted.
     /// The counters and activity come from every record the turn read
     /// covered, so memory follows the open calls rather than the file.
-    pub(crate) fn whole(backend: &dyn Backend, session: &Session) -> Result<Self> {
+    pub(crate) fn whole_with_idle(
+        backend: &dyn Backend,
+        session: &Session,
+        idle: i64,
+    ) -> Result<Self> {
         let mut tally = usage::TurnTally::default();
         let mut turns = TurnFold::default();
+        turns.clock.idle_threshold = idle;
         let mut index = PairIndex::default();
         backend.replayable(session)?;
         let read = crate::stream_numbered(backend, session, None, &mut |turn| {
@@ -370,6 +391,7 @@ impl Counted {
         SessionCount {
             session: self.usage.session,
             coverage,
+            durations_ms: self.turns.clock.finish(self.tools.in_tool),
             tools: self.tools.stats,
             turns: self.turns.kinds,
             kinds: self.kinds,
@@ -554,13 +576,30 @@ impl AssistantClock {
 }
 
 /// The recorded clock, accumulated over the turns that carry a timestamp.
-#[derive(Default)]
 struct Clock {
+    idle_threshold: i64,
+    active: i64,
+    stretches: usize,
     first: Option<DateTime<Utc>>,
     last: Option<DateTime<Utc>>,
     previous: Option<DateTime<Utc>>,
     between_turns_max: Option<i64>,
     counted: usize,
+}
+
+impl Default for Clock {
+    fn default() -> Self {
+        Self {
+            idle_threshold: DEFAULT_IDLE_MS,
+            active: 0,
+            stretches: 1,
+            first: None,
+            last: None,
+            previous: None,
+            between_turns_max: None,
+            counted: 0,
+        }
+    }
 }
 
 impl Clock {
@@ -570,6 +609,11 @@ impl Clock {
         self.last = Some(ts);
         if let Some(previous) = self.previous {
             let gap = ts.signed_duration_since(previous).num_milliseconds();
+            if gap > self.idle_threshold {
+                self.stretches += 1;
+            } else if gap >= 0 {
+                self.active = self.active.saturating_add(gap);
+            }
             if gap >= 0 {
                 self.between_turns_max = Some(self.between_turns_max.unwrap_or(gap).max(gap));
             }
@@ -580,6 +624,9 @@ impl Clock {
     /// The clock, or nothing when no turn the read reached carried a stamp.
     fn finish(self, in_tool: Option<i64>) -> Option<TimeStats> {
         (self.counted > 0).then(|| TimeStats {
+            active: (self.counted > 1).then_some(self.active),
+            stretches: (self.counted > 1).then_some(self.stretches),
+            idle_threshold: (self.counted > 1).then_some(self.idle_threshold),
             // One stamp is a moment rather than a span, so a session with a
             // single timestamped turn records no span at all.
             recorded_span: (self.counted > 1)
@@ -818,6 +865,41 @@ mod tests {
         AccountingBasis, AccountingCoverage, Role, Session, SourceBound, SourceDescriptor, Turn,
     };
 
+    #[test]
+    fn active_clock_splits_only_above_threshold_and_omits_insufficient_evidence() {
+        let mut clock = Clock {
+            idle_threshold: 90_000,
+            ..Clock::default()
+        };
+        assert!(Clock::default().finish(None).is_none());
+        clock.add(Utc.timestamp_opt(0, 0).unwrap());
+        let one = serde_json::to_value(clock.finish(None).unwrap()).unwrap();
+        for key in ["active", "stretches", "idle_threshold"] {
+            assert!(one.get(key).is_none());
+        }
+        let mut fold = TurnFold::default();
+        fold.clock.idle_threshold = 90_000;
+        for (ordinal, ts) in [
+            Some(0),
+            None,
+            Some(90),
+            Some(181),
+            Some(181),
+            Some(180),
+            Some(200),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            fold.add(&turn(ordinal, TurnKind::Operator, ts));
+        }
+        let clock = fold.clock.finish(None).unwrap();
+        assert_eq!(clock.active, Some(110_000));
+        assert_eq!(clock.stretches, Some(2));
+        assert_eq!(clock.idle_threshold, Some(90_000));
+        assert_eq!(clock.count_with_timestamps, 6);
+    }
+
     fn session() -> Session {
         let ts = Utc.timestamp_opt(1_700_000_000, 0).unwrap();
         Session {
@@ -978,7 +1060,7 @@ mod tests {
         );
         assert_eq!(
             value["durations_ms"],
-            json!({ "recorded_span": 20_000, "between_turns_max": 20_000, "count_with_timestamps": 2 })
+            json!({ "active": 20_000, "stretches": 1, "idle_threshold": DEFAULT_IDLE_MS, "recorded_span": 20_000, "between_turns_max": 20_000, "count_with_timestamps": 2 })
         );
         assert_eq!(value["warnings"], json!([]) as Value);
         for absent in ["usage", "lineage"] {

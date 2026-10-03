@@ -1117,6 +1117,14 @@ pub fn stats_with_backends(
     backends: &[Box<dyn Backend>],
     selection: Selection,
 ) -> Result<stats::StatsView> {
+    stats_with_backends_and_idle(backends, selection, stats::DEFAULT_IDLE_MS)
+}
+
+pub fn stats_with_backends_and_idle(
+    backends: &[Box<dyn Backend>],
+    selection: Selection,
+    idle: i64,
+) -> Result<stats::StatsView> {
     let resolved = selection.resolve(backends)?;
     let backend = backends[resolved.backend_index].as_ref();
     let mut transcript = declared_transcript(backend, &resolved.session, EXPORT_TAIL)?;
@@ -1124,7 +1132,7 @@ pub fn stats_with_backends(
         .notes
         .extend(resolved.diagnostics.latest_warnings(&resolved.session));
     let lineage = backend.lineage(&resolved.session)?;
-    Ok(stats::stats(transcript, &lineage))
+    Ok(stats::Counted::bounded_with_idle(transcript, idle).view(&lineage))
 }
 
 /// One session's counted facts over its whole recording, streamed twice so
@@ -1134,9 +1142,17 @@ pub fn stats_full_with_backends(
     backends: &[Box<dyn Backend>],
     selection: Selection,
 ) -> Result<stats::StatsView> {
+    stats_full_with_backends_and_idle(backends, selection, stats::DEFAULT_IDLE_MS)
+}
+
+pub fn stats_full_with_backends_and_idle(
+    backends: &[Box<dyn Backend>],
+    selection: Selection,
+    idle: i64,
+) -> Result<stats::StatsView> {
     let resolved = selection.resolve(backends)?;
     let backend = backends[resolved.backend_index].as_ref();
-    let counted = stats::Counted::whole(backend, &resolved.session)?;
+    let counted = stats::Counted::whole_with_idle(backend, &resolved.session, idle)?;
     let lineage = backend.stream_lineage(&resolved.session)?;
     let mut view = counted.view(&lineage);
     view.notes

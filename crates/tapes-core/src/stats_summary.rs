@@ -22,13 +22,15 @@ pub enum SessionRead {
     Whole,
 }
 
-pub const SCHEMA: &str = "tapes-stats-summary/6";
+pub const SCHEMA: &str = "tapes-stats-summary/7";
 
 #[derive(Debug, Serialize)]
 pub struct SessionStats {
     pub session: UsageSession,
     pub coverage: Coverage,
     pub tools: ToolStats,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub durations_ms: Option<crate::stats::TimeStats>,
 }
 
 #[derive(Debug, Serialize)]
@@ -43,6 +45,10 @@ pub struct ReadFailure {
 pub struct StatsSummary {
     pub schema: &'static str,
     pub selection: SelectionRecord,
+    /// Active milliseconds and stretches summed over sessions with at least two timestamps.
+    pub active: i64,
+    pub stretches: usize,
+    pub idle_threshold: i64,
     pub selected: usize,
     pub read: usize,
     pub failed: Vec<ReadFailure>,
@@ -80,6 +86,15 @@ pub fn with_backends(
     selection: &SessionSelection<'_>,
     read: SessionRead,
 ) -> Result<StatsSummary> {
+    with_backends_and_idle(backends, selection, read, crate::stats::DEFAULT_IDLE_MS)
+}
+
+pub fn with_backends_and_idle(
+    backends: &[Box<dyn Backend>],
+    selection: &SessionSelection<'_>,
+    read: SessionRead,
+    idle: i64,
+) -> Result<StatsSummary> {
     let scope = selection.within.resolve()?;
     let limit = selection.limit.unwrap_or(DEFAULT_LIST_LIMIT);
     let listed = list_scoped(
@@ -92,6 +107,9 @@ pub fn with_backends(
     )?;
     let mut report = StatsSummary {
         schema: SCHEMA,
+        active: 0,
+        stretches: 0,
+        idle_threshold: idle,
         selection: selection_record(selection, limit),
         selected: listed.sessions.len(),
         read: 0,
@@ -111,10 +129,9 @@ pub fn with_backends(
     for (session, origin) in listed.sessions.into_iter().zip(listed.origins) {
         let backend = backends[origin].as_ref();
         let counted = match read {
-            SessionRead::Bounded => {
-                crate::declared_transcript(backend, &session, usize::MAX).map(Counted::bounded)
-            }
-            SessionRead::Whole => Counted::whole(backend, &session),
+            SessionRead::Bounded => crate::declared_transcript(backend, &session, usize::MAX)
+                .map(|transcript| Counted::bounded_with_idle(transcript, idle)),
+            SessionRead::Whole => Counted::whole_with_idle(backend, &session, idle),
         };
         match counted {
             Ok(counted) => {
@@ -130,7 +147,12 @@ pub fn with_backends(
                         .1
                         .add(&counted.turns);
                 }
+                if let Some(clock) = counted.durations_ms {
+                    report.active = report.active.saturating_add(clock.active.unwrap_or(0));
+                    report.stretches += clock.stretches.unwrap_or(0);
+                }
                 report.sessions.push(SessionStats {
+                    durations_ms: counted.durations_ms,
                     session: counted.session,
                     coverage: counted.coverage,
                     tools: counted.tools,
