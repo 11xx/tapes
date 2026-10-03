@@ -639,8 +639,24 @@ READ THE ENDING
   `filePath`, then `filename`. Text bodies retain at most 64Ki characters, with truncation
   explicit, and record inclusive line ranges and an optional total line count.
   Unsupported or malformed bodies remain reference-only. References are never
-  opened. Instructions, environment and prompt snapshots remain unrecognized
-  records; their bodies are not projected as turns.
+  opened. Instruction attachments become ambient turns with one file reference
+  per recorded `files` entry, retaining `path` and optional `content`. At most
+  64 files and 128 parts are retained per turn. Environment attachments become
+  ambient notices carrying bounded JSON text from `snapshot` and `changes`:
+  snapshot fields are workingDirectory, additionalWorkingDirectories, isGitRepo,
+  isWorktree, osVersion, platform, scratchpadDirectory and shell; change fields
+  are field, from, added and removed, with at most 128 changes. Other fields
+  and unsupported shapes produce explicit coverage facts.
+  Prompt snapshots are reference-only descriptors: system_prompt_chars counts
+  characters across the recorded systemPrompt strings, tool_count counts tools,
+  and system_turns retains the recorded systemTurns boolean. Missing values are
+  omitted. System prompt bodies are excluded because repeating them would bury
+  the conversation. Other attachment types remain unrecognized.
+  Every retained attachment body has a 64Ki-character field budget. A cut body
+  has ReadBound availability (`read-bound` in JSON) and an omitted_reason;
+  collection and descriptor bounds are also explicit coverage facts. These
+  content bounds apply independently of source-file and page read bounds.
+  Repeated records remain separate turns even when their text matches.
 
   A Claude tool-result string with a complete `<persisted-output>` envelope
   shows its recorded preview and a reference-only file under `tool-results/`.

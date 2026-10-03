@@ -54,7 +54,7 @@ fn attached_files_are_ambient_and_agree_across_read_modes() {
     let backend = ClaudeBackend::new(fixture_root());
     let session = backend.locate(ATTACHMENTS).unwrap().unwrap();
     let transcript = backend.transcript(&session, usize::MAX).unwrap();
-    assert_eq!(transcript.turns.len(), 6);
+    assert_eq!(transcript.turns.len(), 17);
     assert!(session.derived_title.is_none());
     assert!(transcript
         .turns
@@ -81,7 +81,7 @@ fn attached_files_are_ambient_and_agree_across_read_modes() {
     assert_eq!(artifact.body_lines.as_ref().unwrap().end, 3);
     assert_eq!(artifact.total_lines, Some(8));
     assert_eq!(artifact.source, file.parts[0].record_ref().cloned());
-    for turn in &transcript.turns[1..] {
+    for turn in &transcript.turns[1..6] {
         assert!(reference(turn).body.is_none());
         assert_eq!(
             reference(turn).body_availability,
@@ -89,17 +89,44 @@ fn attached_files_are_ambient_and_agree_across_read_modes() {
         );
     }
     let inventory = agent_tapes_core::content::inventory(&transcript.turns).unwrap();
-    assert_eq!(inventory.records, 6);
-    assert_eq!(inventory.references, 6);
-    assert_eq!(inventory.retained_body, 1);
-    assert_eq!(inventory.reference_only, 5);
+    assert_eq!(inventory.records, 17);
+    assert_eq!(inventory.references, 11);
+    assert_eq!(inventory.retained_body, 4);
+    assert_eq!(inventory.reference_only, 8);
+    assert_eq!(inventory.unsupported, 5);
     let json = serde_json::to_value(&transcript).unwrap();
     let unmapped = json["read"]["unmapped"].to_string();
     assert!(!unmapped.contains("attachment/file"));
     assert!(!unmapped.contains("attachment/compact_file_reference"));
-    assert!(unmapped.contains("attachment/instructions"));
-    assert!(unmapped.contains("attachment/environment"));
-    assert!(unmapped.contains("attachment/prompt_snapshot"));
+    assert!(!unmapped.contains("attachment/instructions"));
+    assert!(!unmapped.contains("attachment/environment"));
+    assert!(!unmapped.contains("attachment/prompt_snapshot"));
+
+    assert!(unmapped.contains("attachment/credential_org"));
+    let instruction = &transcript.turns[6];
+    assert_eq!(reference(instruction).path.as_deref(), Some("AGENTS.md"));
+    assert_eq!(instruction.text, "Synthetic instruction.");
+    let environment = &transcript.turns[9];
+    assert!(environment.text.contains("workingDirectory"));
+    let snapshot = &transcript.turns[12];
+    assert!(snapshot.text.is_empty());
+    if let ContentPart::StructuredArtifact {
+        descriptor,
+        reference,
+        ..
+    } = &snapshot.parts[0]
+    {
+        let descriptor: serde_json::Value = serde_json::from_str(&descriptor.text).unwrap();
+        assert_eq!(
+            descriptor,
+            serde_json::json!({"system_prompt_chars":18,"tool_count":1,"system_turns":true})
+        );
+        assert!(reference.as_ref().unwrap().body.is_none());
+    } else {
+        panic!("expected prompt descriptor")
+    }
+    assert_eq!(snapshot.text, transcript.turns[16].text);
+    assert_eq!(snapshot.parts.len(), transcript.turns[16].parts.len());
 
     let mut streamed = Vec::new();
     backend
@@ -115,12 +142,21 @@ fn attached_files_are_ambient_and_agree_across_read_modes() {
             assert_eq!(expected.text, actual.text);
             assert_eq!(expected.kind, actual.kind);
             assert_eq!(expected.coverage, actual.coverage);
-            let mut expected_ref = reference(expected).clone();
-            let mut actual_ref = reference(actual).clone();
-            assert!(actual_ref.source.is_some());
-            expected_ref.source = None;
-            actual_ref.source = None;
-            assert_eq!(expected_ref, actual_ref);
+            assert!(actual.parts.iter().all(|part| part.record_ref().is_some()));
+            let clean = |turn: &Turn| {
+                let mut value = serde_json::to_value(&turn.parts).unwrap();
+                for part in value.as_array_mut().unwrap() {
+                    part.as_object_mut().unwrap().remove("record_ref");
+                    if let Some(reference) = part
+                        .get_mut("reference")
+                        .and_then(serde_json::Value::as_object_mut)
+                    {
+                        reference.remove("source");
+                    }
+                }
+                value
+            };
+            assert_eq!(clean(expected), clean(actual));
         }
     }
 }

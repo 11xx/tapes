@@ -957,7 +957,12 @@ enum Command {
     /// pages to retrieve retained pre-compaction messages. Claude file attachments
     /// are ambient file references with bounded text bodies and recorded line
     /// ranges; compact references have no body. Referenced files are never opened.
-    /// Instructions, environment and prompt snapshots remain unrecognized.
+    /// Instructions are ambient file references; environment snapshots and changes
+    /// are ambient notices with bounded text. Prompt snapshots retain only prompt
+    /// character and tool counts and the recorded systemTurns boolean, without bodies.
+    /// Attachment bodies retain at most 64Ki characters per field; cuts carry
+    /// read-bound availability and omitted_reason. Repeated records stay separate.
+    /// Other attachment types remain unrecognized.
     /// Complete persisted-output tool results show their preview and a reference-only
     /// file with its recorded size label; the external body is never read.
     /// Every turn carries a

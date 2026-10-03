@@ -1440,6 +1440,9 @@ fn turn(
 fn claude_attachment(value: &Value) -> Option<Turn> {
     let attachment = &value["attachment"];
     let kind = attachment["type"].as_str()?;
+    if matches!(kind, "instructions" | "environment" | "prompt_snapshot") {
+        return attached_context(value, kind);
+    }
     if !matches!(kind, "file" | "compact_file_reference") {
         return None;
     }
@@ -1506,10 +1509,305 @@ fn claude_attachment(value: &Value) -> Option<Turn> {
                 availability,
                 retained_parts,
                 omitted_parts: 0,
-                omitted_reason: None,
+                omitted_reason: (availability == ContentAvailability::ReadBound).then(|| {
+                    "attachment body exceeds a recorded or retained field bound".to_owned()
+                }),
             },
         },
     )
+}
+
+fn attached_context(value: &Value, kind: &str) -> Option<Turn> {
+    let attachment = &value["attachment"];
+    let native_kind = format!("attachment/{kind}");
+    let mut parts = Vec::new();
+    let mut omitted_parts = 0;
+    let mut cut = false;
+    let mut unsupported = false;
+    match kind {
+        "instructions" => {
+            if let Some(files) = attachment["files"].as_array() {
+                omitted_parts = files
+                    .len()
+                    .saturating_sub(crate::content::MAX_ARTIFACT_REFERENCES);
+                for (index, file) in files
+                    .iter()
+                    .take(crate::content::MAX_ARTIFACT_REFERENCES)
+                    .enumerate()
+                {
+                    let Some(path) = file["path"].as_str() else {
+                        omitted_parts += 1;
+                        unsupported = true;
+                        continue;
+                    };
+                    let path = bounded_text(path, crate::content::MAX_DESCRIPTOR_CHARS);
+                    cut |= path.truncated;
+                    let body = file["content"]
+                        .as_str()
+                        .map(|body| bounded_text(body, crate::content::MAX_ARTIFACT_BODY_CHARS));
+                    let availability = match &body {
+                        Some(body) if body.truncated => ContentAvailability::ReadBound,
+                        Some(_) => ContentAvailability::RetainedBody,
+                        None => ContentAvailability::ReferenceOnly,
+                    };
+                    cut |= body.as_ref().is_some_and(|body| body.truncated);
+                    let text = body.as_ref().map(|body| body.text.clone());
+                    let source_field = format!("attachment.files[{index}]");
+                    parts.push(ContentPart::FileReference {
+                        reference: ArtifactReference {
+                            kind: native_kind.clone(),
+                            path: Some(path.text),
+                            descriptor_truncated: path.truncated,
+                            body,
+                            body_availability: Some(availability),
+                            ..ArtifactReference::default()
+                        },
+                        source_field: source_field.clone(),
+                        native_kind: native_kind.clone(),
+                        record_ref: None,
+                    });
+                    if let Some(text) = text {
+                        parts.push(text_part(
+                            text,
+                            &format!("{source_field}.content"),
+                            &native_kind,
+                        ));
+                    }
+                    unsupported |= file.get("content").is_some_and(|body| !body.is_string());
+                    unsupported |= file.as_object().is_some_and(|file| {
+                        file.keys()
+                            .any(|key| !matches!(key.as_str(), "path" | "content" | "type"))
+                    });
+                }
+            } else {
+                unsupported = true;
+            }
+        }
+        "environment" => {
+            for field in ["snapshot", "changes"] {
+                let Some(environment) = attachment.get(field) else {
+                    continue;
+                };
+                let projected = environment_projection(
+                    environment,
+                    field,
+                    &mut unsupported,
+                    &mut omitted_parts,
+                );
+                if let Some(projected) = projected {
+                    let body = bounded_json_body(&projected);
+                    cut |= body.truncated;
+                    parts.push(text_part(
+                        body.text,
+                        &format!("attachment.{field}"),
+                        &native_kind,
+                    ));
+                }
+            }
+            unsupported |= parts.is_empty();
+        }
+        "prompt_snapshot" => {
+            let mut descriptor = serde_json::Map::new();
+            if let Some(prompt) = attachment["systemPrompt"].as_array() {
+                if prompt.iter().all(Value::is_string) {
+                    let chars: usize = prompt
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .map(|text| text.chars().count())
+                        .sum();
+                    descriptor.insert("system_prompt_chars".to_owned(), Value::from(chars));
+                } else {
+                    unsupported = true;
+                }
+            } else if attachment.get("systemPrompt").is_some() {
+                unsupported = true;
+            }
+            if let Some(tools) = attachment["tools"].as_array() {
+                descriptor.insert("tool_count".to_owned(), Value::from(tools.len()));
+            } else if attachment.get("tools").is_some() {
+                unsupported = true;
+            }
+            if let Some(system_turns) = attachment["systemTurns"].as_bool() {
+                descriptor.insert("system_turns".to_owned(), Value::from(system_turns));
+            } else if attachment.get("systemTurns").is_some() {
+                unsupported = true;
+            }
+            parts.push(ContentPart::StructuredArtifact {
+                descriptor: bounded_text(
+                    &Value::Object(descriptor).to_string(),
+                    crate::content::MAX_DESCRIPTOR_CHARS,
+                ),
+                source_field: "attachment".to_owned(),
+                native_kind: native_kind.clone(),
+                reference: Some(ArtifactReference {
+                    kind: native_kind,
+                    body_availability: Some(ContentAvailability::ReferenceOnly),
+                    ..ArtifactReference::default()
+                }),
+                record_ref: None,
+            });
+        }
+        _ => return None,
+    }
+    if parts.is_empty() {
+        parts.push(ContentPart::Unknown {
+            native_kind: format!("attachment/{kind}"),
+            descriptor: bounded_text(
+                "missing or unsupported attachment fields",
+                crate::content::MAX_DESCRIPTOR_CHARS,
+            ),
+            source_field: "attachment".to_owned(),
+            record_ref: None,
+        });
+    }
+    let availability = if cut || omitted_parts > 0 {
+        ContentAvailability::ReadBound
+    } else if unsupported {
+        ContentAvailability::UnsupportedRepresentation
+    } else if kind == "prompt_snapshot" || !parts.iter().any(|part| part.text().is_some()) {
+        ContentAvailability::ReferenceOnly
+    } else {
+        ContentAvailability::RetainedBody
+    };
+    let retained_parts = parts.len();
+    turn(
+        Role::System,
+        TurnKind::Ambient,
+        crate::content::project_text(&parts),
+        timestamp(&value["timestamp"]),
+        value["uuid"].as_str().map(str::to_owned),
+        None,
+        TurnContent {
+            parts,
+            coverage: ContentCoverage {
+                carrier: if kind == "environment" {
+                    ContentCarrier::DirectPart
+                } else {
+                    ContentCarrier::AssociatedArtifact
+                },
+                availability,
+                retained_parts,
+                omitted_parts,
+                omitted_reason: if cut || omitted_parts > 0 {
+                    Some(
+                        "attachment content exceeds a retained field or collection bound"
+                            .to_owned(),
+                    )
+                } else if unsupported {
+                    Some("attachment field is missing or has an unsupported shape".to_owned())
+                } else {
+                    None
+                },
+            },
+        },
+    )
+}
+
+fn environment_projection(
+    value: &Value,
+    field: &str,
+    unsupported: &mut bool,
+    omitted: &mut usize,
+) -> Option<Value> {
+    const SNAPSHOT_FIELDS: &[&str] = &[
+        "additionalWorkingDirectories",
+        "isGitRepo",
+        "isWorktree",
+        "osVersion",
+        "platform",
+        "scratchpadDirectory",
+        "shell",
+        "workingDirectory",
+    ];
+    const CHANGE_FIELDS: &[&str] = &["field", "from", "added", "removed"];
+    let project = |value: &Value, fields: &[&str], unsupported: &mut bool| {
+        let object = value.as_object()?;
+        let mut result = serde_json::Map::new();
+        for (key, value) in object {
+            if !fields.contains(&key.as_str()) {
+                *unsupported = true;
+                continue;
+            }
+            let valid = match key.as_str() {
+                "isGitRepo" | "isWorktree" => value.is_boolean(),
+                "additionalWorkingDirectories" | "added" | "removed" => value
+                    .as_array()
+                    .is_some_and(|items| items.iter().all(Value::is_string)),
+                _ => value.is_string(),
+            };
+            if valid {
+                result.insert(key.clone(), value.clone());
+            } else {
+                *unsupported = true;
+            }
+        }
+        Some(Value::Object(result))
+    };
+    if field == "snapshot" {
+        let result = project(value, SNAPSHOT_FIELDS, unsupported);
+        *unsupported |= result.is_none();
+        result
+    } else if let Some(changes) = value.as_array() {
+        *omitted += changes
+            .len()
+            .saturating_sub(crate::content::MAX_CONTENT_PARTS);
+        let mut result = Vec::new();
+        for change in changes.iter().take(crate::content::MAX_CONTENT_PARTS) {
+            if !change["field"]
+                .as_str()
+                .is_some_and(|field| SNAPSHOT_FIELDS.contains(&field))
+            {
+                *unsupported = true;
+                continue;
+            }
+            if let Some(change) = project(change, CHANGE_FIELDS, unsupported) {
+                result.push(change);
+            } else {
+                *unsupported = true;
+            }
+        }
+        Some(Value::Array(result))
+    } else {
+        *unsupported = true;
+        None
+    }
+}
+
+fn bounded_json_body(value: &Value) -> crate::model::BoundedText {
+    // Serialization stops at the byte ceiling; the retained prefix ends on a UTF-8 boundary.
+    struct Writer {
+        bytes: Vec<u8>,
+        cut: bool,
+    }
+    impl std::io::Write for Writer {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            let remaining = crate::content::MAX_ARTIFACT_BODY_CHARS * 4 - self.bytes.len();
+            self.bytes
+                .extend_from_slice(&bytes[..bytes.len().min(remaining)]);
+            if bytes.len() > remaining {
+                self.cut = true;
+                return Err(std::io::Error::other("attachment field bound"));
+            }
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut writer = Writer {
+        bytes: Vec::new(),
+        cut: false,
+    };
+    let _ = serde_json::to_writer(&mut writer, value);
+    while std::str::from_utf8(&writer.bytes).is_err() {
+        writer.bytes.pop();
+    }
+    let mut body = bounded_text(
+        std::str::from_utf8(&writer.bytes).unwrap(),
+        crate::content::MAX_ARTIFACT_BODY_CHARS,
+    );
+    body.truncated |= writer.cut;
+    body
 }
 
 fn attached_file_body(file: &Value) -> Option<(&str, Option<ReadLines>, Option<u64>)> {
@@ -2134,6 +2432,84 @@ mod read_content_tests {
             json!({"type":"text","file":{"content":"text","startLine":1,"numLines":1,"totalLines":1,"truncatedByTokenCap":true}}),
         ] {
             assert_eq!(claude_read_content(&json!("1\ttext"), Some(&result)), None);
+        }
+    }
+
+    #[test]
+    fn attached_context_bounds_bodies_collections_and_unverified_fields() {
+        let record = |attachment: Value| json!({"type":"attachment","attachment":attachment});
+        let files: Vec<Value> = (0..65).map(|_| json!({"path":"AGENTS.md","content":"界".repeat(crate::content::MAX_ARTIFACT_BODY_CHARS + 1)})).collect();
+        let instructions =
+            claude_attachment(&record(json!({"type":"instructions","files":files}))).unwrap();
+        assert_eq!(instructions.parts.len(), 128);
+        let coverage = instructions.coverage.unwrap();
+        assert_eq!(coverage.omitted_parts, 1);
+        assert_eq!(coverage.availability, ContentAvailability::ReadBound);
+        assert!(coverage.omitted_reason.is_some());
+        for part in &instructions.parts {
+            if let ContentPart::FileReference { reference, .. } = part {
+                let body = reference.body.as_ref().unwrap();
+                assert!(body.truncated);
+                assert_eq!(body.chars, crate::content::MAX_ARTIFACT_BODY_CHARS + 1);
+                assert_eq!(
+                    reference.body_availability,
+                    Some(ContentAvailability::ReadBound)
+                );
+            }
+        }
+        let environment = claude_attachment(&record(json!({"type":"environment","snapshot":{
+            "workingDirectory":"界".repeat(crate::content::MAX_ARTIFACT_BODY_CHARS + 1),
+            "unverified":"excluded"
+        }})))
+        .unwrap();
+        assert!(environment.text.chars().count() <= crate::content::MAX_ARTIFACT_BODY_CHARS);
+        assert!(!environment.text.contains("excluded"));
+        assert_eq!(
+            environment.coverage.as_ref().unwrap().availability,
+            ContentAvailability::ReadBound
+        );
+        assert!(environment.coverage.unwrap().omitted_reason.is_some());
+        let changes: Vec<Value> = (0..129)
+            .map(|_| json!({"field":"workingDirectory","from":"/fixtures/previous"}))
+            .collect();
+        let environment =
+            claude_attachment(&record(json!({"type":"environment","changes":changes}))).unwrap();
+        assert_eq!(environment.coverage.unwrap().omitted_parts, 1);
+        let unverified = claude_attachment(&record(json!({"type":"environment","changes":[{"field":"unverified","from":"excluded"}],"snapshot":{"shell":{"nested":"excluded"}}}))).unwrap();
+        assert!(!unverified.text.contains("excluded"));
+        assert_eq!(
+            unverified.coverage.unwrap().availability,
+            ContentAvailability::UnsupportedRepresentation
+        );
+        assert!(
+            claude_attachment(&record(json!({"type":"unverified","content":"excluded"}))).is_none()
+        );
+    }
+
+    #[test]
+    fn prompt_descriptor_preserves_false_and_omits_missing_counts() {
+        let snapshot = claude_attachment(&json!({"type":"attachment","attachment":{
+            "type":"prompt_snapshot","systemTurns":false,"cliPrefix":"excluded"
+        }}))
+        .unwrap();
+        assert!(snapshot.text.is_empty());
+        let ContentPart::StructuredArtifact {
+            descriptor,
+            reference,
+            ..
+        } = &snapshot.parts[0]
+        else {
+            panic!("missing descriptor")
+        };
+        assert_eq!(
+            serde_json::from_str::<Value>(&descriptor.text).unwrap(),
+            json!({"system_turns":false})
+        );
+        assert!(reference.as_ref().unwrap().body.is_none());
+        for kind in ["instructions", "environment", "prompt_snapshot"] {
+            let turn = claude_attachment(&json!({"type":"attachment","attachment":{"type":kind}}))
+                .unwrap();
+            assert_eq!(turn.kind, crate::model::TurnKind::Ambient);
         }
     }
 
