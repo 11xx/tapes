@@ -2238,6 +2238,26 @@ fn epoch_millis(value: &Value) -> Option<chrono::DateTime<Utc>> {
         .and_then(|millis| Utc.timestamp_millis_opt(millis).single())
 }
 
+/// An API refusal describes store access rather than individual sessions.
+fn fold_api_refusals(listing: &mut Listing) {
+    let mut reasons = std::collections::BTreeSet::new();
+    listing.unsearched.retain(|diagnostic| {
+        if let Some((_, reason)) = diagnostic.split_once(": ") {
+            if reason.contains("API server returned HTTP ") {
+                reasons.insert(reason.to_owned());
+                return false;
+            }
+        }
+        true
+    });
+    if !reasons.is_empty() {
+        listing.unsearched.push(format!(
+            "opencode store: {}",
+            reasons.into_iter().collect::<Vec<_>>().join("; ")
+        ));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2346,25 +2366,5 @@ mod tests {
 
         assert_eq!(backend.program, OsString::from("/missing/opencode2"));
         assert!(!backend.available());
-    }
-}
-
-/// An API refusal describes store access rather than individual sessions.
-fn fold_api_refusals(listing: &mut Listing) {
-    let mut reasons = std::collections::BTreeSet::new();
-    listing.unsearched.retain(|diagnostic| {
-        if let Some((_, reason)) = diagnostic.split_once(": ") {
-            if reason.contains("API server returned HTTP ") {
-                reasons.insert(reason.to_owned());
-                return false;
-            }
-        }
-        true
-    });
-    if !reasons.is_empty() {
-        listing.unsearched.push(format!(
-            "opencode store: {}",
-            reasons.into_iter().collect::<Vec<_>>().join("; ")
-        ));
     }
 }

@@ -4530,6 +4530,33 @@ impl<W: std::io::Write> agent_tapes_core::timeline::Sink for TimelineOutput<W> {
     }
 }
 
+fn parse_search_turns(value: &str) -> std::result::Result<usize, String> {
+    if value == "all" {
+        return Ok(usize::MAX);
+    }
+    value
+        .parse::<usize>()
+        .ok()
+        .filter(|value| *value > 0)
+        .ok_or_else(|| "expected a positive number of turns or all".to_owned())
+}
+
+fn print_search_diagnostics(label: &str, diagnostics: &[String]) {
+    let mut groups = std::collections::BTreeMap::<(String, String), usize>::new();
+    for diagnostic in diagnostics {
+        let (harness, reason) = diagnostic
+            .split_once(" session ")
+            .and_then(|(harness, rest)| rest.split_once(": ").map(|(_, reason)| (harness, reason)))
+            .unwrap_or_else(|| diagnostic.split_once(' ').unwrap_or((diagnostic, "")));
+        *groups
+            .entry((harness.to_owned(), reason.to_owned()))
+            .or_default() += 1;
+    }
+    for ((harness, reason), count) in groups {
+        println!("{label}: {harness}: {reason} ({count})");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -4775,32 +4802,5 @@ mod tests {
 
         let named = render_transcript(&transcript(false), false, None);
         assert!(!named.contains("--exclude"), "{named}");
-    }
-}
-
-fn parse_search_turns(value: &str) -> std::result::Result<usize, String> {
-    if value == "all" {
-        return Ok(usize::MAX);
-    }
-    value
-        .parse::<usize>()
-        .ok()
-        .filter(|value| *value > 0)
-        .ok_or_else(|| "expected a positive number of turns or all".to_owned())
-}
-
-fn print_search_diagnostics(label: &str, diagnostics: &[String]) {
-    let mut groups = std::collections::BTreeMap::<(String, String), usize>::new();
-    for diagnostic in diagnostics {
-        let (harness, reason) = diagnostic
-            .split_once(" session ")
-            .and_then(|(harness, rest)| rest.split_once(": ").map(|(_, reason)| (harness, reason)))
-            .unwrap_or_else(|| diagnostic.split_once(' ').unwrap_or((diagnostic, "")));
-        *groups
-            .entry((harness.to_owned(), reason.to_owned()))
-            .or_default() += 1;
-    }
-    for ((harness, reason), count) in groups {
-        println!("{label}: {harness}: {reason} ({count})");
     }
 }
