@@ -905,6 +905,11 @@ pub fn backends() -> Vec<Box<dyn Backend>> {
 /// The installed backends, each reading at most `read_bytes` from the end of a
 /// file-backed recording.
 pub fn backends_with_read_bytes(read_bytes: u64) -> Result<Vec<Box<dyn Backend>>> {
+    validate_read_bytes(read_bytes)?;
+    Ok(backends_reading(read_bytes))
+}
+
+fn validate_read_bytes(read_bytes: u64) -> Result<()> {
     if !(MIN_READ_BYTES..=MAX_READ_BYTES).contains(&read_bytes) {
         anyhow::bail!(
             "read bytes must be between {} and {}",
@@ -912,7 +917,41 @@ pub fn backends_with_read_bytes(read_bytes: u64) -> Result<Vec<Box<dyn Backend>>
             crate::byte_size::ByteSize::new(MAX_READ_BYTES)
         );
     }
-    Ok(backends_reading(read_bytes))
+    Ok(())
+}
+
+/// Build only the supplied native stores, in input order, without discovering
+/// installed stores or reading or changing process environment. Missing stores
+/// remain unavailable; they never fall back to another store.
+///
+/// `NativeStore::claude` takes the projects directory (`config_root/projects`),
+/// `NativeStore::codex` takes the sessions directory (`config_root/sessions`), and
+/// `NativeStore::pi` takes the sessions directory (`agent_root/sessions`).
+/// Pi file variants take an exact recording path, optionally with a sessions
+/// directory. OpenCode stores carry their program and data directory; use the
+/// explicit `opencode_stable_at` or `opencode_v2_at` constructors to select it.
+/// The read bound applies to file-backed transcript tails.
+pub fn backends_from_stores(
+    stores: impl IntoIterator<Item = NativeStore>,
+    read_bytes: u64,
+) -> Result<Vec<Box<dyn Backend>>> {
+    validate_read_bytes(read_bytes)?;
+    Ok(stores
+        .into_iter()
+        .map(|store| match store.harness() {
+            NativeHarness::Claude => {
+                Box::new(claude::ClaudeBackend::from_store(Some(store)).with_read_bytes(read_bytes))
+                    as Box<dyn Backend>
+            }
+            NativeHarness::Codex => {
+                Box::new(codex::CodexBackend::from_store(Some(store)).with_read_bytes(read_bytes))
+            }
+            NativeHarness::Pi => {
+                Box::new(pi::PiBackend::from_store(Some(store)).with_read_bytes(read_bytes))
+            }
+            NativeHarness::OpenCode => Box::new(opencode::OpenCodeBackend::from_store(store)),
+        })
+        .collect())
 }
 
 fn backends_reading(read_bytes: u64) -> Vec<Box<dyn Backend>> {

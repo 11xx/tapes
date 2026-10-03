@@ -131,8 +131,17 @@ pub struct Page {
 }
 
 pub fn page(selection: Selection<'_>, cursor: Option<&str>, bytes: usize) -> Result<Page> {
-    let backends = backend::backends();
-    let resolved = selection.resolve(&backends)?;
+    page_with_backends(&backend::backends(), selection, cursor, bytes)
+}
+
+/// Read history using only the supplied backends.
+pub fn page_with_backends(
+    backends: &[Box<dyn Backend>],
+    selection: Selection<'_>,
+    cursor: Option<&str>,
+    bytes: usize,
+) -> Result<Page> {
+    let resolved = selection.resolve(backends)?;
     let mut page =
         backends[resolved.backend_index].history_page(&resolved.session, cursor, bytes)?;
     page.notes
@@ -427,14 +436,33 @@ pub fn search(
     pages: usize,
     needle: &str,
 ) -> Result<Search> {
+    search_with_backends(
+        &backend::backends(),
+        selection,
+        cursor,
+        bytes,
+        pages,
+        needle,
+    )
+}
+
+/// Read history using only the supplied backends.
+pub fn search_with_backends(
+    backends: &[Box<dyn Backend>],
+
+    selection: Selection<'_>,
+    cursor: Option<&str>,
+    bytes: usize,
+    pages: usize,
+    needle: &str,
+) -> Result<Search> {
     if !(1..=MAX_PAGES).contains(&pages) {
         bail!("history search pages must be between 1 and {MAX_PAGES}");
     }
     if needle.is_empty() {
         bail!("history search text must not be empty");
     }
-    let backends = backend::backends();
-    let resolved = selection.resolve(&backends)?;
+    let resolved = selection.resolve(backends)?;
     let backend = &backends[resolved.backend_index];
     let mut matches = Vec::new();
     let mut matches_truncated = false;
@@ -512,11 +540,22 @@ pub fn metadata(
     bytes: usize,
     pages: usize,
 ) -> Result<MetadataHistory> {
+    metadata_with_backends(&backend::backends(), selection, cursor, bytes, pages)
+}
+
+/// Read history using only the supplied backends.
+pub fn metadata_with_backends(
+    backends: &[Box<dyn Backend>],
+
+    selection: Selection<'_>,
+    cursor: Option<&str>,
+    bytes: usize,
+    pages: usize,
+) -> Result<MetadataHistory> {
     if !(1..=MAX_PAGES).contains(&pages) {
         bail!("metadata pages must be between 1 and {MAX_PAGES}");
     }
-    let backends = backend::backends();
-    let resolved = selection.resolve(&backends)?;
+    let resolved = selection.resolve(backends)?;
     let backend = &backends[resolved.backend_index];
     let mut observations = Vec::new();
     let mut observations_truncated = false;
