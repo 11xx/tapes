@@ -452,7 +452,8 @@ impl Command {
             | Command::Events { selection, .. }
             | Command::Lineage { selection, .. }
             | Command::Brief { selection, .. } => Some(selection),
-            Command::Stats { query, .. }
+            Command::Timeline { query, .. }
+            | Command::Stats { query, .. }
             | Command::Usage { query, .. }
             | Command::Export { query, .. } => Some(query),
             _ => None,
@@ -1059,6 +1060,22 @@ enum Command {
         #[arg(long, conflicts_with = "read_bytes")]
         full: bool,
         /// Render the versioned tapes-lineage/3 object as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// A payload-free per-turn timeline for one session or a selection.
+    /// Uses the same selection, scope and read bounds as stats.
+    Timeline {
+        #[command(flatten)]
+        query: SessionQueryArgs,
+        #[command(flatten)]
+        read: ReadArgs,
+        /// Stream every turn of each selected recording instead of its bounded read.
+        #[arg(long, conflicts_with = "read_bytes")]
+        full: bool,
+        /// Emit tapes-timeline/1: sessions containing records with only ordinal,
+        /// kind and ts. Ordinals are the zero-based coordinates printed by show;
+        /// missing timestamps are null. Human output is one line per turn.
         #[arg(long)]
         json: bool,
     },
@@ -1928,6 +1945,49 @@ fn dispatch(cli: Cli) -> Result<()> {
                 print_json(&lineage, &selection.input)?;
             } else {
                 print!("{}", render_lineage(&lineage));
+            }
+        }
+        Command::Timeline {
+            query,
+            read,
+            full,
+            json,
+        } => {
+            query.validate_input()?;
+            read.refuse_supplied(&query.input)?;
+            if full {
+                refuse_full_supplied(&query.input)?;
+            }
+            let backends = if query.input.supplied() {
+                query.input.backends()?
+            } else if full {
+                agent_tapes_core::backend::backends()
+            } else {
+                read.backends()?
+            };
+            let warnings = query.latest_warnings(&backends)?;
+            print_selection_warnings(&warnings);
+            let mut sink = TimelineOutput {
+                out: std::io::stdout().lock(),
+                json,
+                first_session: true,
+                first_record: true,
+            };
+            if json {
+                use std::io::Write;
+                write!(sink.out, "{{\"schema\":\"tapes-timeline/1\",\"sessions\":[")?;
+            }
+            if let Some(one) = query.single() {
+                agent_tapes_core::timeline::single(&backends, one, full, &mut sink)?;
+            } else {
+                if !query.has_set_selection() {
+                    return Err(anyhow!("timeline needs a session ID, --latest, or an explicit selection such as --here"));
+                }
+                agent_tapes_core::timeline::selection(&backends, &query.set(), full, &mut sink)?;
+            }
+            if json {
+                use std::io::Write;
+                writeln!(sink.out, "]}}")?;
             }
         }
         Command::Stats {
@@ -4606,5 +4666,59 @@ mod tests {
 
         let named = render_transcript(&transcript(false), false, None);
         assert!(!named.contains("--exclude"), "{named}");
+    }
+}
+
+struct TimelineOutput<W: std::io::Write> {
+    out: W,
+    json: bool,
+    first_session: bool,
+    first_record: bool,
+}
+
+impl<W: std::io::Write> agent_tapes_core::timeline::Sink for TimelineOutput<W> {
+    fn session(&mut self, session: &agent_tapes_core::model::Session) -> Result<()> {
+        if self.json {
+            if !self.first_session {
+                write!(self.out, ",")?;
+            }
+            self.first_session = false;
+            write!(self.out, "{{\"session\":")?;
+            serde_json::to_writer(&mut self.out, &session.id)?;
+            write!(self.out, ",\"records\":[")?;
+        }
+        self.first_record = true;
+        Ok(())
+    }
+    fn record(&mut self, record: agent_tapes_core::timeline::Record) -> Result<()> {
+        if self.json {
+            if !self.first_record {
+                write!(self.out, ",")?;
+            }
+            serde_json::to_writer(&mut self.out, &record)?;
+        } else {
+            writeln!(
+                self.out,
+                "{} {} {}",
+                record.ordinal,
+                serde_json::to_value(record.kind)?
+                    .as_str()
+                    .unwrap_or("unknown"),
+                record
+                    .ts
+                    .map(|ts| ts.to_rfc3339())
+                    .unwrap_or_else(|| "-".into())
+            )?;
+        }
+        self.first_record = false;
+        Ok(())
+    }
+    fn end(&mut self, truncated: bool, notes: &[String]) -> Result<()> {
+        if self.json {
+            write!(self.out, "],\"truncated\":{truncated},\"notes\":")?;
+            serde_json::to_writer(&mut self.out, notes)?;
+            write!(self.out, "}}")?;
+        }
+        Ok(())
     }
 }

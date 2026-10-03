@@ -11744,3 +11744,47 @@ fn show_turn_chars_travels_to_the_replica_and_retains_cap_evidence() {
     fs::remove_dir_all(replica.root).unwrap();
     fs::remove_dir_all(local_codex).unwrap();
 }
+
+#[test]
+fn timeline_projects_fixture_turns_without_payloads() {
+    let id = "00000000-0000-0000-0000-000000000001";
+    let shown = fixture_command("timeline-show", &["show", id, "--json", "--tail", "10000"]);
+    assert!(shown.status.success());
+    let shown: Value = serde_json::from_slice(&shown.stdout).unwrap();
+    for args in [
+        vec!["timeline", id, "--json"],
+        vec!["timeline", id, "--full", "--json"],
+        vec!["timeline", "--global", "--json"],
+        vec!["timeline", "--global", "--full", "--json"],
+    ] {
+        let output = fixture_command("timeline-records", &args);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(value["schema"], "tapes-timeline/1");
+        let session = value["sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|session| session["session"] == id)
+            .unwrap();
+        let records = session["records"].as_array().unwrap();
+        let turns = shown["turns"].as_array().unwrap();
+        assert_eq!(records.len(), turns.len());
+        for (record, turn) in records.iter().zip(turns) {
+            assert_eq!(record.as_object().unwrap().len(), 3);
+            for field in ["ordinal", "kind", "ts"] {
+                assert_eq!(record[field], turn[field]);
+            }
+        }
+    }
+    let human = fixture_command("timeline-human", &["timeline", id]);
+    assert!(human.status.success());
+    assert_eq!(
+        String::from_utf8(human.stdout).unwrap().lines().count(),
+        shown["turns"].as_array().unwrap().len()
+    );
+}
