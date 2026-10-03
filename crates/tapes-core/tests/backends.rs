@@ -3683,6 +3683,16 @@ fn a_source_bounded_read_short_of_the_tail_reports_partial_coverage() {
         "{:?}",
         miss.unsearched
     );
+}
+
+#[test]
+fn a_matching_partial_read_has_no_search_diagnostic() {
+    let backends: Vec<Box<dyn Backend>> = vec![Box::new(SearchFixture {
+        session: resolver_session("bounded-match"),
+        requested_tail: Rc::new(Cell::new(0)),
+        fail: false,
+        bounded: true,
+    })];
 
     let hit = list_with_backends_filtered_and_search(
         &backends,
@@ -3696,7 +3706,7 @@ fn a_source_bounded_read_short_of_the_tail_reports_partial_coverage() {
     .unwrap();
     assert_eq!(hit.sessions.len(), 1);
     assert!(hit.unsearched.is_empty());
-    assert_eq!(hit.partial_search.len(), 1);
+    assert!(hit.partial_search.is_empty());
 }
 
 /// The message ceiling is exact: a store with more messages than the ceiling
@@ -3815,7 +3825,7 @@ fn a_first_line_past_the_probe_ceiling_marks_the_start_uncertain() {
 
 /// The fast JSONL search path applies the same rule as the bounded read: a
 /// file past the reader's bound whose retained tail holds fewer turns than
-/// the search covers has partial coverage on a miss and on a hit.
+/// the search covers reports partial coverage only on a miss.
 #[test]
 fn file_search_short_of_the_tail_reports_partial_coverage() {
     let root = std::env::temp_dir().join(format!("tapes-search-file-bound-{}", std::process::id()));
@@ -3878,7 +3888,7 @@ fn file_search_short_of_the_tail_reports_partial_coverage() {
     .unwrap();
     assert_eq!(hit.sessions.len(), 1);
     assert!(hit.unsearched.is_empty());
-    assert_eq!(hit.partial_search.len(), 1);
+    assert!(hit.partial_search.is_empty());
 
     // A candidate the metadata filters exclude was never asked about, so it
     // is neither returned nor reported as unsearched.

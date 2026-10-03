@@ -859,7 +859,7 @@ pub(crate) fn filter_listing_search<B: Backend + ?Sized>(
     for session in listing.sessions {
         match backend.search_coverage(&session, needle, tail) {
             Ok(coverage) => {
-                if coverage.partial {
+                if coverage.partial && !coverage.matched {
                     listing.partial_search.push(coverage.diagnostic(&session));
                 }
                 if coverage.matched {
@@ -912,7 +912,7 @@ pub(crate) fn filter_listing_search_parallel<B: Backend + Sync + ?Sized>(
     for (session, result) in searched {
         match result {
             Ok(coverage) => {
-                if coverage.partial {
+                if coverage.partial && !coverage.matched {
                     listing.partial_search.push(coverage.diagnostic(session));
                 }
                 if coverage.matched {
@@ -1970,7 +1970,7 @@ pub(crate) fn list_files_with_search(
         if !placed || !query.matches(&session) {
             continue;
         }
-        if coverage.partial {
+        if coverage.partial && !coverage.matched {
             listing.partial_search.push(coverage.diagnostic(&session));
         }
         if coverage.matched && listing.sessions.len() < query.limit {

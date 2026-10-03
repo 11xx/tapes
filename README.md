@@ -63,8 +63,9 @@ once `tapes install pi` adds a small extension that records it, the one file
 
 `list --search <text> --search-turns <N|all>` searches normalized turns in
 bounded reads (default: 32 turns). `all` covers every retained turn within the
-reader's byte and record bounds. Partial coverage is reported for matches and
-misses in `partial_search`; unreadable searches appear in `unsearched`. Human
+reader's byte and record bounds. Partial misses are reported in
+`partial_search`; matches carry no search diagnostic. Unreadable searches appear
+in `unsearched`. Human
 search diagnostics group by harness and reason with counts. JSON retains
 per-session details; OpenCode API refusals describe the store once.
 

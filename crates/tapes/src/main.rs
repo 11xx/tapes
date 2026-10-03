@@ -833,8 +833,8 @@ enum Command {
         sort: SortArg,
         /// Match case-insensitively against normalized turns in each bounded
         /// read, before --limit. --search-turns selects the turn window.
-        /// Partial reads are searched and reported as partial coverage; read
-        /// failures are reported as unsearched. A preflight notice goes to stderr.
+        /// Partial reads are searched; only nonmatches report partial coverage.
+        /// Read failures are unsearched. A preflight notice goes to stderr.
         #[arg(long, value_name = "SUBSTRING")]
         search: Option<String>,
         /// Number of normalized turns to search in each bounded read. `all`

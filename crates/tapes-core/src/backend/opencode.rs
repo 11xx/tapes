@@ -311,7 +311,7 @@ fn filter_listing_search_api(
     for (session, result) in searched {
         match result {
             Ok(coverage) => {
-                if coverage.partial {
+                if coverage.partial && !coverage.matched {
                     listing.partial_search.push(coverage.diagnostic(session));
                 }
                 if coverage.matched {

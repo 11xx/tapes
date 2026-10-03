@@ -133,8 +133,8 @@ pub struct SessionList {
     /// answered, plus diagnostics from a search-stage fallback. A read
     /// failure is not a non-match.
     pub unsearched: Vec<String>,
-    /// Sessions whose searched window is shortened by a source read bound,
-    /// including both matches and misses.
+    /// Nonmatching sessions whose searched window is shortened by a source
+    /// read bound, so absence of the search text cannot be established.
     pub partial_search: Vec<String>,
     /// Candidate sessions inspected to produce this list, across every
     /// harness. A scoped listing reads more than it returns.

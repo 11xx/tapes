@@ -97,8 +97,8 @@ FIND IT
   bounded read. --search-turns <N> selects the last N turns (default 32);
   --search-turns all searches every retained turn. Byte and record bounds still
   apply. Search precedes the per-harness limit. Partial reads are searched:
-  hits remain matches, and partial_search names sessions whose requested turn
-  window was withheld by a source bound, including partial misses. A miss
+  hits remain matches without a coverage diagnostic. partial_search names
+  nonmatching sessions whose requested window was withheld by a source bound. A miss
   describes only the searched window. Read failures are named in unsearched.
   Human search diagnostics group by harness and reason with counts; JSON
   preserves per-session diagnostics. OpenCode API refusals name the store once
