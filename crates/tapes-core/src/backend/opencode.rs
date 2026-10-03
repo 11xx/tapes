@@ -12,8 +12,9 @@ use chrono::{TimeZone, Utc};
 use serde_json::{json, Value};
 
 use super::{
-    accounting_for, filter_listing_search, filter_listing_search_parallel, search_turns, Backend,
-    Listing, Query, SearchCoverage, StreamCoordinates, StreamedTranscript, TokenTotals,
+    accounting_for, bounded_launch, filter_listing_search, filter_listing_search_parallel,
+    merge_launch, search_turns, Backend, Listing, Query, SearchCoverage, StreamCoordinates,
+    StreamedTranscript, TokenTotals,
 };
 use crate::content::{
     bounded_shape, text_part, tool_coverage, tool_part, ContentAvailability, ContentCarrier,
@@ -22,9 +23,9 @@ use crate::content::{
 use crate::event::{self, Bounded, EventKind, EventTranscript, ToolEvent};
 use crate::lineage::{ChildRef, Lineage, ParentRef, SourceRef};
 use crate::model::{
-    human_bytes, AccountingBasis, AccountingCoverage, Cost, KindDeclaration, Model, RecordRef,
-    Role, Session, SourceBound, SourceDescriptor, Tokens, Transcript, Truncation, Turn, TurnKind,
-    TurnSelection, TurnWindow, UserDefault,
+    human_bytes, AccountingBasis, AccountingCoverage, Cost, KindDeclaration, Launch, Model,
+    RecordRef, Role, Session, SourceBound, SourceDescriptor, Tokens, Transcript, Truncation, Turn,
+    TurnKind, TurnSelection, TurnWindow, UserDefault,
 };
 use agent_tapes_discovery::{
     DiscoveryError, Harness as NativeHarness, NativeSession, NativeStore, NativeStoreKind,
@@ -1635,6 +1636,26 @@ fn database_message(row: &Value, parts: Vec<Value>) -> Option<Result<Value>> {
     }))
 }
 
+/// Only the session named by the marker owns its process launch evidence.
+fn opencode_launch(marker: &Value, id: &str) -> Option<Launch> {
+    if marker["session"].as_str() != Some(id) {
+        return None;
+    }
+    marker["modes"]
+        .as_array()?
+        .iter()
+        .fold(None, |current, mode| {
+            merge_launch(
+                current,
+                match mode.as_str() {
+                    Some("tui") => Some(Launch::Interactive),
+                    Some("run") => Some(Launch::Headless),
+                    _ => None,
+                },
+            )
+        })
+}
+
 fn parse_database_session(value: &Value) -> Result<Session> {
     let id = required_string(value, "id")?;
     let started_at = epoch_millis(&value["time_created"]);
@@ -1650,13 +1671,13 @@ fn parse_database_session(value: &Value) -> Result<Session> {
     );
 
     Ok(Session {
-        id,
+        id: id.clone(),
         source: SourceDescriptor::installed("opencode", "opencode-database"),
         metadata: None,
         model,
         model_observation: None,
         model_selections: Vec::new(),
-        launch: None,
+        launch: opencode_launch(&value["tapes_launch"], &id),
         title: value["title"]
             .as_str()
             .filter(|title| !title.is_empty())
@@ -1721,13 +1742,13 @@ fn parse_session(value: &Value) -> Result<Session> {
     );
 
     Ok(Session {
-        id,
+        id: id.clone(),
         source: SourceDescriptor::installed("opencode", "opencode-api"),
         metadata: None,
         model,
         model_observation: None,
         model_selections: Vec::new(),
-        launch: None,
+        launch: opencode_launch(&value["metadata"]["tapes.launch"], &id),
         title: value["title"].as_str().map(str::to_owned),
         derived_title: None,
         derived_title_truncated: None,
@@ -1954,10 +1975,11 @@ fn paged_transcript(session: Session, pages: &MessagePages, tail: usize) -> Tran
 
 /// Keep every turn from the pages fetched for an event read. The event layer
 /// pairs this sequence before applying the same window metadata as `show`.
-fn paged_event_source(session: Session, pages: &MessagePages, tail: usize) -> Transcript {
+fn paged_event_source(mut session: Session, pages: &MessagePages, tail: usize) -> Transcript {
     let turns = normalized_turns(&session, &pages.messages);
     let returned = turns.len().min(tail);
     let truncation = paged_truncation(pages, returned, turns.len(), tail);
+    session.launch = bounded_launch(session.launch, !truncation.is_empty());
     Transcript::new(session, turns, truncation, None, pages.notes.clone())
 }
 
@@ -1968,7 +1990,7 @@ fn paged_event_source(session: Session, pages: &MessagePages, tail: usize) -> Tr
 /// of metadata, so a message read does not invent a title that a title-less
 /// listing could not provide.
 fn parse_transcript(
-    session: Session,
+    mut session: Session,
     messages: &[Value],
     tail: usize,
     notes: Vec<String>,
@@ -1980,6 +2002,7 @@ fn parse_transcript(
         turns.drain(..total - tail);
     }
     let truncation = truncation(turns.len(), total);
+    session.launch = bounded_launch(session.launch, !truncation.is_empty());
 
     Transcript::new(session, turns, truncation, None, notes)
 }
@@ -2262,6 +2285,48 @@ fn fold_api_refusals(listing: &mut Listing) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn launch_metadata_is_session_bound_and_interactive_wins() {
+        let rows: Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/opencode/database-launch.json"
+        ))
+        .unwrap();
+        for row in rows.as_array().unwrap() {
+            let session = parse_database_session(row).unwrap();
+            let expected = match row["expected"].as_str() {
+                Some("interactive") => Some(Launch::Interactive),
+                Some("headless") => Some(Launch::Headless),
+                _ => None,
+            };
+            assert_eq!(session.launch, expected);
+            let mut api = row.clone();
+            api["metadata"] = json!({"tapes.launch": row["tapes_launch"]});
+            assert_eq!(parse_session(&api).unwrap().launch, expected);
+            let bounded =
+                parse_transcript(session.clone(), &[], 0, Vec::new(), |_, _| Truncation {
+                    window: None,
+                    source: vec![SourceBound::RecordPage {
+                        records: 1,
+                        of: "messages".to_owned(),
+                    }],
+                });
+            assert_eq!(
+                bounded.session.launch,
+                if expected == Some(Launch::Headless) {
+                    None
+                } else {
+                    expected
+                }
+            );
+            assert_eq!(
+                parse_transcript(session, &[], 0, Vec::new(), |_, _| Truncation::default())
+                    .session
+                    .launch,
+                expected
+            );
+        }
+    }
+
     use super::*;
 
     #[test]

@@ -692,7 +692,7 @@ struct SessionQueryArgs {
     #[arg(long, value_name = "SUBSTRING", conflicts_with_all = ["session", "latest", "title", "occurrence"])]
     model: Option<String>,
     /// Keep sessions the harness records as interactive or headless. Pi
-    /// records one only with `tapes install pi`, OpenCode none, and sessions
+    /// records one only with `tapes install pi`, OpenCode with `tapes install opencode`, and sessions
     /// without a recognized marker never match.
     #[arg(long, value_enum, value_name = "MODE", conflicts_with_all = ["session", "latest", "title", "occurrence"])]
     launch: Option<LaunchArg>,
@@ -917,7 +917,7 @@ enum Command {
         #[arg(long, value_name = "SUBSTRING")]
         model: Option<String>,
         /// Keep sessions the harness records as interactive or headless.
-        /// Pi records one only with `tapes install pi`, OpenCode none, and
+        /// Pi records one only with `tapes install pi`, OpenCode with `tapes install opencode`, and
         /// sessions without a recognized marker never match.
         #[arg(long, value_enum, value_name = "MODE")]
         launch: Option<LaunchArg>,
@@ -1384,7 +1384,7 @@ enum Command {
         #[arg(long, value_name = "SUBSTRING")]
         model: Option<String>,
         /// Keep sessions the harness records as interactive or headless.
-        /// Pi records one only with `tapes install pi`, OpenCode none, and
+        /// Pi records one only with `tapes install pi`, OpenCode with `tapes install opencode`, and
         /// sessions without a recognized marker never match.
         #[arg(long, value_enum, value_name = "MODE")]
         launch: Option<LaunchArg>,

@@ -6387,7 +6387,7 @@ fn create_opencode_database(root: &Path, id: &str, inserts: &str) {
 CREATE TABLE `session` (`id` text PRIMARY KEY, `parent_id` text, `directory` text NOT NULL,
   `title` text NOT NULL, `model` text, `cost` real, `tokens_input` integer,
   `tokens_output` integer, `tokens_reasoning` integer, `tokens_cache_read` integer,
-  `tokens_cache_write` integer, `time_created` integer NOT NULL, `time_updated` integer NOT NULL);
+  `tokens_cache_write` integer, `metadata` text, `time_created` integer NOT NULL, `time_updated` integer NOT NULL);
 CREATE TABLE `message` (`id` text PRIMARY KEY, `session_id` text NOT NULL,
   `time_created` integer NOT NULL, `time_updated` integer NOT NULL, `data` text NOT NULL);
 CREATE INDEX `message_session_time_created_id_idx` ON `message` (`session_id`,`time_created`,`id`);
@@ -6396,7 +6396,7 @@ CREATE TABLE `part` (`id` text PRIMARY KEY, `message_id` text NOT NULL, `session
 CREATE INDEX `part_session_idx` ON `part` (`session_id`);
 CREATE INDEX `part_message_id_id_idx` ON `part` (`message_id`,`id`);
 INSERT INTO session VALUES ('{id}', NULL, '/fixtures/database', 'Database fixture session',
-  '{{"id":"fixture-db-model"}}', 0, 0, 0, 0, 0, 0, 1784663000000, 1784664200000);
+  '{{"id":"fixture-db-model"}}', 0, 0, 0, 0, 0, 0, NULL, 1784663000000, 1784664200000);
 {inserts}
 "#
     );

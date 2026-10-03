@@ -194,7 +194,7 @@ fn install(path: PathBuf, target: &str, name: &str) -> Result<()> {
         .ok_or_else(|| anyhow!("{} has no parent directory", path.display()))?;
     fs::create_dir_all(directory)
         .with_context(|| format!("cannot create {}", directory.display()))?;
-    let staged = stage(directory, &target)?;
+    let staged = stage(directory, target)?;
     // A new file is published with a hard link, which never replaces a path
     // that appeared meanwhile; an older managed file is replaced by rename.
     let published = if replacing {
