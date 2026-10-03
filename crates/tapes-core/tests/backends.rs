@@ -2555,6 +2555,7 @@ impl Backend for SearchFixture {
         Ok(Transcript {
             session: session.clone(),
             turns: vec![Turn {
+                origin: None,
                 text_truncated: None,
                 text_chars: None,
                 context_event: None,
@@ -5766,6 +5767,7 @@ impl Backend for BulkExportFixture {
         Ok(Transcript {
             session: session.clone(),
             turns: vec![Turn {
+                origin: None,
                 text_truncated: None,
                 text_chars: None,
                 context_event: None,
