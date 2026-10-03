@@ -7612,7 +7612,7 @@ fn show_types_every_turn_and_names_a_control_turn_in_human_output() {
     let human = String::from_utf8(run(&["show", "session-claude"])).unwrap();
     assert!(human.contains("[user/control #10 "), "{human}");
     assert!(human.contains("[user/notice #12 "), "{human}");
-    assert!(human.contains("[user #5 "), "{human}");
+    assert!(human.contains("[user [origin: person] #5 "), "{human}");
 }
 
 #[test]
