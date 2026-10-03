@@ -344,7 +344,7 @@ PROBE BEFORE EXPORTING
   human output is one line per turn. A selected session that cannot be read
   fails the command.
 
-  events projects harness-neutral tool records as tapes-events/13. Each record
+  events projects harness-neutral tool records as tapes-events/12. Each record
   names its source turn with turn_ordinal, the same coordinate show prints;
   ordinal retains that turn coordinate, including for call/result pairs. Pairing is
   exact within the bounded read; an incomplete call or result says whether its
@@ -388,7 +388,7 @@ PROBE BEFORE EXPORTING
   Claude, Codex, or Pi recording twice, pairing past the read bound and
   writing each event as it pairs, with the same filters and counts.
 
-  usage answers where a session's quota went as tapes-usage/9: its recorded
+  usage answers where a session's quota went as tapes-usage/10: its recorded
   launch mode when known, tokens, cost, accounting, turns, and any by-model attribution the source can
   support — Claude's recorded cost-state, Codex's request observations, or
   pi's per-message model each qualified by the thinking level in effect. Read
@@ -417,7 +417,7 @@ PROBE BEFORE EXPORTING
   idle_threshold. These figures cover the same read window as recorded span.
   Selection totals sum active milliseconds and stretches across readable sessions.
 
-  stats counts what one recording holds as tapes-stats/12: turns by kind
+  stats counts what one recording holds as tapes-stats/13: turns by kind
   beside the kinds the harness can record at all, so a zero for a kind it
   cannot record is not read as none observed, tool
   calls by name with their paired durations and error counts, unpaired calls
@@ -550,7 +550,7 @@ READ MANY ENDINGS
   tapes endings --global --harness codex --limit 50 --text
 
   endings answers what each session of a selection ends on, as
-  tapes-endings/8, including a session's recorded launch mode when known, so
+  tapes-endings/9, including a session's recorded launch mode when known, so
   choosing which few endings deserve reading costs one
   bounded read each instead of a transcript apiece. The selection is the one
   list and export take, and the scope and filters apply before any transcript
@@ -605,7 +605,12 @@ READ THE ENDING
   Claude attachment records carry context outside `message`: file attachments
   name paths in `displayPath` and `filename`, with text in
   `content.file.content` under `content.type = text`. Compact file references
-  name paths without a body. Instructions, environment and prompt snapshots
+  name paths without a body. Both carriers become ambient turns with file
+  references; the path is `displayPath`, then the nested `filePath`, then
+  `filename`. Text bodies retain at most 64Ki characters, with truncation
+  explicit, and record inclusive line ranges and an optional total line count.
+  Unsupported or malformed bodies remain reference-only. References are never
+  opened. Instructions, environment and prompt snapshots
   remain unrecognized records; their bodies are not projected as turns.
 
   Every turn carries a `kind`, filled only from what the harness itself
@@ -642,7 +647,7 @@ CONTINUE A COLD SESSION
   tapes brief <id> --tail 20 --json
 
   A continuation has two halves. brief is the transcript's half, as
-  tapes-brief/10: where the session stopped, the directory it worked in and the
+  tapes-brief/11: where the session stopped, the directory it worked in and the
   commit that directory sits on, the tool calls the read never saw a result
   for, the children whose outcome its store does not record, and the last few
   operator and assistant turns, each cut at 600 characters. --tail sets how
@@ -706,7 +711,7 @@ HISTORICAL READS
   each page. Pass next_cursor back as --cursor. Changed sources refuse;
   malformed and oversized record gaps remain explicit. Budgets protect context:
   1 KiB–4 MiB per page, 1–32 pages per search, 100 excerpts/observations.
-  Search JSON uses tapes-history-search/9. Matches retain the turn's source
+  Search JSON uses tapes-history-search/10. Matches retain the turn's source
   reference, native ID and timestamp when recorded, and its kind. Page byte
   bounds and zero-based ordinals locate matches within a page; ordinals are
   not session indices. Human matches show kind and recorded timestamp.

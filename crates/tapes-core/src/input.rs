@@ -46,7 +46,7 @@ pub const MAX_OUTPUT_BYTES: u64 = 64 * 1024 * 1024;
 pub const MAX_RESIDENT_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 pub const MAX_MEMBERS: usize = 10_000;
 pub const MAX_DEPTH: usize = 128;
-pub const MAX_ARTIFACT_BODY_CHARS: usize = 64 * 1024;
+pub const MAX_ARTIFACT_BODY_CHARS: usize = content::MAX_ARTIFACT_BODY_CHARS;
 #[cfg(feature = "zip")]
 const MAX_ZIP_CENTRAL_DIRECTORY_BYTES: u64 = 16 * 1024 * 1024;
 #[cfg(feature = "zip")]
@@ -4498,6 +4498,8 @@ fn read_associated_report<R: Read>(
             action: None,
             body: None,
             body_availability: None,
+            body_lines: None,
+            total_lines: None,
             citations: Vec::new(),
             omitted_citations: 0,
             citation_traversal_incomplete: false,
