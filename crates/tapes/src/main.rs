@@ -4339,6 +4339,31 @@ fn render_turn(turn: &Turn) -> String {
             }
         }
     }
+    for part in &turn.parts {
+        if let agent_tapes_core::content::ContentPart::StructuredArtifact {
+            descriptor,
+            native_kind,
+            ..
+        } = part
+        {
+            if native_kind == "attachment/prompt_snapshot" {
+                text.push_str(&format!(
+                    "\nprompt-snapshot: {}; body: reference-only",
+                    descriptor.text
+                ));
+            }
+        }
+    }
+    if let Some(coverage) = &turn.coverage {
+        if let Some(reason) = &coverage.omitted_reason {
+            if reason.starts_with("attachment ") {
+                text.push_str(&format!(
+                    "\ncontent-coverage: {}",
+                    serde_json::to_string(coverage).unwrap_or_default()
+                ));
+            }
+        }
+    }
     let mut rendered = match turn.ts {
         Some(ts) => format!(
             "[{role} #{} {}]\n{}\n",

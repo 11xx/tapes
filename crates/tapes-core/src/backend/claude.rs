@@ -1530,6 +1530,7 @@ fn attached_context(value: &Value, kind: &str) -> Option<Turn> {
                 omitted_parts = files
                     .len()
                     .saturating_sub(crate::content::MAX_ARTIFACT_REFERENCES);
+                cut |= omitted_parts > 0;
                 for (index, file) in files
                     .iter()
                     .take(crate::content::MAX_ARTIFACT_REFERENCES)
@@ -1605,6 +1606,7 @@ fn attached_context(value: &Value, kind: &str) -> Option<Turn> {
                 }
             }
             unsupported |= parts.is_empty();
+            cut |= omitted_parts > 0;
         }
         "prompt_snapshot" => {
             let mut descriptor = serde_json::Map::new();
@@ -1660,7 +1662,7 @@ fn attached_context(value: &Value, kind: &str) -> Option<Turn> {
             record_ref: None,
         });
     }
-    let availability = if cut || omitted_parts > 0 {
+    let availability = if cut {
         ContentAvailability::ReadBound
     } else if unsupported {
         ContentAvailability::UnsupportedRepresentation
@@ -1688,7 +1690,7 @@ fn attached_context(value: &Value, kind: &str) -> Option<Turn> {
                 availability,
                 retained_parts,
                 omitted_parts,
-                omitted_reason: if cut || omitted_parts > 0 {
+                omitted_reason: if cut {
                     Some(
                         "attachment content exceeds a retained field or collection bound"
                             .to_owned(),
@@ -2469,6 +2471,17 @@ mod read_content_tests {
             ContentAvailability::ReadBound
         );
         assert!(environment.coverage.unwrap().omitted_reason.is_some());
+        let malformed = claude_attachment(&record(
+            json!({"type":"instructions","files":[{"path":17,"content":"excluded"}]}),
+        ))
+        .unwrap();
+        let coverage = malformed.coverage.unwrap();
+        assert_eq!(
+            coverage.availability,
+            ContentAvailability::UnsupportedRepresentation
+        );
+        assert_eq!(coverage.omitted_parts, 1);
+        assert!(malformed.text.is_empty());
         let changes: Vec<Value> = (0..129)
             .map(|_| json!({"field":"workingDirectory","from":"/fixtures/previous"}))
             .collect();
