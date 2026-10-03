@@ -338,7 +338,7 @@ PROBE BEFORE EXPORTING
 
   timeline <id> or timeline --here projects each turn as ordinal, kind and ts
   under tapes-timeline/1, without text or payloads. Ordinals use show's
-  zero-based coordinate. Missing timestamps are null (a dash in human output).
+  zero-based coordinate. Missing timestamps are omitted (a dash in human output).
   Selection, scope and read bounds follow stats; --full streams every selected
   recording. JSON groups records by session with truncation and read notes;
   human output is one line per turn. A selected session that cannot be read

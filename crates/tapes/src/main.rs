@@ -1075,7 +1075,7 @@ enum Command {
         full: bool,
         /// Emit tapes-timeline/1: sessions containing records with only ordinal,
         /// kind and ts. Ordinals are the zero-based coordinates printed by show;
-        /// missing timestamps are null. Human output is one line per turn.
+        /// missing timestamps are omitted. Human output is one line per turn.
         #[arg(long)]
         json: bool,
     },

@@ -11788,3 +11788,47 @@ fn timeline_projects_fixture_turns_without_payloads() {
         shown["turns"].as_array().unwrap().len()
     );
 }
+
+#[test]
+fn timeline_omits_unrecorded_timestamps() {
+    let id = "00000000-0000-0000-0000-000000000001";
+    let (codex_home, home) = fixture_store("timeline-no-timestamp");
+    let recording = CODEX_SESSION_ONE
+        .lines()
+        .map(|line| {
+            let mut record: Value = serde_json::from_str(line).unwrap();
+            if record["type"] == "response_item" {
+                record.as_object_mut().unwrap().remove("timestamp");
+            }
+            record.to_string() + "\n"
+        })
+        .collect::<String>();
+    fs::write(codex_home.join("sessions/2026/01/01/rollout-2026-01-01T10-00-00-00000000-0000-0000-0000-000000000001.jsonl"), recording).unwrap();
+    for full in [false, true] {
+        let mut command = tapes();
+        command.args(["timeline", id, "--json"]);
+        if full {
+            command.arg("--full");
+        }
+        with_fixture_env(
+            &mut command,
+            &codex_home,
+            &home,
+            Path::new("/definitely/missing"),
+        );
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+        let records = value["sessions"][0]["records"].as_array().unwrap();
+        assert!(!records.is_empty());
+        assert!(records.iter().all(|record| record.get("ts").is_none()));
+        assert!(records
+            .iter()
+            .all(|record| record.as_object().unwrap().len() == 2));
+    }
+    fs::remove_dir_all(codex_home).unwrap();
+}

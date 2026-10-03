@@ -13,6 +13,7 @@ pub const SCHEMA: &str = "tapes-timeline/1";
 pub struct Record {
     pub ordinal: usize,
     pub kind: TurnKind,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub ts: Option<DateTime<Utc>>,
 }
 
