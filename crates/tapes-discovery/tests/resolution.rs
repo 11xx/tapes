@@ -292,3 +292,31 @@ fn missing_source_and_invalid_queries_keep_their_error_classes() {
         Err(ResolveError::InvalidQuery)
     ));
 }
+
+#[test]
+fn complete_match_refuses_when_another_harness_hits_its_bound() {
+    let claude = Source::empty("claude").with_page(page(
+        vec![Row::new("prefix-canonical", "claude", "claude-store")],
+        true,
+    ));
+    let codex = Source::empty("codex").with_page(page(Vec::new(), false));
+    let error = resolve(&[&claude, &codex], "prefix-").unwrap_err();
+    assert!(matches!(error, ResolveError::Incomplete { .. }));
+    let message = error.to_string();
+    assert!(message.contains("incomplete harness stores: codex[source 2]"));
+    assert!(message.contains("completely searched harness stores: claude[source 1]"));
+    assert!(message.contains("full ID or --harness <h>"));
+}
+
+#[test]
+fn exact_match_bypasses_another_harness_candidate_bound() {
+    let claude = Source::empty("claude").with_exact(Ok(Some(Row::new(
+        "full-canonical-id",
+        "claude",
+        "claude-store",
+    ))));
+    let codex = Source::empty("codex").with_page(page(Vec::new(), false));
+    let selected = resolve(&[&claude, &codex], "full-canonical-id").unwrap();
+    assert_eq!(selected.record.harness(), "claude");
+    assert_eq!(codex.lists.get(), 0);
+}

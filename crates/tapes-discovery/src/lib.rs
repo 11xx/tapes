@@ -399,7 +399,7 @@ impl std::fmt::Display for ResolveError {
             }
             Self::Incomplete { query, diagnostics } => write!(
                 f,
-                "cannot prove a unique native session for {query:?}; use the full ID ({})",
+                "cannot prove a unique native session for {query:?}; use the full ID or --harness <h> ({})",
                 diagnostics.join("; ")
             ),
             Self::Ambiguous { query, candidates } => {
@@ -723,6 +723,30 @@ pub fn resolve_with_sources<R: IdentityRecord + Clone>(
         truncated |= !page.complete;
         diagnostics.extend(page.failures.iter().cloned());
         pages.push(page);
+    }
+    if truncated {
+        for (complete, label) in [
+            (false, "incomplete harness stores"),
+            (true, "completely searched harness stores"),
+        ] {
+            let stores = pages
+                .iter()
+                .enumerate()
+                .filter(|(index, page)| {
+                    page.complete == complete && (!complete || sources[*index].available())
+                })
+                .map(|(index, _)| format!("{}[source {}]", sources[index].harness(), index + 1))
+                .collect::<Vec<_>>();
+            diagnostics.push(format!(
+                "{label}: {}",
+                if stores.is_empty() {
+                    "none".to_owned()
+                } else {
+                    stores.join(", ")
+                }
+            ));
+        }
+        diagnostics.push("use the full ID or --harness <h> to scope native lookup".to_owned());
     }
     for (source_index, page) in pages.iter().enumerate() {
         let source = sources[source_index];
