@@ -364,6 +364,7 @@ pub enum ResolveError {
     NotFound {
         query: String,
         truncated: bool,
+        diagnostics: Vec<String>,
     },
     Incomplete {
         query: String,
@@ -388,12 +389,15 @@ impl std::fmt::Display for ResolveError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::InvalidQuery => f.write_str("query must be non-empty and contain no NUL"),
-            Self::NotFound { query, truncated } => {
+            Self::NotFound { query, truncated, diagnostics } => {
                 write!(f, "session {query} was not found")?;
                 if *truncated {
                     f.write_str(
-                        " (candidate coverage is incomplete; pass the full ID for a direct lookup)",
+                        " (candidate coverage is incomplete; pass the full ID or --harness <h> for a direct lookup)",
                     )?;
+                }
+                if !diagnostics.is_empty() {
+                    write!(f, " ({})", diagnostics.join("; "))?;
                 }
                 Ok(())
             }
@@ -724,6 +728,7 @@ pub fn resolve_with_sources<R: IdentityRecord + Clone>(
         diagnostics.extend(page.failures.iter().cloned());
         pages.push(page);
     }
+    let mut coverage = Vec::new();
     if truncated {
         for (complete, label) in [
             (false, "incomplete harness stores"),
@@ -737,7 +742,7 @@ pub fn resolve_with_sources<R: IdentityRecord + Clone>(
                 })
                 .map(|(index, _)| format!("{}[source {}]", sources[index].harness(), index + 1))
                 .collect::<Vec<_>>();
-            diagnostics.push(format!(
+            coverage.push(format!(
                 "{label}: {}",
                 if stores.is_empty() {
                     "none".to_owned()
@@ -746,7 +751,7 @@ pub fn resolve_with_sources<R: IdentityRecord + Clone>(
                 }
             ));
         }
-        diagnostics.push("use the full ID or --harness <h> to scope native lookup".to_owned());
+        coverage.push("use the full ID or --harness <h> to scope native lookup".to_owned());
     }
     for (source_index, page) in pages.iter().enumerate() {
         let source = sources[source_index];
@@ -865,6 +870,7 @@ pub fn resolve_with_sources<R: IdentityRecord + Clone>(
         0 if !diagnostics.is_empty() || !failures.is_empty() => {
             let mut failures = failure_messages(failures.iter());
             failures.extend(diagnostics);
+            failures.extend(coverage);
             failures.sort();
             failures.dedup();
             Err(ResolveError::BackendFailed {
@@ -875,11 +881,15 @@ pub fn resolve_with_sources<R: IdentityRecord + Clone>(
         0 => Err(ResolveError::NotFound {
             query: query.to_owned(),
             truncated,
+            diagnostics: coverage,
         }),
-        1 if truncated || !diagnostics.is_empty() => Err(ResolveError::Incomplete {
-            query: query.to_owned(),
-            diagnostics,
-        }),
+        1 if truncated || !diagnostics.is_empty() => {
+            diagnostics.extend(coverage);
+            Err(ResolveError::Incomplete {
+                query: query.to_owned(),
+                diagnostics,
+            })
+        }
         1 => Ok(matches.remove(0)),
         _ => unreachable!("multiple matches returned above"),
     }

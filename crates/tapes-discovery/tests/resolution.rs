@@ -320,3 +320,21 @@ fn exact_match_bypasses_another_harness_candidate_bound() {
     assert_eq!(selected.record.harness(), "claude");
     assert_eq!(codex.lists.get(), 0);
 }
+
+#[test]
+fn bounded_prefix_miss_preserves_not_found_and_explains_store_coverage() {
+    let claude = Source::empty("claude");
+    let codex = Source::empty("codex").with_page(page(Vec::new(), false));
+    let error = resolve(&[&claude, &codex], "missing-prefix").unwrap_err();
+    assert!(matches!(
+        error,
+        ResolveError::NotFound {
+            truncated: true,
+            ..
+        }
+    ));
+    let message = error.to_string();
+    assert!(message.contains("incomplete harness stores: codex[source 2]"));
+    assert!(message.contains("completely searched harness stores: claude[source 1]"));
+    assert!(message.contains("full ID or --harness <h>"));
+}
