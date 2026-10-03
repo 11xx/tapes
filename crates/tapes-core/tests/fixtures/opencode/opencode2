@@ -108,7 +108,7 @@ class Refused(http.server.BaseHTTPRequestHandler):
         pass
 
 port = int(sys.argv[sys.argv.index("--port") + 1])
-http.server.HTTPServer(("127.0.0.1", port), Refused).serve_forever()
+http.server.HTTPServer(("localhost", port), Refused).serve_forever()
 PYTHON
 fi
 
