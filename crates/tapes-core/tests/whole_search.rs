@@ -140,3 +140,94 @@ fn whole_search_finds_a_turn_before_the_bounded_search_window() {
     .unwrap();
     assert_eq!(result.full_search.unwrap().sessions_read, 0);
 }
+
+struct BoundedOnly(CodexBackend);
+impl Backend for BoundedOnly {
+    fn harness(&self) -> &'static str {
+        "codex"
+    }
+    fn available(&self) -> bool {
+        true
+    }
+    fn list(
+        &self,
+        query: &agent_tapes_core::backend::Query,
+    ) -> anyhow::Result<agent_tapes_core::backend::Listing> {
+        self.0.list(query)
+    }
+    fn locate(&self, id: &str) -> anyhow::Result<Option<agent_tapes_core::model::Session>> {
+        self.0.locate(id)
+    }
+    fn transcript(
+        &self,
+        _: &agent_tapes_core::model::Session,
+        _: usize,
+    ) -> anyhow::Result<agent_tapes_core::model::Transcript> {
+        panic!("whole search must not fall back to a bounded reader")
+    }
+    fn kinds(&self) -> agent_tapes_core::model::KindDeclaration {
+        self.0.kinds()
+    }
+}
+
+#[test]
+fn unsupported_store_is_reported_once_without_bounded_fallback() {
+    let stores: Vec<Box<dyn Backend>> = vec![Box::new(BoundedOnly(CodexBackend::new(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/codex"),
+    )))];
+    let filters = ListFilters {
+        search: Some(""),
+        ..Default::default()
+    };
+    let result = search::list(
+        &stores,
+        None,
+        None,
+        &filters,
+        search::Options {
+            limit: 2,
+            sort: ListSort::Newest,
+            match_limit: 1,
+        },
+    )
+    .unwrap();
+    assert_eq!(result.unsearched.len(), 1);
+    assert!(result.sessions.is_empty());
+    let report = result.full_search.unwrap();
+    assert_eq!(report.sessions_read, 0);
+    assert_eq!(report.coverage.len(), 2);
+    assert!(report
+        .coverage
+        .iter()
+        .all(|session| !session.whole_recording_read));
+}
+
+#[test]
+fn session_read_limit_is_global_across_harnesses() {
+    let mut stores = backends();
+    stores.push(Box::new(agent_tapes_core::backend::pi::PiBackend::new(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/pi"),
+    )));
+    let filters = ListFilters {
+        search: Some(""),
+        ..Default::default()
+    };
+    let result = search::list(
+        &stores,
+        None,
+        None,
+        &filters,
+        search::Options {
+            limit: 1,
+            sort: ListSort::Newest,
+            match_limit: 0,
+        },
+    )
+    .unwrap();
+    let report = result.full_search.unwrap();
+    assert_eq!(report.sessions_read, 1);
+    assert_eq!(report.coverage.len(), 1);
+    assert!(report.coverage[0].matches.is_empty());
+    assert!(report.coverage[0].matches_truncated);
+    assert!(report.selection_truncated);
+}
