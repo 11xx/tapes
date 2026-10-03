@@ -275,8 +275,9 @@ PROBE BEFORE EXPORTING
   their stat-based `source_revision` differs. Replays retain the pinned prefix
   identity after appends. Bounded, page, and API reads omit it and read no
   extra bytes to establish it. Absence means no digest was established.
-  `read` records the source length, configured bound, physical head/tail/alignment
-  ranges, decoded record spans, context-only record spans, and gaps;
+  `read` records the source length, configured bound, physical
+  head/tail/alignment ranges, decoded record spans, context-only record spans,
+  and gaps;
   physical coverage does not erase malformed records, and a partial gap is
   discharged only by a successful decode of that same record. A preceding
   newline lets an exact tail boundary retain its first record; a mid-record

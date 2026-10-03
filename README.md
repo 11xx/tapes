@@ -39,11 +39,7 @@ tapes export --latest --bundle out/   # a bounded bundle another session can rea
 `--latest` is the newest session in the project you are in, across every
 worktree of its repository, so picking one up needs no session id. A bundle
 carries whatever the transcript holds, including anything pasted into it;
-`tapes` redacts nothing. Full native file reads (`show --full --json` and
-`export --full`) include `read.source_prefix_digest`: SHA-256 in lowercase
-hex over bytes `[0, source_length)`, including malformed and partial records.
-It identifies identical copies independently of the stat-based source revision;
-bounded, page, and API reads omit it.
+`tapes` redacts nothing.
 
 ## Look across sessions
 
