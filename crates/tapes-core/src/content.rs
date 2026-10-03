@@ -11,6 +11,8 @@ use serde_json::Value;
 
 use crate::model::{BoundedText, RecordRef};
 
+pub const MAX_ARTIFACT_BODY_CHARS: usize = 64 * 1024;
+
 pub const MAX_CONTENT_PARTS: usize = 128;
 pub const MAX_ARTIFACT_REFERENCES: usize = 64;
 pub const MAX_DESCRIPTOR_CHARS: usize = 4 * 1024;
@@ -77,7 +79,7 @@ impl ContentInventory {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ArtifactReference {
     pub kind: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -105,6 +107,12 @@ pub struct ArtifactReference {
     pub digest: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bytes: Option<u64>,
+    /// Native size label, including its recorded unit and rounding.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recorded_size: Option<String>,
+    /// Native tool call that produced this artifact, when recorded.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timestamp: Option<DateTime<Utc>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -119,6 +127,12 @@ pub struct ArtifactReference {
     /// Whether the source exposed a usable body representation.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub body_availability: Option<ContentAvailability>,
+    /// Inclusive, one-based lines represented by the recorded body.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub body_lines: Option<crate::event::ReadLines>,
+    /// Total file lines recorded alongside the body range.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total_lines: Option<u64>,
     /// Native citation metadata retained from the artifact body.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub citations: Vec<ArtifactCitation>,
@@ -615,11 +629,15 @@ pub fn artifact_reference_object(
             path,
             digest,
             bytes,
+            recorded_size: None,
+            tool_call_id: None,
             timestamp: None,
             source: None,
             action: None,
             body: None,
             body_availability: None,
+            body_lines: None,
+            total_lines: None,
             citations: Vec::new(),
             omitted_citations: 0,
             citation_traversal_incomplete: false,

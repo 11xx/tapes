@@ -20,7 +20,7 @@ use crate::model::{
     SourceDescriptor, TerminalObservation, TextTailEvidence, Tokens, Transcript, Truncation, Turn,
 };
 
-pub const USAGE_SCHEMA: &str = "tapes-usage/9";
+pub const USAGE_SCHEMA: &str = "tapes-usage/10";
 
 /// Usage facts a harness records that the normalized session model has no
 /// field for. Each member is present exactly when the harness recorded it.

@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 
 use chrono::{DateTime, Utc};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
@@ -13,7 +13,7 @@ use crate::model::{
     TextTailEvidence, Transcript, Truncation, Turn,
 };
 
-pub const EVENTS_SCHEMA: &str = "tapes-events/13";
+pub const EVENTS_SCHEMA: &str = "tapes-events/12";
 const PREVIEW_CHARS: usize = 200;
 pub const MAX_INVOCATION_TEXT_CHARS: usize = 64 * 1024;
 pub const MAX_INVOCATIONS: usize = 32;
@@ -220,7 +220,7 @@ pub struct ReadLocator {
     pub content_sha256: Option<String>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReadLines {
     pub start: u64,
     pub end: u64,

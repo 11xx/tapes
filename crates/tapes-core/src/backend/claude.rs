@@ -16,8 +16,8 @@ use super::{
     TokenTotals, UnmappedTally,
 };
 use crate::content::{
-    bounded_shape, text_part, tool_coverage, tool_part, ContentAvailability, ContentCarrier,
-    ContentCoverage, ContentPart,
+    bounded_shape, bounded_text, text_part, tool_coverage, tool_part, ArtifactReference,
+    ContentAvailability, ContentCarrier, ContentCoverage, ContentPart,
 };
 use crate::event::{Bounded, EventKind, ReadLines, ToolEvent};
 use crate::history::PageProjection;
@@ -1201,6 +1201,9 @@ fn parse_turns_raw(value: &Value) -> Vec<Turn> {
             tool: None,
         }];
     }
+    if value["type"] == "attachment" {
+        return claude_attachment(value).into_iter().collect();
+    }
     let Some(message) = value.get("message") else {
         return Vec::new();
     };
@@ -1282,21 +1285,53 @@ fn parse_turns_raw(value: &Value) -> Vec<Turn> {
                         omitted_reason: None,
                     },
                 ),
-                subtype @ ("tool_use" | "tool_result") => (
-                    Role::Tool,
-                    block.to_string(),
-                    Some(claude_tool_event(
-                        block,
-                        subtype,
-                        value.get("toolUseResult").filter(|_| {
-                            message["content"]
-                                .as_array()
-                                .is_some_and(|parts| parts.len() == 1)
-                        }),
-                    )),
-                    vec![tool_part(block, "message.content", subtype)],
-                    tool_coverage(),
-                ),
+                subtype @ ("tool_use" | "tool_result") => {
+                    let persisted = (subtype == "tool_result")
+                        .then(|| persisted_tool_output(block))
+                        .flatten();
+                    let (text, parts, coverage) = if let Some(persisted) = persisted {
+                        (
+                            persisted.preview.to_owned(),
+                            vec![
+                                text_part(persisted.preview, "message.content.content", subtype),
+                                ContentPart::FileReference {
+                                    reference: persisted.reference,
+                                    source_field: "message.content.content".to_owned(),
+                                    native_kind: "persisted-output".to_owned(),
+                                    record_ref: None,
+                                },
+                            ],
+                            ContentCoverage {
+                                carrier: ContentCarrier::RecordedReference,
+                                availability: ContentAvailability::ReferenceOnly,
+                                retained_parts: 2,
+                                omitted_parts: 0,
+                                omitted_reason: None,
+                            },
+                        )
+                    } else {
+                        (
+                            block.to_string(),
+                            vec![tool_part(block, "message.content", subtype)],
+                            tool_coverage(),
+                        )
+                    };
+                    (
+                        Role::Tool,
+                        text,
+                        Some(claude_tool_event(
+                            block,
+                            subtype,
+                            value.get("toolUseResult").filter(|_| {
+                                message["content"]
+                                    .as_array()
+                                    .is_some_and(|parts| parts.len() == 1)
+                            }),
+                        )),
+                        parts,
+                        coverage,
+                    )
+                }
                 _ => (
                     role.clone(),
                     String::new(),
@@ -1358,6 +1393,97 @@ fn turn(
         coverage: Some(content.coverage),
         tool,
     })
+}
+
+fn claude_attachment(value: &Value) -> Option<Turn> {
+    let attachment = &value["attachment"];
+    let kind = attachment["type"].as_str()?;
+    if !matches!(kind, "file" | "compact_file_reference") {
+        return None;
+    }
+    let file = &attachment["content"]["file"];
+    let path = attachment["displayPath"]
+        .as_str()
+        .or_else(|| {
+            (kind == "file")
+                .then(|| file["filePath"].as_str())
+                .flatten()
+        })
+        .or_else(|| attachment["filename"].as_str());
+    let path = path.map(|path| bounded_text(path, crate::content::MAX_DESCRIPTOR_CHARS));
+    let mut reference = ArtifactReference {
+        kind: format!("attachment/{kind}"),
+        descriptor_truncated: path.as_ref().is_some_and(|path| path.truncated),
+        path: path.map(|path| path.text),
+        body_availability: Some(ContentAvailability::ReferenceOnly),
+        ..ArtifactReference::default()
+    };
+    if kind == "file" && attachment["content"]["type"] == "text" {
+        if let Some((body, lines, total)) = attached_file_body(file) {
+            let body = bounded_text(body, crate::content::MAX_ARTIFACT_BODY_CHARS);
+            reference.body_availability = Some(
+                if body.truncated || file["truncatedByTokenCap"].as_bool() == Some(true) {
+                    ContentAvailability::ReadBound
+                } else {
+                    ContentAvailability::RetainedBody
+                },
+            );
+            reference.body = Some(body);
+            reference.body_lines = lines;
+            reference.total_lines = total;
+        }
+    }
+    let availability = reference.body_availability?;
+    let text = reference
+        .body
+        .as_ref()
+        .map_or_else(String::new, |body| body.text.clone());
+    let body_present = reference.body.is_some();
+    let part = ContentPart::FileReference {
+        reference,
+        source_field: "attachment".to_owned(),
+        native_kind: format!("attachment/{kind}"),
+        record_ref: None,
+    };
+    let mut parts = vec![part];
+    if body_present {
+        parts.push(text_part(&text, "attachment.content.file.content", "text"));
+    }
+    let retained_parts = parts.len();
+    turn(
+        Role::System,
+        TurnKind::Ambient,
+        text,
+        timestamp(&value["timestamp"]),
+        value["uuid"].as_str().map(str::to_owned),
+        None,
+        TurnContent {
+            parts,
+            coverage: ContentCoverage {
+                carrier: ContentCarrier::AssociatedArtifact,
+                availability,
+                retained_parts,
+                omitted_parts: 0,
+                omitted_reason: None,
+            },
+        },
+    )
+}
+
+fn attached_file_body(file: &Value) -> Option<(&str, Option<ReadLines>, Option<u64>)> {
+    let body = file["content"].as_str()?;
+    file["filePath"].as_str()?;
+    let start = file["startLine"].as_u64()?;
+    let count = file["numLines"].as_u64()?;
+    let total = match file.get("totalLines") {
+        Some(value) => Some(value.as_u64()?),
+        None => None,
+    };
+    let end = start.checked_sub(1)?.checked_add(count)?;
+    if total.is_some_and(|total| end > total) {
+        return None;
+    }
+    Some((body, (count > 0).then_some(ReadLines { start, end }), total))
 }
 
 struct TurnContent {
@@ -1553,9 +1679,94 @@ fn claude_read_content(
     ))
 }
 
+struct PersistedOutput<'a> {
+    preview: &'a str,
+    reference: ArtifactReference,
+}
+
+fn persisted_tool_output(block: &Value) -> Option<PersistedOutput<'_>> {
+    let text = block["content"].as_str()?.trim_end_matches(['\r', '\n']);
+    let inner = text
+        .strip_prefix("<persisted-output>\n")?
+        .strip_suffix("\n</persisted-output>")?;
+    if inner.contains("<persisted-output>") || inner.contains("</persisted-output>") {
+        return None;
+    }
+    let (header, preview) = inner.split_once("\n\n")?;
+    let (size, path) = header
+        .strip_prefix("Output too large (")?
+        .split_once("). Full output saved to: ")?;
+    if !persisted_size(size) {
+        return None;
+    }
+    let (preview_header, preview) = preview.split_once('\n')?;
+    let preview_size = preview_header
+        .strip_prefix("Preview (first ")?
+        .strip_suffix("):")?;
+    if !persisted_size(preview_size) {
+        return None;
+    }
+    let path = Path::new(path);
+    if !path.is_absolute()
+        || path
+            .components()
+            .any(|component| matches!(component, std::path::Component::ParentDir))
+    {
+        return None;
+    }
+    let name = path.file_name()?.to_str()?;
+    if !name.ends_with(".txt") || name.len() <= 4 || name.chars().any(char::is_control) {
+        return None;
+    }
+    let results = path.parent()?;
+    if results.file_name()?.to_str()? != "tool-results" {
+        return None;
+    }
+    let session = results.parent()?.file_name()?.to_str()?;
+    if session.len() != 36
+        || !session.bytes().enumerate().all(|(index, byte)| {
+            if matches!(index, 8 | 13 | 18 | 23) {
+                byte == b'-'
+            } else {
+                byte.is_ascii_hexdigit()
+            }
+        })
+    {
+        return None;
+    }
+    let path = bounded_text(
+        &format!("tool-results/{name}"),
+        crate::content::MAX_DESCRIPTOR_CHARS,
+    );
+    let call_id = block["tool_use_id"]
+        .as_str()
+        .map(|id| bounded_text(id, crate::content::MAX_DESCRIPTOR_CHARS));
+    Some(PersistedOutput {
+        preview,
+        reference: ArtifactReference {
+            kind: "claude-persisted-tool-output".to_owned(),
+            descriptor_truncated: path.truncated || call_id.as_ref().is_some_and(|id| id.truncated),
+            path: Some(path.text),
+            recorded_size: Some(size.to_owned()),
+            tool_call_id: call_id.map(|id| id.text),
+            body_availability: Some(ContentAvailability::ReferenceOnly),
+            ..ArtifactReference::default()
+        },
+    })
+}
+
+fn persisted_size(size: &str) -> bool {
+    size.len() <= 32
+        && size.ends_with('B')
+        && !size.chars().any(char::is_whitespace)
+        && size.starts_with(|character: char| character.is_ascii_digit())
+        && size.parse::<crate::byte_size::ByteSize>().is_ok()
+}
+
 fn claude_tool_event(block: &Value, subtype: &str, structured: Option<&Value>) -> ToolEvent {
     let call = subtype == "tool_use";
     let argument_value = block.get("input").cloned().unwrap_or(Value::Null);
+    let persisted = (!call).then(|| persisted_tool_output(block)).flatten();
     ToolEvent {
         kind: if call {
             EventKind::ToolCall
@@ -1578,7 +1789,12 @@ fn claude_tool_event(block: &Value, subtype: &str, structured: Option<&Value>) -
             .then(|| Bounded::retaining_value(&block["input"]))
             .flatten(),
         output: (!call)
-            .then(|| Bounded::from_value(&block["content"]))
+            .then(|| {
+                persisted.as_ref().map_or_else(
+                    || Bounded::from_value(&block["content"]),
+                    |output| Some(Bounded::from_text(output.preview)),
+                )
+            })
             .flatten(),
         read: call
             .then(|| crate::event::direct_read(block["name"].as_str(), &block["input"]))
@@ -1609,6 +1825,8 @@ fn claude_tool_event(block: &Value, subtype: &str, structured: Option<&Value>) -
         },
         artifact_references: if call {
             crate::event::artifact_references(&argument_value)
+        } else if let Some(persisted) = persisted {
+            vec![persisted.reference]
         } else {
             crate::event::artifact_references(&block["content"])
         },
@@ -1810,8 +2028,11 @@ fn subagent_metadata(path: &Path) -> (Value, Option<String>) {
 
 #[cfg(test)]
 mod read_content_tests {
-    use super::{claude_read_content, claude_tool_event};
+    use super::{claude_attachment, claude_read_content, claude_tool_event, persisted_tool_output};
+    use crate::content::{ContentAvailability, ContentPart};
+    use crate::event::ReadLines;
     use serde_json::json;
+    use serde_json::Value;
 
     #[test]
     fn numbered_content_preserves_bytes_and_requires_every_line() {
@@ -1872,5 +2093,102 @@ mod read_content_tests {
         ] {
             assert_eq!(claude_read_content(&json!("1\ttext"), Some(&result)), None);
         }
+    }
+
+    #[test]
+    fn attached_body_validates_ranges_and_keeps_path_fallbacks() {
+        let file = json!({"content":"body", "filePath":"nested.rs", "startLine":2,"numLines":2});
+        let record = json!({"type":"attachment", "attachment": {
+            "type":"file", "displayPath":"shown.rs", "filename":"named.rs",
+            "content":{"type":"text", "file":file}
+        }});
+        let artifact = |value: &Value| match claude_attachment(value).unwrap().parts.remove(0) {
+            ContentPart::FileReference { reference, .. } => reference,
+            _ => unreachable!(),
+        };
+        let reference = artifact(&record);
+        assert_eq!(reference.path.as_deref(), Some("shown.rs"));
+        assert_eq!(reference.body_lines, Some(ReadLines { start: 2, end: 3 }));
+        assert_eq!(reference.total_lines, None);
+        let mut fallback = record.clone();
+        fallback["attachment"]
+            .as_object_mut()
+            .unwrap()
+            .remove("displayPath");
+        assert_eq!(artifact(&fallback).path.as_deref(), Some("nested.rs"));
+        fallback["attachment"]["content"]["file"]
+            .as_object_mut()
+            .unwrap()
+            .remove("filePath");
+        assert_eq!(artifact(&fallback).path.as_deref(), Some("named.rs"));
+        assert!(artifact(&fallback).body.is_none());
+        fallback["attachment"]
+            .as_object_mut()
+            .unwrap()
+            .remove("filename");
+        assert!(artifact(&fallback).path.is_none());
+        for file in [
+            json!({"content":"body","filePath":"nested.rs","startLine":0,"numLines":1}),
+            json!({"content":"body","filePath":"nested.rs","startLine":2,"numLines":2,"totalLines":2}),
+            json!({"content":"body","filePath":"nested.rs","startLine":2,"numLines":2,"totalLines":"4"}),
+            json!({"content":"body","filePath":"nested.rs","startLine":18446744073709551615u64,"numLines":2}),
+            json!({"content":17,"filePath":"nested.rs","startLine":1,"numLines":1}),
+            json!({"content":"body","filePath":"nested.rs","startLine":1}),
+        ] {
+            let mut malformed = record.clone();
+            malformed["attachment"]["content"]["file"] = file;
+            let reference = artifact(&malformed);
+            assert_eq!(reference.path.as_deref(), Some("shown.rs"));
+            assert!(reference.body.is_none());
+            assert_eq!(
+                reference.body_availability,
+                Some(ContentAvailability::ReferenceOnly)
+            );
+        }
+        let mut unsupported = record.clone();
+        unsupported["attachment"]["content"]["type"] = json!("image");
+        assert!(artifact(&unsupported).body.is_none());
+        let mut oversized = record;
+        oversized["attachment"]["content"]["file"]["content"] =
+            json!("界".repeat(crate::content::MAX_ARTIFACT_BODY_CHARS + 1));
+        let reference = artifact(&oversized);
+        let body = reference.body.unwrap();
+        assert_eq!(
+            body.text.chars().count(),
+            crate::content::MAX_ARTIFACT_BODY_CHARS
+        );
+        assert!(body.truncated);
+        assert_eq!(
+            reference.body_availability,
+            Some(ContentAvailability::ReadBound)
+        );
+    }
+
+    #[test]
+    fn persisted_envelopes_require_complete_qualified_carriers() {
+        let envelope = "<persisted-output>\nOutput too large (30.1KB). Full output saved to: /recordings/20000000-0000-4000-8000-000000000002/tool-results/result001.txt\n\nPreview (first 2KB):\npreview \n\n</persisted-output>";
+        let block = json!({"content":envelope,"tool_use_id":"tool-synthetic"});
+        let output = persisted_tool_output(&block).unwrap();
+        assert_eq!(output.preview, "preview \n");
+        assert_eq!(
+            output.reference.tool_call_id.as_deref(),
+            Some("tool-synthetic")
+        );
+        for malformed in [
+            envelope.replace("30.1KB", "unknown"),
+            envelope.replace("Preview (first 2KB):", "Preview:"),
+            envelope.replace("/tool-results/", "/tool-results/../tool-results/"),
+            envelope.replace("20000000-0000-4000-8000-000000000002", "not-a-session"),
+            envelope.replace("/recordings/", "recordings/"),
+            envelope.replace("result001.txt", "result001.bin"),
+            envelope.replace("</persisted-output>", ""),
+            format!("prefix {envelope}"),
+            format!("{envelope} suffix"),
+        ] {
+            assert!(persisted_tool_output(&json!({"content":malformed})).is_none());
+        }
+        assert!(
+            persisted_tool_output(&json!({"content":[{"type":"text","text":envelope}]})).is_none()
+        );
     }
 }

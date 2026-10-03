@@ -858,7 +858,13 @@ enum Command {
     /// Show one session. The session carries a source descriptor and optional
     /// activity timestamps. Claude compaction boundaries are notices with typed
     /// context-event measurements and preserved anchors; use --full or history
-    /// pages to retrieve retained pre-compaction messages. Every turn carries a
+    /// pages to retrieve retained pre-compaction messages. Claude file attachments
+    /// are ambient file references with bounded text bodies and recorded line
+    /// ranges; compact references have no body. Referenced files are never opened.
+    /// Instructions, environment and prompt snapshots remain unrecognized.
+    /// Complete persisted-output tool results show their preview and a reference-only
+    /// file with its recorded size label; the external body is never read.
+    /// Every turn carries a
     /// `kind` naming what the harness
     /// recorded it as, and a user turn holding a harness command, notice, or
     /// attached context is headed `user/<kind>` rather than `user`. The human
@@ -934,7 +940,7 @@ enum Command {
         json: bool,
     },
     /// Search normalized historical turns within an explicit page budget, retaining coverage gaps.
-    /// JSON uses tapes-history-search/9; matches retain source references, native IDs,
+    /// JSON uses tapes-history-search/10; matches retain source references, native IDs,
     /// kinds and timestamps. Page bounds and ordinals are page-local coordinates.
     HistorySearch {
         #[command(flatten)]
@@ -1010,7 +1016,7 @@ enum Command {
         program: Vec<String>,
         /// Stream the whole recording instead of its bounded tail, writing
         /// each event as it is paired so memory follows the calls awaiting a
-        /// result rather than the file; with --json the same tapes-events/13
+        /// result rather than the file; with --json the same tapes-events/12
         /// object is written event by event. The recording is read twice, the
         /// second read replaying the first; --tail, --name, --call-id, and
         /// --program select as they do over a bounded read. Installed Claude,
@@ -1018,13 +1024,15 @@ enum Command {
         /// updated in place and a second read may not repeat the first.
         #[arg(long, conflicts_with = "read_bytes")]
         full: bool,
-        /// Render the versioned tapes-events/13 object as JSON. `turn_ordinal`
+        /// Render the versioned tapes-events/12 object as JSON. `turn_ordinal`
         /// names the source turn at the same coordinate printed by show;
         /// `ordinal` retains that coordinate for both call and result. Completed Codex
         /// CommandExecution events include integer `exit` when recorded; other
         /// events omit it without structured process status. Each read call
         /// includes its recorded path and range, outcome, and returned-text
-        /// digest. Optional content_sha256 names undecorated file bytes of the
+        /// digest. Claude persisted-output results carry a reference-only file
+        /// with a recorded size label and keep the preview as visible output.
+        /// Optional content_sha256 names undecorated file bytes of the
         /// returned range only when the recorded format establishes them.
         /// Unknown formats and truncated output omit it. An unpaired event's `incomplete` is `no-result-in-read` when
         /// the read ended before a result, `call-before-read-bound` when a
@@ -1120,7 +1128,7 @@ enum Command {
         /// updated in place and a second read may not repeat the first.
         #[arg(long, conflicts_with = "read_bytes")]
         full: bool,
-        /// Render the versioned tapes-stats/12 object, or tapes-stats-summary/7
+        /// Render the versioned tapes-stats/13 object, or tapes-stats-summary/7
         /// for a selection, as JSON. `warnings` names the limits of the read:
         /// `read-window`, `tail-window`, `kind-unknown`, `kind-undeclared` (a
         /// turn of a kind its harness declares it cannot record, so the
@@ -1133,7 +1141,7 @@ enum Command {
         json: bool,
     },
     /// Where quota went. A session named by id or reached with --latest
-    /// answers that session as tapes-usage/9: its recorded tokens, cost, and
+    /// answers that session as tapes-usage/10: its recorded tokens, cost, and
     /// turn counts, plus whatever else its harness recorded — a context
     /// window, a provider quota window, wall-clock durations, a per-model
     /// split. A scope or listing filter instead answers the whole selection
@@ -1185,7 +1193,7 @@ enum Command {
             conflicts_with = "read_bytes"
         )]
         series: Option<Option<usize>>,
-        /// Render the versioned tapes-usage/9 object, or tapes-usage-summary/5
+        /// Render the versioned tapes-usage/10 object, or tapes-usage-summary/5
         /// for a selection, as JSON. `session.model_observation` says
         /// whether more than one model and effort was observed (`mixed`) and
         /// whether a gap, partial read or budget kept the split incomplete
@@ -1199,7 +1207,7 @@ enum Command {
         json: bool,
     },
     /// What a continuation of one session needs from its recording, as
-    /// tapes-brief/10: where the work stopped, the working directory and the
+    /// tapes-brief/11: where the work stopped, the working directory and the
     /// commit it sits on, the calls the read never saw a result for, the
     /// children whose outcome the store does not record, and a bounded tail
     /// of the exchange. It reads the recording alone and judges nothing —
@@ -1215,13 +1223,13 @@ enum Command {
         /// out of the tail.
         #[arg(long, value_name = "N", default_value_t = DEFAULT_BRIEF_TAIL)]
         tail: usize,
-        /// Render the versioned tapes-brief/10 object as JSON. Each `in_flight`
+        /// Render the versioned tapes-brief/11 object as JSON. Each `in_flight`
         /// list holds at most 20 entries, with a note when the bound cut it.
         #[arg(long)]
         json: bool,
     },
     /// What each session of a selection ends on, one bounded record each, as
-    /// tapes-endings/8, including a session's recognized launch mode when one
+    /// tapes-endings/9, including a session's recognized launch mode when one
     /// was recorded. The selection uses the flags `list` and `export` take,
     /// applied before any transcript is opened; each selected session then
     /// costs one bounded read of its newest turns and one lineage read. Every
@@ -1287,7 +1295,7 @@ enum Command {
         /// attached context stay out of it.
         #[arg(long)]
         text: bool,
-        /// Render the versioned tapes-endings/8 object as JSON. An ending's
+        /// Render the versioned tapes-endings/9 object as JSON. An ending's
         /// `source.coverage` is `read-window` when a source bound withheld
         /// turns, `window` when only the --tail window omitted any, and
         /// `session` otherwise.
@@ -4165,14 +4173,37 @@ fn render_header(session: &Session, by_latest: bool) -> String {
 
 fn render_turn(turn: &Turn) -> String {
     let role = human_speaker(turn);
+    let mut text = turn.text.clone();
+    for part in &turn.parts {
+        if let agent_tapes_core::content::ContentPart::FileReference { reference, .. } = part {
+            let availability = reference.body_availability.map_or_else(
+                || "unknown".to_owned(),
+                |availability| serde_json::to_string(&availability).unwrap_or_default(),
+            );
+            text.push_str(&format!(
+                "\nfile-reference: {}; body: {}",
+                reference.path.as_deref().unwrap_or("(unnamed)"),
+                availability.trim_matches('"'),
+            ));
+            if let Some(size) = &reference.recorded_size {
+                text.push_str(&format!("; recorded size: {size}"));
+            }
+            if let Some(lines) = &reference.body_lines {
+                text.push_str(&format!("; lines: {}-{}", lines.start, lines.end));
+            }
+            if let Some(total) = reference.total_lines {
+                text.push_str(&format!("; total lines: {total}"));
+            }
+        }
+    }
     let mut rendered = match turn.ts {
         Some(ts) => format!(
             "[{role} #{} {}]\n{}\n",
             turn.ordinal,
             human_timestamp(ts),
-            turn.text
+            text
         ),
-        None => format!("[{role} #{}]\n{}\n", turn.ordinal, turn.text),
+        None => format!("[{role} #{}]\n{}\n", turn.ordinal, text),
     };
     if turn.text_truncated == Some(true) {
         if let Some(original) = turn.text_chars {

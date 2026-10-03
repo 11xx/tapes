@@ -40,8 +40,8 @@ pub mod timeline;
 pub mod title;
 pub mod usage;
 
-pub const LIST_SCHEMA: &str = "tapes-list/8";
-pub const EXPORT_MANIFEST_SCHEMA: &str = "tapes-export-manifest/6";
+pub const LIST_SCHEMA: &str = "tapes-list/9";
+pub const EXPORT_MANIFEST_SCHEMA: &str = "tapes-export-manifest/7";
 pub const USAGE_SUMMARY_SCHEMA: &str = "tapes-usage-summary/5";
 /// Number of normalized turns a `list --search` query inspects per session.
 /// Keeping this fixed makes the listing's cost predictable for callers.
