@@ -77,7 +77,10 @@ fn expand_pi_path(raw: OsString, home: impl Fn() -> Result<PathBuf>) -> Result<P
         return home();
     }
     if let Some(rest) = bytes.strip_prefix(b"~/") {
-        let rest = OsString::from_vec(rest.to_vec());
+        // Node's `join` keeps the home directory however many separators
+        // follow `~`; a leading `/` would make Rust's `join` discard it.
+        let start = rest.iter().take_while(|&&byte| byte == b'/').count();
+        let rest = OsString::from_vec(rest[start..].to_vec());
         return Ok(home()?.join(rest));
     }
     if bytes.starts_with(b"file://") {
@@ -225,6 +228,8 @@ mod tests {
         let expand = |raw: &str| expand_pi_path(OsString::from(raw), home).unwrap();
         assert_eq!(expand("~"), PathBuf::from("/home/fixture"));
         assert_eq!(expand("~/agent"), PathBuf::from("/home/fixture/agent"));
+        assert_eq!(expand("~//agent"), PathBuf::from("/home/fixture/agent"));
+        assert_eq!(expand("~///"), PathBuf::from("/home/fixture"));
         assert_eq!(expand("/srv/pi agent"), PathBuf::from("/srv/pi agent"));
         assert_eq!(expand("relative/agent"), PathBuf::from("relative/agent"));
         assert_eq!(expand("~other/agent"), PathBuf::from("~other/agent"));
