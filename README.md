@@ -54,8 +54,8 @@ tapes list --remote build-box             # sessions on another machine, read ov
 ```
 
 Without `--here`, a listing covers every session on the machine. Every command
-except `export` takes `--json`, and each JSON answer names its versioned
-schema. Claude Code and Codex record how each session was launched; Pi does
+that reads sessions, except `export`, takes `--json`, and each JSON answer
+names its versioned schema. Claude Code and Codex record how each session was launched; Pi does
 once `tapes install pi` adds a small extension that records it, the one file
 `tapes` writes outside its own output.
 
