@@ -12417,7 +12417,7 @@ fn artifact_reads_only_confined_persisted_results() {
     assert_eq!(default_budget["truncated"], true);
     {
         use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&file, fs::Permissions::from_mode(0)).unwrap();
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o000)).unwrap();
         if fs::File::open(&file).is_err() {
             assert!(!read(token, "6").status.success());
         }
