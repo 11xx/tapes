@@ -9678,7 +9678,7 @@ fn history_pages_cover_records_once_and_reject_changed_sources() {
         "request 00",
     ]);
     let human = String::from_utf8(human.stdout).unwrap();
-    assert!(human.contains("page-local #0 Operator 2026-01-01T10:01:00Z"));
+    assert!(human.contains("page-local #0 operator 2026-01-01T10:01:00Z"));
     fs::write(&path, format!("{body}\n")).unwrap();
     let changed = run(&["page", id, "--cursor", &first_cursor, "--json"]);
     assert!(!changed.status.success());

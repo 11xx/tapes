@@ -1638,11 +1638,11 @@ fn dispatch(cli: Cli) -> Result<()> {
                 );
                 for found in report.matches {
                     println!(
-                        "[page {}..{} page-local #{} {:?}{}] {}",
+                        "[page {}..{} page-local #{} {}{}] {}",
                         found.page_start,
                         found.page_end,
                         found.ordinal,
-                        found.kind,
+                        found.kind.label(),
                         found
                             .ts
                             .map(|ts| format!(" {}", human_timestamp(ts)))
