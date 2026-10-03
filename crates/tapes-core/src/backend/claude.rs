@@ -1438,12 +1438,18 @@ fn claude_attachment(value: &Value) -> Option<Turn> {
         .body
         .as_ref()
         .map_or_else(String::new, |body| body.text.clone());
+    let body_present = reference.body.is_some();
     let part = ContentPart::FileReference {
         reference,
         source_field: "attachment".to_owned(),
         native_kind: format!("attachment/{kind}"),
         record_ref: None,
     };
+    let mut parts = vec![part];
+    if body_present {
+        parts.push(text_part(&text, "attachment.content.file.content", "text"));
+    }
+    let retained_parts = parts.len();
     turn(
         Role::System,
         TurnKind::Ambient,
@@ -1452,11 +1458,11 @@ fn claude_attachment(value: &Value) -> Option<Turn> {
         value["uuid"].as_str().map(str::to_owned),
         None,
         TurnContent {
-            parts: vec![part],
+            parts,
             coverage: ContentCoverage {
                 carrier: ContentCarrier::AssociatedArtifact,
                 availability,
-                retained_parts: 1,
+                retained_parts,
                 omitted_parts: 0,
                 omitted_reason: None,
             },

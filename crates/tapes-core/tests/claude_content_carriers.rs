@@ -60,6 +60,12 @@ fn attached_files_are_ambient_and_agree_across_read_modes() {
         .turns
         .iter()
         .all(|turn| turn.kind == TurnKind::Ambient && !turn.kind.in_exchange()));
+    for turn in &transcript.turns {
+        assert_eq!(
+            turn.text,
+            agent_tapes_core::content::project_text(&turn.parts)
+        );
+    }
     let file = &transcript.turns[0];
     let artifact = reference(file);
     assert_eq!(artifact.path.as_deref(), Some("src/example.rs"));
