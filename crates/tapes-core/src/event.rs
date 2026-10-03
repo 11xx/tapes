@@ -2204,6 +2204,8 @@ mod tests {
 
     fn turn(ordinal: usize, seconds: i64, event: ToolEvent) -> Turn {
         Turn {
+            text_truncated: None,
+            text_chars: None,
             context_event: None,
             model: None,
             role: Role::Tool,

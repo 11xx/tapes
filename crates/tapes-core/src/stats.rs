@@ -928,6 +928,8 @@ mod tests {
 
     fn turn(ordinal: usize, kind: TurnKind, seconds: Option<i64>) -> Turn {
         Turn {
+            text_truncated: None,
+            text_chars: None,
             context_event: None,
             model: None,
             role: match kind {

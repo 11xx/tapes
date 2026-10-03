@@ -794,6 +794,8 @@ mod tests {
             },
             turns: vec![
                 Turn {
+                    text_truncated: None,
+                    text_chars: None,
                     context_event: None,
                     model: None,
                     role: Role::User,
@@ -812,6 +814,8 @@ mod tests {
                     tool: None,
                 },
                 Turn {
+                    text_truncated: None,
+                    text_chars: None,
                     context_event: None,
                     model: None,
                     role: Role::Reasoning,
@@ -830,6 +834,8 @@ mod tests {
                     tool: None,
                 },
                 Turn {
+                    text_truncated: None,
+                    text_chars: None,
                     context_event: None,
                     model: None,
                     role: Role::Tool,
@@ -848,6 +854,8 @@ mod tests {
                     tool: None,
                 },
                 Turn {
+                    text_truncated: None,
+                    text_chars: None,
                     context_event: None,
                     model: None,
                     role: Role::Assistant,
@@ -1327,6 +1335,8 @@ mod tests {
     #[test]
     fn tool_labels_come_from_whichever_key_the_harness_uses() {
         let turn = |text: &str| Turn {
+            text_truncated: None,
+            text_chars: None,
             context_event: None,
             model: None,
             role: Role::Tool,

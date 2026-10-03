@@ -1986,6 +1986,8 @@ fn parse_turns(value: &Value, completed_only: bool) -> Vec<Turn> {
         let completed = payload["type"] == "item_completed";
         let event = codex_runtime_tool_event(item, completed, completed_only);
         return vec![Turn {
+            text_truncated: None,
+            text_chars: None,
             context_event: None,
             model: None,
             role: Role::Tool,
@@ -2094,6 +2096,8 @@ fn parse_turns(value: &Value, completed_only: bool) -> Vec<Turn> {
     };
     ((!text.is_empty()) || !parts.is_empty())
         .then_some(Turn {
+            text_truncated: None,
+            text_chars: None,
             context_event: None,
             model: None,
             role,

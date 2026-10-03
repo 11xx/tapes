@@ -2549,6 +2549,8 @@ impl Backend for SearchFixture {
         Ok(Transcript {
             session: session.clone(),
             turns: vec![Turn {
+                text_truncated: None,
+                text_chars: None,
                 context_event: None,
                 model: None,
                 role: Role::User,
@@ -5726,6 +5728,8 @@ impl Backend for BulkExportFixture {
         Ok(Transcript {
             session: session.clone(),
             turns: vec![Turn {
+                text_truncated: None,
+                text_chars: None,
                 context_event: None,
                 model: None,
                 role: Role::User,

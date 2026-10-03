@@ -867,6 +867,13 @@ enum Command {
     /// last rendered turn. Activity comparisons use the whole-second
     /// timestamps shown to the reader.
     Show {
+        /// Cap each shown turn's text at N Unicode characters. JSON includes
+        /// text_truncated: true and the original text_chars on capped turns;
+        /// human output names the omitted character count. Native content
+        /// parts and other metadata retain their own bounds. Applies to
+        /// bounded, --full, supplied-input, and remote reads.
+        #[arg(long, value_name = "N")]
+        turn_chars: Option<usize>,
         #[command(flatten)]
         selection: SelectionArgs,
         #[command(flatten)]
@@ -909,7 +916,7 @@ enum Command {
         #[arg(long, value_name = "SSH-DESTINATION", conflicts_with = "input")]
         remote: Option<String>,
     },
-    /// Read one bounded page of older Claude or Codex history as tapes-page/9,
+    /// Read one bounded page of older Claude or Codex history as tapes-page/10,
     /// including absolute record references and read evidence. A page decodes
     /// only the records inside its byte range, so a turn's kind matches the one
     /// a whole read gives it. Resume with the returned cursor.
@@ -944,7 +951,7 @@ enum Command {
         json: bool,
     },
     /// Recover recorded model observations outside the usual source tail as a
-    /// models-only tapes-page/9 projection, with explicit history coverage.
+    /// models-only tapes-page/10 projection, with explicit history coverage.
     Metadata {
         #[command(flatten)]
         selection: SelectionArgs,
@@ -1529,6 +1536,7 @@ fn dispatch(cli: Cli) -> Result<()> {
             }
         }
         Command::Show {
+            turn_chars,
             selection,
             read,
             tail,
@@ -1547,7 +1555,8 @@ fn dispatch(cli: Cli) -> Result<()> {
                 kinds.selection()
             };
             if let Some(destination) = remote.as_deref() {
-                let args = remote_show_args(&selection, &read, tail, exchange, &kinds, full);
+                let args =
+                    remote_show_args(&selection, &read, tail, exchange, &kinds, full, turn_chars);
                 let mut transcript = remote_show(destination, &args)?;
                 transcript.session.source.replica = Some(destination.to_owned());
                 if json {
@@ -1572,7 +1581,7 @@ fn dispatch(cli: Cli) -> Result<()> {
                          --scan-bytes, --decoded-bytes, and --record-bytes"
                     ));
                 }
-                return show_full(&selection, tail, turns, json, by_latest);
+                return show_full(&selection, tail, turns, json, by_latest, turn_chars);
             }
             // A selection is cut from every turn the read reached, so its
             // window counts kept turns rather than turns of every kind.
@@ -1599,10 +1608,15 @@ fn dispatch(cli: Cli) -> Result<()> {
                 liveness::annotate(std::slice::from_mut(&mut transcript.session));
                 transcript
             };
-            let transcript = match turns {
+            let mut transcript = match turns {
                 Some((kept, _)) => transcript.project(kept, tail.unwrap_or(100)),
                 None => transcript,
             };
+            if let Some(limit) = turn_chars {
+                for turn in &mut transcript.turns {
+                    turn.cap_text(limit);
+                }
+            }
             if json {
                 print_json(&transcript, &selection.input)?;
             } else {
@@ -2426,9 +2440,11 @@ fn remote_show_args(
     exchange: bool,
     kinds: &TurnKindArgs,
     full: bool,
+    turn_chars: Option<usize>,
 ) -> Vec<OsString> {
     let mut args = RemoteArgs::default();
     args.raw("show");
+    args.value_if("--turn-chars", turn_chars.map(|limit| limit.to_string()));
     if let Some(session) = selection.session.as_deref() {
         args.raw(session);
     }
@@ -3818,9 +3834,11 @@ fn show_full(
     turns: Option<(TurnSelection, &'static str)>,
     json: bool,
     by_latest: bool,
+    turn_chars: Option<usize>,
 ) -> Result<()> {
     let stdout = std::io::stdout();
     let mut sink = FullShow {
+        turn_chars,
         out: std::io::BufWriter::new(stdout.lock()),
         by_latest,
         tail,
@@ -3933,6 +3951,7 @@ impl<W: std::io::Write> FullEvents<W> {
 }
 
 struct FullShow<W: std::io::Write> {
+    turn_chars: Option<usize>,
     out: W,
     by_latest: bool,
     tail: Option<usize>,
@@ -3966,11 +3985,14 @@ impl<W: std::io::Write> agent_tapes_core::TurnSink for FullShow<W> {
         Ok(())
     }
 
-    fn turn(&mut self, turn: Turn) -> Result<()> {
+    fn turn(&mut self, mut turn: Turn) -> Result<()> {
         if let Some((projection, _)) = &mut self.projection {
             if !projection.admit(turn.kind) {
                 return Ok(());
             }
+        }
+        if let Some(limit) = self.turn_chars {
+            turn.cap_text(limit);
         }
         self.total += 1;
         match self.tail {
@@ -4081,7 +4103,7 @@ fn render_header(session: &Session, by_latest: bool) -> String {
 
 fn render_turn(turn: &Turn) -> String {
     let role = human_speaker(turn);
-    match turn.ts {
+    let mut rendered = match turn.ts {
         Some(ts) => format!(
             "[{role} #{} {}]\n{}\n",
             turn.ordinal,
@@ -4089,7 +4111,16 @@ fn render_turn(turn: &Turn) -> String {
             turn.text
         ),
         None => format!("[{role} #{}]\n{}\n", turn.ordinal, turn.text),
+    };
+    if turn.text_truncated == Some(true) {
+        if let Some(original) = turn.text_chars {
+            rendered.push_str(&format!(
+                "[{} characters omitted]\n",
+                original.saturating_sub(turn.text.chars().count())
+            ));
+        }
     }
+    rendered
 }
 
 /// Everything a transcript's human render says after its turns.
@@ -4388,6 +4419,8 @@ mod tests {
                 usage_detail: None,
             },
             turns: vec![Turn {
+                text_truncated: None,
+                text_chars: None,
                 context_event: None,
                 model: None,
                 role: Role::User,

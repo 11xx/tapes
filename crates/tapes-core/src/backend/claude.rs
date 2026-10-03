@@ -1165,6 +1165,8 @@ fn parse_turns_raw(value: &Value) -> Vec<Turn> {
         let segment = &metadata["preservedSegment"];
         let string = |value: &Value| value.as_str().map(str::to_owned);
         return vec![Turn {
+            text_truncated: None,
+            text_chars: None,
             context_event: Some(crate::model::ContextEvent::Compaction(
                 crate::model::Compaction {
                     trigger: string(&metadata["trigger"]),
@@ -1337,6 +1339,8 @@ fn turn(
     content: TurnContent,
 ) -> Option<Turn> {
     ((!text.is_empty()) || !content.parts.is_empty()).then_some(Turn {
+        text_truncated: None,
+        text_chars: None,
         context_event: None,
         model: None,
         kind: role.kind().unwrap_or(user_kind),

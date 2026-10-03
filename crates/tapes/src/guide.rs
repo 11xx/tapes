@@ -254,7 +254,8 @@ READ A RECORDING ON ANOTHER MACHINE
 
 PROBE BEFORE EXPORTING
   tapes show <id> --tail 40      A window, costing no bundle.
-  tapes show <id> --json         tapes-session/16 turns, typed context events, and bounded read, graph, artifact, terminal, and recorded launch evidence.
+  tapes show <id> --turn-chars 2000  Cap each turn’s readable text, naming omitted characters.
+  tapes show <id> --json         tapes-session/17 turns, typed context events, and bounded read, graph, artifact, terminal, and recorded launch evidence.
   tapes show <id> --exchange     Operator and assistant turns only, timestamps and ordinals kept; the name for --only operator,assistant.
   tapes show <id> --omit tool    Every turn but tool calls and results; --only and --omit take kind labels, and export takes both.
   tapes show <id> --full         Every turn of a Claude, Codex, Pi, or OpenCode session, streamed past the read bounds; --json streams it too.
@@ -327,6 +328,13 @@ PROBE BEFORE EXPORTING
   selection. Library consumers use `Session::newest_model_selection()` to
   obtain a `ModelSelectionSpan` and its `last: ModelSelectionRecord` without
   decoding the native records.
+
+  show --turn-chars N caps each turn's text at N Unicode characters after
+  selecting turns. Capped JSON turns carry text_truncated: true and text_chars
+  with the original length; human turns end with the omitted character count.
+  Without the flag text is unchanged. Zero keeps no text. This presentation
+  bound applies to full, supplied-input, and remote reads; native content
+  parts and other metadata retain their own bounds.
 
   events projects harness-neutral tool records as tapes-events/12. Pairing is
   exact within the bounded read; an incomplete call or result says whether its
