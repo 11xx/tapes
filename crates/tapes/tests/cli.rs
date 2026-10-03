@@ -1091,7 +1091,16 @@ fn a_bundle_context_holds_the_turns_show_exchange_returns() {
         .as_array()
         .unwrap()
         .iter()
-        .map(|turn| format!("{} #{}", turn["role"].as_str().unwrap(), turn["ordinal"]))
+        .map(|turn| {
+            let origin = turn["origin"]
+                .as_str()
+                .map_or_else(String::new, |origin| format!(" [origin: {origin}]"));
+            format!(
+                "{}{origin} #{}",
+                turn["role"].as_str().unwrap(),
+                turn["ordinal"]
+            )
+        })
         .collect::<Vec<_>>();
 
     let directory = root.path().join("bundle");
@@ -6975,11 +6984,11 @@ fn show_full_streams_codex_and_pi_recordings_past_the_read_bound() {
     assert!(!bounded.contains("opening request"));
     let full = show(&["show", codex_id, "--full"]);
     assert!(
-        full.contains("[user #0 2026-01-01T10:00:00Z]\nopening request"),
+        full.contains("[user [origin: person] #0 2026-01-01T10:00:00Z]\nopening request"),
         "{}",
         &full[..full.len().min(300)]
     );
-    assert!(full.contains("[user #49 2026-01-01T10:00:00Z]\nclosing request"));
+    assert!(full.contains("[user [origin: person] #49 2026-01-01T10:00:00Z]\nclosing request"));
     assert!(full.contains("the whole recording was streamed"));
 
     let bounded = show(&["show", "pi-full"]);
