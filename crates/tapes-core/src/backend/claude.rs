@@ -1151,7 +1151,7 @@ fn subagent_transcript_count(path: &Path) -> usize {
     subagent_files(path).len()
 }
 
-fn parse_turns(value: &Value) -> Vec<Turn> {
+pub(crate) fn parse_turns(value: &Value) -> Vec<Turn> {
     let model = claude_model(value);
     let mut turns = parse_turns_raw(value);
     for turn in &mut turns {

@@ -4485,6 +4485,7 @@ fn read_associated_report<R: Read>(
     let mut reference = content::artifact_reference(&value, "openai-library-report")
         .unwrap_or_else(|| crate::content::ArtifactReference {
             kind: "openai-library-report".to_owned(),
+            reference: None,
             identity: None,
             origin: None,
             backing: None,

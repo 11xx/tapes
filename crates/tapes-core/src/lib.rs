@@ -18,6 +18,7 @@ pub use event::{
     EVENTS_SCHEMA,
 };
 
+pub mod artifact;
 pub mod backend;
 pub mod brief;
 pub mod bundle;

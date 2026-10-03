@@ -91,3 +91,12 @@ see [its README](crates/tapes-discovery/README.md).
 ## License
 
 [Unlicense](LICENSE) — public domain.
+
+Persisted Claude tool output is read explicitly with
+`tapes artifact <id> --reference <token> --bytes 64KiB --json`.
+Use the opaque `reference` from `show --json` or `events --json` on the same
+native source (including `--native-store claude --native-root <root>`).
+The `tapes-artifact/1` response includes the bounded body, returned byte count,
+truncation, SHA-256 of returned bytes, and `utf-8` or lossless `hex` encoding.
+The maximum budget is 4 MiB. Retrieval refuses symlinks, non-regular files,
+stale results, and references from another recording or source.
