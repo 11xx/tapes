@@ -32,7 +32,7 @@ use crate::model::{
 };
 use crate::usage;
 
-pub const BRIEF_SCHEMA: &str = "tapes-brief/11";
+pub const BRIEF_SCHEMA: &str = "tapes-brief/12";
 /// Newest operator and assistant turns rendered when the caller names no
 /// window. Wide enough to hold the exchange that ended the session, narrow
 /// enough that the brief stays one screen.

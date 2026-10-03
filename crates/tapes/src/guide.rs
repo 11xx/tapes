@@ -308,7 +308,7 @@ READ A RECORDING ON ANOTHER MACHINE
 PROBE BEFORE EXPORTING
   tapes show <id> --tail 40      A window, costing no bundle.
   tapes show <id> --turn-chars 2000  Cap each turn’s readable text, naming omitted characters.
-  tapes show <id> --json         tapes-session/18 turns, typed context events, and bounded read, graph, artifact, terminal, and recorded launch evidence.
+  tapes show <id> --json         tapes-session/19 turns, typed context events, and bounded read, graph, artifact, terminal, and recorded launch evidence.
   tapes show <id> --exchange     Operator and assistant turns only, timestamps and ordinals kept; the name for --only operator,assistant.
   tapes show <id> --only operator --origin person  Operator turns with recorded person origin.
   tapes show <id> --omit tool    Every turn but tool calls and results; --only and --omit take kind labels, and export takes both.
@@ -398,7 +398,7 @@ PROBE BEFORE EXPORTING
   human output is one line per turn. A selected session that cannot be read
   fails the command.
 
-  events <id> projects harness-neutral tool records as tapes-events/13.
+  events <id> projects harness-neutral tool records as tapes-events/14.
   --tool (alias --name) matches the recorded tool name exactly. --command
   matches a case-insensitive substring of a shell call's recorded command
   field (command or cmd), or the serialized input for other tools. Matching
@@ -406,7 +406,7 @@ PROBE BEFORE EXPORTING
   paired results and recorded exit status remain attached to selected calls,
   including results whose recordings omit the tool name.
   events --here or --global accepts the session filters and limits of stats.
-  Selection JSON uses tapes-events-selection/1: each sessions row contains
+  Selection JSON uses tapes-events-selection/2: each sessions row contains
   session, count of matching calls, partial, truncation, and a nested events
   object. --count omits that object, including for one named session. Zero
   matches still produce a row. Partial counts describe only the read window;
@@ -456,7 +456,7 @@ PROBE BEFORE EXPORTING
   Claude, Codex, or Pi recording twice, pairing past the read bound and
   writing each event as it pairs, with the same filters and counts.
 
-  usage answers where a session's quota went as tapes-usage/10: its recorded
+  usage answers where a session's quota went as tapes-usage/11: its recorded
   launch mode when known, tokens, cost, accounting, turns, and any by-model attribution the source can
   support — Claude's recorded cost-state, Codex's request observations, or
   pi's per-message model each qualified by the thinking level in effect. Read
@@ -485,7 +485,7 @@ PROBE BEFORE EXPORTING
   idle_threshold. These figures cover the same read window as recorded span.
   Selection totals sum active milliseconds and stretches across readable sessions.
 
-  stats counts what one recording holds as tapes-stats/13: turns by kind
+  stats counts what one recording holds as tapes-stats/14: turns by kind
   beside the kinds the harness can record at all, so a zero for a kind it
   cannot record is not read as none observed, tool
   calls by name with their paired durations and error counts, unpaired calls
@@ -618,7 +618,7 @@ READ MANY ENDINGS
   tapes endings --global --harness codex --limit 50 --text
 
   endings answers what each session of a selection ends on, as
-  tapes-endings/9, including a session's recorded launch mode when known, so
+  tapes-endings/10, including a session's recorded launch mode when known, so
   choosing which few endings deserve reading costs one
   bounded read each instead of a transcript apiece. The selection is the one
   list and export take, and the scope and filters apply before any transcript
@@ -763,7 +763,7 @@ CONTINUE A COLD SESSION
   tapes brief <id> --tail 20 --json
 
   A continuation has two halves. brief is the transcript's half, as
-  tapes-brief/11: where the session stopped, the directory it worked in and the
+  tapes-brief/12: where the session stopped, the directory it worked in and the
   commit that directory sits on, the tool calls the read never saw a result
   for, the children whose outcome its store does not record, and the last few
   operator and assistant turns, each cut at 600 characters. --tail sets how
@@ -812,7 +812,7 @@ ONE READER PER MACHINE
 CHILD RECORDINGS
   tapes lineage PARENT --json
   tapes child PARENT --reference CHILD --tail 40 --json
-  Read a Claude child's own transcript, usage and ending as tapes-child/9,
+  Read a Claude child's own transcript, usage and ending as tapes-child/10,
   retaining its parent and reference. It is not an ordinary listed session; nested lineage
   remains uninspected and child activity is never added to parent totals.
   The child's id is qualified as PARENT::CHILD, and a child whose recorded
@@ -827,7 +827,7 @@ HISTORICAL READS
   each page. Pass next_cursor back as --cursor. Changed sources refuse;
   malformed and oversized record gaps remain explicit. Budgets protect context:
   1 KiB–4 MiB per page, 1–32 pages per search, 100 excerpts/observations.
-  Search JSON uses tapes-history-search/10. Matches retain the turn's source
+  Search JSON uses tapes-history-search/11. Matches retain the turn's source
   reference, native ID and timestamp when recorded, and its kind. Page byte
   bounds and zero-based ordinals locate matches within a page; ordinals are
   not session indices. Human matches show kind and recorded timestamp.

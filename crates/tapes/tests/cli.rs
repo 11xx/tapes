@@ -2703,7 +2703,7 @@ fn supplied_zip_reads_conversations_and_retains_associated_report_evidence() {
         .unwrap();
     assert!(brief.status.success());
     let brief: Value = serde_json::from_slice(&brief.stdout).unwrap();
-    assert_eq!(brief["schema"], "tapes-brief/11");
+    assert_eq!(brief["schema"], "tapes-brief/12");
     let grouped_brief_part = brief["tail"]
         .as_array()
         .unwrap()
@@ -2722,7 +2722,7 @@ fn supplied_zip_reads_conversations_and_retains_associated_report_evidence() {
         .unwrap();
     assert!(endings.status.success());
     let endings: Value = serde_json::from_slice(&endings.stdout).unwrap();
-    assert_eq!(endings["schema"], "tapes-endings/9");
+    assert_eq!(endings["schema"], "tapes-endings/10");
     let grouped_ending_part = endings["endings"]
         .as_array()
         .unwrap()
@@ -2811,7 +2811,7 @@ fn supplied_citation_descriptors_are_bounded_in_show_and_export() {
         .unwrap();
     assert!(shown.status.success());
     let shown: Value = serde_json::from_slice(&shown.stdout).unwrap();
-    assert_eq!(shown["schema"], "tapes-session/18");
+    assert_eq!(shown["schema"], "tapes-session/19");
     let citation = &shown["artifacts"][0]["citations"][0];
     assert_eq!(citation["uri"]["chars"], 5_024);
     assert_eq!(
@@ -2852,7 +2852,7 @@ fn supplied_citation_descriptors_are_bounded_in_show_and_export() {
         })
         .unwrap();
     let bundle_json: Value = serde_json::from_slice(&fs::read(json_path).unwrap()).unwrap();
-    assert_eq!(bundle_json["schema"], "tapes-session/18");
+    assert_eq!(bundle_json["schema"], "tapes-session/19");
     assert_eq!(
         bundle_json["artifacts"][0]["citations"][0]["title"]["text"]
             .as_str()
@@ -3156,7 +3156,7 @@ fn events_help_explains_pairing_filters_and_the_default_bound() {
     assert!(help.contains("--call-id <ID>"), "{help}");
     assert!(help.contains("--program <PROGRAM>"), "{help}");
     assert!(help.contains("--full-arguments"), "{help}");
-    assert!(help.contains("tapes-events/13"), "{help}");
+    assert!(help.contains("tapes-events/14"), "{help}");
 }
 
 #[test]
@@ -3208,7 +3208,7 @@ fn events_json_answers_call_counts_and_incomplete_calls_without_raw_text() {
     );
     let value: Value = serde_json::from_slice(&output.stdout).unwrap();
 
-    assert_eq!(value["schema"], "tapes-events/13");
+    assert_eq!(value["schema"], "tapes-events/14");
     assert_eq!(value["session"]["id"], id);
     assert!(value.get("truncation").is_none(), "{value}");
     assert_eq!(
@@ -3717,7 +3717,7 @@ fn events_expose_nested_declarations_and_qualified_artifact_consumption() {
         String::from_utf8_lossy(&output.stderr)
     );
     let value: Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(value["schema"], "tapes-events/13");
+    assert_eq!(value["schema"], "tapes-events/14");
     let events = value["events"].as_array().unwrap();
     let shell_call = events
         .iter()
@@ -6941,7 +6941,7 @@ fn show_full_streams_a_claude_recording_past_the_read_bound() {
 
     let json: Value =
         serde_json::from_str(&stdout(&["show", "full-claude", "--full", "--json"])).unwrap();
-    assert_eq!(json["schema"], "tapes-session/18");
+    assert_eq!(json["schema"], "tapes-session/19");
     assert_eq!(json["turns"].as_array().unwrap().len(), 50);
     assert_eq!(json["turns"][0]["text"], "opening request");
     assert_eq!(json["turns"][49]["ordinal"], 49);
@@ -7898,7 +7898,7 @@ fn usage_help_names_the_schema_and_what_the_figures_mean() {
     let output = tapes().args(["usage", "--help"]).output().unwrap();
     assert!(output.status.success());
     let help = String::from_utf8_lossy(&output.stdout);
-    assert!(help.contains("tapes-usage/10"), "{help}");
+    assert!(help.contains("tapes-usage/11"), "{help}");
     assert!(
         help.contains("basis and coverage decide whether figures may be summed"),
         "{help}"
@@ -7931,7 +7931,7 @@ fn usage_json_reports_recorded_facts_and_turn_counts_show_agrees_with() {
     );
     let value: Value = serde_json::from_slice(&output.stdout).unwrap();
 
-    assert_eq!(value["schema"], "tapes-usage/10");
+    assert_eq!(value["schema"], "tapes-usage/11");
     assert_eq!(value["session"]["id"], id);
     assert_eq!(value["session"]["source"]["recorded_harness"], "codex");
     assert_eq!(
@@ -7993,7 +7993,7 @@ fn usage_series_is_opt_in_bounded_and_keeps_legacy_classifications() {
         String::from_utf8_lossy(&output.stderr)
     );
     let value: Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(value["schema"], "tapes-usage/10");
+    assert_eq!(value["schema"], "tapes-usage/11");
     assert_eq!(value["series"]["observed"], 3);
     assert_eq!(value["series"]["returned"], 2);
     assert_eq!(value["series"]["rows"][0]["classification"], "advance");
@@ -8081,7 +8081,7 @@ fn usage_full_counts_every_turn_and_folds_the_whole_recordings_counters() {
     assert_eq!(bounded["accounting"]["coverage"], "read-window");
 
     let full = json(&["usage", "usage-full", "--full", "--json"]);
-    assert_eq!(full["schema"], "tapes-usage/10");
+    assert_eq!(full["schema"], "tapes-usage/11");
     assert_eq!(full["turns"]["total"], 50, "{full}");
     assert_eq!(full["turns"]["user"], 2);
     assert_eq!(full["turns"]["assistant"], 48);
@@ -8598,7 +8598,7 @@ fn endings_help_names_the_schema_and_what_it_does_not_do() {
     assert!(output.status.success());
     let help = String::from_utf8_lossy(&output.stdout);
 
-    assert!(help.contains("tapes-endings/9"), "{help}");
+    assert!(help.contains("tapes-endings/10"), "{help}");
     assert!(help.contains("never on their text"), "{help}");
     assert!(help.contains("labels no session complete"), "{help}");
     assert!(help.contains("--tail <N>"), "{help}");
@@ -8635,7 +8635,7 @@ fn endings_applies_the_activity_window_before_reading_any_transcript() {
     );
     let value: Value = serde_json::from_slice(&output.stdout).unwrap();
 
-    assert_eq!(value["schema"], "tapes-endings/9");
+    assert_eq!(value["schema"], "tapes-endings/10");
     assert_eq!(
         value["selection"]["activity"],
         serde_json::json!({ "since": "2026-01-01T12:00:00Z" })
@@ -8652,7 +8652,7 @@ fn endings_applies_the_activity_window_before_reading_any_transcript() {
         ]
     );
     for ending in endings {
-        assert_eq!(ending["source"]["schema"], "tapes-endings/9");
+        assert_eq!(ending["source"]["schema"], "tapes-endings/10");
         assert_eq!(ending["source"]["source"]["recorded_harness"], "codex");
         assert_eq!(ending["facts"], serde_json::json!(["assistant-close"]));
         // The structural report carries no transcript text of its own.
@@ -8837,7 +8837,7 @@ fn stats_help_names_the_schema_and_what_the_figures_cover() {
     let output = tapes().args(["stats", "--help"]).output().unwrap();
     assert!(output.status.success());
     let help = String::from_utf8_lossy(&output.stdout);
-    assert!(help.contains("tapes-stats/13"), "{help}");
+    assert!(help.contains("tapes-stats/14"), "{help}");
     assert!(help.contains("complete pairs only"), "{help}");
     assert!(
         help.contains("share of recorded token counts rather than of cost"),
@@ -8944,7 +8944,7 @@ fn stats_json_counts_a_chosen_recording_exactly() {
     assert_eq!(
         comparable,
         serde_json::json!({
-            "schema": "tapes-stats/13",
+            "schema": "tapes-stats/14",
             "session": {
                 "id": id,
                 "source": {
@@ -9265,7 +9265,7 @@ fn brief_help_names_the_schema_and_the_half_it_reads() {
     assert!(output.status.success());
     let help = String::from_utf8_lossy(&output.stdout);
 
-    assert!(help.contains("tapes-brief/11"), "{help}");
+    assert!(help.contains("tapes-brief/12"), "{help}");
     assert!(help.contains("reads the recording alone"), "{help}");
     assert!(help.contains("--tail <N>"), "{help}");
     assert!(help.contains("[default: 12]"), "{help}");
@@ -9324,7 +9324,7 @@ fn brief_renders_the_continuation_in_reading_order() {
     assert!(narrow.contains("[assistant #4"), "{narrow}");
 
     let value: Value = serde_json::from_slice(&run(&["brief", id, "--json"])).unwrap();
-    assert_eq!(value["schema"], "tapes-brief/11");
+    assert_eq!(value["schema"], "tapes-brief/12");
     assert_eq!(value["session"]["id"], id);
     assert_eq!(value["working_set"]["directory_exists"], false);
     assert!(value["working_set"].get("git").is_none(), "{value}");
@@ -9761,7 +9761,7 @@ fn history_pages_cover_records_once_and_reject_changed_sources() {
             > complete["matches"][0]["page_start"].as_u64().unwrap()
     );
     assert!(complete["next_cursor"].is_null());
-    assert_eq!(complete["schema"], "tapes-history-search/10");
+    assert_eq!(complete["schema"], "tapes-history-search/11");
     let full: Value =
         serde_json::from_slice(&run(&["show", id, "--full", "--json"]).stdout).unwrap();
     let opening = full["turns"]
@@ -10155,7 +10155,7 @@ fn child_reads_are_qualified_and_never_become_parent_activity() {
         String::from_utf8_lossy(&output.stderr)
     );
     let view: Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(view["schema"], "tapes-child/9");
+    assert_eq!(view["schema"], "tapes-child/10");
     assert_eq!(view["parent"]["id"], "session-claude");
     assert_eq!(
         view["transcript"]["session"]["id"],
@@ -10290,7 +10290,7 @@ fn child_full_streams_a_subagent_recording_past_the_read_bound() {
     assert!(bounded["usage"]["turns"]["total"].as_u64().unwrap() < 50);
 
     let full = json(&[&child[..], &["--full", "--tail", "2", "--json"]].concat());
-    assert_eq!(full["schema"], "tapes-child/9");
+    assert_eq!(full["schema"], "tapes-child/10");
     assert_eq!(full["usage"]["turns"]["total"], 50, "{}", full["usage"]);
     assert_eq!(full["usage"]["turns"]["coverage"], "session");
     assert_eq!(full["usage"]["read"]["projection_options"][0], "full");
@@ -10558,7 +10558,7 @@ fn events_full_arguments_opt_in_returns_the_complete_argument_text() {
 
     let bounded: Value =
         serde_json::from_slice(&run(&["events", "session-pi-arguments", "--json"])).unwrap();
-    assert_eq!(bounded["schema"], "tapes-events/13");
+    assert_eq!(bounded["schema"], "tapes-events/14");
     let arguments = arguments_of(&bounded);
     assert_eq!(arguments["chars"], total);
     assert_eq!(
@@ -10592,7 +10592,7 @@ fn events_full_arguments_opt_in_returns_the_complete_argument_text() {
             request.push("--full");
         }
         let selected: Value = serde_json::from_slice(&run(&request)).unwrap();
-        assert_eq!(selected["schema"], "tapes-events-selection/1");
+        assert_eq!(selected["schema"], "tapes-events-selection/2");
         assert_eq!(selected["sessions"].as_array().unwrap().len(), 2);
         let row = selected["sessions"]
             .as_array()
@@ -10662,7 +10662,7 @@ fn events_full_arguments_opt_in_returns_the_complete_argument_text() {
         let mut request = vec!["events", "session-pi-arguments"];
         request.extend(extra.iter().copied());
         let value: Value = serde_json::from_slice(&run(&request)).unwrap();
-        assert_eq!(value["schema"], "tapes-events/13", "{request:?}");
+        assert_eq!(value["schema"], "tapes-events/14", "{request:?}");
         let arguments = arguments_of(&value);
         assert_eq!(arguments["chars"], total, "{request:?}");
         assert_eq!(
@@ -10966,7 +10966,7 @@ fn show_remote_never_joins_the_local_liveness_registry() {
         String::from_utf8_lossy(&output.stderr)
     );
     let value: Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(value["schema"], "tapes-session/18");
+    assert_eq!(value["schema"], "tapes-session/19");
     assert_eq!(value["session"]["id"], CODEX_ONE_ID);
     assert_eq!(value["session"]["source"]["replica"], "replica-host");
     assert!(
@@ -11101,7 +11101,7 @@ fn a_replica_that_cannot_answer_names_the_cause_and_the_destination() {
             "schema",
             "#!/bin/sh\necho '{\"schema\":\"tapes-list/999\",\"sort\":\"newest\",\"sessions\":[],\"unavailable\":[],\"unreadable\":[],\"unsearched\":[],\"scanned\":0,\"scan_truncated\":false}'\nexit 0\n",
             "unsupported remote schema tapes-list/999; this reader reads tapes-list/9",
-            "unsupported remote schema tapes-list/999; this reader reads tapes-session/18",
+            "unsupported remote schema tapes-list/999; this reader reads tapes-session/19",
         ),
         (
             "empty",
@@ -11327,7 +11327,7 @@ fn export_remote_runs_the_replica_export_and_tags_every_path() {
         .unwrap(),
     )
     .unwrap();
-    assert_eq!(written["schema"], "tapes-session/18");
+    assert_eq!(written["schema"], "tapes-session/19");
     assert!(
         !written["events"].as_array().unwrap().is_empty(),
         "the replica's export held no paired tool events: {written}"
@@ -12128,7 +12128,7 @@ fn claude_content_carriers_survive_cli_views_and_bundle_export() {
             args.push("--full");
         }
         let events: Value = serde_json::from_slice(&run(&args)).unwrap();
-        assert_eq!(events["schema"], "tapes-events/13");
+        assert_eq!(events["schema"], "tapes-events/14");
         assert_eq!(events["pairs"]["complete"], 7);
         let result = events["events"]
             .as_array()
@@ -12170,7 +12170,7 @@ fn claude_content_carriers_survive_cli_views_and_bundle_export() {
         })
         .unwrap();
     let bundle: Value = serde_json::from_slice(&fs::read(json_path).unwrap()).unwrap();
-    assert_eq!(bundle["schema"], "tapes-session/18");
+    assert_eq!(bundle["schema"], "tapes-session/19");
     assert_eq!(bundle["content"]["references"], 2);
 }
 
@@ -12691,4 +12691,175 @@ fn opencode_integration_preserves_foreign_files_and_uses_config_directory() {
     assert!(!run("install").status.success());
     assert!(!run("uninstall").status.success());
     fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn pinned_history_cli_keeps_a_generation_across_appends_and_views() {
+    let root = TemporaryDirectory::new(
+        std::env::temp_dir().join(format!("tapes-pinned-history-{}", std::process::id())),
+    );
+    let codex = root.path().join("codex");
+    let sessions = codex.join("sessions");
+    fs::create_dir_all(&sessions).unwrap();
+    let id = "70000000-0000-0000-0000-000000000001";
+    let path = sessions.join(format!("rollout-2026-01-01T10-00-00-{id}.jsonl"));
+    let header = serde_json::json!({"type":"session_meta","payload":{"id":id,"source":"exec","cwd":"/fixtures/project"}});
+    let model = serde_json::json!({"type":"turn_context","payload":{"model":"fixture-model","effort":"low"}});
+    let mut body = format!("{header}\n");
+    for i in 0..80 {
+        let turn = serde_json::json!({"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":format!("pinned request {i:02} {}", "x".repeat(80))}]}});
+        body.push_str(&format!("{model}\n{turn}\n"));
+    }
+    fs::write(&path, &body).unwrap();
+    let run = |args: &[&str]| {
+        let mut command = tapes();
+        command.args(args);
+        with_fixture_env(&mut command, &codex, &root.path().join("home"), root.path());
+        command.output().unwrap()
+    };
+    let json = |output: Output| {
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice::<Value>(&output.stdout).unwrap()
+    };
+    let full = json(run(&["show", id, "--full", "--json"]));
+    let first = json(run(&["page", id, "--pin", "--bytes", "1024", "--json"]));
+    assert_eq!(first["schema"], "tapes-page/12");
+    assert_eq!(first["pin"]["chunk_bytes"], 1024);
+    assert_eq!(first["pin"]["pinned_bytes"], body.len());
+    assert!(first["pin"]["chunks"].as_u64().unwrap() > 1);
+    assert!(!first["pin"]["verified"].as_array().unwrap().is_empty());
+    assert_eq!(
+        first["read"]["source_prefix_digest"],
+        full["read"]["source_prefix_digest"]
+    );
+    assert!(first["read"]["ranges"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|range| range["kind"] == "verification"));
+    let cursor = first["next_cursor"].as_str().unwrap();
+    let decoded: Value = serde_json::from_str(cursor).unwrap();
+    assert_eq!(decoded["mode"], "pinned");
+    let search = json(run(&[
+        "history-search",
+        id,
+        "--pin",
+        "--bytes",
+        "1024",
+        "--pages",
+        "3",
+        "--search",
+        "pinned request",
+        "--json",
+    ]));
+    assert_eq!(search["schema"], "tapes-history-search/11");
+    assert_eq!(search["pages_read"], 3);
+    assert!(!search["matches"].as_array().unwrap().is_empty());
+    let search_cursor = search["next_cursor"].as_str().unwrap();
+    let continuation_args = [
+        "history-search",
+        id,
+        "--cursor",
+        search_cursor,
+        "--bytes",
+        "1024",
+        "--pages",
+        "3",
+        "--search",
+        "pinned request",
+        "--json",
+    ];
+    let before = json(run(&continuation_args));
+    let metadata = json(run(&[
+        "metadata", id, "--pin", "--bytes", "1024", "--pages", "3", "--json",
+    ]));
+    assert_eq!(metadata["schema"], "tapes-metadata-history/11");
+    assert!(!metadata["observations"].as_array().unwrap().is_empty());
+    assert_eq!(
+        metadata["reads"][0]["projection_options"],
+        serde_json::json!(["models-only"])
+    );
+    let native = json(run(&[
+        "page",
+        id,
+        "--native-store",
+        "codex",
+        "--native-root",
+        codex.to_str().unwrap(),
+        "--pin",
+        "--bytes",
+        "1024",
+        "--json",
+    ]));
+    assert_eq!(
+        native["read"]["source_prefix_digest"],
+        first["read"]["source_prefix_digest"]
+    );
+    let strict = json(run(&["page", id, "--bytes", "1024", "--json"]));
+    assert!(strict.get("pin").is_none());
+    let strict_cursor = strict["next_cursor"].as_str().unwrap();
+    let mut legacy: Value = serde_json::from_str(strict_cursor).unwrap();
+    legacy.as_object_mut().unwrap().remove("mode");
+    assert!(
+        run(&["page", id, "--cursor", &legacy.to_string(), "--json"])
+            .status
+            .success()
+    );
+    for command in ["page", "history-search", "metadata"] {
+        for cursor in [cursor, strict_cursor] {
+            let mut args = vec![command, id, "--pin", "--cursor", cursor];
+            if command == "history-search" {
+                args.extend(["--search", "pinned"]);
+            }
+            let output = run(&args);
+            assert!(!output.status.success());
+            assert!(String::from_utf8_lossy(&output.stderr).contains("cannot be used with"));
+        }
+        let mut args = vec![command, id, "--pin", "--bytes", "1024"];
+        if command == "history-search" {
+            args.extend(["--search", "pinned"]);
+        }
+        let output = run(&args);
+        assert!(output.status.success());
+        assert!(String::from_utf8_lossy(&output.stdout).contains("Pinned "));
+    }
+    let appended = serde_json::json!({"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"appended request"}]}});
+    fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap()
+        .write_all(format!("{appended}\n").as_bytes())
+        .unwrap();
+    let after = json(run(&continuation_args));
+    assert_eq!(before["matches"], after["matches"]);
+    assert_eq!(before["next_cursor"], after["next_cursor"]);
+    for read in after["reads"].as_array().unwrap() {
+        assert_eq!(read["source_revision"], first["read"]["source_revision"]);
+        assert_eq!(
+            read["source_prefix_digest"],
+            first["read"]["source_prefix_digest"]
+        );
+    }
+    for command in ["page", "metadata"] {
+        let continuation = json(run(&[
+            command, id, "--cursor", cursor, "--bytes", "1024", "--json",
+        ]));
+        let read = if command == "page" {
+            &continuation["read"]
+        } else {
+            &continuation["reads"][0]
+        };
+        assert_eq!(
+            read["source_prefix_digest"],
+            first["read"]["source_prefix_digest"]
+        );
+        assert_eq!(read["source_revision"], first["read"]["source_revision"]);
+    }
+    assert!(!run(&["page", id, "--cursor", strict_cursor, "--json"])
+        .status
+        .success());
 }
