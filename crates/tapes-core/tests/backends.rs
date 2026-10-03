@@ -449,6 +449,7 @@ fn pi_launch_modes_match_listing_full_and_streamed_reads() {
         ("launch-pi-resumed", Some(Launch::Interactive)),
         ("launch-pi-none", None),
         ("launch-pi-other", None),
+        ("launch-pi-forked", Some(Launch::Headless)),
     ];
 
     for (id, launch) in expected {
@@ -458,6 +459,28 @@ fn pi_launch_modes_match_listing_full_and_streamed_reads() {
             .unwrap_or_else(|| panic!("pi launch fixture {id} is missing"));
         assert_eq!(listed.launch, launch, "listing {id}");
         assert_eq!(located(&backend, id).launch, launch, "located {id}");
+        let mut cleared = listed.clone();
+        cleared.launch = None;
+        assert_eq!(
+            backend
+                .transcript(&cleared, usize::MAX)
+                .unwrap()
+                .session
+                .launch,
+            launch,
+            "transcript {id}"
+        );
+        let mut stale = listed.clone();
+        stale.launch = Some(Launch::Interactive);
+        assert_eq!(
+            backend
+                .transcript(&stale, usize::MAX)
+                .unwrap()
+                .session
+                .launch,
+            launch,
+            "transcript over stale evidence {id}"
+        );
 
         let mut discard = |_| Ok(());
         let mut stream_input = listed.clone();
@@ -494,38 +517,120 @@ fn pi_launch_entries_are_declined_records_and_other_custom_entries_stay_unrecogn
     assert_eq!(other.unrecognized.get("custom"), Some(&1));
 }
 
-#[test]
-fn pi_launch_survives_a_tail_that_no_longer_reaches_the_opening() {
-    let root = std::env::temp_dir().join(format!("tapes-pi-launch-tail-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&root);
-    std::fs::create_dir_all(&root).unwrap();
-    let mut recording = String::from(concat!(
-        r#"{"type":"session","version":3,"id":"launch-pi-long","timestamp":"2026-01-08T10:00:00Z","cwd":"/fixtures/project"}"#,
-        "\n",
-        r#"{"type":"custom","id":"launch-1","parentId":null,"timestamp":"2026-01-08T10:00:01Z","customType":"tapes.launch","data":{"mode":"tui"}}"#,
-        "\n",
-    ));
+/// A pi recording whose launch entries sit at its opening, in a middle the
+/// bounded windows never reach, and nowhere else.
+fn long_pi_recording(root: &std::path::Path, id: &str, opening: &str, middle: Option<&str>) {
+    let marker = |entry: &str, parent: &str, mode: &str| {
+        format!(
+            r#"{{"type":"custom","id":"{entry}","parentId":"{parent}","timestamp":"2026-01-09T10:00:01Z","customType":"tapes.launch","data":{{"mode":"{mode}","session":"{id}"}}}}"#
+        )
+    };
+    let mut lines = vec![
+        format!(
+            r#"{{"type":"session","version":3,"id":"{id}","timestamp":"2026-01-09T10:00:00Z","cwd":"/fixtures/project"}}"#
+        ),
+        marker("launch-1", "", opening).replace(r#""parentId":"""#, r#""parentId":null"#),
+    ];
     let filler = "x".repeat(1024);
     let mut parent = "launch-1".to_owned();
-    for index in 0..256 {
-        let id = format!("user-{index}");
-        recording.push_str(&format!(
-            r#"{{"type":"message","id":"{id}","parentId":"{parent}","timestamp":"2026-01-08T10:01:00Z","message":{{"role":"user","timestamp":0,"content":[{{"type":"text","text":"{filler}"}}]}}}}"#
+    for index in 0..512 {
+        if index == 64 {
+            if let Some(mode) = middle {
+                lines.push(marker("launch-2", &parent, mode));
+                parent = "launch-2".to_owned();
+            }
+        }
+        let entry = format!("user-{index}");
+        lines.push(format!(
+            r#"{{"type":"message","id":"{entry}","parentId":"{parent}","timestamp":"2026-01-09T10:01:00Z","message":{{"role":"user","timestamp":0,"content":[{{"type":"text","text":"{filler}"}}]}}}}"#
         ));
-        recording.push('\n');
-        parent = id;
+        parent = entry;
     }
     std::fs::write(
-        root.join("2026-01-08T10-00-00-000Z_launch-pi-long.jsonl"),
-        recording,
+        root.join(format!("2026-01-09T10-00-00-000Z_{id}.jsonl")),
+        lines.join("\n") + "\n",
     )
     .unwrap();
+}
 
-    let backend = PiBackend::new(&root).with_read_bytes(agent_tapes_core::backend::MIN_READ_BYTES);
-    let session = located(&backend, "launch-pi-long");
-    let transcript = backend.transcript(&session, usize::MAX).unwrap();
-    assert!(transcript.truncated, "the read must not reach the opening");
-    assert_eq!(session.launch, Some(Launch::Interactive));
+#[test]
+fn a_bounded_pi_read_keeps_interactive_evidence_and_never_claims_headless() {
+    let root = std::env::temp_dir().join(format!("tapes-pi-launch-bounded-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    long_pi_recording(&root, "launch-pi-long-tui", "tui", None);
+    long_pi_recording(&root, "launch-pi-long-print", "print", None);
+    long_pi_recording(&root, "launch-pi-long-hidden", "print", Some("tui"));
+
+    let bounded = PiBackend::new(&root).with_read_bytes(agent_tapes_core::backend::MIN_READ_BYTES);
+    let full = PiBackend::new(&root);
+    for (id, bounded_launch, full_launch) in [
+        (
+            "launch-pi-long-tui",
+            Some(Launch::Interactive),
+            Some(Launch::Interactive),
+        ),
+        ("launch-pi-long-print", None, Some(Launch::Headless)),
+        ("launch-pi-long-hidden", None, Some(Launch::Interactive)),
+    ] {
+        let session = located(&bounded, id);
+        let transcript = bounded.transcript(&session, usize::MAX).unwrap();
+        assert!(
+            transcript.truncated,
+            "{id}: the bounded read must stop short"
+        );
+        assert_eq!(session.launch, bounded_launch, "bounded listing {id}");
+        assert_eq!(
+            transcript.session.launch, bounded_launch,
+            "bounded transcript {id}"
+        );
+
+        let session = located(&full, id);
+        assert_eq!(session.launch, full_launch, "whole read {id}");
+        let mut discard = |_| Ok(());
+        let read = bounded
+            .stream_transcript(&session, None, &mut discard)
+            .unwrap();
+        assert_eq!(
+            bounded.stream_session(&session, &read).unwrap().launch,
+            full_launch,
+            "streamed read {id}"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn a_bounded_claude_read_never_claims_headless() {
+    let root = std::env::temp_dir().join(format!(
+        "tapes-claude-launch-bounded-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&root);
+    let project = root.join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    let id = "10000000-0000-4000-8000-000000000099";
+    let filler = "x".repeat(1024);
+    let lines = (0..512)
+        .map(|index| {
+            format!(
+                r#"{{"type":"user","sessionId":"{id}","uuid":"user-{index}","timestamp":"2026-01-09T10:00:00Z","cwd":"/fixtures/project","entrypoint":"sdk-cli","message":{{"role":"user","content":"{filler}"}}}}"#
+            )
+        })
+        .collect::<Vec<_>>();
+    std::fs::write(project.join(format!("{id}.jsonl")), lines.join("\n") + "\n").unwrap();
+
+    let bounded =
+        ClaudeBackend::new(&root).with_read_bytes(agent_tapes_core::backend::MIN_READ_BYTES);
+    let session = located(&bounded, id);
+    let transcript = bounded.transcript(&session, usize::MAX).unwrap();
+    assert!(transcript.truncated);
+    assert_eq!(session.launch, None);
+    assert_eq!(transcript.session.launch, None);
+    assert_eq!(
+        located(&ClaudeBackend::new(&root), id).launch,
+        Some(Launch::Headless)
+    );
     let _ = std::fs::remove_dir_all(&root);
 }
 

@@ -74,13 +74,16 @@ FIND IT
   interactive, `sdk-cli` is headless, and a recording with both is
   interactive; Codex `cli` and `vscode` sources are interactive, while `exec`
   and a `subagent` source are headless. Pi records no launch mode itself:
-  `tapes install pi` adds an extension that writes a `tapes.launch` entry each
-  time pi opens a session, where `tui` is interactive, `print` and `json` are
-  headless, `rpc` says neither, and any `tui` entry makes the session
-  interactive. Pi sessions recorded without the extension, and OpenCode
-  sessions, carry no marker. Unknown or absent markers never match. These
-  filters apply before the per-harness limit and compose with --harness and
-  the scope flags.
+  `tapes install pi` adds an extension that writes a `tapes.launch` entry,
+  naming the session it was written for, each time pi opens a session. `tui`
+  is interactive, `print` and `json` are headless, `rpc` says neither, any
+  `tui` entry makes the session interactive, and entries a fork copied from
+  its parent are ignored. Pi sessions recorded without the extension, and
+  OpenCode sessions, carry no marker. A bounded read that stops short of a
+  recording keeps interactive evidence it reached but never concludes
+  headless, since the unread part may hold interactive records; `show --full`
+  settles it. Unknown or absent markers never match. These filters apply
+  before the per-harness limit and compose with --harness and the scope flags.
 
   --since and --until filter `last_activity_at`, the newest recorded activity,
   with the half-open rule `since <= last_activity_at < until`, before the

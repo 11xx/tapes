@@ -8,7 +8,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use super::{
-    accounting_for, default_native_store, enrich_native_session, head_directory,
+    accounting_for, bounded_launch, default_native_store, enrich_native_session, head_directory,
     list_discovered_files, list_discovered_files_with_search, merge_launch, read_bounds,
     read_jsonl, read_recording, replay_pin, skipped_records_note, stream_jsonl,
     streamed_trailing_record, timestamp, trailing_record, transcript, transcript_from_recording,
@@ -127,7 +127,10 @@ impl ClaudeBackend {
             .find_map(|value| value["aiTitle"].as_str())
             .map(str::to_owned);
         let model = read.values.iter().rev().find_map(claude_model);
-        let launch = claude_launch(opening.iter().chain(&read.values));
+        let launch = bounded_launch(
+            claude_launch(opening.iter().chain(&read.values)),
+            read.truncated,
+        );
         let (model_observation, model_selections) = claude_selections(read);
         let mut turns = Vec::new();
         for (index, value) in read.values.iter().enumerate() {
@@ -437,7 +440,10 @@ impl Backend for ClaudeBackend {
         let mut session = session.clone();
         session.model = recording.tail.values.iter().rev().find_map(claude_model);
         let opening = recording.opening();
-        session.launch = claude_launch(opening.iter().chain(&recording.tail.values));
+        session.launch = bounded_launch(
+            claude_launch(opening.iter().chain(&recording.tail.values)),
+            recording.tail.truncated,
+        );
         (session.model_observation, session.model_selections) = claude_selections(&recording.tail);
         let mut transcript = transcript_from_recording(
             session,
