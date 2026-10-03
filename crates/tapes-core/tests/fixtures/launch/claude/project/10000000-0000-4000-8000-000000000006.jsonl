@@ -1,0 +1,3 @@
+{"type":"summary","sessionId":"10000000-0000-4000-8000-000000000006","summary":"Interactive then SDK launch fixture"}
+{"type":"user","sessionId":"10000000-0000-4000-8000-000000000006","uuid":"user-cli-first","timestamp":"2026-01-02T15:00:00Z","cwd":"/fixtures/project","entrypoint":"cli","message":{"role":"user","content":"Start the mixed fixture."}}
+{"type":"assistant","sessionId":"10000000-0000-4000-8000-000000000006","uuid":"assistant-sdk-last","timestamp":"2026-01-02T15:00:01Z","cwd":"/fixtures/project","entrypoint":"sdk-cli","message":{"role":"assistant","model":"claude-fixture","content":[{"type":"text","text":"Finish the mixed fixture."}]}}

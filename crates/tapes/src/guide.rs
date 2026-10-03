@@ -308,7 +308,7 @@ PROBE BEFORE EXPORTING
   obtain a `ModelSelectionSpan` and its `last: ModelSelectionRecord` without
   decoding the native records.
 
-  events projects harness-neutral tool records as tapes-events/9. Pairing is
+  events projects harness-neutral tool records as tapes-events/10. Pairing is
   exact within the bounded read; an incomplete call or result says whether its
   counterpart was not reached or not recorded. Event ordinals are the same
   turn coordinates show prints. event_id stays stable across read windows;

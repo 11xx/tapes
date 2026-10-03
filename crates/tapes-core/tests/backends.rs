@@ -335,6 +335,10 @@ fn claude_launch_modes_match_listing_full_and_streamed_reads() {
             Some(Launch::Interactive),
         ),
         ("10000000-0000-4000-8000-000000000005", None),
+        (
+            "10000000-0000-4000-8000-000000000006",
+            Some(Launch::Interactive),
+        ),
     ];
 
     for (id, launch) in expected {
@@ -343,18 +347,12 @@ fn claude_launch_modes_match_listing_full_and_streamed_reads() {
             .find(|session| session.id == id)
             .unwrap_or_else(|| panic!("Claude launch fixture {id} is missing"));
         assert_eq!(listed.launch, launch, "listing {id}");
-        assert_eq!(
-            backend
-                .transcript(listed, usize::MAX)
-                .unwrap()
-                .session
-                .launch,
-            launch,
-            "bounded full read {id}"
-        );
+        let mut full_input = listed.clone();
+        full_input.launch = None;
+        let transcript = backend.transcript(&full_input, usize::MAX).unwrap();
+        assert_eq!(transcript.session.launch, launch, "bounded full read {id}");
 
         if id == expected[0].0 {
-            let transcript = backend.transcript(listed, usize::MAX).unwrap();
             let lineage = agent_tapes_core::lineage::Lineage::default();
             let brief = agent_tapes_core::brief::brief(transcript.clone(), Ok(lineage.clone()), 4);
             assert_eq!(brief.session.launch, launch);
@@ -383,11 +381,13 @@ fn claude_launch_modes_match_listing_full_and_streamed_reads() {
         }
 
         let mut discard = |_| Ok(());
+        let mut stream_input = listed.clone();
+        stream_input.launch = None;
         let read = backend
-            .stream_transcript(listed, None, &mut discard)
+            .stream_transcript(&stream_input, None, &mut discard)
             .unwrap();
         assert_eq!(
-            backend.stream_session(listed, &read).unwrap().launch,
+            backend.stream_session(&stream_input, &read).unwrap().launch,
             launch,
             "streamed read {id}"
         );

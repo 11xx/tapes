@@ -157,7 +157,7 @@ fn claude_coordinates_survive_show_export_and_page() {
             "--json".into(),
         ],
     );
-    assert_eq!(page["schema"], "tapes-page/7");
+    assert_eq!(page["schema"], "tapes-page/8");
     assert_eq!(page["read"]["projection"], page["schema"]);
     assert_eq!(page["read"]["projection_options"], json!(["transcript"]));
     assert_content_reference(&page["turns"][0]["parts"][0]["record_ref"], 0, 0, None);
@@ -330,7 +330,7 @@ fn codex_history_events_and_metadata_report_their_actual_reads() {
         cursor = candidate["next_cursor"].as_str().map(str::to_owned);
         assert!(cursor.is_some(), "history ended before the older operator");
     };
-    assert_eq!(older_small["schema"], "tapes-page/7");
+    assert_eq!(older_small["schema"], "tapes-page/8");
     assert_eq!(older_small["read"]["projection"], older_small["schema"]);
     assert_eq!(
         older_small["read"]["projection_options"],
@@ -395,8 +395,8 @@ fn codex_history_events_and_metadata_report_their_actual_reads() {
             "--json".into(),
         ],
     );
-    assert_eq!(metadata["schema"], "tapes-metadata-history/7");
-    assert_eq!(metadata["reads"][0]["projection"], "tapes-page/7");
+    assert_eq!(metadata["schema"], "tapes-metadata-history/8");
+    assert_eq!(metadata["reads"][0]["projection"], "tapes-page/8");
     assert_eq!(
         metadata["reads"][0]["projection_options"],
         json!(["models-only"])
@@ -404,7 +404,7 @@ fn codex_history_events_and_metadata_report_their_actual_reads() {
     assert!(metadata["reads"][0].get("context_records").is_none());
 
     let events = json_command(root.path(), &["events".into(), id.into(), "--json".into()]);
-    assert_eq!(events["schema"], "tapes-events/9");
+    assert_eq!(events["schema"], "tapes-events/10");
     let event_records = events["events"].as_array().unwrap();
     assert_eq!(event_records.len(), 2);
     for event in event_records {
