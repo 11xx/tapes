@@ -659,14 +659,17 @@ READ THE ENDING
   `unknown`, which is an answer rather than a gap — read its text before
   deciding what it was.
 
-  Operator turns carry an orthogonal `origin` only when `launch` is known.
-  Headless sessions assign `program` to every operator turn. Interactive
-  sessions assign `person`, or `harness` when the native entry establishes
-  injection: Claude's `isMeta: true` or pi's extension `custom_message`.
-  Codex metadata, Claude queue fields, and message text do not establish
-  injection. Without launch evidence, origin is absent. `show` and `export`
-  accept --origin person|program|harness alongside --only; absent origins never
-  match. The projection records the origin selector and counts rejected turns
+  Operator turns carry an orthogonal `origin` only with positive sender
+  evidence. Headless sessions assign `program` to every operator turn.
+  Otherwise Claude assigns `harness` for `isMeta: true`, or `person` for
+  `promptSource: typed`; `queued` and absent promptSource do not identify a
+  person. Pi assigns `harness` to extension `custom_message` entries and
+  `person` to user `message` entries only with interactive launch evidence.
+  Codex records no sender: interactive operator turns have no origin.
+  All other cases omit origin. No message text establishes origin. `show`
+  and `export` accept --origin person|program|harness alongside --only;
+  absent origins never match. The projection records the origin selector
+  and counts rejected turns
   by kind. Origin does not identify a launcher or resolve agent-delegate
   handles; agent-delegate status names its session, and a pi handle is already
   the session id.

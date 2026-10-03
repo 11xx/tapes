@@ -73,10 +73,13 @@ in `unsearched`. Human
 search diagnostics group by harness and reason with counts. JSON retains
 per-session details; OpenCode API refusals describe the store once.
 
-Operator turns carry `origin` when launch evidence establishes their sender:
-`program` in headless sessions, and `person` or marked `harness` input in
-interactive sessions. Without launch evidence, origin is absent. `show` and
-`export` accept `--origin person|program|harness`; absent origins never match.
+Operator turns carry `origin` only with positive sender evidence. Headless
+sessions assign `program`. Claude identifies `person` with `promptSource: typed`
+and `harness` with `isMeta: true`; queued or unmarked input does not identify a
+person. Pi identifies `person` from interactive user messages and `harness`
+from custom messages. Codex records no sender for interactive input.
+`show` and `export` accept `--origin person|program|harness`; absent origins
+never match.
 
 ## Where the rest is
 

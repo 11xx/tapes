@@ -476,14 +476,7 @@ impl Turn {
         } else {
             match launch {
                 Some(Launch::Headless) => Some(OperatorOrigin::Program),
-                Some(Launch::Interactive) => {
-                    Some(if self.origin == Some(OperatorOrigin::Harness) {
-                        OperatorOrigin::Harness
-                    } else {
-                        OperatorOrigin::Person
-                    })
-                }
-                None => None,
+                Some(Launch::Interactive) | None => self.origin,
             }
         };
     }

@@ -6984,11 +6984,11 @@ fn show_full_streams_codex_and_pi_recordings_past_the_read_bound() {
     assert!(!bounded.contains("opening request"));
     let full = show(&["show", codex_id, "--full"]);
     assert!(
-        full.contains("[user [origin: person] #0 2026-01-01T10:00:00Z]\nopening request"),
+        full.contains("[user #0 2026-01-01T10:00:00Z]\nopening request"),
         "{}",
         &full[..full.len().min(300)]
     );
-    assert!(full.contains("[user [origin: person] #49 2026-01-01T10:00:00Z]\nclosing request"));
+    assert!(full.contains("[user #49 2026-01-01T10:00:00Z]\nclosing request"));
     assert!(full.contains("the whole recording was streamed"));
 
     let bounded = show(&["show", "pi-full"]);
@@ -12118,6 +12118,16 @@ fn origin_selection_agrees_in_show_and_export() {
         let entry = entry.unwrap();
         fs::copy(entry.path(), pi_root.join(entry.file_name())).unwrap();
     }
+    let codex_fixtures =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../tapes-core/tests/fixtures/origin/codex");
+    for entry in fs::read_dir(codex_fixtures).unwrap() {
+        let entry = entry.unwrap();
+        fs::copy(
+            entry.path(),
+            codex_home.join("sessions").join(entry.file_name()),
+        )
+        .unwrap();
+    }
     let invoke = |args: &[&str]| {
         let output = tapes()
             .args(args)
@@ -12136,6 +12146,32 @@ fn origin_selection_agrees_in_show_and_export() {
         output
     };
     for full in [false, true] {
+        let id = "72000000-0000-7000-8000-000000000001";
+        let mut args = vec![
+            "show",
+            id,
+            "--harness",
+            "codex",
+            "--only",
+            "operator",
+            "--json",
+        ];
+        if full {
+            args.push("--full");
+        }
+        let shown: Value = serde_json::from_slice(&invoke(&args).stdout).unwrap();
+        assert_eq!(shown["session"]["launch"], "interactive");
+        assert_eq!(shown["turns"].as_array().unwrap().len(), 2);
+        assert!(shown["turns"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|turn| turn.get("origin").is_none()));
+        args.extend(["--origin", "person"]);
+        let shown: Value = serde_json::from_slice(&invoke(&args).stdout).unwrap();
+        assert!(shown["turns"].as_array().unwrap().is_empty());
+    }
+    for full in [false, true] {
         for (mode, origin, expected) in [
             ("interactive", "person", 1),
             ("interactive", "harness", 1),
@@ -12143,6 +12179,7 @@ fn origin_selection_agrees_in_show_and_export() {
             ("headless", "program", 2),
             ("headless", "harness", 0),
             ("absent", "person", 0),
+            ("absent", "harness", 1),
         ] {
             let idx = match mode {
                 "interactive" => 1,

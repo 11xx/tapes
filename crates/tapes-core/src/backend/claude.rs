@@ -1156,8 +1156,14 @@ fn parse_turns(value: &Value) -> Vec<Turn> {
     let mut turns = parse_turns_raw(value);
     for turn in &mut turns {
         turn.model = model.clone();
-        if turn.kind == TurnKind::Operator && value["isMeta"].as_bool() == Some(true) {
-            turn.origin = Some(crate::model::OperatorOrigin::Harness);
+        if turn.kind == TurnKind::Operator {
+            turn.origin = if value["isMeta"].as_bool() == Some(true) {
+                Some(crate::model::OperatorOrigin::Harness)
+            } else if value["promptSource"] == "typed" {
+                Some(crate::model::OperatorOrigin::Person)
+            } else {
+                None
+            };
         }
     }
     turns

@@ -6404,18 +6404,25 @@ fn operator_origins_follow_launch_and_native_injection_evidence() {
                 true,
             ),
         ];
-        for (backend, id, injected) in cases {
+        for (backend, id, _injected) in cases {
             let session = located(backend.as_ref(), &id);
             let mut stale = session.clone();
             stale.launch = None;
             let transcript = backend.transcript(&stale, usize::MAX).unwrap();
-            let expected = match mode {
-                "interactive" if injected => {
+            let expected = match (mode, session.harness()) {
+                ("headless", _) => vec![Some(OperatorOrigin::Program); transcript.turns.len()],
+                (_, "claude") => vec![
+                    Some(OperatorOrigin::Person),
+                    Some(OperatorOrigin::Harness),
+                    None,
+                    None,
+                ],
+                ("interactive", "pi") => {
                     vec![Some(OperatorOrigin::Person), Some(OperatorOrigin::Harness)]
                 }
-                "interactive" => vec![Some(OperatorOrigin::Person)],
-                "headless" => vec![Some(OperatorOrigin::Program); if injected { 2 } else { 1 }],
-                _ => vec![None; if injected { 2 } else { 1 }],
+                (_, "pi") => vec![None, Some(OperatorOrigin::Harness)],
+                (_, "codex") => vec![None, None],
+                _ => unreachable!(),
             };
             assert_eq!(
                 transcript

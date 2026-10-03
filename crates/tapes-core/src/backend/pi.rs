@@ -292,7 +292,7 @@ impl Backend for PiBackend {
     fn transcript(&self, session: &Session, tail: usize) -> Result<Transcript> {
         let path = super::session_file_path(session)
             .ok_or_else(|| anyhow!("pi session {} has no file locator", session.id))?;
-        let (turns, recording, abandoned, trailing_record, unmapped) =
+        let (mut turns, recording, abandoned, trailing_record, unmapped) =
             read_transcript(path, self.read_bytes)?;
         let entries = recording
             .tail
@@ -317,6 +317,9 @@ impl Backend for PiBackend {
                     .find_map(|v| pi_thinking(v))
                     .map(str::to_owned),
             });
+        for turn in &mut turns {
+            pi_origin(turn, session.launch);
+        }
         let mut transcript = transcript_from_recording(
             session,
             turns,
@@ -412,7 +415,7 @@ impl Backend for PiBackend {
                     timestamp: timestamp(&value["timestamp"]),
                 });
             for mut parsed_turn in parsed {
-                parsed_turn.establish_origin(launch);
+                pi_origin(&mut parsed_turn, launch);
                 turn(parsed_turn)?;
             }
             Ok(produced)
@@ -931,6 +934,17 @@ fn active_path<'a>(entries: &[&'a Value]) -> Vec<&'a Value> {
 /// and extension custom messages carry input addressed to the agent.
 fn user_kind(role: &Role) -> TurnKind {
     role.kind().unwrap_or(TurnKind::Operator)
+}
+
+/// Interactive user messages are TUI input; custom messages carry extension input.
+fn pi_origin(turn: &mut Turn, launch: Option<Launch>) {
+    if turn.kind == TurnKind::Operator
+        && turn.origin.is_none()
+        && launch == Some(Launch::Interactive)
+    {
+        turn.origin = Some(crate::model::OperatorOrigin::Person);
+    }
+    turn.establish_origin(launch);
 }
 
 fn pi_turns(value: &Value, thinking: &mut Option<String>) -> Vec<Turn> {
