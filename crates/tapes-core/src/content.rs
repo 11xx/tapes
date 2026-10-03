@@ -81,6 +81,9 @@ impl ContentInventory {
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ArtifactReference {
+    /// Opaque coordinate for an explicit confined persisted-body read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reference: Option<String>,
     pub kind: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub identity: Option<String>,
@@ -618,6 +621,7 @@ pub fn artifact_reference_object(
     (uri.is_some() || path.is_some() || digest.is_some() || bytes.is_some()).then_some(
         ArtifactReference {
             kind: kind.to_owned(),
+            reference: None,
             identity: None,
             origin: None,
             backing: None,

@@ -676,7 +676,16 @@ READ THE ENDING
   shows its recorded preview and a reference-only file under `tool-results/`.
   The reference retains the rounded native `recorded_size` label, not an
   inferred exact byte count, and the originating `tool_call_id` when recorded.
-  Its body is outside the recording and is never opened. Malformed envelopes
+  show --json and events --json include an opaque versioned `reference` token.
+  tapes artifact <id> --reference <token> [--bytes 64KiB] [--json]
+  reads only the named body beside that recording. The budget is 1 byte to
+  4 MiB. tapes-artifact/1 reports bytes returned, truncated, SHA-256 over those
+  bytes, encoding (utf-8 or lossless hex), and body. Tokens bind the native
+  session ID, source descriptor and originating result; changed results and
+  other sources refuse. The envelope must name the selected session directory.
+  Session directory, tool-results and file symlinks refuse, as do non-regular
+  files. Platforms without confined no-follow opens refuse retrieval.
+  Ordinary transcript and event reads never open the body. Malformed envelopes
   remain ordinary tool payloads; path-like text
   outside a tool result does not establish a persisted-output reference.
 

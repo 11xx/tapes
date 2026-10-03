@@ -12448,3 +12448,200 @@ fn origin_selection_agrees_in_show_and_export() {
     assert_eq!(view["turns"][0]["ordinal"], 1);
     let _ = fs::remove_dir_all(codex_home);
 }
+
+#[test]
+#[cfg(unix)]
+fn artifact_reads_only_confined_persisted_results() {
+    use std::os::unix::fs::symlink;
+    let root = TemporaryDirectory::new(
+        std::env::temp_dir().join(format!("tapes-artifact-{}", std::process::id())),
+    );
+    let project = root.path().join("projects/project");
+    fs::create_dir_all(&project).unwrap();
+    let id = "20000000-0000-4000-8000-000000000002";
+    let fixture = include_str!("../../tapes-core/tests/fixtures/claude/content-carriers/project/20000000-0000-4000-8000-000000000002.jsonl");
+    let recording = project.join(format!("{id}.jsonl"));
+    fs::write(&recording, fixture).unwrap();
+    let results = project.join(id).join("tool-results");
+    fs::create_dir_all(&results).unwrap();
+    let file = results.join("result001.txt");
+    fs::write(&file, b"abcdef").unwrap();
+    let run = |args: &[&str]| {
+        tapes()
+            .args(args)
+            .args([
+                "--native-store",
+                "claude",
+                "--native-root",
+                root.path().to_str().unwrap(),
+            ])
+            .output()
+            .unwrap()
+    };
+    let shown = run(&["show", id, "--json"]);
+    assert!(shown.status.success());
+    let shown: Value = serde_json::from_slice(&shown.stdout).unwrap();
+    let turn = shown["turns"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|turn| turn["native_id"] == "result-present")
+        .unwrap();
+    let token = turn["parts"][1]["reference"]["reference"].as_str().unwrap();
+    let events = run(&["events", id, "--json"]);
+    let events: Value = serde_json::from_slice(&events.stdout).unwrap();
+    let event = events["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|event| event["call_id"] == "tool-present" && event["kind"] == "tool-result")
+        .unwrap();
+    assert_eq!(event["artifact_references"][0]["reference"], token);
+    let read = |token: &str, budget: &str| {
+        run(&[
+            "artifact",
+            id,
+            "--reference",
+            token,
+            "--bytes",
+            budget,
+            "--json",
+        ])
+    };
+    let output = read(token, "3");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let body: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(body["schema"], "tapes-artifact/1");
+    assert_eq!(body["body"], "abc");
+    assert_eq!(body["bytes"], 3);
+    assert_eq!(body["truncated"], true);
+    assert_eq!(
+        body["sha256"],
+        "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+    );
+    assert_eq!(
+        serde_json::from_slice::<Value>(&read(token, "6").stdout).unwrap()["truncated"],
+        false
+    );
+    fs::write(&file, []).unwrap();
+    assert_eq!(
+        serde_json::from_slice::<Value>(&read(token, "6").stdout).unwrap()["bytes"],
+        0
+    );
+    fs::write(&file, [0xff]).unwrap();
+    let binary: Value = serde_json::from_slice(&read(token, "6").stdout).unwrap();
+    assert_eq!(binary["encoding"], "hex");
+    assert_eq!(binary["body"], "ff");
+    assert!(!read(token, "0").status.success());
+    assert!(!read(token, "5MiB").status.success());
+    fs::remove_file(&file).unwrap();
+    assert!(!read(token, "6").status.success());
+    symlink(&recording, &file).unwrap();
+    assert!(!read(token, "6").status.success());
+    fs::remove_file(&file).unwrap();
+    fs::create_dir(&file).unwrap();
+    assert!(!read(token, "6").status.success());
+    fs::remove_dir(&file).unwrap();
+    fs::rename(&results, results.with_extension("saved")).unwrap();
+    symlink(results.with_extension("saved"), &results).unwrap();
+    assert!(!read(token, "6").status.success());
+    fs::remove_file(&results).unwrap();
+    fs::rename(results.with_extension("saved"), &results).unwrap();
+    let session_dir = project.join(id);
+    fs::rename(&session_dir, session_dir.with_extension("saved")).unwrap();
+    symlink(session_dir.with_extension("saved"), &session_dir).unwrap();
+    assert!(!read(token, "6").status.success());
+    fs::remove_file(&session_dir).unwrap();
+    fs::rename(session_dir.with_extension("saved"), &session_dir).unwrap();
+    fs::write(&file, b"body").unwrap();
+    let other = "20000000-0000-4000-8000-000000000003";
+    fs::write(
+        project.join(format!("{other}.jsonl")),
+        fixture.replace(id, other),
+    )
+    .unwrap();
+    assert!(!run(&["artifact", other, "--reference", token, "--json"])
+        .status
+        .success());
+    let moved = TemporaryDirectory::new(
+        std::env::temp_dir().join(format!("tapes-artifact-moved-{}", std::process::id())),
+    );
+    fs::create_dir_all(moved.path().join("projects/project")).unwrap();
+    fs::write(
+        moved.path().join(format!("projects/project/{id}.jsonl")),
+        fixture,
+    )
+    .unwrap();
+    assert!(!tapes()
+        .args([
+            "artifact",
+            id,
+            "--reference",
+            token,
+            "--native-store",
+            "claude",
+            "--native-root",
+            moved.path().to_str().unwrap()
+        ])
+        .output()
+        .unwrap()
+        .status
+        .success());
+    let installed = tapes()
+        .env("CLAUDE_CONFIG_DIR", root.path())
+        .args(["show", id, "--harness", "claude", "--json"])
+        .output()
+        .unwrap();
+    assert!(installed.status.success());
+    let installed: Value = serde_json::from_slice(&installed.stdout).unwrap();
+    let installed_turn = installed["turns"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|turn| turn["native_id"] == "result-present")
+        .unwrap();
+    let installed_token = installed_turn["parts"][1]["reference"]["reference"]
+        .as_str()
+        .unwrap();
+    assert_ne!(token, installed_token);
+    assert!(!read(installed_token, "6").status.success());
+    fs::write(&file, vec![b'x'; 65537]).unwrap();
+    let default_budget = run(&["artifact", id, "--reference", token, "--json"]);
+    let default_budget: Value = serde_json::from_slice(&default_budget.stdout).unwrap();
+    assert_eq!(default_budget["bytes"], 65536);
+    assert_eq!(default_budget["truncated"], true);
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o000)).unwrap();
+        if fs::File::open(&file).is_err() {
+            assert!(!read(token, "6").status.success());
+        }
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    let encoded = token.strip_prefix("ta1:").unwrap();
+    let bytes: Vec<u8> = (0..encoded.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&encoded[i..i + 2], 16).unwrap())
+        .collect();
+    let mut coordinate: Value = serde_json::from_slice(&bytes).unwrap();
+    coordinate["path"] = Value::String("tool-results/../outside.txt".to_owned());
+    let forged = format!(
+        "ta1:{}",
+        serde_json::to_vec(&coordinate)
+            .unwrap()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    );
+    assert!(!read(&forged, "6").status.success());
+    fs::write(
+        &recording,
+        fixture.replace("result001.txt", "result009.txt"),
+    )
+    .unwrap();
+    assert!(!read(token, "6").status.success());
+}

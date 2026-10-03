@@ -867,6 +867,21 @@ impl SessionQueryArgs {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Read a persisted tool output using its opaque show/events reference.
+    /// Only native Claude recordings support confined no-follow reads.
+    /// JSON uses tapes-artifact/1 with bytes, truncated, sha256, encoding and body.
+    Artifact {
+        session: String,
+        #[arg(long)]
+        reference: String,
+        /// Returned byte budget: default 64 KiB, maximum 4 MiB.
+        #[arg(long, default_value = "64KiB")]
+        bytes: ByteSize,
+        #[arg(long)]
+        json: bool,
+        #[command(flatten)]
+        input: InputArgs,
+    },
     /// Report one recording's custody as tapes-capture/2. Installed harness
     /// stores are unpinned; explicit native sources report caller-selected-native-store.
     /// Selection and export do not assert immutable native bytes.
@@ -967,7 +982,8 @@ enum Command {
     /// read-bound availability and omitted_reason. Repeated records stay separate.
     /// Other attachment types remain unrecognized.
     /// Complete persisted-output tool results show their preview and a reference-only
-    /// file with its recorded size label; the external body is never read.
+    /// file with its recorded size label and opaque artifact reference; this view
+    /// never reads the external body. Use artifact for an explicit confined read.
     /// Every turn carries a
     /// `kind` naming what the harness
     /// recorded it as, and a user turn holding a harness command, notice, or
@@ -1688,6 +1704,39 @@ fn dispatch(cli: Cli) -> Result<()> {
             } else {
                 print_session_list(&result.sessions);
                 print_availability_note(&result);
+            }
+        }
+        Command::Artifact {
+            session,
+            reference,
+            bytes,
+            json,
+            input,
+        } => {
+            if input.supplied() {
+                return Err(anyhow!("artifact requires a native recording"));
+            }
+            let transcript = agent_tapes_core::show_with_backends(
+                &input.backends()?,
+                Selection::IdInHarness {
+                    id: &session,
+                    harness: "claude",
+                },
+                1,
+            )?;
+            let artifact = agent_tapes_core::artifact::read(
+                &transcript.session,
+                &reference,
+                usize::try_from(bytes.get())?,
+            )?;
+            if json {
+                println!("{}", serde_json::to_string(&artifact)?);
+            } else {
+                println!(
+                    "bytes: {}; truncated: {}; sha256: {}; encoding: {}",
+                    artifact.bytes, artifact.truncated, artifact.sha256, artifact.encoding
+                );
+                print!("{}", artifact.body);
             }
         }
         Command::Show {
