@@ -547,7 +547,7 @@ READ THE ENDING
   Results, then no text          Results landed but were never narrated. The
                                  successor must re-read them; no summary of
                                  them was ever written.
-  A compaction notice           A recorded model-context reduction, not source
+  A compaction notice            A recorded model-context reduction, not source
                                  deletion or completion. Use show --full or
                                  history pages to recover retained earlier
                                  messages; summaries remain ambient evidence.
