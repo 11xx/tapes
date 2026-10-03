@@ -1387,7 +1387,7 @@ enum Command {
     /// --omit narrow all three, and the JSON and trace count the omitted turns
     /// by kind under `projection`.
     #[command(group(clap::ArgGroup::new("export_selection")
-        .args(["session", "latest", "title", "occurrence", "input", "here", "project", "global", "harness", "model", "launch", "directory", "since", "until", "search"])
+        .args(["session", "latest", "title", "occurrence", "input", "native_store", "here", "project", "global", "harness", "model", "launch", "directory", "since", "until", "search"])
         .required(true).multiple(true)))]
     Export {
         #[command(flatten)]

@@ -21,7 +21,8 @@ SELECT A MATERIALIZED NATIVE STORE
   --native-store <claude|codex|pi> requires --native-root <PATH>. PATH is the
   harness configuration root: Claude reads PATH/projects, Codex and Pi read
   PATH/sessions. Every session-reading command accepts the pair, including
-  capture, child, full reads, history paging, aggregates, and export. Only this
+  capture, child, full reads, history paging, aggregates, and export. The pair
+  alone selects a collection for usage, stats, and export. Only this
   store participates; missing or unreadable roots never fall back to installed
   stores. Harness configuration environment is neither read nor changed.
   --input and --remote conflict with the pair. --harness may name the selected

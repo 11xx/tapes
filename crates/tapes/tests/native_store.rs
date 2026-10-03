@@ -215,6 +215,22 @@ fn native_store_reaches_history_views_aggregates_and_export() {
         .unwrap();
     let exported: Value = serde_json::from_slice(&fs::read(json_file).unwrap()).unwrap();
     stores.source(&exported["session"]["source"]);
+    let bulk = stores.root.join("bulk");
+    let output = stores
+        .command(&["export", "--limit", "1"], "selected")
+        .arg("--bundle")
+        .arg(&bulk)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let manifest: Value =
+        serde_json::from_slice(&fs::read(bulk.join("manifest.json")).unwrap()).unwrap();
+    assert_eq!(manifest["schema"], "tapes-export-manifest/6");
+    assert_eq!(manifest["sessions"].as_array().unwrap().len(), 1);
 }
 
 #[test]
