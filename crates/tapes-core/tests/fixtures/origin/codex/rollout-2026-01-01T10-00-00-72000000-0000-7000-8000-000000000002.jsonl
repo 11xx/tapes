@@ -1,0 +1,3 @@
+{"timestamp":"2026-01-01T10:00:00Z","type":"session_meta","payload":{"id":"72000000-0000-7000-8000-000000000002","cwd":"/fixtures/project","source":"exec"}}
+{"timestamp":"2026-01-01T10:00:01Z","type":"response_item","metadata":{"client_authored":false},"payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Synthetic request."}]}}
+{"timestamp":"2026-01-01T10:00:01Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Synthetic completion notification."}]}}

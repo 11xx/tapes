@@ -387,8 +387,30 @@ pub struct Compaction {
     pub omitted_all_preserved_uuids: Option<usize>,
 }
 
+/// The sender of input in the operator role, independent of its turn kind.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum OperatorOrigin {
+    Person,
+    Program,
+    Harness,
+}
+
+impl OperatorOrigin {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Person => "person",
+            Self::Program => "program",
+            Self::Harness => "harness",
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Turn {
+    /// Who supplied an operator turn, when the recording establishes it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<OperatorOrigin>,
     /// Whether presentation omitted a suffix of the normalized text.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text_truncated: Option<bool>,
@@ -447,6 +469,18 @@ pub struct Turn {
 }
 
 impl Turn {
+    /// Resolve sender evidence against the session's recorded launch mode.
+    pub(crate) fn establish_origin(&mut self, launch: Option<Launch>) {
+        self.origin = if self.kind != TurnKind::Operator {
+            None
+        } else {
+            match launch {
+                Some(Launch::Headless) => Some(OperatorOrigin::Program),
+                Some(Launch::Interactive) | None => self.origin,
+            }
+        };
+    }
+
     /// Cap the readable text at a Unicode scalar boundary, retaining its original size.
     pub fn cap_text(&mut self, limit: usize) {
         let chars = self.text.chars().count();
@@ -1160,7 +1194,11 @@ impl TurnKind {
 /// than an operator's message names what the harness recorded it as, so a
 /// reader judging an ending is not told a command was an unanswered prompt.
 pub fn human_speaker(turn: &Turn) -> String {
-    speaker(&turn.role, turn.kind)
+    let name = speaker(&turn.role, turn.kind);
+    turn.origin.map_or_else(
+        || name.clone(),
+        |origin| format!("{name} [origin: {}]", origin.label()),
+    )
 }
 
 /// The same naming for a turn a projection carries by its role and kind
@@ -1288,7 +1326,7 @@ impl Transcript {
     /// kind.
     pub fn project(mut self, selection: TurnSelection, tail: usize) -> Self {
         let mut projection = Projection::new(selection);
-        self.turns.retain(|turn| projection.admit(turn.kind));
+        self.turns.retain(|turn| projection.admit_turn(turn));
         let total = self.turns.len();
         if total > tail {
             self.turns.drain(..total - tail);
@@ -1320,17 +1358,20 @@ impl Transcript {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TurnSelection {
     kinds: u8,
+    origin: Option<OperatorOrigin>,
 }
 
 impl TurnSelection {
     /// The exchange: what the operator asked and what the agent visibly said.
     pub const EXCHANGE: Self = Self {
+        origin: None,
         kinds: 1 << TurnKind::Operator as u8 | 1 << TurnKind::Assistant as u8,
     };
 
     /// Keep the named kinds and no other.
     pub fn only(kinds: impl IntoIterator<Item = TurnKind>) -> Self {
         Self {
+            origin: None,
             kinds: kinds.into_iter().fold(0, |set, kind| set | kind.bit()),
         }
     }
@@ -1343,6 +1384,15 @@ impl TurnSelection {
                 .into_iter()
                 .filter(|kind| !omitted.keeps(*kind)),
         )
+    }
+
+    pub fn with_origin(mut self, origin: OperatorOrigin) -> Self {
+        self.origin = Some(origin);
+        self
+    }
+
+    pub fn keeps_turn(self, turn: &Turn) -> bool {
+        self.keeps(turn.kind) && self.origin.is_none_or(|origin| turn.origin == Some(origin))
     }
 
     pub fn keeps(self, kind: TurnKind) -> bool {
@@ -1359,13 +1409,33 @@ impl TurnSelection {
 
 impl Serialize for TurnSelection {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.collect_seq(self.kinds())
+        if let Some(origin) = self.origin {
+            use serde::ser::SerializeStruct;
+            let mut state = serializer.serialize_struct("TurnSelection", 2)?;
+            state.serialize_field("kinds", &self.kinds().collect::<Vec<_>>())?;
+            state.serialize_field("origin", &origin)?;
+            state.end()
+        } else {
+            serializer.collect_seq(self.kinds())
+        }
     }
 }
 
 impl<'de> Deserialize<'de> for TurnSelection {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        Vec::<TurnKind>::deserialize(deserializer).map(Self::only)
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Wire {
+            Kinds(Vec<TurnKind>),
+            Origin {
+                kinds: Vec<TurnKind>,
+                origin: OperatorOrigin,
+            },
+        }
+        Ok(match Wire::deserialize(deserializer)? {
+            Wire::Kinds(kinds) => Self::only(kinds),
+            Wire::Origin { kinds, origin } => Self::only(kinds).with_origin(origin),
+        })
     }
 }
 
@@ -1376,18 +1446,29 @@ impl<'de> Deserialize<'de> for TurnSelection {
 pub struct Projection {
     pub kept: TurnSelection,
     pub omitted: BTreeMap<TurnKind, usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<OperatorOrigin>,
 }
 
 impl Projection {
     pub fn new(kept: TurnSelection) -> Self {
         Self {
             kept,
+            origin: kept.origin,
             omitted: BTreeMap::new(),
         }
     }
 
     /// Whether a turn of this kind stays, counting it under `omitted` when it
     /// does not.
+    pub fn admit_turn(&mut self, turn: &Turn) -> bool {
+        let kept = self.kept.keeps_turn(turn);
+        if !kept {
+            *self.omitted.entry(turn.kind).or_insert(0) += 1;
+        }
+        kept
+    }
+
     pub fn admit(&mut self, kind: TurnKind) -> bool {
         let kept = self.kept.keeps(kind);
         if !kept {
@@ -1402,7 +1483,11 @@ impl Projection {
         if kept.is_empty() {
             return "none".to_owned();
         }
-        kept.join(", ")
+        let summary = kept.join(", ");
+        self.origin.map_or_else(
+            || summary.clone(),
+            |origin| format!("{summary} with origin {}", origin.label()),
+        )
     }
 
     /// The omitted counts for a human reader, e.g. `3 tool, 1 reasoning`.
@@ -1696,6 +1781,7 @@ mod tests {
             coverage: AccountingCoverage::Session,
         };
         let turn = Turn {
+            origin: None,
             text_truncated: None,
             text_chars: None,
             context_event: None,
@@ -1851,6 +1937,7 @@ mod tests {
         session.title = None;
         let session = session.with_derived_title(&[
             Turn {
+                origin: None,
                 text_truncated: None,
                 text_chars: None,
                 context_event: None,
@@ -1871,6 +1958,7 @@ mod tests {
                 tool: None,
             },
             Turn {
+                origin: None,
                 text_truncated: None,
                 text_chars: None,
                 context_event: None,
@@ -1912,6 +2000,7 @@ mod tests {
         let mut complete = session();
         complete.title = None;
         let complete = complete.with_derived_title(&[Turn {
+            origin: None,
             text_truncated: None,
             text_chars: None,
             context_event: None,
@@ -1938,6 +2027,7 @@ mod tests {
         let mut shortened = session();
         shortened.title = None;
         let shortened = shortened.with_derived_title(&[Turn {
+            origin: None,
             text_truncated: None,
             text_chars: None,
             context_event: None,
@@ -1970,6 +2060,7 @@ mod tests {
         let mut session = session();
         session.title = None;
         let session = session.with_derived_title(&[Turn {
+            origin: None,
             text_truncated: None,
             text_chars: None,
             context_event: None,
@@ -2000,6 +2091,7 @@ mod tests {
     #[test]
     fn derived_title_does_not_replace_recorded_title() {
         let session = session().with_derived_title(&[Turn {
+            origin: None,
             text_truncated: None,
             text_chars: None,
             context_event: None,
@@ -2114,6 +2206,7 @@ mod tests {
     #[test]
     fn a_turn_carries_its_ordinal_and_omits_an_absent_native_id() {
         let turn = Turn {
+            origin: None,
             text_truncated: None,
             text_chars: None,
             context_event: None,

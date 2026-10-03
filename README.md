@@ -50,6 +50,7 @@ carries whatever the transcript holds, including anything pasted into it;
 tapes list --here                         # this project's sessions, every harness, newest first
 tapes list --search "rate limit"          # sessions whose recent turns mention it
 tapes list --search "rate limit" --search-turns all  # every turn in the bounded read
+tapes show <id> --only operator --origin person # input with recorded person origin
 tapes list --launch interactive           # sessions a person drove, not headless runs
 tapes endings --here --since 2026-09-01   # what each session ended on
 tapes usage --here --by model             # where the tokens and the cost went
@@ -72,6 +73,13 @@ in `unsearched`. Human
 search diagnostics group by harness and reason with counts. JSON retains
 per-session details; OpenCode API refusals describe the store once.
 
+Operator turns carry `origin` only with positive sender evidence. Headless
+sessions assign `program`. Claude identifies `person` with `promptSource: typed`
+and `harness` with `isMeta: true`; queued or unmarked input does not identify a
+person. Pi identifies `person` from interactive user messages and `harness`
+from custom messages. Codex records no sender for interactive input.
+`show` and `export` accept `--origin person|program|harness`; absent origins
+never match.
 
 ## Where the rest is
 

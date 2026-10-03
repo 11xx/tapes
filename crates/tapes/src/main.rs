@@ -406,6 +406,10 @@ struct TurnKindArgs {
     /// turn is counted by kind under `projection`.
     #[arg(long, value_name = "KIND", value_delimiter = ',', value_parser = turn_kind_parser(), conflicts_with = "omit")]
     only: Vec<TurnKind>,
+    /// Keep operator turns sent by person, program, or harness. Origin requires
+    /// positive sender evidence; turns without an origin never match.
+    #[arg(long, value_name = "ORIGIN", value_parser = origin_parser())]
+    origin: Option<agent_tapes_core::model::OperatorOrigin>,
     /// Keep every turn but those of these kinds; repeatable or
     /// comma-separated. Omitted turns are counted by kind under `projection`.
     #[arg(long, value_name = "KIND", value_delimiter = ',', value_parser = turn_kind_parser())]
@@ -415,14 +419,34 @@ struct TurnKindArgs {
 impl TurnKindArgs {
     /// The selection the flags ask for, with the flag that asked for it.
     fn selection(&self) -> Option<(TurnSelection, &'static str)> {
-        if !self.only.is_empty() {
-            return Some((TurnSelection::only(self.only.iter().copied()), "--only"));
+        let (mut selection, flag) = if !self.only.is_empty() {
+            (TurnSelection::only(self.only.iter().copied()), "--only")
+        } else if !self.omit.is_empty() {
+            (TurnSelection::omit(self.omit.iter().copied()), "--omit")
+        } else if self.origin.is_some() {
+            (TurnSelection::only(TurnKind::ALL), "--origin")
+        } else {
+            return None;
+        };
+        if let Some(origin) = self.origin {
+            selection = selection.with_origin(origin);
         }
-        if !self.omit.is_empty() {
-            return Some((TurnSelection::omit(self.omit.iter().copied()), "--omit"));
-        }
-        None
+        Some((selection, flag))
     }
+}
+
+fn origin_parser(
+) -> impl clap::builder::TypedValueParser<Value = agent_tapes_core::model::OperatorOrigin> {
+    use agent_tapes_core::model::OperatorOrigin;
+    use clap::builder::TypedValueParser as _;
+    clap::builder::PossibleValuesParser::new(["person", "program", "harness"]).map(|label| {
+        match label.as_str() {
+            "person" => OperatorOrigin::Person,
+            "program" => OperatorOrigin::Program,
+            "harness" => OperatorOrigin::Harness,
+            _ => unreachable!("origin parser admits only origin labels"),
+        }
+    })
 }
 
 fn turn_kind_parser() -> impl clap::builder::TypedValueParser<Value = TurnKind> {
@@ -1386,9 +1410,9 @@ enum Command {
     ///
     /// A bundle's files are fixed views of one read: `.context.md` holds the
     /// exchange, as `show --exchange` returns it; `.json` and `.trace.md` hold
-    /// every turn, and `.json` also holds the paired tool `events`. --only and
-    /// --omit narrow all three, and the JSON and trace count the omitted turns
-    /// by kind under `projection`.
+    /// every turn, and `.json` also holds the paired tool `events`. --only,
+    /// --omit, and --origin narrow all three; the JSON and trace count omitted
+    /// turns by kind under `projection`.
     #[command(group(clap::ArgGroup::new("export_selection")
         .args(["session", "latest", "title", "occurrence", "input", "native_store", "here", "project", "global", "harness", "model", "launch", "directory", "since", "until", "search"])
         .required(true).multiple(true)))]
@@ -1663,7 +1687,12 @@ fn dispatch(cli: Cli) -> Result<()> {
             read.refuse_supplied(&selection.input)?;
             let by_latest = selection.latest;
             let turns = if exchange {
-                Some((TurnSelection::EXCHANGE, "--exchange"))
+                Some((
+                    kinds.origin.map_or(TurnSelection::EXCHANGE, |origin| {
+                        TurnSelection::EXCHANGE.with_origin(origin)
+                    }),
+                    "--exchange",
+                ))
             } else {
                 kinds.selection()
             };
@@ -2683,6 +2712,10 @@ fn remote_read_args(
         read.read_bytes.map(|bytes| bytes.get().to_string()),
     );
     args.value_if("--tail", tail.map(|tail| tail.to_string()));
+    args.value_if(
+        "--origin",
+        kinds.origin.map(|origin| origin.label().to_owned()),
+    );
     if !kinds.only.is_empty() {
         args.value("--only", kind_labels(&kinds.only));
     }
@@ -4162,7 +4195,7 @@ impl<W: std::io::Write> agent_tapes_core::TurnSink for FullShow<W> {
 
     fn turn(&mut self, mut turn: Turn) -> Result<()> {
         if let Some((projection, _)) = &mut self.projection {
-            if !projection.admit(turn.kind) {
+            if !projection.admit_turn(&turn) {
                 return Ok(());
             }
         }
@@ -4698,6 +4731,7 @@ mod tests {
                 usage_detail: None,
             },
             turns: vec![Turn {
+                origin: None,
                 text_truncated: None,
                 text_chars: None,
                 context_event: None,

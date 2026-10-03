@@ -2043,6 +2043,7 @@ fn parse_message(message: &Value) -> Vec<Turn> {
             .as_str()
             .filter(|text| !text.is_empty())
             .map(|text| Turn {
+                origin: None,
                 text_truncated: None,
                 text_chars: None,
                 context_event: None,
@@ -2147,6 +2148,7 @@ fn parse_message(message: &Value) -> Vec<Turn> {
                 .map(str::to_owned)
                 .or_else(|| message_id.clone());
             ((!text.is_empty()) || !parts.is_empty()).then_some(Turn {
+                origin: None,
                 text_truncated: None,
                 text_chars: None,
                 context_event: None,

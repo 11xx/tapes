@@ -823,6 +823,7 @@ mod tests {
 
     fn turn(role: Role) -> Turn {
         Turn {
+            origin: None,
             text_truncated: None,
             text_chars: None,
             context_event: None,

@@ -292,7 +292,7 @@ impl Backend for PiBackend {
     fn transcript(&self, session: &Session, tail: usize) -> Result<Transcript> {
         let path = super::session_file_path(session)
             .ok_or_else(|| anyhow!("pi session {} has no file locator", session.id))?;
-        let (turns, recording, abandoned, trailing_record, unmapped) =
+        let (mut turns, recording, abandoned, trailing_record, unmapped) =
             read_transcript(path, self.read_bytes)?;
         let entries = recording
             .tail
@@ -317,6 +317,9 @@ impl Backend for PiBackend {
                     .find_map(|v| pi_thinking(v))
                     .map(str::to_owned),
             });
+        for turn in &mut turns {
+            pi_origin(turn, session.launch);
+        }
         let mut transcript = transcript_from_recording(
             session,
             turns,
@@ -344,9 +347,11 @@ impl Backend for PiBackend {
         // only each entry's position, id, and parent; the second emits the
         // active entries' turns in recording order.
         let mut positions = HashMap::<String, (usize, Option<String>)>::new();
+        let mut launch = None;
         let mut last = None;
         let mut entries = 0;
         let first = stream_jsonl(path, replay_pin(replay)?, |value, _, _| {
+            launch = merge_launch(launch, pi_launch_entry(value, &session.id));
             if value["type"] == "session" {
                 return Ok(false);
             }
@@ -409,7 +414,8 @@ impl Backend for PiBackend {
                     kind: kind.to_owned(),
                     timestamp: timestamp(&value["timestamp"]),
                 });
-            for parsed_turn in parsed {
+            for mut parsed_turn in parsed {
+                pi_origin(&mut parsed_turn, launch);
                 turn(parsed_turn)?;
             }
             Ok(produced)
@@ -924,10 +930,21 @@ fn active_path<'a>(entries: &[&'a Value]) -> Vec<&'a Value> {
     path
 }
 
-/// pi records its harness commands outside the conversation, so every message
-/// in its user role is one the operator sent.
+/// pi records harness commands outside the conversation. User-role messages
+/// and extension custom messages carry input addressed to the agent.
 fn user_kind(role: &Role) -> TurnKind {
     role.kind().unwrap_or(TurnKind::Operator)
+}
+
+/// Interactive user messages are TUI input; custom messages carry extension input.
+fn pi_origin(turn: &mut Turn, launch: Option<Launch>) {
+    if turn.kind == TurnKind::Operator
+        && turn.origin.is_none()
+        && launch == Some(Launch::Interactive)
+    {
+        turn.origin = Some(crate::model::OperatorOrigin::Person);
+    }
+    turn.establish_origin(launch);
 }
 
 fn pi_turns(value: &Value, thinking: &mut Option<String>) -> Vec<Turn> {
@@ -976,6 +993,28 @@ fn pi_selections(
 }
 
 fn parse_turns(value: &Value) -> Vec<Turn> {
+    if value["type"] == "custom_message" {
+        let mut normalized = value.clone();
+        normalized["type"] = Value::String("message".to_owned());
+        normalized["message"] = serde_json::json!({"role": "user", "content": value["content"]});
+        let mut turns = parse_turns(&normalized);
+        for turn in &mut turns {
+            turn.origin = Some(crate::model::OperatorOrigin::Harness);
+            for part in &mut turn.parts {
+                let source_field = match part {
+                    ContentPart::Text { source_field, .. }
+                    | ContentPart::Transcription { source_field, .. }
+                    | ContentPart::MediaReference { source_field, .. }
+                    | ContentPart::FileReference { source_field, .. }
+                    | ContentPart::StructuredArtifact { source_field, .. }
+                    | ContentPart::ToolPayload { source_field, .. }
+                    | ContentPart::Unknown { source_field, .. } => source_field,
+                };
+                *source_field = source_field.replacen("message.content", "content", 1);
+            }
+        }
+        return turns;
+    }
     if value["type"] != "message" {
         return Vec::new();
     }
@@ -992,6 +1031,7 @@ fn parse_turns(value: &Value) -> Vec<Turn> {
         "developer" => Role::Developer,
         "toolResult" => {
             return vec![Turn {
+                origin: None,
                 text_truncated: None,
                 text_chars: None,
                 context_event: None,
@@ -1018,6 +1058,7 @@ fn parse_turns(value: &Value) -> Vec<Turn> {
     if let Some(text) = content.as_str() {
         return (!text.is_empty())
             .then(|| Turn {
+                origin: None,
                 text_truncated: None,
                 text_chars: None,
                 context_event: None,
@@ -1115,6 +1156,7 @@ fn parse_turns(value: &Value) -> Vec<Turn> {
                 ),
             };
             ((!text.is_empty()) || !parts.is_empty()).then_some(Turn {
+                origin: None,
                 text_truncated: None,
                 text_chars: None,
                 context_event: None,

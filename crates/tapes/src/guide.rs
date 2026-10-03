@@ -285,6 +285,7 @@ PROBE BEFORE EXPORTING
   tapes show <id> --turn-chars 2000  Cap each turn’s readable text, naming omitted characters.
   tapes show <id> --json         tapes-session/18 turns, typed context events, and bounded read, graph, artifact, terminal, and recorded launch evidence.
   tapes show <id> --exchange     Operator and assistant turns only, timestamps and ordinals kept; the name for --only operator,assistant.
+  tapes show <id> --only operator --origin person  Operator turns with recorded person origin.
   tapes show <id> --omit tool    Every turn but tool calls and results; --only and --omit take kind labels, and export takes both.
   tapes show <id> --full         Every turn of a Claude, Codex, Pi, or OpenCode session, streamed past the read bounds; --json streams it too.
   tapes events <id> --json       Typed tool calls, results, pairs, and content parts.
@@ -543,7 +544,7 @@ EXPORT, THEN INGEST PROGRESSIVELY
      assistant-visible text — the session's argument, and the small part of
      it. The harness's own commands, notices, attached context, and user turns
      of unknown sender stay out of it and remain in the trace. --only and
-     --omit narrow all three files.
+     --omit and --origin narrow all three files.
   2. .json, narrowly, with jq. The canonical object plus turns, cost, tokens,
      and the session directory's git head and branch when they resolve. Query
      it for facts; do not print it.
@@ -657,6 +658,21 @@ READ THE ENDING
   reasoning, and tool turns. A user turn the harness left no evidence for is
   `unknown`, which is an answer rather than a gap — read its text before
   deciding what it was.
+
+  Operator turns carry an orthogonal `origin` only with positive sender
+  evidence. Headless sessions assign `program` to every operator turn.
+  Otherwise Claude assigns `harness` for `isMeta: true`, or `person` for
+  `promptSource: typed`; `queued` and absent promptSource do not identify a
+  person. Pi assigns `harness` to extension `custom_message` entries and
+  `person` to user `message` entries only with interactive launch evidence.
+  Codex records no sender: interactive operator turns have no origin.
+  All other cases omit origin. No message text establishes origin. `show`
+  and `export` accept --origin person|program|harness alongside --only;
+  absent origins never match. The projection records the origin selector
+  and counts rejected turns by kind. Origin does not identify a launcher or
+  resolve agent-delegate
+  handles; agent-delegate status names its session, and a pi handle is already
+  the session id.
 
   A session the user deliberately aborted is a frozen handoff whatever its
   last turn looks like: report what was abandoned, and do not resume it on
