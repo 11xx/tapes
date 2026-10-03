@@ -11960,3 +11960,140 @@ fn claude_content_carriers_survive_cli_views_and_bundle_export() {
     assert_eq!(bundle["schema"], "tapes-session/17");
     assert_eq!(bundle["content"]["references"], 2);
 }
+
+#[test]
+fn list_search_turn_depth_reaches_older_supplied_turns() {
+    let input = supplied_fixture("chatgpt-export.json");
+    for (depth, expected) in [("1", 0), ("2", 1), ("all", 1)] {
+        let output = tapes()
+            .args([
+                "list",
+                "--input",
+                input.to_str().unwrap(),
+                "--search",
+                "question",
+                "--search-turns",
+                depth,
+                "--json",
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(
+            value["sessions"].as_array().unwrap().len(),
+            expected,
+            "{depth}"
+        );
+        assert!(value["partial_search"].as_array().unwrap().is_empty());
+    }
+    for depth in ["0", "invalid"] {
+        let output = tapes()
+            .args(["list", "--search", "question", "--search-turns", depth])
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+    }
+    let output = tapes()
+        .args(["list", "--search-turns", "all"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+}
+
+#[test]
+fn remote_list_preserves_search_turn_depth() {
+    let replica = RemoteReplica::new("search-depth");
+    replica.record(CODEX_ONE_FILE, CODEX_SESSION_ONE);
+    let (codex, home) = fixture_store("remote-search-depth-local");
+    for (depth, expected) in [("1", 0), ("all", 1)] {
+        let output = run_against_replica(
+            &replica,
+            &codex,
+            &home,
+            Path::new("/definitely/missing"),
+            &[
+                "list",
+                "--global",
+                "--remote",
+                "replica-host",
+                "--search",
+                "Inspect the fixture.",
+                "--search-turns",
+                depth,
+                "--json",
+            ],
+        );
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(
+            value["sessions"].as_array().unwrap().len(),
+            expected,
+            "{depth}"
+        );
+        assert!(replica
+            .queried()
+            .last()
+            .unwrap()
+            .contains(&format!("'--search-turns' '{depth}'")));
+    }
+}
+
+#[test]
+fn human_search_diagnostics_group_sessions_by_harness_and_reason() {
+    let transport = failing_transport(
+        "fold-search",
+        r#"#!/bin/sh
+cat <<'JSON'
+{"schema":"tapes-list/9","sort":"newest","sessions":[],"unavailable":[],"unreadable":[],"unsearched":["codex session fixture-one: read failed","codex session fixture-two: read failed","claude session fixture-three: read failed"],"partial_search":["codex session fixture-four: partial coverage of the requested turn window","codex session fixture-five: partial coverage of the requested turn window"],"scanned":5,"scan_truncated":false}
+JSON
+"#,
+    );
+    let output = tapes()
+        .args(["list", "--remote", "replica-host"])
+        .env("TAPES_SSH", &transport)
+        .output()
+        .unwrap();
+    fs::remove_file(transport).unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let human = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        human.contains("Unsearched: codex: read failed (2)"),
+        "{human}"
+    );
+    assert!(
+        human.contains("Unsearched: claude: read failed (1)"),
+        "{human}"
+    );
+    assert!(
+        human.contains("Partial search: codex: partial coverage of the requested turn window (2)"),
+        "{human}"
+    );
+    assert!(!human.contains("fixture-one"));
+    assert_eq!(
+        human
+            .lines()
+            .filter(|line| line.starts_with("Unsearched:"))
+            .count(),
+        2
+    );
+    assert_eq!(
+        human
+            .lines()
+            .filter(|line| line.starts_with("Partial search:"))
+            .count(),
+        1
+    );
+}

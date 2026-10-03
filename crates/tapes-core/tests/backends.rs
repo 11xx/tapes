@@ -6350,3 +6350,25 @@ fn codex_exit_status_requires_a_completed_command_and_an_integer() {
         .get("tool")
         .is_none());
 }
+
+#[test]
+fn opencode_api_refusal_is_reported_once_for_the_store() {
+    let api = OpenCodeAlias::new("api-refused");
+    let backends: Vec<Box<dyn Backend>> = vec![Box::new(OpenCodeBackend::new(api.path()))];
+    let result = list_with_backends_filtered_and_search(
+        &backends,
+        Some("opencode"),
+        None,
+        10,
+        None,
+        None,
+        Some("fixture"),
+    )
+    .unwrap();
+    assert!(result.sessions.is_empty());
+    assert!(result.partial_search.is_empty());
+    assert_eq!(
+        result.unsearched,
+        vec!["opencode store: opencode API server returned HTTP 401"]
+    );
+}

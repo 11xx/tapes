@@ -1064,6 +1064,7 @@ impl OpenCodeBackend {
                 "opencode v2 search prefilter failed: {error:#}; searched without prefilter"
             ));
         }
+        fold_api_refusals(&mut searched);
         searched
     }
 }
@@ -2345,5 +2346,25 @@ mod tests {
 
         assert_eq!(backend.program, OsString::from("/missing/opencode2"));
         assert!(!backend.available());
+    }
+}
+
+/// An API refusal describes store access rather than individual sessions.
+fn fold_api_refusals(listing: &mut Listing) {
+    let mut reasons = std::collections::BTreeSet::new();
+    listing.unsearched.retain(|diagnostic| {
+        if let Some((_, reason)) = diagnostic.split_once(": ") {
+            if reason.contains("API server returned HTTP ") {
+                reasons.insert(reason.to_owned());
+                return false;
+            }
+        }
+        true
+    });
+    if !reasons.is_empty() {
+        listing.unsearched.push(format!(
+            "opencode store: {}",
+            reasons.into_iter().collect::<Vec<_>>().join("; ")
+        ));
     }
 }

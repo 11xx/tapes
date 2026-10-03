@@ -49,6 +49,12 @@ case $name in
     session=session.json
     mode=counting
     ;;
+  opencode2-api-refused*)
+    list=list.json
+    messages=messages.json
+    session=session.json
+    mode=api-refused
+    ;;
   opencode2-serve-failed*)
     list=list.json
     messages=messages.json
@@ -87,6 +93,24 @@ case ${5:-} in
   malformed-row) mode=database-malformed ;;
   database) mode=database ;;
 esac
+
+if [ "$mode" = api-refused ] && [ "${1:-}" = serve ]; then
+  exec /usr/bin/python3 - "$@" <<'PYTHON'
+import http.server
+import sys
+
+class Refused(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(401)
+        self.end_headers()
+
+    def log_message(self, *args):
+        pass
+
+port = int(sys.argv[sys.argv.index("--port") + 1])
+http.server.HTTPServer(("127.0.0.1", port), Refused).serve_forever()
+PYTHON
+fi
 
 if [ "$mode" = serve-failed ] && [ "${1:-}" = serve ]; then
   exit 7

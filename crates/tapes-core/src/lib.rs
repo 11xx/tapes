@@ -133,6 +133,8 @@ pub struct SessionList {
     /// answered, plus diagnostics from a search-stage fallback. A read
     /// failure is not a non-match.
     pub unsearched: Vec<String>,
+    /// Sessions whose searched window is shortened by a source read bound,
+    /// including both matches and misses.
     pub partial_search: Vec<String>,
     /// Candidate sessions inspected to produce this list, across every
     /// harness. A scoped listing reads more than it returns.
@@ -633,25 +635,7 @@ pub(crate) fn list_scoped(
                     );
                 }
                 unreadable_sessions.extend(unavailable);
-                if backend.harness() == "opencode" {
-                    let mut refusals = std::collections::BTreeSet::new();
-                    for diagnostic in unsearched {
-                        if let Some((_, reason)) = diagnostic.split_once(": ") {
-                            if reason.contains("API server returned HTTP ") {
-                                refusals.insert(reason.to_owned());
-                                continue;
-                            }
-                        }
-                        unsearched_sessions.push(diagnostic);
-                    }
-                    unsearched_sessions.extend(
-                        refusals
-                            .into_iter()
-                            .map(|reason| format!("opencode store: {reason}")),
-                    );
-                } else {
-                    unsearched_sessions.extend(unsearched);
-                }
+                unsearched_sessions.extend(unsearched);
                 partial_search.extend(partial);
                 scanned += inspected;
                 scan_truncated |= truncated;
