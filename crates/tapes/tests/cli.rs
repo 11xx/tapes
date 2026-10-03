@@ -9627,10 +9627,137 @@ fn history_pages_cover_records_once_and_reject_changed_sources() {
             > complete["matches"][0]["page_start"].as_u64().unwrap()
     );
     assert!(complete["next_cursor"].is_null());
+    assert_eq!(complete["schema"], "tapes-history-search/9");
+    let full: Value =
+        serde_json::from_slice(&run(&["show", id, "--full", "--json"]).stdout).unwrap();
+    let opening = full["turns"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|turn| turn["text"] == "historical request 00")
+        .unwrap();
+    for field in ["record_ref", "native_id", "kind", "ts"] {
+        assert_eq!(complete["matches"][0][field], opening[field], "{field}");
+    }
+    assert!(complete["matches"][0].get("native_id").is_none());
+    for bytes in ["1024", "2048", "65536"] {
+        let search: Value = serde_json::from_slice(
+            &run(&[
+                "history-search",
+                id,
+                "--bytes",
+                bytes,
+                "--pages",
+                "32",
+                "--search",
+                "historical request",
+                "--json",
+            ])
+            .stdout,
+        )
+        .unwrap();
+        assert_eq!(search["matches"].as_array().unwrap().len(), 40);
+        for hit in search["matches"].as_array().unwrap() {
+            let turn = full["turns"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|turn| turn["text"] == hit["text"])
+                .unwrap();
+            for field in ["record_ref", "native_id", "kind", "ts"] {
+                assert_eq!(hit[field], turn[field], "{field}, bytes={bytes}");
+            }
+        }
+    }
+    let human = run(&[
+        "history-search",
+        id,
+        "--bytes",
+        "65536",
+        "--search",
+        "request 00",
+    ]);
+    let human = String::from_utf8(human.stdout).unwrap();
+    assert!(human.contains("page-local #0 Operator 2026-01-01T10:01:00Z"));
     fs::write(&path, format!("{body}\n")).unwrap();
     let changed = run(&["page", id, "--cursor", &first_cursor, "--json"]);
     assert!(!changed.status.success());
     assert!(String::from_utf8_lossy(&changed.stderr).contains("source changed"));
+}
+
+#[test]
+fn history_search_distinguishes_duplicate_records_and_normalized_parts() {
+    let root = TemporaryDirectory::new(
+        std::env::temp_dir().join(format!("tapes-search-coordinates-{}", std::process::id())),
+    );
+    let home = root.path().join("home");
+    let project = home.join(".claude/projects/fixture");
+    fs::create_dir_all(&project).unwrap();
+    let id = "session-coordinates";
+    let text = format!("coordinate fixture {}", "x".repeat(700));
+    let mut body = String::new();
+    for uuid in [Some("record-one"), Some("record-two"), None] {
+        let mut record = serde_json::json!({"type":"assistant","sessionId":id,
+            "message":{"role":"assistant","content":[
+                {"type":"thinking","thinking":text}, {"type":"text","text":text}]}});
+        if let Some(uuid) = uuid {
+            record["uuid"] = uuid.into();
+        }
+        body.push_str(&format!("{record}\n"));
+    }
+    body.push_str("malformed\n");
+    fs::write(project.join(format!("{id}.jsonl")), body).unwrap();
+    let run = |args: &[&str]| {
+        let mut command = tapes();
+        command.args(args);
+        with_fixture_env(&mut command, &root.path().join("codex"), &home, root.path());
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice::<Value>(&output.stdout).unwrap()
+    };
+    let full = run(&["show", id, "--full", "--json"]);
+    for bytes in ["2048", "65536"] {
+        let search = run(&[
+            "history-search",
+            id,
+            "--bytes",
+            bytes,
+            "--pages",
+            "32",
+            "--search",
+            "coordinate fixture",
+            "--json",
+        ]);
+        let hits = search["matches"].as_array().unwrap();
+        assert_eq!(hits.len(), 6);
+        assert_eq!(search["skipped_records"], 1);
+        let mut refs = std::collections::BTreeSet::new();
+        for hit in hits {
+            assert_eq!(hit["text_truncated"], true);
+            assert_eq!(hit["text"].as_str().unwrap().chars().count(), 600);
+            assert!(hit.get("ts").is_none());
+            assert!(refs.insert(hit["record_ref"].to_string()));
+            let turn = full["turns"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|turn| turn["record_ref"] == hit["record_ref"])
+                .unwrap();
+            for field in ["native_id", "kind", "ts"] {
+                assert_eq!(hit[field], turn[field]);
+            }
+        }
+        assert_eq!(
+            hits.iter()
+                .filter(|hit| hit.get("native_id").is_none())
+                .count(),
+            2
+        );
+    }
 }
 
 #[test]

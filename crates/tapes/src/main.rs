@@ -910,6 +910,8 @@ enum Command {
         json: bool,
     },
     /// Search normalized historical turns within an explicit page budget, retaining coverage gaps.
+    /// JSON uses tapes-history-search/9; matches retain source references, native IDs,
+    /// kinds and timestamps. Page bounds and ordinals are page-local coordinates.
     HistorySearch {
         #[command(flatten)]
         selection: SelectionArgs,
@@ -1636,8 +1638,16 @@ fn dispatch(cli: Cli) -> Result<()> {
                 );
                 for found in report.matches {
                     println!(
-                        "[page {}..{} #{}] {}",
-                        found.page_start, found.page_end, found.ordinal, found.text
+                        "[page {}..{} page-local #{} {:?}{}] {}",
+                        found.page_start,
+                        found.page_end,
+                        found.ordinal,
+                        found.kind,
+                        found
+                            .ts
+                            .map(|ts| format!(" {}", human_timestamp(ts)))
+                            .unwrap_or_default(),
+                        found.text
                     );
                 }
                 if report.matches_truncated {
