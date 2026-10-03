@@ -125,6 +125,7 @@ fn claude_coordinates_survive_show_export_and_page() {
         root.path(),
         &[
             "export".into(),
+            "--full".into(),
             id.into(),
             "--bundle".into(),
             bundle_root_string,
@@ -145,6 +146,18 @@ fn claude_coordinates_survive_show_export_and_page() {
         .unwrap();
     let bundle: Value = serde_json::from_slice(&fs::read(bundle_json_path).unwrap()).unwrap();
     assert_eq!(bundle["schema"], "tapes-session/16");
+    assert!(show["read"].get("source_prefix_digest").is_none());
+    let full = json_command(
+        root.path(),
+        &["show".into(), id.into(), "--full".into(), "--json".into()],
+    );
+    let digest = &full["read"]["source_prefix_digest"];
+    assert_eq!(digest["algorithm"], "sha256");
+    assert_eq!(digest["value"].as_str().unwrap().len(), 64);
+    assert_eq!(digest["span"]["start"], 0);
+    assert_eq!(digest["span"]["end"], full["read"]["source_length"]);
+    assert_eq!(*digest, bundle["read"]["source_prefix_digest"]);
+
     assert_content_reference(&bundle["turns"][1]["parts"][0]["record_ref"], 1, 0, None);
 
     let page = json_command(
@@ -157,6 +170,7 @@ fn claude_coordinates_survive_show_export_and_page() {
             "--json".into(),
         ],
     );
+    assert!(page["read"].get("source_prefix_digest").is_none());
     assert_eq!(page["schema"], "tapes-page/9");
     assert_eq!(page["read"]["projection"], page["schema"]);
     assert_eq!(page["read"]["projection_options"], json!(["transcript"]));
@@ -395,7 +409,7 @@ fn codex_history_events_and_metadata_report_their_actual_reads() {
             "--json".into(),
         ],
     );
-    assert_eq!(metadata["schema"], "tapes-metadata-history/8");
+    assert_eq!(metadata["schema"], "tapes-metadata-history/9");
     assert_eq!(metadata["reads"][0]["projection"], "tapes-page/9");
     assert_eq!(
         metadata["reads"][0]["projection_options"],

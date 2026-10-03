@@ -4086,26 +4086,35 @@ fn a_read_counts_the_records_it_represented_as_no_turn() {
     ];
     for ((backend, id), declined) in file_fixture_backends().into_iter().zip(expected) {
         let session = located(backend.as_ref(), id);
-        let bounded = backend
+        let bounded_read = backend
             .transcript(&session, usize::MAX)
             .unwrap()
             .read
-            .unwrap()
+            .unwrap();
+        assert!(bounded_read.source_prefix_digest.is_none(), "{id}");
+        let bounded = bounded_read
             .unmapped
             .unwrap_or_else(|| panic!("{id} counts no unmapped records"));
         assert_eq!(bounded.declined, declined, "{id}");
         assert!(bounded.unrecognized.is_empty(), "{id}: {bounded:?}");
         let streamed = backend
             .stream_transcript(&session, None, &mut |_| Ok(()))
-            .unwrap()
-            .unmapped;
-        assert_eq!(streamed.as_ref(), Some(&bounded), "{id}");
+            .unwrap();
+        assert!(
+            streamed.read_evidence(None).source_prefix_digest.is_some(),
+            "{id}"
+        );
+        assert_eq!(streamed.unmapped.as_ref(), Some(&bounded), "{id}");
     }
 
     let opencode = OpenCodeBackend::new(opencode_fixture_program());
     let session = located(&opencode, "ses_000000fixtureSharedSession");
     let read = opencode.transcript(&session, usize::MAX).unwrap().read;
-    assert!(read.is_none_or(|read| read.unmapped.is_none()));
+    assert!(read.is_none_or(|read| read.unmapped.is_none() && read.source_prefix_digest.is_none()));
+    let api_full = opencode
+        .stream_transcript(&session, None, &mut |_| Ok(()))
+        .unwrap();
+    assert!(api_full.read_evidence(None).source_prefix_digest.is_none());
 
     let root =
         std::env::temp_dir().join(format!("tapes-claude-unrecognized-{}", std::process::id()));
@@ -4454,7 +4463,7 @@ fn codex_modern_usage_records_choose_the_modern_basis_and_keep_native_rows() {
     )
     .unwrap();
 
-    assert_eq!(view.schema, "tapes-usage/8");
+    assert_eq!(view.schema, "tapes-usage/9");
     assert_eq!(
         view.tokens.as_ref().and_then(|tokens| tokens.input),
         Some(60)
@@ -6204,4 +6213,87 @@ fn claude_compaction_is_bounded_notice_evidence_across_read_paths() {
             .count(),
         2
     );
+}
+
+#[test]
+fn native_prefix_digest_identifies_bytes_and_retains_the_replay_prefix() {
+    use sha2::{Digest, Sha256};
+    use std::io::Write;
+    let id = "90000000-0000-0000-0000-000000000014";
+    let body = format!("{}\nnot json\n{{\"unfinished\":", codex_meta(id));
+    let root = codex_rollout_text("public-prefix", id, &body);
+    let copy_root = codex_rollout_text("public-prefix-copy", id, &body);
+    let backend = CodexBackend::new(&root);
+    let copy_backend = CodexBackend::new(&copy_root);
+    let session = backend.locate(id).unwrap().unwrap();
+    let copy_session = copy_backend.locate(id).unwrap().unwrap();
+    let first = backend
+        .stream_transcript(&session, None, &mut |_| Ok(()))
+        .unwrap();
+    let copied = copy_backend
+        .stream_transcript(&copy_session, None, &mut |_| Ok(()))
+        .unwrap();
+    let evidence = first.read_evidence(None);
+    let digest = evidence.source_prefix_digest.as_ref().unwrap();
+    assert_eq!(
+        digest,
+        copied
+            .read_evidence(None)
+            .source_prefix_digest
+            .as_ref()
+            .unwrap()
+    );
+    assert_ne!(
+        evidence.source_revision,
+        copied.read_evidence(None).source_revision
+    );
+    assert_eq!(
+        digest.value,
+        format!("{:x}", Sha256::digest(body.as_bytes()))
+    );
+    assert_eq!(digest.span.start, 0);
+    assert_eq!(digest.span.end, body.len() as u64);
+    assert!(!evidence.gaps.is_empty());
+    let encoded = serde_json::to_value(&evidence).unwrap();
+    assert_eq!(encoded["source_prefix_digest"]["algorithm"], "sha256");
+    let mut older = encoded.clone();
+    older
+        .as_object_mut()
+        .unwrap()
+        .remove("source_prefix_digest");
+    let older: ReadEvidence = serde_json::from_value(older).unwrap();
+    assert!(older.source_prefix_digest.is_none());
+    assert!(serde_json::to_value(older)
+        .unwrap()
+        .get("source_prefix_digest")
+        .is_none());
+    let path = root
+        .join("sessions/2026/01/01")
+        .join(format!("rollout-2026-01-01T12-00-00-{id}.jsonl"));
+    fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap()
+        .write_all(b"tail")
+        .unwrap();
+    let replay = backend
+        .stream_transcript(&session, Some(&first), &mut |_| Ok(()))
+        .unwrap();
+    assert_eq!(
+        replay.read_evidence(None).source_prefix_digest.as_ref(),
+        Some(digest)
+    );
+    let copy_path = copy_root
+        .join("sessions/2026/01/01")
+        .join(format!("rollout-2026-01-01T12-00-00-{id}.jsonl"));
+    fs::write(copy_path, body.replacen("not json", "Not json", 1)).unwrap();
+    let mutated = copy_backend
+        .stream_transcript(&copy_session, None, &mut |_| Ok(()))
+        .unwrap();
+    assert_ne!(
+        mutated.read_evidence(None).source_prefix_digest.as_ref(),
+        Some(digest)
+    );
+    fs::remove_dir_all(root).unwrap();
+    fs::remove_dir_all(copy_root).unwrap();
 }
