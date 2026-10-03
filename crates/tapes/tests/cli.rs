@@ -1856,7 +1856,12 @@ fn list_help_exits_successfully() {
         "{help}"
     );
     assert!(help.contains("--search-turns <N|all>"), "{help}");
-    assert!(help.contains("Partial reads are searched"), "{help}");
+    assert!(
+        help.contains("Partial bounded nonmatches report partial coverage"),
+        "{help}"
+    );
+    assert!(help.contains("full_search"), "{help}");
+    assert!(help.contains("matches_truncated"), "{help}");
     assert!(help.contains("unsearched"), "{help}");
     assert!(help.contains("--input <PATH>"), "{help}");
     assert!(help.contains("chatgpt-exporter"), "{help}");

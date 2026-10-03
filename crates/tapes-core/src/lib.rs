@@ -35,6 +35,7 @@ pub mod model;
 mod model_observation;
 pub mod reader;
 pub mod scope;
+pub mod search;
 pub mod stats;
 pub mod stats_summary;
 pub mod timeline;
@@ -119,6 +120,8 @@ pub struct SessionList {
     pub schema: &'static str,
     pub sort: ListSort,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub full_search: Option<search::FullSearch>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub activity: Option<ActivityWindow>,
     pub sessions: Vec<Session>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -155,6 +158,8 @@ pub struct SessionList {
 #[derive(Deserialize)]
 struct SerializedList {
     schema: String,
+    #[serde(default)]
+    full_search: Option<search::FullSearch>,
     sort: ListSort,
     #[serde(default)]
     activity: Option<ActivityWindow>,
@@ -191,6 +196,7 @@ impl<'de> Deserialize<'de> for SessionList {
         Ok(Self {
             schema: LIST_SCHEMA,
             sort: serialized.sort,
+            full_search: serialized.full_search,
             activity: serialized.activity,
             sessions: serialized.sessions,
             artifacts: serialized.artifacts,
@@ -435,6 +441,7 @@ pub fn list_with_backends_options(
     let listed = list_scoped(backends, harness, scope, limit, filters, sort)?;
     Ok(SessionList {
         schema: LIST_SCHEMA,
+        full_search: None,
         sort,
         activity: (filters.since.is_some() || filters.until.is_some()).then_some(ActivityWindow {
             since: filters.since,
@@ -1959,6 +1966,7 @@ pub fn visit_event_sessions(
     }
     Ok(SessionList {
         schema: LIST_SCHEMA,
+        full_search: None,
         sort: selection.sort,
         activity: (selection.filters.since.is_some() || selection.filters.until.is_some())
             .then_some(ActivityWindow {

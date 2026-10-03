@@ -362,6 +362,11 @@ pub trait Backend {
     /// locating it again; the transcript read may still need to open the
     /// underlying record to collect turns.
     fn transcript(&self, session: &Session, tail: usize) -> Result<Transcript>;
+    /// Whether the backend has a whole-recording search reader.
+    fn supports_full_search(&self) -> bool {
+        false
+    }
+
     /// Read the whole recording in order, handing each normalized turn to
     /// `turn` as it is produced, so memory follows one record rather than the
     /// file. The default refuses: a backend without a streamed reader must not

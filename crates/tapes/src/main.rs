@@ -908,7 +908,9 @@ enum Command {
         #[command(flatten)]
         scope: ScopeArgs,
         /// Take at most this many sessions from each harness [default: 20].
-        /// The scope and filters apply first, so a bound never hides a match.
+        /// Scope and filters apply first. With --search --full, this bounds
+        /// sessions read globally before content matching; withheld candidates
+        /// are reported by full_search.selection_truncated.
         #[arg(long)]
         limit: Option<usize>,
         /// Match case-insensitively against the full model identity shown in
@@ -942,16 +944,28 @@ enum Command {
         /// session id, then harness.
         #[arg(long, value_enum, default_value_t = SortArg::Newest)]
         sort: SortArg,
-        /// Match case-insensitively against normalized turns in each bounded
-        /// read, before --limit. --search-turns selects the turn window.
-        /// Partial reads are searched; only nonmatches report partial coverage.
-        /// Read failures are unsearched. A preflight notice goes to stderr.
+        /// Match case-insensitively against normalized turns. Bounded searches
+        /// precede --limit; --search-turns selects their turn window. Partial
+        /// bounded nonmatches report partial coverage. --full searches whole
+        /// recordings after --limit. Read failures are unsearched, and a
+        /// preflight notice goes to stderr.
         #[arg(long, value_name = "SUBSTRING")]
         search: Option<String>,
         /// Number of normalized turns to search in each bounded read. `all`
         /// searches every retained turn; source byte and record bounds apply.
         #[arg(long, value_name = "N|all", default_value = "32", requires = "search", value_parser = parse_search_turns)]
         search_turns: usize,
+        /// Stream whole recordings after metadata and scope filters. --limit
+        /// bounds sessions read globally. full_search reports selection
+        /// truncation and coverage for matches and nonmatches; coordinates
+        /// carry zero-based ordinal, kind, timestamp and record reference.
+        /// whole_recording_read requires no gaps, skipped records or bounds.
+        #[arg(long, requires = "search", conflicts_with = "search_turns")]
+        full: bool,
+        /// Maximum matching turn coordinates retained per session in a whole
+        /// search. Overflow sets matches_truncated without stopping the read.
+        #[arg(long, default_value = "100", requires = "full")]
+        search_matches: usize,
 
         #[command(flatten)]
         input: InputArgs,
@@ -1614,6 +1628,8 @@ fn dispatch(cli: Cli) -> Result<()> {
             sort,
             search,
             search_turns,
+            full,
+            search_matches,
             input,
             json,
             remote,
@@ -1642,6 +1658,8 @@ fn dispatch(cli: Cli) -> Result<()> {
                     sort,
                     search: &search,
                     search_turns,
+                    full,
+                    search_matches,
                 });
                 let result = remote_list(destination, &args);
                 let (result, failure) = match result {
@@ -1657,13 +1675,16 @@ fn dispatch(cli: Cli) -> Result<()> {
                     println!("Replica: {destination}");
                     print_session_list(&result.sessions);
                     print_availability_note(&result);
+                    print_full_search(&result);
                 }
                 if let Some(unavailable) = failure {
                     return Err(unavailable.into());
                 }
                 return Ok(());
             }
-            if search.is_some() {
+            if full {
+                eprintln!("Searching whole recordings; --limit bounds sessions read after metadata filters.");
+            } else if search.is_some() {
                 eprintln!(
                     "Searching a bounded window of normalized turns in each candidate session before applying --limit."
                 );
@@ -1677,7 +1698,24 @@ fn dispatch(cli: Cli) -> Result<()> {
                 search: search.as_deref(),
                 search_turns: Some(search_turns),
             };
-            let result = if input.supplied() {
+            let result = if full {
+                let selected_scope = if input.supplied() {
+                    None
+                } else {
+                    scope.within().resolve()?
+                };
+                agent_tapes_core::search::list(
+                    &input.backends()?,
+                    harness.as_deref(),
+                    selected_scope.as_ref(),
+                    &filters,
+                    agent_tapes_core::search::Options {
+                        limit: limit.unwrap_or(20),
+                        sort: sort.into(),
+                        match_limit: search_matches,
+                    },
+                )?
+            } else if input.supplied() {
                 let backends = input.backends()?;
                 agent_tapes_core::list_with_backends_options(
                     &backends,
@@ -1704,6 +1742,7 @@ fn dispatch(cli: Cli) -> Result<()> {
             } else {
                 print_session_list(&result.sessions);
                 print_availability_note(&result);
+                print_full_search(&result);
             }
         }
         Command::Artifact {
@@ -2693,6 +2732,8 @@ struct RemoteListQuery<'a> {
     sort: SortArg,
     search: &'a Option<String>,
     search_turns: usize,
+    full: bool,
+    search_matches: usize,
 }
 
 fn remote_list_args(query: &RemoteListQuery<'_>) -> Vec<OsString> {
@@ -2708,7 +2749,10 @@ fn remote_list_args(query: &RemoteListQuery<'_>) -> Vec<OsString> {
     args.value_if("--until", query.until.map(timestamp_arg));
     args.value("--sort", sort_label(query.sort));
     args.value_if("--search", query.search.as_deref());
-    if query.search.is_some() {
+    if query.full {
+        args.raw("--full");
+        args.value("--search-matches", query.search_matches.to_string());
+    } else if query.search.is_some() {
         args.value(
             "--search-turns",
             if query.search_turns == usize::MAX {
@@ -2876,6 +2920,7 @@ fn unreachable_list(
 ) -> agent_tapes_core::SessionList {
     agent_tapes_core::SessionList {
         schema: agent_tapes_core::LIST_SCHEMA,
+        full_search: None,
         sort: sort.into(),
         activity: (since.is_some() || until.is_some())
             .then_some(agent_tapes_core::ActivityWindow { since, until }),
@@ -3977,6 +4022,30 @@ fn incomplete_label(incomplete: &Incomplete) -> &'static str {
         Incomplete::NoResultInRead => "no-result-in-read",
         Incomplete::CallBeforeReadBound => "call-before-read-bound",
         Incomplete::CallNotRecorded => "call-not-recorded",
+    }
+}
+
+fn print_full_search(result: &agent_tapes_core::SessionList) {
+    if let Some(search) = &result.full_search {
+        println!(
+            "Sessions read: {}; selection truncated: {}",
+            search.sessions_read, search.selection_truncated
+        );
+        for coverage in &search.coverage {
+            println!(
+                "{} {}: whole={}, matches_truncated={}",
+                coverage.harness,
+                coverage.session,
+                coverage.whole_recording_read,
+                coverage.matches_truncated
+            );
+            for found in &coverage.matches {
+                println!(
+                    "  {} {:?} {:?} {:?}",
+                    found.ordinal, found.kind, found.ts, found.record_ref
+                );
+            }
+        }
     }
 }
 
