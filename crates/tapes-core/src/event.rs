@@ -13,7 +13,7 @@ use crate::model::{
     TextTailEvidence, Transcript, Truncation, Turn,
 };
 
-pub const EVENTS_SCHEMA: &str = "tapes-events/12";
+pub const EVENTS_SCHEMA: &str = "tapes-events/13";
 const PREVIEW_CHARS: usize = 200;
 pub const MAX_INVOCATION_TEXT_CHARS: usize = 64 * 1024;
 pub const MAX_INVOCATIONS: usize = 32;
@@ -332,6 +332,8 @@ pub enum Incomplete {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct EventRecord {
     pub ordinal: usize,
+    /// The zero-based normalized turn coordinate printed by `show`.
+    pub turn_ordinal: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub event_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -611,6 +613,7 @@ pub fn turn_records(turn: &Turn) -> impl Iterator<Item = EventRecord> {
         let event_id = event_identity(turn, &event.kind);
         EventRecord {
             ordinal: turn.ordinal,
+            turn_ordinal: turn.ordinal,
             native_id: turn
                 .native_id
                 .clone()

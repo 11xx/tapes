@@ -336,7 +336,9 @@ PROBE BEFORE EXPORTING
   bound applies to full, supplied-input, and remote reads; native content
   parts and other metadata retain their own bounds.
 
-  events projects harness-neutral tool records as tapes-events/12. Pairing is
+  events projects harness-neutral tool records as tapes-events/13. Each record
+  names its source turn with turn_ordinal, the same coordinate show prints;
+  ordinal retains that turn coordinate, including for call/result pairs. Pairing is
   exact within the bounded read; an incomplete call or result says whether its
   counterpart was not reached or not recorded. `exit` is an integer process
   status on completed Codex CommandExecution events when exit_code is recorded.
