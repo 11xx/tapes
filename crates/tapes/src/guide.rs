@@ -109,8 +109,10 @@ FIND IT
   Its session metadata `tapes.launch` contains `session` and `modes`: `tui`
   is interactive, `run` is headless, and TUI evidence wins. A marker naming
   another session is ignored. Creation and the first prompt in a resumed
-  session record the process mode; unrecognized entrypoints and attached
-  servers record nothing.
+  session record the process mode. The plugin recognizes the process's
+  `/cli/tui/worker` entrypoint path and `run` command argument, verified
+  against OpenCode 1.18.33. A layout tapes does not recognize leaves the
+  session without a marker; attached servers record nothing.
   Pi and OpenCode sessions without their integration carry no marker.
   Install and uninstall refuse foreign files, symlinks, and directories;
   `tapes uninstall opencode` preserves recorded metadata. For Claude, Pi,

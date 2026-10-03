@@ -1,4 +1,10 @@
-/** Records process launch evidence in session metadata, outside model context. */
+/**
+ * Records process launch evidence in session metadata, outside model context.
+ * The `/cli/tui/worker` entrypoint path identifies TUI mode; the `run`
+ * command argument identifies run mode. These internal-layout signals were
+ * verified against OpenCode 1.18.33. A layout tapes does not recognize leaves
+ * the session without a marker.
+ */
 export default async function ({ client }) {
 	const entrypoint = process.argv[1]?.replaceAll("\\", "/") ?? "";
 	const mode = /\/cli\/tui\/worker\.[jt]s$/.test(entrypoint)
