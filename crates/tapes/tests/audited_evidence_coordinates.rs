@@ -418,7 +418,7 @@ fn codex_history_events_and_metadata_report_their_actual_reads() {
     assert!(metadata["reads"][0].get("context_records").is_none());
 
     let events = json_command(root.path(), &["events".into(), id.into(), "--json".into()]);
-    assert_eq!(events["schema"], "tapes-events/12");
+    assert_eq!(events["schema"], "tapes-events/13");
     let event_records = events["events"].as_array().unwrap();
     assert_eq!(event_records.len(), 2);
     for event in event_records {

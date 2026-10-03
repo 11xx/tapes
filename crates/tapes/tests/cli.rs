@@ -3141,7 +3141,7 @@ fn events_help_explains_pairing_filters_and_the_default_bound() {
     assert!(help.contains("--call-id <ID>"), "{help}");
     assert!(help.contains("--program <PROGRAM>"), "{help}");
     assert!(help.contains("--full-arguments"), "{help}");
-    assert!(help.contains("tapes-events/12"), "{help}");
+    assert!(help.contains("tapes-events/13"), "{help}");
 }
 
 #[test]
@@ -3193,7 +3193,7 @@ fn events_json_answers_call_counts_and_incomplete_calls_without_raw_text() {
     );
     let value: Value = serde_json::from_slice(&output.stdout).unwrap();
 
-    assert_eq!(value["schema"], "tapes-events/12");
+    assert_eq!(value["schema"], "tapes-events/13");
     assert_eq!(value["session"]["id"], id);
     assert!(value.get("truncation").is_none(), "{value}");
     assert_eq!(
@@ -3678,7 +3678,7 @@ fn events_expose_nested_declarations_and_qualified_artifact_consumption() {
         String::from_utf8_lossy(&output.stderr)
     );
     let value: Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(value["schema"], "tapes-events/12");
+    assert_eq!(value["schema"], "tapes-events/13");
     let events = value["events"].as_array().unwrap();
     let shell_call = events
         .iter()
@@ -10475,7 +10475,7 @@ fn events_full_arguments_opt_in_returns_the_complete_argument_text() {
 
     let bounded: Value =
         serde_json::from_slice(&run(&["events", "session-pi-arguments", "--json"])).unwrap();
-    assert_eq!(bounded["schema"], "tapes-events/12");
+    assert_eq!(bounded["schema"], "tapes-events/13");
     let arguments = arguments_of(&bounded);
     assert_eq!(arguments["chars"], total);
     assert_eq!(
@@ -10500,7 +10500,7 @@ fn events_full_arguments_opt_in_returns_the_complete_argument_text() {
         let mut request = vec!["events", "session-pi-arguments"];
         request.extend(extra.iter().copied());
         let value: Value = serde_json::from_slice(&run(&request)).unwrap();
-        assert_eq!(value["schema"], "tapes-events/12", "{request:?}");
+        assert_eq!(value["schema"], "tapes-events/13", "{request:?}");
         let arguments = arguments_of(&value);
         assert_eq!(arguments["chars"], total, "{request:?}");
         assert_eq!(
@@ -11914,7 +11914,7 @@ fn claude_content_carriers_survive_cli_views_and_bundle_export() {
             args.push("--full");
         }
         let events: Value = serde_json::from_slice(&run(&args)).unwrap();
-        assert_eq!(events["schema"], "tapes-events/12");
+        assert_eq!(events["schema"], "tapes-events/13");
         assert_eq!(events["pairs"]["complete"], 7);
         let result = events["events"]
             .as_array()
@@ -11956,6 +11956,6 @@ fn claude_content_carriers_survive_cli_views_and_bundle_export() {
         })
         .unwrap();
     let bundle: Value = serde_json::from_slice(&fs::read(json_path).unwrap()).unwrap();
-    assert_eq!(bundle["schema"], "tapes-session/17");
+    assert_eq!(bundle["schema"], "tapes-session/18");
     assert_eq!(bundle["content"]["references"], 2);
 }

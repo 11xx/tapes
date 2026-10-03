@@ -369,7 +369,7 @@ PROBE BEFORE EXPORTING
   human output is one line per turn. A selected session that cannot be read
   fails the command.
 
-  events projects harness-neutral tool records as tapes-events/12. Each record
+  events projects harness-neutral tool records as tapes-events/13. Each record
   names its source turn with turn_ordinal, the same coordinate show prints;
   ordinal retains that turn coordinate, including for call/result pairs. Pairing is
   exact within the bounded read; an incomplete call or result says whether its

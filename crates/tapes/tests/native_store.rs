@@ -229,7 +229,7 @@ fn native_store_reaches_history_views_aggregates_and_export() {
     );
     let manifest: Value =
         serde_json::from_slice(&fs::read(bulk.join("manifest.json")).unwrap()).unwrap();
-    assert_eq!(manifest["schema"], "tapes-export-manifest/6");
+    assert_eq!(manifest["schema"], "tapes-export-manifest/7");
     assert_eq!(manifest["sessions"].as_array().unwrap().len(), 1);
 }
 
