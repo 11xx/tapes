@@ -21,8 +21,8 @@ is safe to point at a session that is still running.
 Select recorded tool calls across sessions with `tapes events --here --tool
 bash --command 'cargo test'`. Matching includes paired results and recorded
 exit status. Add `--count` for per-session counts, or `--full` to stream whole
-recordings. Selection JSON uses `tapes-events-selection/1` with per-session
-counts and partial-read status; event objects use `tapes-events/13`.
+recordings. Selection JSON uses `tapes-events-selection/2` with per-session
+counts and partial-read status; event objects use `tapes-events/14`.
 
 ## Install
 
@@ -64,6 +64,14 @@ tapes timeline <id> --json                # turn ordinals, kinds and timestamps
 tapes stats <id> --idle 45m               # active time, stretches, tools, cache share
 tapes list --remote build-box             # sessions on another machine, read over ssh
 ```
+
+For a growing Claude or Codex recording, start `tapes page <id> --pin --bytes
+1MiB --json`, then continue with its `next_cursor` as `--cursor` alone.
+`history-search` and `metadata` also accept `--pin`. One bounded-memory pass
+hashes a prefix up to 1 GiB; later pages verify their chunks and ignore appends.
+Edits refuse when their chunk is reached; replacement and truncation refuse
+immediately. The guide explains verification costs and the captured-copy
+fallback for bytes that must survive a rewrite.
 
 Without `--here`, a listing covers every session on the machine. Every command
 that reads sessions, except `export`, takes `--json`, and each JSON answer

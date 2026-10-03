@@ -23,7 +23,7 @@ use crate::usage::{self, ModelUsage, TurnCoverage, UsageSession, UsageView};
 
 pub const DEFAULT_IDLE_MS: i64 = 45 * 60 * 1000;
 
-pub const STATS_SCHEMA: &str = "tapes-stats/13";
+pub const STATS_SCHEMA: &str = "tapes-stats/14";
 
 /// One session's counted facts, in the order a reader takes them: what the
 /// figures cover, the turns, the tool calls behind them, the recorded clock,

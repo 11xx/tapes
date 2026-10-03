@@ -205,7 +205,7 @@ impl From<InputFormatArg> for InputFormat {
 #[derive(Args, Clone, Debug, Default)]
 struct InputArgs {
     /// Select exactly one materialized native store; never consult installed stores.
-    /// Conflicts with --input, --remote, and --harness naming another harness.
+    /// Conflicts with --input and --harness naming another harness.
     /// OpenCode uses an API or database and cannot be selected by a root.
     #[arg(
         long,
@@ -1057,7 +1057,7 @@ enum Command {
         #[arg(long, value_name = "SSH-DESTINATION", conflicts_with = "input")]
         remote: Option<String>,
     },
-    /// Read one bounded page of older Claude or Codex history as tapes-page/11,
+    /// Read one bounded page of older Claude or Codex history as tapes-page/12,
     /// including absolute record references and read evidence. A page decodes
     /// only the records inside its byte range, so a turn's kind matches the one
     /// a whole read gives it. Resume with the returned cursor.
@@ -1066,6 +1066,16 @@ enum Command {
         selection: SelectionArgs,
         #[arg(long)]
         cursor: Option<String>,
+        /// Hash a fixed prefix up to 1GiB in one streaming pass with bounded memory.
+        /// Later pages verify their chunks, ignore appends beyond the pinned end,
+        /// and refuse replacement, truncation or an edit in a chunk they reach.
+        /// Continue with --cursor alone; a strict walk must restart to acquire a pin.
+        /// Use --bytes equal to the reported chunk size to limit verification reads
+        /// (at most 3 × 4MiB per page). Chunks already passed are not rechecked;
+        /// changes during hashing are part of its observation. A pin preserves no
+        /// bytes through a rewrite: read a captured copy with --native-store instead.
+        #[arg(long, conflicts_with = "cursor")]
+        pin: bool,
         /// Maximum payload bytes per page, between 1KiB and 4MiB.
         /// The one alignment byte read before the page is counted separately.
         #[arg(long, default_value_t = ByteSize::new(agent_tapes_core::history::DEFAULT_BYTES as u64))]
@@ -1074,13 +1084,23 @@ enum Command {
         json: bool,
     },
     /// Search normalized historical turns within an explicit page budget, retaining coverage gaps.
-    /// JSON uses tapes-history-search/10; matches retain source references, native IDs,
+    /// JSON uses tapes-history-search/11; matches retain source references, native IDs,
     /// kinds and timestamps. Page bounds and ordinals are page-local coordinates.
     HistorySearch {
         #[command(flatten)]
         selection: SelectionArgs,
         #[arg(long)]
         cursor: Option<String>,
+        /// Hash a fixed prefix up to 1GiB in one streaming pass with bounded memory.
+        /// Later pages verify their chunks, ignore appends beyond the pinned end,
+        /// and refuse replacement, truncation or an edit in a chunk they reach.
+        /// Continue with --cursor alone; a strict walk must restart to acquire a pin.
+        /// Use --bytes equal to the reported chunk size to limit verification reads
+        /// (at most 3 × 4MiB per page). Chunks already passed are not rechecked;
+        /// changes during hashing are part of its observation. A pin preserves no
+        /// bytes through a rewrite: read a captured copy with --native-store instead.
+        #[arg(long, conflicts_with = "cursor")]
+        pin: bool,
         #[arg(long, default_value_t = ByteSize::new(agent_tapes_core::history::DEFAULT_BYTES as u64))]
         bytes: ByteSize,
         /// Maximum pages to read, between 1 and 32.
@@ -1092,12 +1112,23 @@ enum Command {
         json: bool,
     },
     /// Recover recorded model observations outside the usual source tail as a
-    /// models-only tapes-page/11 projection, with explicit history coverage.
+    /// models-only tapes-page/12 projection, with explicit history coverage.
+    /// JSON uses tapes-metadata-history/11.
     Metadata {
         #[command(flatten)]
         selection: SelectionArgs,
         #[arg(long)]
         cursor: Option<String>,
+        /// Hash a fixed prefix up to 1GiB in one streaming pass with bounded memory.
+        /// Later pages verify their chunks, ignore appends beyond the pinned end,
+        /// and refuse replacement, truncation or an edit in a chunk they reach.
+        /// Continue with --cursor alone; a strict walk must restart to acquire a pin.
+        /// Use --bytes equal to the reported chunk size to limit verification reads
+        /// (at most 3 × 4MiB per page). Chunks already passed are not rechecked;
+        /// changes during hashing are part of its observation. A pin preserves no
+        /// bytes through a rewrite: read a captured copy with --native-store instead.
+        #[arg(long, conflicts_with = "cursor")]
+        pin: bool,
         #[arg(long, default_value_t = ByteSize::new(agent_tapes_core::history::DEFAULT_BYTES as u64))]
         bytes: ByteSize,
         #[arg(long, default_value_t = 1)]
@@ -1105,7 +1136,7 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Read a Claude child's own transcript, accounting and ending as tapes-child/9 under its parent session.
+    /// Read a Claude child's own transcript, accounting and ending as tapes-child/10 under its parent session.
     Child {
         #[command(flatten)]
         selection: SelectionArgs,
@@ -1146,9 +1177,9 @@ enum Command {
         /// including text beyond the argument preview, and keeps paired results.
         #[arg(long, value_name = "SUBSTRING")]
         command: Option<String>,
-        /// Return tapes-events-selection/1 per-session call counts and partial-read
+        /// Return tapes-events-selection/2 per-session call counts and partial-read
         /// status without event records. Explicit selections use this schema with
-        /// nested tapes-events/13 objects when --count is absent.
+        /// nested tapes-events/14 objects when --count is absent.
         #[arg(long)]
         count: bool,
         /// Match the recorded tool call identifier exactly. Repeatable.
@@ -1160,7 +1191,7 @@ enum Command {
         program: Vec<String>,
         /// Stream the whole recording instead of its bounded tail, writing
         /// each event as it is paired so memory follows the calls awaiting a
-        /// result rather than the file; with --json the same tapes-events/13
+        /// result rather than the file; with --json the same tapes-events/14
         /// object is written event by event. The recording is read twice, the
         /// second read replaying the first; --tail, --name, --call-id, and
         /// --program, --tool, and --command select as they do over a bounded read. Installed Claude,
@@ -1168,7 +1199,7 @@ enum Command {
         /// updated in place and a second read may not repeat the first.
         #[arg(long, conflicts_with = "read_bytes")]
         full: bool,
-        /// Render the versioned tapes-events/13 object as JSON. `turn_ordinal`
+        /// Render the versioned tapes-events/14 object as JSON. `turn_ordinal`
         /// names the source turn at the same coordinate printed by show;
         /// `ordinal` retains that coordinate for both call and result. Completed Codex
         /// CommandExecution events include integer `exit` when recorded; other
@@ -1272,7 +1303,7 @@ enum Command {
         /// updated in place and a second read may not repeat the first.
         #[arg(long, conflicts_with = "read_bytes")]
         full: bool,
-        /// Render the versioned tapes-stats/13 object, or tapes-stats-summary/8
+        /// Render the versioned tapes-stats/14 object, or tapes-stats-summary/8
         /// for a selection, as JSON. `warnings` names the limits of the read:
         /// `read-window`, `tail-window`, `kind-unknown`, `kind-undeclared` (a
         /// turn of a kind its harness declares it cannot record, so the
@@ -1285,7 +1316,7 @@ enum Command {
         json: bool,
     },
     /// Where quota went. A session named by id or reached with --latest
-    /// answers that session as tapes-usage/10: its recorded tokens, cost, and
+    /// answers that session as tapes-usage/11: its recorded tokens, cost, and
     /// turn counts, plus whatever else its harness recorded — a context
     /// window, a provider quota window, wall-clock durations, a per-model
     /// split. A scope or listing filter instead answers the whole selection
@@ -1337,7 +1368,7 @@ enum Command {
             conflicts_with = "read_bytes"
         )]
         series: Option<Option<usize>>,
-        /// Render the versioned tapes-usage/10 object, or tapes-usage-summary/6
+        /// Render the versioned tapes-usage/11 object, or tapes-usage-summary/6
         /// for a selection, as JSON. `session.model_observation` says
         /// whether more than one model and effort was observed (`mixed`) and
         /// whether a gap, partial read or budget kept the split incomplete
@@ -1351,7 +1382,7 @@ enum Command {
         json: bool,
     },
     /// What a continuation of one session needs from its recording, as
-    /// tapes-brief/11: where the work stopped, the working directory and the
+    /// tapes-brief/12: where the work stopped, the working directory and the
     /// commit it sits on, the calls the read never saw a result for, the
     /// children whose outcome the store does not record, and a bounded tail
     /// of the exchange. It reads the recording alone and judges nothing —
@@ -1367,13 +1398,13 @@ enum Command {
         /// out of the tail.
         #[arg(long, value_name = "N", default_value_t = DEFAULT_BRIEF_TAIL)]
         tail: usize,
-        /// Render the versioned tapes-brief/11 object as JSON. Each `in_flight`
+        /// Render the versioned tapes-brief/12 object as JSON. Each `in_flight`
         /// list holds at most 20 entries, with a note when the bound cut it.
         #[arg(long)]
         json: bool,
     },
     /// What each session of a selection ends on, one bounded record each, as
-    /// tapes-endings/9, including a session's recognized launch mode when one
+    /// tapes-endings/10, including a session's recognized launch mode when one
     /// was recorded. The selection uses the flags `list` and `export` take,
     /// applied before any transcript is opened; each selected session then
     /// costs one bounded read of its newest turns and one lineage read. Every
@@ -1439,7 +1470,7 @@ enum Command {
         /// attached context stay out of it.
         #[arg(long)]
         text: bool,
-        /// Render the versioned tapes-endings/9 object as JSON. An ending's
+        /// Render the versioned tapes-endings/10 object as JSON. An ending's
         /// `source.coverage` is `read-window` when a source bound withheld
         /// turns, `window` when only the --tail window omitted any, and
         /// `session` otherwise.
@@ -1572,6 +1603,24 @@ fn print_json_with_selection_warnings<T: Serialize>(
         );
     }
     print_json(&value, input)
+}
+
+fn print_history_pin(reads: &[agent_tapes_core::model::ReadEvidence]) {
+    if let Some(digest) = reads
+        .first()
+        .and_then(|read| read.source_prefix_digest.as_ref())
+    {
+        let verified: u64 = reads
+            .iter()
+            .flat_map(|read| &read.ranges)
+            .filter(|range| range.kind == agent_tapes_core::model::ReadRangeKind::Verification)
+            .map(|range| range.span.end - range.span.start)
+            .sum();
+        println!(
+            "Pinned {} bytes; verified {} bytes",
+            digest.span.end, verified
+        );
+    }
 }
 
 fn print_selection_warnings(warnings: &[String]) {
@@ -1880,6 +1929,7 @@ fn dispatch(cli: Cli) -> Result<()> {
         Command::Page {
             selection,
             cursor,
+            pin,
             bytes,
             json,
         } => {
@@ -1889,12 +1939,13 @@ fn dispatch(cli: Cli) -> Result<()> {
                     "--input is not supported by page; supplied exports have no installed history cursor"
                 ));
             }
+            let cursor = agent_tapes_core::history::walk_cursor(pin, cursor.as_deref())?;
             let latest_warnings = selection.latest_warnings(&selection.input.backends()?)?;
             print_selection_warnings(&latest_warnings);
             let page = agent_tapes_core::history::page_with_backends(
                 &selection.input.backends()?,
                 selection.selection(),
-                cursor.as_deref(),
+                cursor,
                 bytes.get_usize(),
             )?;
             if json {
@@ -1910,6 +1961,12 @@ fn dispatch(cli: Cli) -> Result<()> {
                     page.skipped_records,
                     page.skipped_fragment_bytes
                 );
+                if let Some(pin) = &page.pin {
+                    println!(
+                        "Pinned {} bytes in {} chunks of {} bytes; verified {} bytes",
+                        pin.pinned_bytes, pin.chunks, pin.chunk_bytes, pin.verification_bytes
+                    );
+                }
                 for turn in &page.turns {
                     println!("[{} #{}] {}", human_speaker(turn), turn.ordinal, turn.text);
                 }
@@ -1921,6 +1978,7 @@ fn dispatch(cli: Cli) -> Result<()> {
         Command::HistorySearch {
             selection,
             cursor,
+            pin,
             bytes,
             pages,
             search,
@@ -1932,12 +1990,13 @@ fn dispatch(cli: Cli) -> Result<()> {
                     "--input is not supported by history-search; supplied exports have no installed history cursor"
                 ));
             }
+            let cursor = agent_tapes_core::history::walk_cursor(pin, cursor.as_deref())?;
             let latest_warnings = selection.latest_warnings(&selection.input.backends()?)?;
             print_selection_warnings(&latest_warnings);
             let report = agent_tapes_core::history::search_with_backends(
                 &selection.input.backends()?,
                 selection.selection(),
-                cursor.as_deref(),
+                cursor,
                 bytes.get_usize(),
                 pages,
                 &search,
@@ -1952,6 +2011,7 @@ fn dispatch(cli: Cli) -> Result<()> {
                     report.skipped_records,
                     report.skipped_fragment_bytes
                 );
+                print_history_pin(&report.reads);
                 for found in report.matches {
                     println!(
                         "[page {}..{} page-local #{} {}{}] {}",
@@ -1977,6 +2037,7 @@ fn dispatch(cli: Cli) -> Result<()> {
         Command::Metadata {
             selection,
             cursor,
+            pin,
             bytes,
             pages,
             json,
@@ -1987,12 +2048,13 @@ fn dispatch(cli: Cli) -> Result<()> {
                     "--input is not supported by metadata; supplied exports have no installed history cursor"
                 ));
             }
+            let cursor = agent_tapes_core::history::walk_cursor(pin, cursor.as_deref())?;
             let latest_warnings = selection.latest_warnings(&selection.input.backends()?)?;
             print_selection_warnings(&latest_warnings);
             let report = agent_tapes_core::history::metadata_with_backends(
                 &selection.input.backends()?,
                 selection.selection(),
-                cursor.as_deref(),
+                cursor,
                 bytes.get_usize(),
                 pages,
             )?;
@@ -2000,6 +2062,7 @@ fn dispatch(cli: Cli) -> Result<()> {
                 println!("{}", serde_json::to_string(&report)?);
             } else {
                 println!("Recorded model observations: {} pages, {} bytes; {} malformed records, {} skipped fragment bytes", report.pages_read, report.bytes_read, report.skipped_records, report.skipped_fragment_bytes);
+                print_history_pin(&report.reads);
                 for observation in report.observations {
                     match observation.timestamp {
                         Some(timestamp) => println!(
@@ -4252,7 +4315,7 @@ fn events_selection(
     if json {
         write!(
             out,
-            "{{\"schema\":\"tapes-events-selection/1\",\"sessions\":["
+            "{{\"schema\":\"tapes-events-selection/2\",\"sessions\":["
         )?;
     }
     let mut first = true;

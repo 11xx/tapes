@@ -21,5 +21,6 @@ libc.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
+base64 = "0.22"
 agent-tapes-discovery.workspace = true
 zip = { workspace = true, optional = true }

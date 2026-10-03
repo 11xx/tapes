@@ -5,24 +5,26 @@ use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 
 use anyhow::{bail, Context, Result};
+use base64::{engine::general_purpose::STANDARD, Engine};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 use crate::backend::{self, Backend};
 use chrono::Utc;
 
 use crate::content::{self, ContentInventory};
 use crate::model::{
-    ByteSpan, Model, ReadEvidence, ReadGap, ReadRange, ReadRangeKind, RecordRef, Session, Turn,
-    TurnKind,
+    ByteSpan, Launch, Model, ReadEvidence, ReadGap, ReadRange, ReadRangeKind, RecordRef, Session,
+    Turn, TurnKind,
 };
 use crate::Selection;
 
 pub const DEFAULT_BYTES: usize = 64 * 1024;
 pub const MAX_BYTES: usize = 4 * 1024 * 1024;
-pub const PAGE_SCHEMA: &str = "tapes-page/11";
-pub const HISTORY_SEARCH_SCHEMA: &str = "tapes-history-search/10";
-pub const METADATA_HISTORY_SCHEMA: &str = "tapes-metadata-history/10";
+pub const PAGE_SCHEMA: &str = "tapes-page/12";
+pub const HISTORY_SEARCH_SCHEMA: &str = "tapes-history-search/11";
+pub const METADATA_HISTORY_SCHEMA: &str = "tapes-metadata-history/11";
 const MAX_CURSOR_BYTES: usize = 16 * 1024;
 const MAX_PAGES: usize = 32;
 const MAX_RESULTS: usize = 100;
@@ -44,7 +46,7 @@ impl PageProjection {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-struct Cursor {
+struct StrictCursor {
     session: String,
     store: String,
     device: u64,
@@ -58,7 +60,7 @@ struct Cursor {
     discard_suffix: bool,
 }
 
-impl Cursor {
+impl StrictCursor {
     fn at_end(session: &Session, path: &Path, metadata: &Metadata) -> Self {
         Self {
             session: session.id.clone(),
@@ -103,6 +105,148 @@ impl Cursor {
     }
 }
 
+const PIN_REQUEST: &str = "pin";
+const MAX_PIN_BYTES: u64 = 256 * MAX_BYTES as u64;
+
+/// Initiate a pinned walk, or continue the mode carried by an existing cursor.
+pub fn walk_cursor(pin: bool, cursor: Option<&str>) -> Result<Option<&str>> {
+    if pin && cursor.is_some() {
+        bail!("--pin cannot be used with --cursor; restart with --pin to pin a recording");
+    }
+    if !pin && cursor == Some(PIN_REQUEST) {
+        bail!("invalid history cursor");
+    }
+    Ok(if pin { Some(PIN_REQUEST) } else { cursor })
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "mode", rename_all = "lowercase")]
+enum Cursor {
+    Strict(StrictCursor),
+    Pinned(PinnedCursor),
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct PinnedCursor {
+    session: String,
+    store: String,
+    device: u64,
+    inode: u64,
+    end: u64,
+    chunk: u64,
+    digests: String,
+    prefix_sha256: String,
+    revision: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    launch: Option<Launch>,
+    next_end: u64,
+    discard_suffix: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PinEvidence {
+    pub chunk_bytes: u64,
+    pub chunks: usize,
+    pub pinned_bytes: u64,
+    pub verification_bytes: usize,
+    pub verified: Vec<ByteSpan>,
+}
+
+fn chunk_size(end: u64, bytes: usize) -> Result<u64> {
+    if end > MAX_PIN_BYTES {
+        bail!("--pin supports prefixes up to 1GiB; page a captured copy with --native-store");
+    }
+    Ok((bytes as u64).max(end.div_ceil(256)))
+}
+
+fn chunk_span(end: u64, chunk: u64, index: u64) -> ByteSpan {
+    ByteSpan {
+        start: end.saturating_sub((index + 1) * chunk),
+        end: end.saturating_sub(index * chunk),
+    }
+}
+
+impl PinnedCursor {
+    fn capture(
+        file: &mut File,
+        state: &StrictCursor,
+        bytes: usize,
+        launch: Option<Launch>,
+    ) -> Result<(Self, Vec<u8>)> {
+        let chunk = chunk_size(state.size, bytes)?;
+        let count = state.size.div_ceil(chunk) as usize;
+        let mut hashes = vec![[0u8; 32]; count];
+        let mut whole = Sha256::new();
+        let mut partial = Sha256::new();
+        let mut tail = Vec::with_capacity(chunk as usize);
+        let mut buffer = vec![0; 256 * 1024];
+        let mut offset = 0;
+        file.seek(SeekFrom::Start(0))?;
+        while offset < state.size {
+            let index = (state.size - 1 - offset) / chunk;
+            let span = chunk_span(state.size, chunk, index);
+            let n = buffer.len().min((span.end - offset) as usize);
+            file.read_exact(&mut buffer[..n])?;
+            whole.update(&buffer[..n]);
+            partial.update(&buffer[..n]);
+            if index == 0 {
+                tail.extend_from_slice(&buffer[..n]);
+            }
+            offset += n as u64;
+            if offset == span.end {
+                hashes[index as usize] = partial.finalize_reset().into();
+            }
+        }
+        let prefix = crate::model::SourcePrefixDigest::sha256(whole.finalize().into(), state.size);
+        Ok((
+            Self {
+                session: state.session.clone(),
+                store: state.store.clone(),
+                device: state.device,
+                inode: state.inode,
+                end: state.size,
+                chunk,
+                digests: STANDARD.encode(hashes.concat()),
+                prefix_sha256: prefix.value,
+                revision: cursor_revision(state),
+                launch,
+                next_end: state.size,
+                discard_suffix: false,
+            },
+            tail,
+        ))
+    }
+
+    fn matches_file(&self, metadata: &Metadata) -> bool {
+        metadata.dev() == self.device && metadata.ino() == self.inode && metadata.len() >= self.end
+    }
+
+    fn validate(&self, state: &StrictCursor) -> Result<Vec<u8>> {
+        let hashes = STANDARD
+            .decode(&self.digests)
+            .context("invalid pin digests")?;
+        if self.session != state.session
+            || self.store != state.store
+            || self.device != state.device
+            || self.inode != state.inode
+            || state.size < self.end
+        {
+            bail!("history source changed or cursor belongs to another recording; restart without --cursor");
+        }
+        if self.end > MAX_PIN_BYTES
+            || self.chunk == 0
+            || self.chunk > MAX_BYTES as u64
+            || self.end.div_ceil(self.chunk) > 256
+            || self.next_end > self.end
+            || hashes.len() != self.end.div_ceil(self.chunk) as usize * 32
+            || self.prefix_sha256.len() != 64
+        {
+            bail!("invalid pinned history cursor");
+        }
+        Ok(hashes)
+    }
+}
+
 #[derive(Debug, Serialize)]
 pub struct ModelObservation {
     pub model: Model,
@@ -121,6 +265,8 @@ pub struct Page {
     pub skipped_records: usize,
     pub skipped_fragment_bytes: usize,
     pub read: ReadEvidence,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pin: Option<PinEvidence>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content: Option<ContentInventory>,
     pub turns: Vec<Turn>,
@@ -165,27 +311,101 @@ pub(crate) fn read_file(
     }
     let mut file = File::open(path).with_context(|| format!("open {}", path.display()))?;
     let metadata = file.metadata()?;
-    let mut state = Cursor::at_end(session, path, &metadata).resume(cursor)?;
-    let end = state.end;
+    let current = StrictCursor::at_end(session, path, &metadata);
+    let mut cached_tail = None;
+    let mut state = if cursor == Some(PIN_REQUEST) {
+        let (pin, tail) = PinnedCursor::capture(&mut file, &current, bytes, session.launch)?;
+        cached_tail = Some(tail);
+        Cursor::Pinned(pin)
+    } else if let Some(raw) = cursor {
+        if raw.len() > MAX_CURSOR_BYTES {
+            bail!("invalid oversized history cursor");
+        }
+        let mut value: Value = serde_json::from_str(raw).context("invalid history cursor")?;
+        if value.get("mode").is_none() {
+            value
+                .as_object_mut()
+                .context("invalid history cursor")?
+                .insert("mode".into(), Value::String("strict".into()));
+        }
+        let parsed: Cursor = serde_json::from_value(value).context("invalid history cursor")?;
+        match &parsed {
+            Cursor::Strict(_) => {
+                current.clone().resume(Some(raw))?;
+            }
+            Cursor::Pinned(pin) => {
+                pin.validate(&current)?;
+            }
+        }
+        parsed
+    } else {
+        Cursor::Strict(current)
+    };
+    let (end, discard_suffix) = match &state {
+        Cursor::Strict(s) => (s.end, s.discard_suffix),
+        Cursor::Pinned(s) => (s.next_end, s.discard_suffix),
+    };
     let window_start = end.saturating_sub(bytes as u64);
-    let mut aligned = window_start == 0;
     let alignment_bytes = usize::from(window_start > 0);
-    if window_start > 0 {
-        file.seek(SeekFrom::Start(window_start - 1))?;
-        let mut preceding = [0];
-        file.read_exact(&mut preceding)?;
-        aligned = preceding[0] == b'\n';
-    }
-    file.seek(SeekFrom::Start(window_start))?;
-    let mut data = vec![0; (end - window_start) as usize];
-    file.read_exact(&mut data)?;
+    let read_start = window_start.saturating_sub(1);
+    let mut pin_evidence = None;
+    let (data, aligned) = match &state {
+        Cursor::Strict(_) => {
+            file.seek(SeekFrom::Start(read_start))?;
+            let mut raw = vec![0; (end - read_start) as usize];
+            file.read_exact(&mut raw)?;
+            let aligned = window_start == 0 || raw[0] == b'\n';
+            (raw[alignment_bytes..].to_vec(), aligned)
+        }
+        Cursor::Pinned(pin) => {
+            let hashes = pin.validate(&StrictCursor::at_end(session, path, &metadata))?;
+            let mut raw = Vec::new();
+            let mut verified = Vec::new();
+            let mut verification_bytes = 0;
+            if end > read_start {
+                let first = (pin.end - end) / pin.chunk;
+                let last = (pin.end - 1 - read_start) / pin.chunk;
+                for index in (first..=last).rev() {
+                    let span = chunk_span(pin.end, pin.chunk, index);
+                    let data = if index == 0 && cached_tail.is_some() {
+                        cached_tail.take().unwrap()
+                    } else {
+                        file.seek(SeekFrom::Start(span.start))?;
+                        let mut data = vec![0; (span.end - span.start) as usize];
+                        file.read_exact(&mut data)?;
+                        data
+                    };
+                    let digest: [u8; 32] = Sha256::digest(&data).into();
+                    if digest.as_slice() != &hashes[index as usize * 32..(index as usize + 1) * 32]
+                    {
+                        bail!("history source changed inside the pinned prefix (bytes {}..{}); restart without --cursor, or page a captured copy with --native-store", span.start, span.end);
+                    }
+                    verification_bytes += data.len();
+                    let lo = read_start.max(span.start) - span.start;
+                    let hi = end.min(span.end) - span.start;
+                    raw.extend_from_slice(&data[lo as usize..hi as usize]);
+                    verified.push(span);
+                }
+            }
+            let aligned = window_start == 0 || raw[0] == b'\n';
+            pin_evidence = Some(PinEvidence {
+                chunk_bytes: pin.chunk,
+                chunks: hashes.len() / 32,
+                pinned_bytes: pin.end,
+                verification_bytes,
+                verified,
+            });
+            (raw[alignment_bytes..].to_vec(), aligned)
+        }
+    };
+    let mut discard_suffix = discard_suffix;
     let mut finish = data.len();
     let mut skipped_fragment_bytes = 0;
-    if state.discard_suffix {
+    if discard_suffix {
         if let Some(newline) = data.iter().rposition(|b| *b == b'\n') {
             finish = newline + 1;
             skipped_fragment_bytes += data.len() - finish;
-            state.discard_suffix = false;
+            discard_suffix = false;
         } else {
             finish = 0;
             skipped_fragment_bytes += data.len();
@@ -204,7 +424,7 @@ pub(crate) fn read_file(
         // No whole record fits. Advance through its bytes explicitly without
         // inventing a normalized record from either fragment.
         skipped_fragment_bytes = data.len();
-        state.discard_suffix = true;
+        discard_suffix = true;
         start = window_start;
     }
     let (values, spans, skipped_records, mut gaps) = parse_records(
@@ -229,17 +449,48 @@ pub(crate) fn read_file(
             reason: "discarded-partial-suffix".to_owned(),
         });
     }
-    let revision = cursor_revision(&state);
+    let revision = match &state {
+        Cursor::Strict(s) => cursor_revision(s),
+        Cursor::Pinned(s) => s.revision.clone(),
+    };
+    let launch = match &state {
+        Cursor::Strict(_) => session.launch,
+        Cursor::Pinned(pin) => pin.launch,
+    };
     let (mut turns, models) = normalize(&values, &spans, &revision);
     for (ordinal, turn) in turns.iter_mut().enumerate() {
         turn.ordinal = ordinal;
-        turn.establish_origin(session.launch);
+        turn.establish_origin(launch);
     }
     let after = std::fs::metadata(path)?;
-    if !state.matches_file(&after) {
+    if !match &state {
+        Cursor::Strict(s) => s.matches_file(&after),
+        Cursor::Pinned(s) => s.matches_file(&after),
+    } {
         bail!("history source changed during the page read; restart without --cursor");
     }
-    state.end = start;
+    let (source_length, source_prefix_digest) = match &mut state {
+        Cursor::Strict(s) => {
+            s.end = start;
+            s.discard_suffix = discard_suffix;
+            (s.size, None)
+        }
+        Cursor::Pinned(s) => {
+            s.next_end = start;
+            s.discard_suffix = discard_suffix;
+            (
+                s.end,
+                Some(crate::model::SourcePrefixDigest {
+                    algorithm: crate::model::DigestAlgorithm::Sha256,
+                    value: s.prefix_sha256.clone(),
+                    span: ByteSpan {
+                        start: 0,
+                        end: s.end,
+                    },
+                }),
+            )
+        }
+    };
     let next_cursor = (start > 0)
         .then(|| serde_json::to_string(&state))
         .transpose()?;
@@ -260,12 +511,18 @@ pub(crate) fn read_file(
             end,
         },
     });
+    if let Some(pin) = &pin_evidence {
+        ranges.extend(pin.verified.iter().map(|span| ReadRange {
+            kind: ReadRangeKind::Verification,
+            span: *span,
+        }));
+    }
     let read = ReadEvidence {
-        source_length: state.size,
+        source_length,
         configured_bound: bytes as u64,
         coordinate_domain: "file-byte-range".to_owned(),
         source_revision: Some(revision),
-        source_prefix_digest: None,
+        source_prefix_digest,
         source_prefix_sha256: None,
         producer: session.source.producer.clone(),
         projection: PAGE_SCHEMA.to_owned(),
@@ -279,17 +536,20 @@ pub(crate) fn read_file(
         record_sha256: Vec::new(),
         reader: Some(crate::reader::identity()),
     };
+    let mut generation = session.clone();
+    generation.launch = launch;
     Ok(Page {
         schema: PAGE_SCHEMA,
-        session: session.clone(),
+        session: generation,
         start,
         end,
-        source_bytes: state.size,
+        source_bytes: source_length,
         bytes_read: data.len(),
         alignment_bytes,
         skipped_records,
         skipped_fragment_bytes,
         read,
+        pin: pin_evidence,
         content: content::inventory(&turns),
         turns,
         models,
@@ -331,7 +591,7 @@ fn parse_records(bytes: &[u8], base: u64) -> (Vec<Value>, Vec<ByteSpan>, usize, 
     (values, spans, skipped, gaps)
 }
 
-fn cursor_revision(cursor: &Cursor) -> String {
+fn cursor_revision(cursor: &StrictCursor) -> String {
     format!(
         "stat:{}:{}:{}:{}:{}:{}:{}",
         cursor.device,
@@ -593,4 +853,38 @@ pub fn metadata_with_backends(
         next_cursor: progress.next_cursor,
         notes,
     })
+}
+
+#[cfg(test)]
+mod pinned_tests {
+    use super::*;
+
+    #[test]
+    fn chunk_bounds_and_cursor_capacity() {
+        assert_eq!(chunk_size(0, 1024).unwrap(), 1024);
+        assert_eq!(chunk_size(MAX_PIN_BYTES, 1024).unwrap(), MAX_BYTES as u64);
+        assert!(chunk_size(MAX_PIN_BYTES + 1, MAX_BYTES).is_err());
+        assert_eq!(chunk_span(2500, 1024, 2), ByteSpan { start: 0, end: 452 });
+        let pin = Cursor::Pinned(PinnedCursor {
+            session: "fixture-session".into(),
+            store: "/fixtures/recording.jsonl".into(),
+            device: 1,
+            inode: 2,
+            end: MAX_PIN_BYTES,
+            chunk: MAX_BYTES as u64,
+            digests: STANDARD.encode(vec![0u8; 256 * 32]),
+            prefix_sha256: "0".repeat(64),
+            revision: "stat:1:2:1073741824:0:0:0:0".into(),
+            launch: Some(Launch::Interactive),
+            next_end: MAX_PIN_BYTES,
+            discard_suffix: false,
+        });
+        let encoded = serde_json::to_string(&pin).unwrap();
+        eprintln!(
+            "256-chunk cursor: {} bytes (limit {})",
+            encoded.len(),
+            MAX_CURSOR_BYTES
+        );
+        assert!(encoded.len() < MAX_CURSOR_BYTES);
+    }
 }
