@@ -367,6 +367,10 @@ impl Backend for CodexBackend {
         Ok(transcript)
     }
 
+    fn supports_full_search(&self) -> bool {
+        true
+    }
+
     fn stream_transcript(
         &self,
         session: &Session,

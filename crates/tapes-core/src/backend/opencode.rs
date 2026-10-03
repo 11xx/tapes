@@ -1245,6 +1245,10 @@ impl Backend for OpenCodeBackend {
         Ok(paged_transcript(session.clone(), &pages, tail))
     }
 
+    fn supports_full_search(&self) -> bool {
+        true
+    }
+
     fn stream_transcript(
         &self,
         session: &Session,

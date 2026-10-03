@@ -87,6 +87,13 @@ from custom messages. Codex records no sender for interactive input.
 `show` and `export` accept `--origin person|program|harness`; absent origins
 never match.
 
+`list --search <text> --full` streams whole recordings after metadata and
+scope filters. `--limit` caps sessions read globally; `full_search` reports
+selection truncation and coverage, including nonmatches. `--search-matches`
+caps matching turn coordinates per session (default 100), with a truncation
+flag. Coordinates carry the whole-recording ordinal, kind, timestamp and
+record reference. Whole coverage requires a read without gaps or bounds.
+
 ## Where the rest is
 
 `tapes` with no arguments prints the workflow guide, and `tapes <command>

@@ -132,6 +132,18 @@ FIND IT
   start or list candidates, search falls back to CLI API GETs and records the
   failed stage and diagnostic in unsearched.
 
+  --search <text> --full streams each selected recording through its whole
+  reader, with memory following one record. Metadata, scope, harness, launch,
+  and activity filters apply before reading. --limit bounds sessions read
+  globally; full_search.selection_truncated reports candidates withheld or
+  an incomplete candidate scan. --search-matches <N> caps matching turn
+  coordinates per session (default 100); matches_truncated reports overflow.
+  full_search.coverage includes nonmatches and states whole_recording_read,
+  which requires no gaps, skipped records, trailing record, or source bounds.
+  Ordinals are zero-based across the whole normalized recording. OpenCode uses
+  its database or API full reader. Stores without a whole reader are named
+  once in unsearched. --full conflicts with --search-turns.
+
   File-backed harnesses may show a bounded first-meaningful-user-turn hint
   prefixed with ~ when a harness recorded no title, cut at 96 characters. JSON
   keeps that hint as derived_title and leaves the recorded title absent;
