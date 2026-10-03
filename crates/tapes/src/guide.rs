@@ -372,7 +372,20 @@ PROBE BEFORE EXPORTING
   human output is one line per turn. A selected session that cannot be read
   fails the command.
 
-  events projects harness-neutral tool records as tapes-events/13. Each record
+  events <id> projects harness-neutral tool records as tapes-events/13.
+  --tool (alias --name) matches the recorded tool name exactly. --command
+  matches a case-insensitive substring of a shell call's recorded command
+  field (command or cmd), or the serialized input for other tools. Matching
+  uses complete retained input, including text beyond arguments.preview;
+  paired results and recorded exit status remain attached to selected calls.
+  events --here or --global accepts the session filters and limits of stats.
+  Selection JSON uses tapes-events-selection/1: each sessions row contains
+  session, count of matching calls, partial, truncation, and a nested events
+  object. --count omits that object, including for one named session. Zero
+  matches still produce a row. Partial counts describe only the read window;
+  --full streams each selected recording. An unreadable selected recording
+  fails the command. Collection discovery diagnostics accompany the rows.
+  Each record
   names its source turn with turn_ordinal, the same coordinate show prints;
   ordinal retains that turn coordinate, including for call/result pairs. Pairing is
   exact within the bounded read; an incomplete call or result says whether its

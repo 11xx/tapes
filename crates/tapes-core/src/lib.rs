@@ -1328,15 +1328,32 @@ pub fn events_full_with_options_with_backends(
 ) -> Result<StreamedEvents> {
     let resolved = selection.resolve(backends)?;
     let backend = backends[resolved.backend_index].as_ref();
+    let mut streamed =
+        events_full_for_session(backend, &resolved.session, tail, filter, options, sink)?;
+    let warnings = resolved.diagnostics.latest_warnings(&resolved.session);
+    streamed.read.notes.extend(warnings.clone());
+    streamed.events.notes.extend(warnings);
+    Ok(streamed)
+}
+
+/// Stream events from the exact session returned by discovery.
+pub fn events_full_for_session(
+    backend: &dyn Backend,
+    session: &Session,
+    tail: usize,
+    filter: &event::EventFilter<'_>,
+    options: event::EventOptions,
+    sink: &mut dyn EventSink,
+) -> Result<StreamedEvents> {
     let mut index = event::PairIndex::default();
     let mut content = content::ContentInventory::default();
     let mut title = None;
     let mut turns = 0;
     // The newest ordinal at which each call id was declared with a requested
-    // program, so the window can decide which declarations it holds.
+    // program and command, so the window can decide which matches it holds.
     let mut declared = HashMap::<String, usize>::new();
-    backend.replayable(&resolved.session)?;
-    let mut read = stream_numbered(backend, &resolved.session, None, &mut |turn| {
+    backend.replayable(session)?;
+    let read = stream_numbered(backend, session, None, &mut |turn| {
         turns += 1;
         content.add(&turn);
         keep_title_turn(&mut title, &turn);
@@ -1353,19 +1370,17 @@ pub fn events_full_with_options_with_backends(
         }
         Ok(())
     })?;
-    read.notes
-        .extend(resolved.diagnostics.latest_warnings(&resolved.session));
     let returned = turns.min(tail);
     let first = turns - returned;
     let selected = declared
         .into_iter()
         .filter_map(|(call_id, ordinal)| (ordinal >= first).then_some(call_id))
         .collect::<HashSet<_>>();
-    let session = whole_session(backend, &resolved.session, &read, &title)?;
+    let session = whole_session(backend, session, &read, &title)?;
     let mut pairing = index.pairing(event::read_was_bounded(&read.source_bounds));
     let mut pairs = event::PairTally::default();
     let mut opened = false;
-    stream_numbered(backend, &resolved.session, Some(&read), &mut |turn| {
+    stream_numbered(backend, &session, Some(&read), &mut |turn| {
         if !opened {
             sink.session(&session)?;
             opened = true;
@@ -1921,4 +1936,52 @@ pub(crate) fn selection_record(selection: &SessionSelection<'_>, limit: usize) -
         limit,
         search: filters.search.map(str::to_owned),
     }
+}
+
+/// Visit selected sessions through the backend that discovered each occurrence.
+pub fn visit_event_sessions(
+    backends: &[Box<dyn Backend>],
+    selection: &SessionSelection<'_>,
+    visit: &mut dyn FnMut(&dyn Backend, &Session) -> Result<()>,
+) -> Result<SessionList> {
+    let scope = selection.within.resolve()?;
+    let listed = list_scoped(
+        backends,
+        selection.harness,
+        scope.as_ref(),
+        selection.limit.unwrap_or(DEFAULT_LIST_LIMIT),
+        &selection.filters,
+        selection.sort,
+    )?;
+    for (session, origin) in listed.sessions.iter().zip(listed.origins.iter()) {
+        visit(backends[*origin].as_ref(), session)?;
+    }
+    Ok(SessionList {
+        schema: LIST_SCHEMA,
+        sort: selection.sort,
+        activity: (selection.filters.since.is_some() || selection.filters.until.is_some())
+            .then_some(ActivityWindow {
+                since: selection.filters.since,
+                until: selection.filters.until,
+            }),
+        sessions: listed.sessions,
+        artifacts: listed.artifacts,
+        unavailable: listed.unavailable,
+        unreadable: listed.unreadable,
+        unsearched: listed.unsearched,
+        partial_search: listed.partial_search,
+        scanned: listed.scanned,
+        scan_truncated: listed.scan_truncated,
+        unplaced: Unplaced::from_directories(listed.unplaced),
+    })
+}
+
+/// Visit one resolved session through its owning backend.
+pub fn visit_event_session(
+    backends: &[Box<dyn Backend>],
+    selection: Selection<'_>,
+    visit: &mut dyn FnMut(&dyn Backend, &Session) -> Result<()>,
+) -> Result<()> {
+    let resolved = selection.resolve(backends)?;
+    visit(backends[resolved.backend_index].as_ref(), &resolved.session)
 }
