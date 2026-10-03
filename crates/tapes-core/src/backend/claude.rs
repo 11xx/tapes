@@ -1285,21 +1285,53 @@ fn parse_turns_raw(value: &Value) -> Vec<Turn> {
                         omitted_reason: None,
                     },
                 ),
-                subtype @ ("tool_use" | "tool_result") => (
-                    Role::Tool,
-                    block.to_string(),
-                    Some(claude_tool_event(
-                        block,
-                        subtype,
-                        value.get("toolUseResult").filter(|_| {
-                            message["content"]
-                                .as_array()
-                                .is_some_and(|parts| parts.len() == 1)
-                        }),
-                    )),
-                    vec![tool_part(block, "message.content", subtype)],
-                    tool_coverage(),
-                ),
+                subtype @ ("tool_use" | "tool_result") => {
+                    let persisted = (subtype == "tool_result")
+                        .then(|| persisted_tool_output(block))
+                        .flatten();
+                    let (text, parts, coverage) = if let Some(persisted) = persisted {
+                        (
+                            persisted.preview.to_owned(),
+                            vec![
+                                text_part(persisted.preview, "message.content.content", subtype),
+                                ContentPart::FileReference {
+                                    reference: persisted.reference,
+                                    source_field: "message.content.content".to_owned(),
+                                    native_kind: "persisted-output".to_owned(),
+                                    record_ref: None,
+                                },
+                            ],
+                            ContentCoverage {
+                                carrier: ContentCarrier::RecordedReference,
+                                availability: ContentAvailability::ReferenceOnly,
+                                retained_parts: 2,
+                                omitted_parts: 0,
+                                omitted_reason: None,
+                            },
+                        )
+                    } else {
+                        (
+                            block.to_string(),
+                            vec![tool_part(block, "message.content", subtype)],
+                            tool_coverage(),
+                        )
+                    };
+                    (
+                        Role::Tool,
+                        text,
+                        Some(claude_tool_event(
+                            block,
+                            subtype,
+                            value.get("toolUseResult").filter(|_| {
+                                message["content"]
+                                    .as_array()
+                                    .is_some_and(|parts| parts.len() == 1)
+                            }),
+                        )),
+                        parts,
+                        coverage,
+                    )
+                }
                 _ => (
                     role.clone(),
                     String::new(),
@@ -1413,7 +1445,7 @@ fn claude_attachment(value: &Value) -> Option<Turn> {
         record_ref: None,
     };
     turn(
-        Role::User,
+        Role::System,
         TurnKind::Ambient,
         text,
         timestamp(&value["timestamp"]),
@@ -1641,9 +1673,94 @@ fn claude_read_content(
     ))
 }
 
+struct PersistedOutput<'a> {
+    preview: &'a str,
+    reference: ArtifactReference,
+}
+
+fn persisted_tool_output(block: &Value) -> Option<PersistedOutput<'_>> {
+    let text = block["content"].as_str()?.trim_end_matches(['\r', '\n']);
+    let inner = text
+        .strip_prefix("<persisted-output>\n")?
+        .strip_suffix("\n</persisted-output>")?;
+    if inner.contains("<persisted-output>") || inner.contains("</persisted-output>") {
+        return None;
+    }
+    let (header, preview) = inner.split_once("\n\n")?;
+    let (size, path) = header
+        .strip_prefix("Output too large (")?
+        .split_once("). Full output saved to: ")?;
+    if !persisted_size(size) {
+        return None;
+    }
+    let (preview_header, preview) = preview.split_once('\n')?;
+    let preview_size = preview_header
+        .strip_prefix("Preview (first ")?
+        .strip_suffix("):")?;
+    if !persisted_size(preview_size) {
+        return None;
+    }
+    let path = Path::new(path);
+    if !path.is_absolute()
+        || path
+            .components()
+            .any(|component| matches!(component, std::path::Component::ParentDir))
+    {
+        return None;
+    }
+    let name = path.file_name()?.to_str()?;
+    if !name.ends_with(".txt") || name.len() <= 4 || name.chars().any(char::is_control) {
+        return None;
+    }
+    let results = path.parent()?;
+    if results.file_name()?.to_str()? != "tool-results" {
+        return None;
+    }
+    let session = results.parent()?.file_name()?.to_str()?;
+    if session.len() != 36
+        || !session.bytes().enumerate().all(|(index, byte)| {
+            if matches!(index, 8 | 13 | 18 | 23) {
+                byte == b'-'
+            } else {
+                byte.is_ascii_hexdigit()
+            }
+        })
+    {
+        return None;
+    }
+    let path = bounded_text(
+        &format!("tool-results/{name}"),
+        crate::content::MAX_DESCRIPTOR_CHARS,
+    );
+    let call_id = block["tool_use_id"]
+        .as_str()
+        .map(|id| bounded_text(id, crate::content::MAX_DESCRIPTOR_CHARS));
+    Some(PersistedOutput {
+        preview,
+        reference: ArtifactReference {
+            kind: "claude-persisted-tool-output".to_owned(),
+            descriptor_truncated: path.truncated || call_id.as_ref().is_some_and(|id| id.truncated),
+            path: Some(path.text),
+            recorded_size: Some(size.to_owned()),
+            tool_call_id: call_id.map(|id| id.text),
+            body_availability: Some(ContentAvailability::ReferenceOnly),
+            ..ArtifactReference::default()
+        },
+    })
+}
+
+fn persisted_size(size: &str) -> bool {
+    size.len() <= 32
+        && size.ends_with('B')
+        && !size.chars().any(char::is_whitespace)
+        && size.starts_with(|character: char| character.is_ascii_digit())
+        && size.parse::<crate::byte_size::ByteSize>().is_ok()
+}
+
 fn claude_tool_event(block: &Value, subtype: &str, structured: Option<&Value>) -> ToolEvent {
     let call = subtype == "tool_use";
     let argument_value = block.get("input").cloned().unwrap_or(Value::Null);
+    let persisted = (!call).then(|| persisted_tool_output(block)).flatten();
     ToolEvent {
         kind: if call {
             EventKind::ToolCall
@@ -1666,7 +1783,12 @@ fn claude_tool_event(block: &Value, subtype: &str, structured: Option<&Value>) -
             .then(|| Bounded::retaining_value(&block["input"]))
             .flatten(),
         output: (!call)
-            .then(|| Bounded::from_value(&block["content"]))
+            .then(|| {
+                persisted.as_ref().map_or_else(
+                    || Bounded::from_value(&block["content"]),
+                    |output| Some(Bounded::from_text(output.preview)),
+                )
+            })
             .flatten(),
         read: call
             .then(|| crate::event::direct_read(block["name"].as_str(), &block["input"]))
@@ -1697,6 +1819,8 @@ fn claude_tool_event(block: &Value, subtype: &str, structured: Option<&Value>) -
         },
         artifact_references: if call {
             crate::event::artifact_references(&argument_value)
+        } else if let Some(persisted) = persisted {
+            vec![persisted.reference]
         } else {
             crate::event::artifact_references(&block["content"])
         },
@@ -1898,7 +2022,7 @@ fn subagent_metadata(path: &Path) -> (Value, Option<String>) {
 
 #[cfg(test)]
 mod read_content_tests {
-    use super::{claude_attachment, claude_read_content, claude_tool_event};
+    use super::{claude_attachment, claude_read_content, claude_tool_event, persisted_tool_output};
     use crate::content::{ContentAvailability, ContentPart};
     use crate::event::ReadLines;
     use serde_json::json;
@@ -2031,6 +2155,34 @@ mod read_content_tests {
         assert_eq!(
             reference.body_availability,
             Some(ContentAvailability::ReadBound)
+        );
+    }
+
+    #[test]
+    fn persisted_envelopes_require_complete_qualified_carriers() {
+        let envelope = "<persisted-output>\nOutput too large (30.1KB). Full output saved to: /recordings/20000000-0000-4000-8000-000000000002/tool-results/result001.txt\n\nPreview (first 2KB):\npreview \n\n</persisted-output>";
+        let block = json!({"content":envelope,"tool_use_id":"tool-synthetic"});
+        let output = persisted_tool_output(&block).unwrap();
+        assert_eq!(output.preview, "preview \n");
+        assert_eq!(
+            output.reference.tool_call_id.as_deref(),
+            Some("tool-synthetic")
+        );
+        for malformed in [
+            envelope.replace("30.1KB", "unknown"),
+            envelope.replace("Preview (first 2KB):", "Preview:"),
+            envelope.replace("/tool-results/", "/tool-results/../tool-results/"),
+            envelope.replace("20000000-0000-4000-8000-000000000002", "not-a-session"),
+            envelope.replace("/recordings/", "recordings/"),
+            envelope.replace("result001.txt", "result001.bin"),
+            envelope.replace("</persisted-output>", ""),
+            format!("prefix {envelope}"),
+            format!("{envelope} suffix"),
+        ] {
+            assert!(persisted_tool_output(&json!({"content":malformed})).is_none());
+        }
+        assert!(
+            persisted_tool_output(&json!({"content":[{"type":"text","text":envelope}]})).is_none()
         );
     }
 }

@@ -862,6 +862,8 @@ enum Command {
     /// are ambient file references with bounded text bodies and recorded line
     /// ranges; compact references have no body. Referenced files are never opened.
     /// Instructions, environment and prompt snapshots remain unrecognized.
+    /// Complete persisted-output tool results show their preview and a reference-only
+    /// file with its recorded size label; the external body is never read.
     /// Every turn carries a
     /// `kind` naming what the harness
     /// recorded it as, and a user turn holding a harness command, notice, or
@@ -1028,7 +1030,9 @@ enum Command {
         /// CommandExecution events include integer `exit` when recorded; other
         /// events omit it without structured process status. Each read call
         /// includes its recorded path and range, outcome, and returned-text
-        /// digest. Optional content_sha256 names undecorated file bytes of the
+        /// digest. Claude persisted-output results carry a reference-only file
+        /// with a recorded size label and keep the preview as visible output.
+        /// Optional content_sha256 names undecorated file bytes of the
         /// returned range only when the recorded format establishes them.
         /// Unknown formats and truncated output omit it. An unpaired event's `incomplete` is `no-result-in-read` when
         /// the read ended before a result, `call-before-read-bound` when a
@@ -4181,6 +4185,9 @@ fn render_turn(turn: &Turn) -> String {
                 reference.path.as_deref().unwrap_or("(unnamed)"),
                 availability.trim_matches('"'),
             ));
+            if let Some(size) = &reference.recorded_size {
+                text.push_str(&format!("; recorded size: {size}"));
+            }
             if let Some(lines) = &reference.body_lines {
                 text.push_str(&format!("; lines: {}-{}", lines.start, lines.end));
             }

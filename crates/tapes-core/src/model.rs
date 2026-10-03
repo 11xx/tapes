@@ -441,7 +441,7 @@ pub struct Turn {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub coverage: Option<ContentCoverage>,
     /// Harness-neutral tool data used by in-process projections. Session JSON
-    /// keeps the harness envelope in `text` as its stable wire contract.
+    /// exposes visible text and content parts; events serialize tool data.
     #[serde(skip)]
     pub tool: Option<ToolEvent>,
 }

@@ -11835,3 +11835,127 @@ fn timeline_omits_unrecorded_timestamps() {
     }
     fs::remove_dir_all(codex_home).unwrap();
 }
+
+#[test]
+fn claude_content_carriers_survive_cli_views_and_bundle_export() {
+    let root = TemporaryDirectory::new(
+        std::env::temp_dir().join(format!("tapes-cli-content-carriers-{}", std::process::id())),
+    );
+    let projects = root.path().join("projects/project");
+    fs::create_dir_all(&projects).unwrap();
+    for id in [
+        "20000000-0000-4000-8000-000000000001",
+        "20000000-0000-4000-8000-000000000002",
+    ] {
+        fs::copy(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../tapes-core/tests/fixtures/claude/content-carriers/project")
+                .join(format!("{id}.jsonl")),
+            projects.join(format!("{id}.jsonl")),
+        )
+        .unwrap();
+    }
+    let run = |args: &[&str]| {
+        let output = tapes()
+            .args(args)
+            .env("CLAUDE_CONFIG_DIR", root.path())
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        output.stdout
+    };
+    let attachments = "20000000-0000-4000-8000-000000000001";
+    let human = String::from_utf8(run(&["show", attachments, "--harness", "claude"])).unwrap();
+    assert!(human.contains("[system #"));
+    assert!(human.contains(
+        "file-reference: src/example.rs; body: retained-body; lines: 3-3; total lines: 8"
+    ));
+    assert!(human.contains("file-reference: src/compact.rs; body: reference-only"));
+    let exchange: Value = serde_json::from_slice(&run(&[
+        "show",
+        attachments,
+        "--harness",
+        "claude",
+        "--exchange",
+        "--json",
+    ]))
+    .unwrap();
+    assert!(exchange["turns"].as_array().unwrap().is_empty());
+
+    let persisted = "20000000-0000-4000-8000-000000000002";
+    for args in [
+        vec!["show", persisted, "--harness", "claude", "--json"],
+        vec!["show", persisted, "--harness", "claude", "--full", "--json"],
+        vec!["page", persisted, "--harness", "claude", "--json"],
+    ] {
+        let view: Value = serde_json::from_slice(&run(&args)).unwrap();
+        let turn = view["turns"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|turn| turn["native_id"] == "result-present")
+            .unwrap();
+        assert_eq!(turn["text"], "Synthetic output preview.\n...");
+        let reference = &turn["parts"][1]["reference"];
+        assert_eq!(reference["path"], "tool-results/result001.txt");
+        assert_eq!(reference["recorded_size"], "51.6KB");
+        assert_eq!(reference["tool_call_id"], "tool-present");
+        assert_eq!(reference["body_availability"], "reference-only");
+        assert!(reference.get("body").is_none());
+        assert_eq!(view["content"]["references"], 2);
+    }
+    for full in [false, true] {
+        let mut args = vec!["events", persisted, "--harness", "claude", "--json"];
+        if full {
+            args.push("--full");
+        }
+        let events: Value = serde_json::from_slice(&run(&args)).unwrap();
+        assert_eq!(events["schema"], "tapes-events/12");
+        assert_eq!(events["pairs"]["complete"], 7);
+        let result = events["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|event| event["call_id"] == "tool-present" && event["kind"] == "tool-result")
+            .unwrap();
+        assert_eq!(
+            result["output"]["preview"],
+            "Synthetic output preview.\n..."
+        );
+        assert_eq!(
+            result["artifact_references"][0]["body_availability"],
+            "reference-only"
+        );
+    }
+    let human = String::from_utf8(run(&["show", persisted, "--harness", "claude"])).unwrap();
+    assert!(human.contains(
+        "file-reference: tool-results/result001.txt; body: reference-only; recorded size: 51.6KB"
+    ));
+
+    let directory = root.path().join("bundles");
+    fs::create_dir(&directory).unwrap();
+    run(&[
+        "export",
+        persisted,
+        "--harness",
+        "claude",
+        "--full",
+        "--bundle",
+        directory.to_str().unwrap(),
+    ]);
+    let json_path = fs::read_dir(&directory)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find(|path| {
+            path.extension()
+                .is_some_and(|extension| extension == "json")
+        })
+        .unwrap();
+    let bundle: Value = serde_json::from_slice(&fs::read(json_path).unwrap()).unwrap();
+    assert_eq!(bundle["schema"], "tapes-session/17");
+    assert_eq!(bundle["content"]["references"], 2);
+}

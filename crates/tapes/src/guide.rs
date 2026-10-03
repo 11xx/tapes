@@ -606,12 +606,20 @@ READ THE ENDING
   name paths in `displayPath` and `filename`, with text in
   `content.file.content` under `content.type = text`. Compact file references
   name paths without a body. Both carriers become ambient turns with file
-  references; the path is `displayPath`, then the nested `filePath`, then
-  `filename`. Text bodies retain at most 64Ki characters, with truncation
+  references under the system role; the path is `displayPath`, then the nested
+  `filePath`, then `filename`. Text bodies retain at most 64Ki characters, with truncation
   explicit, and record inclusive line ranges and an optional total line count.
   Unsupported or malformed bodies remain reference-only. References are never
-  opened. Instructions, environment and prompt snapshots
-  remain unrecognized records; their bodies are not projected as turns.
+  opened. Instructions, environment and prompt snapshots remain unrecognized
+  records; their bodies are not projected as turns.
+
+  A Claude tool-result string with a complete `<persisted-output>` envelope
+  shows its recorded preview and a reference-only file under `tool-results/`.
+  The reference retains the rounded native `recorded_size` label, not an
+  inferred exact byte count, and the originating `tool_call_id` when recorded.
+  Its body is outside the recording and is never opened. Malformed envelopes
+  remain ordinary tool payloads; path-like text
+  outside a tool result does not establish a persisted-output reference.
 
   Every turn carries a `kind`, filled only from what the harness itself
   wrote, a field beside the text or an element it wraps its own text in:

@@ -4493,6 +4493,8 @@ fn read_associated_report<R: Read>(
             path: None,
             digest: None,
             bytes: None,
+            recorded_size: None,
+            tool_call_id: None,
             timestamp: None,
             source: None,
             action: None,

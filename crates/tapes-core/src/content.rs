@@ -107,6 +107,12 @@ pub struct ArtifactReference {
     pub digest: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bytes: Option<u64>,
+    /// Native size label, including its recorded unit and rounding.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recorded_size: Option<String>,
+    /// Native tool call that produced this artifact, when recorded.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timestamp: Option<DateTime<Utc>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -623,6 +629,8 @@ pub fn artifact_reference_object(
             path,
             digest,
             bytes,
+            recorded_size: None,
+            tool_call_id: None,
             timestamp: None,
             source: None,
             action: None,
