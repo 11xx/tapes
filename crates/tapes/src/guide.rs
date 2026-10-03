@@ -669,8 +669,8 @@ READ THE ENDING
   All other cases omit origin. No message text establishes origin. `show`
   and `export` accept --origin person|program|harness alongside --only;
   absent origins never match. The projection records the origin selector
-  and counts rejected turns
-  by kind. Origin does not identify a launcher or resolve agent-delegate
+  and counts rejected turns by kind. Origin does not identify a launcher or
+  resolve agent-delegate
   handles; agent-delegate status names its session, and a pi handle is already
   the session id.
 

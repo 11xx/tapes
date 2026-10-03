@@ -407,7 +407,7 @@ struct TurnKindArgs {
     #[arg(long, value_name = "KIND", value_delimiter = ',', value_parser = turn_kind_parser(), conflicts_with = "omit")]
     only: Vec<TurnKind>,
     /// Keep operator turns sent by person, program, or harness. Origin requires
-    /// recorded launch evidence; turns without an origin never match.
+    /// positive sender evidence; turns without an origin never match.
     #[arg(long, value_name = "ORIGIN", value_parser = origin_parser())]
     origin: Option<agent_tapes_core::model::OperatorOrigin>,
     /// Keep every turn but those of these kinds; repeatable or
