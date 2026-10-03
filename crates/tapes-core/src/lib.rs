@@ -828,20 +828,33 @@ pub fn resolve_session(
     backends: &[Box<dyn Backend>],
     query: &str,
 ) -> std::result::Result<ResolvedSession, ResolveError> {
-    resolve_session_scoped(backends, query, None)
+    resolve_session_from_indices(backends, query, &(0..backends.len()).collect::<Vec<_>>())
 }
 
 fn resolve_session_scoped(
     backends: &[Box<dyn Backend>],
     query: &str,
     harness: Option<&str>,
-) -> std::result::Result<ResolvedSession, ResolveError> {
+) -> Result<ResolvedSession> {
+    if let Some(harness) = harness {
+        if !backends.iter().any(|backend| backend.harness() == harness) {
+            return Err(anyhow!("unknown harness: {harness}"));
+        }
+    }
     let indices = backends
         .iter()
         .enumerate()
         .filter(|(_, backend)| harness.is_none_or(|harness| backend.harness() == harness))
         .map(|(index, _)| index)
         .collect::<Vec<_>>();
+    Ok(resolve_session_from_indices(backends, query, &indices)?)
+}
+
+fn resolve_session_from_indices(
+    backends: &[Box<dyn Backend>],
+    query: &str,
+    indices: &[usize],
+) -> std::result::Result<ResolvedSession, ResolveError> {
     let sources = indices
         .iter()
         .map(|&index| BackendIdentitySource(backends[index].as_ref()))
@@ -932,7 +945,7 @@ impl Selection<'_> {
         match self {
             Self::Id(id) => Ok(resolve_session(backends, id)?),
             Self::IdInHarness { id, harness } => {
-                Ok(resolve_session_scoped(backends, id, Some(harness))?)
+                resolve_session_scoped(backends, id, Some(harness))
             }
             Self::Occurrence(occurrence) => {
                 let mut matches = Vec::new();

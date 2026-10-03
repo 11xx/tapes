@@ -130,6 +130,17 @@ impl NativeStore {
         }
     }
 
+    /// Distinguish store generations that share one harness.
+    pub fn store_label(&self) -> Option<&'static str> {
+        match self {
+            Self::OpenCode(store) => Some(match store.flavor() {
+                OpenCodeFlavor::Stable => "stable",
+                OpenCodeFlavor::V2 => "v2",
+            }),
+            _ => None,
+        }
+    }
+
     pub fn root(&self) -> Option<&Path> {
         match self {
             Self::Claude { root }
@@ -459,6 +470,10 @@ impl IdentityRecord for NativeSession {
 /// A source adapted to the shared exact/prefix selector.
 pub trait IdentitySource<R: IdentityRecord> {
     fn harness(&self) -> &str;
+    /// A human-readable distinction between stores of the same harness.
+    fn store_label(&self) -> Option<&str> {
+        None
+    }
     fn locate_exact(&self, query: &str) -> Result<Option<R>, String>;
     fn candidates(&self, limit: usize) -> CandidatePage<R, String>;
     fn shares_session_ids(&self) -> bool {
@@ -564,6 +579,10 @@ impl SharedStorePrecedence {
 }
 
 impl IdentitySource<NativeSession> for NativeStore {
+    fn store_label(&self) -> Option<&str> {
+        NativeStore::store_label(self)
+    }
+
     fn harness(&self) -> &str {
         self.harness().as_str()
     }
@@ -740,7 +759,19 @@ pub fn resolve_with_sources<R: IdentityRecord + Clone>(
                 .filter(|(index, page)| {
                     page.complete == complete && (!complete || sources[*index].available())
                 })
-                .map(|(index, _)| format!("{}[source {}]", sources[index].harness(), index + 1))
+                .map(|(index, _)| {
+                    let source = sources[index];
+                    let harness = source.harness();
+                    let shared_harness = sources
+                        .iter()
+                        .filter(|source| source.harness() == harness)
+                        .count()
+                        > 1;
+                    match source.store_label().filter(|_| shared_harness) {
+                        Some(label) => format!("{harness} ({label})"),
+                        None => harness.to_owned(),
+                    }
+                })
                 .collect::<Vec<_>>();
             coverage.push(format!(
                 "{label}: {}",

@@ -36,6 +36,7 @@ impl IdentityRecord for Row {
 
 struct Source {
     harness: String,
+    label: Option<&'static str>,
     exact: Result<Option<Row>, String>,
     page: CandidatePage<Row, String>,
     shared: bool,
@@ -48,6 +49,7 @@ impl Source {
     fn empty(harness: &str) -> Self {
         Self {
             harness: harness.to_owned(),
+            label: None,
             exact: Ok(None),
             page: page(Vec::new(), true),
             shared: false,
@@ -84,6 +86,9 @@ impl Source {
 }
 
 impl IdentitySource<Row> for Source {
+    fn store_label(&self) -> Option<&str> {
+        self.label
+    }
     fn harness(&self) -> &str {
         &self.harness
     }
@@ -303,8 +308,8 @@ fn complete_match_refuses_when_another_harness_hits_its_bound() {
     let error = resolve(&[&claude, &codex], "prefix-").unwrap_err();
     assert!(matches!(error, ResolveError::Incomplete { .. }));
     let message = error.to_string();
-    assert!(message.contains("incomplete harness stores: codex[source 2]"));
-    assert!(message.contains("completely searched harness stores: claude[source 1]"));
+    assert!(message.contains("incomplete harness stores: codex"));
+    assert!(message.contains("completely searched harness stores: claude"));
     assert!(message.contains("full ID or --harness <h>"));
 }
 
@@ -334,7 +339,40 @@ fn bounded_prefix_miss_preserves_not_found_and_explains_store_coverage() {
         }
     ));
     let message = error.to_string();
-    assert!(message.contains("incomplete harness stores: codex[source 2]"));
-    assert!(message.contains("completely searched harness stores: claude[source 1]"));
+    assert!(message.contains("incomplete harness stores: codex"));
+    assert!(message.contains("completely searched harness stores: claude"));
     assert!(message.contains("full ID or --harness <h>"));
+}
+
+#[test]
+fn coverage_distinguishes_only_stores_of_the_same_harness() {
+    let stable = Source {
+        label: Some("stable"),
+        ..Source::empty("opencode")
+            .shared()
+            .with_page(page(Vec::new(), false))
+    };
+    let v2 = Source {
+        label: Some("v2"),
+        ..Source::empty("opencode").shared()
+    };
+    let claude = Source {
+        label: Some("unused-detail"),
+        ..Source::empty("claude")
+    };
+    let error = resolve(&[&stable, &v2, &claude], "missing").unwrap_err();
+    let message = error.to_string();
+    assert!(message.contains("incomplete harness stores: opencode (stable)"));
+    assert!(message.contains("completely searched harness stores: opencode (v2), claude"));
+    assert!(!message.contains("unused-detail"));
+    assert!(!message.contains("[source"));
+}
+
+#[test]
+fn native_open_code_store_labels_name_their_generations() {
+    use agent_tapes_discovery::NativeStore;
+    let stable = NativeStore::opencode_stable("synthetic-opencode");
+    let v2 = NativeStore::opencode_v2("synthetic-opencode-v2");
+    assert_eq!(stable.store_label(), Some("stable"));
+    assert_eq!(v2.store_label(), Some("v2"));
 }

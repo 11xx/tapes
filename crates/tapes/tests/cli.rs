@@ -11165,3 +11165,25 @@ fn session_commands_accept_harness_scoped_prefixes() {
     assert!(String::from_utf8_lossy(&output.stderr).contains("was not found"));
     fs::remove_dir_all(codex_home).unwrap();
 }
+
+#[test]
+fn id_lookup_refuses_an_unknown_harness() {
+    let (codex_home, home) = fixture_store("unknown-harness");
+    for view in ["show", "stats", "capture"] {
+        let mut command = tapes();
+        command.args([view, "synthetic-prefix", "--harness", "foo", "--json"]);
+        with_fixture_env(&mut command, &codex_home, &home, &codex_home);
+        let output = command.output().unwrap();
+        assert!(!output.status.success(), "{view}");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("unknown harness: foo"),
+            "{view}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            !String::from_utf8_lossy(&output.stderr).contains("was not found"),
+            "{view}"
+        );
+    }
+    fs::remove_dir_all(codex_home).unwrap();
+}

@@ -365,6 +365,10 @@ pub trait Backend {
     fn store(&self) -> Option<String> {
         None
     }
+    /// A human-readable distinction between stores of the same harness.
+    fn store_label(&self) -> Option<&str> {
+        None
+    }
     /// Which turn kinds this harness's records can evidence, and the kind its
     /// reader gives a user turn that carries no evidence of its own.
     fn kinds(&self) -> crate::model::KindDeclaration;
@@ -485,6 +489,9 @@ impl IdentityRecord for Session {
 pub(crate) struct BackendIdentitySource<'a>(pub &'a dyn Backend);
 
 impl IdentitySource<Session> for BackendIdentitySource<'_> {
+    fn store_label(&self) -> Option<&str> {
+        self.0.store_label()
+    }
     fn harness(&self) -> &str {
         self.0.harness()
     }
