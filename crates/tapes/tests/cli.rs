@@ -11368,3 +11368,157 @@ fn id_lookup_refuses_an_unknown_harness() {
     }
     fs::remove_dir_all(codex_home).unwrap();
 }
+
+#[test]
+fn claude_content_digests_survive_bounded_and_streamed_events_and_exports() {
+    use sha2::{Digest, Sha256};
+
+    let root = TemporaryDirectory::new(
+        std::env::temp_dir().join(format!("tapes-cli-content-digests-{}", std::process::id())),
+    );
+    let config = root.path().join("claude-config");
+    let projects = config.join("projects/-fixtures-project");
+    fs::create_dir_all(&projects).unwrap();
+    let id = "session-read-claude";
+    let fixture = include_str!(
+        "../../tapes-core/tests/fixtures/read-records/claude/project/session-read-claude.jsonl"
+    );
+    let structured = serde_json::json!({"type":"text","file":{
+        "filePath":"src/whole.rs","content":"whole fixture\n",
+        "startLine":1,"numLines":2,"totalLines":2
+    }});
+    let mut truncated = structured.clone();
+    truncated["file"]["truncatedByTokenCap"] = Value::Bool(true);
+    let cases = [
+        (
+            "numbered",
+            "7\tfirst\r\n8\tlast",
+            false,
+            None,
+            Some("first\r\nlast"),
+        ),
+        ("mixed", "1\tfirst\ntruncated", false, None, None),
+        ("unknown", "whole fixture\n", false, None, None),
+        ("failed", "1\twhole fixture\n", true, None, None),
+        (
+            "truncated",
+            "1\twhole fixture\n",
+            false,
+            Some(truncated),
+            None,
+        ),
+        (
+            "structured",
+            "recorded warning",
+            false,
+            Some(structured),
+            Some("whole fixture\n"),
+        ),
+    ];
+    for (label, output, failed, structured, expected) in cases {
+        let mut rows: Vec<Value> = fixture
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        rows[4]["message"]["content"][0]["content"] = serde_json::json!(output);
+        rows[4]["message"]["content"][0]["is_error"] = serde_json::json!(failed);
+        if let Some(structured) = structured {
+            rows[4]["toolUseResult"] = structured;
+        }
+        let recording = rows
+            .iter()
+            .map(|row| format!("{row}\n"))
+            .collect::<String>();
+        fs::write(projects.join(format!("{id}.jsonl")), recording).unwrap();
+        let run = |arguments: &[&str]| {
+            let result = tapes()
+                .args(arguments)
+                .env("HOME", root.path().join("home"))
+                .env("CLAUDE_CONFIG_DIR", &config)
+                .env("XDG_DATA_HOME", root.path().join("xdg"))
+                .env("PATH", "/usr/bin:/bin")
+                .env_remove("CODEX_HOME")
+                .env_remove("PI_CODING_AGENT_DIR")
+                .env_remove("PI_CODING_AGENT_SESSION_DIR")
+                .env_remove("PI_SESSION_FILE")
+                .output()
+                .unwrap();
+            assert!(
+                result.status.success(),
+                "{}",
+                String::from_utf8_lossy(&result.stderr)
+            );
+            result
+        };
+        let check = |value: &Value| {
+            let events = value["events"].as_array().unwrap();
+            let first = events
+                .iter()
+                .find(|event| event["call_id"] == "tool-read-1" && event["kind"] == "tool-call")
+                .unwrap();
+            assert_eq!(
+                first["read"]["sha256"],
+                format!("sha256:{:x}", Sha256::digest(b"10\tfixture line\n"))
+            );
+            assert_eq!(
+                first["read"]["content_sha256"],
+                format!("sha256:{:x}", Sha256::digest(b"fixture line\n"))
+            );
+            assert_eq!(
+                first["read"]["lines"],
+                serde_json::json!({"start":10,"end":10})
+            );
+            let second = events
+                .iter()
+                .find(|event| event["call_id"] == "tool-read-2" && event["kind"] == "tool-call")
+                .unwrap();
+            if let Some(content) = expected {
+                assert_eq!(
+                    second["read"]["content_sha256"],
+                    format!("sha256:{:x}", Sha256::digest(content.as_bytes())),
+                    "{label}"
+                );
+                assert!(second["read"].get("lines").is_some(), "{label}");
+            } else {
+                assert!(second["read"].get("content_sha256").is_none(), "{label}");
+            }
+            if failed {
+                assert!(second["read"].get("sha256").is_none());
+            } else {
+                assert_eq!(
+                    second["read"]["sha256"],
+                    format!("sha256:{:x}", Sha256::digest(output.as_bytes()))
+                );
+            }
+        };
+        for full in [false, true] {
+            let mut arguments = vec!["events", id, "--json"];
+            if full {
+                arguments.push("--full");
+            }
+            let result = run(&arguments);
+            let value: Value = serde_json::from_slice(&result.stdout).unwrap();
+            assert_eq!(value["schema"], agent_tapes_core::event::EVENTS_SCHEMA);
+            check(&value);
+            let bundle = root.path().join(format!("bundle-{label}-{full}"));
+            fs::create_dir_all(&bundle).unwrap();
+            let mut arguments = vec!["export", id, "--bundle", bundle.to_str().unwrap()];
+            if full {
+                arguments.push("--full");
+            }
+            run(&arguments);
+            let json = fs::read_dir(&bundle)
+                .unwrap()
+                .map(|entry| entry.unwrap().path())
+                .find(|path| {
+                    path.extension()
+                        .is_some_and(|extension| extension == "json")
+                        && path.file_name().unwrap() != "manifest.json"
+                })
+                .unwrap();
+            let value: Value = serde_json::from_slice(&fs::read(json).unwrap()).unwrap();
+            assert_eq!(value["schema"], agent_tapes_core::model::SESSION_SCHEMA);
+            check(&value);
+        }
+    }
+}
