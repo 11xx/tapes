@@ -10074,7 +10074,7 @@ fn child_reads_are_qualified_and_never_become_parent_activity() {
         String::from_utf8_lossy(&output.stderr)
     );
     let view: Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(view["schema"], "tapes-child/7");
+    assert_eq!(view["schema"], "tapes-child/8");
     assert_eq!(view["parent"]["id"], "session-claude");
     assert_eq!(
         view["transcript"]["session"]["id"],
@@ -10209,7 +10209,7 @@ fn child_full_streams_a_subagent_recording_past_the_read_bound() {
     assert!(bounded["usage"]["turns"]["total"].as_u64().unwrap() < 50);
 
     let full = json(&[&child[..], &["--full", "--tail", "2", "--json"]].concat());
-    assert_eq!(full["schema"], "tapes-child/7");
+    assert_eq!(full["schema"], "tapes-child/8");
     assert_eq!(full["usage"]["turns"]["total"], 50, "{}", full["usage"]);
     assert_eq!(full["usage"]["turns"]["coverage"], "session");
     assert_eq!(full["usage"]["read"]["projection_options"][0], "full");

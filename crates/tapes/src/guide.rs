@@ -675,8 +675,8 @@ ONE READER PER MACHINE
 CHILD RECORDINGS
   tapes lineage PARENT --json
   tapes child PARENT --reference CHILD --tail 40 --json
-  Read a Claude child's own transcript, usage and ending with its parent and
-  reference retained. It is not an ordinary listed session; nested lineage
+  Read a Claude child's own transcript, usage and ending as tapes-child/8,
+  retaining its parent and reference. It is not an ordinary listed session; nested lineage
   remains uninspected and child activity is never added to parent totals.
   The child's id is qualified as PARENT::CHILD, and a child whose recorded
   native session ids do not name the parent, or name none, is refused.

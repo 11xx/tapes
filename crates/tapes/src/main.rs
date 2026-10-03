@@ -964,7 +964,7 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Read a Claude child's own transcript, accounting and ending as tapes-child/7 under its parent session.
+    /// Read a Claude child's own transcript, accounting and ending as tapes-child/8 under its parent session.
     Child {
         #[command(flatten)]
         selection: SelectionArgs,
