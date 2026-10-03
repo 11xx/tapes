@@ -73,9 +73,14 @@ FIND IT
   launch evidence: Claude `cli` and `claude-desktop` entrypoints are
   interactive, `sdk-cli` is headless, and a recording with both is
   interactive; Codex `cli` and `vscode` sources are interactive, while `exec`
-  and a `subagent` source are headless. Unknown or absent markers never
-  match, and Pi and OpenCode have no launch marker. These filters apply before
-  the per-harness limit and compose with --harness and the scope flags.
+  and a `subagent` source are headless. Pi records no launch mode itself:
+  `tapes install pi` adds an extension that writes a `tapes.launch` entry each
+  time pi opens a session, where `tui` is interactive, `print` and `json` are
+  headless, `rpc` says neither, and any `tui` entry makes the session
+  interactive. Pi sessions recorded without the extension, and OpenCode
+  sessions, carry no marker. Unknown or absent markers never match. These
+  filters apply before the per-harness limit and compose with --harness and
+  the scope flags.
 
   --since and --until filter `last_activity_at`, the newest recorded activity,
   with the half-open rule `since <= last_activity_at < until`, before the

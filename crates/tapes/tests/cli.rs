@@ -11522,3 +11522,59 @@ fn claude_content_digests_survive_bounded_and_streamed_events_and_exports() {
         }
     }
 }
+
+#[test]
+fn install_pi_writes_a_managed_extension_once_and_uninstall_removes_only_it() {
+    let root = std::env::temp_dir().join(format!("tapes-cli-install-pi-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&root);
+    let agent = root.join("agent");
+    let extension = agent.join("extensions/tapes-launch.ts");
+    let run = |args: &[&str]| {
+        tapes()
+            .args(args)
+            .env("PI_CODING_AGENT_DIR", &agent)
+            .env("HOME", root.join("home"))
+            .output()
+            .unwrap()
+    };
+
+    let installed = run(&["install", "pi"]);
+    assert!(
+        installed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&installed.stderr)
+    );
+    let source = fs::read_to_string(&extension).unwrap();
+    assert!(source.starts_with("// Managed by tapes."));
+    assert!(source.contains("appendEntry(\"tapes.launch\""));
+
+    let again = run(&["install", "pi"]);
+    assert!(again.status.success());
+    assert!(String::from_utf8_lossy(&again.stdout).contains("already installed"));
+    assert_eq!(fs::read_to_string(&extension).unwrap(), source);
+
+    let removed = run(&["uninstall", "pi"]);
+    assert!(removed.status.success());
+    assert!(!extension.exists());
+    let absent = run(&["uninstall", "pi"]);
+    assert!(absent.status.success());
+
+    fs::write(&extension, "export default function () {}\n").unwrap();
+    let refused = run(&["install", "pi"]);
+    assert!(!refused.status.success());
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("does not manage"));
+    let kept = run(&["uninstall", "pi"]);
+    assert!(!kept.status.success());
+    assert_eq!(
+        fs::read_to_string(&extension).unwrap(),
+        "export default function () {}\n"
+    );
+    assert!(fs::read_dir(agent.join("extensions"))
+        .unwrap()
+        .all(|entry| !entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with('.')));
+    let _ = fs::remove_dir_all(&root);
+}
