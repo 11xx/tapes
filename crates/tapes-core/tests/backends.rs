@@ -2352,6 +2352,7 @@ impl Backend for SearchFixture {
         Ok(Transcript {
             session: session.clone(),
             turns: vec![Turn {
+                context_event: None,
                 model: None,
                 role: Role::User,
                 kind: TurnKind::Operator,
@@ -5519,6 +5520,7 @@ impl Backend for BulkExportFixture {
         Ok(Transcript {
             session: session.clone(),
             turns: vec![Turn {
+                context_event: None,
                 model: None,
                 role: Role::User,
                 kind: TurnKind::Operator,
@@ -5886,4 +5888,123 @@ fn claude_model_variant_is_absent_when_the_newest_assistant_records_no_effort() 
     let transcript = backend.transcript(&session, 10).unwrap();
     assert_eq!(transcript.session.model.as_ref(), Some(&expected));
     let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn claude_compaction_is_bounded_notice_evidence_across_read_paths() {
+    use agent_tapes_core::model::ContextEvent;
+    let root = fixtures("claude-compaction");
+    let backend = ClaudeBackend::new(&root);
+    let standalone = located(&backend, "20000000-0000-4000-8000-000000000002");
+    let summary = backend.transcript(&standalone, 1).unwrap();
+    assert_eq!(summary.turns[0].kind, TurnKind::Notice);
+    let Some(ContextEvent::Compaction(bare)) = &summary.turns[0].context_event else {
+        panic!("missing bare boundary")
+    };
+    assert_eq!(serde_json::to_value(bare).unwrap(), serde_json::json!({}));
+    let standalone_page = backend.history_page(&standalone, None, 1024).unwrap();
+    assert_eq!(standalone_page.turns[0].kind, TurnKind::Ambient);
+    assert!(standalone_page.turns[0].context_event.is_none());
+    let session = located(&backend, "20000000-0000-4000-8000-000000000001");
+    let mut full = backend.transcript(&session, 100).unwrap();
+    assert_eq!(full.turns.len(), 5);
+    assert_eq!(full.turns[2].kind, TurnKind::Ambient);
+    assert!(full
+        .read
+        .as_ref()
+        .unwrap()
+        .unmapped
+        .as_ref()
+        .unwrap()
+        .unrecognized
+        .is_empty());
+    assert!(full.turns.iter().all(|turn| turn.tool.is_none()));
+    let auto = &full.turns[1];
+    assert_eq!(auto.kind, TurnKind::Notice);
+    assert!(!auto.kind.in_exchange());
+    assert!(auto.ts.is_some());
+    assert!(auto.record_ref.is_some());
+    let Some(ContextEvent::Compaction(event)) = &auto.context_event else {
+        panic!("missing compaction")
+    };
+    assert_eq!(event.trigger.as_deref(), Some("auto"));
+    assert_eq!(event.pre_tokens, Some(100));
+    assert_eq!(event.post_tokens, Some(20));
+    assert_eq!(event.duration_ms, Some(12));
+    assert_eq!(event.cumulative_dropped_tokens, Some(80));
+    assert_eq!(event.preserved_messages_anchor.as_deref(), Some("before"));
+    assert_eq!(event.preserved_segment_head.as_deref(), Some("before"));
+    assert_eq!(event.omitted_preserved_uuids, Some(5000));
+    assert_eq!(event.omitted_all_preserved_uuids, Some(6000));
+    assert!(serde_json::to_vec(event).unwrap().len() < 600);
+    let Some(ContextEvent::Compaction(manual)) = &full.turns[3].context_event else {
+        panic!("missing manual boundary")
+    };
+    assert_eq!(manual.trigger.as_deref(), Some("manual"));
+    assert_eq!(manual.pre_tokens, None);
+    assert_eq!(manual.post_tokens, None);
+    assert_eq!(manual.omitted_preserved_uuids, None);
+    let mut streamed = Vec::new();
+    backend
+        .stream_transcript(&session, None, &mut |turn| {
+            streamed.push(turn);
+            Ok(())
+        })
+        .unwrap();
+    for turn in &mut full.turns {
+        turn.ordinal = 0;
+    }
+    assert_eq!(streamed, full.turns);
+    let mut page = backend.history_page(&session, None, 200_000).unwrap();
+    for turn in &mut page.turns {
+        turn.ordinal = 0;
+    }
+    assert_eq!(page.turns, full.turns);
+    let tail = backend.transcript(&session, 1).unwrap();
+    assert!(tail.turns.iter().all(|turn| turn.context_event.is_none()));
+    let narrow = ClaudeBackend::new(&root).with_read_bytes(MIN_READ_BYTES);
+    let bounded = narrow.transcript(&session, 100).unwrap();
+    assert!(!bounded
+        .turns
+        .iter()
+        .any(|turn| turn.native_id.as_deref() == Some("boundary-auto")));
+    let mut cursor = None;
+    let mut paged = Vec::new();
+    loop {
+        let page = narrow
+            .history_page(&session, cursor.as_deref(), 200_000)
+            .unwrap();
+        paged.extend(page.turns);
+        cursor = page.next_cursor;
+        if cursor.is_none() {
+            break;
+        }
+    }
+    for turn in &mut paged {
+        turn.ordinal = 0;
+    }
+    assert_eq!(paged, full.turns);
+    let child = backend.child_transcript(&session, "compaction").unwrap();
+    assert_eq!(
+        child
+            .turns
+            .iter()
+            .filter(|turn| turn.context_event.is_some())
+            .count(),
+        2
+    );
+    let mut streamed_child = Vec::new();
+    backend
+        .stream_child_transcript(&session, "compaction", &mut |turn| {
+            streamed_child.push(turn);
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(
+        streamed_child
+            .iter()
+            .filter(|turn| turn.context_event.is_some())
+            .count(),
+        2
+    );
 }

@@ -794,6 +794,7 @@ mod tests {
             },
             turns: vec![
                 Turn {
+                    context_event: None,
                     model: None,
                     role: Role::User,
                     kind: TurnKind::Operator,
@@ -811,6 +812,7 @@ mod tests {
                     tool: None,
                 },
                 Turn {
+                    context_event: None,
                     model: None,
                     role: Role::Reasoning,
                     kind: TurnKind::Reasoning,
@@ -828,6 +830,7 @@ mod tests {
                     tool: None,
                 },
                 Turn {
+                    context_event: None,
                     model: None,
                     role: Role::Tool,
                     kind: TurnKind::Tool,
@@ -845,6 +848,7 @@ mod tests {
                     tool: None,
                 },
                 Turn {
+                    context_event: None,
                     model: None,
                     role: Role::Assistant,
                     kind: TurnKind::Assistant,
@@ -1323,6 +1327,7 @@ mod tests {
     #[test]
     fn tool_labels_come_from_whichever_key_the_harness_uses() {
         let turn = |text: &str| Turn {
+            context_event: None,
             model: None,
             role: Role::Tool,
             kind: TurnKind::Tool,

@@ -1,0 +1,2 @@
+{"type": "user", "sessionId": "20000000-0000-4000-8000-000000000002", "isCompactSummary": true, "message": {"role": "user", "content": "Summary without a visible boundary"}}
+{"type": "system", "sessionId": "20000000-0000-4000-8000-000000000002", "subtype": "compact_boundary", "uuid": "bare-boundary"}

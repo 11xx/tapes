@@ -10,7 +10,7 @@ use crate::content::{ContentCoverage, ContentPart};
 use crate::event::ToolEvent;
 use crate::usage::UsageDetail;
 
-pub const SESSION_SCHEMA: &str = "tapes-session/15";
+pub const SESSION_SCHEMA: &str = "tapes-session/16";
 /// How the recording identifies the session's launch mode.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -352,8 +352,45 @@ pub enum AccountingCoverage {
     SinceReset,
 }
 
+/// A recorded operation on model context, independent of source retention.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ContextEvent {
+    Compaction(Compaction),
+}
+
+/// Recorded compaction measurements and anchors. UUID lists are represented
+/// by omission counts; absent or malformed native fields remain absent.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Compaction {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trigger: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pre_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub post_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cumulative_dropped_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preserved_messages_anchor: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preserved_segment_anchor: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preserved_segment_head: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preserved_segment_tail: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub omitted_preserved_uuids: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub omitted_all_preserved_uuids: Option<usize>,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Turn {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_event: Option<ContextEvent>,
     /// Model and effort associated with the native assistant record.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<Model>,
@@ -1607,6 +1644,7 @@ mod tests {
             coverage: AccountingCoverage::Session,
         };
         let turn = Turn {
+            context_event: None,
             model: None,
             role: Role::Assistant,
             kind: TurnKind::Assistant,
@@ -1759,6 +1797,7 @@ mod tests {
         session.title = None;
         let session = session.with_derived_title(&[
             Turn {
+                context_event: None,
                 model: None,
                 role: Role::User,
                 kind: TurnKind::Operator,
@@ -1776,6 +1815,7 @@ mod tests {
                 tool: None,
             },
             Turn {
+                context_event: None,
                 model: None,
                 role: Role::User,
                 kind: TurnKind::Operator,
@@ -1814,6 +1854,7 @@ mod tests {
         let mut complete = session();
         complete.title = None;
         let complete = complete.with_derived_title(&[Turn {
+            context_event: None,
             model: None,
             role: Role::User,
             kind: TurnKind::Operator,
@@ -1837,6 +1878,7 @@ mod tests {
         let mut shortened = session();
         shortened.title = None;
         let shortened = shortened.with_derived_title(&[Turn {
+            context_event: None,
             model: None,
             role: Role::User,
             kind: TurnKind::Operator,
@@ -1866,6 +1908,7 @@ mod tests {
         let mut session = session();
         session.title = None;
         let session = session.with_derived_title(&[Turn {
+            context_event: None,
             model: None,
             role: Role::User,
             kind: TurnKind::Operator,
@@ -1893,6 +1936,7 @@ mod tests {
     #[test]
     fn derived_title_does_not_replace_recorded_title() {
         let session = session().with_derived_title(&[Turn {
+            context_event: None,
             model: None,
             role: Role::User,
             kind: TurnKind::Operator,
@@ -2004,6 +2048,7 @@ mod tests {
     #[test]
     fn a_turn_carries_its_ordinal_and_omits_an_absent_native_id() {
         let turn = Turn {
+            context_event: None,
             model: None,
             role: Role::User,
             kind: TurnKind::Operator,

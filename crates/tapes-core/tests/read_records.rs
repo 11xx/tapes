@@ -164,7 +164,7 @@ fn read_locators_survive_export_and_capture_is_unpinned() {
         .unwrap();
         let exported: Value =
             serde_json::from_slice(&fs::read(&bundle.json.path).unwrap()).unwrap();
-        assert_eq!(exported["schema"], "tapes-session/15");
+        assert_eq!(exported["schema"], "tapes-session/16");
         let exported_call = exported["events"]
             .as_array()
             .unwrap()

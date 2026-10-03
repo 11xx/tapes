@@ -2181,6 +2181,7 @@ mod tests {
 
     fn turn(ordinal: usize, seconds: i64, event: ToolEvent) -> Turn {
         Turn {
+            context_event: None,
             model: None,
             role: Role::Tool,
             kind: TurnKind::Tool,
