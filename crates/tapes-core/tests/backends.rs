@@ -1969,7 +1969,7 @@ fn opencode_is_unavailable_when_its_binary_is_absent() {
 /// exist on disk: a recorded path that is gone cannot be attributed to any
 /// project.
 fn scoped_store(name: &str, directories: &[&Path]) -> PathBuf {
-    let root = std::env::temp_dir().join(format!("tapes-scoped-{name}"));
+    let root = std::env::temp_dir().join(format!("tapes-scoped-{name}-{}", std::process::id()));
     let _ = fs::remove_dir_all(&root);
     let day = root.join("2026/08/09");
     fs::create_dir_all(&day).unwrap();
@@ -2007,7 +2007,7 @@ fn scoped_store(name: &str, directories: &[&Path]) -> PathBuf {
 }
 
 fn filtered_store(name: &str) -> PathBuf {
-    let root = std::env::temp_dir().join(format!("tapes-filtered-{name}"));
+    let root = std::env::temp_dir().join(format!("tapes-filtered-{name}-{}", std::process::id()));
     let _ = fs::remove_dir_all(&root);
     let day = root.join("2026/08/09");
     fs::create_dir_all(&day).unwrap();
@@ -2275,8 +2275,10 @@ fn listing_ties_on_activity_by_session_id() {
 
 #[test]
 fn a_scoped_listing_finds_the_project_past_the_limit() {
-    let mine = std::env::temp_dir().join("tapes-scoped-mine/nested");
-    let theirs = std::env::temp_dir().join("tapes-scoped-theirs");
+    let mine = std::env::temp_dir()
+        .join(format!("tapes-scoped-mine-{}", std::process::id()))
+        .join("nested");
+    let theirs = std::env::temp_dir().join(format!("tapes-scoped-theirs-{}", std::process::id()));
     fs::create_dir_all(&mine).unwrap();
     fs::create_dir_all(&theirs).unwrap();
     // The project's session is the older of the two, so a limit applied
@@ -2312,11 +2314,11 @@ fn a_scoped_listing_finds_the_project_past_the_limit() {
 /// resumed session can have moved away from the `session_meta` the probe sees.
 #[test]
 fn the_probe_and_the_parse_place_a_session_in_the_same_directory() {
-    let opening = std::env::temp_dir().join("tapes-scoped-opening");
-    let later = std::env::temp_dir().join("tapes-scoped-later");
+    let opening = std::env::temp_dir().join(format!("tapes-scoped-opening-{}", std::process::id()));
+    let later = std::env::temp_dir().join(format!("tapes-scoped-later-{}", std::process::id()));
     fs::create_dir_all(&opening).unwrap();
     fs::create_dir_all(&later).unwrap();
-    let root = std::env::temp_dir().join("tapes-store-moved");
+    let root = std::env::temp_dir().join(format!("tapes-store-moved-{}", std::process::id()));
     let _ = fs::remove_dir_all(&root);
     let day = root.join("2026/08/09");
     fs::create_dir_all(&day).unwrap();
@@ -2370,9 +2372,10 @@ fn the_probe_and_the_parse_place_a_session_in_the_same_directory() {
 /// a session would be a wrong answer rather than a fast one.
 #[test]
 fn a_session_the_probe_cannot_place_is_still_found() {
-    let project = std::env::temp_dir().join("tapes-scoped-unprobeable");
+    let project =
+        std::env::temp_dir().join(format!("tapes-scoped-unprobeable-{}", std::process::id()));
     fs::create_dir_all(&project).unwrap();
-    let root = std::env::temp_dir().join("tapes-store-unprobeable");
+    let root = std::env::temp_dir().join(format!("tapes-store-unprobeable-{}", std::process::id()));
     let _ = fs::remove_dir_all(&root);
     let day = root.join("2026/08/09");
     fs::create_dir_all(&day).unwrap();
@@ -2412,7 +2415,7 @@ fn a_session_the_probe_cannot_place_is_still_found() {
 /// normalize with no directory at all — invisible to every scoped listing.
 #[test]
 fn a_transcript_past_the_read_window_still_reports_its_directory() {
-    let root = std::env::temp_dir().join("tapes-pi-oversized");
+    let root = std::env::temp_dir().join(format!("tapes-pi-oversized-{}", std::process::id()));
     let _ = fs::remove_dir_all(&root);
     fs::create_dir_all(&root).unwrap();
     let path = root.join("2026-01-01T10-00-00-000Z_session-huge.jsonl");
@@ -2473,7 +2476,10 @@ fn a_transcript_past_the_read_window_still_reports_its_directory() {
 
 #[test]
 fn the_latest_in_scope_needs_no_id_and_honours_exclusions() {
-    let project = std::env::temp_dir().join("tapes-scoped-latest-project");
+    let project = std::env::temp_dir().join(format!(
+        "tapes-scoped-latest-project-{}",
+        std::process::id()
+    ));
     fs::create_dir_all(&project).unwrap();
     let root = scoped_store("latest", &[&project, &project]);
     let backends: Vec<Box<dyn Backend>> = vec![Box::new(CodexBackend::new(&root))];
