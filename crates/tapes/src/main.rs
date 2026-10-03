@@ -1410,9 +1410,9 @@ enum Command {
     ///
     /// A bundle's files are fixed views of one read: `.context.md` holds the
     /// exchange, as `show --exchange` returns it; `.json` and `.trace.md` hold
-    /// every turn, and `.json` also holds the paired tool `events`. --only and
-    /// --omit and --origin narrow all three, and the JSON and trace count the omitted turns
-    /// by kind under `projection`.
+    /// every turn, and `.json` also holds the paired tool `events`. --only,
+    /// --omit, and --origin narrow all three; the JSON and trace count omitted
+    /// turns by kind under `projection`.
     #[command(group(clap::ArgGroup::new("export_selection")
         .args(["session", "latest", "title", "occurrence", "input", "native_store", "here", "project", "global", "harness", "model", "launch", "directory", "since", "until", "search"])
         .required(true).multiple(true)))]

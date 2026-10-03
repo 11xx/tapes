@@ -6400,7 +6400,7 @@ fn operator_origins_follow_launch_and_native_injection_evidence() {
             ),
             (
                 Box::new(PiBackend::new(fixtures("origin/pi"))),
-                format!("origin-pi-{mode}"),
+                format!("73000000-0000-7000-8000-{idx:012}"),
                 true,
             ),
         ];

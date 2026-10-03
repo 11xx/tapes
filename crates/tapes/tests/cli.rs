@@ -4384,7 +4384,7 @@ fn launch_filter_selects_sessions_before_limit_and_reaches_endings() {
     );
     let manifest: Value =
         serde_json::from_slice(&fs::read(bundle_dir.join("manifest.json")).unwrap()).unwrap();
-    assert_eq!(manifest["schema"], "tapes-export-manifest/7");
+    assert_eq!(manifest["schema"], "tapes-export-manifest/6");
     assert_eq!(manifest["selection"]["launch"], "headless");
 
     fs::remove_dir_all(codex_home).unwrap();
@@ -8407,7 +8407,7 @@ fn export_over_an_activity_window_writes_one_bundle_per_session_and_a_manifest()
     );
     let manifest: Value =
         serde_json::from_slice(&fs::read(bundle.join("manifest.json")).unwrap()).unwrap();
-    assert_eq!(manifest["schema"], "tapes-export-manifest/7");
+    assert_eq!(manifest["schema"], "tapes-export-manifest/6");
     assert_eq!(
         manifest["selection"],
         serde_json::json!({
@@ -12144,7 +12144,12 @@ fn origin_selection_agrees_in_show_and_export() {
             ("headless", "harness", 0),
             ("absent", "person", 0),
         ] {
-            let id = format!("origin-pi-{mode}");
+            let idx = match mode {
+                "interactive" => 1,
+                "headless" => 2,
+                _ => 3,
+            };
+            let id = format!("73000000-0000-7000-8000-{idx:012}");
             let mut args = vec![
                 "show", &id, "--only", "operator", "--origin", origin, "--json",
             ];
@@ -12185,7 +12190,7 @@ fn origin_selection_agrees_in_show_and_export() {
     }
     let output = invoke(&[
         "show",
-        "origin-pi-interactive",
+        "73000000-0000-7000-8000-000000000001",
         "--origin",
         "harness",
         "--exchange",
@@ -12195,7 +12200,7 @@ fn origin_selection_agrees_in_show_and_export() {
     assert_eq!(view["turns"].as_array().unwrap().len(), 1);
     let output = invoke(&[
         "show",
-        "origin-pi-headless",
+        "73000000-0000-7000-8000-000000000002",
         "--origin",
         "program",
         "--tail",
