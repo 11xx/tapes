@@ -371,7 +371,11 @@ impl OpenCodeStore {
              'time_created', time_created, 'time_updated', time_updated, 'model', model, \
              'cost', cost, 'tokens_input', tokens_input, 'tokens_output', tokens_output, \
              'tokens_reasoning', tokens_reasoning, 'tokens_cache_read', tokens_cache_read, \
-             'tokens_cache_write', tokens_cache_write) AS row FROM session WHERE id = {} LIMIT 1",
+             'tokens_cache_write', tokens_cache_write, 'tapes_launch', \
+             json(CASE WHEN json_valid(metadata) THEN CASE \
+             WHEN json_type(metadata, '$.\"tapes.launch\"') = 'object' AND \
+             length(json_extract(metadata, '$.\"tapes.launch\"')) <= 1024 \
+             THEN json_extract(metadata, '$.\"tapes.launch\"') END END)) AS row FROM session WHERE id = {} LIMIT 1",
             sql_literal(id)
         );
         let rows = self.database_rows(&query)?;
@@ -404,7 +408,11 @@ impl OpenCodeStore {
              'time_created', time_created, 'time_updated', time_updated, 'model', model, \
              'cost', cost, 'tokens_input', tokens_input, 'tokens_output', tokens_output, \
              'tokens_reasoning', tokens_reasoning, 'tokens_cache_read', tokens_cache_read, \
-             'tokens_cache_write', tokens_cache_write) AS row FROM session \
+             'tokens_cache_write', tokens_cache_write, 'tapes_launch', \
+             json(CASE WHEN json_valid(metadata) THEN CASE \
+             WHEN json_type(metadata, '$.\"tapes.launch\"') = 'object' AND \
+             length(json_extract(metadata, '$.\"tapes.launch\"')) <= 1024 \
+             THEN json_extract(metadata, '$.\"tapes.launch\"') END END)) AS row FROM session \
              ORDER BY time_updated DESC LIMIT {limit}"
         );
         let mut rows = self.database_rows(&query)?;

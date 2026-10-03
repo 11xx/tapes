@@ -68,8 +68,13 @@ tapes list --remote build-box             # sessions on another machine, read ov
 Without `--here`, a listing covers every session on the machine. Every command
 that reads sessions, except `export`, takes `--json`, and each JSON answer
 names its versioned schema. Claude Code and Codex record how each session was launched; Pi does
-once `tapes install pi` adds a small extension that records it, the one file
-`tapes` writes outside its own output.
+with `tapes install pi`, and OpenCode with `tapes install opencode`. These
+integrations write one owned file into the harness configuration. OpenCode
+records `tui` and `run` in session-bound metadata at creation or the first
+prompt after resuming. TUI evidence wins; inherited fork metadata is ignored.
+Unrecognized runtimes leave launch mode absent. `tapes uninstall <harness>`
+removes only a tapes-managed regular file. Restart OpenCode after installation
+or removal.
 
 `list --search <text> --search-turns <N|all>` searches normalized turns in
 bounded reads (default: 32 turns). `all` covers every retained turn within the

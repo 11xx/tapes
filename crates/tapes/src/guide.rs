@@ -103,12 +103,25 @@ FIND IT
   naming the session it was written for, each time pi opens a session. `tui`
   is interactive, `print` and `json` are headless, `rpc` says neither, any
   `tui` entry makes the session interactive, and entries a fork copied from
-  its parent are ignored. Pi sessions recorded without the extension, and
-  OpenCode sessions, carry no marker. For Claude and Pi, a bounded read that
-  stops short of a recording keeps interactive evidence it reached but never
-  concludes headless, since the unread part may hold interactive records;
-  `show --full` settles it. Codex's source is its opening record, so a bounded
-  read settles it. Unknown or absent markers never match. These filters apply
+  its parent are ignored. `tapes install opencode` adds a plugin under
+  `$OPENCODE_CONFIG_DIR/plugins`, or `$XDG_CONFIG_HOME/opencode/plugins`
+  (default `~/.config/opencode/plugins`). Restart OpenCode to load it.
+  Its session metadata `tapes.launch` contains `session` and `modes`: `tui`
+  is interactive, `run` is headless, and TUI evidence wins. A marker naming
+  another session is ignored. Creation and the first prompt in a resumed
+  session record the process mode. The plugin recognizes the process's
+  `/cli/tui/worker` entrypoint path and `run` command argument, verified
+  against OpenCode 1.18.33. A layout tapes does not recognize leaves the
+  session without a marker; attached servers record nothing.
+  Pi and OpenCode sessions without their integration carry no marker.
+  Install and uninstall refuse foreign files, symlinks, and directories;
+  `tapes uninstall opencode` preserves recorded metadata. For Claude, Pi,
+  and OpenCode, a read that stops short of a recording keeps interactive evidence it reached but never
+  concludes headless;
+  `show --full` settles Claude and Pi; OpenCode streaming exports carry its
+  complete session metadata. OpenCode listings read the complete launch marker
+  independently of transcript windows. Codex's source is its opening record,
+  so a bounded read settles it. Unknown or absent markers never match. These filters apply
   before the per-harness limit and compose with --harness and the scope flags.
 
   --since and --until filter `last_activity_at`, the newest recorded activity,

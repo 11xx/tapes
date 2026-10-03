@@ -6392,7 +6392,7 @@ fn create_opencode_database(root: &Path, id: &str, inserts: &str) {
 CREATE TABLE `session` (`id` text PRIMARY KEY, `parent_id` text, `directory` text NOT NULL,
   `title` text NOT NULL, `model` text, `cost` real, `tokens_input` integer,
   `tokens_output` integer, `tokens_reasoning` integer, `tokens_cache_read` integer,
-  `tokens_cache_write` integer, `time_created` integer NOT NULL, `time_updated` integer NOT NULL);
+  `tokens_cache_write` integer, `metadata` text, `time_created` integer NOT NULL, `time_updated` integer NOT NULL);
 CREATE TABLE `message` (`id` text PRIMARY KEY, `session_id` text NOT NULL,
   `time_created` integer NOT NULL, `time_updated` integer NOT NULL, `data` text NOT NULL);
 CREATE INDEX `message_session_time_created_id_idx` ON `message` (`session_id`,`time_created`,`id`);
@@ -6401,7 +6401,7 @@ CREATE TABLE `part` (`id` text PRIMARY KEY, `message_id` text NOT NULL, `session
 CREATE INDEX `part_session_idx` ON `part` (`session_id`);
 CREATE INDEX `part_message_id_id_idx` ON `part` (`message_id`,`id`);
 INSERT INTO session VALUES ('{id}', NULL, '/fixtures/database', 'Database fixture session',
-  '{{"id":"fixture-db-model"}}', 0, 0, 0, 0, 0, 0, 1784663000000, 1784664200000);
+  '{{"id":"fixture-db-model"}}', 0, 0, 0, 0, 0, 0, NULL, 1784663000000, 1784664200000);
 {inserts}
 "#
     );
@@ -12649,4 +12649,46 @@ fn artifact_reads_only_confined_persisted_results() {
     )
     .unwrap();
     assert!(!read(token, "6").status.success());
+}
+
+#[test]
+fn opencode_integration_preserves_foreign_files_and_uses_config_directory() {
+    let root = std::env::temp_dir().join(format!("tapes-opencode-install-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&root);
+    let config = root.join("config");
+    let plugin = config.join("plugins/tapes-launch.ts");
+    let run = |action: &str| {
+        tapes()
+            .args([action, "opencode"])
+            .env("OPENCODE_CONFIG_DIR", &config)
+            .output()
+            .unwrap()
+    };
+    assert!(run("install").status.success());
+    let source = fs::read(&plugin).unwrap();
+    assert!(source.starts_with(b"// Managed by tapes."));
+    assert!(run("install").status.success());
+    assert_eq!(fs::read(&plugin).unwrap(), source);
+    fs::write(
+        &plugin,
+        "// Managed by tapes. Reinstall instead of editing this file.\nold",
+    )
+    .unwrap();
+    assert!(run("install").status.success());
+    assert_eq!(fs::read(&plugin).unwrap(), source);
+    assert!(run("uninstall").status.success());
+    assert!(run("uninstall").status.success());
+    fs::write(&plugin, "foreign").unwrap();
+    assert!(!run("install").status.success());
+    assert!(!run("uninstall").status.success());
+    assert_eq!(fs::read(&plugin).unwrap(), b"foreign");
+    fs::remove_file(&plugin).unwrap();
+    std::os::unix::fs::symlink(root.join("missing"), &plugin).unwrap();
+    assert!(!run("install").status.success());
+    assert!(!run("uninstall").status.success());
+    fs::remove_file(&plugin).unwrap();
+    fs::create_dir(&plugin).unwrap();
+    assert!(!run("install").status.success());
+    assert!(!run("uninstall").status.success());
+    fs::remove_dir_all(root).unwrap();
 }

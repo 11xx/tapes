@@ -1,0 +1,74 @@
+[
+  {
+    "id": "ses_fixture",
+    "title": "Fixture session",
+    "time_created": 1700000000000,
+    "time_updated": 1700000000000,
+    "tapes_launch": null,
+    "expected": null
+  },
+  {
+    "id": "ses_fixture",
+    "title": "Fixture session",
+    "time_created": 1700000000000,
+    "time_updated": 1700000000000,
+    "tapes_launch": {
+      "session": "ses_fixture",
+      "modes": [
+        "run"
+      ]
+    },
+    "expected": "headless"
+  },
+  {
+    "id": "ses_fixture",
+    "title": "Fixture session",
+    "time_created": 1700000000000,
+    "time_updated": 1700000000000,
+    "tapes_launch": {
+      "session": "ses_fixture",
+      "modes": [
+        "run",
+        "tui"
+      ]
+    },
+    "expected": "interactive"
+  },
+  {
+    "id": "ses_fixture",
+    "title": "Fixture session",
+    "time_created": 1700000000000,
+    "time_updated": 1700000000000,
+    "tapes_launch": {
+      "session": "ses_parent",
+      "modes": [
+        "tui"
+      ]
+    },
+    "expected": null
+  },
+  {
+    "id": "ses_fixture",
+    "title": "Fixture session",
+    "time_created": 1700000000000,
+    "time_updated": 1700000000000,
+    "tapes_launch": {
+      "session": "ses_fixture",
+      "modes": [
+        "unknown"
+      ]
+    },
+    "expected": null
+  },
+  {
+    "id": "ses_fixture",
+    "title": "Fixture session",
+    "time_created": 1700000000000,
+    "time_updated": 1700000000000,
+    "tapes_launch": {
+      "session": "ses_fixture",
+      "modes": "run"
+    },
+    "expected": null
+  }
+]

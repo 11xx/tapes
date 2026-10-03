@@ -692,7 +692,7 @@ struct SessionQueryArgs {
     #[arg(long, value_name = "SUBSTRING", conflicts_with_all = ["session", "latest", "title", "occurrence"])]
     model: Option<String>,
     /// Keep sessions the harness records as interactive or headless. Pi
-    /// records one only with `tapes install pi`, OpenCode none, and sessions
+    /// records one only with `tapes install pi`, OpenCode with `tapes install opencode`, and sessions
     /// without a recognized marker never match.
     #[arg(long, value_enum, value_name = "MODE", conflicts_with_all = ["session", "latest", "title", "occurrence"])]
     launch: Option<LaunchArg>,
@@ -919,7 +919,7 @@ enum Command {
         #[arg(long, value_name = "SUBSTRING")]
         model: Option<String>,
         /// Keep sessions the harness records as interactive or headless.
-        /// Pi records one only with `tapes install pi`, OpenCode none, and
+        /// Pi records one only with `tapes install pi`, OpenCode with `tapes install opencode`, and
         /// sessions without a recognized marker never match.
         #[arg(long, value_enum, value_name = "MODE")]
         launch: Option<LaunchArg>,
@@ -1398,7 +1398,7 @@ enum Command {
         #[arg(long, value_name = "SUBSTRING")]
         model: Option<String>,
         /// Keep sessions the harness records as interactive or headless.
-        /// Pi records one only with `tapes install pi`, OpenCode none, and
+        /// Pi records one only with `tapes install pi`, OpenCode with `tapes install opencode`, and
         /// sessions without a recognized marker never match.
         #[arg(long, value_enum, value_name = "MODE")]
         launch: Option<LaunchArg>,
@@ -1507,6 +1507,8 @@ enum Command {
     /// own recordings. `pi` writes tapes' pi extension, which records the
     /// launch mode of every session pi opens afterwards, into
     /// `$PI_CODING_AGENT_DIR/extensions` (default `~/.pi/agent/extensions`).
+    /// `opencode` writes a plugin into `$OPENCODE_CONFIG_DIR/plugins`, or
+    /// `$XDG_CONFIG_HOME/opencode/plugins` (default `~/.config/opencode/plugins`).
     /// A file there that tapes does not manage is refused.
     Install {
         #[arg(value_enum)]
@@ -1523,6 +1525,7 @@ enum Command {
 #[derive(Clone, Copy, Debug, ValueEnum)]
 enum IntegrationArg {
     Pi,
+    Opencode,
 }
 
 fn main() -> Result<()> {
@@ -2548,9 +2551,15 @@ fn dispatch(cli: Cli) -> Result<()> {
         Command::Install {
             harness: IntegrationArg::Pi,
         } => integration::install_pi()?,
+        Command::Install {
+            harness: IntegrationArg::Opencode,
+        } => integration::install_opencode()?,
         Command::Uninstall {
             harness: IntegrationArg::Pi,
         } => integration::uninstall_pi()?,
+        Command::Uninstall {
+            harness: IntegrationArg::Opencode,
+        } => integration::uninstall_opencode()?,
         Command::Export {
             query,
             read,
