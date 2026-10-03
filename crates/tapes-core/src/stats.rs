@@ -21,7 +21,7 @@ use crate::model::{
 };
 use crate::usage::{self, ModelUsage, TurnCoverage, UsageSession, UsageView};
 
-pub const STATS_SCHEMA: &str = "tapes-stats/10";
+pub const STATS_SCHEMA: &str = "tapes-stats/11";
 
 /// One session's counted facts, in the order a reader takes them: what the
 /// figures cover, the turns, the tool calls behind them, the recorded clock,
@@ -827,6 +827,7 @@ mod tests {
             model: None,
             model_observation: None,
             model_selections: Vec::new(),
+            launch: None,
             title: None,
             derived_title: None,
             derived_title_truncated: None,

@@ -22,8 +22,8 @@ use crate::event::{Bounded, EventKind, ToolEvent};
 use crate::history::PageProjection;
 use crate::lineage::{ChildRef, Lineage, SourceRef};
 use crate::model::{
-    derive_title, AccountingBasis, AccountingCoverage, Cost, KindDeclaration, Model, Role, Session,
-    SourceDescriptor, Tokens, TrailingRecord, Transcript, Turn, TurnKind, TurnSelection,
+    derive_title, AccountingBasis, AccountingCoverage, Cost, KindDeclaration, Launch, Model, Role,
+    Session, SourceDescriptor, Tokens, TrailingRecord, Transcript, Turn, TurnKind, TurnSelection,
 };
 use crate::usage::{Durations, ModelUsage, UsageDetail};
 use agent_tapes_discovery::{Harness as NativeHarness, IdentityBasis, NativeSession, NativeStore};
@@ -126,6 +126,7 @@ impl ClaudeBackend {
             .find_map(|value| value["aiTitle"].as_str())
             .map(str::to_owned);
         let model = read.values.iter().rev().find_map(claude_model);
+        let launch = claude_launch(opening.iter().chain(&read.values));
         let (model_observation, model_selections) = claude_selections(read);
         let mut turns = Vec::new();
         for (index, value) in read.values.iter().enumerate() {
@@ -161,6 +162,7 @@ impl ClaudeBackend {
             model,
             model_observation,
             model_selections,
+            launch,
             title,
             derived_title: None,
             derived_title_truncated: None,
@@ -433,6 +435,8 @@ impl Backend for ClaudeBackend {
         let notes = subagent_notes(path);
         let mut session = session.clone();
         session.model = recording.tail.values.iter().rev().find_map(claude_model);
+        let opening = recording.opening();
+        session.launch = claude_launch(opening.iter().chain(&recording.tail.values));
         (session.model_observation, session.model_selections) = claude_selections(&recording.tail);
         let mut transcript = transcript_from_recording(
             session,
@@ -591,6 +595,7 @@ impl Backend for ClaudeBackend {
             model: None,
             model_observation: None,
             model_selections: Vec::new(),
+            launch: None,
             title: records.title.take(),
             derived_title: None,
             derived_title_truncated: None,
@@ -723,6 +728,7 @@ struct ClaudeRecords {
     cost_state: Option<Value>,
     requests: RequestTokens,
     model: Option<Model>,
+    launch: Option<Launch>,
     selections: crate::model_observation::Selections,
     title: Option<String>,
     directory: Option<String>,
@@ -731,6 +737,7 @@ struct ClaudeRecords {
 
 impl ClaudeRecords {
     fn observe(&mut self, value: &Value) {
+        self.launch = merge_launch(self.launch, claude_entrypoint(value));
         if value["type"] == "cost-state" {
             self.cost_state = Some(value.clone());
         }
@@ -774,9 +781,38 @@ impl ClaudeRecords {
         session.tokens = tokens;
         session.cost = cost;
         session.model = self.model;
+        session.launch = self.launch;
         (session.model_observation, session.model_selections) = self.selections.finish(true);
         self.activity.apply(session);
     }
+}
+
+fn claude_entrypoint(value: &Value) -> Option<Launch> {
+    if !matches!(
+        value["type"].as_str(),
+        Some("user" | "assistant" | "attachment" | "system")
+    ) {
+        return None;
+    }
+    match value["entrypoint"].as_str()? {
+        "cli" | "claude-desktop" => Some(Launch::Interactive),
+        "sdk-cli" => Some(Launch::Headless),
+        _ => None,
+    }
+}
+
+fn merge_launch(current: Option<Launch>, observed: Option<Launch>) -> Option<Launch> {
+    match observed {
+        Some(Launch::Interactive) => Some(Launch::Interactive),
+        Some(Launch::Headless) if current.is_none() => Some(Launch::Headless),
+        _ => current,
+    }
+}
+
+fn claude_launch<'a>(values: impl IntoIterator<Item = &'a Value>) -> Option<Launch> {
+    values.into_iter().fold(None, |current, value| {
+        merge_launch(current, claude_entrypoint(value))
+    })
 }
 
 /// The model an assistant record names, with the effort the turn ran at: the

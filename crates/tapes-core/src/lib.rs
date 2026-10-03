@@ -39,9 +39,9 @@ pub mod stats_summary;
 pub mod title;
 pub mod usage;
 
-pub const LIST_SCHEMA: &str = "tapes-list/7";
-pub const EXPORT_MANIFEST_SCHEMA: &str = "tapes-export-manifest/5";
-pub const USAGE_SUMMARY_SCHEMA: &str = "tapes-usage-summary/4";
+pub const LIST_SCHEMA: &str = "tapes-list/8";
+pub const EXPORT_MANIFEST_SCHEMA: &str = "tapes-export-manifest/6";
+pub const USAGE_SUMMARY_SCHEMA: &str = "tapes-usage-summary/5";
 /// Number of normalized turns a `list --search` query inspects per session.
 /// Keeping this fixed makes the listing's cost predictable for callers.
 pub const LIST_SEARCH_TAIL: usize = 32;
@@ -96,6 +96,7 @@ pub enum ListSort {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct ListFilters<'a> {
     pub model: Option<&'a str>,
+    pub launch: Option<model::Launch>,
     pub directory: Option<&'a str>,
     pub since: Option<DateTime<Utc>>,
     pub until: Option<DateTime<Utc>>,
@@ -498,10 +499,13 @@ pub(crate) fn list_scoped(
         } else {
             usize::MAX
         },
-        filters.model,
-        filters.directory,
-        filters.since,
-        filters.until,
+        backend::QueryFilters {
+            model: filters.model,
+            launch: filters.launch,
+            directory: filters.directory,
+            since: filters.since,
+            until: filters.until,
+        },
     );
     query.sort = sort;
     let mut found: Vec<(Session, usize)> = Vec::new();
@@ -1583,6 +1587,8 @@ pub struct SelectionRecord {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub launch: Option<model::Launch>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub directory: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub activity: Option<ActivityWindow>,
@@ -1829,6 +1835,7 @@ pub(crate) fn selection_record(selection: &SessionSelection<'_>, limit: usize) -
         project,
         harness: selection.harness.map(str::to_owned),
         model: filters.model.map(str::to_owned),
+        launch: filters.launch,
         directory: filters.directory.map(str::to_owned),
         activity: (filters.since.is_some() || filters.until.is_some()).then_some(ActivityWindow {
             since: filters.since,

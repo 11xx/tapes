@@ -123,6 +123,8 @@ pub struct Query<'a> {
     pub ceiling: usize,
     /// Lowercase substring of the full model identity, when filtering.
     pub model: Option<String>,
+    /// How the harness records the session was launched, when filtering.
+    pub launch: Option<crate::model::Launch>,
     /// Lowercase substring of a session's directory path, when filtering.
     pub directory: Option<String>,
     /// Lower bound for the session's newest recorded activity, inclusive.
@@ -134,6 +136,16 @@ pub struct Query<'a> {
     pub sort: crate::ListSort,
 }
 
+/// Metadata predicates applied before a listing's result limit.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct QueryFilters<'a> {
+    pub model: Option<&'a str>,
+    pub launch: Option<crate::model::Launch>,
+    pub directory: Option<&'a str>,
+    pub since: Option<DateTime<Utc>>,
+    pub until: Option<DateTime<Utc>>,
+}
+
 impl<'a> Query<'a> {
     pub fn unscoped(limit: usize) -> Self {
         Self {
@@ -141,6 +153,7 @@ impl<'a> Query<'a> {
             limit,
             ceiling: usize::MAX,
             model: None,
+            launch: None,
             directory: None,
             since: None,
             until: None,
@@ -148,18 +161,13 @@ impl<'a> Query<'a> {
         }
     }
 
-    pub fn unscoped_with_filters(
-        limit: usize,
-        model: Option<&str>,
-        directory: Option<&str>,
-        since: Option<DateTime<Utc>>,
-        until: Option<DateTime<Utc>>,
-    ) -> Self {
+    pub fn unscoped_with_filters(limit: usize, filters: QueryFilters<'_>) -> Self {
         Self {
-            model: model.map(str::to_lowercase),
-            directory: directory.map(str::to_lowercase),
-            since,
-            until,
+            model: filters.model.map(str::to_lowercase),
+            launch: filters.launch,
+            directory: filters.directory.map(str::to_lowercase),
+            since: filters.since,
+            until: filters.until,
             ..Self::unscoped(limit)
         }
     }
@@ -168,25 +176,24 @@ impl<'a> Query<'a> {
         scope: Option<&'a Scope>,
         limit: usize,
         ceiling: usize,
-        model: Option<&str>,
-        directory: Option<&str>,
-        since: Option<DateTime<Utc>>,
-        until: Option<DateTime<Utc>>,
+        filters: QueryFilters<'_>,
     ) -> Self {
         Self {
             scope,
             limit,
             ceiling,
-            model: model.map(str::to_lowercase),
-            directory: directory.map(str::to_lowercase),
-            since,
-            until,
+            model: filters.model.map(str::to_lowercase),
+            launch: filters.launch,
+            directory: filters.directory.map(str::to_lowercase),
+            since: filters.since,
+            until: filters.until,
             sort: crate::ListSort::Newest,
         }
     }
 
     pub(crate) fn has_filters(&self) -> bool {
         self.model.is_some()
+            || self.launch.is_some()
             || self.directory.is_some()
             || self.since.is_some()
             || self.until.is_some()
@@ -204,6 +211,9 @@ impl<'a> Query<'a> {
                 directory.to_string_lossy().to_lowercase().contains(needle)
             })
         });
+        let launch_matches = self
+            .launch
+            .is_none_or(|launch| session.launch == Some(launch));
         let since_matches = self.since.is_none_or(|since| {
             session
                 .last_activity_at
@@ -214,7 +224,7 @@ impl<'a> Query<'a> {
                 .last_activity_at
                 .is_some_and(|activity| activity < until)
         });
-        model_matches && directory_matches && since_matches && until_matches
+        model_matches && launch_matches && directory_matches && since_matches && until_matches
     }
 }
 

@@ -18,7 +18,7 @@ use crate::history::PageProjection;
 use crate::lineage::{ChildRef, Lineage, ParentRef, SourceRef};
 use crate::model::{
     is_known_envelope, is_known_notice, AccountingBasis, AccountingCoverage, ByteSpan,
-    KindDeclaration, Model, ModelObservationStatus, ReadGap, RecordRef, Role, Session,
+    KindDeclaration, Launch, Model, ModelObservationStatus, ReadGap, RecordRef, Role, Session,
     SourceDescriptor, TerminalObservation, Tokens, TrailingRecord, Transcript, Turn, TurnKind,
     TurnSelection, UserDefault,
 };
@@ -108,6 +108,7 @@ impl CodexBackend {
                     .find_map(codex_cwd)
                     .map(PathBuf::from)
             });
+        let launch = opening.first().and_then(codex_launch);
         let mut reader = CodexTurns::default();
         let turns = read
             .values
@@ -125,6 +126,7 @@ impl CodexBackend {
             model: facts.model,
             model_observation: facts.model_observation,
             model_selections: facts.model_selections,
+            launch,
             title: None,
             derived_title: None,
             derived_title_truncated: None,
@@ -663,6 +665,21 @@ fn read_transcript(path: &Path, read_bytes: u64) -> Result<CodexTranscriptRead> 
 fn codex_cwd(value: &Value) -> Option<&str> {
     match value["type"].as_str() {
         Some("session_meta") | Some("turn_context") => value["payload"]["cwd"].as_str(),
+        _ => None,
+    }
+}
+
+fn codex_launch(value: &Value) -> Option<Launch> {
+    if value["type"] != "session_meta" {
+        return None;
+    }
+    match &value["payload"]["source"] {
+        Value::String(source) => match source.as_str() {
+            "cli" | "vscode" => Some(Launch::Interactive),
+            "exec" => Some(Launch::Headless),
+            _ => None,
+        },
+        Value::Object(source) if source.contains_key("subagent") => Some(Launch::Headless),
         _ => None,
     }
 }

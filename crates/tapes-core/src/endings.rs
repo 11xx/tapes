@@ -24,13 +24,13 @@ use crate::content::{self, ContentCoverage, ContentInventory, ContentPart};
 use crate::event::{self, EventKind, EventRecord};
 use crate::lineage::{Lineage, ParentRef};
 use crate::model::{
-    EntryMetadata, LiveState, Model, ReadEvidence, RecordRef, Role, SessionMetadata, SourceBound,
-    SourceDescriptor, TerminalObservation, TextTailEvidence, TrailingRecord, Transcript,
-    Truncation, Turn, TurnKind,
+    EntryMetadata, Launch, LiveState, Model, ReadEvidence, RecordRef, Role, SessionMetadata,
+    SourceBound, SourceDescriptor, TerminalObservation, TextTailEvidence, TrailingRecord,
+    Transcript, Truncation, Turn, TurnKind,
 };
 use crate::{list_scoped, selection_record, SelectionRecord, SessionSelection, DEFAULT_LIST_LIMIT};
 
-pub const ENDINGS_SCHEMA: &str = "tapes-endings/6";
+pub const ENDINGS_SCHEMA: &str = "tapes-endings/7";
 /// Newest turns read per session when the caller names no window. Wide enough
 /// to hold a tool call and the exchange around it, narrow enough that a
 /// selection of hundreds stays a survey.
@@ -129,6 +129,8 @@ pub struct EndingSession {
     pub metadata: Option<SessionMetadata>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<Model>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub launch: Option<Launch>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -406,6 +408,7 @@ pub fn ending(transcript: Transcript, lineage: Result<Lineage>, tail: usize, tex
             source: session.source.clone(),
             metadata: session.metadata.clone(),
             model: session.model.clone(),
+            launch: session.launch,
             title: session.title.clone(),
             derived_title: session.derived_title.clone(),
             directory: session.directory.clone(),

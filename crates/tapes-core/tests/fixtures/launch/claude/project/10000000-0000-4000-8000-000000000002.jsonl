@@ -1,0 +1,2 @@
+{"type":"summary","sessionId":"10000000-0000-4000-8000-000000000002","summary":"Desktop launch fixture"}
+{"type":"assistant","sessionId":"10000000-0000-4000-8000-000000000002","uuid":"assistant-desktop","timestamp":"2026-01-02T11:00:00Z","cwd":"/fixtures/project","entrypoint":"claude-desktop","message":{"role":"assistant","model":"claude-fixture","content":[{"type":"text","text":"Desktop fixture complete."}]}}

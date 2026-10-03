@@ -1,0 +1,3 @@
+{"timestamp":"2026-01-02T11:00:00Z","type":"session_meta","payload":{"id":"60000000-0000-7000-8000-000000000012","session_id":"60000000-0000-7000-8000-000000000012","cwd":"/fixtures/project","model_provider":"openai","source":"vscode"}}
+{"timestamp":"2026-01-02T11:00:01Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Inspect the launch fixture."}]}}
+{"timestamp":"2026-01-02T11:00:02Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Launch fixture complete."}]}}

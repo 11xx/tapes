@@ -146,6 +146,7 @@ impl PiBackend {
             model,
             model_observation,
             model_selections,
+            launch: None,
             title: None,
             derived_title: None,
             derived_title_truncated: None,

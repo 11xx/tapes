@@ -22,7 +22,7 @@ pub enum SessionRead {
     Whole,
 }
 
-pub const SCHEMA: &str = "tapes-stats-summary/5";
+pub const SCHEMA: &str = "tapes-stats-summary/6";
 
 #[derive(Debug, Serialize)]
 pub struct SessionStats {

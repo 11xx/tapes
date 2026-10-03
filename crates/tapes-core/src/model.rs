@@ -10,7 +10,24 @@ use crate::content::{ContentCoverage, ContentPart};
 use crate::event::ToolEvent;
 use crate::usage::UsageDetail;
 
-pub const SESSION_SCHEMA: &str = "tapes-session/14";
+pub const SESSION_SCHEMA: &str = "tapes-session/15";
+/// How the recording identifies the session's launch mode.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Launch {
+    Interactive,
+    Headless,
+}
+
+impl Launch {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Interactive => "interactive",
+            Self::Headless => "headless",
+        }
+    }
+}
+
 /// Maximum length of a title derived from the first user turn.
 pub const DERIVED_TITLE_MAX_CHARS: usize = 96;
 
@@ -36,6 +53,8 @@ pub struct Session {
     /// switch have separate spans; endpoints describe observed records only.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub model_selections: Vec<ModelSelectionSpan>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launch: Option<Launch>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
     /// A bounded human-facing hint derived from the first user turn when the
@@ -1543,6 +1562,7 @@ mod tests {
             }),
             model_observation: None,
             model_selections: Vec::new(),
+            launch: None,
             title: Some("Build the model".into()),
             derived_title: None,
             derived_title_truncated: None,
@@ -1655,9 +1675,26 @@ mod tests {
         assert!(!object.contains_key("derived_title"));
         assert!(!object.contains_key("derived_title_truncated"));
         assert!(!object.contains_key("model"));
+        assert!(!object.contains_key("launch"));
         assert!(!object.contains_key("cost"));
         assert!(!object.contains_key("tokens"));
         assert!(!object.contains_key("accounting"));
+    }
+
+    #[test]
+    fn launch_values_use_their_wire_labels() {
+        assert_eq!(
+            serde_json::to_value(Launch::Interactive).unwrap(),
+            json!("interactive")
+        );
+        assert_eq!(
+            serde_json::to_value(Launch::Headless).unwrap(),
+            json!("headless")
+        );
+
+        let mut session = session();
+        session.launch = Some(Launch::Headless);
+        assert_eq!(serde_json::to_value(session).unwrap()["launch"], "headless");
     }
 
     #[test]
