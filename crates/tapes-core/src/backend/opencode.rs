@@ -2032,6 +2032,7 @@ fn parse_message(message: &Value) -> Vec<Turn> {
             .as_str()
             .filter(|text| !text.is_empty())
             .map(|text| Turn {
+                context_event: None,
                 model: None,
                 kind: user_kind(&role),
                 role,
@@ -2133,6 +2134,7 @@ fn parse_message(message: &Value) -> Vec<Turn> {
                 .map(str::to_owned)
                 .or_else(|| message_id.clone());
             ((!text.is_empty()) || !parts.is_empty()).then_some(Turn {
+                context_event: None,
                 model: None,
                 kind: user_kind(&role),
                 role,

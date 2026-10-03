@@ -242,7 +242,7 @@ READ A RECORDING ON ANOTHER MACHINE
 
 PROBE BEFORE EXPORTING
   tapes show <id> --tail 40      A window, costing no bundle.
-  tapes show <id> --json         tapes-session/15 turns and bounded read, graph, artifact, terminal, and recorded launch evidence.
+  tapes show <id> --json         tapes-session/16 turns, typed context events, and bounded read, graph, artifact, terminal, and recorded launch evidence.
   tapes show <id> --exchange     Operator and assistant turns only, timestamps and ordinals kept; the name for --only operator,assistant.
   tapes show <id> --omit tool    Every turn but tool calls and results; --only and --omit take kind labels, and export takes both.
   tapes show <id> --full         Every turn of a Claude, Codex, Pi, or OpenCode session, streamed past the read bounds; --json streams it too.
@@ -547,8 +547,10 @@ READ THE ENDING
   Results, then no text          Results landed but were never narrated. The
                                  successor must re-read them; no summary of
                                  them was ever written.
-  A summary, then a detail jump  A compaction. The working detail is gone, so
-                                 the handoff is what restores it.
+  A compaction notice           A recorded model-context reduction, not source
+                                 deletion or completion. Use show --full or
+                                 history pages to recover retained earlier
+                                 messages; summaries remain ambient evidence.
   An error or limit message      A crash or a quota cut. The cut is arbitrary
                                  and often mid-tool, so say what was in flight
                                  and whether it landed.

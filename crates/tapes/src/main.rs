@@ -844,7 +844,10 @@ enum Command {
         remote: Option<String>,
     },
     /// Show one session. The session carries a source descriptor and optional
-    /// activity timestamps; every turn carries a `kind` naming what the harness
+    /// activity timestamps. Claude compaction boundaries are notices with typed
+    /// context-event measurements and preserved anchors; use --full or history
+    /// pages to retrieve retained pre-compaction messages. Every turn carries a
+    /// `kind` naming what the harness
     /// recorded it as, and a user turn holding a harness command, notice, or
     /// attached context is headed `user/<kind>` rather than `user`. The human
     /// header names a recognized launch mode and marks a matching live session
@@ -893,7 +896,7 @@ enum Command {
         #[arg(long, value_name = "SSH-DESTINATION", conflicts_with = "input")]
         remote: Option<String>,
     },
-    /// Read one bounded page of older Claude or Codex history as tapes-page/8,
+    /// Read one bounded page of older Claude or Codex history as tapes-page/9,
     /// including absolute record references and read evidence. A page decodes
     /// only the records inside its byte range, so a turn's kind matches the one
     /// a whole read gives it. Resume with the returned cursor.
@@ -928,7 +931,7 @@ enum Command {
         json: bool,
     },
     /// Recover recorded model observations outside the usual source tail as a
-    /// models-only tapes-page/8 projection, with explicit history coverage.
+    /// models-only tapes-page/9 projection, with explicit history coverage.
     Metadata {
         #[command(flatten)]
         selection: SelectionArgs,
@@ -941,7 +944,7 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Read a Claude child's own transcript, accounting and ending as tapes-child/6 under its parent session.
+    /// Read a Claude child's own transcript, accounting and ending as tapes-child/7 under its parent session.
     Child {
         #[command(flatten)]
         selection: SelectionArgs,
@@ -4311,6 +4314,7 @@ mod tests {
                 usage_detail: None,
             },
             turns: vec![Turn {
+                context_event: None,
                 model: None,
                 role: Role::User,
                 kind: TurnKind::Operator,

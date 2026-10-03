@@ -1160,6 +1160,46 @@ fn claude_selections(
 }
 
 fn parse_turns_raw(value: &Value) -> Vec<Turn> {
+    if value["type"] == "system" && value["subtype"] == "compact_boundary" {
+        let metadata = &value["compactMetadata"];
+        let messages = &metadata["preservedMessages"];
+        let segment = &metadata["preservedSegment"];
+        let string = |value: &Value| value.as_str().map(str::to_owned);
+        return vec![Turn {
+            context_event: Some(crate::model::ContextEvent::Compaction(
+                crate::model::Compaction {
+                    trigger: string(&metadata["trigger"]),
+                    pre_tokens: metadata["preTokens"].as_u64(),
+                    post_tokens: metadata["postTokens"].as_u64(),
+                    duration_ms: metadata["durationMs"].as_u64(),
+                    cumulative_dropped_tokens: metadata["cumulativeDroppedTokens"].as_u64(),
+                    preserved_messages_anchor: string(&messages["anchorUuid"]),
+                    preserved_segment_anchor: string(&segment["anchorUuid"]),
+                    preserved_segment_head: string(&segment["headUuid"]),
+                    preserved_segment_tail: string(&segment["tailUuid"]),
+                    omitted_preserved_uuids: messages["uuids"].as_array().map(Vec::len),
+                    omitted_all_preserved_uuids: messages["allUuids"].as_array().map(Vec::len),
+                },
+            )),
+            model: None,
+            role: Role::System,
+            kind: TurnKind::Notice,
+            text:
+                "Model context compacted; retained source history is independent of this boundary."
+                    .to_owned(),
+            ts: timestamp(&value["timestamp"]),
+            ordinal: 0,
+            native_id: value["uuid"].as_str().map(str::to_owned),
+            request_turn_id: None,
+            metadata: None,
+            record_ref: None,
+            channel: None,
+            recipient: None,
+            parts: Vec::new(),
+            coverage: None,
+            tool: None,
+        }];
+    }
     let Some(message) = value.get("message") else {
         return Vec::new();
     };
@@ -1290,6 +1330,7 @@ fn turn(
     content: TurnContent,
 ) -> Option<Turn> {
     ((!text.is_empty()) || !content.parts.is_empty()).then_some(Turn {
+        context_event: None,
         model: None,
         kind: role.kind().unwrap_or(user_kind),
         role,
