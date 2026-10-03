@@ -12863,3 +12863,24 @@ fn pinned_history_cli_keeps_a_generation_across_appends_and_views() {
         .status
         .success());
 }
+
+#[test]
+fn pinned_history_help_describes_local_verification_and_its_limits() {
+    for command in ["page", "history-search", "metadata"] {
+        let output = tapes().args([command, "--help"]).output().unwrap();
+        assert!(output.status.success());
+        let help = String::from_utf8(output.stdout).unwrap();
+        for contract in [
+            "--pin",
+            "one streaming pass",
+            "bounded memory",
+            "1GiB",
+            "--cursor alone",
+            "already passed",
+            "captured copy",
+        ] {
+            assert!(help.contains(contract), "{command}: missing {contract}");
+        }
+        assert!(!help.contains("--remote"), "{command}: {help}");
+    }
+}

@@ -332,15 +332,15 @@ PROBE BEFORE EXPORTING
   `--read-bytes` widens the file tail (4MiB by default, at most 1GiB), `show
   --full` streams a whole session past it and past OpenCode's store page, and
   explicit page reads reach older Claude or Codex file history. `read`
-  includes `source_prefix_digest` only when a streaming file read establishes
-  a pin: algorithm `sha256`, lowercase hex `value`, and `span` from byte zero
+  includes `source_prefix_digest` when a streaming full read or a pinned
+  history walk establishes a prefix: algorithm `sha256`, lowercase hex `value`, and `span` from byte zero
   to `source_length` (exclusive). It hashes source bytes, including malformed
   records and newline-less tails. Identical copies share the digest even when
   their stat-based `source_revision` differs. Replays retain the pinned prefix
-  identity after appends. Bounded, page, and API reads omit it and read no
-  extra bytes to establish it. Absence means no digest was established.
+  identity after appends. Bounded reads, strict pages, and API reads omit it
+  and read no extra bytes to establish it. Absence means no digest was established.
   `read` records the source length, configured bound, physical
-  head/tail/alignment ranges, decoded record spans, context-only record spans,
+  head/tail/alignment/verification ranges, decoded record spans, context-only record spans,
   and gaps;
   physical coverage does not erase malformed records, and a partial gap is
   discharged only by a successful decode of that same record. A preceding
@@ -824,16 +824,36 @@ HISTORICAL READS
   tapes history-search SESSION --search TEXT --pages 8 --json
   tapes metadata SESSION --pages 8 --json
   Claude and Codex history is paged backward, with chronological turns within
-  each page. Pass next_cursor back as --cursor. Changed sources refuse;
-  malformed and oversized record gaps remain explicit. Budgets protect context:
+  each page. Pass next_cursor back as --cursor. Strict cursors are the default
+  and refuse any source revision change; malformed and oversized record gaps
+  remain explicit. Budgets protect context:
   1 KiB–4 MiB per page, 1–32 pages per search, 100 excerpts/observations.
+  To walk a growing recording, start page, history-search, or metadata with
+  --pin. It hashes the fixed prefix in one streaming pass with bounded memory
+  and refuses prefixes over 1 GiB. At most 256 SHA-256 chunks are anchored
+  downward from the pinned end. Later pages verify the chunks covering their
+  window and alignment byte, reading at most 3 × 4 MiB for verification.
+  Appends past the pinned end are ignored. Replacement and truncation refuse
+  immediately; a rewrite inside the prefix refuses when its chunk is reached,
+  naming the byte span. Verified records, prefix digest and source revision
+  retain the pinned generation across page, search and metadata continuations.
+  The cursor carries the mode: continue with --cursor alone. --pin and --cursor
+  conflict, and a strict walk must restart to acquire a pin.
+  Page JSON uses tapes-page/12 and reports pin.chunk_bytes, chunks,
+  pinned_bytes, verification_bytes and verified spans. read.ranges marks these
+  spans as verification; source_prefix_digest identifies bytes 0..pinned_bytes.
+  Use --bytes equal to pin.chunk_bytes to limit verification amplification.
+  Chunks already passed are not rechecked, and mutations during the initial
+  hashing pass are part of its observation. A pin does not preserve bytes
+  through a rewrite. For durable bytes, capture a copy and read its native
+  store with --native-store and --native-root; --pin also works on that copy.
   Search JSON uses tapes-history-search/11. Matches retain the turn's source
   reference, native ID and timestamp when recorded, and its kind. Page byte
   bounds and zero-based ordinals locate matches within a page; ordinals are
   not session indices. Human matches show kind and recorded timestamp.
-  Metadata pages extract model observations without decoding transcript
-  turns; their read evidence uses the page schema with the `models-only`
-  option. Older model observations never silently replace current session
+  Metadata JSON uses tapes-metadata-history/11. Its pages extract model
+  observations without decoding transcript turns; their read evidence uses
+  the page schema with the `models-only` option. Older model observations never silently replace current session
   metadata.
 TOOL USAGE OVER A SELECTION
   tapes stats --here --since 2026-01-01 --json

@@ -65,6 +65,14 @@ tapes stats <id> --idle 45m               # active time, stretches, tools, cache
 tapes list --remote build-box             # sessions on another machine, read over ssh
 ```
 
+For a growing Claude or Codex recording, start `tapes page <id> --pin --bytes
+1MiB --json`, then continue with its `next_cursor` as `--cursor` alone.
+`history-search` and `metadata` also accept `--pin`. One bounded-memory pass
+hashes a prefix up to 1 GiB; later pages verify their chunks and ignore appends.
+Edits refuse when their chunk is reached; replacement and truncation refuse
+immediately. The guide explains verification costs and the captured-copy
+fallback for bytes that must survive a rewrite.
+
 Without `--here`, a listing covers every session on the machine. Every command
 that reads sessions, except `export`, takes `--json`, and each JSON answer
 names its versioned schema. Claude Code and Codex record how each session was launched; Pi does

@@ -1066,8 +1066,14 @@ enum Command {
         selection: SelectionArgs,
         #[arg(long)]
         cursor: Option<String>,
-        /// Hash a fixed prefix up to 1GiB and verify each page's chunks;
-        /// appends beyond that prefix are ignored. Continue with --cursor alone.
+        /// Hash a fixed prefix up to 1GiB in one streaming pass with bounded memory.
+        /// Later pages verify their chunks, ignore appends beyond the pinned end,
+        /// and refuse replacement, truncation or an edit in a chunk they reach.
+        /// Continue with --cursor alone; a strict walk must restart to acquire a pin.
+        /// Use --bytes equal to the reported chunk size to limit verification reads
+        /// (at most 3 × 4MiB per page). Chunks already passed are not rechecked;
+        /// changes during hashing are part of its observation. A pin preserves no
+        /// bytes through a rewrite: read a captured copy with --native-store instead.
         #[arg(long, conflicts_with = "cursor")]
         pin: bool,
         /// Maximum payload bytes per page, between 1KiB and 4MiB.
@@ -1085,8 +1091,14 @@ enum Command {
         selection: SelectionArgs,
         #[arg(long)]
         cursor: Option<String>,
-        /// Hash a fixed prefix up to 1GiB and verify each page's chunks;
-        /// appends beyond that prefix are ignored. Continue with --cursor alone.
+        /// Hash a fixed prefix up to 1GiB in one streaming pass with bounded memory.
+        /// Later pages verify their chunks, ignore appends beyond the pinned end,
+        /// and refuse replacement, truncation or an edit in a chunk they reach.
+        /// Continue with --cursor alone; a strict walk must restart to acquire a pin.
+        /// Use --bytes equal to the reported chunk size to limit verification reads
+        /// (at most 3 × 4MiB per page). Chunks already passed are not rechecked;
+        /// changes during hashing are part of its observation. A pin preserves no
+        /// bytes through a rewrite: read a captured copy with --native-store instead.
         #[arg(long, conflicts_with = "cursor")]
         pin: bool,
         #[arg(long, default_value_t = ByteSize::new(agent_tapes_core::history::DEFAULT_BYTES as u64))]
@@ -1101,13 +1113,20 @@ enum Command {
     },
     /// Recover recorded model observations outside the usual source tail as a
     /// models-only tapes-page/12 projection, with explicit history coverage.
+    /// JSON uses tapes-metadata-history/11.
     Metadata {
         #[command(flatten)]
         selection: SelectionArgs,
         #[arg(long)]
         cursor: Option<String>,
-        /// Hash a fixed prefix up to 1GiB and verify each page's chunks;
-        /// appends beyond that prefix are ignored. Continue with --cursor alone.
+        /// Hash a fixed prefix up to 1GiB in one streaming pass with bounded memory.
+        /// Later pages verify their chunks, ignore appends beyond the pinned end,
+        /// and refuse replacement, truncation or an edit in a chunk they reach.
+        /// Continue with --cursor alone; a strict walk must restart to acquire a pin.
+        /// Use --bytes equal to the reported chunk size to limit verification reads
+        /// (at most 3 × 4MiB per page). Chunks already passed are not rechecked;
+        /// changes during hashing are part of its observation. A pin preserves no
+        /// bytes through a rewrite: read a captured copy with --native-store instead.
         #[arg(long, conflicts_with = "cursor")]
         pin: bool,
         #[arg(long, default_value_t = ByteSize::new(agent_tapes_core::history::DEFAULT_BYTES as u64))]
