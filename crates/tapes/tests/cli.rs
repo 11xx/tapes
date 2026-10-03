@@ -11537,36 +11537,38 @@ fn install_pi_writes_a_managed_extension_once_and_uninstall_removes_only_it() {
             .unwrap()
     };
 
-    // pi expands `~/` and `file://` agent dirs, so tapes installs where pi loads.
-    for (agent_dir, expected) in [
-        ("~/pi agent".to_owned(), home.join("pi agent")),
-        (
-            format!("file://{}/url%20agent", root.display()),
-            root.join("url agent"),
-        ),
-    ] {
-        let extension = expected.join("extensions/tapes-launch.ts");
-        let installed = run(&agent_dir, &["install", "pi"]);
-        assert!(
-            installed.status.success(),
-            "{}",
-            String::from_utf8_lossy(&installed.stderr)
-        );
-        let source = fs::read_to_string(&extension).unwrap();
-        assert!(source.starts_with("// Managed by tapes."));
-        assert!(source.contains("appendEntry(\"tapes.launch\""));
+    // A file URL is refused rather than resolved, so nothing lands where pi
+    // would not look.
+    let url = format!("file://{}/url-agent", root.display());
+    let refused = run(&url, &["install", "pi"]);
+    assert!(!refused.status.success());
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("file URL"));
+    assert!(!root.join("url-agent").exists());
 
-        let again = run(&agent_dir, &["install", "pi"]);
-        assert!(again.status.success());
-        assert!(String::from_utf8_lossy(&again.stdout).contains("already installed"));
-        assert_eq!(fs::read_to_string(&extension).unwrap(), source);
+    // pi expands a leading `~/`, so tapes installs where pi loads.
+    let agent_dir = "~/pi agent";
+    let expected = home.join("pi agent");
+    let extension = expected.join("extensions/tapes-launch.ts");
+    let installed = run(agent_dir, &["install", "pi"]);
+    assert!(
+        installed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&installed.stderr)
+    );
+    let source = fs::read_to_string(&extension).unwrap();
+    assert!(source.starts_with("// Managed by tapes."));
+    assert!(source.contains("appendEntry(\"tapes.launch\""));
 
-        let removed = run(&agent_dir, &["uninstall", "pi"]);
-        assert!(removed.status.success());
-        assert!(!extension.exists());
-        let absent = run(&agent_dir, &["uninstall", "pi"]);
-        assert!(absent.status.success());
-    }
+    let again = run(agent_dir, &["install", "pi"]);
+    assert!(again.status.success());
+    assert!(String::from_utf8_lossy(&again.stdout).contains("already installed"));
+    assert_eq!(fs::read_to_string(&extension).unwrap(), source);
+
+    let removed = run(agent_dir, &["uninstall", "pi"]);
+    assert!(removed.status.success());
+    assert!(!extension.exists());
+    let absent = run(agent_dir, &["uninstall", "pi"]);
+    assert!(absent.status.success());
 
     let agent = root.join("agent");
     let agent_dir = agent.to_str().unwrap();
@@ -11594,6 +11596,16 @@ fn install_pi_writes_a_managed_extension_once_and_uninstall_removes_only_it() {
         .file_type()
         .is_symlink());
     assert!(!root.join("nowhere.ts").exists());
+
+    // A directory at the path is neither replaced nor removed.
+    fs::remove_file(&extension).unwrap();
+    fs::create_dir(&extension).unwrap();
+    let refused = run(agent_dir, &["install", "pi"]);
+    assert!(!refused.status.success());
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("not a regular file"));
+    assert!(!run(agent_dir, &["uninstall", "pi"]).status.success());
+    assert!(extension.is_dir());
+    fs::remove_dir(&extension).unwrap();
 
     assert!(fs::read_dir(agent.join("extensions"))
         .unwrap()
