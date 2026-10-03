@@ -99,6 +99,21 @@ fn add_counter(total: &mut Option<u64>, value: Option<u64>) {
     }
 }
 
+/// Fold one record's launch evidence into a session's: any interactive
+/// evidence makes the session interactive, and headless evidence counts only
+/// while nothing else is known.
+pub(crate) fn merge_launch(
+    current: Option<crate::model::Launch>,
+    observed: Option<crate::model::Launch>,
+) -> Option<crate::model::Launch> {
+    use crate::model::Launch;
+    match observed {
+        Some(Launch::Interactive) => Some(Launch::Interactive),
+        Some(Launch::Headless) if current.is_none() => Some(Launch::Headless),
+        _ => current,
+    }
+}
+
 pub(crate) fn accounting_for(
     tokens: Option<&Tokens>,
     cost: Option<&Cost>,

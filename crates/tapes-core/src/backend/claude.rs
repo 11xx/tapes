@@ -9,11 +9,11 @@ use sha2::{Digest, Sha256};
 
 use super::{
     accounting_for, default_native_store, enrich_native_session, head_directory,
-    list_discovered_files, list_discovered_files_with_search, read_bounds, read_jsonl,
-    read_recording, replay_pin, skipped_records_note, stream_jsonl, streamed_trailing_record,
-    timestamp, trailing_record, transcript, transcript_from_recording, ActivityRange, Backend,
-    Jsonl, Listing, ParsedFile, Query, StreamedChild, StreamedTranscript, TokenTotals,
-    UnmappedTally,
+    list_discovered_files, list_discovered_files_with_search, merge_launch, read_bounds,
+    read_jsonl, read_recording, replay_pin, skipped_records_note, stream_jsonl,
+    streamed_trailing_record, timestamp, trailing_record, transcript, transcript_from_recording,
+    ActivityRange, Backend, Jsonl, Listing, ParsedFile, Query, StreamedChild, StreamedTranscript,
+    TokenTotals, UnmappedTally,
 };
 use crate::content::{
     bounded_shape, text_part, tool_coverage, tool_part, ContentAvailability, ContentCarrier,
@@ -799,14 +799,6 @@ fn claude_entrypoint(value: &Value) -> Option<Launch> {
         "cli" | "claude-desktop" => Some(Launch::Interactive),
         "sdk-cli" => Some(Launch::Headless),
         _ => None,
-    }
-}
-
-fn merge_launch(current: Option<Launch>, observed: Option<Launch>) -> Option<Launch> {
-    match observed {
-        Some(Launch::Interactive) => Some(Launch::Interactive),
-        Some(Launch::Headless) if current.is_none() => Some(Launch::Headless),
-        _ => current,
     }
 }
 
