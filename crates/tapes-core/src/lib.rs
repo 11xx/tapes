@@ -1966,6 +1966,7 @@ pub fn visit_event_sessions(
     }
     Ok(SessionList {
         schema: LIST_SCHEMA,
+        full_search: None,
         sort: selection.sort,
         activity: (selection.filters.since.is_some() || selection.filters.until.is_some())
             .then_some(ActivityWindow {
