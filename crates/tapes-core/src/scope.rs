@@ -272,12 +272,19 @@ mod tests {
 
     #[test]
     fn without_a_repository_the_scope_is_the_subtree() {
-        let root = std::env::temp_dir().join(format!("tapes-scope-plain-{}", std::process::id()));
+        // TMPDIR can be inside a worktree; this fixture needs a system directory
+        // whose ancestors do not contain a Git repository.
+        let parent = Path::new("/tmp");
+        let root = parent.join(format!("tapes-scope-plain-{}", std::process::id()));
         let nested = root.join("nested");
         std::fs::create_dir_all(&nested).expect("temp directory is creatable");
+        assert!(
+            git(&root, &["rev-parse", "--git-dir"]).is_none(),
+            "subtree fixture precondition: the fixture must be outside any Git repository"
+        );
         let scope = Scope::at(&root).expect("scope resolves");
         assert!(scope.contains(&nested));
-        assert!(!scope.contains(&std::env::temp_dir()));
+        assert!(!scope.contains(parent));
         std::fs::remove_dir_all(root).expect("cleanup");
     }
 }
