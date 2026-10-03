@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Result};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 use super::{
     accounting_for, default_native_store, enrich_native_session, head_directory,
@@ -18,7 +19,7 @@ use crate::content::{
     bounded_shape, text_part, tool_coverage, tool_part, ContentAvailability, ContentCarrier,
     ContentCoverage, ContentPart,
 };
-use crate::event::{Bounded, EventKind, ToolEvent};
+use crate::event::{Bounded, EventKind, ReadLines, ToolEvent};
 use crate::history::PageProjection;
 use crate::lineage::{ChildRef, Lineage, SourceRef};
 use crate::model::{
@@ -1284,7 +1285,15 @@ fn parse_turns_raw(value: &Value) -> Vec<Turn> {
                 subtype @ ("tool_use" | "tool_result") => (
                     Role::Tool,
                     block.to_string(),
-                    Some(claude_tool_event(block, subtype)),
+                    Some(claude_tool_event(
+                        block,
+                        subtype,
+                        value.get("toolUseResult").filter(|_| {
+                            message["content"]
+                                .as_array()
+                                .is_some_and(|parts| parts.len() == 1)
+                        }),
+                    )),
                     vec![tool_part(block, "message.content", subtype)],
                     tool_coverage(),
                 ),
@@ -1487,7 +1496,62 @@ fn is_element(text: &str, tag: &str) -> bool {
         && !text[tag.len() + 2..].contains(&format!("<{tag}>"))
 }
 
-fn claude_tool_event(block: &Value, subtype: &str) -> ToolEvent {
+fn claude_read_content(
+    output: &Value,
+    structured: Option<&Value>,
+) -> Option<(String, Option<ReadLines>)> {
+    if let Some(result) = structured {
+        if result["type"] != "text" {
+            return None;
+        }
+        let file = &result["file"];
+        if file["truncatedByTokenCap"].as_bool() == Some(true) {
+            return None;
+        }
+        let content = file["content"].as_str()?;
+        let start = file["startLine"].as_u64()?;
+        let count = file["numLines"].as_u64()?;
+        let total = file["totalLines"].as_u64()?;
+        let end = start.checked_sub(1)?.checked_add(count)?;
+        if end > total {
+            return None;
+        }
+        let lines = (count > 0).then_some(ReadLines { start, end });
+        return Some((content.to_owned(), lines));
+    }
+    let text = crate::event::returned_text(output)?;
+    if text.is_empty() {
+        return None;
+    }
+    let mut content = String::new();
+    let mut previous: Option<u64> = None;
+    let mut start = None;
+    for line in text.split_inclusive('\n') {
+        let (prefix, body) = line.split_once('\t')?;
+        if prefix.is_empty() || !prefix.bytes().all(|byte| byte.is_ascii_digit()) {
+            return None;
+        }
+        let number = prefix.parse::<u64>().ok()?;
+        if prefix != number.to_string()
+            || number == 0
+            || previous.is_some_and(|previous| previous.checked_add(1) != Some(number))
+        {
+            return None;
+        }
+        start.get_or_insert(number);
+        previous = Some(number);
+        content.push_str(body);
+    }
+    Some((
+        content,
+        Some(ReadLines {
+            start: start?,
+            end: previous?,
+        }),
+    ))
+}
+
+fn claude_tool_event(block: &Value, subtype: &str, structured: Option<&Value>) -> ToolEvent {
     let call = subtype == "tool_use";
     let argument_value = block.get("input").cloned().unwrap_or(Value::Null);
     ToolEvent {
@@ -1518,10 +1582,18 @@ fn claude_tool_event(block: &Value, subtype: &str) -> ToolEvent {
             .then(|| crate::event::direct_read(block["name"].as_str(), &block["input"]))
             .flatten(),
         returned_read: (!call).then(|| {
-            crate::event::returned_read(
+            let mut returned = crate::event::returned_read(
                 &block["content"],
                 block["is_error"].as_bool().map(|error| !error),
-            )
+            );
+            if returned.succeeded != Some(false) {
+                if let Some((content, lines)) = claude_read_content(&block["content"], structured) {
+                    returned.content_sha256 =
+                        Some(format!("sha256:{:x}", Sha256::digest(content.as_bytes())));
+                    returned.content_lines = lines;
+                }
+            }
+            returned
         }),
         completed_ts: None,
         invocations: if call {
@@ -1730,5 +1802,72 @@ fn subagent_metadata(path: &Path) -> (Value, Option<String>) {
                 path.display()
             )),
         ),
+    }
+}
+
+#[cfg(test)]
+mod read_content_tests {
+    use super::{claude_read_content, claude_tool_event};
+    use serde_json::json;
+
+    #[test]
+    fn numbered_content_preserves_bytes_and_requires_every_line() {
+        for (output, expected) in [
+            ("10\tfirst\n11\tsecond\n", Some("first\nsecond\n")),
+            ("1\tfirst\r\n2\tlast", Some("first\r\nlast")),
+            ("1\t\n2\t\tindented", Some("\n\tindented")),
+            ("1\tfirst\ntruncated", None),
+            ("1\tfirst\n3\tthird", None),
+            ("1\tfirst\n2→second", None),
+            ("plain text", None),
+            ("", None),
+            ("0\tfirst", None),
+            ("01\tfirst", None),
+        ] {
+            assert_eq!(
+                claude_read_content(&json!(output), None)
+                    .as_ref()
+                    .map(|(content, _)| content.as_str()),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn failed_reads_have_no_content_digest_and_ranges_follow_returned_lines() {
+        let block = json!({"content":"10\tfirst\n11\tsecond", "is_error":false});
+        let returned = claude_tool_event(&block, "tool_result", None)
+            .returned_read
+            .unwrap();
+        assert!(returned.content_sha256.is_some());
+        let lines = returned.content_lines.unwrap();
+        assert_eq!((lines.start, lines.end), (10, 11));
+        let failed = json!({"content":"1\ttext", "is_error":true});
+        let returned = claude_tool_event(&failed, "tool_result", None)
+            .returned_read
+            .unwrap();
+        assert!(returned.content_sha256.is_none());
+        assert!(returned.content_lines.is_none());
+    }
+
+    #[test]
+    fn structured_text_is_authoritative_and_other_shapes_are_unknown() {
+        let result = json!({"type":"text", "file": {
+            "content":"original\n", "startLine":10,"numLines":1,"totalLines":20
+        }});
+        assert_eq!(
+            claude_read_content(&json!("decorated"), Some(&result))
+                .as_ref()
+                .map(|(content, _)| content.as_str()),
+            Some("original\n")
+        );
+        for result in [
+            json!({"type":"image","file":{"content":"text"}}),
+            json!({"type":"text","file":{"content":"text"}}),
+            json!({"type":"text","file":{"content":"text","startLine":2,"numLines":2,"totalLines":2}}),
+            json!({"type":"text","file":{"content":"text","startLine":1,"numLines":1,"totalLines":1,"truncatedByTokenCap":true}}),
+        ] {
+            assert_eq!(claude_read_content(&json!("1\ttext"), Some(&result)), None);
+        }
     }
 }

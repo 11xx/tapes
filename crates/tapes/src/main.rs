@@ -999,7 +999,7 @@ enum Command {
         program: Vec<String>,
         /// Stream the whole recording instead of its bounded tail, writing
         /// each event as it is paired so memory follows the calls awaiting a
-        /// result rather than the file; with --json the same tapes-events/10
+        /// result rather than the file; with --json the same tapes-events/11
         /// object is written event by event. The recording is read twice, the
         /// second read replaying the first; --tail, --name, --call-id, and
         /// --program select as they do over a bounded read. Installed Claude,
@@ -1007,9 +1007,11 @@ enum Command {
         /// updated in place and a second read may not repeat the first.
         #[arg(long, conflicts_with = "read_bytes")]
         full: bool,
-        /// Render the versioned tapes-events/10 object as JSON. Each read call
+        /// Render the versioned tapes-events/11 object as JSON. Each read call
         /// includes its recorded path and range, outcome, and returned-text
-        /// digest. An unpaired event's `incomplete` is `no-result-in-read` when
+        /// digest. Optional content_sha256 names undecorated file bytes of the
+        /// returned range only when the recorded format establishes them.
+        /// Unknown formats and truncated output omit it. An unpaired event's `incomplete` is `no-result-in-read` when
         /// the read ended before a result, `call-before-read-bound` when a
         /// source bound can hide the call, or `call-not-recorded` when the read
         /// reached the recording's start and holds no call.

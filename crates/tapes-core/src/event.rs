@@ -13,7 +13,7 @@ use crate::model::{
     TextTailEvidence, Transcript, Truncation, Turn,
 };
 
-pub const EVENTS_SCHEMA: &str = "tapes-events/10";
+pub const EVENTS_SCHEMA: &str = "tapes-events/11";
 const PREVIEW_CHARS: usize = 200;
 pub const MAX_INVOCATION_TEXT_CHARS: usize = 64 * 1024;
 pub const MAX_INVOCATIONS: usize = 32;
@@ -212,6 +212,9 @@ pub struct ReadLocator {
     pub succeeded: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sha256: Option<String>,
+    /// Digest of the returned file bytes when the recorded format establishes them.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content_sha256: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -224,6 +227,8 @@ pub struct ReadLines {
 pub(crate) struct ReturnedRead {
     pub succeeded: Option<bool>,
     pub sha256: Option<String>,
+    pub content_sha256: Option<String>,
+    pub content_lines: Option<ReadLines>,
 }
 
 pub(crate) fn returned_text(value: &Value) -> Option<&str> {
@@ -238,6 +243,8 @@ pub(crate) fn returned_text(value: &Value) -> Option<&str> {
 pub(crate) fn returned_read(value: &Value, succeeded: Option<bool>) -> ReturnedRead {
     ReturnedRead {
         succeeded,
+        content_sha256: None,
+        content_lines: None,
         sha256: (succeeded != Some(false))
             .then(|| returned_text(value))
             .flatten()
@@ -266,6 +273,7 @@ pub(crate) fn direct_read(name: Option<&str>, input: &Value) -> Option<ReadLocat
         whole: (input["whole"].as_bool() == Some(true)).then_some(true),
         succeeded: None,
         sha256: None,
+        content_sha256: None,
     })
 }
 
@@ -297,6 +305,7 @@ pub(crate) fn shell_read(command: &str) -> Option<ReadLocator> {
         whole,
         succeeded: None,
         sha256: None,
+        content_sha256: None,
     })
 }
 
@@ -866,6 +875,10 @@ fn complete_call(call: &mut EventRecord, result: ResultFacts) {
     if let (Some(read), Some(returned)) = (&mut call.event.read, &result.returned_read) {
         read.succeeded = returned.succeeded;
         read.sha256 = returned.sha256.clone();
+        read.content_sha256 = returned.content_sha256.clone();
+        if let Some(lines) = &returned.content_lines {
+            read.lines = Some(lines.clone());
+        }
     }
     call.event.artifact_consumptions = artifact_consumptions(
         &call.event.artifact_references,
@@ -2361,6 +2374,10 @@ mod tests {
                     ) {
                         read.succeeded = returned.succeeded;
                         read.sha256 = returned.sha256.clone();
+                        read.content_sha256 = returned.content_sha256.clone();
+                        if let Some(lines) = &returned.content_lines {
+                            read.lines = Some(lines.clone());
+                        }
                     }
                     records[call_index].event.artifact_consumptions = artifact_consumptions(
                         &records[call_index].event.artifact_references,
