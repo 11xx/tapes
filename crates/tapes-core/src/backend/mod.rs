@@ -603,7 +603,11 @@ pub(crate) fn enrich_native_session(
         locator,
         native_path,
         member: None,
-        container: None,
+        container: session
+            .source
+            .location
+            .as_ref()
+            .and_then(|location| location.container.clone()),
     });
     Ok(session)
 }
@@ -952,6 +956,37 @@ pub fn backends_from_stores(
             NativeHarness::OpenCode => Box::new(opencode::OpenCodeBackend::from_store(store)),
         })
         .collect())
+}
+
+/// Read one caller-selected native store with configuration-root provenance.
+/// No installed discovery or harness environment participates in this selection.
+pub fn backends_from_native_root(
+    store: NativeStore,
+    root: PathBuf,
+    read_bytes: u64,
+) -> Result<Vec<Box<dyn Backend>>> {
+    validate_read_bytes(read_bytes)?;
+    let backend: Box<dyn Backend> = match store.harness() {
+        NativeHarness::Claude => Box::new(
+            claude::ClaudeBackend::from_store(Some(store))
+                .with_read_bytes(read_bytes)
+                .with_native_root(root),
+        ),
+        NativeHarness::Codex => Box::new(
+            codex::CodexBackend::from_store(Some(store))
+                .with_read_bytes(read_bytes)
+                .with_native_root(root),
+        ),
+        NativeHarness::Pi => Box::new(
+            pi::PiBackend::from_store(Some(store))
+                .with_read_bytes(read_bytes)
+                .with_native_root(root),
+        ),
+        NativeHarness::OpenCode => {
+            anyhow::bail!("OpenCode uses an API or database, not a configuration root")
+        }
+    };
+    Ok(vec![backend])
 }
 
 fn backends_reading(read_bytes: u64) -> Vec<Box<dyn Backend>> {

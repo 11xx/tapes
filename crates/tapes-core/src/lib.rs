@@ -893,8 +893,8 @@ pub fn capture_with_backends(
 ) -> Result<CaptureReport> {
     let resolved = selection.resolve(backends)?;
     let session = resolved.session;
-    if session.source.kind != model::SourceKind::InstalledRecording {
-        anyhow::bail!("capture state is available only for installed recordings");
+    if session.source.kind == model::SourceKind::SuppliedExport {
+        anyhow::bail!("capture state is available only for native recordings");
     }
     let store_path_class = match session.harness() {
         "claude" => "claude-project-jsonl",
@@ -912,11 +912,15 @@ pub fn capture_with_backends(
     };
     let harness = session.harness().to_owned();
     Ok(CaptureReport {
-        schema: "tapes-capture/1",
+        schema: "tapes-capture/2",
         session: session.id,
         harness,
         store_path_class,
-        state: "unpinned",
+        state: if session.source.kind == model::SourceKind::ExplicitNativeStore {
+            "caller-selected-native-store"
+        } else {
+            "unpinned"
+        },
     })
 }
 

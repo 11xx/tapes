@@ -31,6 +31,7 @@ use agent_tapes_discovery::{Harness as NativeHarness, IdentityBasis, NativeSessi
 
 #[derive(Clone, Debug)]
 pub struct CodexBackend {
+    native_root: Option<PathBuf>,
     store: Option<NativeStore>,
     /// How much of a recording's end a transcript read takes.
     read_bytes: u64,
@@ -49,6 +50,7 @@ impl CodexBackend {
         Self {
             store: Some(NativeStore::codex(root)),
             read_bytes: super::DEFAULT_READ_BYTES,
+            native_root: None,
         }
     }
 
@@ -56,7 +58,24 @@ impl CodexBackend {
         Self {
             store,
             read_bytes: super::DEFAULT_READ_BYTES,
+            native_root: None,
         }
+    }
+
+    pub(crate) fn with_native_root(mut self, root: PathBuf) -> Self {
+        self.native_root = Some(root);
+        self
+    }
+
+    fn source(&self, path: &Path) -> SourceDescriptor {
+        let mut source = SourceDescriptor::installed("codex", path.display().to_string());
+        if let Some(root) = &self.native_root {
+            source.kind = crate::model::SourceKind::ExplicitNativeStore;
+            if let Some(location) = &mut source.location {
+                location.container = Some(root.display().to_string());
+            }
+        }
+        source
     }
 
     /// Read at most `read_bytes` from the end of each recording.
@@ -121,7 +140,7 @@ impl CodexBackend {
 
         let session = Session {
             id: native.id().to_owned(),
-            source: SourceDescriptor::installed("codex", path.display().to_string()),
+            source: self.source(path),
             metadata: None,
             model: facts.model,
             model_observation: facts.model_observation,

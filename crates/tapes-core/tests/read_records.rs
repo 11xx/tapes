@@ -54,7 +54,7 @@ fn read_locators_survive_export_and_capture_is_unpinned() {
             4 * 1024 * 1024,
         )];
         let report = capture_with_backends(&backends, Selection::Id(id)).unwrap();
-        assert_eq!(report.schema, "tapes-capture/1");
+        assert_eq!(report.schema, "tapes-capture/2");
         assert_eq!(report.session, id);
         assert_eq!(report.harness, harness);
         assert_eq!(report.state, "unpinned");
@@ -175,7 +175,7 @@ fn read_locators_survive_export_and_capture_is_unpinned() {
         .unwrap();
         let exported: Value =
             serde_json::from_slice(&fs::read(&bundle.json.path).unwrap()).unwrap();
-        assert_eq!(exported["schema"], "tapes-session/17");
+        assert_eq!(exported["schema"], "tapes-session/18");
         let exported_call = exported["events"]
             .as_array()
             .unwrap()

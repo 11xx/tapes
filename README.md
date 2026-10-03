@@ -12,7 +12,10 @@ a bundle a fresh session in any harness can read.
 The same reader answers questions across sessions: which ones mention
 something, what each ended on, where the tokens went. With `--input` it reads
 ChatGPT and Perplexity exports, and with `--remote` it asks another machine's
-`tapes` over ssh. It only reads: no command writes to a harness's store, so it
+`tapes` over ssh. To read one materialized native store, use
+`--native-store claude --native-root archive/claude` (also `codex` or `pi`).
+The root contains Claude's `projects` or Codex/Pi's `sessions`; selection never
+falls back to installed stores. It only reads: no command writes to a harness's store, so it
 is safe to point at a session that is still running.
 
 ## Install
