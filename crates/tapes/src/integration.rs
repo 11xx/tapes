@@ -36,6 +36,32 @@ fn pi_extension_path() -> Result<PathBuf> {
     Ok(agent_dir.join("extensions").join(PI_EXTENSION_FILE))
 }
 
+fn opencode_plugin_path() -> Result<PathBuf> {
+    let directory = match env::var_os("OPENCODE_CONFIG_DIR").filter(|dir| !dir.is_empty()) {
+        Some(dir) => PathBuf::from(dir),
+        None => match env::var_os("XDG_CONFIG_HOME").filter(|dir| !dir.is_empty()) {
+            Some(dir) => PathBuf::from(dir).join("opencode"),
+            None => home_dir()?.join(".config/opencode"),
+        },
+    };
+    Ok(directory.join("plugins").join(PI_EXTENSION_FILE))
+}
+
+pub fn install_opencode() -> Result<()> {
+    install(
+        opencode_plugin_path()?,
+        &format!(
+            "{PI_EXTENSION_MARKER}{}",
+            include_str!("../opencode/tapes-launch.ts")
+        ),
+        "OpenCode plugin",
+    )
+}
+
+pub fn uninstall_opencode() -> Result<()> {
+    uninstall(opencode_plugin_path()?, "OpenCode plugin")
+}
+
 fn home_dir() -> Result<PathBuf> {
     if let Some(home) = env::var_os("HOME").filter(|home| !home.is_empty()) {
         return Ok(PathBuf::from(home));
@@ -150,14 +176,13 @@ fn stage(directory: &Path, contents: &str) -> Result<PathBuf> {
 }
 
 pub fn install_pi() -> Result<()> {
-    let path = pi_extension_path()?;
-    let target = pi_extension();
+    install(pi_extension_path()?, &pi_extension(), "pi extension")
+}
+
+fn install(path: PathBuf, target: &str, name: &str) -> Result<()> {
     let replacing = match occupant(&path)? {
         Occupant::Managed(bytes) if bytes == target.as_bytes() => {
-            println!(
-                "The pi extension is already installed in {}.",
-                path.display()
-            );
+            println!("The {name} is already installed in {}.", path.display());
             return Ok(());
         }
         Occupant::Managed(_) => true,
@@ -187,19 +212,32 @@ pub fn install_pi() -> Result<()> {
             return Err(error).with_context(|| format!("cannot install {}", path.display()))
         }
     }
-    println!("Installed the pi extension in {}.", path.display());
-    println!("pi sessions opened from now on record their launch mode; run /reload in open ones.");
+    println!("Installed the {name} in {}.", path.display());
+    if name == "pi extension" {
+        println!(
+            "pi sessions opened from now on record their launch mode; run /reload in open ones."
+        );
+    } else {
+        println!("Restart OpenCode to load the plugin.");
+    }
     Ok(())
 }
 
 pub fn uninstall_pi() -> Result<()> {
-    let path = pi_extension_path()?;
+    uninstall(pi_extension_path()?, "pi extension")
+}
+
+fn uninstall(path: PathBuf, name: &str) -> Result<()> {
     match occupant(&path)? {
-        Occupant::Absent => println!("No pi extension is installed in {}.", path.display()),
+        Occupant::Absent => println!("No {name} is installed in {}.", path.display()),
         Occupant::Managed(_) => {
             fs::remove_file(&path).with_context(|| format!("cannot remove {}", path.display()))?;
-            println!("Removed the pi extension from {}.", path.display());
-            println!("Run /reload in pi sessions that are already open.");
+            println!("Removed the {name} from {}.", path.display());
+            if name == "pi extension" {
+                println!("Run /reload in pi sessions that are already open.");
+            } else {
+                println!("Restart OpenCode to unload the plugin.");
+            }
         }
         Occupant::Foreign(why) => bail!("{} {why}; refusing to remove it", path.display()),
     }

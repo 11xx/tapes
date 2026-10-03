@@ -12645,3 +12645,45 @@ fn artifact_reads_only_confined_persisted_results() {
     .unwrap();
     assert!(!read(token, "6").status.success());
 }
+
+#[test]
+fn opencode_integration_preserves_foreign_files_and_uses_config_directory() {
+    let root = std::env::temp_dir().join(format!("tapes-opencode-install-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&root);
+    let config = root.join("config");
+    let plugin = config.join("plugins/tapes-launch.ts");
+    let run = |action: &str| {
+        tapes()
+            .args([action, "opencode"])
+            .env("OPENCODE_CONFIG_DIR", &config)
+            .output()
+            .unwrap()
+    };
+    assert!(run("install").status.success());
+    let source = fs::read(&plugin).unwrap();
+    assert!(source.starts_with(b"// Managed by tapes."));
+    assert!(run("install").status.success());
+    assert_eq!(fs::read(&plugin).unwrap(), source);
+    fs::write(
+        &plugin,
+        "// Managed by tapes. Reinstall instead of editing this file.\nold",
+    )
+    .unwrap();
+    assert!(run("install").status.success());
+    assert_eq!(fs::read(&plugin).unwrap(), source);
+    assert!(run("uninstall").status.success());
+    assert!(run("uninstall").status.success());
+    fs::write(&plugin, "foreign").unwrap();
+    assert!(!run("install").status.success());
+    assert!(!run("uninstall").status.success());
+    assert_eq!(fs::read(&plugin).unwrap(), b"foreign");
+    fs::remove_file(&plugin).unwrap();
+    std::os::unix::fs::symlink(root.join("missing"), &plugin).unwrap();
+    assert!(!run("install").status.success());
+    assert!(!run("uninstall").status.success());
+    fs::remove_file(&plugin).unwrap();
+    fs::create_dir(&plugin).unwrap();
+    assert!(!run("install").status.success());
+    assert!(!run("uninstall").status.success());
+    fs::remove_dir_all(root).unwrap();
+}

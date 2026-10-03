@@ -1493,6 +1493,8 @@ enum Command {
     /// own recordings. `pi` writes tapes' pi extension, which records the
     /// launch mode of every session pi opens afterwards, into
     /// `$PI_CODING_AGENT_DIR/extensions` (default `~/.pi/agent/extensions`).
+    /// `opencode` writes a plugin into `$OPENCODE_CONFIG_DIR/plugins`, or
+    /// `$XDG_CONFIG_HOME/opencode/plugins` (default `~/.config/opencode/plugins`).
     /// A file there that tapes does not manage is refused.
     Install {
         #[arg(value_enum)]
@@ -1509,6 +1511,7 @@ enum Command {
 #[derive(Clone, Copy, Debug, ValueEnum)]
 enum IntegrationArg {
     Pi,
+    Opencode,
 }
 
 fn main() -> Result<()> {
@@ -2509,9 +2512,15 @@ fn dispatch(cli: Cli) -> Result<()> {
         Command::Install {
             harness: IntegrationArg::Pi,
         } => integration::install_pi()?,
+        Command::Install {
+            harness: IntegrationArg::Opencode,
+        } => integration::install_opencode()?,
         Command::Uninstall {
             harness: IntegrationArg::Pi,
         } => integration::uninstall_pi()?,
+        Command::Uninstall {
+            harness: IntegrationArg::Opencode,
+        } => integration::uninstall_opencode()?,
         Command::Export {
             query,
             read,
