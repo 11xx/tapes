@@ -48,7 +48,7 @@ tapes list --here                         # this project's sessions, every harne
 tapes list --search "rate limit"          # sessions whose recent turns mention it
 tapes endings --here --since 2026-09-01   # what each session ended on
 tapes usage --here --by model             # where the tokens and the cost went
-tapes stats <id>                          # turns, tool calls, durations, cache share
+tapes stats <id> --idle 45m               # active time, stretches, tools, cache share
 tapes list --remote build-box             # sessions on another machine, read over ssh
 ```
 

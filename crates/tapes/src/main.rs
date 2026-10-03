@@ -1049,13 +1049,17 @@ enum Command {
     /// `assistant_turns_ms` with its count, median, p90, and max. Nothing is
     /// judged, ranked, or explained.
     /// A scope or listing filter selects multiple sessions and returns
-    /// tapes-stats-summary/6: recorded tools grouped by harness and name,
+    /// tapes-stats-summary/7: recorded tools grouped by harness and name,
     /// with per-session read coverage, pairing counts and failures, and per
     /// harness the recordable kinds no session read held. Children are not
     /// read through their parents.
     Stats {
         #[command(flatten)]
         query: SessionQueryArgs,
+        /// Gaps above this duration separate working stretches. Active time sums
+        /// nonnegative timestamp gaps at or below it within the read coverage.
+        #[arg(long, default_value = "45m", value_parser = parse_idle)]
+        idle: i64,
         #[command(flatten)]
         read: ReadArgs,
         /// Stream the whole recording instead of its bounded tail, twice: the
@@ -1068,7 +1072,7 @@ enum Command {
         /// updated in place and a second read may not repeat the first.
         #[arg(long, conflicts_with = "read_bytes")]
         full: bool,
-        /// Render the versioned tapes-stats/11 object, or tapes-stats-summary/6
+        /// Render the versioned tapes-stats/12 object, or tapes-stats-summary/7
         /// for a selection, as JSON. `warnings` names the limits of the read:
         /// `read-window`, `tail-window`, `kind-unknown`, `kind-undeclared` (a
         /// turn of a kind its harness declares it cannot record, so the
@@ -1860,6 +1864,7 @@ fn dispatch(cli: Cli) -> Result<()> {
             query,
             read,
             full,
+            idle,
             json,
         } => {
             query.validate_input()?;
@@ -1876,15 +1881,16 @@ fn dispatch(cli: Cli) -> Result<()> {
             print_selection_warnings(&latest_warnings);
             if let Some(one) = query.single() {
                 let stats = if full {
-                    agent_tapes_core::stats_full_with_backends(
+                    agent_tapes_core::stats_full_with_backends_and_idle(
                         &agent_tapes_core::backend::backends(),
                         one,
+                        idle,
                     )?
                 } else if query.input.supplied() {
                     let backends = query.input.backends()?;
-                    agent_tapes_core::stats_with_backends(&backends, one)?
+                    agent_tapes_core::stats_with_backends_and_idle(&backends, one, idle)?
                 } else {
-                    agent_tapes_core::stats_with_backends(&single_backends, one)?
+                    agent_tapes_core::stats_with_backends_and_idle(&single_backends, one, idle)?
                 };
                 if json {
                     print_json_with_selection_warnings(&stats, &query.input, &latest_warnings)?;
@@ -1896,23 +1902,26 @@ fn dispatch(cli: Cli) -> Result<()> {
                     return Err(anyhow!("stats needs a session ID, --latest, or an explicit selection such as --here"));
                 }
                 let summary = if full {
-                    agent_tapes_core::stats_summary::with_backends(
+                    agent_tapes_core::stats_summary::with_backends_and_idle(
                         &agent_tapes_core::backend::backends(),
                         &query.set(),
                         SessionRead::Whole,
+                        idle,
                     )?
                 } else if query.input.supplied() {
                     let backends = query.input.backends()?;
-                    agent_tapes_core::stats_summary::with_backends(
+                    agent_tapes_core::stats_summary::with_backends_and_idle(
                         &backends,
                         &query.set(),
                         SessionRead::Bounded,
+                        idle,
                     )?
                 } else {
-                    agent_tapes_core::stats_summary::with_backends(
+                    agent_tapes_core::stats_summary::with_backends_and_idle(
                         &read.backends()?,
                         &query.set(),
                         SessionRead::Bounded,
+                        idle,
                     )?
                 };
                 if json {
@@ -2518,6 +2527,10 @@ fn coverage_name(coverage: TurnCoverage) -> &'static str {
 
 fn print_stats_summary(summary: &agent_tapes_core::stats_summary::StatsSummary) {
     println!(
+        "active: {}ms, {} stretches, idle threshold {}ms",
+        summary.active, summary.stretches, summary.idle_threshold
+    );
+    println!(
         "Recorded tool usage: {} selected, {} read, {} failed",
         summary.selected,
         summary.read,
@@ -2983,14 +2996,27 @@ fn render_tool_name(tool: &ToolNameStats) -> String {
     )
 }
 
+fn parse_idle(value: &str) -> Result<i64, String> {
+    let duration = humantime::parse_duration(value).map_err(|error| error.to_string())?;
+    i64::try_from(duration.as_millis())
+        .map_err(|_| "idle duration exceeds the millisecond range".to_owned())
+}
+
 fn render_time(durations: &TimeStats) -> String {
     [
         ("recorded span", durations.recorded_span),
+        ("active", durations.active),
+        ("idle threshold", durations.idle_threshold),
         ("in tool", durations.in_tool),
         ("longest gap between turns", durations.between_turns_max),
     ]
     .into_iter()
     .filter_map(|(name, value)| value.map(|value| format!("{name} {value}ms")))
+    .chain(
+        durations
+            .stretches
+            .map(|count| format!("{count} stretches")),
+    )
     .chain(std::iter::once(format!(
         "{} turns with timestamps",
         durations.count_with_timestamps
