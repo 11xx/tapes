@@ -960,7 +960,12 @@ enum Command {
     /// pages to retrieve retained pre-compaction messages. Claude file attachments
     /// are ambient file references with bounded text bodies and recorded line
     /// ranges; compact references have no body. Referenced files are never opened.
-    /// Instructions, environment and prompt snapshots remain unrecognized.
+    /// Instructions are ambient file references; environment snapshots and changes
+    /// are ambient notices with bounded text. Prompt snapshots retain only prompt
+    /// character and tool counts and the recorded systemTurns boolean, without bodies.
+    /// Attachment bodies retain at most 64Ki characters per field; cuts carry
+    /// read-bound availability and omitted_reason. Repeated records stay separate.
+    /// Other attachment types remain unrecognized.
     /// Complete persisted-output tool results show their preview and a reference-only
     /// file with its recorded size label; the external body is never read.
     /// Every turn carries a
@@ -4515,6 +4520,31 @@ fn render_turn(turn: &Turn) -> String {
             }
             if let Some(total) = reference.total_lines {
                 text.push_str(&format!("; total lines: {total}"));
+            }
+        }
+    }
+    for part in &turn.parts {
+        if let agent_tapes_core::content::ContentPart::StructuredArtifact {
+            descriptor,
+            native_kind,
+            ..
+        } = part
+        {
+            if native_kind == "attachment/prompt_snapshot" {
+                text.push_str(&format!(
+                    "\nprompt-snapshot: {}; body: reference-only",
+                    descriptor.text
+                ));
+            }
+        }
+    }
+    if let Some(coverage) = &turn.coverage {
+        if let Some(reason) = &coverage.omitted_reason {
+            if reason.starts_with("attachment ") {
+                text.push_str(&format!(
+                    "\ncontent-coverage: {}",
+                    serde_json::to_string(coverage).unwrap_or_default()
+                ));
             }
         }
     }

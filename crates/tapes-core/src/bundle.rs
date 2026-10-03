@@ -486,6 +486,17 @@ fn write_trace_turn(out: &mut String, turn: &Turn) {
 fn write_turn_body(out: &mut String, turn: &Turn) {
     out.push_str(turn.text.trim_end());
     out.push_str("\n\n");
+    if let Some(coverage) = &turn.coverage {
+        if let Some(reason) = &coverage.omitted_reason {
+            if reason.starts_with("attachment ") {
+                let _ = writeln!(
+                    out,
+                    "content-coverage: {}",
+                    serde_json::to_string(coverage).unwrap_or_default()
+                );
+            }
+        }
+    }
     for part in &turn.parts {
         if part.text().is_none() {
             let _ = writeln!(

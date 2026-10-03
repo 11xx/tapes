@@ -12032,6 +12032,58 @@ fn claude_content_carriers_survive_cli_views_and_bundle_export() {
         "file-reference: src/example.rs; body: retained-body; lines: 3-3; total lines: 8"
     ));
     assert!(human.contains("file-reference: src/compact.rs; body: reference-only"));
+    assert!(human.contains("file-reference: AGENTS.md; body: retained-body"));
+    assert!(human.contains("workingDirectory"));
+    assert!(human.contains("prompt-snapshot:"));
+    assert!(human.contains("system_prompt_chars"));
+    assert!(human.contains("system_turns"));
+    assert!(human.contains("attachment field is missing or has an unsupported shape"));
+    for args in [
+        vec!["show", attachments, "--harness", "claude", "--json"],
+        vec![
+            "show",
+            attachments,
+            "--harness",
+            "claude",
+            "--full",
+            "--json",
+        ],
+        vec!["page", attachments, "--harness", "claude", "--json"],
+    ] {
+        let view: Value = serde_json::from_slice(&run(&args)).unwrap();
+        assert_eq!(view["turns"].as_array().unwrap().len(), 17);
+        assert_eq!(view["content"]["records"], 17);
+        assert_eq!(view["content"]["references"], 11);
+        assert_eq!(view["content"]["unsupported"], 5);
+        if args[0] == "show" {
+            let unmapped = view["read"]["unmapped"]["unrecognized"]
+                .as_object()
+                .unwrap();
+            assert_eq!(unmapped.len(), 1);
+            assert_eq!(unmapped["attachment/credential_org"], 1);
+        }
+        let prompt = view["turns"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|turn| turn["native_id"] == "prompt_snapshot-present")
+            .unwrap();
+        let descriptor: Value =
+            serde_json::from_str(prompt["parts"][0]["descriptor"]["text"].as_str().unwrap())
+                .unwrap();
+        assert_eq!(
+            descriptor,
+            serde_json::json!({"system_prompt_chars":18,"tool_count":1,"system_turns":true})
+        );
+        assert_eq!(prompt["text"], "");
+        assert!(prompt["parts"][0]["reference"].get("body").is_none());
+        assert!(view["turns"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|turn| turn["kind"] == "ambient"));
+    }
+
     let exchange: Value = serde_json::from_slice(&run(&[
         "show",
         attachments,
