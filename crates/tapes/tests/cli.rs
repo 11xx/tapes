@@ -1846,7 +1846,8 @@ fn list_help_exits_successfully() {
         help.contains("RFC 3339 timestamps with an offset"),
         "{help}"
     );
-    assert!(help.contains("last 32 normalized turns"), "{help}");
+    assert!(help.contains("--search-turns <N|all>"), "{help}");
+    assert!(help.contains("Partial reads are searched"), "{help}");
     assert!(help.contains("unsearched"), "{help}");
     assert!(help.contains("--input <PATH>"), "{help}");
     assert!(help.contains("chatgpt-exporter"), "{help}");
@@ -4649,7 +4650,7 @@ fn list_searches_recent_fixture_turns_before_the_limit_and_survives_a_bad_line()
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(
-        String::from_utf8_lossy(&output.stderr).contains("last 32 normalized turns"),
+        String::from_utf8_lossy(&output.stderr).contains("bounded window of normalized turns"),
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
@@ -7829,7 +7830,7 @@ fn usage_help_names_the_schema_and_what_the_figures_mean() {
         "{help}"
     );
     assert!(help.contains("quota is a separate fact"), "{help}");
-    assert!(help.contains("tapes-usage-summary/5"), "{help}");
+    assert!(help.contains("tapes-usage-summary/6"), "{help}");
     assert!(help.contains("--by"), "{help}");
 }
 
@@ -8221,7 +8222,7 @@ fn usage_summary_sums_the_listings_own_counters_and_counts_the_sessions_behind_t
     );
     let value: Value = serde_json::from_slice(&output.stdout).unwrap();
 
-    assert_eq!(value["schema"], "tapes-usage-summary/5");
+    assert_eq!(value["schema"], "tapes-usage-summary/6");
     assert_eq!(value["selection"]["scope"], "global");
     assert_eq!(value["selection"]["harness"], "codex");
     assert_eq!(value["scanned"], 4);
@@ -11958,4 +11959,141 @@ fn claude_content_carriers_survive_cli_views_and_bundle_export() {
     let bundle: Value = serde_json::from_slice(&fs::read(json_path).unwrap()).unwrap();
     assert_eq!(bundle["schema"], "tapes-session/18");
     assert_eq!(bundle["content"]["references"], 2);
+}
+
+#[test]
+fn list_search_turn_depth_reaches_older_supplied_turns() {
+    let input = supplied_fixture("chatgpt-export.json");
+    for (depth, expected) in [("1", 0), ("2", 1), ("all", 1)] {
+        let output = tapes()
+            .args([
+                "list",
+                "--input",
+                input.to_str().unwrap(),
+                "--search",
+                "question",
+                "--search-turns",
+                depth,
+                "--json",
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(
+            value["sessions"].as_array().unwrap().len(),
+            expected,
+            "{depth}"
+        );
+        assert!(value["partial_search"].as_array().unwrap().is_empty());
+    }
+    for depth in ["0", "invalid"] {
+        let output = tapes()
+            .args(["list", "--search", "question", "--search-turns", depth])
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+    }
+    let output = tapes()
+        .args(["list", "--search-turns", "all"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+}
+
+#[test]
+fn remote_list_preserves_search_turn_depth() {
+    let replica = RemoteReplica::new("search-depth");
+    replica.record(CODEX_ONE_FILE, CODEX_SESSION_ONE);
+    let (codex, home) = fixture_store("remote-search-depth-local");
+    for (depth, expected) in [("1", 0), ("all", 1)] {
+        let output = run_against_replica(
+            &replica,
+            &codex,
+            &home,
+            Path::new("/definitely/missing"),
+            &[
+                "list",
+                "--global",
+                "--remote",
+                "replica-host",
+                "--search",
+                "Inspect the fixture.",
+                "--search-turns",
+                depth,
+                "--json",
+            ],
+        );
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(
+            value["sessions"].as_array().unwrap().len(),
+            expected,
+            "{depth}"
+        );
+        assert!(replica
+            .queried()
+            .last()
+            .unwrap()
+            .contains(&format!("'--search-turns' '{depth}'")));
+    }
+}
+
+#[test]
+fn human_search_diagnostics_group_sessions_by_harness_and_reason() {
+    let transport = failing_transport(
+        "fold-search",
+        r#"#!/bin/sh
+cat <<'JSON'
+{"schema":"tapes-list/9","sort":"newest","sessions":[],"unavailable":[],"unreadable":[],"unsearched":["codex session fixture-one: read failed","codex session fixture-two: read failed","claude session fixture-three: read failed"],"partial_search":["codex session fixture-four: partial coverage of the requested turn window","codex session fixture-five: partial coverage of the requested turn window"],"scanned":5,"scan_truncated":false}
+JSON
+"#,
+    );
+    let output = tapes()
+        .args(["list", "--remote", "replica-host"])
+        .env("TAPES_SSH", &transport)
+        .output()
+        .unwrap();
+    fs::remove_file(transport).unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let human = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        human.contains("Unsearched: codex: read failed (2)"),
+        "{human}"
+    );
+    assert!(
+        human.contains("Unsearched: claude: read failed (1)"),
+        "{human}"
+    );
+    assert!(
+        human.contains("Partial search: codex: partial coverage of the requested turn window (2)"),
+        "{human}"
+    );
+    assert!(!human.contains("fixture-one"));
+    assert_eq!(
+        human
+            .lines()
+            .filter(|line| line.starts_with("Unsearched:"))
+            .count(),
+        2
+    );
+    assert_eq!(
+        human
+            .lines()
+            .filter(|line| line.starts_with("Partial search:"))
+            .count(),
+        1
+    );
 }

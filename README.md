@@ -49,6 +49,7 @@ carries whatever the transcript holds, including anything pasted into it;
 ```sh
 tapes list --here                         # this project's sessions, every harness, newest first
 tapes list --search "rate limit"          # sessions whose recent turns mention it
+tapes list --search "rate limit" --search-turns all  # every turn in the bounded read
 tapes list --launch interactive           # sessions a person drove, not headless runs
 tapes endings --here --since 2026-09-01   # what each session ended on
 tapes usage --here --by model             # where the tokens and the cost went
@@ -62,6 +63,15 @@ that reads sessions, except `export`, takes `--json`, and each JSON answer
 names its versioned schema. Claude Code and Codex record how each session was launched; Pi does
 once `tapes install pi` adds a small extension that records it, the one file
 `tapes` writes outside its own output.
+
+`list --search <text> --search-turns <N|all>` searches normalized turns in
+bounded reads (default: 32 turns). `all` covers every retained turn within the
+reader's byte and record bounds. Partial misses are reported in
+`partial_search`; matches carry no search diagnostic. Unreadable searches appear
+in `unsearched`. Human
+search diagnostics group by harness and reason with counts. JSON retains
+per-session details; OpenCode API refusals describe the store once.
+
 
 ## Where the rest is
 

@@ -13,7 +13,7 @@ use serde_json::{json, Value};
 
 use super::{
     accounting_for, filter_listing_search, filter_listing_search_parallel, search_turns, Backend,
-    Listing, Query, StreamCoordinates, StreamedTranscript, TokenTotals,
+    Listing, Query, SearchCoverage, StreamCoordinates, StreamedTranscript, TokenTotals,
 };
 use crate::content::{
     bounded_shape, text_part, tool_coverage, tool_part, ContentAvailability, ContentCarrier,
@@ -201,10 +201,10 @@ impl OpenCodeApiClient {
         serde_json::from_slice(&body).context("opencode API server returned invalid JSON")
     }
 
-    fn search(&self, session: &Session, needle: &str, tail: usize) -> Result<bool> {
+    fn search(&self, session: &Session, needle: &str, tail: usize) -> Result<SearchCoverage> {
         let pages = paged_messages(&|path| self.request(path), &session.id, tail)?;
         let transcript = paged_transcript(session.clone(), &pages, tail);
-        search_turns(&transcript, needle, tail)
+        Ok(search_turns(&transcript, needle, tail))
     }
 }
 
@@ -310,8 +310,14 @@ fn filter_listing_search_api(
     });
     for (session, result) in searched {
         match result {
-            Ok(true) => listing.sessions.push(session.clone()),
-            Ok(false) => {}
+            Ok(coverage) => {
+                if coverage.partial && !coverage.matched {
+                    listing.partial_search.push(coverage.diagnostic(session));
+                }
+                if coverage.matched {
+                    listing.sessions.push(session.clone());
+                }
+            }
             Err(error) => listing
                 .unsearched
                 .push(format!("{} session {}: {error:#}", "opencode", session.id)),
@@ -1058,6 +1064,7 @@ impl OpenCodeBackend {
                 "opencode v2 search prefilter failed: {error:#}; searched without prefilter"
             ));
         }
+        fold_api_refusals(&mut searched);
         searched
     }
 }
@@ -2229,6 +2236,26 @@ fn epoch_millis(value: &Value) -> Option<chrono::DateTime<Utc>> {
     value
         .as_i64()
         .and_then(|millis| Utc.timestamp_millis_opt(millis).single())
+}
+
+/// An API refusal describes store access rather than individual sessions.
+fn fold_api_refusals(listing: &mut Listing) {
+    let mut reasons = std::collections::BTreeSet::new();
+    listing.unsearched.retain(|diagnostic| {
+        if let Some((_, reason)) = diagnostic.split_once(": ") {
+            if reason.contains("API server returned HTTP ") {
+                reasons.insert(reason.to_owned());
+                return false;
+            }
+        }
+        true
+    });
+    if !reasons.is_empty() {
+        listing.unsearched.push(format!(
+            "opencode store: {}",
+            reasons.into_iter().collect::<Vec<_>>().join("; ")
+        ));
+    }
 }
 
 #[cfg(test)]

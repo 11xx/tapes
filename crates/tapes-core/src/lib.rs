@@ -42,7 +42,7 @@ pub mod usage;
 
 pub const LIST_SCHEMA: &str = "tapes-list/9";
 pub const EXPORT_MANIFEST_SCHEMA: &str = "tapes-export-manifest/7";
-pub const USAGE_SUMMARY_SCHEMA: &str = "tapes-usage-summary/5";
+pub const USAGE_SUMMARY_SCHEMA: &str = "tapes-usage-summary/6";
 /// Number of normalized turns a `list --search` query inspects per session.
 /// Keeping this fixed makes the listing's cost predictable for callers.
 pub const LIST_SEARCH_TAIL: usize = 32;
@@ -102,6 +102,7 @@ pub struct ListFilters<'a> {
     pub since: Option<DateTime<Utc>>,
     pub until: Option<DateTime<Utc>>,
     pub search: Option<&'a str>,
+    pub search_turns: Option<usize>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -132,6 +133,9 @@ pub struct SessionList {
     /// answered, plus diagnostics from a search-stage fallback. A read
     /// failure is not a non-match.
     pub unsearched: Vec<String>,
+    /// Nonmatching sessions whose searched window is shortened by a source
+    /// read bound, so absence of the search text cannot be established.
+    pub partial_search: Vec<String>,
     /// Candidate sessions inspected to produce this list, across every
     /// harness. A scoped listing reads more than it returns.
     pub scanned: usize,
@@ -162,6 +166,8 @@ struct SerializedList {
     unreadable: Vec<String>,
     #[serde(default)]
     unsearched: Vec<String>,
+    #[serde(default)]
+    partial_search: Vec<String>,
     scanned: usize,
     #[serde(default)]
     scan_truncated: bool,
@@ -190,6 +196,7 @@ impl<'de> Deserialize<'de> for SessionList {
             unavailable: serialized.unavailable,
             unreadable: serialized.unreadable,
             unsearched: serialized.unsearched,
+            partial_search: serialized.partial_search,
             scanned: serialized.scanned,
             scan_truncated: serialized.scan_truncated,
             unplaced: serialized.unplaced,
@@ -437,6 +444,7 @@ pub fn list_with_backends_options(
         unavailable: listed.unavailable,
         unreadable: listed.unreadable,
         unsearched: listed.unsearched,
+        partial_search: listed.partial_search,
         scanned: listed.scanned,
         scan_truncated: listed.scan_truncated,
         unplaced: Unplaced::from_directories(listed.unplaced),
@@ -453,6 +461,7 @@ pub(crate) struct Listed {
     pub(crate) unavailable: Vec<String>,
     pub(crate) unreadable: Vec<String>,
     pub(crate) unsearched: Vec<String>,
+    pub(crate) partial_search: Vec<String>,
     pub(crate) scanned: usize,
     pub(crate) scan_truncated: bool,
     /// Recorded directories the scope excluded because they no longer resolve.
@@ -518,6 +527,7 @@ pub(crate) fn list_scoped(
     let mut unavailable_harnesses = Vec::new();
     let mut unreadable_sessions = Vec::new();
     let mut unsearched_sessions = Vec::new();
+    let mut partial_search = Vec::new();
     let mut artifacts = Vec::new();
     let mut scanned = 0;
     let mut scan_truncated = false;
@@ -596,7 +606,11 @@ pub(crate) fn list_scoped(
             }
         }
         let listing = if let Some(needle) = filters.search {
-            backend.list_with_search(&query, needle, LIST_SEARCH_TAIL)
+            backend.list_with_search(
+                &query,
+                needle,
+                filters.search_turns.unwrap_or(LIST_SEARCH_TAIL),
+            )
         } else {
             backend.list(&query)
         };
@@ -607,6 +621,7 @@ pub(crate) fn list_scoped(
                 unavailable,
                 unavailable_ids,
                 unsearched,
+                partial_search: partial,
                 scanned: inspected,
                 scan_truncated: truncated,
             }) => {
@@ -621,6 +636,7 @@ pub(crate) fn list_scoped(
                 }
                 unreadable_sessions.extend(unavailable);
                 unsearched_sessions.extend(unsearched);
+                partial_search.extend(partial);
                 scanned += inspected;
                 scan_truncated |= truncated;
                 found.extend(sessions.into_iter().map(|session| (session, index)));
@@ -711,6 +727,7 @@ pub(crate) fn list_scoped(
         unavailable,
         unreadable: unreadable_sessions,
         unsearched: unsearched_sessions,
+        partial_search,
         scanned,
         scan_truncated,
         unplaced: scope.map(Scope::unresolved_ranked).unwrap_or_default(),
@@ -1697,6 +1714,7 @@ pub struct ExportManifest {
     pub unavailable: Vec<String>,
     pub unreadable: Vec<String>,
     pub unsearched: Vec<String>,
+    pub partial_search: Vec<String>,
     pub scanned: usize,
     pub scan_truncated: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1800,6 +1818,7 @@ pub fn export_selection_with_backends(
         unavailable: listed.unavailable,
         unreadable: listed.unreadable,
         unsearched: listed.unsearched,
+        partial_search: listed.partial_search,
         scanned: listed.scanned,
         scan_truncated: listed.scan_truncated,
         unplaced,
@@ -1829,6 +1848,7 @@ pub struct UsageSummary {
     pub unavailable: Vec<String>,
     pub unreadable: Vec<String>,
     pub unsearched: Vec<String>,
+    pub partial_search: Vec<String>,
     pub scanned: usize,
     pub scan_truncated: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1872,6 +1892,7 @@ pub fn usage_summary_with_backends(
         unavailable: listed.unavailable,
         unreadable: listed.unreadable,
         unsearched: listed.unsearched,
+        partial_search: listed.partial_search,
         scanned: listed.scanned,
         scan_truncated: listed.scan_truncated,
         unplaced: Unplaced::from_directories(listed.unplaced),
