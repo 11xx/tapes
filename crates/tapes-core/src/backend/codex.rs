@@ -2228,6 +2228,8 @@ fn codex_returned_read(output: &Value) -> crate::event::ReturnedRead {
         crate::event::ReturnedRead {
             succeeded: status,
             sha256: None,
+            content_sha256: None,
+            content_lines: None,
         },
         |bytes| crate::event::returned_read(&Value::String(bytes.to_owned()), status),
     )

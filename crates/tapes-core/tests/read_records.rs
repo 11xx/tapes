@@ -102,13 +102,24 @@ fn read_locators_survive_export_and_capture_is_unpinned() {
                 .as_ref()
                 .unwrap()
                 .end,
-            40
+            if harness == "claude" { 10 } else { 40 }
         );
         assert_eq!(call.event.read.as_ref().unwrap().whole, None);
         assert_eq!(call.event.read.as_ref().unwrap().succeeded, Some(true));
         assert_eq!(
             call.event.read.as_ref().unwrap().sha256.as_deref(),
-            Some(digest.as_str())
+            Some(
+                if harness == "claude" {
+                    format!("sha256:{:x}", Sha256::digest(b"10\tfixture line\n"))
+                } else {
+                    digest.clone()
+                }
+                .as_str()
+            )
+        );
+        assert_eq!(
+            call.event.read.as_ref().unwrap().content_sha256.as_deref(),
+            (harness == "claude").then_some(digest.as_str())
         );
         let second = events
             .events
@@ -171,7 +182,15 @@ fn read_locators_survive_export_and_capture_is_unpinned() {
             .iter()
             .find(|record| record["kind"] == "tool-call")
             .unwrap();
-        assert_eq!(exported_call["read"]["sha256"], digest);
+        assert_eq!(
+            exported_call["read"]["sha256"],
+            call.event.read.as_ref().unwrap().sha256.as_deref().unwrap()
+        );
+        if harness == "claude" {
+            assert_eq!(exported_call["read"]["content_sha256"], digest);
+        } else {
+            assert!(exported_call["read"].get("content_sha256").is_none());
+        }
         assert_eq!(
             capture_with_backends(&backends, Selection::Id(id))
                 .unwrap()

@@ -311,14 +311,19 @@ PROBE BEFORE EXPORTING
   obtain a `ModelSelectionSpan` and its `last: ModelSelectionRecord` without
   decoding the native records.
 
-  events projects harness-neutral tool records as tapes-events/10. Pairing is
+  events projects harness-neutral tool records as tapes-events/11. Pairing is
   exact within the bounded read; an incomplete call or result says whether its
   counterpart was not reached or not recorded. Event ordinals are the same
   turn coordinates show prints. event_id stays stable across read windows;
   native_id is the harness record id where recorded, or a coordinate-derived
   record-sha256 id for a tool turn without one. A recognized file read has
   its recorded path, recorded line range or explicit whole-file scope, outcome
-  when known, and sha256 of returned UTF-8 text. Missing scope is unknown.
+  when known, and sha256 of returned UTF-8 text. content_sha256 names the
+  returned file bytes for Claude text reads only when structured file content
+  or every decimal-number/tab line establishes them exactly. Structured token
+  truncation and any unmatched line leave it absent. Partial reads digest the
+  returned range and carry its line coordinates. Unknown formats omit
+  content_sha256. Missing scope is unknown.
   capture reports unpinned for harness-store recordings; exporting does not
   pin native bytes. With no --tail, every event the bounded reader
   reaches is returned; --name and --call-id filter only after pairing.
