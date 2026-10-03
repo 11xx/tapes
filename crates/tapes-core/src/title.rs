@@ -20,10 +20,7 @@ pub fn resolve(
         scope,
         TITLE_SCAN_LIMIT,
         TITLE_SCAN_LIMIT,
-        None,
-        None,
-        None,
-        None,
+        super::backend::QueryFilters::default(),
     );
     let mut matches = Vec::new();
     let mut incomplete = Vec::new();

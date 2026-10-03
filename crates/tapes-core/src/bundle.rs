@@ -777,6 +777,7 @@ mod tests {
                 }),
                 model_observation: None,
                 model_selections: Vec::new(),
+                launch: None,
                 title: Some("A rescue".into()),
                 derived_title: None,
                 derived_title_truncated: None,

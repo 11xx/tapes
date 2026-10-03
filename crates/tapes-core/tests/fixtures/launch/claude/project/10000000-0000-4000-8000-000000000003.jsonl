@@ -1,0 +1,2 @@
+{"type":"summary","sessionId":"10000000-0000-4000-8000-000000000003","summary":"SDK launch fixture"}
+{"type":"attachment","sessionId":"10000000-0000-4000-8000-000000000003","uuid":"attachment-sdk","timestamp":"2026-01-02T12:00:00Z","cwd":"/fixtures/project","entrypoint":"sdk-cli","message":{"role":"user","content":"Attached SDK fixture."}}

@@ -1,0 +1,2 @@
+{"type":"summary","sessionId":"10000000-0000-4000-8000-000000000005","summary":"Unmarked launch fixture"}
+{"type":"user","sessionId":"10000000-0000-4000-8000-000000000005","uuid":"user-unmarked","timestamp":"2026-01-02T14:00:00Z","cwd":"/fixtures/project","promptSource":"sdk","message":{"role":"user","content":"Inspect the unmarked fixture."}}

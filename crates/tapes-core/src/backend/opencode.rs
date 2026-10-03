@@ -1645,6 +1645,7 @@ fn parse_database_session(value: &Value) -> Result<Session> {
         model,
         model_observation: None,
         model_selections: Vec::new(),
+        launch: None,
         title: value["title"]
             .as_str()
             .filter(|title| !title.is_empty())
@@ -1715,6 +1716,7 @@ fn parse_session(value: &Value) -> Result<Session> {
         model,
         model_observation: None,
         model_selections: Vec::new(),
+        launch: None,
         title: value["title"].as_str().map(str::to_owned),
         derived_title: None,
         derived_title_truncated: None,

@@ -2143,6 +2143,7 @@ mod tests {
             model: None,
             model_observation: None,
             model_selections: Vec::new(),
+            launch: None,
             title: None,
             derived_title: None,
             derived_title_truncated: None,

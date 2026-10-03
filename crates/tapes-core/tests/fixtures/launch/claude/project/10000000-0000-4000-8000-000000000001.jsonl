@@ -1,0 +1,2 @@
+{"type":"summary","sessionId":"10000000-0000-4000-8000-000000000001","summary":"CLI launch fixture"}
+{"type":"user","sessionId":"10000000-0000-4000-8000-000000000001","uuid":"user-cli","timestamp":"2026-01-02T10:00:00Z","cwd":"/fixtures/project","entrypoint":"cli","message":{"role":"user","content":"Inspect the CLI fixture."}}

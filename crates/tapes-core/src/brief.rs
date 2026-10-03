@@ -26,13 +26,13 @@ use crate::endings::{self, Ending, EndingSource, Fact, Incomplete, TailEntry, Tu
 use crate::event::{self, Bounded, EventKind};
 use crate::lineage::{ChildRef, Lineage};
 use crate::model::{
-    Accounting, Cost, LiveState, Model, ModelObservationStatus, ReadEvidence, RecordRef,
+    Accounting, Cost, Launch, LiveState, Model, ModelObservationStatus, ReadEvidence, RecordRef,
     SessionMetadata, SourceDescriptor, TerminalObservation, TextTailEvidence, Tokens,
     TrailingRecord, Transcript, Truncation,
 };
 use crate::usage;
 
-pub const BRIEF_SCHEMA: &str = "tapes-brief/8";
+pub const BRIEF_SCHEMA: &str = "tapes-brief/9";
 /// Newest operator and assistant turns rendered when the caller names no
 /// window. Wide enough to hold the exchange that ended the session, narrow
 /// enough that the brief stays one screen.
@@ -57,6 +57,8 @@ pub struct BriefSession {
     pub model_observation: Option<ModelObservationStatus>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub model_selections: Vec<crate::model::ModelSelectionSpan>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub launch: Option<Launch>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -249,6 +251,7 @@ pub fn brief(transcript: Transcript, lineage: Result<Lineage>, tail: usize) -> B
         model: transcript.session.model.clone(),
         model_observation: transcript.session.model_observation.clone(),
         model_selections: transcript.session.model_selections.clone(),
+        launch: transcript.session.launch,
         title: transcript.session.title.clone(),
         derived_title: transcript.session.derived_title.clone(),
         started_at: transcript.session.started_at,

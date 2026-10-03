@@ -17,8 +17,8 @@ use agent_tapes_core::backend::pi::PiBackend;
 use agent_tapes_core::backend::{Backend, Listing, Query, StreamedTranscript, MIN_READ_BYTES};
 use agent_tapes_core::event::{project, EventKind, Incomplete};
 use agent_tapes_core::model::{
-    Accounting, AccountingBasis, AccountingCoverage, Cost, Model, ReadEvidence, Role, Session,
-    SourceBound, SourceDescriptor, Tokens, Transcript, Truncation, Turn, TurnKind,
+    Accounting, AccountingBasis, AccountingCoverage, Cost, Launch, Model, ReadEvidence, Role,
+    Session, SourceBound, SourceDescriptor, Tokens, Transcript, Truncation, Turn, TurnKind,
 };
 use agent_tapes_core::usage::{
     usage, Durations, ModelUsage, ObservationBasis, ObservationClassification, RateWindow,
@@ -311,6 +311,142 @@ fn every_backend_satisfies_shared_normalization_assertions() {
         assert_eq!(tailed.turns.len(), 1);
         assert!(tailed.truncated);
     }
+}
+
+#[test]
+fn claude_launch_modes_match_listing_full_and_streamed_reads() {
+    let backend = ClaudeBackend::new(fixtures("launch/claude"));
+    let sessions = backend.list(&Query::unscoped(20)).unwrap().sessions;
+    let expected = [
+        (
+            "10000000-0000-4000-8000-000000000001",
+            Some(Launch::Interactive),
+        ),
+        (
+            "10000000-0000-4000-8000-000000000002",
+            Some(Launch::Interactive),
+        ),
+        (
+            "10000000-0000-4000-8000-000000000003",
+            Some(Launch::Headless),
+        ),
+        (
+            "10000000-0000-4000-8000-000000000004",
+            Some(Launch::Interactive),
+        ),
+        ("10000000-0000-4000-8000-000000000005", None),
+    ];
+
+    for (id, launch) in expected {
+        let listed = sessions
+            .iter()
+            .find(|session| session.id == id)
+            .unwrap_or_else(|| panic!("Claude launch fixture {id} is missing"));
+        assert_eq!(listed.launch, launch, "listing {id}");
+        assert_eq!(
+            backend
+                .transcript(listed, usize::MAX)
+                .unwrap()
+                .session
+                .launch,
+            launch,
+            "bounded full read {id}"
+        );
+
+        if id == expected[0].0 {
+            let transcript = backend.transcript(listed, usize::MAX).unwrap();
+            let lineage = agent_tapes_core::lineage::Lineage::default();
+            let brief = agent_tapes_core::brief::brief(transcript.clone(), Ok(lineage.clone()), 4);
+            assert_eq!(brief.session.launch, launch);
+            assert_eq!(
+                agent_tapes_core::usage::usage(&transcript).session.launch,
+                launch
+            );
+            assert_eq!(
+                agent_tapes_core::stats::stats(transcript.clone(), &lineage)
+                    .session
+                    .launch,
+                launch
+            );
+            assert_eq!(
+                agent_tapes_core::lineage::view(&transcript.session, lineage.clone())
+                    .session
+                    .launch,
+                launch
+            );
+            assert_eq!(
+                agent_tapes_core::endings::ending(transcript, Ok(lineage), 4, false)
+                    .session
+                    .launch,
+                launch
+            );
+        }
+
+        let mut discard = |_| Ok(());
+        let read = backend
+            .stream_transcript(listed, None, &mut discard)
+            .unwrap();
+        assert_eq!(
+            backend.stream_session(listed, &read).unwrap().launch,
+            launch,
+            "streamed read {id}"
+        );
+    }
+
+    let parent = sessions
+        .iter()
+        .find(|session| session.id == expected[0].0)
+        .unwrap();
+    let mut discard = |_| Ok(());
+    let child = backend
+        .stream_child_transcript(parent, "launch-child", &mut discard)
+        .unwrap();
+    assert_eq!(child.session.launch, Some(Launch::Headless));
+}
+
+#[test]
+fn codex_launch_modes_use_only_the_first_session_meta_source() {
+    let backend = CodexBackend::new(fixtures("launch/codex"));
+    let sessions = backend.list(&Query::unscoped(20)).unwrap().sessions;
+    let expected = [
+        (
+            "60000000-0000-7000-8000-000000000011",
+            Some(Launch::Interactive),
+        ),
+        (
+            "60000000-0000-7000-8000-000000000012",
+            Some(Launch::Interactive),
+        ),
+        (
+            "60000000-0000-7000-8000-000000000013",
+            Some(Launch::Headless),
+        ),
+        (
+            "60000000-0000-7000-8000-000000000014",
+            Some(Launch::Headless),
+        ),
+        ("60000000-0000-7000-8000-000000000015", None),
+    ];
+
+    for (id, launch) in expected {
+        let listed = sessions
+            .iter()
+            .find(|session| session.id == id)
+            .unwrap_or_else(|| panic!("Codex launch fixture {id} is missing"));
+        assert_eq!(listed.launch, launch, "{id}");
+    }
+}
+
+#[test]
+fn pi_and_opencode_leave_launch_absent() {
+    let pi = PiBackend::new(fixtures("pi"));
+    assert_eq!(located(&pi, "session-pi").launch, None);
+
+    let opencode = OpenCodeBackend::new(opencode_fixture_program());
+    assert_eq!(
+        located(&opencode, "ses_000000fixtureSharedSession").launch,
+        None
+    );
 }
 
 #[test]
@@ -2436,6 +2572,7 @@ fn resolver_session(id: &str) -> Session {
         model: None,
         model_observation: None,
         model_selections: Vec::new(),
+        launch: None,
         title: None,
         derived_title: None,
         derived_title_truncated: None,
@@ -4119,7 +4256,7 @@ fn codex_modern_usage_records_choose_the_modern_basis_and_keep_native_rows() {
     )
     .unwrap();
 
-    assert_eq!(view.schema, "tapes-usage/7");
+    assert_eq!(view.schema, "tapes-usage/8");
     assert_eq!(
         view.tokens.as_ref().and_then(|tokens| tokens.input),
         Some(60)

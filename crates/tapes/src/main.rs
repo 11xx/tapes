@@ -44,6 +44,28 @@ enum SortArg {
     Oldest,
 }
 
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum LaunchArg {
+    Interactive,
+    Headless,
+}
+
+impl From<LaunchArg> for agent_tapes_core::model::Launch {
+    fn from(launch: LaunchArg) -> Self {
+        match launch {
+            LaunchArg::Interactive => Self::Interactive,
+            LaunchArg::Headless => Self::Headless,
+        }
+    }
+}
+
+fn launch_label(launch: LaunchArg) -> &'static str {
+    match launch {
+        LaunchArg::Interactive => "interactive",
+        LaunchArg::Headless => "headless",
+    }
+}
+
 impl From<SortArg> for agent_tapes_core::ListSort {
     fn from(sort: SortArg) -> Self {
         match sort {
@@ -544,7 +566,7 @@ struct SessionQueryArgs {
     #[arg(conflicts_with_all = ["title", "latest", "occurrence", "exclude", "harness", "here", "project", "global"])]
     session: Option<String>,
     /// Match the recorded title exactly in scope; incomplete or ambiguous lookup refuses.
-    #[arg(long, conflicts_with_all = ["session", "latest", "occurrence", "exclude", "limit", "model", "directory", "since", "until", "sort", "search"])]
+    #[arg(long, conflicts_with_all = ["session", "latest", "occurrence", "exclude", "limit", "model", "launch", "directory", "since", "until", "sort", "search"])]
     title: Option<String>,
     /// Take the most recent session in scope instead of naming one. A
     /// caller asking from inside a live session is usually itself the most
@@ -570,6 +592,11 @@ struct SessionQueryArgs {
     /// `id (variant)`. Sessions without a model never match.
     #[arg(long, value_name = "SUBSTRING", conflicts_with_all = ["session", "latest", "title", "occurrence"])]
     model: Option<String>,
+    /// Keep sessions the harness records as interactive or headless. Pi and
+    /// OpenCode have no launch marker, and sessions without a recognized
+    /// marker never match.
+    #[arg(long, value_enum, value_name = "MODE", conflicts_with_all = ["session", "latest", "title", "occurrence"])]
+    launch: Option<LaunchArg>,
     /// Match case-insensitively against the recorded directory path.
     /// Sessions without a directory never match.
     #[arg(long, value_name = "SUBSTRING", conflicts_with_all = ["session", "latest", "title", "occurrence"])]
@@ -617,6 +644,7 @@ impl SessionQueryArgs {
         if self.input.occurrence.is_some()
             && (self.limit.is_some()
                 || self.model.is_some()
+                || self.launch.is_some()
                 || self.directory.is_some()
                 || self.since.is_some()
                 || self.until.is_some()
@@ -683,6 +711,7 @@ impl SessionQueryArgs {
             || self.harness.is_some()
             || self.limit.is_some()
             || self.model.is_some()
+            || self.launch.is_some()
             || self.directory.is_some()
             || self.since.is_some()
             || self.until.is_some()
@@ -705,6 +734,7 @@ impl SessionQueryArgs {
             limit: self.limit,
             filters: agent_tapes_core::ListFilters {
                 model: self.model.as_deref(),
+                launch: self.launch.map(Into::into),
                 directory: self.directory.as_deref(),
                 since: self.since,
                 until: self.until,
@@ -754,8 +784,7 @@ enum Command {
         #[command(flatten)]
         scope: ScopeArgs,
         /// Take at most this many sessions from each harness [default: 20].
-        /// The scope and metadata filters apply first, so a bound never hides
-        /// a match.
+        /// The scope and filters apply first, so a bound never hides a match.
         #[arg(long)]
         limit: Option<usize>,
         /// Match case-insensitively against the full model identity shown in
@@ -763,6 +792,11 @@ enum Command {
         /// spelling. Sessions without a model never match.
         #[arg(long, value_name = "SUBSTRING")]
         model: Option<String>,
+        /// Keep sessions the harness records as interactive or headless.
+        /// Pi and OpenCode have no launch marker, and sessions without a
+        /// recognized marker never match.
+        #[arg(long, value_enum, value_name = "MODE")]
+        launch: Option<LaunchArg>,
         /// Match case-insensitively against the recorded directory path.
         /// Sessions without a directory never match.
         #[arg(long, value_name = "SUBSTRING")]
@@ -796,8 +830,8 @@ enum Command {
         #[command(flatten)]
         input: InputArgs,
         /// Render results as JSON. Matching sessions may include optional
-        /// `live` and `accounting` fields; accounting states the basis and
-        /// coverage of any recorded cost or token counters.
+        /// `launch`, `live`, and `accounting` fields; accounting states the
+        /// basis and coverage of any recorded cost or token counters.
         #[arg(long)]
         json: bool,
         /// Answer from a named replica over ssh: run its own tapes with the
@@ -813,7 +847,8 @@ enum Command {
     /// activity timestamps; every turn carries a `kind` naming what the harness
     /// recorded it as, and a user turn holding a harness command, notice, or
     /// attached context is headed `user/<kind>` rather than `user`. The human
-    /// header marks a matching live session when harness-status is reachable,
+    /// header names a recognized launch mode and marks a matching live session
+    /// when harness-status is reachable,
     /// and a verified trailing record is named when the store ends after its
     /// last rendered turn. Activity comparisons use the whole-second
     /// timestamps shown to the reader.
@@ -904,7 +939,7 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Read a Claude child's own transcript, accounting and ending as tapes-child/5 under its parent session.
+    /// Read a Claude child's own transcript, accounting and ending as tapes-child/6 under its parent session.
     Child {
         #[command(flatten)]
         selection: SelectionArgs,
@@ -992,7 +1027,7 @@ enum Command {
         /// Installed Claude, Codex, Pi, and OpenCode sessions.
         #[arg(long, conflicts_with = "read_bytes")]
         full: bool,
-        /// Render the versioned tapes-lineage/2 object as JSON.
+        /// Render the versioned tapes-lineage/3 object as JSON.
         #[arg(long)]
         json: bool,
     },
@@ -1014,7 +1049,7 @@ enum Command {
     /// `assistant_turns_ms` with its count, median, p90, and max. Nothing is
     /// judged, ranked, or explained.
     /// A scope or listing filter selects multiple sessions and returns
-    /// tapes-stats-summary/5: recorded tools grouped by harness and name,
+    /// tapes-stats-summary/6: recorded tools grouped by harness and name,
     /// with per-session read coverage, pairing counts and failures, and per
     /// harness the recordable kinds no session read held. Children are not
     /// read through their parents.
@@ -1033,7 +1068,7 @@ enum Command {
         /// updated in place and a second read may not repeat the first.
         #[arg(long, conflicts_with = "read_bytes")]
         full: bool,
-        /// Render the versioned tapes-stats/10 object, or tapes-stats-summary/5
+        /// Render the versioned tapes-stats/11 object, or tapes-stats-summary/6
         /// for a selection, as JSON. `warnings` names the limits of the read:
         /// `read-window`, `tail-window`, `kind-unknown`, `kind-undeclared` (a
         /// turn of a kind its harness declares it cannot record, so the
@@ -1046,11 +1081,11 @@ enum Command {
         json: bool,
     },
     /// Where quota went. A session named by id or reached with --latest
-    /// answers that session as tapes-usage/7: its recorded tokens, cost, and
+    /// answers that session as tapes-usage/8: its recorded tokens, cost, and
     /// turn counts, plus whatever else its harness recorded — a context
     /// window, a provider quota window, wall-clock durations, a per-model
     /// split. A scope or listing filter instead answers the whole selection
-    /// as tapes-usage-summary/4, grouped by --by and summing each counter
+    /// as tapes-usage-summary/5, grouped by --by and summing each counter
     /// over the sessions that recorded it. The accounting basis and coverage
     /// decide whether figures may be summed; cost is only what the harness
     /// recorded, and quota is a separate fact about the account rather than
@@ -1098,7 +1133,7 @@ enum Command {
             conflicts_with = "read_bytes"
         )]
         series: Option<Option<usize>>,
-        /// Render the versioned tapes-usage/7 object, or tapes-usage-summary/4
+        /// Render the versioned tapes-usage/8 object, or tapes-usage-summary/5
         /// for a selection, as JSON. `session.model_observation` says
         /// whether more than one model and effort was observed (`mixed`) and
         /// whether a gap, partial read or budget kept the split incomplete
@@ -1112,7 +1147,7 @@ enum Command {
         json: bool,
     },
     /// What a continuation of one session needs from its recording, as
-    /// tapes-brief/8: where the work stopped, the working directory and the
+    /// tapes-brief/9: where the work stopped, the working directory and the
     /// commit it sits on, the calls the read never saw a result for, the
     /// children whose outcome the store does not record, and a bounded tail
     /// of the exchange. It reads the recording alone and judges nothing —
@@ -1128,13 +1163,14 @@ enum Command {
         /// out of the tail.
         #[arg(long, value_name = "N", default_value_t = DEFAULT_BRIEF_TAIL)]
         tail: usize,
-        /// Render the versioned tapes-brief/8 object as JSON. Each `in_flight`
+        /// Render the versioned tapes-brief/9 object as JSON. Each `in_flight`
         /// list holds at most 20 entries, with a note when the bound cut it.
         #[arg(long)]
         json: bool,
     },
     /// What each session of a selection ends on, one bounded record each, as
-    /// tapes-endings/6. The selection uses the flags `list` and `export` take,
+    /// tapes-endings/7, including a session's recognized launch mode when one
+    /// was recorded. The selection uses the flags `list` and `export` take,
     /// applied before any transcript is opened; each selected session then
     /// costs one bounded read of its newest turns and one lineage read. Every
     /// fact rests on the normalized turn kinds and typed tool events of the
@@ -1157,6 +1193,11 @@ enum Command {
         /// `id (variant)`. Sessions without a model never match.
         #[arg(long, value_name = "SUBSTRING")]
         model: Option<String>,
+        /// Keep sessions the harness records as interactive or headless.
+        /// Pi and OpenCode have no launch marker, and sessions without a
+        /// recognized marker never match.
+        #[arg(long, value_enum, value_name = "MODE")]
+        launch: Option<LaunchArg>,
         /// Match case-insensitively against the recorded directory path.
         /// Sessions without a directory never match.
         #[arg(long, value_name = "SUBSTRING")]
@@ -1194,7 +1235,7 @@ enum Command {
         /// attached context stay out of it.
         #[arg(long)]
         text: bool,
-        /// Render the versioned tapes-endings/6 object as JSON. An ending's
+        /// Render the versioned tapes-endings/7 object as JSON. An ending's
         /// `source.coverage` is `read-window` when a source bound withheld
         /// turns, `window` when only the --tail window omitted any, and
         /// `session` otherwise.
@@ -1202,7 +1243,8 @@ enum Command {
         json: bool,
     },
     /// Export sessions as bundles. One session by id or `--latest`, or every
-    /// session a selection holds: the listing flags choose the same set
+    /// session a selection holds: the listing flags, including `--launch`,
+    /// choose the same set
     /// `list` would return, in the same order, and a `manifest.json` beside
     /// the bundles records that selection and every bundle it produced. Each
     /// session keeps its own bundle, bounded unless --full reads it whole; a
@@ -1216,7 +1258,7 @@ enum Command {
     /// --omit narrow all three, and the JSON and trace count the omitted turns
     /// by kind under `projection`.
     #[command(group(clap::ArgGroup::new("export_selection")
-        .args(["session", "latest", "title", "occurrence", "input", "here", "project", "global", "harness", "model", "directory", "since", "until", "search"])
+        .args(["session", "latest", "title", "occurrence", "input", "here", "project", "global", "harness", "model", "launch", "directory", "since", "until", "search"])
         .required(true).multiple(true)))]
     Export {
         #[command(flatten)]
@@ -1344,6 +1386,7 @@ fn dispatch(cli: Cli) -> Result<()> {
             scope,
             limit,
             model,
+            launch,
             directory,
             since,
             until,
@@ -1367,6 +1410,7 @@ fn dispatch(cli: Cli) -> Result<()> {
                     scope: &scope,
                     limit,
                     model: &model,
+                    launch,
                     directory: &directory,
                     since,
                     until,
@@ -1400,6 +1444,7 @@ fn dispatch(cli: Cli) -> Result<()> {
             }
             let filters = agent_tapes_core::ListFilters {
                 model: model.as_deref(),
+                launch: launch.map(Into::into),
                 directory: directory.as_deref(),
                 since,
                 until,
@@ -2026,6 +2071,7 @@ fn dispatch(cli: Cli) -> Result<()> {
             scope,
             limit,
             model,
+            launch,
             directory,
             since,
             until,
@@ -2065,6 +2111,7 @@ fn dispatch(cli: Cli) -> Result<()> {
                 limit,
                 filters: agent_tapes_core::ListFilters {
                     model: model.as_deref(),
+                    launch: launch.map(Into::into),
                     directory: directory.as_deref(),
                     since,
                     until,
@@ -2276,6 +2323,7 @@ struct RemoteListQuery<'a> {
     scope: &'a ScopeArgs,
     limit: Option<usize>,
     model: &'a Option<String>,
+    launch: Option<LaunchArg>,
     directory: &'a Option<String>,
     since: Option<agent_tapes_core::ActivityTimestamp>,
     until: Option<agent_tapes_core::ActivityTimestamp>,
@@ -2290,6 +2338,7 @@ fn remote_list_args(query: &RemoteListQuery<'_>) -> Vec<OsString> {
     args.value_if("--harness", query.harness.as_deref());
     args.value_if("--limit", query.limit.map(|limit| limit.to_string()));
     args.value_if("--model", query.model.as_deref());
+    args.value_if("--launch", query.launch.map(launch_label));
     args.value_if("--directory", query.directory.as_deref());
     args.value_if("--since", query.since.map(timestamp_arg));
     args.value_if("--until", query.until.map(timestamp_arg));
@@ -2353,6 +2402,7 @@ fn remote_export_args(
     args.value_if("--harness", query.harness.as_deref());
     args.value_if("--limit", query.limit.map(|limit| limit.to_string()));
     args.value_if("--model", query.model.as_deref());
+    args.value_if("--launch", query.launch.map(launch_label));
     args.value_if("--directory", query.directory.as_deref());
     args.value_if("--since", query.since.map(timestamp_arg));
     args.value_if("--until", query.until.map(timestamp_arg));
@@ -3922,11 +3972,19 @@ fn render_transcript(
 }
 
 fn render_header(session: &Session, by_latest: bool) -> String {
-    if session.live.is_some() || by_latest || session.source.replica.is_some() {
+    if session.live.is_some()
+        || by_latest
+        || session.source.replica.is_some()
+        || session.launch.is_some()
+    {
+        let launch = session.launch.map_or_else(String::new, |launch| {
+            format!(" [launch: {}]", launch.as_str())
+        });
         format!(
-            "# {} {}{}{}\n",
+            "# {} {}{}{}{}\n",
             session.harness(),
             session.id,
+            launch,
             live_marker(session),
             replica_marker(session)
         )
@@ -4201,6 +4259,7 @@ mod tests {
                 model: None,
                 model_observation: None,
                 model_selections: Vec::new(),
+                launch: None,
                 title: None,
                 derived_title: None,
                 derived_title_truncated: None,

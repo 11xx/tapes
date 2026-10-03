@@ -13,9 +13,9 @@
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 
-use crate::model::{Model, Session, SessionMetadata, SourceDescriptor, Truncation};
+use crate::model::{Launch, Model, Session, SessionMetadata, SourceDescriptor, Truncation};
 
-pub const LINEAGE_SCHEMA: &str = "tapes-lineage/2";
+pub const LINEAGE_SCHEMA: &str = "tapes-lineage/3";
 
 /// One session's relatives, as its harness recorded them.
 #[derive(Clone, Debug, Default, PartialEq, Serialize)]
@@ -141,6 +141,8 @@ pub struct LineageSession {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<Model>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub launch: Option<Launch>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub started_at: Option<DateTime<Utc>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_activity_at: Option<DateTime<Utc>>,
@@ -176,6 +178,7 @@ pub fn view(session: &Session, mut lineage: Lineage) -> LineageView {
             source: session.source.clone(),
             metadata: session.metadata.clone(),
             model: session.model.clone(),
+            launch: session.launch,
             started_at: session.started_at,
             last_activity_at: session.last_activity_at,
             directory: session.directory.clone(),
@@ -204,6 +207,7 @@ mod tests {
             model: None,
             model_observation: None,
             model_selections: Vec::new(),
+            launch: None,
             title: None,
             derived_title: None,
             derived_title_truncated: None,

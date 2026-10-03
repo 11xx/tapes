@@ -1,0 +1,4 @@
+{"timestamp":"2026-01-02T14:00:00Z","type":"session_meta","payload":{"id":"60000000-0000-7000-8000-000000000015","session_id":"60000000-0000-7000-8000-000000000015","cwd":"/fixtures/project","model_provider":"openai","source":"future-route"}}
+{"timestamp":"2026-01-02T14:00:01Z","type":"turn_context","payload":{"source":"cli","cwd":"/fixtures/project","model":"gpt-fixture"}}
+{"timestamp":"2026-01-02T14:00:02Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Inspect the launch fixture."}]}}
+{"timestamp":"2026-01-02T14:00:03Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Launch fixture complete."}]}}

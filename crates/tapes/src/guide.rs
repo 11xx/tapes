@@ -54,6 +54,7 @@ FIND IT
   tapes list                     Every available harness, newest first.
   tapes list --here              This project, across every worktree.
   tapes list --harness codex     One backend.
+  tapes list --launch headless  Sessions with a recorded headless marker.
   tapes list --search <text>     Recent content, across matching sessions.
 
   --limit bounds each harness and defaults to 20. The scope applies first, so
@@ -68,8 +69,13 @@ FIND IT
   identity shown in MODEL: `id (variant)` when a variant exists. A session
   without a model never matches. --directory <substring> matches
   case-insensitively against the recorded directory path; a session without a
-  directory never matches. Both filters are applied before the per-harness
-  limit and compose with --harness and the scope flags.
+  directory never matches. --launch interactive|headless uses recognized
+  launch evidence: Claude `cli` and `claude-desktop` entrypoints are
+  interactive, `sdk-cli` is headless, and a recording with both is
+  interactive; Codex `cli` and `vscode` sources are interactive, while `exec`
+  and a `subagent` source are headless. Unknown or absent markers never
+  match, and Pi and OpenCode have no launch marker. These filters apply before
+  the per-harness limit and compose with --harness and the scope flags.
 
   --since and --until filter `last_activity_at`, the newest recorded activity,
   with the half-open rule `since <= last_activity_at < until`, before the
@@ -102,7 +108,9 @@ FIND IT
   they cover the session or only the bounded read window.
 
   JSON omits a fact the harness did not record rather than writing it as
-  null, an empty string, or an invented default. A session
+  null, an empty string, or an invented default. `launch` appears only when
+  the reader recognizes the harness's recorded marker; it is never inferred
+  from `promptSource`, the command line, or the session's content. A session
   whose opening record the reader could not reach carries
   start_uncertain: true: it began at or before its started_at.
 
@@ -234,7 +242,7 @@ READ A RECORDING ON ANOTHER MACHINE
 
 PROBE BEFORE EXPORTING
   tapes show <id> --tail 40      A window, costing no bundle.
-  tapes show <id> --json         The same turns as tapes-session/14, with bounded read, graph, artifact, and terminal evidence.
+  tapes show <id> --json         tapes-session/15 turns and bounded read, graph, artifact, terminal, and recorded launch evidence.
   tapes show <id> --exchange     Operator and assistant turns only, timestamps and ordinals kept; the name for --only operator,assistant.
   tapes show <id> --omit tool    Every turn but tool calls and results; --only and --omit take kind labels, and export takes both.
   tapes show <id> --full         Every turn of a Claude, Codex, Pi, or OpenCode session, streamed past the read bounds; --json streams it too.
@@ -334,8 +342,8 @@ PROBE BEFORE EXPORTING
   Claude, Codex, or Pi recording twice, pairing past the read bound and
   writing each event as it pairs, with the same filters and counts.
 
-  usage answers where a session's quota went as tapes-usage/7: its recorded
-  tokens, cost, accounting, turns, and any by-model attribution the source can
+  usage answers where a session's quota went as tapes-usage/8: its recorded
+  launch mode when known, tokens, cost, accounting, turns, and any by-model attribution the source can
   support — Claude's recorded cost-state, Codex's request observations, or
   pi's per-message model each qualified by the thinking level in effect. Read
   accounting before adding anything up — basis says
@@ -357,7 +365,7 @@ PROBE BEFORE EXPORTING
   older rows. `--full --series` uses the pinned recording, while summaries,
   supplied inputs, and unsupported harnesses refuse the option.
 
-  stats counts what one recording holds as tapes-stats/10: turns by kind
+  stats counts what one recording holds as tapes-stats/11: turns by kind
   beside the kinds the harness can record at all, so a zero for a kind it
   cannot record is not read as none observed, tool
   calls by name with their paired durations and error counts, unpaired calls
@@ -383,7 +391,7 @@ PROBE BEFORE EXPORTING
   selection that is the shape of a reader that stopped recognizing a kind.
 
   lineage answers which sessions a recording names as relatives, as
-  tapes-lineage/2: the session it was spawned or forked from, and the children
+  tapes-lineage/3: the session it was spawned or forked from, and the children
   its own store records, each with the role, model, spawn and completion
   stamps, and outcome its harness wrote. A relationship exists only where a
   record states it — a child header naming a parent, a spawn or completion
@@ -402,7 +410,7 @@ PROBE BEFORE EXPORTING
   the tail window is still named.
 
   Given a scope or a listing filter instead of a session, usage answers that
-  whole selection as tapes-usage-summary/4, using the flags list and export
+  whole selection as tapes-usage-summary/5, using the flags list and export
   take and grouping by --by (harness and model unless told otherwise). It sums
   the counters the listing already carries, so nothing is re-read. Read
   counted before a sum: it says how many of a group's sessions recorded that
@@ -470,7 +478,7 @@ EXPORT, THEN INGEST PROGRESSIVELY
   Probe with show first: a whole bundle of a large session is large.
 
   Given the listing flags instead of an id — the scope flags, --harness,
-  --model, --directory, --since, --until, --sort, --limit, --search — export
+  --model, --launch, --directory, --since, --until, --sort, --limit, --search — export
   takes the set list would return, in the same order, and writes one bundle
   per session. Bundles are never joined: each session keeps its own three
   files, bounded unless --full, and manifest.json beside them is the only file spanning the
@@ -490,7 +498,8 @@ READ MANY ENDINGS
   tapes endings --global --harness codex --limit 50 --text
 
   endings answers what each session of a selection ends on, as
-  tapes-endings/6, so choosing which few endings deserve reading costs one
+  tapes-endings/7, including a session's recorded launch mode when known, so
+  choosing which few endings deserve reading costs one
   bounded read each instead of a transcript apiece. The selection is the one
   list and export take, and the scope and filters apply before any transcript
   is opened. --tail sets how many of each session's newest turns are read (12
@@ -573,7 +582,7 @@ CONTINUE A COLD SESSION
   tapes brief <id> --tail 20 --json
 
   A continuation has two halves. brief is the transcript's half, as
-  tapes-brief/8: where the session stopped, the directory it worked in and the
+  tapes-brief/9: where the session stopped, the directory it worked in and the
   commit that directory sits on, the tool calls the read never saw a result
   for, the children whose outcome its store does not record, and the last few
   operator and assistant turns, each cut at 600 characters. --tail sets how

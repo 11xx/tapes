@@ -1,0 +1,2 @@
+{"type":"summary","sessionId":"10000000-0000-4000-8000-000000000001","summary":"Child launch fixture"}
+{"type":"assistant","sessionId":"10000000-0000-4000-8000-000000000001","uuid":"child-assistant","timestamp":"2026-01-02T10:00:01Z","cwd":"/fixtures/project","entrypoint":"sdk-cli","message":{"role":"assistant","model":"claude-fixture","content":[{"type":"text","text":"Child complete."}]}}

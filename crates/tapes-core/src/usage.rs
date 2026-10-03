@@ -15,12 +15,12 @@ use serde_json::Value;
 use crate::backend::{skipped_records_note, StreamedTranscript};
 use crate::content::ContentInventory;
 use crate::model::{
-    Accounting, AccountingBasis, AccountingCoverage, Cost, Model, ModelObservationStatus,
+    Accounting, AccountingBasis, AccountingCoverage, Cost, Launch, Model, ModelObservationStatus,
     ReadEvidence, ReadGap, RecordRef, Role, Session, SessionMetadata, SourceBound,
     SourceDescriptor, TerminalObservation, TextTailEvidence, Tokens, Transcript, Truncation, Turn,
 };
 
-pub const USAGE_SCHEMA: &str = "tapes-usage/7";
+pub const USAGE_SCHEMA: &str = "tapes-usage/8";
 
 /// Usage facts a harness records that the normalized session model has no
 /// field for. Each member is present exactly when the harness recorded it.
@@ -325,6 +325,8 @@ pub struct UsageSession {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub model_selections: Vec<crate::model::ModelSelectionSpan>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub launch: Option<Launch>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub started_at: Option<DateTime<Utc>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_activity_at: Option<DateTime<Utc>>,
@@ -447,6 +449,7 @@ fn project(session: &Session, turns: TurnTally, facts: ReadFacts) -> UsageView {
             model: session.model.clone(),
             model_observation: session.model_observation.clone(),
             model_selections: session.model_selections.clone(),
+            launch: session.launch,
             started_at: session.started_at,
             last_activity_at: session.last_activity_at,
             directory: session.directory.clone(),
@@ -801,6 +804,7 @@ mod tests {
             model: None,
             model_observation: None,
             model_selections: Vec::new(),
+            launch: None,
             title: None,
             derived_title: None,
             derived_title_truncated: None,
