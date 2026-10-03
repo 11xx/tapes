@@ -359,3 +359,57 @@ fn pin_cannot_upgrade_a_strict_cursor() {
     let page = fixture.backend.history_page(&session, None, 1024).unwrap();
     assert!(agent_tapes_core::history::walk_cursor(true, page.next_cursor.as_deref()).is_err());
 }
+
+#[test]
+fn pinned_turn_origins_survive_rediscovery_after_an_interactive_append() {
+    let bytes = String::from_utf8(recording(64))
+        .unwrap()
+        .replace(
+            "\"type\":\"user\"",
+            "\"type\":\"user\",\"promptSource\":\"sdk\"",
+        )
+        .replacen(
+            "\"type\":\"user\"",
+            "\"type\":\"user\",\"entrypoint\":\"sdk-cli\"",
+            1,
+        );
+    let fixture = Fixture::new(bytes.as_bytes());
+    let session = fixture.backend.locate("fixture-session").unwrap().unwrap();
+    assert_eq!(
+        session.launch,
+        Some(agent_tapes_core::model::Launch::Headless)
+    );
+    let first = fixture
+        .backend
+        .history_page(
+            &session,
+            agent_tapes_core::history::walk_cursor(true, None).unwrap(),
+            1024,
+        )
+        .unwrap();
+    let cursor = first.next_cursor.as_deref().unwrap();
+    let before = fixture
+        .backend
+        .history_page(&session, Some(cursor), 1024)
+        .unwrap();
+    assert!(!before.turns.is_empty());
+    assert_eq!(
+        before.turns[0].origin,
+        Some(agent_tapes_core::model::OperatorOrigin::Program)
+    );
+    fixture.append(b"{\"type\":\"user\",\"entrypoint\":\"cli\",\"sessionId\":\"fixture-session\",\"message\":{\"role\":\"user\",\"content\":\"appended interactive input\"}}\n");
+    let rediscovered = fixture.backend.locate("fixture-session").unwrap().unwrap();
+    assert_eq!(
+        rediscovered.launch,
+        Some(agent_tapes_core::model::Launch::Interactive)
+    );
+    let after = fixture
+        .backend
+        .history_page(&rediscovered, Some(cursor), 1024)
+        .unwrap();
+    assert_eq!(before.session.launch, after.session.launch);
+    assert_eq!(
+        serde_json::to_value(&before.turns).unwrap(),
+        serde_json::to_value(&after.turns).unwrap()
+    );
+}

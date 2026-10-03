@@ -837,6 +837,8 @@ HISTORICAL READS
   immediately; a rewrite inside the prefix refuses when its chunk is reached,
   naming the byte span. Verified records, prefix digest and source revision
   retain the pinned generation across page, search and metadata continuations.
+  Pinned turns use the launch mode observed when the walk began for origin
+  attribution, even if a later append changes the session's launch evidence.
   The cursor carries the mode: continue with --cursor alone. --pin and --cursor
   conflict, and a strict walk must restart to acquire a pin.
   Page JSON uses tapes-page/12 and reports pin.chunk_bytes, chunks,

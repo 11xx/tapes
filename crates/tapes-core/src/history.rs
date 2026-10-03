@@ -15,8 +15,8 @@ use chrono::Utc;
 
 use crate::content::{self, ContentInventory};
 use crate::model::{
-    ByteSpan, Model, ReadEvidence, ReadGap, ReadRange, ReadRangeKind, RecordRef, Session, Turn,
-    TurnKind,
+    ByteSpan, Launch, Model, ReadEvidence, ReadGap, ReadRange, ReadRangeKind, RecordRef, Session,
+    Turn, TurnKind,
 };
 use crate::Selection;
 
@@ -137,6 +137,8 @@ struct PinnedCursor {
     digests: String,
     prefix_sha256: String,
     revision: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    launch: Option<Launch>,
     next_end: u64,
     discard_suffix: bool,
 }
@@ -165,7 +167,12 @@ fn chunk_span(end: u64, chunk: u64, index: u64) -> ByteSpan {
 }
 
 impl PinnedCursor {
-    fn capture(file: &mut File, state: &StrictCursor, bytes: usize) -> Result<(Self, Vec<u8>)> {
+    fn capture(
+        file: &mut File,
+        state: &StrictCursor,
+        bytes: usize,
+        launch: Option<Launch>,
+    ) -> Result<(Self, Vec<u8>)> {
         let chunk = chunk_size(state.size, bytes)?;
         let count = state.size.div_ceil(chunk) as usize;
         let mut hashes = vec![[0u8; 32]; count];
@@ -202,6 +209,7 @@ impl PinnedCursor {
                 digests: STANDARD.encode(hashes.concat()),
                 prefix_sha256: prefix.value,
                 revision: cursor_revision(state),
+                launch,
                 next_end: state.size,
                 discard_suffix: false,
             },
@@ -306,7 +314,7 @@ pub(crate) fn read_file(
     let current = StrictCursor::at_end(session, path, &metadata);
     let mut cached_tail = None;
     let mut state = if cursor == Some(PIN_REQUEST) {
-        let (pin, tail) = PinnedCursor::capture(&mut file, &current, bytes)?;
+        let (pin, tail) = PinnedCursor::capture(&mut file, &current, bytes, session.launch)?;
         cached_tail = Some(tail);
         Cursor::Pinned(pin)
     } else if let Some(raw) = cursor {
@@ -445,10 +453,14 @@ pub(crate) fn read_file(
         Cursor::Strict(s) => cursor_revision(s),
         Cursor::Pinned(s) => s.revision.clone(),
     };
+    let launch = match &state {
+        Cursor::Strict(_) => session.launch,
+        Cursor::Pinned(pin) => pin.launch,
+    };
     let (mut turns, models) = normalize(&values, &spans, &revision);
     for (ordinal, turn) in turns.iter_mut().enumerate() {
         turn.ordinal = ordinal;
-        turn.establish_origin(session.launch);
+        turn.establish_origin(launch);
     }
     let after = std::fs::metadata(path)?;
     if !match &state {
@@ -524,9 +536,11 @@ pub(crate) fn read_file(
         record_sha256: Vec::new(),
         reader: Some(crate::reader::identity()),
     };
+    let mut generation = session.clone();
+    generation.launch = launch;
     Ok(Page {
         schema: PAGE_SCHEMA,
-        session: session.clone(),
+        session: generation,
         start,
         end,
         source_bytes: source_length,
@@ -861,6 +875,7 @@ mod pinned_tests {
             digests: STANDARD.encode(vec![0u8; 256 * 32]),
             prefix_sha256: "0".repeat(64),
             revision: "stat:1:2:1073741824:0:0:0:0".into(),
+            launch: Some(Launch::Interactive),
             next_end: MAX_PIN_BYTES,
             discard_suffix: false,
         });
