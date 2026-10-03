@@ -908,7 +908,9 @@ enum Command {
         #[command(flatten)]
         scope: ScopeArgs,
         /// Take at most this many sessions from each harness [default: 20].
-        /// The scope and filters apply first, so a bound never hides a match.
+        /// Scope and filters apply first. With --search --full, this bounds
+        /// sessions read globally before content matching; withheld candidates
+        /// are reported by full_search.selection_truncated.
         #[arg(long)]
         limit: Option<usize>,
         /// Match case-insensitively against the full model identity shown in
@@ -942,20 +944,26 @@ enum Command {
         /// session id, then harness.
         #[arg(long, value_enum, default_value_t = SortArg::Newest)]
         sort: SortArg,
-        /// Match case-insensitively against normalized turns in each bounded
-        /// read, before --limit. --search-turns selects the turn window.
-        /// Partial reads are searched; only nonmatches report partial coverage.
-        /// Read failures are unsearched. A preflight notice goes to stderr.
+        /// Match case-insensitively against normalized turns. Bounded searches
+        /// precede --limit; --search-turns selects their turn window. Partial
+        /// bounded nonmatches report partial coverage. --full searches whole
+        /// recordings after --limit. Read failures are unsearched, and a
+        /// preflight notice goes to stderr.
         #[arg(long, value_name = "SUBSTRING")]
         search: Option<String>,
         /// Number of normalized turns to search in each bounded read. `all`
         /// searches every retained turn; source byte and record bounds apply.
         #[arg(long, value_name = "N|all", default_value = "32", requires = "search", value_parser = parse_search_turns)]
         search_turns: usize,
-        /// Stream whole recordings after metadata filters. --limit bounds sessions read globally.
+        /// Stream whole recordings after metadata and scope filters. --limit
+        /// bounds sessions read globally. full_search reports selection
+        /// truncation and coverage for matches and nonmatches; coordinates
+        /// carry zero-based ordinal, kind, timestamp and record reference.
+        /// whole_recording_read requires no gaps, skipped records or bounds.
         #[arg(long, requires = "search", conflicts_with = "search_turns")]
         full: bool,
-        /// Maximum matching turn coordinates retained per session in a whole search.
+        /// Maximum matching turn coordinates retained per session in a whole
+        /// search. Overflow sets matches_truncated without stopping the read.
         #[arg(long, default_value = "100", requires = "full")]
         search_matches: usize,
 
