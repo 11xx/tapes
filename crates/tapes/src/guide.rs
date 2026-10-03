@@ -336,7 +336,17 @@ PROBE BEFORE EXPORTING
   bound applies to full, supplied-input, and remote reads; native content
   parts and other metadata retain their own bounds.
 
-  events projects harness-neutral tool records as tapes-events/12. Pairing is
+  timeline <id> or timeline --here projects each turn as ordinal, kind and ts
+  under tapes-timeline/1, without text or payloads. Ordinals use show's
+  zero-based coordinate. Missing timestamps are omitted (a dash in human output).
+  Selection, scope and read bounds follow stats; --full streams every selected
+  recording. JSON groups records by session with truncation and read notes;
+  human output is one line per turn. A selected session that cannot be read
+  fails the command.
+
+  events projects harness-neutral tool records as tapes-events/13. Each record
+  names its source turn with turn_ordinal, the same coordinate show prints;
+  ordinal retains that turn coordinate, including for call/result pairs. Pairing is
   exact within the bounded read; an incomplete call or result says whether its
   counterpart was not reached or not recorded. `exit` is an integer process
   status on completed Codex CommandExecution events when exit_code is recorded.

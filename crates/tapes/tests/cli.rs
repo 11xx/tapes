@@ -3141,7 +3141,7 @@ fn events_help_explains_pairing_filters_and_the_default_bound() {
     assert!(help.contains("--call-id <ID>"), "{help}");
     assert!(help.contains("--program <PROGRAM>"), "{help}");
     assert!(help.contains("--full-arguments"), "{help}");
-    assert!(help.contains("tapes-events/12"), "{help}");
+    assert!(help.contains("tapes-events/13"), "{help}");
 }
 
 #[test]
@@ -3193,7 +3193,7 @@ fn events_json_answers_call_counts_and_incomplete_calls_without_raw_text() {
     );
     let value: Value = serde_json::from_slice(&output.stdout).unwrap();
 
-    assert_eq!(value["schema"], "tapes-events/12");
+    assert_eq!(value["schema"], "tapes-events/13");
     assert_eq!(value["session"]["id"], id);
     assert!(value.get("truncation").is_none(), "{value}");
     assert_eq!(
@@ -3202,6 +3202,9 @@ fn events_json_answers_call_counts_and_incomplete_calls_without_raw_text() {
     );
     let events = value["events"].as_array().unwrap();
     assert_eq!(events.len(), 3);
+    assert!(events
+        .iter()
+        .all(|event| event["turn_ordinal"] == event["ordinal"]));
     assert!(events.iter().all(|event| event.get("text").is_none()));
     assert_eq!(
         events
@@ -3675,7 +3678,7 @@ fn events_expose_nested_declarations_and_qualified_artifact_consumption() {
         String::from_utf8_lossy(&output.stderr)
     );
     let value: Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(value["schema"], "tapes-events/12");
+    assert_eq!(value["schema"], "tapes-events/13");
     let events = value["events"].as_array().unwrap();
     let shell_call = events
         .iter()
@@ -10469,7 +10472,7 @@ fn events_full_arguments_opt_in_returns_the_complete_argument_text() {
 
     let bounded: Value =
         serde_json::from_slice(&run(&["events", "session-pi-arguments", "--json"])).unwrap();
-    assert_eq!(bounded["schema"], "tapes-events/12");
+    assert_eq!(bounded["schema"], "tapes-events/13");
     let arguments = arguments_of(&bounded);
     assert_eq!(arguments["chars"], total);
     assert_eq!(
@@ -10494,7 +10497,7 @@ fn events_full_arguments_opt_in_returns_the_complete_argument_text() {
         let mut request = vec!["events", "session-pi-arguments"];
         request.extend(extra.iter().copied());
         let value: Value = serde_json::from_slice(&run(&request)).unwrap();
-        assert_eq!(value["schema"], "tapes-events/12", "{request:?}");
+        assert_eq!(value["schema"], "tapes-events/13", "{request:?}");
         let arguments = arguments_of(&value);
         assert_eq!(arguments["chars"], total, "{request:?}");
         assert_eq!(
@@ -11740,4 +11743,92 @@ fn show_turn_chars_travels_to_the_replica_and_retains_cap_evidence() {
     assert!(replica.queried()[0].contains("'--turn-chars' '2'"));
     fs::remove_dir_all(replica.root).unwrap();
     fs::remove_dir_all(local_codex).unwrap();
+}
+
+#[test]
+fn timeline_projects_fixture_turns_without_payloads() {
+    let id = "00000000-0000-0000-0000-000000000001";
+    let shown = fixture_command("timeline-show", &["show", id, "--json", "--tail", "10000"]);
+    assert!(shown.status.success());
+    let shown: Value = serde_json::from_slice(&shown.stdout).unwrap();
+    for args in [
+        vec!["timeline", id, "--json"],
+        vec!["timeline", id, "--full", "--json"],
+        vec!["timeline", "--global", "--json"],
+        vec!["timeline", "--global", "--full", "--json"],
+    ] {
+        let output = fixture_command("timeline-records", &args);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(value["schema"], "tapes-timeline/1");
+        let session = value["sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|session| session["session"] == id)
+            .unwrap();
+        let records = session["records"].as_array().unwrap();
+        let turns = shown["turns"].as_array().unwrap();
+        assert_eq!(records.len(), turns.len());
+        for (record, turn) in records.iter().zip(turns) {
+            assert_eq!(record.as_object().unwrap().len(), 3);
+            for field in ["ordinal", "kind", "ts"] {
+                assert_eq!(record[field], turn[field]);
+            }
+        }
+    }
+    let human = fixture_command("timeline-human", &["timeline", id]);
+    assert!(human.status.success());
+    assert_eq!(
+        String::from_utf8(human.stdout).unwrap().lines().count(),
+        shown["turns"].as_array().unwrap().len()
+    );
+}
+
+#[test]
+fn timeline_omits_unrecorded_timestamps() {
+    let id = "00000000-0000-0000-0000-000000000001";
+    let (codex_home, home) = fixture_store("timeline-no-timestamp");
+    let recording = CODEX_SESSION_ONE
+        .lines()
+        .map(|line| {
+            let mut record: Value = serde_json::from_str(line).unwrap();
+            if record["type"] == "response_item" {
+                record.as_object_mut().unwrap().remove("timestamp");
+            }
+            record.to_string() + "\n"
+        })
+        .collect::<String>();
+    fs::write(codex_home.join("sessions/2026/01/01/rollout-2026-01-01T10-00-00-00000000-0000-0000-0000-000000000001.jsonl"), recording).unwrap();
+    for full in [false, true] {
+        let mut command = tapes();
+        command.args(["timeline", id, "--json"]);
+        if full {
+            command.arg("--full");
+        }
+        with_fixture_env(
+            &mut command,
+            &codex_home,
+            &home,
+            Path::new("/definitely/missing"),
+        );
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+        let records = value["sessions"][0]["records"].as_array().unwrap();
+        assert!(!records.is_empty());
+        assert!(records.iter().all(|record| record.get("ts").is_none()));
+        assert!(records
+            .iter()
+            .all(|record| record.as_object().unwrap().len() == 2));
+    }
+    fs::remove_dir_all(codex_home).unwrap();
 }

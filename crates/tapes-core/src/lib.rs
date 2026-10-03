@@ -36,6 +36,7 @@ pub mod reader;
 pub mod scope;
 pub mod stats;
 pub mod stats_summary;
+pub mod timeline;
 pub mod title;
 pub mod usage;
 
