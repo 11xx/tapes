@@ -3613,6 +3613,30 @@ fn incomplete_native_prefix_refuses_but_a_full_id_still_resolves() {
 }
 
 #[test]
+fn events_command_matches_serialized_non_shell_input() {
+    let output = fixture_command(
+        "events-input-selection",
+        &[
+            "events",
+            "00000000-0000-0000-0000-000000000001",
+            "--tool",
+            "fixture_tool",
+            "--command",
+            "PATH",
+            "--json",
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["events"].as_array().unwrap().len(), 2);
+    assert_eq!(value["events"][0]["kind"], "tool-call");
+}
+
+#[test]
 fn events_filters_after_pairing_and_tail_uses_show_ordinals() {
     let id = "00000000-0000-0000-0000-000000000001";
     let named = fixture_command(
@@ -3620,7 +3644,7 @@ fn events_filters_after_pairing_and_tail_uses_show_ordinals() {
         &["events", id, "--name", "fixture_tool", "--json"],
     );
     let named: Value = serde_json::from_slice(&named.stdout).unwrap();
-    assert_eq!(named["events"].as_array().unwrap().len(), 1);
+    assert_eq!(named["events"].as_array().unwrap().len(), 2);
     assert_eq!(named["events"][0]["kind"], "tool-call");
     assert_eq!(
         named["pairs"],
@@ -3843,6 +3867,42 @@ fn events_expose_nested_declarations_and_qualified_artifact_consumption() {
         .unwrap()
         .iter()
         .any(|event| event["kind"] == "tool-call" && event["call_id"] == "call-shell"));
+
+    for full in [false, true] {
+        let mut paired = tapes();
+        paired.args([
+            "events",
+            id,
+            "--tool",
+            "exec",
+            "--command",
+            "CARGO TEST",
+            "--json",
+        ]);
+        if full {
+            paired.arg("--full");
+        }
+        with_fixture_env(
+            &mut paired,
+            &codex_home,
+            &home,
+            Path::new("/definitely/missing"),
+        );
+        let output = paired.output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+        let records = value["events"].as_array().unwrap();
+        assert_eq!(records.len(), 2);
+        assert!(records.iter().all(|r| r["call_id"] == "call-shell"));
+        assert!(records.iter().all(|r| r["pair"].is_object()));
+        assert!(records
+            .iter()
+            .any(|r| r["kind"] == "tool-result" && r.get("name").is_none()));
+    }
 
     let mut wrong_name = tapes();
     wrong_name.args(["events", id, "--name", "git", "--json"]);
@@ -7399,7 +7459,7 @@ fn events_and_stats_full_stream_claude_and_codex_recordings_past_the_read_bound(
             assert_eq!(comparable(full), comparable(wide), "{id} {selection:?}");
         }
         let full = json(&["events", id, "--full", "--name", "fixture_tool", "--json"]);
-        assert_eq!(full["events"].as_array().unwrap().len(), 1, "{id}: {full}");
+        assert_eq!(full["events"].as_array().unwrap().len(), 2, "{id}: {full}");
         assert_eq!(
             full["pairs"],
             serde_json::json!({"complete": 1, "incomplete": 0})
@@ -10453,6 +10513,14 @@ fn events_full_arguments_opt_in_returns_the_complete_argument_text() {
     )
     .unwrap();
 
+    fs::write(
+        pi_sessions.join("2026-01-03T10-00-00-000Z_session-pi-input.jsonl"),
+        PI_SESSION_LONG_ARGUMENTS
+            .replace("session-pi-arguments", "session-pi-input")
+            .replace("\"bash\"", "\"fixture_tool\""),
+    )
+    .unwrap();
+
     let run = |arguments: &[&str]| {
         let mut command = tapes();
         command.args(arguments);
@@ -10502,6 +10570,85 @@ fn events_full_arguments_opt_in_returns_the_complete_argument_text() {
         ["chars", "preview"],
         "{arguments}"
     );
+
+    for full in [false, true] {
+        let mut request = vec![
+            "events",
+            "--global",
+            "--harness",
+            "pi",
+            "--tool",
+            "bash",
+            "--command",
+            "BUILD --WORKSPACE --ALL-TARGETS",
+            "--json",
+        ];
+        if full {
+            request.push("--full");
+        }
+        let selected: Value = serde_json::from_slice(&run(&request)).unwrap();
+        assert_eq!(selected["schema"], "tapes-events-selection/1");
+        assert_eq!(selected["sessions"].as_array().unwrap().len(), 2);
+        let row = selected["sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["session"]["id"] == "session-pi-arguments")
+            .unwrap();
+        assert_eq!(row["count"], 1);
+        assert_eq!(row["partial"], false);
+        assert_eq!(row["events"]["events"].as_array().unwrap().len(), 2);
+        assert_eq!(row["events"]["pairs"]["complete"], 1);
+        request.push("--count");
+        let counted: Value = serde_json::from_slice(&run(&request)).unwrap();
+        assert_eq!(counted["sessions"][0]["count"], 1);
+        assert!(counted["sessions"][0].get("events").is_none());
+        let mut excluded = request.clone();
+        let pattern = excluded.iter().position(|arg| *arg == "--command").unwrap() + 1;
+        excluded[pattern] = "/fixtures/project";
+        let absent: Value = serde_json::from_slice(&run(&excluded)).unwrap();
+        assert_eq!(absent["sessions"][0]["count"], 0);
+        let mut partial = request.clone();
+        partial.extend(["--tail", "0"]);
+        let partial: Value = serde_json::from_slice(&run(&partial)).unwrap();
+        assert_eq!(partial["sessions"][0]["count"], 0);
+        assert_eq!(partial["sessions"][0]["partial"], true);
+    }
+    for full in [false, true] {
+        let mut request = vec![
+            "events",
+            "--global",
+            "--tool",
+            "fixture_tool",
+            "--command",
+            "/FIXTURES/PROJECT",
+            "--count",
+            "--json",
+        ];
+        if full {
+            request.push("--full");
+        }
+        let selected: Value = serde_json::from_slice(&run(&request)).unwrap();
+        let rows = selected["sessions"].as_array().unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(
+            rows.iter()
+                .map(|r| r["count"].as_u64().unwrap())
+                .sum::<u64>(),
+            1
+        );
+    }
+
+    let count: Value = serde_json::from_slice(&run(&[
+        "events",
+        "session-pi-arguments",
+        "--count",
+        "--command",
+        "CARGO TEST",
+        "--json",
+    ]))
+    .unwrap();
+    assert_eq!(count["sessions"][0]["count"], 1);
 
     for extra in [
         vec!["--full-arguments", "--json"],

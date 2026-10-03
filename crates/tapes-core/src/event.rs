@@ -399,7 +399,8 @@ impl EventTranscript {
 }
 
 /// Which paired records a caller asked for. Each list is matched exactly and
-/// an empty one admits every record. A record declaring a requested nested
+/// an empty one admits every record. Command substrings match case-insensitively.
+/// A record declaring a requested nested
 /// program selects its call id, so the records sharing that id are kept with
 /// it; filtering never changes how a record was paired.
 #[derive(Clone, Copy, Debug, Default)]
@@ -407,12 +408,72 @@ pub struct EventFilter<'a> {
     pub names: &'a [String],
     pub call_ids: &'a [String],
     pub programs: &'a [String],
+    pub command: Option<&'a str>,
 }
 
 impl EventFilter<'_> {
-    /// Whether `record` declares a requested program, selecting its call id.
+    /// Whether a record matches the requested call selectors, selecting its call id.
     pub fn selects_call(&self, record: &EventRecord) -> bool {
-        !self.programs.is_empty() && program_matches(record, self.programs)
+        if self.command.is_none() && self.names.is_empty() {
+            return !self.programs.is_empty() && program_matches(record, self.programs);
+        }
+        record.event.kind == EventKind::ToolCall
+            && (self.names.is_empty()
+                || record
+                    .event
+                    .name
+                    .as_ref()
+                    .is_some_and(|name| self.names.contains(name)))
+            && (self.call_ids.is_empty()
+                || record
+                    .event
+                    .call_id
+                    .as_ref()
+                    .is_some_and(|id| self.call_ids.contains(id)))
+            && (self.programs.is_empty() || program_matches(record, self.programs))
+            && self.command_matches(record)
+    }
+
+    fn command_matches(&self, record: &EventRecord) -> bool {
+        self.command.is_none_or(|wanted| {
+            record.event.arguments.as_ref().is_some_and(|arguments| {
+                let text = arguments.full.as_deref().unwrap_or(&arguments.preview);
+                let value = serde_json::from_str::<Value>(text).ok();
+                let shell = record.event.name.as_deref().is_some_and(|name| {
+                    matches!(
+                        name.rsplit('.').next().unwrap_or(name),
+                        "Bash"
+                            | "bash"
+                            | "exec"
+                            | "exec_command"
+                            | "shell"
+                            | "shell_command"
+                            | "CommandExecution"
+                    )
+                });
+                let command = value.as_ref().filter(|_| shell).and_then(|value| {
+                    value
+                        .get("command")
+                        .or_else(|| value.get("cmd"))
+                        .or(Some(value))
+                });
+                let command = command.and_then(|value| {
+                    value.as_str().map(str::to_owned).or_else(|| {
+                        value
+                            .as_array()?
+                            .iter()
+                            .map(Value::as_str)
+                            .collect::<Option<Vec<_>>>()
+                            .map(|argv| argv.join(" "))
+                    })
+                });
+                command
+                    .as_deref()
+                    .unwrap_or(text)
+                    .to_lowercase()
+                    .contains(&wanted.to_lowercase())
+            })
+        })
     }
 
     /// Whether `record` is kept, where `selected` answers whether a call id
@@ -424,7 +485,8 @@ impl EventFilter<'_> {
                 .event
                 .name
                 .as_ref()
-                .is_some_and(|name| self.names.contains(name));
+                .is_some_and(|name| self.names.contains(name))
+            || record.event.call_id.as_deref().is_some_and(&selected);
         let call_ids = self.call_ids.is_empty()
             || record
                 .event
@@ -433,8 +495,11 @@ impl EventFilter<'_> {
                 .is_some_and(|call_id| self.call_ids.contains(call_id));
         let programs = self.programs.is_empty()
             || program_matches(record, self.programs)
-            || record.event.call_id.as_deref().is_some_and(selected);
-        names && call_ids && programs
+            || record.event.call_id.as_deref().is_some_and(&selected);
+        let command = self.command.is_none()
+            || (record.event.kind == EventKind::ToolCall && self.command_matches(record))
+            || record.event.call_id.as_deref().is_some_and(&selected);
+        names && call_ids && programs && command
     }
 }
 

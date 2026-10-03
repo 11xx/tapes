@@ -18,6 +18,12 @@ The root contains Claude's `projects` or Codex/Pi's `sessions`; selection never
 falls back to installed stores. It only reads: no command writes to a harness's store, so it
 is safe to point at a session that is still running.
 
+Select recorded tool calls across sessions with `tapes events --here --tool
+bash --command 'cargo test'`. Matching includes paired results and recorded
+exit status. Add `--count` for per-session counts, or `--full` to stream whole
+recordings. Selection JSON uses `tapes-events-selection/1` with per-session
+counts and partial-read status; event objects use `tapes-events/13`.
+
 ## Install
 
 `tapes` builds to a single binary, supported on Unix-like systems, and needs

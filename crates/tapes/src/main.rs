@@ -1,3 +1,4 @@
+use agent_tapes_core::EventSink;
 mod guide;
 mod integration;
 mod liveness;
@@ -534,10 +535,12 @@ impl Command {
             | Command::HistorySearch { selection, .. }
             | Command::Metadata { selection, .. }
             | Command::Child { selection, .. }
-            | Command::Events { selection, .. }
             | Command::Lineage { selection, .. }
             | Command::Brief { selection, .. } => Some(selection),
-            Command::Timeline { query, .. }
+            Command::Events {
+                selection: query, ..
+            }
+            | Command::Timeline { query, .. }
             | Command::Stats { query, .. }
             | Command::Usage { query, .. }
             | Command::Export { query, .. } => Some(query),
@@ -1088,12 +1091,12 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Project typed tool calls and results from one session. Pairing is exact
+    /// Project typed tool calls and results from a session or selection. Pairing is exact
     /// within the bounded read; an unpaired event names which read boundary
     /// prevented a complete pair.
     Events {
         #[command(flatten)]
-        selection: SelectionArgs,
+        selection: SessionQueryArgs,
         #[command(flatten)]
         read: ReadArgs,
         /// Return events on turns within the final N-turn ordinal window. The
@@ -1101,8 +1104,18 @@ enum Command {
         #[arg(long)]
         tail: Option<usize>,
         /// Match the recorded tool name exactly. Repeatable.
-        #[arg(long, value_name = "NAME")]
+        #[arg(long, visible_alias = "tool", value_name = "NAME")]
         name: Vec<String>,
+        /// Match a case-insensitive substring of the recorded shell command,
+        /// or serialized input for other tools. Uses complete retained input,
+        /// including text beyond the argument preview, and keeps paired results.
+        #[arg(long, value_name = "SUBSTRING")]
+        command: Option<String>,
+        /// Return tapes-events-selection/1 per-session call counts and partial-read
+        /// status without event records. Explicit selections use this schema with
+        /// nested tapes-events/13 objects when --count is absent.
+        #[arg(long)]
+        count: bool,
         /// Match the recorded tool call identifier exactly. Repeatable.
         #[arg(long, value_name = "ID")]
         call_id: Vec<String>,
@@ -1115,7 +1128,7 @@ enum Command {
         /// result rather than the file; with --json the same tapes-events/13
         /// object is written event by event. The recording is read twice, the
         /// second read replaying the first; --tail, --name, --call-id, and
-        /// --program select as they do over a bounded read. Installed Claude,
+        /// --program, --tool, and --command select as they do over a bounded read. Installed Claude,
         /// Codex, and Pi sessions; OpenCode refuses, since its messages are
         /// updated in place and a second read may not repeat the first.
         #[arg(long, conflicts_with = "read_bytes")]
@@ -1989,6 +2002,8 @@ fn dispatch(cli: Cli) -> Result<()> {
             read,
             tail,
             name,
+            command,
+            count,
             call_id,
             program,
             full,
@@ -1996,6 +2011,9 @@ fn dispatch(cli: Cli) -> Result<()> {
             full_arguments,
         } => {
             selection.validate_input()?;
+            if selection.input.after_occurrence.is_some() {
+                return Err(anyhow!("--after-occurrence is not supported by events"));
+            }
             read.refuse_supplied(&selection.input)?;
             let by_latest = selection.latest;
             let options = agent_tapes_core::event::EventOptions { full_arguments };
@@ -2010,23 +2028,42 @@ fn dispatch(cli: Cli) -> Result<()> {
                 names: &name,
                 call_ids: &call_id,
                 programs: &program,
+                command: command.as_deref(),
             };
             if full {
                 refuse_full_supplied(&selection.input)?;
+            }
+            selection.validate_window()?;
+            if selection.single().is_none() || count {
+                if selection.single().is_none() && !selection.has_set_selection() {
+                    return Err(anyhow!("events needs a session ID, --latest, or an explicit selection such as --here"));
+                }
+                return events_selection(
+                    &selection,
+                    &event_backends,
+                    tail,
+                    &filter,
+                    options,
+                    full,
+                    count,
+                    json,
+                );
+            }
+            if full {
                 return events_full(&selection, tail, &filter, json, by_latest, options);
             }
             let mut events = if selection.input.supplied() {
                 let backends = selection.input.backends()?;
                 agent_tapes_core::events_with_options_with_backends(
                     &backends,
-                    selection.selection(),
+                    selection.single().expect("single selection"),
                     tail.unwrap_or(usize::MAX),
                     options,
                 )?
             } else {
                 let mut events = agent_tapes_core::events_with_options_with_backends(
                     &event_backends,
-                    selection.selection(),
+                    selection.single().expect("single selection"),
                     tail.unwrap_or(usize::MAX),
                     options,
                 )?;
@@ -4066,10 +4103,157 @@ fn show_full(
     sink.finish(read)
 }
 
+#[allow(clippy::too_many_arguments)]
+fn events_selection(
+    query: &SessionQueryArgs,
+    backends: &[Box<dyn Backend>],
+    tail: Option<usize>,
+    filter: &agent_tapes_core::event::EventFilter<'_>,
+    options: agent_tapes_core::event::EventOptions,
+    full: bool,
+    count_only: bool,
+    json: bool,
+) -> Result<()> {
+    use std::io::Write;
+    let stdout = std::io::stdout();
+    let mut out = std::io::BufWriter::new(stdout.lock());
+    if json {
+        write!(
+            out,
+            "{{\"schema\":\"tapes-events-selection/1\",\"sessions\":["
+        )?;
+    }
+    let mut first = true;
+    let mut emit = |backend: &dyn Backend, session: &Session| -> Result<()> {
+        if json {
+            if !first {
+                write!(out, ",")?;
+            }
+            write!(out, "{{")?;
+        }
+        first = false;
+        let mut sink = SelectionEvents {
+            out: &mut out,
+            count: 0,
+            json,
+            count_only,
+            writer: None,
+        };
+        let events = if full {
+            agent_tapes_core::events_full_for_session(
+                backend,
+                session,
+                tail.unwrap_or(usize::MAX),
+                filter,
+                options,
+                &mut sink,
+            )?
+            .events
+        } else {
+            let mut events =
+                backend.events_with_options(session, tail.unwrap_or(usize::MAX), options)?;
+            events.retain(filter);
+            sink.session(&events.session)?;
+            for record in &events.events {
+                sink.record(record.clone())?;
+            }
+            events
+        };
+        let calls = sink.count;
+        if let Some(writer) = sink.writer.take() {
+            writer.close(sink.out, &events)?;
+        }
+        if json {
+            if !count_only {
+                write!(sink.out, ",")?;
+            }
+            write!(
+                sink.out,
+                "\"session\":{},\"count\":{},\"partial\":{},\"truncation\":{}}}",
+                serde_json::to_string(&events.session)?,
+                calls,
+                events.truncated,
+                serde_json::to_string(&events.truncation)?
+            )?;
+        } else {
+            writeln!(
+                sink.out,
+                "{} ({}): {} calls; partial={}",
+                events.session.id,
+                events.session.harness(),
+                calls,
+                events.truncated
+            )?;
+            let mut notes = String::new();
+            render_truncation_notes(&mut notes, &events.truncation);
+            sink.out.write_all(notes.as_bytes())?;
+        }
+        Ok(())
+    };
+    if let Some(one) = query.single() {
+        agent_tapes_core::visit_event_session(backends, one, &mut emit)?;
+    } else {
+        let discovery = agent_tapes_core::visit_event_sessions(backends, &query.set(), &mut emit)?;
+        if json {
+            write!(
+                out,
+                "],\"discovery\":{}}}",
+                serde_json::to_string(&discovery)?
+            )?;
+            out.flush()?;
+            return Ok(());
+        }
+        print_availability_note(&discovery);
+    }
+    if json {
+        writeln!(out, "]}}")?;
+    }
+    out.flush()?;
+    Ok(())
+}
+
+struct SelectionEvents<'a, W: std::io::Write> {
+    out: &'a mut W,
+    count: usize,
+    json: bool,
+    count_only: bool,
+    writer: Option<agent_tapes_core::event::StreamedEventsJson>,
+}
+impl<W: std::io::Write> agent_tapes_core::EventSink for SelectionEvents<'_, W> {
+    fn session(&mut self, session: &Session) -> Result<()> {
+        if !self.count_only {
+            if self.json {
+                self.out.write_all(b"\"events\":")?;
+                self.writer = Some(agent_tapes_core::event::StreamedEventsJson::open(
+                    self.out, session,
+                )?);
+            } else {
+                self.out
+                    .write_all(render_header(session, false).as_bytes())?;
+            }
+        }
+        Ok(())
+    }
+    fn record(&mut self, record: EventRecord) -> Result<()> {
+        if record.event.kind == agent_tapes_core::event::EventKind::ToolCall {
+            self.count += 1;
+        }
+        if !self.count_only {
+            if let Some(writer) = &mut self.writer {
+                writer.record(self.out, &record)?;
+            } else {
+                self.out.write_all(render_event(&record).as_bytes())?;
+                self.out.write_all(b"\n")?;
+            }
+        }
+        Ok(())
+    }
+}
+
 /// `events --full` writes each kept event as the second read pairs it, so the
 /// whole recording is never held.
 fn events_full(
-    selection: &SelectionArgs,
+    selection: &SessionQueryArgs,
     tail: Option<usize>,
     filter: &agent_tapes_core::event::EventFilter<'_>,
     json: bool,
@@ -4085,7 +4269,7 @@ fn events_full(
     };
     let streamed = agent_tapes_core::events_full_with_options_with_backends(
         &selection.input.backends()?,
-        selection.selection(),
+        selection.single().expect("single selection"),
         tail.unwrap_or(usize::MAX),
         filter,
         options,
