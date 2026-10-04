@@ -899,7 +899,7 @@ enum Command {
     },
     /// List available sessions. Human output keeps the exact session id in
     /// the ID column and puts any present-tense state in a separate LIVE
-    /// column. If harness-status is unavailable, malformed, oversized, or
+    /// column. If agent-status is unavailable, malformed, oversized, or
     /// slower than its 250 ms deadline, LIVE is blank.
     List {
         /// Restrict results to one harness.
@@ -1003,7 +1003,7 @@ enum Command {
     /// recorded it as, and a user turn holding a harness command, notice, or
     /// attached context is headed `user/<kind>` rather than `user`. The human
     /// header names a recognized launch mode and marks a matching live session
-    /// when harness-status is reachable,
+    /// when agent-status is reachable,
     /// and a verified trailing record is named when the store ends after its
     /// last rendered turn. Activity comparisons use the whole-second
     /// timestamps shown to the reader.

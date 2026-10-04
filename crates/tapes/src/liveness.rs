@@ -75,7 +75,7 @@ pub fn snapshot() -> HashMap<String, LiveState> {
 }
 
 fn spawn_status() -> io::Result<Child> {
-    let mut command = Command::new("harness-status");
+    let mut command = Command::new("agent-status");
     command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())

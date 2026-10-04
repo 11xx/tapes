@@ -1556,7 +1556,7 @@ fn fake_status(root: &Path, body: &str, exit: i32) -> (PathBuf, PathBuf) {
     let calls = root.join("calls");
     fs::create_dir_all(&bin).unwrap();
     fs::write(&snapshot, body).unwrap();
-    let program = bin.join("harness-status");
+    let program = bin.join("agent-status");
     fs::write(
         &program,
         format!(
@@ -1577,7 +1577,7 @@ fn fake_stalled_status(root: &Path) -> (PathBuf, PathBuf, PathBuf, PathBuf) {
     let parent_pid = root.join("parent.pid");
     let child_pid = root.join("child.pid");
     fs::create_dir_all(&bin).unwrap();
-    let program = bin.join("harness-status");
+    let program = bin.join("agent-status");
     fs::write(
         &program,
         format!(
@@ -1598,7 +1598,7 @@ fn fake_exited_stalled_status(root: &Path) -> (PathBuf, PathBuf, PathBuf, PathBu
     let parent_pid = root.join("parent.pid");
     let child_pid = root.join("child.pid");
     fs::create_dir_all(&bin).unwrap();
-    let program = bin.join("harness-status");
+    let program = bin.join("agent-status");
     fs::write(
         &program,
         format!(
@@ -10773,7 +10773,7 @@ impl RemoteReplica {
     /// one, the replica reports no liveness at all.
     fn status(&self, snapshot: &str) -> PathBuf {
         let calls = self.root.join("remote-status-calls");
-        let program = self.bin.join("harness-status");
+        let program = self.bin.join("agent-status");
         fs::write(
             &program,
             format!(

@@ -242,7 +242,7 @@ impl Session {
     }
 }
 
-/// The present-tense state supplied by the optional harness-status authority.
+/// The present-tense state supplied by the optional agent-status authority.
 /// Recording backends do not populate it, because a transcript cannot answer
 /// whether its session is running now.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

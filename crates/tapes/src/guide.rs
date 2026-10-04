@@ -209,7 +209,7 @@ FIND IT
   A session recorded in a directory that no longer exists cannot be placed in
   any project, so a scoped search will not find it. Its id still resolves.
 
-  When the optional harness-status command answers, list puts matching
+  When the optional agent-status command answers, list puts matching
   sessions' working or idle state in its separate LIVE column, and the JSON
   form carries the same `live` field. A missing, failed, malformed, oversized,
   or status snapshot slower than 250 ms leaves that field out and does not
@@ -284,7 +284,7 @@ READ A RECORDING ON ANOTHER MACHINE
   --remote asks the named host's own tapes over ssh and answers from that
   replica; nothing is installed there and no store is copied. The replica
   resolves its own scope paths and stores, and a session's live state is
-  whatever that machine reported: this machine's harness-status is never
+  whatever that machine reported: this machine's agent-status is never
   consulted for a replica, so live is unknown unless the replica answered.
   A replica that cannot answer is unavailable with the cause and the
   destination — never an empty listing, and never a completed session.
