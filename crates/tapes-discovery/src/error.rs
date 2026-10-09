@@ -1,5 +1,6 @@
 use std::fmt;
 use std::io;
+use std::path::PathBuf;
 
 /// Failures that prevent a native store observation from being complete.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -24,6 +25,13 @@ pub enum DiscoveryError {
         coordinate: String,
         status: String,
     },
+    /// A file named for the queried session records a different session.
+    IdentityMismatch {
+        coordinate: String,
+        path: PathBuf,
+        queried: String,
+        found: String,
+    },
 }
 
 impl DiscoveryError {
@@ -45,7 +53,8 @@ impl DiscoveryError {
             | Self::InvalidMetadata { coordinate, .. }
             | Self::BoundExhausted { coordinate, .. }
             | Self::TimedOut { coordinate }
-            | Self::CommandFailed { coordinate, .. } => coordinate,
+            | Self::CommandFailed { coordinate, .. }
+            | Self::IdentityMismatch { coordinate, .. } => coordinate,
         }
     }
 }
@@ -69,6 +78,16 @@ impl fmt::Display for DiscoveryError {
             Self::CommandFailed { coordinate, status } => {
                 write!(f, "{coordinate}: metadata command failed ({status})")
             }
+            Self::IdentityMismatch {
+                coordinate,
+                path,
+                queried,
+                found,
+            } => write!(
+                f,
+                "{coordinate}: {} is named for session {queried} but records session {found}",
+                path.display()
+            ),
         }
     }
 }

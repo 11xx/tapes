@@ -320,3 +320,137 @@ fn restore_env(name: &str, value: Option<std::ffi::OsString>) {
         std::env::remove_var(name);
     }
 }
+
+const CODEX_ID_A: &str = "00000000-0000-4000-8000-00000000000a";
+const CODEX_ID_B: &str = "00000000-0000-4000-8000-00000000000b";
+
+fn codex_record(id: &str) -> String {
+    format!("{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"{id}\"}}}}\n")
+}
+
+fn codex_name(id: &str) -> String {
+    format!("2026/09/24/rollout-2026-09-24T12-00-00-000Z-{id}.jsonl")
+}
+
+fn assert_mismatch_names_both(error: &str, path: &Path, queried: &str, found: &str) {
+    assert!(error.contains(queried), "{error}");
+    assert!(error.contains(found), "{error}");
+    assert!(error.contains(&path.display().to_string()), "{error}");
+}
+
+#[test]
+fn codex_file_named_for_one_id_but_recording_another_is_a_failure() {
+    let temp = Temp::new();
+    let root = temp.path().join("codex");
+    let path = write(&root, &codex_name(CODEX_ID_A), &codex_record(CODEX_ID_B));
+
+    let error = NativeStore::codex(&root)
+        .locate_exact(CODEX_ID_A)
+        .unwrap_err();
+    assert!(matches!(error, DiscoveryError::IdentityMismatch { .. }));
+    assert_mismatch_names_both(&error.to_string(), &path, CODEX_ID_A, CODEX_ID_B);
+
+    let result = Discovery::new([NativeStore::codex(&root)]).resolve(CODEX_ID_A);
+    match result {
+        Err(ResolveError::BackendFailed { failures, .. }) => {
+            assert_mismatch_names_both(&failures.join("; "), &path, CODEX_ID_A, CODEX_ID_B);
+        }
+        other => panic!("expected a backend failure, got {other:?}"),
+    }
+}
+
+#[test]
+fn pi_file_named_for_one_id_but_recording_another_is_a_failure() {
+    let temp = Temp::new();
+    let root = temp.path().join("pi");
+    let path = write(
+        &root,
+        "2026-09-24T12-00-00-000Z_session-a.jsonl",
+        "{\"type\":\"session\",\"id\":\"session-b\"}\n",
+    );
+
+    let error = NativeStore::pi(&root)
+        .locate_exact("session-a")
+        .unwrap_err();
+    assert_mismatch_names_both(&error.to_string(), &path, "session-a", "session-b");
+    assert!(matches!(
+        Discovery::new([NativeStore::pi(&root)]).resolve("session-a"),
+        Err(ResolveError::BackendFailed { .. })
+    ));
+}
+
+#[test]
+fn claude_file_named_for_one_id_but_recording_another_is_a_failure() {
+    let temp = Temp::new();
+    let root = temp.path().join("claude");
+    let path = write(
+        &root,
+        "project/session-a.jsonl",
+        "{\"sessionId\":\"session-b\"}\n",
+    );
+    let error = NativeStore::claude(&root)
+        .locate_exact("session-a")
+        .unwrap_err();
+    assert_mismatch_names_both(&error.to_string(), &path, "session-a", "session-b");
+}
+
+#[test]
+fn a_correct_file_for_the_queried_id_wins_over_a_mismatched_one() {
+    let temp = Temp::new();
+    let root = temp.path().join("codex");
+    write(&root, &codex_name(CODEX_ID_A), &codex_record(CODEX_ID_B));
+    let good = write(
+        &root,
+        &format!("2026/09/25/rollout-2026-09-25T12-00-00-000Z-{CODEX_ID_A}.jsonl"),
+        &codex_record(CODEX_ID_A),
+    );
+    for file_first in [false, true] {
+        if file_first {
+            let older = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+            fs::File::options()
+                .write(true)
+                .open(&good)
+                .unwrap()
+                .set_modified(older)
+                .unwrap();
+        }
+        let session = NativeStore::codex(&root)
+            .locate_exact(CODEX_ID_A)
+            .unwrap()
+            .unwrap();
+        assert_eq!(session.id(), CODEX_ID_A);
+        assert_eq!(session.locator(), Some(good.as_path()));
+        assert_eq!(
+            Discovery::new([NativeStore::codex(&root)])
+                .resolve(CODEX_ID_A)
+                .unwrap()
+                .id(),
+            CODEX_ID_A
+        );
+    }
+}
+
+#[test]
+fn the_first_mismatched_file_in_sort_order_is_reported() {
+    let temp = Temp::new();
+    let root = temp.path().join("codex");
+    let first = write(&root, &codex_name(CODEX_ID_A), &codex_record(CODEX_ID_B));
+    write(
+        &root,
+        &format!("2026/09/23/rollout-2026-09-23T12-00-00-000Z-{CODEX_ID_A}.jsonl"),
+        &codex_record("00000000-0000-4000-8000-00000000000c"),
+    );
+    let older = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+    fs::File::options()
+        .write(true)
+        .open(root.join("2026/09/23").join(format!(
+            "rollout-2026-09-23T12-00-00-000Z-{CODEX_ID_A}.jsonl"
+        )))
+        .unwrap()
+        .set_modified(older)
+        .unwrap();
+    let error = NativeStore::codex(&root)
+        .locate_exact(CODEX_ID_A)
+        .unwrap_err();
+    assert_mismatch_names_both(&error.to_string(), &first, CODEX_ID_A, CODEX_ID_B);
+}

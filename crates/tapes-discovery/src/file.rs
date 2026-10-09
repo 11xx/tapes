@@ -403,15 +403,24 @@ fn locate_exact_using(
             bound: "1,000 exact filename candidates",
         });
     }
+    let mut mismatch = None;
     for index in filename_matches {
         let path = &entries[index].path;
         match inspect(store, path) {
             Ok(Some(session)) if session.id() == id => return Ok(Some(session)),
-            Ok(_) => {}
-            Err(error) => return Err(error),
+            Ok(Some(other)) => {
+                mismatch.get_or_insert_with(|| DiscoveryError::IdentityMismatch {
+                    coordinate: store.coordinate(),
+                    path: path.clone(),
+                    queried: id.to_owned(),
+                    found: other.id().to_owned(),
+                });
+            }
+            Ok(None) => {}
+            Err(error) => return Err(mismatch.unwrap_or(error)),
         }
     }
-    if let Some(error) = first_failure {
+    if let Some(error) = mismatch.or(first_failure) {
         return Err(error);
     }
     Ok(None)
@@ -1098,6 +1107,37 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn a_mismatch_is_not_replaced_by_a_later_read_failure() {
+        let temp = Temp::new();
+        let root = temp.path().join("pi");
+        write(
+            &root,
+            "2026-09-23T12-00-00-000Z_id.jsonl",
+            "{\"type\":\"session\",\"id\":\"id\"}\n",
+        );
+        write(
+            &root,
+            "2026-09-24T12-00-00-000Z_id.jsonl",
+            "{\"type\":\"session\",\"id\":\"other\"}\n",
+        );
+        let store = NativeStore::pi(&root);
+        let mut opened = 0;
+        let error = locate_exact_using(&store, &root, "id", |store, path| {
+            opened += 1;
+            if opened == 1 {
+                probe(store, path)
+            } else {
+                Err(DiscoveryError::TimedOut {
+                    coordinate: store.coordinate(),
+                })
+            }
+        })
+        .unwrap_err();
+        assert_eq!(opened, 2);
+        assert!(matches!(error, DiscoveryError::IdentityMismatch { .. }));
     }
 
     #[test]
