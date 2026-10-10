@@ -3,7 +3,7 @@ use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
@@ -539,7 +539,8 @@ impl Backend for ClaudeBackend {
 
     /// A Claude session's children are the subagent transcripts under its own
     /// directory and the `Agent` calls its records hold. The parent names
-    /// them; a child's own turns are never read here.
+    /// them; a plugin-steered child's bounded ending can establish completion.
+    /// Enumeration and child-ending I/O failures leave lineage unreadable.
     fn lineage(&self, session: &Session) -> Result<Lineage> {
         let path = self.recording(session)?;
         let read = read_jsonl(&path, self.read_bytes)?;
@@ -549,7 +550,7 @@ impl Backend for ClaudeBackend {
         }
         Ok(Lineage {
             truncation: read_bounds(&read),
-            ..self.relatives(&path, calls)
+            ..self.relatives(&path, calls)?
         })
     }
 
@@ -560,7 +561,7 @@ impl Backend for ClaudeBackend {
             calls.observe(value);
             Ok(false)
         })?;
-        let mut lineage = self.relatives(&path, calls);
+        let mut lineage = self.relatives(&path, calls)?;
         lineage.notes.extend(skipped_records_note(read.skipped));
         Ok(lineage)
     }
@@ -698,11 +699,11 @@ impl ClaudeBackend {
 
     /// A Claude session's children: the subagent transcripts under its own
     /// directory, joined to the `Agent` calls its records hold.
-    fn relatives(&self, path: &Path, calls: AgentCalls) -> Lineage {
+    fn relatives(&self, path: &Path, calls: AgentCalls) -> Result<Lineage> {
         let AgentCalls(mut calls) = calls;
         let mut children = Vec::new();
         let mut notes = Vec::new();
-        for file in subagent_files(path) {
+        for file in subagent_files(path)? {
             if let Some(note) = file.metadata_note {
                 notes.push(note);
             }
@@ -727,9 +728,11 @@ impl ClaudeBackend {
                 },
             ];
             source.extend(call.sources());
-            let ending = (file.plugin_steered && call.completed_at.is_none())
-                .then(|| child_ending(&file.transcript, self.read_bytes))
-                .flatten();
+            let ending = if file.plugin_steered && call.completed_at.is_none() {
+                child_ending(&file.transcript, self.read_bytes)?
+            } else {
+                None
+            };
             if let Some(native_id) = ending.as_ref().and_then(|ending| ending.record.clone()) {
                 source.push(SourceRef::Record { native_id });
             }
@@ -759,11 +762,11 @@ impl ClaudeBackend {
             });
         }
 
-        Lineage {
+        Ok(Lineage {
             children,
             notes,
             ..Lineage::default()
-        }
+        })
     }
 }
 
@@ -950,11 +953,12 @@ fn count_unmapped(tally: &mut UnmappedTally, value: &Value) {
 /// many belong to it.
 fn subagent_notes(path: &Path) -> Vec<String> {
     match subagent_transcript_count(path) {
-        0 => Vec::new(),
-        1 => vec!["1 subagent transcript belongs to this session.".to_owned()],
-        count => vec![format!(
+        Ok(0) => Vec::new(),
+        Ok(1) => vec!["1 subagent transcript belongs to this session.".to_owned()],
+        Ok(count) => vec![format!(
             "{count} subagent transcripts belong to this session."
         )],
+        Err(error) => vec![format!("Subagent transcript count unavailable: {error:#}")],
     }
 }
 
@@ -1161,16 +1165,9 @@ fn claude_trailing_kind(value: &Value) -> Option<&'static str> {
     }
 }
 
-/// Claude names each project directory after the working directory it
-/// recorded, which looks like a way to select a scope's sessions without
-/// opening a file. It is not one, and this backend deliberately does not do
-/// it: the encoding is lossy, and a session recorded through a symlinked
-/// spelling of a path lands in a directory whose name no canonical scope
-/// root reproduces. Narrowing on the name would hide it, and a filter that
-/// can produce false negatives is a wrong answer rather than a fast one.
-/// The per-file directory probe is cheap enough to make the trade unnecessary.
-fn subagent_transcript_count(path: &Path) -> usize {
-    subagent_files(path).len()
+/// Count transcript filenames only when the entire child directory is readable.
+fn subagent_transcript_count(path: &Path) -> Result<usize> {
+    Ok(subagent_files(path)?.len())
 }
 
 pub(crate) fn parse_turns(value: &Value) -> Vec<Turn> {
@@ -2346,72 +2343,88 @@ struct ChildEnding {
 /// The ending a subagent's recording states: its final conversation record is
 /// an assistant record that stopped on `end_turn`. Housekeeping records
 /// Claude appends after the conversation do not reopen it. A recording whose
-/// final line cannot be read, whose final record lies outside the read bound,
-/// or whose ending carries no timestamp states no ending.
-fn child_ending(path: &Path, read_bytes: u64) -> Option<ChildEnding> {
-    let read = read_jsonl(path, read_bytes).ok()?;
-    let (index, last) = read
+/// final line cannot be parsed, whose final record lies outside the read bound,
+/// or whose ending carries no timestamp states no ending. I/O failures are errors.
+fn child_ending(path: &Path, read_bytes: u64) -> Result<Option<ChildEnding>> {
+    let read = read_jsonl(path, read_bytes)
+        .with_context(|| format!("Subagent ending {} unavailable", path.display()))?;
+    let Some((index, last)) = read
         .values
         .iter()
         .enumerate()
         .rev()
-        .find(|(_, value)| claude_trailing_kind(value).is_none())?;
+        .find(|(_, value)| claude_trailing_kind(value).is_none())
+    else {
+        return Ok(None);
+    };
     if read
         .gaps
         .iter()
         .any(|gap| gap.span.start >= read.spans[index].end)
     {
-        return None;
+        return Ok(None);
     }
     if last["type"] != "assistant" || last["message"]["stop_reason"] != "end_turn" {
-        return None;
+        return Ok(None);
     }
-    Some(ChildEnding {
-        at: timestamp(&last["timestamp"])?,
+    Ok(timestamp(&last["timestamp"]).map(|at| ChildEnding {
+        at,
         record: last["uuid"].as_str().map(str::to_owned),
-    })
+    }))
 }
 
 /// The subagent transcripts recorded under a session's own directory. Each
 /// carries a meta record naming the agent, and the file's stem carries the
 /// agent id the parent's completion record repeats.
-fn subagent_files(path: &Path) -> Vec<SubagentFile> {
-    let Some(session) = path.file_stem() else {
-        return Vec::new();
-    };
+fn subagent_files(path: &Path) -> Result<Vec<SubagentFile>> {
+    let session = path
+        .file_stem()
+        .ok_or_else(|| anyhow!("Claude recording has no file stem"))?;
     let directory = path.with_file_name(session).join("subagents");
-    let mut files = fs::read_dir(directory)
-        .into_iter()
-        .flatten()
-        .flatten()
-        .filter_map(|entry| {
-            let path = entry.path();
-            let agent_id = path
-                .file_stem()
-                .and_then(|stem| stem.to_str())?
-                .strip_prefix("agent-")?
-                .to_owned();
-            path.extension()
-                .is_some_and(|extension| extension == "jsonl")
-                .then(|| {
-                    let meta = path.with_file_name(format!("agent-{agent_id}.meta.json"));
-                    let (recorded, metadata_note) = subagent_metadata(&meta);
-                    SubagentFile {
-                        metadata_note,
-                        agent_id,
-                        transcript: path,
-                        meta,
-                        tool_use_id: recorded["toolUseId"].as_str().map(str::to_owned),
-                        agent_type: recorded["agentType"].as_str().map(str::to_owned),
-                        model: recorded["model"].as_str().map(str::to_owned),
-                        plugin_steered: recorded["pluginSteered"] == true
-                            && recorded["requestNonInteractive"] != false,
-                    }
-                })
-        })
-        .collect::<Vec<_>>();
+    let entries = match fs::read_dir(&directory) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!("Subagent enumeration {} unavailable", directory.display())
+            });
+        }
+    };
+    let mut files = Vec::new();
+    for entry in entries {
+        let entry = entry
+            .with_context(|| format!("Subagent enumeration {} unavailable", directory.display()))?;
+        let path = entry.path();
+        if !path
+            .extension()
+            .is_some_and(|extension| extension == "jsonl")
+        {
+            continue;
+        }
+        let Some(agent_id) = path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .and_then(|stem| stem.strip_prefix("agent-"))
+        else {
+            continue;
+        };
+        let agent_id = agent_id.to_owned();
+        let meta = path.with_file_name(format!("agent-{agent_id}.meta.json"));
+        let (recorded, metadata_note) = subagent_metadata(&meta);
+        files.push(SubagentFile {
+            metadata_note,
+            agent_id,
+            transcript: path,
+            meta,
+            tool_use_id: recorded["toolUseId"].as_str().map(str::to_owned),
+            agent_type: recorded["agentType"].as_str().map(str::to_owned),
+            model: recorded["model"].as_str().map(str::to_owned),
+            plugin_steered: recorded["pluginSteered"] == true
+                && recorded["requestNonInteractive"] != false,
+        });
+    }
     files.sort_by(|left, right| left.agent_id.cmp(&right.agent_id));
-    files
+    Ok(files)
 }
 
 fn subagent_metadata(path: &Path) -> (Value, Option<String>) {

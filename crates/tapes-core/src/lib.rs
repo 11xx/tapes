@@ -1151,9 +1151,9 @@ pub fn lineage_full_with_backends(
     Ok(view)
 }
 
-/// One session's recorded relatives. The read never opens a child's turns:
-/// ordinary child sessions are read under their own IDs, while Claude
-/// subagent evidence is read through the parent-qualified child API.
+/// One session's recorded relatives. Ordinary child sessions are read under
+/// their own IDs. Claude plugin-steered completion uses the child's bounded
+/// ending; failed enumeration or required ending reads propagate to the caller.
 pub fn lineage(selection: Selection) -> Result<lineage::LineageView> {
     lineage_with_backends(&backend::backends(), selection)
 }
@@ -1172,7 +1172,7 @@ pub fn lineage_with_backends(
 
 /// One session's counted facts. The transcript read uses the export-shaped
 /// window, and the relatives are counted from the same reference read
-/// `lineage` answers with, which never opens a child.
+/// `lineage` answers with; child turns are excluded from parent totals.
 pub fn stats(selection: Selection) -> Result<stats::StatsView> {
     stats_with_backends(&backend::backends(), selection)
 }

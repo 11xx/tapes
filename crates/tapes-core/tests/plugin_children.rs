@@ -4,6 +4,7 @@
 //! recording's final record the only statement of its completion.
 
 use std::fs;
+use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 
 use agent_tapes_core::backend::claude::ClaudeBackend;
@@ -441,7 +442,7 @@ fn a_final_record_larger_than_the_bound_leaves_the_child_open() {
 }
 
 #[test]
-fn a_missing_or_unreadable_child_recording_is_not_an_error() {
+fn a_nonregular_child_recording_fails_lineage() {
     let store = Store::new("missing");
     store.write_parent(&[parent_prompt()]);
     store.write_child(FINISHED, &plugin_meta(), "");
@@ -454,10 +455,12 @@ fn a_missing_or_unreadable_child_recording_is_not_an_error() {
     )
     .unwrap();
 
-    let lineage = store.lineage(&ClaudeBackend::new(&store.0));
-
-    assert_eq!(lineage.children.len(), 1, "{:#?}", lineage.children);
-    assert!(lineage.children[0].completed_at.is_none());
+    let backend = ClaudeBackend::new(&store.0);
+    let session = backend.locate(PARENT).unwrap().unwrap();
+    for result in [backend.lineage(&session), backend.stream_lineage(&session)] {
+        let error = result.expect_err("a child transcript directory is unreadable");
+        assert!(format!("{error:#}").contains("Is a directory"), "{error:#}");
+    }
 }
 
 #[test]
@@ -506,4 +509,149 @@ fn unknown_trailing_records_and_gaps_before_housekeeping_leave_the_child_open() 
         + &lines(&[json!({"type": "cost-state", "sessionId": PARENT, "totalCostUSD": 0.5})]);
     let (_store, child) = single_child("gap-before-housekeeping", &plugin_meta(), &recording);
     assert!(child.completed_at.is_none());
+}
+
+struct Unreadable {
+    path: PathBuf,
+    permissions: fs::Permissions,
+}
+
+impl Unreadable {
+    fn new(path: PathBuf) -> Self {
+        let permissions = fs::metadata(&path).unwrap().permissions();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o000)).unwrap();
+        Self { path, permissions }
+    }
+}
+
+impl Drop for Unreadable {
+    fn drop(&mut self) {
+        fs::set_permissions(&self.path, self.permissions.clone()).unwrap();
+    }
+}
+
+fn assert_lineage_read_failure(store: &Store, component: &str) {
+    let backend = ClaudeBackend::new(&store.0);
+    let session = backend.locate(PARENT).unwrap().unwrap();
+    for result in [backend.lineage(&session), backend.stream_lineage(&session)] {
+        let error = result.expect_err("an unreadable child store cannot establish lineage");
+        let diagnostic = format!("{error:#}");
+        assert!(diagnostic.contains(component), "{diagnostic}");
+        assert!(diagnostic.contains("Permission denied"), "{diagnostic}");
+        assert_eq!(
+            error.downcast_ref::<std::io::Error>().unwrap().kind(),
+            std::io::ErrorKind::PermissionDenied,
+        );
+    }
+}
+
+#[test]
+fn an_unreadable_child_directory_fails_bounded_and_streamed_lineage() {
+    let store = Store::new("unreadable-directory");
+    store.write_parent(&[parent_prompt()]);
+    store.write_child(
+        FINISHED,
+        &plugin_meta(),
+        &lines(&[brief(FINISHED), ended(FINISHED)]),
+    );
+    let _unreadable = Unreadable::new(store.project().join(PARENT).join("subagents"));
+
+    assert_lineage_read_failure(&store, "subagents");
+}
+
+#[test]
+fn an_unreadable_child_transcript_fails_bounded_and_streamed_lineage() {
+    let store = Store::new("unreadable-transcript");
+    store.write_parent(&[parent_prompt()]);
+    store.write_child(
+        FINISHED,
+        &plugin_meta(),
+        &lines(&[brief(FINISHED), ended(FINISHED)]),
+    );
+    let _unreadable = Unreadable::new(
+        store
+            .project()
+            .join(PARENT)
+            .join("subagents")
+            .join(format!("agent-{FINISHED}.jsonl")),
+    );
+
+    assert_lineage_read_failure(&store, &format!("agent-{FINISHED}.jsonl"));
+}
+
+#[test]
+fn an_unreadable_child_directory_reports_an_unknown_transcript_count() {
+    let store = Store::new("unreadable-count");
+    store.write_parent(&[parent_prompt()]);
+    store.write_child(
+        FINISHED,
+        &plugin_meta(),
+        &lines(&[brief(FINISHED), ended(FINISHED)]),
+    );
+    let backend = ClaudeBackend::new(&store.0);
+    let session = backend.locate(PARENT).unwrap().unwrap();
+    let _unreadable = Unreadable::new(store.project().join(PARENT).join("subagents"));
+
+    let bounded = backend.transcript(&session, 20).unwrap();
+    let streamed = backend
+        .stream_transcript(&session, None, &mut |_| Ok(()))
+        .unwrap();
+    for notes in [bounded.notes, streamed.notes] {
+        assert!(
+            notes.iter().any(
+                |note| note.contains("Subagent transcript count unavailable")
+                    && note.contains("Permission denied")
+            ),
+            "{notes:?}"
+        );
+        assert!(
+            !notes
+                .iter()
+                .any(|note| note.contains("belongs to this session")
+                    || note.contains("belong to this session")),
+            "{notes:?}"
+        );
+    }
+}
+
+#[test]
+fn an_absent_child_directory_establishes_no_stored_children() {
+    let store = Store::new("absent-directory");
+    store.write_parent(&[parent_prompt()]);
+    let backend = ClaudeBackend::new(&store.0);
+    let session = backend.locate(PARENT).unwrap().unwrap();
+    assert!(store.lineage(&backend).children.is_empty());
+    assert!(backend.transcript(&session, 20).unwrap().notes.is_empty());
+    assert!(backend
+        .stream_transcript(&session, None, &mut |_| Ok(()))
+        .unwrap()
+        .notes
+        .is_empty());
+}
+
+#[test]
+fn an_unreadable_child_body_does_not_invalidate_its_observed_file_count() {
+    let store = Store::new("readable-count");
+    store.write_parent(&[parent_prompt()]);
+    store.write_child(
+        FINISHED,
+        &plugin_meta(),
+        &lines(&[brief(FINISHED), ended(FINISHED)]),
+    );
+    let backend = ClaudeBackend::new(&store.0);
+    let session = backend.locate(PARENT).unwrap().unwrap();
+    let _unreadable = Unreadable::new(
+        store
+            .project()
+            .join(PARENT)
+            .join("subagents")
+            .join(format!("agent-{FINISHED}.jsonl")),
+    );
+    let bounded = backend.transcript(&session, 20).unwrap();
+    let streamed = backend
+        .stream_transcript(&session, None, &mut |_| Ok(()))
+        .unwrap();
+    for notes in [bounded.notes, streamed.notes] {
+        assert_eq!(notes, ["1 subagent transcript belongs to this session."]);
+    }
 }

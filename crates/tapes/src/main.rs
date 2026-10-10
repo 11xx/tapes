@@ -1015,7 +1015,8 @@ enum Command {
     /// when agent-status is reachable,
     /// and a verified trailing record is named when the store ends after its
     /// last rendered turn. Activity comparisons use the whole-second
-    /// timestamps shown to the reader.
+    /// timestamps shown to the reader. Claude subagent count notes report
+    /// failed directory enumeration instead of a count.
     Show {
         /// Cap each shown turn's text at N Unicode characters. JSON includes
         /// text_truncated: true and the original text_chars on capped turns;
@@ -1168,7 +1169,8 @@ enum Command {
     },
     /// Project typed tool calls and results from a session or selection. Pairing is exact
     /// within the bounded read; an unpaired event names which read boundary
-    /// prevented a complete pair.
+    /// prevented a complete pair. Claude subagent count notes report failed
+    /// directory enumeration instead of a count.
     Events {
         #[command(flatten)]
         selection: SessionQueryArgs,
@@ -1247,6 +1249,9 @@ enum Command {
     /// housekeeping, including cost-state and system turn_duration/stop_hook_summary,
     /// is skipped; unknown records and read gaps do not establish completion. Otherwise
     /// it has no completion stamp, which does not say it is still running.
+    /// Failed Claude subagent enumeration or a required child-ending read fails
+    /// lineage with its source and I/O diagnostic. An absent subagent directory
+    /// establishes no stored child transcripts.
     Lineage {
         #[command(flatten)]
         selection: SelectionArgs,
@@ -1264,6 +1269,7 @@ enum Command {
     },
     /// A payload-free per-turn timeline for one session or a selection.
     /// Uses the same selection, scope and read bounds as stats.
+    /// Claude subagent count notes report failed enumeration instead of a count.
     Timeline {
         #[command(flatten)]
         query: SessionQueryArgs,
@@ -1298,8 +1304,10 @@ enum Command {
     /// A scope or listing filter selects multiple sessions and returns
     /// tapes-stats-summary/8: recorded tools grouped by harness and name,
     /// with per-session read coverage, pairing counts and failures, and per
-    /// harness the recordable kinds no session read held. Children are not
-    /// read through their parents.
+    /// harness the recordable kinds no session read held. Child turns are
+    /// excluded from parent totals. Failed Claude subagent enumeration or a
+    /// required child-ending read fails single-session stats; a selection
+    /// retains the failure for that session.
     Stats {
         #[command(flatten)]
         query: SessionQueryArgs,
@@ -1340,7 +1348,8 @@ enum Command {
     /// over the sessions that recorded it. The accounting basis and coverage
     /// decide whether figures may be summed; cost is only what the harness
     /// recorded, and quota is a separate fact about the account rather than
-    /// these sessions.
+    /// these sessions. Claude subagent count notes report failed directory
+    /// enumeration instead of a count.
     Usage {
         #[command(flatten)]
         query: SessionQueryArgs,
@@ -1403,7 +1412,9 @@ enum Command {
     /// children whose outcome the store does not record, and a bounded tail
     /// of the exchange. It reads the recording alone and judges nothing —
     /// what a project's journal records about the same work is the other half
-    /// of a continuation, and the caller joins them.
+    /// of a continuation, and the caller joins them. Failed Claude subagent
+    /// enumeration or a required child-ending read is reported as unavailable
+    /// lineage, with the diagnostic; an empty child list proves nothing then.
     Brief {
         #[command(flatten)]
         selection: SelectionArgs,
@@ -1430,7 +1441,9 @@ enum Command {
     /// result for, results no turn narrates, a closing assistant turn. What
     /// the read left unestablished is named beside them, and `source` is the
     /// coordinate to write down when filing a follow-up. The report infers no
-    /// reason for an ending and labels no session complete.
+    /// reason for an ending and labels no session complete. Failed Claude
+    /// subagent enumeration or a required child-ending read leaves lineage
+    /// uninspected and retains its diagnostic.
     Endings {
         /// Restrict results to one harness.
         #[arg(long)]
@@ -1507,7 +1520,8 @@ enum Command {
     /// exchange, as `show --exchange` returns it; `.json` and `.trace.md` hold
     /// every turn, and `.json` also holds the paired tool `events`. --only,
     /// --omit, and --origin narrow all three; the JSON and trace count omitted
-    /// turns by kind under `projection`.
+    /// turns by kind under `projection`. Claude subagent count notes report
+    /// failed directory enumeration instead of a count.
     #[command(group(clap::ArgGroup::new("export_selection")
         .args(["session", "latest", "title", "occurrence", "input", "native_store", "here", "project", "global", "harness", "model", "launch", "directory", "since", "until", "search"])
         .required(true).multiple(true)))]

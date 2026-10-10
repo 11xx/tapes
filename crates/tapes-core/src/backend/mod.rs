@@ -492,8 +492,9 @@ pub trait Backend {
         ))
     }
     /// The relationships this session's store records for it. The default is
-    /// the answer for a harness that records none: a backend reports only
-    /// what a record names, and never reads a child's turns.
+    /// the answer for a harness that records none. A backend reports only
+    /// recorded relationships, reports required enumeration and ending-read
+    /// failures, and excludes child turns from the parent's transcript.
     fn lineage(&self, session: &Session) -> Result<Lineage> {
         let _ = session;
         Ok(Lineage::default())

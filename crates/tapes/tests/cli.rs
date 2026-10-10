@@ -13006,3 +13006,70 @@ fn pinned_history_help_describes_local_verification_and_its_limits() {
         assert!(!help.contains("--remote"), "{command}: {help}");
     }
 }
+
+#[test]
+fn unreadable_claude_children_reach_cli_errors_and_coverage_notes() {
+    let root = TemporaryDirectory::new(std::env::temp_dir().join(format!(
+        "tapes-cli-unreadable-children-{}",
+        std::process::id()
+    )));
+    let home = root.path().join("home");
+    let project = home.join(".claude/projects/fixture");
+    let children = project.join("session-claude/subagents");
+    fs::create_dir_all(&children).unwrap();
+    fs::write(project.join("session-claude.jsonl"), CLAUDE_SESSION).unwrap();
+    let child = children.join("agent-hidden.jsonl");
+    fs::write(&child, CLAUDE_SESSION).unwrap();
+    fs::write(
+        children.join("agent-hidden.meta.json"),
+        r#"{"pluginSteered":true,"requestNonInteractive":true}"#,
+    )
+    .unwrap();
+    let run = |arguments: &[&str]| {
+        let mut command = tapes();
+        command.args(arguments);
+        with_fixture_env(&mut command, &root.path().join("codex"), &home, root.path());
+        command.output().unwrap()
+    };
+    for path in [&children, &child] {
+        let permissions = fs::metadata(path).unwrap().permissions();
+        fs::set_permissions(path, fs::Permissions::from_mode(0o000)).unwrap();
+        let bounded = run(&["lineage", "session-claude", "--json"]);
+        let full = run(&["lineage", "session-claude", "--full", "--json"]);
+        let brief = run(&["brief", "session-claude", "--json"]);
+        let show = run(&["show", "session-claude", "--json"]);
+        fs::set_permissions(path, permissions).unwrap();
+        for output in [bounded, full] {
+            assert!(!output.status.success(), "{output:?}");
+            assert!(output.stdout.is_empty(), "{output:?}");
+            let diagnostic = String::from_utf8_lossy(&output.stderr);
+            assert!(
+                diagnostic.contains("Subagent") && diagnostic.contains("Permission denied"),
+                "{diagnostic}"
+            );
+        }
+        assert!(brief.status.success(), "{brief:?}");
+        let value: Value = serde_json::from_slice(&brief.stdout).unwrap();
+        assert!(
+            value["notes"].as_array().unwrap().iter().any(|note| note
+                .as_str()
+                .is_some_and(|note| note.contains("Recorded relatives could not be read")
+                    && note.contains("Permission denied"))),
+            "{value}"
+        );
+        assert!(show.status.success(), "{show:?}");
+        if path == &children {
+            let value: Value = serde_json::from_slice(&show.stdout).unwrap();
+            assert!(
+                value["notes"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|note| note.as_str().is_some_and(|note| note
+                        .contains("Subagent transcript count unavailable")
+                        && note.contains("Permission denied"))),
+                "{value}"
+            );
+        }
+    }
+}

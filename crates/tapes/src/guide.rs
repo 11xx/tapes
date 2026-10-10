@@ -530,6 +530,9 @@ PROBE BEFORE EXPORTING
   A parent refers to a child and never absorbs it. Use `show` with an ordinary
   child session ID, or `child PARENT --reference CHILD` for a Claude subagent.
   Claude child references do not become ordinary session IDs.
+  Claude lineage fails when subagent directory enumeration or a required
+  child-ending read fails, naming the source and retaining the I/O error.
+  An absent subagent directory establishes no stored child transcripts.
   What each harness records differs: claude names its subagent transcripts and
   the Agent calls that spawned them, codex joins spawn and wait calls to the
   rollout headers naming this session as their parent, opencode reads the
@@ -771,7 +774,9 @@ SIGNALS THAT THE PICTURE IS PARTIAL
   what the normalized model has no field for: pi's abandoned branches, where a
   large remainder means the user changed direction; a claude session's
   subagent transcripts, which live in separate files and whose endings are not
-  the parent's; lines that would not parse; an opencode page boundary. Codex
+  the parent's; lines that would not parse; an opencode page boundary. A
+  subagent count requires successful directory enumeration; failed enumeration
+  produces a diagnostic note instead of a count. Codex
   reasoning is frequently encrypted and arrives as `[encrypted reasoning]`, so
   that placeholder marks reasoning you cannot read rather than reasoning that
   did not happen. Read both signals and state what is missing rather than
