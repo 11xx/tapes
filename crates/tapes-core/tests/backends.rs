@@ -1680,7 +1680,13 @@ fn claude_cost_state_supplies_recorded_totals_over_request_usage() {
         2,
         "cost-state is metadata, not a turn"
     );
-    assert!(transcript.trailing_record.is_none());
+    assert_eq!(
+        transcript
+            .trailing_record
+            .as_ref()
+            .map(|record| record.kind.as_str()),
+        Some("cost-state")
+    );
 
     fs::remove_dir_all(root).unwrap();
 }

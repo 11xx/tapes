@@ -459,3 +459,51 @@ fn a_missing_or_unreadable_child_recording_is_not_an_error() {
     assert_eq!(lineage.children.len(), 1, "{:#?}", lineage.children);
     assert!(lineage.children[0].completed_at.is_none());
 }
+
+#[test]
+fn all_known_housekeeping_records_preserve_the_final_conversation_ending() {
+    let housekeeping = [
+        json!({"type": "cost-state", "sessionId": PARENT, "totalCostUSD": 0.5}),
+        json!({"type": "custom-title", "sessionId": PARENT, "customTitle": "Review"}),
+        json!({"type": "agent-name", "sessionId": PARENT, "agentName": "Reviewer"}),
+        json!({"type": "queue-operation", "sessionId": PARENT, "operation": "dequeue"}),
+        json!({"type": "bridge-session", "sessionId": PARENT, "lastSequenceNum": 1}),
+        json!({"type": "file-history-snapshot", "messageId": "ending", "isSnapshotUpdate": true}),
+        json!({"type": "file-history-delta", "messageId": "ending", "snapshotMessageId": "snapshot"}),
+        json!({"type": "system", "subtype": "turn_duration", "sessionId": PARENT, "durationMs": 10}),
+        json!({"type": "system", "subtype": "stop_hook_summary", "sessionId": PARENT, "hookCount": 0}),
+    ];
+    for (index, record) in housekeeping.into_iter().enumerate() {
+        let (_store, child) = single_child(
+            &format!("known-housekeeping-{index}"),
+            &plugin_meta(),
+            &lines(&[brief(FINISHED), ended(FINISHED), record.clone()]),
+        );
+        assert_eq!(
+            child.completed_at,
+            Some(instant("2026-10-09T18:39:12.500Z")),
+            "{record}: {child:#?}"
+        );
+        assert!(has_record(&child, &format!("{FINISHED}-ending")));
+    }
+}
+
+#[test]
+fn unknown_trailing_records_and_gaps_before_housekeeping_leave_the_child_open() {
+    for record in [
+        json!({"type": "future-metadata", "sessionId": PARENT}),
+        json!({"type": "system", "subtype": "future-system", "sessionId": PARENT}),
+    ] {
+        let (_store, child) = single_child(
+            "unknown",
+            &plugin_meta(),
+            &lines(&[brief(FINISHED), ended(FINISHED), record]),
+        );
+        assert!(child.completed_at.is_none());
+    }
+    let recording = lines(&[brief(FINISHED), ended(FINISHED)])
+        + "malformed\n"
+        + &lines(&[json!({"type": "cost-state", "sessionId": PARENT, "totalCostUSD": 0.5})]);
+    let (_store, child) = single_child("gap-before-housekeeping", &plugin_meta(), &recording);
+    assert!(child.completed_at.is_none());
+}

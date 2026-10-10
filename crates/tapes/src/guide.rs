@@ -540,7 +540,8 @@ PROBE BEFORE EXPORTING
   parent states neither its spawn nor its end. When such a subagent takes no
   further input, its completion is read from its own recording: the timestamp
   of its final record, if that is an assistant record that stopped on end_turn
-  (trailing housekeeping records are skipped), with that record's id in source
+  (known trailing housekeeping records, including cost-state and system
+  turn_duration/stop_hook_summary, are skipped), with that record's id in source
   after the recording's file. Without that ending there is no completion
   stamp, which means not seen to finish rather than running: a child killed
   mid-turn reads the same. A completion the parent's own records state is

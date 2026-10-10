@@ -942,24 +942,7 @@ fn count_unmapped(tally: &mut UnmappedTally, value: &Value) {
         _ => None,
     };
     let native_type = detail.map_or_else(|| kind.to_owned(), |detail| format!("{kind}/{detail}"));
-    let declined = matches!(
-        kind,
-        "cost-state"
-            | "ai-title"
-            | "custom-title"
-            | "agent-name"
-            | "last-prompt"
-            | "mode"
-            | "permission-mode"
-            | "atis-latch"
-            | "queue-operation"
-            | "bridge-session"
-            | "file-history-snapshot"
-            | "file-history-delta"
-    ) || matches!(
-        native_type.as_str(),
-        "system/turn_duration" | "system/stop_hook_summary"
-    );
+    let declined = claude_trailing_kind(value).is_some();
     tally.add(native_type, declined);
 }
 
@@ -1157,11 +1140,23 @@ impl RequestTokens {
 
 fn claude_trailing_kind(value: &Value) -> Option<&'static str> {
     match value["type"].as_str()? {
+        "cost-state" => Some("cost-state"),
         "last-prompt" => Some("last-prompt"),
         "ai-title" => Some("ai-title"),
+        "custom-title" => Some("custom-title"),
+        "agent-name" => Some("agent-name"),
         "mode" => Some("mode"),
         "permission-mode" => Some("permission-mode"),
         "atis-latch" => Some("atis-latch"),
+        "queue-operation" => Some("queue-operation"),
+        "bridge-session" => Some("bridge-session"),
+        "file-history-snapshot" => Some("file-history-snapshot"),
+        "file-history-delta" => Some("file-history-delta"),
+        "system" => match value["subtype"].as_str()? {
+            "turn_duration" => Some("system/turn_duration"),
+            "stop_hook_summary" => Some("system/stop_hook_summary"),
+            _ => None,
+        },
         _ => None,
     }
 }

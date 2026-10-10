@@ -1243,7 +1243,9 @@ enum Command {
     /// subagent a plugin launched has no spawn or completion in the parent's
     /// records; one that takes no further input is stamped completed from its
     /// own recording when that recording's final record is an assistant record
-    /// that stopped on `end_turn`, citing that record in `source`. Otherwise
+    /// that stopped on `end_turn`, citing that record in `source`. Known trailing
+    /// housekeeping, including cost-state and system turn_duration/stop_hook_summary,
+    /// is skipped; unknown records and read gaps do not establish completion. Otherwise
     /// it has no completion stamp, which does not say it is still running.
     Lineage {
         #[command(flatten)]
