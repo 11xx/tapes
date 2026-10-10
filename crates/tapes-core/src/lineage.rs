@@ -122,8 +122,9 @@ impl ChildRef {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
 pub enum SourceRef {
-    /// A record in this session's own recording, by the identifier its
-    /// harness wrote on it.
+    /// A record, by the identifier its harness wrote on it: one in this
+    /// session's own recording, or, listed after a child's recording file, one
+    /// in that recording.
     Record { native_id: String },
     /// A file in the store.
     File { path: String },

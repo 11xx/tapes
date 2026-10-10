@@ -727,11 +727,17 @@ impl ClaudeBackend {
                 },
             ];
             source.extend(call.sources());
+            let ending = (file.plugin_steered && call.completed_at.is_none())
+                .then(|| child_ending(&file.transcript, self.read_bytes))
+                .flatten();
+            if let Some(native_id) = ending.as_ref().and_then(|ending| ending.record.clone()) {
+                source.push(SourceRef::Record { native_id });
+            }
             children.push(ChildRef {
                 role: file.agent_type.or(call.agent_type).or(call.role),
                 model: file.model.or(call.model),
                 spawned_at: call.spawned_at,
-                completed_at: call.completed_at,
+                completed_at: call.completed_at.or(ending.map(|ending| ending.at)),
                 disposition: call.disposition,
                 resolved: true,
                 source,
@@ -2255,6 +2261,10 @@ struct SubagentFile {
     tool_use_id: Option<String>,
     agent_type: Option<String>,
     model: Option<String>,
+    /// A plugin launched this subagent and nothing answers it afterwards, so
+    /// the parent records no `Agent` call for it and its own recording is the
+    /// only statement of where it ended.
+    plugin_steered: bool,
 }
 
 /// The agent calls a Claude recording holds, keyed by tool-use id and folded
@@ -2331,6 +2341,42 @@ fn tool_use_result(value: &Value) -> Option<Value> {
     }
 }
 
+/// Where a subagent's own recording ends its turn.
+struct ChildEnding {
+    at: chrono::DateTime<chrono::Utc>,
+    /// The identifier Claude wrote on the ending record.
+    record: Option<String>,
+}
+
+/// The ending a subagent's recording states: its final conversation record is
+/// an assistant record that stopped on `end_turn`. Housekeeping records
+/// Claude appends after the conversation do not reopen it. A recording whose
+/// final line cannot be read, whose final record lies outside the read bound,
+/// or whose ending carries no timestamp states no ending.
+fn child_ending(path: &Path, read_bytes: u64) -> Option<ChildEnding> {
+    let read = read_jsonl(path, read_bytes).ok()?;
+    let (index, last) = read
+        .values
+        .iter()
+        .enumerate()
+        .rev()
+        .find(|(_, value)| claude_trailing_kind(value).is_none())?;
+    if read
+        .gaps
+        .iter()
+        .any(|gap| gap.span.start >= read.spans[index].end)
+    {
+        return None;
+    }
+    if last["type"] != "assistant" || last["message"]["stop_reason"] != "end_turn" {
+        return None;
+    }
+    Some(ChildEnding {
+        at: timestamp(&last["timestamp"])?,
+        record: last["uuid"].as_str().map(str::to_owned),
+    })
+}
+
 /// The subagent transcripts recorded under a session's own directory. Each
 /// carries a meta record naming the agent, and the file's stem carries the
 /// agent id the parent's completion record repeats.
@@ -2363,6 +2409,8 @@ fn subagent_files(path: &Path) -> Vec<SubagentFile> {
                         tool_use_id: recorded["toolUseId"].as_str().map(str::to_owned),
                         agent_type: recorded["agentType"].as_str().map(str::to_owned),
                         model: recorded["model"].as_str().map(str::to_owned),
+                        plugin_steered: recorded["pluginSteered"] == true
+                            && recorded["requestNonInteractive"] != false,
                     }
                 })
         })
