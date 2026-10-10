@@ -10,10 +10,10 @@ use sha2::{Digest, Sha256};
 use super::{
     accounting_for, bounded_launch, default_native_store, enrich_native_session, head_directory,
     list_discovered_files, list_discovered_files_with_search, merge_launch, read_bounds,
-    read_jsonl, read_recording, replay_pin, skipped_records_note, stream_jsonl,
-    streamed_trailing_record, timestamp, trailing_record, transcript, transcript_from_recording,
-    ActivityRange, Backend, Jsonl, Listing, ParsedFile, Query, StreamedChild, StreamedTranscript,
-    TokenTotals, UnmappedTally,
+    read_recording, replay_pin, skipped_records_note, stream_jsonl, streamed_trailing_record,
+    timestamp, trailing_record, transcript, transcript_from_recording, ActivityRange, Backend,
+    Jsonl, Listing, ParsedFile, Query, StreamedChild, StreamedTranscript, TokenTotals,
+    UnmappedTally,
 };
 use crate::content::{
     bounded_shape, bounded_text, text_part, tool_coverage, tool_part, ArtifactReference,
@@ -225,6 +225,7 @@ impl ClaudeBackend {
             .ok_or_else(|| anyhow!("session has no source file"))?;
         crate::history::read_file(
             session,
+            "claude",
             path,
             cursor,
             bytes,
@@ -500,12 +501,14 @@ impl Backend for ClaudeBackend {
             .ok_or_else(|| anyhow!("claude session {} has no file locator", session.id))?;
         let mut launch = None;
         let opening = stream_jsonl(path, replay_pin(replay)?, |value, _, _| {
+            super::validate_native_identity(value, "claude", &session.id)?;
             launch = merge_launch(launch, claude_entrypoint(value));
             Ok(false)
         })?;
         let domain = format!("file:{}", path.display());
         let mut unmapped = UnmappedTally::default();
         let read = stream_jsonl(path, Some(opening.pin()), |value, span, revision| {
+            super::validate_native_identity(value, "claude", &session.id)?;
             let mut parsed = parse_turns(value);
             if parsed.is_empty() {
                 count_unmapped(&mut unmapped, value);
@@ -543,14 +546,16 @@ impl Backend for ClaudeBackend {
     /// Enumeration and child-ending I/O failures leave lineage unreadable.
     fn lineage(&self, session: &Session) -> Result<Lineage> {
         let path = self.recording(session)?;
-        let read = read_jsonl(&path, self.read_bytes)?;
+        let recording = read_recording(&path, self.read_bytes)?;
+        super::validate_recording_identity(&recording, "claude", &session.id)?;
+        let read = &recording.tail;
         let mut calls = AgentCalls::default();
         for value in &read.values {
             calls.observe(value);
         }
         Ok(Lineage {
-            truncation: read_bounds(&read),
-            ..self.relatives(&path, calls)?
+            truncation: read_bounds(read),
+            ..self.relatives(&path, &session.id, calls)?
         })
     }
 
@@ -558,10 +563,11 @@ impl Backend for ClaudeBackend {
         let path = self.recording(session)?;
         let mut calls = AgentCalls::default();
         let read = stream_jsonl(&path, None, |value, _, _| {
+            super::validate_native_identity(value, "claude", &session.id)?;
             calls.observe(value);
             Ok(false)
         })?;
-        let mut lineage = self.relatives(&path, calls)?;
+        let mut lineage = self.relatives(&path, &session.id, calls)?;
         lineage.notes.extend(skipped_records_note(read.skipped));
         Ok(lineage)
     }
@@ -571,6 +577,7 @@ impl Backend for ClaudeBackend {
         let mut records = ClaudeRecords::default();
         let mut last_end = 0;
         stream_jsonl(&path, Some(read.pin()?), |value, span, _| {
+            super::validate_native_identity(value, "claude", &session.id)?;
             if span.start != last_end {
                 records.selections.interrupt();
             }
@@ -699,7 +706,7 @@ impl ClaudeBackend {
 
     /// A Claude session's children: the subagent transcripts under its own
     /// directory, joined to the `Agent` calls its records hold.
-    fn relatives(&self, path: &Path, calls: AgentCalls) -> Result<Lineage> {
+    fn relatives(&self, path: &Path, parent_id: &str, calls: AgentCalls) -> Result<Lineage> {
         let AgentCalls(mut calls) = calls;
         let mut children = Vec::new();
         let mut notes = Vec::new();
@@ -729,7 +736,7 @@ impl ClaudeBackend {
             ];
             source.extend(call.sources());
             let ending = if file.plugin_steered && call.completed_at.is_none() {
-                child_ending(&file.transcript, self.read_bytes)?
+                child_ending(&file.transcript, parent_id, self.read_bytes)?
             } else {
                 None
             };
@@ -905,6 +912,7 @@ fn read_transcript(
     crate::model::UnmappedRecords,
 )> {
     let recording = read_recording(path, read_bytes)?;
+    super::validate_recording_identity(&recording, "claude", &session.id)?;
     let read = &recording.tail;
     let mut turns = Vec::new();
     let mut last_turn = None;
@@ -2344,10 +2352,25 @@ struct ChildEnding {
 /// an assistant record that stopped on `end_turn`. Housekeeping records
 /// Claude appends after the conversation do not reopen it. A recording whose
 /// final line cannot be parsed, whose final record lies outside the read bound,
-/// or whose ending carries no timestamp states no ending. I/O failures are errors.
-fn child_ending(path: &Path, read_bytes: u64) -> Result<Option<ChildEnding>> {
-    let read = read_jsonl(path, read_bytes)
+/// or whose ending carries no timestamp states no ending. The opening and tail
+/// must carry matching native parent identity evidence. Identity and I/O failures
+/// are errors.
+fn child_ending(path: &Path, parent_id: &str, read_bytes: u64) -> Result<Option<ChildEnding>> {
+    let recording = read_recording(path, read_bytes)
         .with_context(|| format!("Subagent ending {} unavailable", path.display()))?;
+    let mut identified = false;
+    for value in recording.opening().iter().chain(&recording.tail.values) {
+        if let Some(id) = value.get("sessionId") {
+            if id.as_str() != Some(parent_id) {
+                anyhow::bail!("child recording contains a different or invalid native parent ID");
+            }
+            identified = true;
+        }
+    }
+    if !identified {
+        anyhow::bail!("child recording has no native parent identity evidence");
+    }
+    let read = &recording.tail;
     let Some((index, last)) = read
         .values
         .iter()
@@ -2430,7 +2453,7 @@ fn subagent_files(path: &Path) -> Result<Vec<SubagentFile>> {
 fn subagent_metadata(path: &Path) -> (Value, Option<String>) {
     const LIMIT: usize = 64 * 1024;
     let read = || -> Result<Value> {
-        let file = fs::File::open(path)?;
+        let file = super::open_regular_file(path)?;
         let mut bytes = Vec::new();
         file.take((LIMIT + 1) as u64).read_to_end(&mut bytes)?;
         if bytes.len() > LIMIT {

@@ -34,7 +34,11 @@ SELECT A MATERIALIZED NATIVE STORE
   --project, and --global give an explicit scope. A removed recorded working
   directory does not prevent direct ID or global-store reads.
   source.kind is explicit-native-store, source.location.container names PATH,
-  and source.location.locator names the exact recording. This is a selected
+  and source.location.locator names the exact recording. Recording reads accept
+  only regular opened files, without waiting for FIFO writers. Identity-bearing
+  records must match the selected native session (the parent for Claude children).
+  Bounded reads check the opening and retained tail; full reads check every record.
+  This is a selected
   occurrence, with no live annotation or claim of immutable bytes. capture
   reports caller-selected-native-store: the caller selected the native source,
   and tapes has not pinned its bytes.
@@ -548,7 +552,10 @@ PROBE BEFORE EXPORTING
   of its final record, if that is an assistant record that stopped on end_turn
   (known trailing housekeeping records, including cost-state and system
   turn_duration/stop_hook_summary, are skipped), with that record's id in source
-  after the recording's file. Without that ending there is no completion
+  after the recording's file. Identity-bearing records in the bounded opening
+  and tail must name the selected native parent; absent or conflicting identity
+  fails the ending read. Recording and child metadata reads accept only regular
+  opened files and never wait for a FIFO writer. Without that ending there is no completion
   stamp, which means not seen to finish rather than running: a child killed
   mid-turn reads the same. A completion the parent's own records state is
   preferred, and the spawn stays unstamped, since the child's first record is

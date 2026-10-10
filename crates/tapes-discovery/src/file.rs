@@ -752,14 +752,14 @@ fn pi_filename_id(stem: &str) -> Option<&str> {
 }
 
 fn probe(store: &NativeStore, path: &Path) -> Result<Option<NativeSession>, DiscoveryError> {
-    probe_with_open(store, path, |path| File::open(path))
+    probe_with_open(store, path, crate::open_regular_file)
 }
 
 fn probe_runtime_file(
     store: &NativeStore,
     path: &Path,
 ) -> Result<Option<NativeSession>, DiscoveryError> {
-    probe_file(store, path, false, |path| File::open(path))
+    probe_file(store, path, false, crate::open_regular_file)
 }
 
 fn probe_with_open(
@@ -807,6 +807,15 @@ fn probe_file(
             ));
         }
     };
+    let metadata = file.metadata().map_err(|error| {
+        DiscoveryError::io(path.display().to_string(), "inspect opened file", &error)
+    })?;
+    if !metadata.is_file() {
+        return Err(DiscoveryError::InvalidMetadata {
+            coordinate: path.display().to_string(),
+            reason: "native candidate is not a regular file",
+        });
+    }
     let bytes = match opening(&mut file, metadata.len()) {
         Ok(bytes) => bytes,
         Err(error) => {
@@ -1385,6 +1394,23 @@ mod tests {
         let bytes = opening(&mut file, 4 * 1024 * 1024).unwrap();
         assert_eq!(bytes.bytes.len(), INITIAL_OPENING_BYTES);
         assert!(bytes.bytes.len() < 4 * 1024 * 1024);
+    }
+
+    #[test]
+    fn opened_descriptor_must_be_a_regular_file() {
+        let temp = Temp::new();
+        let root = temp.path().join("claude");
+        let path = write(&root, "project/id.jsonl", "{\"sessionId\":\"id\"}\n");
+        let result = probe_with_open(&NativeStore::claude(root), &path, |_| {
+            File::open(temp.path())
+        });
+        assert!(matches!(
+            result,
+            Err(DiscoveryError::InvalidMetadata {
+                reason: "native candidate is not a regular file",
+                ..
+            })
+        ));
     }
 
     #[test]

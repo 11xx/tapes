@@ -575,7 +575,10 @@ struct SelectionArgs {
     /// session the caller runs in, as its harness's exported variable names it.
     /// Identity mismatches refuse prefix fallback; a correct exact match wins
     /// even after another candidate's read failure. The filename/header rule
-    /// also applies to Pi's explicit recording file.
+    /// also applies to Pi's explicit recording file. Recording reads accept only
+    /// regular opened files and never wait for FIFO writers. Identity-bearing
+    /// records must match the selected native session in the opening and bounded
+    /// tail, or throughout a full read.
     #[arg(
         required_unless_present_any = ["latest", "title", "occurrence"],
         conflicts_with_all = ["latest", "title", "occurrence", "exclude", "here", "project", "global"]
@@ -667,7 +670,10 @@ struct SessionQueryArgs {
     /// session the caller runs in, as its harness's exported variable names it.
     /// Identity mismatches refuse prefix fallback; a correct exact match wins
     /// even after another candidate's read failure. The filename/header rule
-    /// also applies to Pi's explicit recording file.
+    /// also applies to Pi's explicit recording file. Recording reads accept only
+    /// regular opened files and never wait for FIFO writers. Identity-bearing
+    /// records must match the selected native session in the opening and bounded
+    /// tail, or throughout a full read.
     #[arg(conflicts_with_all = ["title", "latest", "occurrence", "exclude", "here", "project", "global"])]
     session: Option<String>,
     /// Match the recorded title exactly in scope; incomplete or ambiguous lookup refuses.
@@ -897,7 +903,10 @@ enum Command {
         /// Exact session id, an unambiguous prefix, or `self`.
         /// Identity mismatches refuse prefix fallback; a correct exact match wins
         /// even after another candidate's read failure. The filename/header rule
-        /// also applies to Pi's explicit recording file.
+        /// also applies to Pi's explicit recording file. Recording reads accept only
+        /// regular opened files and never wait for FIFO writers. Identity-bearing
+        /// records must match the selected native session in the opening and bounded
+        /// tail, or throughout a full read.
         session: String,
         /// Restrict ID or prefix lookup to one harness.
         #[arg(long)]
@@ -1249,6 +1258,9 @@ enum Command {
     /// housekeeping, including cost-state and system turn_duration/stop_hook_summary,
     /// is skipped; unknown records and read gaps do not establish completion. Otherwise
     /// it has no completion stamp, which does not say it is still running.
+    /// Child-ending opening and tail identity records must name the native parent;
+    /// missing or conflicting identity fails. Only regular opened recording and
+    /// metadata files supply evidence; FIFO reads never wait for a writer.
     /// Failed Claude subagent enumeration or a required child-ending read fails
     /// lineage with its source and I/O diagnostic. An absent subagent directory
     /// establishes no stored child transcripts. Codex candidate header probe

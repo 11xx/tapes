@@ -297,6 +297,7 @@ pub fn page_with_backends(
 
 pub(crate) fn read_file(
     session: &Session,
+    harness: &str,
     path: &Path,
     cursor: Option<&str>,
     bytes: usize,
@@ -309,8 +310,13 @@ pub(crate) fn read_file(
             crate::byte_size::ByteSize::new(MAX_BYTES as u64)
         );
     }
-    let mut file = File::open(path).with_context(|| format!("open {}", path.display()))?;
+    let mut file = crate::backend::open_regular_file(path)
+        .with_context(|| format!("open {}", path.display()))?;
     let metadata = file.metadata()?;
+    let opening = crate::backend::head_jsonl_from(&mut file, metadata.len())?;
+    for value in &opening.values {
+        crate::backend::validate_native_identity(value, harness, &session.id)?;
+    }
     let current = StrictCursor::at_end(session, path, &metadata);
     let mut cached_tail = None;
     let mut state = if cursor == Some(PIN_REQUEST) {
@@ -457,6 +463,9 @@ pub(crate) fn read_file(
         Cursor::Strict(_) => session.launch,
         Cursor::Pinned(pin) => pin.launch,
     };
+    for value in &values {
+        crate::backend::validate_native_identity(value, harness, &session.id)?;
+    }
     let (mut turns, models) = normalize(&values, &spans, &revision);
     for (ordinal, turn) in turns.iter_mut().enumerate() {
         turn.ordinal = ordinal;

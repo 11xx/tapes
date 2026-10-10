@@ -1160,9 +1160,68 @@ impl Recording {
     }
 }
 
+/// Nonblocking open prevents a replaced path from waiting for a FIFO writer.
+/// Only a regular opened descriptor can supply recording bytes.
+pub(crate) fn open_regular_file(path: &Path) -> std::io::Result<File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let file = File::options()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(path)?;
+    let metadata = file.metadata()?;
+    if metadata.is_dir() {
+        return Err(std::io::Error::from_raw_os_error(libc::EISDIR));
+    }
+    if !metadata.is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "recording source is not a regular file",
+        ));
+    }
+    Ok(file)
+}
+
+pub(crate) fn validate_native_identity(
+    value: &Value,
+    harness: &str,
+    expected: &str,
+) -> Result<bool> {
+    let expected = if harness == "claude" {
+        expected
+            .split_once("::")
+            .map_or(expected, |(parent, _)| parent)
+    } else {
+        expected
+    };
+    let id = match harness {
+        "claude" => value.get("sessionId"),
+        "codex" if value["type"] == "session_meta" => Some(&value["payload"]["id"]),
+        "pi" if value["type"] == "session" => Some(&value["id"]),
+        _ => None,
+    };
+    if let Some(id) = id {
+        if id.as_str() != Some(expected) {
+            anyhow::bail!("{harness} recording contains a different or invalid native session ID");
+        }
+        return Ok(true);
+    }
+    Ok(false)
+}
+
+pub(crate) fn validate_recording_identity(
+    recording: &Recording,
+    harness: &str,
+    expected: &str,
+) -> Result<()> {
+    for value in recording.opening().iter().chain(&recording.tail.values) {
+        validate_native_identity(value, harness, expected)?;
+    }
+    Ok(())
+}
+
 pub(crate) fn read_recording(path: &Path, read_bytes: u64) -> Result<Recording> {
     let mut file =
-        File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
+        open_regular_file(path).with_context(|| format!("failed to open {}", path.display()))?;
     let metadata = file.metadata()?;
     let tail = read_jsonl_from(&mut file, &metadata, read_bytes)?;
     let head = if tail.truncated {
@@ -1181,20 +1240,6 @@ pub(crate) fn read_recording(path: &Path, read_bytes: u64) -> Result<Recording> 
         head_gaps: head.gaps,
         tail,
     })
-}
-
-pub(crate) fn read_jsonl(path: &Path, read_bytes: u64) -> Result<Jsonl> {
-    let mut file =
-        File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
-    let metadata = file
-        .metadata()
-        .with_context(|| format!("failed to inspect {}", path.display()))?;
-    let read = read_jsonl_from(&mut file, &metadata, read_bytes)?;
-    let after = file.metadata()?;
-    if !same_source(&metadata, &after) {
-        anyhow::bail!("recording source changed during the read; restart without a cursor");
-    }
-    Ok(read)
 }
 
 /// What a whole-recording read's `source_length` counts.
@@ -1502,7 +1547,8 @@ fn stream_jsonl_within(
     mut record: impl FnMut(&Value, ByteSpan, &str) -> Result<bool>,
     mut gap: impl FnMut(&ReadGap),
 ) -> Result<StreamedJsonl> {
-    let file = File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
+    let file =
+        open_regular_file(path).with_context(|| format!("failed to open {}", path.display()))?;
     let metadata = file
         .metadata()
         .with_context(|| format!("failed to inspect {}", path.display()))?;
@@ -1706,7 +1752,7 @@ fn read_jsonl_from_length(
 /// usage totals and an opt-in observation suffix cannot silently mix reads.
 pub(crate) fn read_recording_at(path: &Path, evidence: &ReadEvidence) -> Result<Recording> {
     let mut file =
-        File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
+        open_regular_file(path).with_context(|| format!("failed to open {}", path.display()))?;
     let metadata = file
         .metadata()
         .with_context(|| format!("failed to inspect {}", path.display()))?;
@@ -1808,7 +1854,7 @@ fn raw_tail_may_contain(path: &Path, needle: &str, read_bytes: u64) -> bool {
     if needle.is_empty() || !needle.bytes().all(|byte| byte.is_ascii_alphanumeric()) {
         return true;
     }
-    let Ok(mut file) = File::open(path) else {
+    let Ok(mut file) = open_regular_file(path) else {
         return true;
     };
     let Ok(len) = file.metadata().map(|metadata| metadata.len()) else {
@@ -1837,7 +1883,7 @@ fn raw_tail_may_contain(path: &Path, needle: &str, read_bytes: u64) -> bool {
 /// about a session at the top, and `read_jsonl` reads the *end* of a file, so
 /// a large transcript loses its own header without this.
 pub(crate) fn head_jsonl(path: &Path) -> Result<Vec<Value>> {
-    let mut file = File::open(path)?;
+    let mut file = open_regular_file(path)?;
     let metadata = file.metadata()?;
     Ok(head_jsonl_from(&mut file, metadata.len())?.values)
 }

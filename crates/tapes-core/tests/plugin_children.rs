@@ -655,3 +655,116 @@ fn an_unreadable_child_body_does_not_invalidate_its_observed_file_count() {
         assert_eq!(notes, ["1 subagent transcript belongs to this session."]);
     }
 }
+
+#[test]
+fn plugin_completion_requires_matching_parent_identity() {
+    for (index, identity) in [json!("another-parent"), Value::Null, json!(42)]
+        .into_iter()
+        .enumerate()
+    {
+        for position in 0..3 {
+            let store = Store::new(&format!("identity-{index}-{position}"));
+            store.write_parent(&[parent_prompt()]);
+            let mut records = vec![
+                brief(FINISHED),
+                ended(FINISHED),
+                json!({"type": "cost-state", "sessionId": PARENT}),
+            ];
+            records[position]["sessionId"] = identity.clone();
+            store.write_child(FINISHED, &plugin_meta(), &lines(&records));
+            let backend = ClaudeBackend::new(&store.0);
+            let session = backend.locate(PARENT).unwrap().unwrap();
+            for result in [backend.lineage(&session), backend.stream_lineage(&session)] {
+                let error = result.expect_err("foreign identity cannot establish child completion");
+                assert!(
+                    format!("{error:#}").contains("native parent ID"),
+                    "{error:#}"
+                );
+            }
+        }
+    }
+    let store = Store::new("identity-absent");
+    store.write_parent(&[parent_prompt()]);
+    let mut record = ended(FINISHED);
+    record.as_object_mut().unwrap().remove("sessionId");
+    store.write_child(FINISHED, &plugin_meta(), &lines(&[record]));
+    let backend = ClaudeBackend::new(&store.0);
+    let session = backend.locate(PARENT).unwrap().unwrap();
+    assert!(backend.lineage(&session).is_err());
+    assert!(backend.stream_lineage(&session).is_err());
+}
+
+#[test]
+fn fifo_child_reads_are_bounded() {
+    const PROBE: &str = "TAPES_FIFO_CHILD_PROBE";
+    if let Ok(component) = std::env::var(PROBE) {
+        let store = Store::new(&format!("fifo-{component}"));
+        store.write_parent(&[parent_prompt()]);
+        store.write_child(FINISHED, &plugin_meta(), "");
+        let directory = store.project().join(PARENT).join("subagents");
+        let path = directory.join(format!("agent-{FINISHED}.{component}"));
+        fs::remove_file(&path).unwrap();
+        let name = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+        let backend = ClaudeBackend::new(&store.0);
+        let session = backend.locate(PARENT).unwrap().unwrap();
+        if component == "jsonl" {
+            assert!(backend.lineage(&session).is_err());
+            assert!(backend.stream_lineage(&session).is_err());
+            assert!(backend.child_transcript(&session, FINISHED).is_err());
+            assert!(backend
+                .stream_child_transcript(&session, FINISHED, &mut |_| Ok(()))
+                .is_err());
+        } else {
+            let lineage = store.lineage(&backend);
+            assert!(lineage.children[0].completed_at.is_none());
+            assert!(lineage
+                .notes
+                .iter()
+                .any(|note| note.contains("regular file")));
+        }
+        return;
+    }
+    for component in ["jsonl", "meta.json"] {
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "fifo_child_reads_are_bounded", "--nocapture"])
+            .env(PROBE, component)
+            .spawn()
+            .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                assert!(status.success(), "FIFO {component} probe failed");
+                break;
+            }
+            if std::time::Instant::now() >= deadline {
+                child.kill().unwrap();
+                child.wait().unwrap();
+                let scratch = std::env::temp_dir().join(format!(
+                    "tapes-plugin-children-fifo-{component}-{}",
+                    child.id()
+                ));
+                fs::remove_dir_all(scratch).unwrap();
+                panic!("FIFO {component} read exceeded two seconds without a writer");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+}
+
+#[test]
+fn completion_checks_parent_identity_in_the_opening_before_a_bounded_tail() {
+    let store = Store::new("opening-identity");
+    store.write_parent(&[parent_prompt()]);
+    let mut first = brief(FINISHED);
+    first["sessionId"] = json!("foreign-parent");
+    let mut records = vec![first];
+    records
+        .extend((0..100).map(|_| assistant(FINISHED, "work", "2026-10-09T18:35:00Z", Value::Null)));
+    records.push(ended(FINISHED));
+    store.write_child(FINISHED, &plugin_meta(), &lines(&records));
+    let backend = ClaudeBackend::new(&store.0).with_read_bytes(MIN_READ_BYTES);
+    let session = backend.locate(PARENT).unwrap().unwrap();
+    assert!(backend.lineage(&session).is_err());
+    assert!(backend.stream_lineage(&session).is_err());
+}

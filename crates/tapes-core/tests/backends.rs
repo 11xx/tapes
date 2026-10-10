@@ -6487,3 +6487,85 @@ fn operator_origins_follow_launch_and_native_injection_evidence() {
         }
     }
 }
+
+#[test]
+fn selected_identity_is_checked_on_every_recording_read() {
+    for (backend, id) in file_fixture_backends() {
+        let session = backend.locate(id).unwrap().unwrap();
+        let location = session.source.location.as_ref().unwrap();
+        let path = Path::new(&location.locator);
+        let root = std::env::temp_dir().join(format!(
+            "tapes-identity-{}-{}",
+            backend.harness(),
+            std::process::id()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let copied = root.join(path.file_name().unwrap());
+        let contents = fs::read_to_string(path).unwrap();
+        fs::write(&copied, contents.replace(id, "foreign-recording")).unwrap();
+        let mut session = session.clone();
+        session.source =
+            SourceDescriptor::installed(backend.harness(), copied.display().to_string());
+        assert!(
+            backend.transcript(&session, 10).is_err(),
+            "{} bounded",
+            backend.harness()
+        );
+        assert!(
+            backend
+                .stream_transcript(&session, None, &mut |_| Ok(()))
+                .is_err(),
+            "{} streamed",
+            backend.harness()
+        );
+        assert!(
+            backend.lineage(&session).is_err(),
+            "{} lineage",
+            backend.harness()
+        );
+        assert!(
+            backend.stream_lineage(&session).is_err(),
+            "{} streamed lineage",
+            backend.harness()
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[test]
+fn history_and_metadata_pages_validate_selected_identity() {
+    for (backend, id) in file_fixture_backends()
+        .into_iter()
+        .filter(|(backend, _)| backend.harness() != "pi")
+    {
+        let mut session = backend.locate(id).unwrap().unwrap();
+        let root = std::env::temp_dir().join(format!(
+            "tapes-page-identity-{}-{}",
+            backend.harness(),
+            std::process::id()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let path = Path::new(&session.source.location.as_ref().unwrap().locator);
+        let copied = root.join(path.file_name().unwrap());
+        fs::write(
+            &copied,
+            fs::read_to_string(path)
+                .unwrap()
+                .replace(id, "foreign-recording"),
+        )
+        .unwrap();
+        session.source =
+            SourceDescriptor::installed(backend.harness(), copied.display().to_string());
+        assert!(
+            backend.history_page(&session, None, 64 * 1024).is_err(),
+            "{} history",
+            backend.harness()
+        );
+        assert!(
+            backend.metadata_page(&session, None, 64 * 1024).is_err(),
+            "{} metadata",
+            backend.harness()
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+}

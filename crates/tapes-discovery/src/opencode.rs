@@ -177,7 +177,7 @@ impl OpenCodeStore {
                 reason: "OpenCode database is not a regular file",
             });
         }
-        let mut file = fs::File::open(&path).map_err(|error| {
+        let mut file = crate::open_regular_file(&path).map_err(|error| {
             DiscoveryError::io(path.display().to_string(), "open OpenCode database", &error)
         })?;
         let mut header = [0_u8; 16];

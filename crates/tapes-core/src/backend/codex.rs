@@ -45,6 +45,11 @@ type CodexTranscriptRead = (
     crate::model::UnmappedRecords,
 );
 
+struct CandidateRecording {
+    path: PathBuf,
+    id: String,
+}
+
 impl CodexBackend {
     pub fn new(root: impl Into<PathBuf>) -> Self {
         Self {
@@ -186,6 +191,7 @@ impl CodexBackend {
             .ok_or_else(|| anyhow!("session has no source file"))?;
         crate::history::read_file(
             session,
+            "codex",
             path,
             cursor,
             bytes,
@@ -349,7 +355,7 @@ impl Backend for CodexBackend {
         let path = super::session_file_path(session)
             .ok_or_else(|| anyhow!("codex session {} has no file locator", session.id))?;
         let (turns, recording, trailing_record, terminal, unmapped) =
-            read_transcript(path, self.read_bytes)?;
+            read_transcript(path, self.read_bytes, &session.id)?;
         let mut session = session.clone();
         session.launch = recording.opening().first().and_then(codex_launch);
         let mut transcript = transcript_from_recording(
@@ -384,6 +390,7 @@ impl Backend for CodexBackend {
         let mut launch = None;
         let mut reader = CodexTurns::default();
         let read = stream_jsonl(path, replay_pin(replay)?, |value, span, revision| {
+            super::validate_native_identity(value, "codex", &session.id)?;
             if value["type"] == "session_meta" {
                 launch = codex_launch(value);
             }
@@ -437,6 +444,7 @@ impl Backend for CodexBackend {
             path,
             Some(read.pin()?),
             |value, span, revision| {
+                super::validate_native_identity(value, "codex", &session.id)?;
                 records.borrow_mut().observe(value, Some(span), revision);
                 Ok(false)
             },
@@ -484,6 +492,7 @@ impl Backend for CodexBackend {
                         prefix_sha256: Some(prefix_sha256),
                     }),
                     |value, span, revision| {
+                        super::validate_native_identity(value, "codex", &session.id)?;
                         records.borrow_mut().observe(value, Some(span), revision);
                         Ok(false)
                     },
@@ -492,6 +501,7 @@ impl Backend for CodexBackend {
                 records.into_inner()
             } else {
                 let recording = super::read_recording_at(path, evidence)?;
+                super::validate_recording_identity(&recording, "codex", &session.id)?;
                 let mut records = records;
                 records.observe_read(
                     &recording.tail.values,
@@ -503,6 +513,7 @@ impl Backend for CodexBackend {
             }
         } else {
             let recording = super::read_recording(path, self.read_bytes)?;
+            super::validate_recording_identity(&recording, "codex", &session.id)?;
             let mut records = records;
             records.set_read_window(recording.tail.truncated);
             records.observe_read(
@@ -526,11 +537,12 @@ impl CodexBackend {
     fn lineage_from_inputs(
         &self,
         session: &Session,
-        files: Vec<PathBuf>,
+        files: Vec<CandidateRecording>,
         path: PathBuf,
         discovery_notes: Vec<String>,
     ) -> Result<Lineage> {
         let recording = read_recording(&path, self.read_bytes)?;
+        super::validate_recording_identity(&recording, "codex", &session.id)?;
         let header = recording
             .opening()
             .iter()
@@ -551,13 +563,14 @@ impl CodexBackend {
     fn stream_lineage_from_inputs(
         &self,
         session: &Session,
-        files: Vec<PathBuf>,
+        files: Vec<CandidateRecording>,
         path: PathBuf,
         discovery_notes: Vec<String>,
     ) -> Result<Lineage> {
         let mut header = None;
         let mut agents = SpawnedAgents::default();
         let read = stream_jsonl(&path, None, |value, _, _| {
+            super::validate_native_identity(value, "codex", &session.id)?;
             if header.is_none() && value["type"] == "session_meta" {
                 header = Some(value["payload"].clone());
             }
@@ -571,7 +584,10 @@ impl CodexBackend {
     }
 
     /// Use discovery-owned native locators for sibling and parent joins.
-    fn lineage_inputs(&self, session: &Session) -> Result<(Vec<PathBuf>, PathBuf, Vec<String>)> {
+    fn lineage_inputs(
+        &self,
+        session: &Session,
+    ) -> Result<(Vec<CandidateRecording>, PathBuf, Vec<String>)> {
         let path = super::session_file_path(session)
             .map(Path::to_path_buf)
             .ok_or_else(|| anyhow!("codex session {} has no file locator", session.id))?;
@@ -583,7 +599,12 @@ impl CodexBackend {
         let files = page
             .records
             .iter()
-            .filter_map(|native| native.locator().map(Path::to_path_buf))
+            .filter_map(|native| {
+                native.locator().map(|path| CandidateRecording {
+                    path: path.to_path_buf(),
+                    id: native.id().to_owned(),
+                })
+            })
             .collect();
         let mut notes = page
             .failures
@@ -605,7 +626,7 @@ impl CodexBackend {
     /// store's child rollout headers.
     fn relatives(
         &self,
-        files: &[PathBuf],
+        files: &[CandidateRecording],
         path: &Path,
         session: &Session,
         header: &Value,
@@ -680,8 +701,9 @@ impl CodexBackend {
     }
 }
 
-fn read_transcript(path: &Path, read_bytes: u64) -> Result<CodexTranscriptRead> {
+fn read_transcript(path: &Path, read_bytes: u64, expected: &str) -> Result<CodexTranscriptRead> {
     let recording = read_recording(path, read_bytes)?;
+    super::validate_recording_identity(&recording, "codex", expected)?;
     let read = &recording.tail;
     let mut turns = Vec::new();
     let mut last_turn = None;
@@ -2489,7 +2511,7 @@ fn payload_json(value: &Value) -> Value {
 /// and the probe bound when the store held more than the read inspected.
 /// Failed probes retain their source and I/O cause in the coverage notes.
 fn child_headers(
-    files: &[PathBuf],
+    files: &[CandidateRecording],
     own: &Path,
     id: &str,
     notes: &mut Vec<String>,
@@ -2499,8 +2521,10 @@ fn child_headers(
     let children = files
         .iter()
         .take(inspected)
-        .filter(|path| path.as_path() != own)
-        .filter_map(|path| {
+        .filter(|candidate| candidate.path.as_path() != own)
+        .filter_map(|candidate| {
+            let path = &candidate.path;
+            let expected = &candidate.id;
             let values = match head_jsonl(path) {
                 Ok(values) => values,
                 Err(error) => {
@@ -2511,6 +2535,15 @@ fn child_headers(
                     return None;
                 }
             };
+            for value in &values {
+                if let Err(error) = super::validate_native_identity(value, "codex", expected) {
+                    notes.push(format!(
+                        "Codex lineage candidate header {} could not be read: {error:#}",
+                        path.display()
+                    ));
+                    return None;
+                }
+            }
             let payload = values
                 .into_iter()
                 .find(|value| value["type"] == "session_meta")
@@ -2566,7 +2599,7 @@ mod tests {
         }
     }
 
-    fn failed_child_probe(full: bool, read_failure: bool) {
+    fn failed_child_probe(full: bool, read_failure: bool, identity_failure: bool) {
         let root = Store(std::env::temp_dir().join(format!(
             "tapes-child-probe-{}-{}",
             std::process::id(),
@@ -2612,10 +2645,21 @@ mod tests {
         }
         let (files, path, notes) = backend.lineage_inputs(&parent).unwrap();
         assert!(notes.is_empty(), "{notes:?}");
-        assert!(files.contains(&child_path));
+        assert!(files.iter().any(|candidate| candidate.path == child_path));
         fs::remove_file(&child_path).unwrap();
-        if read_failure {
-            // Opening and statting a directory succeed; reading its bytes fails.
+        if identity_failure {
+            fs::write(
+                &child_path,
+                format!(
+                    "{}\n",
+                    serde_json::json!({
+                        "type": "session_meta", "payload": {"id": "foreign-recording",
+                            "parent_thread_id": parent_id, "agent_path": "/root/worker"}
+                    })
+                ),
+            )
+            .unwrap();
+        } else if read_failure {
             fs::create_dir(&child_path).unwrap();
         }
         let lineage = if full {
@@ -2628,6 +2672,10 @@ mod tests {
         assert_eq!(lineage.notes.len(), 1, "{lineage:?}");
         assert!(lineage.notes[0].contains(&child_path.display().to_string()));
         assert!(lineage.notes[0].contains("could not be read"));
+        if identity_failure {
+            assert!(lineage.notes[0].contains("native session ID"));
+            return;
+        }
         let cause = std::io::Error::from_raw_os_error(if read_failure {
             libc::EISDIR
         } else {
@@ -2638,21 +2686,26 @@ mod tests {
 
     #[test]
     fn bounded_lineage_retains_child_header_open_failure_after_discovery() {
-        failed_child_probe(false, false);
+        failed_child_probe(false, false, false);
     }
 
     #[test]
     fn streamed_lineage_retains_child_header_open_failure_after_discovery() {
-        failed_child_probe(true, false);
+        failed_child_probe(true, false, false);
     }
 
     #[test]
     fn bounded_lineage_retains_child_header_read_failure_after_discovery() {
-        failed_child_probe(false, true);
+        failed_child_probe(false, true, false);
     }
 
     #[test]
     fn streamed_lineage_retains_child_header_read_failure_after_discovery() {
-        failed_child_probe(true, true);
+        failed_child_probe(true, true, false);
+    }
+    #[test]
+    fn child_header_identity_changes_after_discovery_are_rejected() {
+        failed_child_probe(false, false, true);
+        failed_child_probe(true, false, true);
     }
 }

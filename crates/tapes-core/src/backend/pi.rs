@@ -293,7 +293,7 @@ impl Backend for PiBackend {
         let path = super::session_file_path(session)
             .ok_or_else(|| anyhow!("pi session {} has no file locator", session.id))?;
         let (mut turns, recording, abandoned, trailing_record, unmapped) =
-            read_transcript(path, self.read_bytes)?;
+            read_transcript(path, self.read_bytes, &session.id)?;
         let entries = recording
             .tail
             .values
@@ -355,6 +355,7 @@ impl Backend for PiBackend {
         let mut last = None;
         let mut entries = 0;
         let first = stream_jsonl(path, replay_pin(replay)?, |value, _, _| {
+            super::validate_native_identity(value, "pi", &session.id)?;
             launch = merge_launch(launch, pi_launch_entry(value, &session.id));
             if value["type"] == "session" {
                 return Ok(false);
@@ -390,6 +391,7 @@ impl Backend for PiBackend {
         let mut unmapped = UnmappedTally::default();
         let mut thinking = None;
         let read = stream_jsonl(path, Some(first.pin()), |value, span, revision| {
+            super::validate_native_identity(value, "pi", &session.id)?;
             if value["type"] == "session" {
                 count_unmapped(&mut unmapped, value);
                 return Ok(false);
@@ -446,6 +448,7 @@ impl Backend for PiBackend {
     fn lineage(&self, session: &Session) -> Result<Lineage> {
         let path = self.recording(session)?;
         let recording = read_recording(&path, self.read_bytes)?;
+        super::validate_recording_identity(&recording, "pi", &session.id)?;
         let parent = recording
             .opening()
             .iter()
@@ -464,6 +467,7 @@ impl Backend for PiBackend {
         let path = self.recording(session)?;
         let mut header = None;
         let read = stream_jsonl(&path, None, |value, _, _| {
+            super::validate_native_identity(value, "pi", &session.id)?;
             if header.is_none() && value["type"] == "session" {
                 header = Some(value["parentSession"].as_str().map(str::to_owned));
             }
@@ -490,6 +494,7 @@ impl Backend for PiBackend {
         let mut activity = ActivityRange::default();
         let mut launch = None;
         stream_jsonl(&path, Some(read.pin()?), |value, _, _| {
+            super::validate_native_identity(value, "pi", &session.id)?;
             activity.observe(value);
             launch = merge_launch(launch, pi_launch_entry(value, &session.id));
             if value["type"] == "session" {
@@ -617,8 +622,9 @@ type PiTranscriptRead = (
     crate::model::UnmappedRecords,
 );
 
-fn read_transcript(path: &Path, read_bytes: u64) -> Result<PiTranscriptRead> {
+fn read_transcript(path: &Path, read_bytes: u64, expected: &str) -> Result<PiTranscriptRead> {
     let recording = read_recording(path, read_bytes)?;
+    super::validate_recording_identity(&recording, "pi", expected)?;
     let read = &recording.tail;
     let mut unmapped = UnmappedTally::default();
     for header in read
