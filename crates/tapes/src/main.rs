@@ -1251,7 +1251,9 @@ enum Command {
     /// it has no completion stamp, which does not say it is still running.
     /// Failed Claude subagent enumeration or a required child-ending read fails
     /// lineage with its source and I/O diagnostic. An absent subagent directory
-    /// establishes no stored child transcripts.
+    /// establishes no stored child transcripts. Codex candidate header probe
+    /// failures appear in notes with their source and I/O diagnostic on bounded
+    /// and full reads; an unreadable header does not establish absent relatives.
     Lineage {
         #[command(flatten)]
         selection: SelectionArgs,

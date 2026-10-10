@@ -1836,17 +1836,10 @@ fn raw_tail_may_contain(path: &Path, needle: &str, read_bytes: u64) -> bool {
 /// Parse the opening of a JSONL file. Every harness writes what it knows
 /// about a session at the top, and `read_jsonl` reads the *end* of a file, so
 /// a large transcript loses its own header without this.
-pub(crate) fn head_jsonl(path: &Path) -> Vec<Value> {
-    let Ok(mut file) = File::open(path) else {
-        return Vec::new();
-    };
-    let Ok(metadata) = file.metadata() else {
-        return Vec::new();
-    };
-    let Ok(head) = head_jsonl_from(&mut file, metadata.len()) else {
-        return Vec::new();
-    };
-    head.values
+pub(crate) fn head_jsonl(path: &Path) -> Result<Vec<Value>> {
+    let mut file = File::open(path)?;
+    let metadata = file.metadata()?;
+    Ok(head_jsonl_from(&mut file, metadata.len())?.values)
 }
 
 pub(crate) fn head_jsonl_from(file: &mut File, source_length: u64) -> Result<HeadJsonl> {
@@ -1893,7 +1886,11 @@ pub(crate) fn head_directory(
     path: &Path,
     pick: impl Fn(&Value) -> Option<&str>,
 ) -> Option<PathBuf> {
-    head_jsonl(path).iter().find_map(pick).map(PathBuf::from)
+    head_jsonl(path)
+        .ok()?
+        .iter()
+        .find_map(pick)
+        .map(PathBuf::from)
 }
 
 /// Walk mtime-ordered candidates newest first, keeping those the query accepts

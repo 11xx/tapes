@@ -533,6 +533,9 @@ PROBE BEFORE EXPORTING
   Claude lineage fails when subagent directory enumeration or a required
   child-ending read fails, naming the source and retaining the I/O error.
   An absent subagent directory establishes no stored child transcripts.
+  Codex lineage notes retain candidate header probe failures with their source
+  and I/O error; an unreadable header does not establish an absent relationship.
+  These notes apply to bounded reads and lineage --full.
   What each harness records differs: claude names its subagent transcripts and
   the Agent calls that spawned them, codex joins spawn and wait calls to the
   rollout headers naming this session as their parent, opencode reads the

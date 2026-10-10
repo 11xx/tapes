@@ -421,39 +421,12 @@ impl Backend for CodexBackend {
     /// store's own recordings. Only headers are read; no child's turns are.
     fn lineage(&self, session: &Session) -> Result<Lineage> {
         let (files, path, discovery_notes) = self.lineage_inputs(session)?;
-        let recording = read_recording(&path, self.read_bytes)?;
-        let header = recording
-            .opening()
-            .iter()
-            .find(|value| value["type"] == "session_meta")
-            .map(|value| value["payload"].clone())
-            .unwrap_or(Value::Null);
-        let mut agents = SpawnedAgents::default();
-        for value in &recording.tail.values {
-            agents.observe(value);
-        }
-        let lineage = Lineage {
-            truncation: read_bounds(&recording.tail),
-            ..self.relatives(&files, &path, session, &header, agents, discovery_notes)
-        };
-        Ok(lineage)
+        self.lineage_from_inputs(session, files, path, discovery_notes)
     }
 
     fn stream_lineage(&self, session: &Session) -> Result<Lineage> {
         let (files, path, discovery_notes) = self.lineage_inputs(session)?;
-        let mut header = None;
-        let mut agents = SpawnedAgents::default();
-        let read = stream_jsonl(&path, None, |value, _, _| {
-            if header.is_none() && value["type"] == "session_meta" {
-                header = Some(value["payload"].clone());
-            }
-            agents.observe(value);
-            Ok(false)
-        })?;
-        let header = header.unwrap_or(Value::Null);
-        let mut lineage = self.relatives(&files, &path, session, &header, agents, discovery_notes);
-        lineage.notes.extend(skipped_records_note(read.skipped));
-        Ok(lineage)
+        self.stream_lineage_from_inputs(session, files, path, discovery_notes)
     }
 
     fn stream_session(&self, session: &Session, read: &StreamedTranscript) -> Result<Session> {
@@ -550,6 +523,53 @@ impl Backend for CodexBackend {
 }
 
 impl CodexBackend {
+    fn lineage_from_inputs(
+        &self,
+        session: &Session,
+        files: Vec<PathBuf>,
+        path: PathBuf,
+        discovery_notes: Vec<String>,
+    ) -> Result<Lineage> {
+        let recording = read_recording(&path, self.read_bytes)?;
+        let header = recording
+            .opening()
+            .iter()
+            .find(|value| value["type"] == "session_meta")
+            .map(|value| value["payload"].clone())
+            .unwrap_or(Value::Null);
+        let mut agents = SpawnedAgents::default();
+        for value in &recording.tail.values {
+            agents.observe(value);
+        }
+        let lineage = Lineage {
+            truncation: read_bounds(&recording.tail),
+            ..self.relatives(&files, &path, session, &header, agents, discovery_notes)
+        };
+        Ok(lineage)
+    }
+
+    fn stream_lineage_from_inputs(
+        &self,
+        session: &Session,
+        files: Vec<PathBuf>,
+        path: PathBuf,
+        discovery_notes: Vec<String>,
+    ) -> Result<Lineage> {
+        let mut header = None;
+        let mut agents = SpawnedAgents::default();
+        let read = stream_jsonl(&path, None, |value, _, _| {
+            if header.is_none() && value["type"] == "session_meta" {
+                header = Some(value["payload"].clone());
+            }
+            agents.observe(value);
+            Ok(false)
+        })?;
+        let header = header.unwrap_or(Value::Null);
+        let mut lineage = self.relatives(&files, &path, session, &header, agents, discovery_notes);
+        lineage.notes.extend(skipped_records_note(read.skipped));
+        Ok(lineage)
+    }
+
     /// Use discovery-owned native locators for sibling and parent joins.
     fn lineage_inputs(&self, session: &Session) -> Result<(Vec<PathBuf>, PathBuf, Vec<String>)> {
         let path = super::session_file_path(session)
@@ -615,7 +635,7 @@ impl CodexBackend {
         });
 
         let mut agents = agents.agents;
-        let (probed, probe_bound) = child_headers(files, path, &session.id);
+        let (probed, probe_bound) = child_headers(files, path, &session.id, &mut notes);
         for child in probed {
             let entry = agents.entry(child.agent_path.clone()).or_default();
             entry.session_id = Some(child.thread_id);
@@ -2467,7 +2487,13 @@ fn payload_json(value: &Value) -> Value {
 
 /// The store's recordings whose headers name this session as their parent,
 /// and the probe bound when the store held more than the read inspected.
-fn child_headers(files: &[PathBuf], own: &Path, id: &str) -> (Vec<ChildHeader>, Option<usize>) {
+/// Failed probes retain their source and I/O cause in the coverage notes.
+fn child_headers(
+    files: &[PathBuf],
+    own: &Path,
+    id: &str,
+    notes: &mut Vec<String>,
+) -> (Vec<ChildHeader>, Option<usize>) {
     let inspected = files.len().min(MAX_LINEAGE_PROBES);
     let bound = (files.len() > inspected).then_some(inspected);
     let children = files
@@ -2475,7 +2501,17 @@ fn child_headers(files: &[PathBuf], own: &Path, id: &str) -> (Vec<ChildHeader>, 
         .take(inspected)
         .filter(|path| path.as_path() != own)
         .filter_map(|path| {
-            let payload = head_jsonl(path)
+            let values = match head_jsonl(path) {
+                Ok(values) => values,
+                Err(error) => {
+                    notes.push(format!(
+                        "Codex lineage candidate header {} could not be read: {error:#}",
+                        path.display()
+                    ));
+                    return None;
+                }
+            };
+            let payload = values
                 .into_iter()
                 .find(|value| value["type"] == "session_meta")
                 .map(|value| value["payload"].clone())?;
@@ -2512,4 +2548,111 @@ fn turn_context_effort(payload: &Value) -> Option<&str> {
         .as_str()
         .or_else(|| payload["reasoning_effort"].as_str())
         .or_else(|| payload["collaboration_mode"]["settings"]["reasoning_effort"].as_str())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static NEXT_STORE: AtomicUsize = AtomicUsize::new(0);
+
+    struct Store(PathBuf);
+
+    impl Drop for Store {
+        fn drop(&mut self) {
+            fs::remove_dir_all(&self.0).unwrap();
+        }
+    }
+
+    fn failed_child_probe(full: bool, read_failure: bool) {
+        let root = Store(std::env::temp_dir().join(format!(
+            "tapes-child-probe-{}-{}",
+            std::process::id(),
+            NEXT_STORE.fetch_add(1, Ordering::Relaxed)
+        )));
+        fs::create_dir_all(&root.0).unwrap();
+        let parent_id = "00000000-0000-0000-0000-000000000001";
+        let child_id = "00000000-0000-0000-0000-000000000002";
+        let parent_path = root
+            .0
+            .join(format!("rollout-2026-01-01T10-00-00-{parent_id}.jsonl"));
+        let child_path = root
+            .0
+            .join(format!("rollout-2026-01-01T11-00-00-{child_id}.jsonl"));
+        fs::copy(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/codex")
+                .join(parent_path.file_name().unwrap()),
+            &parent_path,
+        )
+        .unwrap();
+        fs::write(
+            &child_path,
+            format!(
+                "{}\n",
+                serde_json::json!({
+                    "type": "session_meta",
+                    "payload": {
+                        "id": child_id,
+                        "parent_thread_id": parent_id,
+                        "agent_path": "/root/worker"
+                    }
+                })
+            ),
+        )
+        .unwrap();
+        let backend = CodexBackend::new(&root.0);
+        let parent = backend.locate(parent_id).unwrap().unwrap();
+        for lineage in [backend.lineage(&parent), backend.stream_lineage(&parent)] {
+            let lineage = lineage.unwrap();
+            assert_eq!(lineage.children.len(), 1);
+            assert!(lineage.children[0].resolved);
+        }
+        let (files, path, notes) = backend.lineage_inputs(&parent).unwrap();
+        assert!(notes.is_empty(), "{notes:?}");
+        assert!(files.contains(&child_path));
+        fs::remove_file(&child_path).unwrap();
+        if read_failure {
+            // Opening and statting a directory succeed; reading its bytes fails.
+            fs::create_dir(&child_path).unwrap();
+        }
+        let lineage = if full {
+            backend.stream_lineage_from_inputs(&parent, files, path, notes)
+        } else {
+            backend.lineage_from_inputs(&parent, files, path, notes)
+        }
+        .unwrap();
+        assert!(lineage.children.is_empty());
+        assert_eq!(lineage.notes.len(), 1, "{lineage:?}");
+        assert!(lineage.notes[0].contains(&child_path.display().to_string()));
+        assert!(lineage.notes[0].contains("could not be read"));
+        let cause = std::io::Error::from_raw_os_error(if read_failure {
+            libc::EISDIR
+        } else {
+            libc::ENOENT
+        });
+        assert!(lineage.notes[0].contains(&cause.to_string()));
+    }
+
+    #[test]
+    fn bounded_lineage_retains_child_header_open_failure_after_discovery() {
+        failed_child_probe(false, false);
+    }
+
+    #[test]
+    fn streamed_lineage_retains_child_header_open_failure_after_discovery() {
+        failed_child_probe(true, false);
+    }
+
+    #[test]
+    fn bounded_lineage_retains_child_header_read_failure_after_discovery() {
+        failed_child_probe(false, true);
+    }
+
+    #[test]
+    fn streamed_lineage_retains_child_header_read_failure_after_discovery() {
+        failed_child_probe(true, true);
+    }
 }
