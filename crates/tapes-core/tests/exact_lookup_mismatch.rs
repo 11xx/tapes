@@ -112,3 +112,29 @@ fn a_named_mismatch_cannot_resolve_as_a_unique_prefix() {
         "session-a-other",
     );
 }
+
+#[test]
+fn a_later_correct_file_wins_after_mismatch_and_invalid_metadata() {
+    let temp = Temp::new("three-candidates");
+    let now = std::time::SystemTime::now();
+    for (offset, body) in [
+        (0, "{\"type\":\"session\",\"id\":\"other\"}\n"),
+        (1, "{\"type\":\"session\",\"id\":42}\n"),
+        (2, "{\"type\":\"session\",\"id\":\"id\"}\n"),
+    ] {
+        let path = write(
+            &temp.0,
+            &format!("2026-09-0{}T12-00-00-000Z_id.jsonl", offset + 1),
+            body,
+        );
+        fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(now - std::time::Duration::from_secs(offset * 60))
+            .unwrap();
+    }
+    let backends = backends_from_stores([NativeStore::pi(&temp.0)], MIN_READ_BYTES).unwrap();
+    assert_eq!(backends[0].locate("id").unwrap().unwrap().id, "id");
+    assert_eq!(resolve_session(&backends, "id").unwrap().session.id, "id");
+}

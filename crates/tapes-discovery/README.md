@@ -49,7 +49,9 @@ traversal visits at most 100,000 entries at depth 64 and retains at most 16
 MiB per store. Prefix resolution inspects at most 1,000 candidates per store.
 A full ID matching a native-convention filename can be located beyond that
 prefix page. A file named for the queried ID whose header names another ID
-produces an identity-mismatch failure. A correct exact recording takes precedence;
+produces an identity-mismatch failure. Exact lookup inspects every bounded
+filename candidate until it finds a correct recording, retaining mismatch and
+read failures until then. A correct exact recording takes precedence;
 without one, identity mismatches refuse prefix fallback. Incomplete candidate
 coverage remains an error for prefix selection.
 

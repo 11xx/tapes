@@ -404,6 +404,7 @@ fn locate_exact_using(
         });
     }
     let mut mismatch = None;
+    let mut read_failure = None;
     for index in filename_matches {
         let path = &entries[index].path;
         match inspect(store, path) {
@@ -417,10 +418,12 @@ fn locate_exact_using(
                 });
             }
             Ok(None) => {}
-            Err(error) => return Err(mismatch.unwrap_or(error)),
+            Err(error) => {
+                read_failure.get_or_insert(error);
+            }
         }
     }
-    if let Some(error) = mismatch.or(first_failure) {
+    if let Some(error) = mismatch.or(read_failure).or(first_failure) {
         return Err(error);
     }
     Ok(None)
@@ -1138,6 +1141,36 @@ mod tests {
         .unwrap_err();
         assert_eq!(opened, 2);
         assert!(matches!(error, DiscoveryError::IdentityMismatch { .. }));
+    }
+
+    #[test]
+    fn a_correct_exact_candidate_wins_after_mismatch_and_read_failure() {
+        let temp = Temp::new();
+        let root = temp.path().join("pi");
+        for day in 1..=3 {
+            write(
+                &root,
+                &format!("2026-09-0{day}T12-00-00-000Z_id.jsonl"),
+                "{\"type\":\"session\",\"id\":\"id\"}\n",
+            );
+        }
+        let store = NativeStore::pi(&root);
+        let mut inspected = 0;
+        let result = locate_exact_using(&store, &root, "id", |store, path| {
+            inspected += 1;
+            match inspected {
+                1 => {
+                    fs::write(path, "{\"type\":\"session\",\"id\":\"other\"}\n").unwrap();
+                    probe(store, path)
+                }
+                2 => Err(DiscoveryError::TimedOut {
+                    coordinate: store.coordinate(),
+                }),
+                _ => probe(store, path),
+            }
+        });
+        assert_eq!(result.unwrap().unwrap().id(), "id");
+        assert_eq!(inspected, 3);
     }
 
     #[test]

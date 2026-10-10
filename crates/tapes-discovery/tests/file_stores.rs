@@ -508,3 +508,42 @@ fn a_named_mismatch_cannot_resolve_as_a_unique_prefix() {
         );
     }
 }
+
+#[test]
+fn a_later_correct_file_wins_after_mismatch_and_invalid_metadata() {
+    let temp = Temp::new();
+    let root = temp.path().join("pi");
+    let now = SystemTime::now();
+    for (offset, body) in [
+        (0, "{\"type\":\"session\",\"id\":\"other\"}\n"),
+        (1, "{\"type\":\"session\",\"id\":42}\n"),
+        (2, "{\"type\":\"session\",\"id\":\"id\"}\n"),
+    ] {
+        let path = write(
+            &root,
+            &format!("2026-09-0{}T12-00-00-000Z_id.jsonl", offset + 1),
+            body,
+        );
+        fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(now - std::time::Duration::from_secs(offset * 60))
+            .unwrap();
+    }
+    assert_eq!(
+        NativeStore::pi(&root)
+            .locate_exact("id")
+            .unwrap()
+            .unwrap()
+            .id(),
+        "id"
+    );
+    assert_eq!(
+        Discovery::new([NativeStore::pi(&root)])
+            .resolve("id")
+            .unwrap()
+            .id(),
+        "id"
+    );
+}
