@@ -574,7 +574,8 @@ struct SelectionArgs {
     /// Session identifier, full or a prefix whose bounded native discovery proves unique, or `self` for the
     /// session the caller runs in, as its harness's exported variable names it.
     /// Identity mismatches refuse prefix fallback; a correct exact match wins
-    /// even after another candidate's read failure.
+    /// even after another candidate's read failure. The filename/header rule
+    /// also applies to Pi's explicit recording file.
     #[arg(
         required_unless_present_any = ["latest", "title", "occurrence"],
         conflicts_with_all = ["latest", "title", "occurrence", "exclude", "here", "project", "global"]
@@ -665,7 +666,8 @@ struct SessionQueryArgs {
     /// Session identifier, full or a prefix whose bounded native discovery proves unique, or `self` for the
     /// session the caller runs in, as its harness's exported variable names it.
     /// Identity mismatches refuse prefix fallback; a correct exact match wins
-    /// even after another candidate's read failure.
+    /// even after another candidate's read failure. The filename/header rule
+    /// also applies to Pi's explicit recording file.
     #[arg(conflicts_with_all = ["title", "latest", "occurrence", "exclude", "here", "project", "global"])]
     session: Option<String>,
     /// Match the recorded title exactly in scope; incomplete or ambiguous lookup refuses.
@@ -894,7 +896,8 @@ enum Command {
         input: InputArgs,
         /// Exact session id, an unambiguous prefix, or `self`.
         /// Identity mismatches refuse prefix fallback; a correct exact match wins
-        /// even after another candidate's read failure.
+        /// even after another candidate's read failure. The filename/header rule
+        /// also applies to Pi's explicit recording file.
         session: String,
         /// Restrict ID or prefix lookup to one harness.
         #[arg(long)]

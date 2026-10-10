@@ -26,6 +26,8 @@ identity.
 `Discovery::from_env` adds `PI_SESSION_FILE` alongside the configured Pi
 directory. An exact identity in that live recording takes precedence over the
 same identity in the directory; candidate pages include the identity once.
+A live file named for the queried ID whose header names another ID reports an
+identity mismatch, with a correct directory recording taking precedence.
 Other Pi identities remain resolvable from `PI_CODING_AGENT_SESSION_DIR`,
 then `PI_CODING_AGENT_DIR/sessions`, then the default Pi session directory.
 

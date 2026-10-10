@@ -138,3 +138,35 @@ fn a_later_correct_file_wins_after_mismatch_and_invalid_metadata() {
     assert_eq!(backends[0].locate("id").unwrap().unwrap().id, "id");
     assert_eq!(resolve_session(&backends, "id").unwrap().session.id, "id");
 }
+
+#[test]
+fn an_explicit_pi_file_retains_named_mismatches_and_directory_precedence() {
+    let temp = Temp::new("explicit-pi");
+    let path = write(
+        &temp.0,
+        "2026-09-24T12-00-00-000Z_session-a.jsonl",
+        "{\"type\":\"session\",\"id\":\"session-a-other\"}\n",
+    );
+    let backends = backends_from_stores([NativeStore::pi_file(&path)], MIN_READ_BYTES).unwrap();
+    assert!(backends[0].locate("session-a").is_err());
+    assert_mismatch(
+        resolve_session(&backends, "session-a"),
+        "session-a",
+        "session-a-other",
+    );
+    write(
+        &temp.0,
+        "2026-09-25T12-00-00-000Z_session-a.jsonl",
+        "{\"type\":\"session\",\"id\":\"session-a\"}\n",
+    );
+    let backends =
+        backends_from_stores([NativeStore::pi_with_file(&temp.0, &path)], MIN_READ_BYTES).unwrap();
+    assert_eq!(
+        backends[0].locate("session-a").unwrap().unwrap().id,
+        "session-a"
+    );
+    assert_eq!(
+        resolve_session(&backends, "session-a").unwrap().session.id,
+        "session-a"
+    );
+}

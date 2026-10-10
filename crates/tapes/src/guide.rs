@@ -181,6 +181,8 @@ FIND IT
   both ids, rather than reporting the session absent; a correct file for the id
   in the same store wins even after an intervening read failure. Every bounded
   exact filename candidate is inspected until a correct match is found.
+  The filename/header rule also applies to Pi's explicit recording file;
+  a correct directory recording takes precedence over its mismatch.
   An identity mismatch remains a failure
   when candidate enumeration finds only prefix matches. A prefix is accepted only when
   bounded candidate coverage proves it unique; an ambiguous prefix lists its

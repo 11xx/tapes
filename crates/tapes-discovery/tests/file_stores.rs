@@ -547,3 +547,47 @@ fn a_later_correct_file_wins_after_mismatch_and_invalid_metadata() {
         "id"
     );
 }
+
+#[test]
+fn an_explicit_pi_file_retains_named_mismatches_and_directory_precedence() {
+    let temp = Temp::new();
+    let root = temp.path().join("pi");
+    let path = write(
+        &root,
+        "2026-09-24T12-00-00-000Z_session-a.jsonl",
+        "{\"type\":\"session\",\"id\":\"session-a-other\"}\n",
+    );
+    let error = NativeStore::pi_file(&path)
+        .locate_exact("session-a")
+        .unwrap_err();
+    assert!(matches!(error, DiscoveryError::IdentityMismatch { .. }));
+    assert_mismatch_names_both(&error.to_string(), &path, "session-a", "session-a-other");
+    assert!(matches!(
+        Discovery::new([NativeStore::pi_file(&path)]).resolve("session-a"),
+        Err(ResolveError::BackendFailed { .. })
+    ));
+    let correct = write(
+        &root,
+        "2026-09-25T12-00-00-000Z_session-a.jsonl",
+        "{\"type\":\"session\",\"id\":\"session-a\"}\n",
+    );
+    let store = NativeStore::pi_with_file(&root, &path);
+    let session = store.locate_exact("session-a").unwrap().unwrap();
+    assert_eq!(session.locator(), Some(correct.as_path()));
+    assert_eq!(
+        Discovery::new([store]).resolve("session-a").unwrap().id(),
+        "session-a"
+    );
+    assert!(NativeStore::pi_file(&path)
+        .locate_exact("unrelated")
+        .unwrap()
+        .is_none());
+    assert_eq!(
+        NativeStore::pi_file(&path)
+            .locate_exact("session-a-other")
+            .unwrap()
+            .unwrap()
+            .id(),
+        "session-a-other"
+    );
+}

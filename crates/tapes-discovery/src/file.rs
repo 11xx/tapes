@@ -336,11 +336,11 @@ pub(crate) fn locate_exact(
     store: &NativeStore,
     id: &str,
 ) -> Result<Option<NativeSession>, DiscoveryError> {
-    let live = store.file().map(|path| probe_runtime_file(store, path));
+    let live = store.file().map(|path| {
+        probe_runtime_file(store, path).and_then(|session| exact_identity(store, path, id, session))
+    });
     if let Some(Ok(Some(session))) = &live {
-        if session.id() == id {
-            return Ok(Some(session.clone()));
-        }
+        return Ok(Some(session.clone()));
     }
     let directory = match store.root() {
         Some(root) => locate_exact_using(store, root, id, probe),
@@ -350,6 +350,26 @@ pub(crate) fn locate_exact(
         (_, Ok(Some(session))) => Ok(Some(session)),
         (Some(Err(error)), _) => Err(error),
         (_, result) => result,
+    }
+}
+
+fn exact_identity(
+    store: &NativeStore,
+    path: &Path,
+    id: &str,
+    session: Option<NativeSession>,
+) -> Result<Option<NativeSession>, DiscoveryError> {
+    match session {
+        Some(session) if session.id() == id => Ok(Some(session)),
+        Some(other) if filename_id(store.harness(), path).as_deref() == Some(id) => {
+            Err(DiscoveryError::IdentityMismatch {
+                coordinate: store.coordinate(),
+                path: path.to_owned(),
+                queried: id.to_owned(),
+                found: other.id().to_owned(),
+            })
+        }
+        _ => Ok(None),
     }
 }
 
@@ -407,15 +427,10 @@ fn locate_exact_using(
     let mut read_failure = None;
     for index in filename_matches {
         let path = &entries[index].path;
-        match inspect(store, path) {
-            Ok(Some(session)) if session.id() == id => return Ok(Some(session)),
-            Ok(Some(other)) => {
-                mismatch.get_or_insert_with(|| DiscoveryError::IdentityMismatch {
-                    coordinate: store.coordinate(),
-                    path: path.clone(),
-                    queried: id.to_owned(),
-                    found: other.id().to_owned(),
-                });
+        match inspect(store, path).and_then(|session| exact_identity(store, path, id, session)) {
+            Ok(Some(session)) => return Ok(Some(session)),
+            Err(error @ DiscoveryError::IdentityMismatch { .. }) => {
+                mismatch.get_or_insert(error);
             }
             Ok(None) => {}
             Err(error) => {
