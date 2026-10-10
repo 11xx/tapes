@@ -1150,6 +1150,14 @@ mod tests {
             "2026-09-24T12-00-00-000Z_id.jsonl",
             "{\"type\":\"session\",\"id\":\"other\"}\n",
         );
+        for day in [23, 24] {
+            File::options()
+                .write(true)
+                .open(root.join(format!("2026-09-{day}T12-00-00-000Z_id.jsonl")))
+                .unwrap()
+                .set_times(fs::FileTimes::new().set_modified(UNIX_EPOCH + Duration::from_secs(day)))
+                .unwrap();
+        }
         let store = NativeStore::pi(&root);
         let mut opened = 0;
         let error = locate_exact_using(&store, &root, "id", |store, path| {
