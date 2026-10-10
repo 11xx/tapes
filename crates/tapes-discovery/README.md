@@ -48,8 +48,10 @@ those bounded bytes; it does not return or retain transcript text. Native
 traversal visits at most 100,000 entries at depth 64 and retains at most 16
 MiB per store. Prefix resolution inspects at most 1,000 candidates per store.
 A full ID matching a native-convention filename can be located beyond that
-prefix page. A header/filename mismatch is found only through bounded candidate
-enumeration, whose incomplete coverage remains an error for prefix selection.
+prefix page. A file named for the queried ID whose header names another ID
+produces an identity-mismatch failure. A correct exact recording takes precedence;
+without one, identity mismatches refuse prefix fallback. Incomplete candidate
+coverage remains an error for prefix selection.
 
 OpenCode metadata responses are capped at 8 MiB with a 30-second command
 deadline and at most 1,000 candidate rows. Stable and v2 stores share the
@@ -68,7 +70,8 @@ exhausted bounds, timed-out metadata commands, and failed commands.
 `ResolveError` distinguishes invalid queries, absence, incomplete coverage,
 ambiguity, backend failures, and a failed higher-precedence shared store.
 `CandidatePage` carries its records, scan counts, completeness, unreadable IDs,
-and failures.
+and failures. `IdentitySource::locate_for_resolution` retains whether an exact
+failure refuses prefix fallback; native identity mismatches carry that policy.
 
 ## Dependency
 

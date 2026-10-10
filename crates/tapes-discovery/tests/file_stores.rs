@@ -454,3 +454,57 @@ fn the_first_mismatched_file_in_sort_order_is_reported() {
         .unwrap_err();
     assert_mismatch_names_both(&error.to_string(), &first, CODEX_ID_A, CODEX_ID_B);
 }
+
+#[test]
+fn a_named_mismatch_cannot_resolve_as_a_unique_prefix() {
+    let temp = Temp::new();
+    for (harness, name, body) in [
+        (
+            "pi",
+            "2026-09-24T12-00-00-000Z_session-a.jsonl",
+            "{\"type\":\"session\",\"id\":\"session-a-other\"}\n",
+        ),
+        (
+            "claude",
+            "project/session-a.jsonl",
+            "{\"sessionId\":\"session-a-other\"}\n",
+        ),
+    ] {
+        let root = temp.path().join(harness);
+        let path = write(&root, name, body);
+        let store = if harness == "pi" {
+            NativeStore::pi(&root)
+        } else {
+            NativeStore::claude(&root)
+        };
+        match Discovery::new([store]).resolve("session-a") {
+            Err(ResolveError::BackendFailed { failures, .. }) => {
+                assert_mismatch_names_both(
+                    &failures.join("; "),
+                    &path,
+                    "session-a",
+                    "session-a-other",
+                );
+            }
+            other => panic!("expected a named mismatch failure, got {other:?}"),
+        }
+        let (name, body) = if harness == "pi" {
+            (
+                "2026-09-25T12-00-00-000Z_other.jsonl",
+                "{\"type\":\"session\",\"id\":\"session-a\"}\n",
+            )
+        } else {
+            ("project/other.jsonl", "{\"sessionId\":\"session-a\"}\n")
+        };
+        write(&root, name, body);
+        let store = if harness == "pi" {
+            NativeStore::pi(&root)
+        } else {
+            NativeStore::claude(&root)
+        };
+        assert_eq!(
+            Discovery::new([store]).resolve("session-a").unwrap().id(),
+            "session-a"
+        );
+    }
+}

@@ -179,7 +179,8 @@ FIND IT
   A full session id uses direct native lookup. A recording file named for the id
   whose header records another session fails the lookup, naming the path and
   both ids, rather than reporting the session absent; a correct file for the id
-  in the same store still wins. A prefix is accepted only when
+  in the same store still wins. An identity mismatch remains a failure
+  when candidate enumeration finds only prefix matches. A prefix is accepted only when
   bounded candidate coverage proves it unique; an ambiguous prefix lists its
   candidates. --harness <h> restricts ID and prefix lookup to that harness's
   stores. Incomplete coverage names incomplete and completely searched harness

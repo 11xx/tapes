@@ -544,6 +544,21 @@ impl IdentitySource<Session> for BackendIdentitySource<'_> {
         self.0.locate(query).map_err(|error| format!("{error:#}"))
     }
 
+    fn locate_for_resolution(
+        &self,
+        query: &str,
+    ) -> std::result::Result<Option<Session>, agent_tapes_discovery::ExactLookupFailure> {
+        self.0
+            .locate(query)
+            .map_err(|error| agent_tapes_discovery::ExactLookupFailure {
+                refuses_prefix: matches!(
+                    error.downcast_ref::<agent_tapes_discovery::DiscoveryError>(),
+                    Some(agent_tapes_discovery::DiscoveryError::IdentityMismatch { .. })
+                ),
+                message: format!("{error:#}"),
+            })
+    }
+
     fn candidates(&self, limit: usize) -> NativeCandidatePage<Session, String> {
         let mut query = Query::unscoped(limit);
         query.ceiling = limit;

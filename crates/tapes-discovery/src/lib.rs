@@ -467,6 +467,13 @@ impl IdentityRecord for NativeSession {
     }
 }
 
+/// An exact lookup error with its prefix-fallback policy.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExactLookupFailure {
+    pub message: String,
+    pub refuses_prefix: bool,
+}
+
 /// A source adapted to the shared exact/prefix selector.
 pub trait IdentitySource<R: IdentityRecord> {
     fn harness(&self) -> &str;
@@ -475,6 +482,15 @@ pub trait IdentitySource<R: IdentityRecord> {
         None
     }
     fn locate_exact(&self, query: &str) -> Result<Option<R>, String>;
+    /// Preserve failures that prefix candidates cannot answer. Correct exact
+    /// records still take precedence over these failures.
+    fn locate_for_resolution(&self, query: &str) -> Result<Option<R>, ExactLookupFailure> {
+        self.locate_exact(query)
+            .map_err(|message| ExactLookupFailure {
+                message,
+                refuses_prefix: false,
+            })
+    }
     fn candidates(&self, limit: usize) -> CandidatePage<R, String>;
     fn shares_session_ids(&self) -> bool {
         false
@@ -591,6 +607,16 @@ impl IdentitySource<NativeSession> for NativeStore {
         NativeStore::locate_exact(self, query).map_err(|error| error.to_string())
     }
 
+    fn locate_for_resolution(
+        &self,
+        query: &str,
+    ) -> Result<Option<NativeSession>, ExactLookupFailure> {
+        NativeStore::locate_exact(self, query).map_err(|error| ExactLookupFailure {
+            refuses_prefix: matches!(error, DiscoveryError::IdentityMismatch { .. }),
+            message: error.to_string(),
+        })
+    }
+
     fn candidates(&self, limit: usize) -> CandidatePage<NativeSession, String> {
         let page = NativeStore::candidates(self, limit);
         CandidatePage {
@@ -628,15 +654,17 @@ pub fn resolve_with_sources<R: IdentityRecord + Clone>(
         return Err(ResolveError::InvalidQuery);
     }
     let mut exact = Vec::<Resolved<R>>::new();
+    let mut refuses_prefix = false;
     let mut failures = Vec::<(usize, String, String)>::new();
     let mut precedence = SharedStorePrecedence::default();
     for (source_index, source) in sources.iter().enumerate() {
-        match source.locate_exact(query) {
+        match source.locate_for_resolution(query) {
             Ok(Some(record)) if record.id() == query => exact.push(Resolved {
                 source_index,
                 record,
             }),
             Ok(Some(_)) => {
+                refuses_prefix = true;
                 if source.shares_session_ids() {
                     precedence.record_store_failure(source.harness(), true, source_index);
                 }
@@ -651,7 +679,8 @@ pub fn resolve_with_sources<R: IdentityRecord + Clone>(
                 if source.shares_session_ids() {
                     precedence.record_store_failure(source.harness(), true, source_index);
                 }
-                failures.push((source_index, source.harness().to_owned(), error));
+                refuses_prefix |= error.refuses_prefix;
+                failures.push((source_index, source.harness().to_owned(), error.message));
             }
         }
     }
@@ -885,6 +914,12 @@ pub fn resolve_with_sources<R: IdentityRecord + Clone>(
                     .iter()
                     .map(|hit| (&hit.record as &dyn IdentityRecord, hit.source_index)),
             ),
+        });
+    }
+    if refuses_prefix {
+        return Err(ResolveError::BackendFailed {
+            query: query.to_owned(),
+            failures: failure_messages(failures.iter()),
         });
     }
     if matches.len() > 1 {

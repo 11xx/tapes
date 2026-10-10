@@ -96,3 +96,19 @@ fn pi_recording_under_another_session_name_fails_the_lookup() {
         "session-a"
     );
 }
+
+#[test]
+fn a_named_mismatch_cannot_resolve_as_a_unique_prefix() {
+    let temp = Temp::new("prefix");
+    write(
+        &temp.0,
+        "2026-01-01T10-00-00-000Z_session-a.jsonl",
+        "{\"type\":\"session\",\"id\":\"session-a-other\"}\n",
+    );
+    let backends = backends_from_stores([NativeStore::pi(&temp.0)], MIN_READ_BYTES).unwrap();
+    assert_mismatch(
+        resolve_session(&backends, "session-a"),
+        "session-a",
+        "session-a-other",
+    );
+}
