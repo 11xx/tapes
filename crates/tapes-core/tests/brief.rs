@@ -504,3 +504,84 @@ fn a_handle_list_the_bound_cut_says_so() {
         brief.notes
     );
 }
+
+#[test]
+fn readme_describes_the_current_checkout_commit_reported_by_brief_and_export() {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../target")
+        .join(format!("checkout-context-fixture-{}", std::process::id()));
+    let checkout = Store { root };
+    fs::create_dir_all(&checkout.root).unwrap();
+    let git = |args: &[&str], input: &str| {
+        let mut child = Command::new("git")
+            .arg("-C")
+            .arg(&checkout.root)
+            .args(args)
+            .env("GIT_EDITOR", "true")
+            .env("GIT_SEQUENCE_EDITOR", "true")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(input.as_bytes())
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap().trim().to_owned()
+    };
+    git(&["init", "--object-format=sha1"], "");
+    let tree = git(&["mktree"], "");
+    let commit = |message: &str| {
+        git(&["hash-object", "-t", "commit", "-w", "--stdin"],
+        &format!("tree {tree}\nauthor Fixture <fixture@example.invalid> 1 +0000\ncommitter Fixture <fixture@example.invalid> 1 +0000\n\n{message}\n"))
+    };
+    let recorded = commit("Recorded checkout");
+    git(&["update-ref", "HEAD", &recorded], "");
+    let id = "00000000-0000-4000-8000-0000000000e1";
+    let (_store, backends) = codex_store(
+        "checkout-revision",
+        id,
+        checkout.root.to_str().unwrap(),
+        codex_operator(2, "Inspect the fixture."),
+    );
+    assert_eq!(
+        brief(&backends, id, 12)
+            .working_set
+            .git
+            .unwrap()
+            .head
+            .as_deref(),
+        Some(recorded.as_str())
+    );
+
+    let current = commit("Current checkout");
+    git(&["update-ref", "HEAD", &current], "");
+    assert_ne!(recorded, current);
+    let value = serde_json::to_value(brief(&backends, id, 12)).unwrap();
+    assert_eq!(value["working_set"]["git"]["head"], current);
+    let session = backends[0].locate(id).unwrap().unwrap();
+    let transcript = backends[0].transcript(&session, 12).unwrap();
+    let bundle =
+        agent_tapes_core::bundle::export(&transcript, &_store.root.join("export")).unwrap();
+    let value: Value = serde_json::from_slice(&fs::read(bundle.json.path).unwrap()).unwrap();
+    assert_eq!(value["git"]["head"], current);
+
+    let readme = include_str!("../../../README.md");
+    assert!(
+        readme.contains("current checkout commit"),
+        "README must identify the present checkout revision observed by brief and export"
+    );
+    assert!(!readme.contains("which directory and commit it was on"));
+}

@@ -63,7 +63,7 @@ impl Bundle {
     }
 }
 
-/// The commit a session's working directory sat on, when that is knowable.
+/// The current commit and branch of the session's recorded working directory.
 #[derive(Clone, Debug, Serialize)]
 pub struct GitContext {
     #[serde(skip_serializing_if = "Option::is_none")]

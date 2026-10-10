@@ -5,9 +5,9 @@ Read any coding agent's recorded sessions, and hand them to the next one.
 When a coding agent's session dies mid-task, the work it did survives only in
 the harness's own recording, in a format no other harness reads. `tapes` reads
 the recordings of Claude Code, Codex, OpenCode and Pi through one model. It
-tells you where a session stopped, which directory and commit it was on, which
-tool calls never got a result, and what it cost, and it exports the session as
-a bundle a fresh session in any harness can read.
+tells you where a session stopped, its recorded directory and that directory's
+current checkout commit, which tool calls never got a result, and what it cost.
+It exports the session as a bundle a fresh session in any harness can read.
 
 The same reader answers questions across sessions: which ones mention
 something, what each ended on, where the tokens went. With `--input` it reads
