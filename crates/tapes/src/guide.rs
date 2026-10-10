@@ -531,6 +531,16 @@ PROBE BEFORE EXPORTING
   parent column on either projection, and pi carries a parent reference on the
   child alone. lineage --full streams every record, so a child spawned before
   the tail window is still named.
+  A Claude subagent a plugin launched has no Agent call in the parent, so the
+  parent states neither its spawn nor its end. When such a subagent takes no
+  further input, its completion is read from its own recording: the timestamp
+  of its final record, if that is an assistant record that stopped on end_turn
+  (trailing housekeeping records are skipped), with that record's id in source
+  after the recording's file. Without that ending there is no completion
+  stamp, which means not seen to finish rather than running: a child killed
+  mid-turn reads the same. A completion the parent's own records state is
+  preferred, and the spawn stays unstamped, since the child's first record is
+  its own first activity and not the parent's launch.
 
   Given a scope or a listing filter instead of a session, usage answers that
   whole selection as tapes-usage-summary/6, using the flags list and export

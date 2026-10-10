@@ -1230,7 +1230,12 @@ enum Command {
     /// inferred from directories, titles, or timestamps. A reference the
     /// store cannot resolve is kept and marked. A child is referred to, never
     /// absorbed: use `show` for an ordinary child session ID, or
-    /// `child PARENT --reference CHILD` for a Claude subagent.
+    /// `child PARENT --reference CHILD` for a Claude subagent. A Claude
+    /// subagent a plugin launched has no spawn or completion in the parent's
+    /// records; one that takes no further input is stamped completed from its
+    /// own recording when that recording's final record is an assistant record
+    /// that stopped on `end_turn`, citing that record in `source`. Otherwise
+    /// it has no completion stamp, which does not say it is still running.
     Lineage {
         #[command(flatten)]
         selection: SelectionArgs,

@@ -7691,6 +7691,128 @@ fn lineage_help_names_the_schema_and_the_rule_it_follows() {
         "{help}"
     );
     assert!(help.contains("referred to, never"), "{help}");
+    assert!(
+        help.contains("stamped completed from its own recording"),
+        "{help}"
+    );
+}
+
+/// A subagent a plugin launched has no `Agent` call in the parent, so the
+/// binary reads its completion from the child's own final record and cites
+/// that record; a child still mid-turn gets no stamp.
+#[test]
+fn lineage_stamps_a_finished_plugin_steered_child_and_not_a_running_one() {
+    let root = TemporaryDirectory::new(
+        std::env::temp_dir().join(format!("tapes-cli-plugin-child-{}", std::process::id())),
+    );
+    let home = root.path().join("home");
+    let project = home.join(".claude/projects/fixture");
+    let children = project.join("session-claude/subagents");
+    fs::create_dir_all(&children).unwrap();
+    fs::write(project.join("session-claude.jsonl"), CLAUDE_SESSION).unwrap();
+    let meta = serde_json::json!({
+        "agentType": "delegated-agents:run", "toolUseId": "toolu_plugin_0001",
+        "pluginSteered": true, "requestShape": "background", "requestNonInteractive": true
+    })
+    .to_string();
+    let assistant = |agent: &str, uuid: &str, at: &str, stop_reason: &str| {
+        serde_json::json!({
+            "type": "assistant", "sessionId": "session-claude", "uuid": uuid, "timestamp": at,
+            "isSidechain": true, "agentId": agent,
+            "message": {"role": "assistant", "model": "claude-fixture",
+                "stop_reason": stop_reason, "content": [{"type": "text", "text": "child-only"}]}
+        })
+        .to_string()
+            + "\n"
+    };
+    for (agent, uuid, at, stop_reason) in [
+        (
+            "a5f3c01d7e2b49a60",
+            "ending-record",
+            "2026-01-01T10:09:00.000Z",
+            "end_turn",
+        ),
+        (
+            "a9b81e4d03c7f25a1",
+            "midturn-record",
+            "2026-01-01T10:09:30.000Z",
+            "tool_use",
+        ),
+    ] {
+        fs::write(children.join(format!("agent-{agent}.meta.json")), &meta).unwrap();
+        fs::write(
+            children.join(format!("agent-{agent}.jsonl")),
+            assistant(agent, uuid, at, stop_reason),
+        )
+        .unwrap();
+    }
+    let run = |arguments: &[&str]| {
+        let mut command = tapes();
+        command.args(arguments);
+        with_fixture_env(&mut command, &root.path().join("codex"), &home, root.path());
+        let output = command.output().unwrap();
+        assert!(output.status.success(), "{output:?}");
+        output.stdout
+    };
+
+    let value: Value =
+        serde_json::from_slice(&run(&["lineage", "session-claude", "--json"])).unwrap();
+    let child = |reference: &str| {
+        value["lineage"]["children"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|child| child["reference"] == reference)
+            .unwrap_or_else(|| panic!("no child {reference}: {value}"))
+            .clone()
+    };
+    let finished = child("a5f3c01d7e2b49a60");
+    assert_eq!(finished["completed_at"], "2026-01-01T10:09:00Z");
+    assert_eq!(finished["resolved"], true);
+    assert!(finished.get("spawned_at").is_none(), "{finished}");
+    assert!(
+        finished["source"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|source| source["kind"] == "record" && source["native_id"] == "ending-record"),
+        "{finished}"
+    );
+    let running = child("a9b81e4d03c7f25a1");
+    assert!(running.get("completed_at").is_none(), "{running}");
+    assert!(
+        !serde_json::to_string(&value)
+            .unwrap()
+            .contains("child-only"),
+        "a child's own text never reaches the parent's lineage"
+    );
+
+    let human = String::from_utf8(run(&["lineage", "session-claude"])).unwrap();
+    assert!(
+        human
+            .lines()
+            .any(|line| line.contains("a5f3c01d7e2b49a60") && !line.contains("completed -")),
+        "{human}"
+    );
+    assert!(
+        human
+            .lines()
+            .any(|line| line.contains("a9b81e4d03c7f25a1") && line.contains("completed -")),
+        "{human}"
+    );
+}
+
+/// The guide lists where a Claude subagent's completion comes from, including
+/// a plugin-steered subagent's own recording.
+#[test]
+fn the_guide_names_where_a_plugin_steered_subagents_completion_comes_from() {
+    let guide = tapes().output().unwrap();
+    let text = String::from_utf8_lossy(&guide.stdout);
+    assert!(
+        text.contains("a plugin launched has no Agent call"),
+        "{text}"
+    );
+    assert!(text.contains("stopped on end_turn"), "{text}");
 }
 
 /// The command reports the relationships a store recorded, keeps a reference
