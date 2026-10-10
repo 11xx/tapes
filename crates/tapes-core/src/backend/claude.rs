@@ -406,7 +406,7 @@ impl Backend for ClaudeBackend {
         let mut listing = list_discovered_files(
             store,
             query,
-            |path| head_directory(path, claude_cwd),
+            |native, path| head_directory(path, native, claude_cwd),
             |native, path| self.parse(native, path).map(|(session, _, _)| session),
         );
         listing
@@ -426,7 +426,7 @@ impl Backend for ClaudeBackend {
             needle,
             tail,
             self.read_bytes,
-            |path| head_directory(path, claude_cwd),
+            |native, path| head_directory(path, native, claude_cwd),
             |native, path| {
                 self.parse(native, path)
                     .map(|(session, turns, read)| ParsedFile {

@@ -578,7 +578,8 @@ struct SelectionArgs {
     /// also applies to Pi's explicit recording file. Recording reads accept only
     /// regular opened files and never wait for FIFO writers. Identity-bearing
     /// records must match the selected native session in the opening and bounded
-    /// tail, or throughout a full read.
+    /// tail, or throughout a full read. Listing prefilters with uncertain native
+    /// identity defer to normalization and its diagnostics.
     #[arg(
         required_unless_present_any = ["latest", "title", "occurrence"],
         conflicts_with_all = ["latest", "title", "occurrence", "exclude", "here", "project", "global"]
@@ -673,7 +674,8 @@ struct SessionQueryArgs {
     /// also applies to Pi's explicit recording file. Recording reads accept only
     /// regular opened files and never wait for FIFO writers. Identity-bearing
     /// records must match the selected native session in the opening and bounded
-    /// tail, or throughout a full read.
+    /// tail, or throughout a full read. Listing prefilters with uncertain native
+    /// identity defer to normalization and its diagnostics.
     #[arg(conflicts_with_all = ["title", "latest", "occurrence", "exclude", "here", "project", "global"])]
     session: Option<String>,
     /// Match the recorded title exactly in scope; incomplete or ambiguous lookup refuses.
@@ -906,7 +908,8 @@ enum Command {
         /// also applies to Pi's explicit recording file. Recording reads accept only
         /// regular opened files and never wait for FIFO writers. Identity-bearing
         /// records must match the selected native session in the opening and bounded
-        /// tail, or throughout a full read.
+        /// tail, or throughout a full read. Listing prefilters with uncertain native
+        /// identity defer to normalization and its diagnostics.
         session: String,
         /// Restrict ID or prefix lookup to one harness.
         #[arg(long)]
@@ -918,7 +921,10 @@ enum Command {
     /// List available sessions. Human output keeps the exact session id in
     /// the ID column and puts any present-tense state in a separate LIVE
     /// column. If agent-status is unavailable, malformed, oversized, or
-    /// slower than its 250 ms deadline, LIVE is blank.
+    /// slower than its 250 ms deadline, LIVE is blank. Native recording probes
+    /// accept only regular opened files and never wait for FIFO writers.
+    /// Identity-bearing records must match the discovered native session;
+    /// uncertain prefilters defer to normalization and its diagnostics.
     List {
         /// Restrict results to one harness.
         #[arg(long)]

@@ -38,6 +38,8 @@ SELECT A MATERIALIZED NATIVE STORE
   only regular opened files, without waiting for FIFO writers. Identity-bearing
   records must match the selected native session (the parent for Claude children).
   Bounded reads check the opening and retained tail; full reads check every record.
+  Directory and raw-text prefilters validate the probed native identity before
+  excluding a candidate; uncertain probes defer to normalization and its diagnostics.
   This is a selected
   occurrence, with no live annotation or claim of immutable bytes. capture
   reports caller-selected-native-store: the caller selected the native source,

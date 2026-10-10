@@ -693,7 +693,7 @@ fn merge_discovery_coverage(
 pub(crate) fn list_discovered_files(
     store: &NativeStore,
     query: &Query,
-    probe: impl Fn(&Path) -> Option<PathBuf>,
+    probe: impl Fn(&NativeSession, &Path) -> Option<PathBuf>,
     parse: impl Fn(&NativeSession, &Path) -> Result<Session>,
 ) -> Listing {
     if query.limit == 0 {
@@ -714,26 +714,31 @@ pub(crate) fn list_discovered_files(
         by_path.insert(path, native);
     }
     let parse_errors = std::cell::RefCell::new(Vec::<(String, String)>::new());
-    let mut listing = list_files(files, query, probe, |path| {
-        let native = by_path.get(path)?;
-        match parse(native, path) {
-            Ok(session) => match enrich_native_session(native, session) {
-                Ok(session) => Some(session),
+    let mut listing = list_files(
+        files,
+        query,
+        |path| by_path.get(path).and_then(|native| probe(native, path)),
+        |path| {
+            let native = by_path.get(path)?;
+            match parse(native, path) {
+                Ok(session) => match enrich_native_session(native, session) {
+                    Ok(session) => Some(session),
+                    Err(error) => {
+                        parse_errors
+                            .borrow_mut()
+                            .push((native.id().to_owned(), format!("{}", error)));
+                        None
+                    }
+                },
                 Err(error) => {
                     parse_errors
                         .borrow_mut()
-                        .push((native.id().to_owned(), format!("{}", error)));
+                        .push((native.id().to_owned(), format!("{error:#}")));
                     None
                 }
-            },
-            Err(error) => {
-                parse_errors
-                    .borrow_mut()
-                    .push((native.id().to_owned(), format!("{error:#}")));
-                None
             }
-        }
-    });
+        },
+    );
     for (id, error) in parse_errors.into_inner() {
         listing
             .unavailable
@@ -762,7 +767,7 @@ pub(crate) fn list_discovered_files_with_search(
     needle: &str,
     tail: usize,
     read_bytes: u64,
-    probe: impl Fn(&Path) -> Option<PathBuf>,
+    probe: impl Fn(&NativeSession, &Path) -> Option<PathBuf>,
     parse: impl Fn(&NativeSession, &Path) -> Result<ParsedFile> + Sync,
 ) -> Listing {
     if query.limit == 0 {
@@ -781,8 +786,17 @@ pub(crate) fn list_discovered_files_with_search(
         by_path.insert(path, native);
     }
     let parse_errors = std::sync::Mutex::new(Vec::<(String, String)>::new());
-    let mut listing =
-        list_files_with_search(files, query, needle, tail, read_bytes, probe, |path| {
+    let mut listing = list_files_with_search(
+        files,
+        query,
+        needle,
+        tail,
+        SearchInputs {
+            read_bytes,
+            identities: Some(&by_path),
+        },
+        |path| by_path.get(path).and_then(|native| probe(native, path)),
+        |path| {
             let native = by_path.get(path)?;
             let parsed = match parse(native, path) {
                 Ok(parsed) => parsed,
@@ -808,7 +822,8 @@ pub(crate) fn list_discovered_files_with_search(
                     None
                 }
             }
-        });
+        },
+    );
     for (id, error) in parse_errors
         .into_inner()
         .expect("parse diagnostic mutex poisoned")
@@ -1206,6 +1221,18 @@ pub(crate) fn validate_native_identity(
         return Ok(true);
     }
     Ok(false)
+}
+
+fn validate_discovered_identity(values: &[Value], native: &NativeSession) -> Result<()> {
+    let mut identified = false;
+    for value in values {
+        identified |= validate_native_identity(value, native.harness().as_str(), native.id())?;
+    }
+    if native.identity_basis() == Some(agent_tapes_discovery::IdentityBasis::Header) && !identified
+    {
+        anyhow::bail!("recording has no selected native identity evidence");
+    }
+    Ok(())
 }
 
 pub(crate) fn validate_recording_identity(
@@ -1850,7 +1877,12 @@ fn stat_revision(metadata: &std::fs::Metadata) -> String {
 /// character to be written as a `\u` escape, and non-ASCII case folding can
 /// change the characters a search sees, so those inputs stay candidates for
 /// the normal parser. A raw hit is only a reason to parse; it is not a match.
-fn raw_tail_may_contain(path: &Path, needle: &str, read_bytes: u64) -> bool {
+fn raw_tail_may_contain(
+    path: &Path,
+    needle: &str,
+    read_bytes: u64,
+    native: Option<&NativeSession>,
+) -> bool {
     if needle.is_empty() || !needle.bytes().all(|byte| byte.is_ascii_alphanumeric()) {
         return true;
     }
@@ -1871,17 +1903,30 @@ fn raw_tail_may_contain(path: &Path, needle: &str, read_bytes: u64) -> bool {
     if bytes.iter().any(|byte| *byte >= 0x80) || bytes.windows(2).any(|window| window == b"\\u") {
         return true;
     }
-    bytes.windows(needle.len()).any(|window| {
+    let hit = bytes.windows(needle.len()).any(|window| {
         window
             .iter()
             .zip(needle.bytes())
             .all(|(byte, expected)| byte.eq_ignore_ascii_case(&expected))
-    })
+    });
+    if hit {
+        return true;
+    }
+    if let Some(native) = native {
+        if start != 0 {
+            return true;
+        }
+        let (values, _, _, _) = parse_jsonl_records(&bytes, 0);
+        if validate_discovered_identity(&values, native).is_err() {
+            return true;
+        }
+    }
+    false
 }
 
 /// Parse the opening of a JSONL file. Every harness writes what it knows
-/// about a session at the top, and `read_jsonl` reads the *end* of a file, so
-/// a large transcript loses its own header without this.
+/// about a session at the top. A bounded transcript retains the file's end;
+/// its header is established by a separate opening probe.
 pub(crate) fn head_jsonl(path: &Path) -> Result<Vec<Value>> {
     let mut file = open_regular_file(path)?;
     let metadata = file.metadata()?;
@@ -1930,13 +1975,12 @@ pub(crate) fn head_jsonl_from(file: &mut File, source_length: u64) -> Result<Hea
 /// line", tried against each line in turn.
 pub(crate) fn head_directory(
     path: &Path,
+    native: &NativeSession,
     pick: impl Fn(&Value) -> Option<&str>,
 ) -> Option<PathBuf> {
-    head_jsonl(path)
-        .ok()?
-        .iter()
-        .find_map(pick)
-        .map(PathBuf::from)
+    let values = head_jsonl(path).ok()?;
+    validate_discovered_identity(&values, native).ok()?;
+    values.iter().find_map(pick).map(PathBuf::from)
 }
 
 /// Walk mtime-ordered candidates newest first, keeping those the query accepts
@@ -1972,12 +2016,17 @@ pub(crate) fn list_files(
 /// reported as partial coverage by the same rule `search_turns` applies. Worker
 /// reads preserve candidate order before the caller applies scope and result
 /// limits.
-pub(crate) fn list_files_with_search(
+struct SearchInputs<'a> {
+    read_bytes: u64,
+    identities: Option<&'a HashMap<PathBuf, NativeSession>>,
+}
+
+fn list_files_with_search(
     files: Vec<PathBuf>,
     query: &Query,
     needle: &str,
     tail: usize,
-    read_bytes: u64,
+    inputs: SearchInputs<'_>,
     probe: impl Fn(&Path) -> Option<PathBuf>,
     parse: impl Fn(&Path) -> Option<ParsedFile> + Sync,
 ) -> Listing {
@@ -2017,8 +2066,17 @@ pub(crate) fn list_files_with_search(
                         .iter()
                         .map(|path| {
                             let oversized = fs::metadata(path)
-                                .map_or(true, |metadata| metadata.len() > read_bytes);
-                            if !oversized && !raw_tail_may_contain(path, &needle, read_bytes) {
+                                .map_or(true, |metadata| metadata.len() > inputs.read_bytes);
+                            if !oversized
+                                && !raw_tail_may_contain(
+                                    path,
+                                    &needle,
+                                    inputs.read_bytes,
+                                    inputs
+                                        .identities
+                                        .and_then(|identities| identities.get(path)),
+                                )
+                            {
                                 return SearchOutcome::Miss;
                             }
                             let Some(parsed) = parse(path) else {
@@ -2613,17 +2671,71 @@ mod tests {
     }
 
     #[test]
+    fn prefilters_do_not_exclude_a_foreign_recording_before_validation() {
+        let root =
+            std::env::temp_dir().join(format!("tapes-prefilter-identity-{}", std::process::id()));
+        fs::create_dir_all(root.join("project")).unwrap();
+        let path = root.join("project/fixture-parent.jsonl");
+        fs::write(
+            &path,
+            br#"{"sessionId":"fixture-parent","cwd":"/fixtures/inside"}"#,
+        )
+        .unwrap();
+        let native = NativeStore::claude(&root)
+            .locate_exact("fixture-parent")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            head_directory(&path, &native, |value| value["cwd"].as_str()),
+            Some(PathBuf::from("/fixtures/inside"))
+        );
+        assert!(!raw_tail_may_contain(
+            &path,
+            "needle",
+            DEFAULT_READ_BYTES,
+            Some(&native)
+        ));
+        for record in [
+            serde_json::json!({"sessionId":"foreign-parent", "cwd":"/fixtures/outside", "text":"other"}),
+            serde_json::json!({"sessionId":null, "cwd":"/fixtures/outside", "text":"other"}),
+            serde_json::json!({"cwd":"/fixtures/outside", "text":"other"}),
+        ] {
+            fs::write(&path, record.to_string()).unwrap();
+            let directory = head_directory(&path, &native, |value| value["cwd"].as_str());
+            let candidate =
+                raw_tail_may_contain(&path, "needle", DEFAULT_READ_BYTES, Some(&native));
+            assert_eq!((directory, candidate), (None, true));
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn raw_prefilter_skips_a_definite_miss_but_not_a_hit() {
         let path = std::env::temp_dir().join(format!("tapes-raw-prefilter-{}", std::process::id()));
         let _ = fs::remove_file(&path);
         fs::write(&path, br#"{"text":"other"}"#).unwrap();
-        assert!(!raw_tail_may_contain(&path, "needle", DEFAULT_READ_BYTES));
+        assert!(!raw_tail_may_contain(
+            &path,
+            "needle",
+            DEFAULT_READ_BYTES,
+            None
+        ));
 
         fs::write(&path, br#"{"text":"NEEDLE"}"#).unwrap();
-        assert!(raw_tail_may_contain(&path, "needle", DEFAULT_READ_BYTES));
+        assert!(raw_tail_may_contain(
+            &path,
+            "needle",
+            DEFAULT_READ_BYTES,
+            None
+        ));
 
         fs::write(&path, br#"{"text":"\u006e\u0065\u0065\u0064\u006c\u0065"}"#).unwrap();
-        assert!(raw_tail_may_contain(&path, "needle", DEFAULT_READ_BYTES));
+        assert!(raw_tail_may_contain(
+            &path,
+            "needle",
+            DEFAULT_READ_BYTES,
+            None
+        ));
 
         fs::remove_file(path).unwrap();
     }
@@ -2640,7 +2752,10 @@ mod tests {
             &Query::unscoped(10),
             "needle",
             32,
-            DEFAULT_READ_BYTES,
+            SearchInputs {
+                read_bytes: DEFAULT_READ_BYTES,
+                identities: None,
+            },
             |_| None,
             |_| {
                 parsed.store(true, Ordering::Relaxed);

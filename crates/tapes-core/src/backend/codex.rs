@@ -298,7 +298,7 @@ impl Backend for CodexBackend {
         let mut listing = list_discovered_files(
             store,
             query,
-            |path| head_directory(path, codex_cwd),
+            |native, path| head_directory(path, native, codex_cwd),
             |native, path| self.parse(native, path).map(|(session, _, _)| session),
         );
         listing
@@ -318,7 +318,7 @@ impl Backend for CodexBackend {
             needle,
             tail,
             self.read_bytes,
-            |path| head_directory(path, codex_cwd),
+            |native, path| head_directory(path, native, codex_cwd),
             |native, path| {
                 self.parse(native, path)
                     .map(|(session, turns, read)| ParsedFile {
