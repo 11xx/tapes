@@ -1278,10 +1278,11 @@ impl RequestWitness {
 
     fn retain_tools(&mut self, incoming: &RequestDimensions) {
         let held = self.tools();
-        let values = [
-            incoming.web_search_requests.or(held[0]),
-            incoming.web_fetch_requests.or(held[1]),
-        ];
+        let fresh = [incoming.web_search_requests, incoming.web_fetch_requests];
+        let values = [fresh[0].or(held[0]), fresh[1].or(held[1])];
+        let conflicting = TOOL_DIMENSIONS
+            .iter()
+            .any(|name| self.dimensions.conflicting.contains_key(name));
         let dominates = |left: [Option<u64>; 2], right: [Option<u64>; 2]| {
             left.into_iter()
                 .zip(right)
@@ -1291,7 +1292,9 @@ impl RequestWitness {
                     _ => false,
                 })
         };
-        if dominates(values, self.tool_envelope) {
+        if dominates(values, self.tool_envelope)
+            && (!conflicting || dominates(fresh, self.tool_envelope))
+        {
             self.dimensions.web_search_requests = values[0];
             self.dimensions.web_fetch_requests = values[1];
             for name in TOOL_DIMENSIONS {

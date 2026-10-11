@@ -572,7 +572,9 @@ PROBE BEFORE EXPORTING
   apply only when they match the selected cache-write count; incompatible
   categorical values, TTL splits and tool observations are withheld and
   counted per request under conflicting. Tool counters select their own
-  dominant observation without summing alternatives. At most 16 TTL-count
+  dominant observation without summing alternatives; only fresh evidence
+  dominating all earlier observations can discharge a tool conflict.
+  At most 16 TTL-count
   witnesses are held per request; excess observations join omitted_values.
 
   `usage SESSION --reconcile` is Claude-only. It reads the parent and every

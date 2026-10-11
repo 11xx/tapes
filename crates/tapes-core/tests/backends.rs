@@ -2180,6 +2180,70 @@ fn sparse_later_dimensions_preserve_advancing_counter_witnesses() {
 }
 
 #[test]
+fn sparse_tool_observations_do_not_discharge_conflicts_without_fresh_evidence() {
+    let root =
+        std::env::temp_dir().join(format!("tapes-sparse-tool-evidence-{}", std::process::id()));
+    let project = root.join("project");
+    fs::create_dir_all(&project).unwrap();
+    let prototype: serde_json::Value = claude_dimensions_recording()
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .find(|value| value["uuid"] == "assistant-1")
+        .unwrap();
+    for fresh in [false, true] {
+        let mut observations = vec![
+            serde_json::json!({"web_search_requests":2,"web_fetch_requests":1}),
+            serde_json::json!({"web_search_requests":1,"web_fetch_requests":2}),
+            serde_json::json!({"web_fetch_requests":2}),
+        ];
+        if fresh {
+            observations.push(serde_json::json!({"web_search_requests":2,"web_fetch_requests":2}));
+        }
+        let recording = observations
+            .into_iter()
+            .enumerate()
+            .map(|(index, tools)| {
+                let mut value = prototype.clone();
+                value["uuid"] = serde_json::json!(format!("tool-witness-{index}"));
+                value["message"]["usage"]["server_tool_use"] = tools;
+                value.to_string()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n";
+        fs::write(
+            project.join(format!("{CLAUDE_DIMENSIONS_SESSION}.jsonl")),
+            recording,
+        )
+        .unwrap();
+        let backend = ClaudeBackend::new(root.clone());
+        let bounded = usage_value(&backend, CLAUDE_DIMENSIONS_SESSION);
+        let backends: Vec<Box<dyn Backend>> = vec![Box::new(backend)];
+        let full = serde_json::to_value(
+            usage_full_with_backends(&backends, Selection::Id(CLAUDE_DIMENSIONS_SESSION)).unwrap(),
+        )
+        .unwrap();
+        for value in [&bounded, &full] {
+            let dimensions = &value["requests"];
+            assert_eq!(dimensions["requests"], 1);
+            if fresh {
+                assert_eq!(dimensions["web_search_requests"], 2);
+                assert_eq!(dimensions["web_fetch_requests"], 2);
+                assert!(dimensions.get("conflicting").is_none());
+            } else {
+                assert_eq!(
+                    dimensions["conflicting"],
+                    serde_json::json!({"web_search_requests":1,"web_fetch_requests":1})
+                );
+                assert!(dimensions.get("web_search_requests").is_none());
+                assert!(dimensions.get("web_fetch_requests").is_none());
+            }
+        }
+    }
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn request_dimension_conflicts_are_qualified_without_summing_alternatives() {
     let (root, bounded, full) = claude_dimension_witnesses("conflicts", |usage, later| {
         usage["server_tool_use"] = if later {
