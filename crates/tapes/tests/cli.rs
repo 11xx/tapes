@@ -10503,7 +10503,8 @@ fn usage_summary_adds_claude_and_codex_only_in_disjoint_categories() {
     .unwrap();
     let run = |json: bool| {
         let mut command = tapes();
-        command.args(["usage", "--global"]);
+        // One directory holds both sessions, so the only group mixes them.
+        command.args(["usage", "--global", "--by", "directory"]);
         if json {
             command.arg("--json");
         }
@@ -10554,6 +10555,15 @@ fn usage_summary_adds_claude_and_codex_only_in_disjoint_categories() {
     assert!(
         rendered.contains(
             "Convention codex: native input includes cache read, output includes reasoning\n"
+        ),
+        "{rendered}"
+    );
+    // Only the Claude partition carries a cost, and it is still labelled.
+    assert_eq!(report["groups"].as_array().unwrap().len(), 1, "{report}");
+    assert!(report["groups"][0].get("cost").is_none(), "{report}");
+    assert!(
+        rendered.contains(
+            "Cost is each harness's own estimate; no recording states its pricing basis.\n"
         ),
         "{rendered}"
     );

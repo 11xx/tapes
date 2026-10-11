@@ -4147,6 +4147,10 @@ fn render_usage_summary(summary: &UsageSummary, by: &[GroupBy]) -> String {
         .groups
         .iter()
         .any(|group| group.tally.cost.is_some())
+        || summary
+            .partitions
+            .iter()
+            .any(|partition| partition.tally.cost.is_some())
     {
         out.push_str(
             "Cost is each harness's own estimate; no recording states its pricing basis.\n",
