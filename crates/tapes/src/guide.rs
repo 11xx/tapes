@@ -532,8 +532,11 @@ PROBE BEFORE EXPORTING
   `provider_account_namespace` is `unestablished`: response identifiers
   alone do not establish cross-recording equality without an account
   namespace. `forked_from` is the parent session id derived from the
-  header's recording filename, never its path. A header whose parent id
-  cannot be derived sets `fork_parent_unestablished` instead.
+  header's recording filename, never its path. The first underscore separates
+  the timestamp from the full id. Parent ids hold at most 128 ASCII bytes,
+  begin and end with a letter or digit, and allow dots, hyphens, and underscores
+  inside. A header whose parent id cannot be derived sets
+  `fork_parent_unestablished` instead.
   Coverage is `session` for a read from the first byte and `read-window`
   for a bounded tail, independently of the active branch: a branch that
   restarted from a new root can lie wholly in the tail while what it replaced

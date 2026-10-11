@@ -9089,6 +9089,84 @@ fn pi_usage_reports_active_branch_and_consumption_apart() {
     assert!(help.contains("`retained-branches`"), "{help}");
 }
 
+#[test]
+fn pi_cli_preserves_complete_parent_ids_without_paths() {
+    let root = TemporaryDirectory::new(
+        std::env::temp_dir().join(format!("tapes-cli-pi-parent-ids-{}", std::process::id())),
+    );
+    let sessions = root.path().join("sessions");
+    let parent_dir = sessions.join("private-owner/encoded-project");
+    fs::create_dir_all(&parent_dir).unwrap();
+    let fixtures =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../tapes-core/tests/fixtures/pi-parent-ids");
+    for (index, id) in [
+        "native_parent",
+        "native.parent",
+        "native_.parent-2",
+        "parent.jsonl",
+    ]
+    .iter()
+    .enumerate()
+    {
+        let parent_name = format!("2026-01-12T10-00-00-000Z_{id}.jsonl");
+        let parent = parent_dir.join(&parent_name);
+        fs::copy(fixtures.join(&parent_name), &parent).unwrap();
+        let child_name = format!("2026-01-12T10-00-00-000Z_fork{index}.jsonl");
+        let child = format!("fork{index}");
+        let contents = fs::read_to_string(fixtures.join(&child_name)).unwrap();
+        let (header, entries) = contents.split_once('\n').unwrap();
+        let mut header: Value = serde_json::from_str(header).unwrap();
+        header["parentSession"] = serde_json::json!(parent);
+        fs::write(sessions.join(child_name), format!("{header}\n{entries}")).unwrap();
+        for full in [false, true] {
+            for action in ["usage", "lineage"] {
+                let run = |json: bool| {
+                    let mut command = tapes();
+                    command
+                        .args([action, &child, "--native-store", "pi", "--native-root"])
+                        .arg(root.path());
+                    if full {
+                        command.arg("--full");
+                    }
+                    if json {
+                        command.arg("--json");
+                    }
+                    let output = command.output().unwrap();
+                    assert!(
+                        output.status.success(),
+                        "{action} full={full}: {}",
+                        String::from_utf8_lossy(&output.stderr)
+                    );
+                    let rendered = String::from_utf8(output.stdout).unwrap();
+                    for private in [
+                        "private-owner",
+                        "encoded-project",
+                        parent.to_str().unwrap(),
+                        &parent_name,
+                    ] {
+                        assert!(!rendered.contains(private), "{action}: {rendered}");
+                    }
+                    rendered
+                };
+                let human = run(false);
+                let value: Value = serde_json::from_str(&run(true)).unwrap();
+                if action == "usage" {
+                    assert_eq!(
+                        value["consumption"]["identity"]["forked_from"], *id,
+                        "{value}"
+                    );
+                    assert!(human.contains(&format!("forked from {id}")), "{human}");
+                } else {
+                    assert_eq!(value["lineage"]["parent"]["native_id"], *id, "{value}");
+                    assert_eq!(value["lineage"]["parent"]["resolved"], true, "{value}");
+                    assert!(human.contains(&format!("parent: {id} ")), "{human}");
+                    assert!(!human.contains("unresolved"), "{human}");
+                }
+            }
+        }
+    }
+}
+
 /// pi records the model on every assistant message, so both `usage` and
 /// `stats` report the per-model split the recording states, qualified by the
 /// effort in effect.

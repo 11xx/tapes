@@ -742,6 +742,7 @@ fn codex_filename_id(stem: &str) -> Option<&str> {
 }
 
 /// Derive a Pi session identity from its timestamp-prefixed recording filename.
+/// The first underscore separates the timestamp from the entire session id.
 /// This interprets the filename only and never opens the referenced recording.
 pub fn pi_recording_id(path: &Path) -> Option<&str> {
     if path.extension()?.to_str()? != "jsonl" {
@@ -751,7 +752,7 @@ pub fn pi_recording_id(path: &Path) -> Option<&str> {
 }
 
 fn pi_filename_id(stem: &str) -> Option<&str> {
-    let (timestamp, id) = stem.rsplit_once('_')?;
+    let (timestamp, id) = stem.split_once('_')?;
     let date = timestamp.get(..10)?;
     (date.as_bytes().get(4) == Some(&b'-')
         && date.as_bytes().get(7) == Some(&b'-')
@@ -1212,6 +1213,37 @@ mod tests {
         });
         assert_eq!(result.unwrap().unwrap().id(), "id");
         assert_eq!(inspected, 3);
+    }
+
+    #[test]
+    fn pi_filename_identity_preserves_the_entire_native_id() {
+        for id in [
+            "native_parent",
+            "native.parent",
+            "native_.parent-2",
+            "parent.jsonl",
+        ] {
+            let temp = Temp::new();
+            let root = temp.path().join("pi");
+            let name = format!("2026-01-12T10-00-00-000Z_{id}.jsonl");
+            let path = write(&root, &name, "{\"type\":\"message\"}\n");
+            assert!(native_filename(Harness::Pi, &path));
+            assert_eq!(pi_recording_id(&path), Some(id));
+            assert_eq!(filename_id(Harness::Pi, &path).as_deref(), Some(id));
+            let store = NativeStore::pi(&root);
+            let page = store.candidates(10);
+            assert_eq!(page.records.len(), 1);
+            assert_eq!(page.records[0].id(), id);
+            assert_eq!(
+                page.records[0].identity_basis(),
+                Some(IdentityBasis::Filename)
+            );
+            assert_eq!(store.locate_exact(id).unwrap().unwrap().id(), id);
+            assert!(store.locate_exact("parent").unwrap().is_none());
+            fs::write(&path, "{\"type\":\"session\",\"id\":null}\n").unwrap();
+            let unreadable = store.candidates(10);
+            assert_eq!(unreadable.unreadable_ids, vec![id.to_owned()]);
+        }
     }
 
     #[test]

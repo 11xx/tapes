@@ -640,3 +640,125 @@ fn an_unrecognized_fork_locator_reports_uncertainty_without_the_path() {
         assert!(!view.to_string().contains("unrecognized.jsonl"), "{path}");
     }
 }
+
+const PARENT_IDS: [&str; 4] = [
+    "native_parent",
+    "native.parent",
+    "native_.parent-2",
+    "parent.jsonl",
+];
+
+fn parent_id_store(index: usize, bare: bool) -> (Temp, PathBuf) {
+    let temp = Temp::new("parent-ids");
+    let fixture_root = fixtures("pi-parent-ids");
+    let parent_name = format!("2026-01-12T10-00-00-000Z_{}.jsonl", PARENT_IDS[index]);
+    let parent_dir = temp.0.join("private-owner/encoded-project");
+    fs::create_dir_all(&parent_dir).unwrap();
+    let parent = parent_dir.join(&parent_name);
+    fs::copy(fixture_root.join(&parent_name), &parent).unwrap();
+    let child_name = format!("2026-01-12T10-00-00-000Z_fork{index}.jsonl");
+    let contents = fs::read_to_string(fixture_root.join(&child_name)).unwrap();
+    let (header, entries) = contents.split_once('\n').unwrap();
+    let mut header: Value = serde_json::from_str(header).unwrap();
+    header["parentSession"] = if bare {
+        json!(PARENT_IDS[index])
+    } else {
+        json!(parent)
+    };
+    fs::write(temp.0.join(child_name), format!("{header}\n{entries}")).unwrap();
+    (temp, parent)
+}
+
+#[test]
+fn consumption_keeps_complete_native_parent_ids_without_paths() {
+    for (index, &parent_id) in PARENT_IDS.iter().enumerate() {
+        for bare in [false, true] {
+            let (store, parent) = parent_id_store(index, bare);
+            for (path, view) in both(&store.0, &format!("fork{index}")) {
+                assert_eq!(
+                    view["consumption"]["identity"]["forked_from"], parent_id,
+                    "{path}: {view}"
+                );
+                assert!(
+                    view["consumption"]["identity"]
+                        .get("fork_parent_unestablished")
+                        .is_none(),
+                    "{view}"
+                );
+                let output = view.to_string();
+                for private in [
+                    "private-owner",
+                    "encoded-project",
+                    parent.to_str().unwrap(),
+                    parent.file_name().unwrap().to_str().unwrap(),
+                ] {
+                    assert!(!output.contains(private), "{path}: {output}");
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn lineage_resolves_complete_native_parent_ids_without_paths() {
+    for (index, parent_id) in PARENT_IDS.iter().enumerate() {
+        for bare in [false, true] {
+            let (store, parent_path) = parent_id_store(index, bare);
+            let backend = PiBackend::new(&store.0);
+            let child = backend.locate(&format!("fork{index}")).unwrap().unwrap();
+            for lineage in [
+                backend.lineage(&child).unwrap(),
+                backend.stream_lineage(&child).unwrap(),
+            ] {
+                let parent = lineage.parent.as_ref().unwrap();
+                assert_eq!(parent.native_id, *parent_id);
+                assert!(parent.resolved);
+                let output = serde_json::to_string(&lineage).unwrap();
+                for private in [
+                    "private-owner",
+                    "encoded-project",
+                    parent_path.to_str().unwrap(),
+                    parent_path.file_name().unwrap().to_str().unwrap(),
+                ] {
+                    assert!(!output.contains(private), "{output}");
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn parent_identity_uses_native_grammar_with_a_length_bound() {
+    for (id, valid) in [
+        ("A".to_owned(), true),
+        ("a".repeat(128), true),
+        ("a".repeat(129), false),
+        ("_parent".to_owned(), false),
+        ("parent_".to_owned(), false),
+        (".parent".to_owned(), false),
+        ("parent.".to_owned(), false),
+        ("-parent".to_owned(), false),
+        ("parent-".to_owned(), false),
+        ("parent/child".to_owned(), false),
+        ("parent\\child".to_owned(), false),
+        ("éparent".to_owned(), false),
+    ] {
+        let store = rewound_variant("parent-grammar", |lines| {
+            let mut header: Value = serde_json::from_str(&lines[0]).unwrap();
+            header["parentSession"] = json!(id);
+            lines[0] = header.to_string();
+        });
+        for (path, view) in both(&store.0, "session-rewound") {
+            let identity = &view["consumption"]["identity"];
+            if valid {
+                assert_eq!(identity["forked_from"], id, "{path}: {view}");
+            } else {
+                assert!(identity.get("forked_from").is_none(), "{path}: {view}");
+                assert_eq!(
+                    identity["fork_parent_unestablished"], true,
+                    "{path}: {view}"
+                );
+            }
+        }
+    }
+}

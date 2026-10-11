@@ -1379,7 +1379,9 @@ enum Command {
     /// consumption event once, with per-counter measurement coverage for known
     /// subtotals, event split, observed identity (provider account namespace
     /// unestablished), and incompleteness. Consumption cost is absent when no
-    /// counted event is priced; coverage still counts unpriced events.
+    /// counted event is priced; coverage still counts unpriced events. Fork
+    /// parents retain complete native ids, including dots and underscores,
+    /// within a 128-byte bound; recording paths stay private.
     Usage {
         #[command(flatten)]
         query: SessionQueryArgs,

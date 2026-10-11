@@ -833,19 +833,21 @@ fn pi_parent_session(value: &Value) -> Option<Option<String>> {
 }
 
 /// Paths contribute only their filename-derived identity. Bare identifiers
-/// remain usable for recordings that name the parent directly.
+/// remain usable for recordings that name the parent directly. Pi ids begin
+/// and end with an ASCII alphanumeric and allow dots, hyphens, and underscores
+/// inside; a normalized parent id holds at most 128 bytes.
 fn pi_parent_id(reference: &str) -> Option<String> {
-    let id = if reference.contains('/') || reference.contains('\\') || reference.ends_with(".jsonl")
-    {
+    let id = if reference.contains('/') || reference.contains('\\') {
         agent_tapes_discovery::pi_recording_id(Path::new(reference))?
     } else {
         reference
     };
-    (!id.is_empty()
-        && id.len() <= 128
+    (id.len() <= 128
+        && id.as_bytes().first().is_some_and(u8::is_ascii_alphanumeric)
+        && id.as_bytes().last().is_some_and(u8::is_ascii_alphanumeric)
         && id
             .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_')))
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_')))
     .then(|| id.to_owned())
 }
 
