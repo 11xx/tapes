@@ -554,3 +554,84 @@ fn active_accounting_names_excluded_entry_classes() {
         );
     }
 }
+
+#[test]
+fn total_only_usage_with_zero_cost_is_unpriced() {
+    let store = rewound_variant("total-only", |lines| {
+        let index = line_index(lines, "assistant-3a");
+        let mut entry: Value = serde_json::from_str(&lines[index]).unwrap();
+        entry["message"]["usage"] = json!({"totalTokens":660,"cost":{"total":0}});
+        lines[index] = entry.to_string();
+    });
+    for (path, view) in both(&store.0, "session-rewound") {
+        assert_eq!(view["consumption"]["cost"]["usd"], 0.8125, "{path}");
+        assert_eq!(
+            view["consumption"]["measurement_coverage"]["cost"]["unpriced"], 1,
+            "{path}: {view}"
+        );
+        assert_eq!(
+            view["consumption"]["measurement_coverage"]["cost"]["measured"], 4,
+            "{path}"
+        );
+    }
+}
+
+#[test]
+fn missing_prices_retain_only_the_known_cost_subtotal() {
+    for all in [false, true] {
+        let store = rewound_variant("missing-prices", |lines| {
+            for line in lines {
+                let mut entry: Value = serde_json::from_str(line).unwrap();
+                let selected = all || entry["id"] == "assistant-3a";
+                let usage = if entry["type"] == "message" {
+                    &mut entry["message"]["usage"]
+                } else {
+                    &mut entry["usage"]
+                };
+                if selected {
+                    if let Some(usage) = usage.as_object_mut() {
+                        usage.remove("cost");
+                    }
+                }
+                *line = entry.to_string();
+            }
+        });
+        for (path, view) in both(&store.0, "session-rewound") {
+            let consumption = &view["consumption"];
+            if all {
+                assert!(consumption.get("cost").is_none(), "{path}: {view}");
+            } else {
+                assert_eq!(consumption["cost"]["usd"], 0.8125, "{path}");
+            }
+            assert_eq!(
+                consumption["measurement_coverage"]["cost"]["missing"],
+                if all { 5 } else { 1 },
+                "{path}"
+            );
+            assert_eq!(
+                consumption["measurement_coverage"]["cost"]["unpriced"], 0,
+                "{path}"
+            );
+        }
+    }
+}
+
+#[test]
+fn an_unrecognized_fork_locator_reports_uncertainty_without_the_path() {
+    let store = rewound_variant("unknown-parent", |lines| {
+        let mut header: Value = serde_json::from_str(&lines[0]).unwrap();
+        header["parentSession"] = json!("/private-owner/encoded-project/unrecognized.jsonl");
+        lines[0] = header.to_string();
+    });
+    for (path, view) in both(&store.0, "session-rewound") {
+        let identity = &view["consumption"]["identity"];
+        assert!(identity.get("forked_from").is_none(), "{path}: {view}");
+        assert_eq!(
+            identity["fork_parent_unestablished"], true,
+            "{path}: {view}"
+        );
+        assert!(!view.to_string().contains("private-owner"), "{path}");
+        assert!(!view.to_string().contains("encoded-project"), "{path}");
+        assert!(!view.to_string().contains("unrecognized.jsonl"), "{path}");
+    }
+}

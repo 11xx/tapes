@@ -9060,7 +9060,15 @@ fn pi_usage_reports_active_branch_and_consumption_apart() {
         }
 
         arguments.push("--json");
-        let value: Value = serde_json::from_str(&run(&arguments)).unwrap();
+        let rendered = run(&arguments);
+        for private in [
+            "private-owner",
+            "encoded-project",
+            "2025-12-31T10-00-00-000Z",
+        ] {
+            assert!(!rendered.contains(private), "{rendered}");
+        }
+        let value: Value = serde_json::from_str(&rendered).unwrap();
         assert_eq!(value["schema"], "tapes-usage/11");
         assert_eq!(value["accounting"]["selection"], "active-branch", "{value}");
         assert_eq!(value["cost"]["usd"], 0.5, "{value}");

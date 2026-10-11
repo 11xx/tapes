@@ -904,6 +904,8 @@ struct PiRequest {
     reasoning: Option<u64>,
     cache_read: Option<u64>,
     cache_write: Option<u64>,
+    /// Native total retained for per-event pricing classification.
+    total_tokens: Option<u64>,
     cost: Option<f64>,
 }
 
@@ -929,6 +931,7 @@ fn pi_usage_counters(usage: &Value) -> Option<PiRequest> {
         reasoning: counter("reasoning"),
         cache_read: counter("cacheRead"),
         cache_write: counter("cacheWrite"),
+        total_tokens: counter("totalTokens"),
         cost: usage
             .get("cost")
             .and_then(Value::as_object)
@@ -1150,6 +1153,7 @@ impl PiConsumption {
             usage.reasoning,
             usage.cache_read,
             usage.cache_write,
+            usage.total_tokens,
         ]
         .into_iter()
         .flatten()
