@@ -830,6 +830,10 @@ pub struct UsageAggregate {
 /// count is only a recorded token count, and neither is derived from the
 /// other. With no dimensions the whole set is one group under an empty key.
 pub fn aggregate(sessions: &[Session], by: &[GroupBy]) -> UsageAggregate {
+    partitioned_aggregate(sessions, by).0
+}
+
+fn unchecked_aggregate(sessions: &[Session], by: &[GroupBy]) -> UsageAggregate {
     let mut groups: BTreeMap<Vec<Option<String>>, Tally> = BTreeMap::new();
     let mut totals = Tally::default();
     for session in sessions {
@@ -1294,7 +1298,7 @@ mod tests {
     /// came from two is not read as three.
     #[test]
     fn a_group_sums_only_the_counters_its_sessions_recorded() {
-        let aggregate = aggregate(&spenders(), &[GroupBy::Harness, GroupBy::Model]);
+        let aggregate = unchecked_aggregate(&spenders(), &[GroupBy::Harness, GroupBy::Model]);
         let value = serde_json::to_value(&aggregate).unwrap();
 
         assert_eq!(
@@ -1450,7 +1454,7 @@ pub fn partitioned_aggregate(
     sessions: &[Session],
     by: &[GroupBy],
 ) -> (UsageAggregate, Vec<AccountingPartition>) {
-    let mut aggregate = aggregate(sessions, by);
+    let mut aggregate = unchecked_aggregate(sessions, by);
     let mut partitions: BTreeMap<(String, String), (Option<Accounting>, Tally)> = BTreeMap::new();
     let mut domains: BTreeMap<Vec<Option<String>>, Domains> = BTreeMap::new();
     let mut all = Domains::default();
@@ -1649,6 +1653,22 @@ mod partition_tests {
         assert!(partitions
             .iter()
             .all(|partition| partition.tally.disjoint.is_some()));
+    }
+
+    #[test]
+    fn public_aggregate_refuses_cross_basis_disjoint_sums() {
+        let mut sessions = vec![
+            recorded("claude", native(5, 65, 12, 2_300, 360)),
+            recorded("claude", native(5, 65, 12, 2_300, 360)),
+        ];
+        sessions[1].accounting.as_mut().unwrap().basis = AccountingBasis::SummedRequests;
+        let result = aggregate(&sessions, &[GroupBy::Harness]);
+        assert!(result.totals.mixed_accounting);
+        assert!(result.totals.disjoint.is_none());
+        assert!(result.groups[0].tally.disjoint.is_none());
+        let (_, partitions) = partitioned_aggregate(&sessions, &[]);
+        assert_eq!(partitions.len(), 2);
+        assert!(partitions.iter().all(|part| part.tally.disjoint.is_some()));
     }
 
     #[test]
