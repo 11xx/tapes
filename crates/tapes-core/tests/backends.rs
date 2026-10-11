@@ -17,8 +17,9 @@ use agent_tapes_core::backend::pi::PiBackend;
 use agent_tapes_core::backend::{Backend, Listing, Query, StreamedTranscript, MIN_READ_BYTES};
 use agent_tapes_core::event::{project, EventKind, Incomplete};
 use agent_tapes_core::model::{
-    Accounting, AccountingBasis, AccountingCoverage, Cost, Launch, Model, ReadEvidence, Role,
-    Session, SourceBound, SourceDescriptor, Tokens, Transcript, Truncation, Turn, TurnKind,
+    Accounting, AccountingBasis, AccountingCoverage, AccountingSelection, Cost, Launch, Model,
+    ReadEvidence, Role, Session, SourceBound, SourceDescriptor, Tokens, Transcript, Truncation,
+    Turn, TurnKind,
 };
 use agent_tapes_core::usage::{
     usage, Durations, ModelUsage, ObservationBasis, ObservationClassification, RateWindow,
@@ -2074,7 +2075,7 @@ fn pi_reports_entries_outside_the_active_leaf_path() {
         Some(Accounting {
             basis: AccountingBasis::SummedRequests,
             coverage: AccountingCoverage::Session,
-            selection: None,
+            selection: Some(AccountingSelection::ActiveBranch),
         })
     );
     assert_eq!(transcript.session.tokens, session.tokens);

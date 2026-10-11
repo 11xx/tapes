@@ -47,6 +47,9 @@ pub struct UsageDetail {
     pub requests: Option<RequestDimensions>,
     pub cost_coverage: Option<CostCoverage>,
     pub request_failures: usize,
+    /// Consumption over every branch a recording retains, where the
+    /// session's counters select only one of them.
+    pub consumption: Option<Consumption>,
 }
 
 impl UsageDetail {
@@ -60,6 +63,7 @@ impl UsageDetail {
             && self.requests.is_none()
             && self.cost_coverage.is_none()
             && self.request_failures == 0
+            && self.consumption.is_none()
     }
 
     /// The detail, or nothing when the harness recorded none of it.
@@ -282,6 +286,63 @@ pub struct UsageAttribution {
     pub bounds: Vec<String>,
 }
 
+/// What a recording consumed across every branch it retains. A harness that
+/// rewinds by appending a new branch keeps the abandoned one, and its
+/// requests were consumed whichever branch the conversation resumed on. The
+/// session's own counters stay the active branch's; this figure counts each
+/// consumption event the read reached once, keyed by its identity.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct Consumption {
+    /// `summed-requests` over `retained-branches`. Coverage is `session` when
+    /// the read began at the recording's first byte and `read-window` when it
+    /// kept a tail.
+    pub accounting: Accounting,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tokens: Option<Tokens>,
+    /// Present only when every counted event recorded a cost.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cost: Option<Cost>,
+    pub events: ConsumptionEvents,
+    pub identity: ConsumptionIdentity,
+    /// Why the figure is not a complete measurement of what it covers: records
+    /// the read could not decode, and requests whose recorded usage stopped
+    /// with them. Empty with `session` coverage, the figure is complete.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub incomplete: Vec<String>,
+}
+
+/// The consumption events behind a figure, by the branch that holds them.
+/// `active_branch` plus `other_branches` is `counted`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct ConsumptionEvents {
+    pub counted: usize,
+    pub active_branch: usize,
+    pub other_branches: usize,
+    /// Observations of an event already counted: the same entry recorded
+    /// again, or another entry naming the same provider response. A repeat
+    /// is a witness and adds nothing.
+    pub repeats: usize,
+}
+
+/// How the counted events are identified, which decides how far a union
+/// with another recording's events can be exact.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct ConsumptionIdentity {
+    /// Keyed by the provider's response identity, which names the same event
+    /// in any recording that holds it.
+    pub provider_response: usize,
+    /// Keyed by the entry's identity within this recording alone; whether
+    /// another recording holds the same event is unestablished.
+    pub recording_entry: usize,
+    /// Measured with no identity at all.
+    pub unidentified: usize,
+    /// The parent session a fork's header names, as the header records it. A
+    /// fork copies its parent's entries, so events the two share are
+    /// witnessed in both.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub forked_from: Option<String>,
+}
+
 /// One raw Codex accounting observation. A row is not necessarily a request:
 /// repeated modern records, unchanged legacy totals, and quota-only events are
 /// retained as observations but do not become counted requests.
@@ -457,6 +518,7 @@ pub struct UsageView {
     pub requests: Option<RequestDimensions>,
     #[serde(skip_serializing_if = "is_zero")]
     pub request_failures: usize,
+    pub consumption: Option<Consumption>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub series: Option<UsageObservationSeries>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -563,6 +625,7 @@ fn project(session: &Session, turns: TurnTally, facts: ReadFacts) -> UsageView {
         attribution: detail.attribution,
         requests: detail.requests,
         request_failures: detail.request_failures,
+        consumption: detail.consumption,
         series: None,
         read: facts.read,
         terminal: facts.terminal,
@@ -1173,6 +1236,7 @@ mod tests {
             requests: None,
             cost_coverage: None,
             request_failures: 0,
+            consumption: None,
         });
         let transcript = Transcript::new(
             session,

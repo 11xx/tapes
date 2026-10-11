@@ -25,7 +25,7 @@ use agent_tapes_core::stats::{
 };
 use agent_tapes_core::stats_summary::SessionRead;
 use agent_tapes_core::usage::{
-    DisjointSum, Durations, GroupBy, GroupKey, ModelUsage, ObservationClassification, RateLimits,
+    Consumption, DisjointSum, Durations, GroupBy, GroupKey, ModelUsage, ObservationClassification, RateLimits,
     RateWindow, RequestDimensions, TurnCoverage, UsageAttribution, UsageObservation,
     UsageObservationOptions, UsageOptions, UsageTally, UsageView,
 };
@@ -1374,6 +1374,10 @@ enum Command {
     /// summed; cost is the harness's own estimate, and quota is a separate
     /// fact about the account rather than these sessions. Claude subagent
     /// count notes report failed directory enumeration instead of a count.
+    /// A pi session's counters select its
+    /// active branch; its `consumption` sums every retained branch, each
+    /// consumption event once, with its own coverage, event split, identity,
+    /// and incompleteness.
     Usage {
         #[command(flatten)]
         query: SessionQueryArgs,
@@ -1398,8 +1402,11 @@ enum Command {
         /// request-observation read cover the session; recorded-total
         /// accounting keeps its own epoch coverage, including `since-reset`,
         /// and Codex attribution reports its observation coverage separately.
-        /// Installed Claude, Codex, Pi, and OpenCode sessions; a selection
-        /// refuses it.
+        /// pi's active-branch coverage stays `read-window` when an unreadable
+        /// record cuts the branch or follows its last entry, and its
+        /// consumption covers the session with any unreadable record named
+        /// under `incomplete`. Installed Claude, Codex, Pi, and OpenCode
+        /// sessions; a selection refuses it.
         #[arg(long, conflicts_with_all = ["read_bytes", "by"])]
         full: bool,
         /// Retain a bounded recent suffix of Codex accounting observations.
@@ -1447,6 +1454,10 @@ enum Command {
         /// figures. Its `disjoint` sums across harnesses, naming each
         /// `conventions` entry and counting `missing` sessions per category,
         /// and is omitted only where accounting basis or coverage differ.
+        /// `accounting.selection`
+        /// is `active-branch` where the counters sum one of several
+        /// conversation paths; `consumption` then carries the
+        /// `retained-branches` figure beside them.
         #[arg(long)]
         json: bool,
     },
@@ -3753,6 +3764,9 @@ fn render_usage(usage: &UsageView) -> String {
     if let Some(requests) = &usage.requests {
         out.push_str(&render_request_dimensions(requests));
     }
+    if let Some(consumption) = &usage.consumption {
+        out.push_str(&render_consumption(consumption));
+    }
     if let Some(series) = &usage.series {
         out.push_str(&format!(
             "series: {} observations returned of {}; basis and counted status are read-local\n",
@@ -3980,6 +3994,46 @@ fn render_accounting(accounting: &Accounting) -> String {
         }
     };
     format!("{basis}{selection}, covering {coverage}")
+}
+
+/// What every retained branch consumed, beside the session's own counters
+/// when those select one branch.
+fn render_consumption(consumption: &Consumption) -> String {
+    let mut figures = Vec::new();
+    if let Some(tokens) = &consumption.tokens {
+        figures.push(format!("tokens {}", render_tokens(tokens)));
+    }
+    if let Some(cost) = &consumption.cost {
+        figures.push(format!("cost {}", render_cost(cost)));
+    }
+    let events = &consumption.events;
+    let identity = &consumption.identity;
+    let mut out = format!(
+        "consumption: {}; {}\n",
+        figures.join(", "),
+        render_accounting(&consumption.accounting)
+    );
+    out.push_str(&format!(
+        "consumption events: {} counted, {} on the active branch, {} on other branches, {} repeats\n",
+        events.counted, events.active_branch, events.other_branches, events.repeats
+    ));
+    out.push_str(&format!(
+        "consumption identity: {} by provider response, {} by recording entry, {} unidentified",
+        identity.provider_response, identity.recording_entry, identity.unidentified
+    ));
+    if let Some(parent) = &identity.forked_from {
+        out.push_str(&format!(
+            "; forked from {parent}, whose events it may repeat"
+        ));
+    }
+    out.push('\n');
+    if !consumption.incomplete.is_empty() {
+        out.push_str(&format!(
+            "consumption incomplete: {}\n",
+            consumption.incomplete.join(", ")
+        ));
+    }
+    out
 }
 
 fn render_rate_limits(out: &mut String, limits: &RateLimits) {

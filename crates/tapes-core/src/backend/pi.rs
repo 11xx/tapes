@@ -18,11 +18,11 @@ use crate::content::{
 use crate::event::{Bounded, EventKind, ToolEvent};
 use crate::lineage::{Lineage, ParentRef};
 use crate::model::{
-    AccountingBasis, AccountingCoverage, Cost, CostCoverage, KindDeclaration, Launch, Model, Role,
-    Session, SourceDescriptor, Tokens, TrailingRecord, Transcript, Turn, TurnKind, TurnSelection,
-    UserDefault,
+    Accounting, AccountingBasis, AccountingCoverage, AccountingSelection, Cost, CostCoverage, KindDeclaration,
+    Launch, Model, ReadGap, Role, Session, SourceDescriptor, Tokens, TrailingRecord, Transcript,
+    Turn, TurnKind, TurnSelection, UserDefault,
 };
-use crate::usage::{ModelUsage, UsageDetail};
+use crate::usage::{Consumption, ConsumptionEvents, ConsumptionIdentity, ModelUsage, UsageDetail};
 use agent_tapes_discovery::{Harness as NativeHarness, IdentityBasis, NativeSession, NativeStore};
 
 #[derive(Clone, Debug)]
@@ -111,7 +111,7 @@ impl PiBackend {
             .iter()
             .filter(|value| value["type"] != "session")
             .collect::<Vec<_>>();
-        let active = active_path(&entries);
+        let (active, rooted) = active_branch(&entries);
         let active_ids = active
             .iter()
             .filter_map(|entry| entry["id"].as_str())
@@ -124,6 +124,32 @@ impl PiBackend {
                     .is_some_and(|id| !active_ids.contains(id))
             })
             .count();
+        let leaf_end = read
+            .values
+            .iter()
+            .zip(&read.spans)
+            .rfind(|(value, _)| value["type"] != "session")
+            .map(|(_, span)| span.end);
+        let mut consumption = PiConsumption::default();
+        for entry in &entries {
+            if let Some(consumed) = pi_consumed(entry) {
+                let id = entry["id"].as_str();
+                let on_branch = id.is_some_and(|id| active_ids.contains(id));
+                consumption.observe(id, &consumed, on_branch);
+            }
+        }
+        let consumption = consumption.finish(
+            if read.truncated {
+                AccountingCoverage::ReadWindow
+            } else {
+                AccountingCoverage::Session
+            },
+            read.skipped,
+            opening
+                .iter()
+                .find_map(pi_parent_session)
+                .map(str::to_owned),
+        );
         let directory = opening.iter().find_map(pi_cwd).map(PathBuf::from);
         let variant = active.iter().rev().find_map(|value| pi_thinking(value));
         let model = active
@@ -141,20 +167,15 @@ impl PiBackend {
             .collect::<Vec<_>>();
         let (model_observation, model_selections) = pi_selections(&active, read);
         let (tokens, cost, by_model, cost_coverage) = pi_usage(&active);
-        let coverage = if read.truncated {
-            AccountingCoverage::ReadWindow
-        } else {
-            AccountingCoverage::Session
-        };
-        let accounting = accounting_for(
+        let accounting = branch_accounting(
             tokens.as_ref(),
             cost.as_ref(),
-            AccountingBasis::SummedRequests,
-            coverage,
+            branch_coverage(rooted, leaf_end, &read.gaps),
         );
         let usage_detail = UsageDetail {
             by_model,
             cost_coverage,
+            consumption,
             ..UsageDetail::default()
         }
         .into_option();
@@ -486,19 +507,24 @@ impl Backend for PiBackend {
     }
 
     /// pi sums per-request usage along the active branch, which is the last
-    /// entry's ancestry. One pass keeps each entry's place in the tree and the
-    /// facts it carries; the branch is walked once the last entry is known.
+    /// entry's ancestry, and consumption over every entry. One pass keeps each
+    /// entry's place in the tree and the facts it carries; the branch is
+    /// walked once the last entry is known.
     fn stream_session(&self, session: &Session, read: &StreamedTranscript) -> Result<Session> {
         let path = self.recording(session)?;
         let mut entries = Vec::<PiEntry>::new();
         let mut positions = HashMap::<String, usize>::new();
         let mut activity = ActivityRange::default();
         let mut launch = None;
-        stream_jsonl(&path, Some(read.pin()?), |value, _, _| {
+        let mut forked_from = None;
+        let streamed = stream_jsonl(&path, Some(read.pin()?), |value, span, _| {
             super::validate_native_identity(value, "pi", &session.id)?;
             activity.observe(value);
             launch = merge_launch(launch, pi_launch_entry(value, &session.id));
             if value["type"] == "session" {
+                if forked_from.is_none() {
+                    forked_from = pi_parent_session(value).map(str::to_owned);
+                }
                 return Ok(false);
             }
             let id = value["id"].as_str().map(str::to_owned);
@@ -509,14 +535,17 @@ impl Backend for PiBackend {
                 id,
                 parent: value["parentId"].as_str().map(str::to_owned),
                 request: pi_request(value),
+                consumed: pi_consumed(value),
                 model: pi_model(value).map(str::to_owned),
                 thinking: pi_thinking(value).map(str::to_owned),
                 timestamp: timestamp(&value["timestamp"]),
+                end: span.end,
             });
             Ok(false)
         })?;
         let mut active = Vec::new();
         let mut seen = HashSet::new();
+        let mut rooted = false;
         let mut current = entries.len().checked_sub(1);
         while let Some(position) = current {
             let entry = &entries[position];
@@ -527,12 +556,27 @@ impl Backend for PiBackend {
                 break;
             }
             active.push(position);
+            rooted = entry.parent.is_none();
             current = entry
                 .parent
                 .as_deref()
                 .and_then(|parent| positions.get(parent).copied());
         }
         active.reverse();
+        let coverage = branch_coverage(
+            rooted,
+            entries.last().map(|entry| entry.end),
+            &streamed.gaps,
+        );
+        let mut consumption = PiConsumption::default();
+        for entry in &entries {
+            if let Some(consumed) = &entry.consumed {
+                let id = entry.id.as_deref();
+                consumption.observe(id, consumed, id.is_some_and(|id| seen.contains(id)));
+            }
+        }
+        let consumption =
+            consumption.finish(AccountingCoverage::Session, streamed.skipped, forked_from);
 
         let mut usage = PiUsage::default();
         let mut model = None;
@@ -559,17 +603,13 @@ impl Backend for PiBackend {
         }
         let (tokens, cost, by_model, cost_coverage) = usage.finish();
         let mut whole = session.clone();
-        whole.accounting = accounting_for(
-            tokens.as_ref(),
-            cost.as_ref(),
-            AccountingBasis::SummedRequests,
-            AccountingCoverage::Session,
-        );
+        whole.accounting = branch_accounting(tokens.as_ref(), cost.as_ref(), coverage);
         whole.tokens = tokens;
         whole.cost = cost;
         whole.usage_detail = UsageDetail {
             by_model,
             cost_coverage,
+            consumption,
             ..UsageDetail::default()
         }
         .into_option();
@@ -611,9 +651,12 @@ struct PiEntry {
     id: Option<String>,
     parent: Option<String>,
     request: Option<PiRequest>,
+    consumed: Option<PiConsumed>,
     model: Option<String>,
     thinking: Option<String>,
     timestamp: Option<chrono::DateTime<chrono::Utc>>,
+    /// Where the entry's record ends in the file.
+    end: u64,
 }
 
 type PiTranscriptRead = (
@@ -751,6 +794,39 @@ fn pi_cwd(value: &Value) -> Option<&str> {
         .flatten()
 }
 
+/// The session a fork's header names as the one it was copied from.
+fn pi_parent_session(value: &Value) -> Option<&str> {
+    (value["type"] == "session")
+        .then(|| value["parentSession"].as_str())
+        .flatten()
+}
+
+/// The accounting of requests summed along the active branch.
+fn branch_accounting(
+    tokens: Option<&Tokens>,
+    cost: Option<&Cost>,
+    coverage: AccountingCoverage,
+) -> Option<Accounting> {
+    accounting_for(tokens, cost, AccountingBasis::SummedRequests, coverage).map(|accounting| {
+        Accounting {
+            selection: Some(AccountingSelection::ActiveBranch),
+            ..accounting
+        }
+    })
+}
+
+/// The active branch is whole when its walk from the leaf reached an entry
+/// naming no parent and no record after the leaf went undecoded, since an
+/// undecoded record there could have been the leaf.
+fn branch_coverage(rooted: bool, leaf_end: Option<u64>, gaps: &[ReadGap]) -> AccountingCoverage {
+    let whole = rooted && leaf_end.is_some_and(|end| gaps.iter().all(|gap| gap.span.start < end));
+    if whole {
+        AccountingCoverage::Session
+    } else {
+        AccountingCoverage::ReadWindow
+    }
+}
+
 fn pi_usage(
     entries: &[&Value],
 ) -> (
@@ -790,7 +866,13 @@ fn pi_request(entry: &Value) -> Option<PiRequest> {
     if message.get("role").and_then(Value::as_str) != Some("assistant") {
         return None;
     }
-    let usage = message.get("usage").and_then(Value::as_object)?;
+    pi_usage_counters(message.get("usage")?)
+}
+
+/// The counters of one usage object, in the shape pi writes on every entry
+/// that records consumption.
+fn pi_usage_counters(usage: &Value) -> Option<PiRequest> {
+    let usage = usage.as_object()?;
     let counter = |name: &str| usage.get(name).and_then(Value::as_u64);
     Some(PiRequest {
         input: counter("input"),
@@ -936,6 +1018,128 @@ impl PiUsage {
     }
 }
 
+/// One consumption event an entry records: an assistant message's request,
+/// or the usage pi writes on a tool result, a compaction, a branch summary,
+/// or an entry of type `usage`.
+struct PiConsumed {
+    usage: PiRequest,
+    /// The provider and the response identity it returned, which an
+    /// assistant message records when the provider supplied one.
+    response: Option<(String, String)>,
+    /// The request ended on an error or an abort, so its usage stopped with it.
+    stopped: bool,
+}
+
+fn pi_consumed(entry: &Value) -> Option<PiConsumed> {
+    let message = &entry["message"];
+    let assistant = entry["type"] == "message" && message["role"] == "assistant";
+    let usage = match entry["type"].as_str()? {
+        "message" if assistant || message["role"] == "toolResult" => &message["usage"],
+        "compaction" | "branch_summary" | "usage" => &entry["usage"],
+        _ => return None,
+    };
+    let response = assistant
+        .then(|| {
+            Some((
+                message["provider"].as_str()?.to_owned(),
+                message["responseId"].as_str()?.to_owned(),
+            ))
+        })
+        .flatten();
+    Some(PiConsumed {
+        usage: pi_usage_counters(usage)?,
+        response,
+        stopped: assistant && matches!(message["stopReason"].as_str(), Some("error" | "aborted")),
+    })
+}
+
+/// Consumption events summed in recording order, each once. An entry whose
+/// id or provider response was already counted is a repeat of that event.
+#[derive(Default)]
+struct PiConsumption {
+    totals: PiTotals,
+    events: ConsumptionEvents,
+    identity: ConsumptionIdentity,
+    stopped: usize,
+    entries: HashSet<String>,
+    responses: HashSet<(String, String)>,
+}
+
+impl PiConsumption {
+    fn observe(&mut self, id: Option<&str>, consumed: &PiConsumed, on_branch: bool) {
+        let repeat = id.is_some_and(|id| !self.entries.insert(id.to_owned()))
+            | consumed
+                .response
+                .as_ref()
+                .is_some_and(|response| !self.responses.insert(response.clone()));
+        if repeat {
+            self.events.repeats += 1;
+            return;
+        }
+        self.totals.add(&consumed.usage);
+        self.events.counted += 1;
+        if on_branch {
+            self.events.active_branch += 1;
+        } else {
+            self.events.other_branches += 1;
+        }
+        match (&consumed.response, id) {
+            (Some(_), _) => self.identity.provider_response += 1,
+            (None, Some(_)) => self.identity.recording_entry += 1,
+            (None, None) => self.identity.unidentified += 1,
+        }
+        if consumed.stopped {
+            self.stopped += 1;
+        }
+    }
+
+    /// The figure, absent when the read reached no event. `coverage` is how
+    /// much of the recording the read reached and `unreadable` the records in
+    /// it that could not be decoded.
+    fn finish(
+        self,
+        coverage: AccountingCoverage,
+        unreadable: usize,
+        forked_from: Option<String>,
+    ) -> Option<Consumption> {
+        if self.events.counted == 0 {
+            return None;
+        }
+        let mut incomplete = Vec::new();
+        match unreadable {
+            0 => {}
+            1 => incomplete.push("1 record could not be read".to_owned()),
+            count => incomplete.push(format!("{count} records could not be read")),
+        }
+        match self.stopped {
+            0 => {}
+            1 => incomplete.push(
+                "1 request stopped on an error or an abort; its recorded usage is partial"
+                    .to_owned(),
+            ),
+            count => incomplete.push(format!(
+                "{count} requests stopped on an error or an abort; their recorded usage is partial"
+            )),
+        }
+        let (tokens, cost) = self.totals.finish();
+        Some(Consumption {
+            accounting: Accounting {
+                basis: AccountingBasis::SummedRequests,
+                coverage,
+                selection: Some(AccountingSelection::RetainedBranches),
+            },
+            tokens,
+            cost,
+            events: self.events,
+            identity: ConsumptionIdentity {
+                forked_from,
+                ..self.identity
+            },
+            incomplete,
+        })
+    }
+}
+
 /// The model an assistant message names.
 fn pi_model(value: &Value) -> Option<&str> {
     let message = value.get("message")?;
@@ -960,12 +1164,19 @@ fn pi_trailing_kind(value: &Value) -> Option<&'static str> {
 }
 
 fn active_path<'a>(entries: &[&'a Value]) -> Vec<&'a Value> {
+    active_branch(entries).0
+}
+
+/// The last entry's ancestry, root first, and whether the walk reached an
+/// entry naming no parent rather than stopping at one the entries lack.
+fn active_branch<'a>(entries: &[&'a Value]) -> (Vec<&'a Value>, bool) {
     let by_id = entries
         .iter()
         .filter_map(|entry| entry["id"].as_str().map(|id| (id, *entry)))
         .collect::<HashMap<_, _>>();
     let mut path = Vec::new();
     let mut seen = HashSet::new();
+    let mut rooted = false;
     let mut current = entries.last().copied();
     while let Some(entry) = current {
         let Some(id) = entry["id"].as_str() else {
@@ -975,12 +1186,12 @@ fn active_path<'a>(entries: &[&'a Value]) -> Vec<&'a Value> {
             break;
         }
         path.push(entry);
-        current = entry["parentId"]
-            .as_str()
-            .and_then(|parent| by_id.get(parent).copied());
+        let parent = entry["parentId"].as_str();
+        rooted = parent.is_none();
+        current = parent.and_then(|parent| by_id.get(parent).copied());
     }
     path.reverse();
-    path
+    (path, rooted)
 }
 
 /// pi records harness commands outside the conversation. User-role messages

@@ -8985,6 +8985,81 @@ fn stats_help_names_the_schema_and_what_the_figures_cover() {
     assert!(help.contains("median"), "{help}");
 }
 
+/// A rewound pi recording answers usage with its active-branch counters and,
+/// beside them, what every retained branch consumed, in text and JSON and on
+/// both reading paths.
+#[test]
+fn pi_usage_reports_active_branch_and_consumption_apart() {
+    let root = TemporaryDirectory::new(
+        std::env::temp_dir().join(format!("tapes-cli-pi-rewound-{}", std::process::id())),
+    );
+    let home = root.path().join("home");
+    let pi_sessions = home.join(".pi/agent/sessions");
+    fs::create_dir_all(&pi_sessions).unwrap();
+    fs::copy(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join(
+            "../tapes-core/tests/fixtures/rewound/pi/2026-01-05T10-00-00-000Z_session-rewound.jsonl",
+        ),
+        pi_sessions.join("2026-01-05T10-00-00-000Z_session-rewound.jsonl"),
+    )
+    .unwrap();
+
+    let run = |arguments: &[&str]| {
+        let mut command = tapes();
+        command.args(arguments);
+        with_fixture_env(
+            &mut command,
+            &root.path().join("codex"),
+            &home,
+            Path::new("/definitely/missing"),
+        );
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap()
+    };
+
+    for full in [false, true] {
+        let mut arguments = vec!["usage", "session-rewound"];
+        if full {
+            arguments.push("--full");
+        }
+        let human = run(&arguments);
+        for line in [
+            "tokens: input 400, output 40, reasoning 8, cache read 200, cache write 20\n",
+            "accounting: a sum of per-request records along the active branch, covering the whole branch\n",
+            "consumption: tokens input 1030, output 103, reasoning 20, cache read 500, cache write 50, cost 1.3125 USD; a sum of per-request records over every retained branch, covering the whole recording\n",
+            "consumption events: 5 counted, 3 on the active branch, 2 on other branches, 0 repeats\n",
+            "consumption identity: 4 by provider response, 1 by recording entry, 0 unidentified\n",
+        ] {
+            assert!(human.contains(line), "full={full}: {line}in {human}");
+        }
+
+        arguments.push("--json");
+        let value: Value = serde_json::from_str(&run(&arguments)).unwrap();
+        assert_eq!(value["schema"], "tapes-usage/11");
+        assert_eq!(value["accounting"]["selection"], "active-branch", "{value}");
+        assert_eq!(value["cost"]["usd"], 0.5, "{value}");
+        assert_eq!(
+            value["consumption"]["accounting"],
+            serde_json::json!({
+                "basis": "summed-requests",
+                "coverage": "session",
+                "selection": "retained-branches"
+            }),
+            "{value}"
+        );
+        assert_eq!(value["consumption"]["cost"]["usd"], 1.3125, "{value}");
+    }
+
+    let help = run(&["usage", "--help"]);
+    assert!(help.contains("`consumption`"), "{help}");
+    assert!(help.contains("`retained-branches`"), "{help}");
+}
+
 /// pi records the model on every assistant message, so both `usage` and
 /// `stats` report the per-model split the recording states, qualified by the
 /// effort in effect.

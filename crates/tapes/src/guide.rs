@@ -176,6 +176,11 @@ FIND IT
   they cover the session or only the bounded read window. A cost carries
   kind: harness-calculated-estimate and lists pricing_basis under missing:
   the harness priced it, and no recording says on which price table.
+  Where a recording
+  keeps more than one conversation path, its selection says which records the
+  figures were summed over: pi's counters are `active-branch`, the last
+  entry's ancestry, and cover the session only when the read linked that
+  branch from its last entry to its root.
 
   JSON omits a fact the harness did not record rather than writing it as
   null, an empty string, or an invented default. `launch` appears only when
@@ -512,6 +517,28 @@ PROBE BEFORE EXPORTING
   Synthetic assistant records join no request tally; positively witnessed
   failures are counted separately and their consumption is unknown.
 
+  A pi rewind appends a new branch and keeps the old one, and the abandoned
+  requests were consumed all the same. pi usage therefore carries
+  `consumption` beside the active-branch counters: tokens and cost summed over
+  every retained branch, with `accounting.selection` `retained-branches`.
+  It counts every entry pi records usage on — assistant requests, tool
+  results, compactions, branch summaries, and usage entries — so it can exceed
+  the active branch's figure even without a rewind. Each event counts once:
+  an entry seen again, or another entry naming the same provider response, is
+  a repeat and adds nothing, so a re-read or a copied entry consumes nothing
+  new. `events` splits the counted events between the active branch and the
+  others; `identity` says how many are keyed by provider response, which names
+  the event in any recording, and how many only by the recording's own entry,
+  and `forked_from` repeats the parent session a fork's header names, since
+  the entries the fork copied appear in both recordings. Coverage is
+  `session` for a read from the first byte and `read-window` for a bounded
+  tail, independently of the active branch: a branch that restarted from a
+  new root can lie wholly in the tail while what it replaced does not.
+  `incomplete` names unreadable records and requests that stopped on an
+  error or an abort, whose usage stopped with them; the figure is complete
+  only with `session` coverage and no `incomplete` reason. Nothing is counted
+  for a branch the read did not reach.
+
   `usage SESSION --series[=N]` opts into a recent bounded suffix of Codex raw
   accounting observations: 200 rows by default, 1 through 10,000 explicitly.
   Rows retain source coordinates, native ordinals when recorded, response IDs,
@@ -818,7 +845,8 @@ SIGNALS THAT THE PICTURE IS PARTIAL
   ordinary show/export reads. Explicit page reads have their own byte budget.
   Transcript notes carry
   what the normalized model has no field for: pi's abandoned branches, where a
-  large remainder means the user changed direction; a claude session's
+  large remainder means the user changed direction and `usage` reports what
+  those branches consumed; a claude session's
   subagent transcripts, which live in separate files and whose endings are not
   the parent's; lines that would not parse; an opencode page boundary. A
   subagent count requires successful directory enumeration; failed enumeration
