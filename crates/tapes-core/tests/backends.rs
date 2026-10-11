@@ -2868,8 +2868,7 @@ fn malformed_lines_leave_parseable_turns_and_a_note() {
             "{} reported a trailing record after its final turn",
             backend.harness()
         );
-        let mut expected_notes = Vec::new();
-        expected_notes.push("Skipped 1 unparseable line.".to_owned());
+        let expected_notes = vec!["Skipped 1 unparseable line.".to_owned()];
         assert_eq!(transcript.notes, expected_notes);
     }
 }
