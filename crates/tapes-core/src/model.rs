@@ -542,6 +542,27 @@ impl Tokens {
         .flatten()
         .any(|count| count > 0)
     }
+
+    /// Whether these counters record at least as much as `other` on every
+    /// counter `other` records. A harness that writes a streamed response's
+    /// usage more than once can write a partial count first; the witness
+    /// that dominates the others is the request's usage, and two witnesses
+    /// that each record more on some counter are alternative observations.
+    pub fn dominates(&self, other: &Self) -> bool {
+        [
+            (self.input, other.input),
+            (self.output, other.output),
+            (self.reasoning, other.reasoning),
+            (self.cache_read, other.cache_read),
+            (self.cache_write, other.cache_write),
+        ]
+        .into_iter()
+        .all(|pair| match pair {
+            (_, None) => true,
+            (Some(mine), Some(theirs)) => mine >= theirs,
+            (None, Some(_)) => false,
+        })
+    }
 }
 
 /// How a harness's native counters divide a request's tokens.

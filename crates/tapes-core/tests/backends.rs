@@ -1908,6 +1908,27 @@ fn claude_names_the_dimensions_a_request_or_a_recorded_total_did_not_record() {
     fs::remove_dir_all(root).unwrap();
 }
 
+const CLAUDE_FAMILY_SESSION: &str = "40000000-0000-4000-8000-000000000001";
+
+/// A subagent's streamed response is first written with a partial output
+/// count; the request's usage is the witness that records the most.
+#[test]
+fn a_claude_request_sum_takes_each_requests_final_witness() {
+    let backend = ClaudeBackend::new(fixtures("claude-family"));
+    let parent = located(&backend, CLAUDE_FAMILY_SESSION);
+    let child = backend
+        .child_transcript(&parent, "a0123456789abcdef")
+        .unwrap();
+    assert_eq!(
+        child
+            .session
+            .tokens
+            .as_ref()
+            .and_then(|tokens| tokens.output),
+        Some(90)
+    );
+}
+
 #[test]
 fn claude_cost_state_supplies_recorded_totals_over_request_usage() {
     let root = std::env::temp_dir().join(format!("tapes-claude-cost-state-{}", std::process::id()));

@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -1146,14 +1146,17 @@ fn claude_request_tokens(values: &[Value]) -> RequestUsage {
 }
 
 /// Per-request usage summed once per request id, since Claude repeats a
-/// request's usage on every record the response spans. The same requests'
-/// cache-write TTL split and price-relevant dimensions are tallied beside it;
-/// a record marked `answeredWithoutRequest` made no request and is no request
-/// in that tally.
+/// request's usage on every record the response spans. A response streamed
+/// into several records can carry a partial count before its final one, so a
+/// request counts the witness that dominates the others; of two witnesses
+/// neither of which dominates, the first stands. The same requests'
+/// cache-write TTL split and price-relevant dimensions are tallied beside it
+/// from each request's first witness; a record marked `answeredWithoutRequest`
+/// made no request and is no request in that tally.
 #[derive(Default)]
 struct RequestTokens {
-    seen: HashSet<String>,
-    totals: TokenTotals,
+    requests: HashMap<String, Tokens>,
+    unkeyed: TokenTotals,
     dimensions: RequestDimensions,
     failures: usize,
 }
@@ -1167,8 +1170,18 @@ struct RequestUsage {
 
 impl RequestTokens {
     fn finish(self) -> RequestUsage {
+        let mut totals = self.unkeyed;
+        for tokens in self.requests.into_values() {
+            totals.add(
+                tokens.input,
+                tokens.output,
+                tokens.reasoning,
+                tokens.cache_read,
+                tokens.cache_write,
+            );
+        }
         RequestUsage {
-            tokens: self.totals.finish(),
+            tokens: totals.finish(),
             failures: self.failures,
             dimensions: (self.dimensions.requests > 0).then_some(self.dimensions),
         }
@@ -1191,26 +1204,45 @@ impl RequestTokens {
         let Some(usage) = message.get("usage").and_then(Value::as_object) else {
             return;
         };
-        if let Some(request_id) = value["requestId"].as_str() {
-            if !self.seen.insert(request_id.to_owned()) {
-                return;
-            }
+        let tokens = request_usage_tokens(usage);
+        match value["requestId"].as_str() {
+            Some(request_id) => match self.requests.get_mut(request_id) {
+                Some(held) => {
+                    if tokens.dominates(held) {
+                        *held = tokens;
+                    }
+                    return;
+                }
+                None => {
+                    self.requests.insert(request_id.to_owned(), tokens);
+                }
+            },
+            None => self.unkeyed.add(
+                tokens.input,
+                tokens.output,
+                tokens.reasoning,
+                tokens.cache_read,
+                tokens.cache_write,
+            ),
         }
-        self.totals.add(
-            usage.get("input_tokens").and_then(Value::as_u64),
-            usage.get("output_tokens").and_then(Value::as_u64),
-            usage
-                .get("output_tokens_details")
-                .and_then(|details| details.get("thinking_tokens"))
-                .and_then(Value::as_u64),
-            usage.get("cache_read_input_tokens").and_then(Value::as_u64),
-            usage
-                .get("cache_creation_input_tokens")
-                .and_then(Value::as_u64),
-        );
         if value["answeredWithoutRequest"] != true {
             request_dimensions(&mut self.dimensions, usage);
         }
+    }
+}
+
+/// One request record's native counters; thinking is a share of output.
+fn request_usage_tokens(usage: &serde_json::Map<String, Value>) -> Tokens {
+    let counter = |name: &str| usage.get(name).and_then(Value::as_u64);
+    Tokens {
+        input: counter("input_tokens"),
+        output: counter("output_tokens"),
+        reasoning: usage
+            .get("output_tokens_details")
+            .and_then(|details| details.get("thinking_tokens"))
+            .and_then(Value::as_u64),
+        cache_read: counter("cache_read_input_tokens"),
+        cache_write: counter("cache_creation_input_tokens"),
     }
 }
 
