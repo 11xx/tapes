@@ -1302,7 +1302,7 @@ fn pi_keeps_an_unresolved_parent_reference() {
     let lineage = backend.lineage(&session).unwrap();
 
     let parent = lineage.parent.as_ref().unwrap();
-    assert_eq!(parent.native_id, "session-pi-parent");
+    assert_eq!(parent.native_id, "e0581212-d966-4d00-91c8-235b728a28c1");
     assert!(!parent.resolved, "the fixture store holds no such session");
     assert_eq!(parent.source, "session.parentSession");
     assert!(lineage.children.is_empty());
@@ -1992,10 +1992,12 @@ fn malformed_lines_leave_parseable_turns_and_a_note() {
             "{} reported a trailing record after its final turn",
             backend.harness()
         );
-        assert_eq!(
-            transcript.notes,
-            vec!["Skipped 1 unparseable line.".to_owned()]
-        );
+        let mut expected_notes = Vec::new();
+        if backend.harness() == "pi" {
+            expected_notes.push("Active-branch accounting includes assistant-message usage only; it excludes compaction, branch-summary, tool-result, and usage entries.".to_owned());
+        }
+        expected_notes.push("Skipped 1 unparseable line.".to_owned());
+        assert_eq!(transcript.notes, expected_notes);
     }
 }
 
@@ -2053,7 +2055,10 @@ fn pi_reports_entries_outside_the_active_leaf_path() {
 
     assert_eq!(
         transcript.notes,
-        vec!["1 entry belongs to an abandoned branch.".to_owned()]
+        vec![
+            "Active-branch accounting includes assistant-message usage only; it excludes compaction, branch-summary, tool-result, and usage entries.".to_owned(),
+            "1 entry belongs to an abandoned branch.".to_owned()
+        ]
     );
     assert!(transcript
         .turns

@@ -299,16 +299,31 @@ pub struct Consumption {
     pub accounting: Accounting,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tokens: Option<Tokens>,
-    /// Present only when every counted event recorded a cost.
+    /// Known cost subtotal. Its measurement coverage qualifies missing and
+    /// unpriced events; a numeric zero beside nonzero usage is unpriced.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cost: Option<Cost>,
+    /// Per-counter coverage among the counted events. Missing dimensions
+    /// leave known subtotals, never complete measurements.
+    pub measurement_coverage: BTreeMap<String, MeasurementCoverage>,
     pub events: ConsumptionEvents,
     pub identity: ConsumptionIdentity,
     /// Why the figure is not a complete measurement of what it covers: records
     /// the read could not decode, and requests whose recorded usage stopped
-    /// with them. Empty with `session` coverage, the figure is complete.
+    /// with them, and counters with missing or unpriced events. Empty with
+    /// `session` coverage, the quantities are complete; cross-recording
+    /// identity still depends on an established account namespace.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub incomplete: Vec<String>,
+}
+
+/// Coverage of one quantity among counted consumption events. The three
+/// counts sum to `events.counted`; zero is measured only when it is priced.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct MeasurementCoverage {
+    pub measured: usize,
+    pub missing: usize,
+    pub unpriced: usize,
 }
 
 /// The consumption events behind a figure, by the branch that holds them.
@@ -328,19 +343,26 @@ pub struct ConsumptionEvents {
 /// with another recording's events can be exact.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
 pub struct ConsumptionIdentity {
-    /// Keyed by the provider's response identity, which names the same event
-    /// in any recording that holds it.
+    /// Keyed by an observed (provider, response) identifier within this read.
+    /// Equality across recordings requires an established account namespace.
     pub provider_response: usize,
+    /// Pi does not establish the provider account namespace. Observed response
+    /// identifiers alone cannot establish equality across recording sources.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider_account_namespace: Option<String>,
     /// Keyed by the entry's identity within this recording alone; whether
     /// another recording holds the same event is unestablished.
     pub recording_entry: usize,
     /// Measured with no identity at all.
     pub unidentified: usize,
-    /// The parent session a fork's header names, as the header records it. A
+    /// The normalized parent session id derived from a fork's header. A
     /// fork copies its parent's entries, so events the two share are
     /// witnessed in both.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub forked_from: Option<String>,
+    /// The header records a fork relationship but its parent id cannot be derived.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub fork_parent_unestablished: bool,
 }
 
 /// One raw Codex accounting observation. A row is not necessarily a request:

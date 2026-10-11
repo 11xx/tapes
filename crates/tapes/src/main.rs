@@ -1376,7 +1376,9 @@ enum Command {
     /// count notes report failed directory enumeration instead of a count.
     /// A pi session's counters select its
     /// active branch; its `consumption` sums every retained branch, each
-    /// consumption event once, with its own coverage, event split, identity,
+    /// consumption event once, with per-counter measurement coverage for known
+    /// subtotals, event split, observed identity (provider account namespace
+    /// unestablished),
     /// and incompleteness.
     Usage {
         #[command(flatten)]
@@ -4017,14 +4019,25 @@ fn render_consumption(consumption: &Consumption) -> String {
         "consumption events: {} counted, {} on the active branch, {} on other branches, {} repeats\n",
         events.counted, events.active_branch, events.other_branches, events.repeats
     ));
+    for (counter, coverage) in &consumption.measurement_coverage {
+        if coverage.missing > 0 || coverage.unpriced > 0 {
+            out.push_str(&format!(
+                "consumption {counter}: known subtotal; {}/{} events measured, {} missing, {} unpriced\n",
+                coverage.measured, events.counted, coverage.missing, coverage.unpriced
+            ));
+        }
+    }
     out.push_str(&format!(
-        "consumption identity: {} by provider response, {} by recording entry, {} unidentified",
+        "consumption identity: {} by observed provider response (account namespace unestablished), {} by recording entry, {} unidentified",
         identity.provider_response, identity.recording_entry, identity.unidentified
     ));
     if let Some(parent) = &identity.forked_from {
         out.push_str(&format!(
             "; forked from {parent}, whose events it may repeat"
         ));
+    }
+    if identity.fork_parent_unestablished {
+        out.push_str("; fork parent identity unestablished");
     }
     out.push('\n');
     if !consumption.incomplete.is_empty() {

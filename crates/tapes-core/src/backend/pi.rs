@@ -145,10 +145,7 @@ impl PiBackend {
                 AccountingCoverage::Session
             },
             read.skipped,
-            opening
-                .iter()
-                .find_map(pi_parent_session)
-                .map(str::to_owned),
+            opening.iter().find_map(pi_parent_session),
         );
         let directory = opening.iter().find_map(pi_cwd).map(PathBuf::from);
         let variant = active.iter().rev().find_map(|value| pi_thinking(value));
@@ -476,10 +473,19 @@ impl Backend for PiBackend {
             .iter()
             .find(|value| value["type"] == "session")
             .and_then(|value| value["parentSession"].as_str())
-            .map(|native_id| self.parent_ref(native_id))
-            .transpose()?;
+            .map(|reference| self.parent_ref(reference))
+            .transpose()?
+            .flatten();
+        let uncertain = recording
+            .opening()
+            .iter()
+            .any(|value| pi_parent_session(value) == Some(None));
         Ok(Lineage {
             parent,
+            notes: uncertain
+                .then(|| "Fork parent identity is unestablished.".to_owned())
+                .into_iter()
+                .collect(),
             truncation: read_bounds(&recording.tail),
             ..Lineage::default()
         })
@@ -495,13 +501,21 @@ impl Backend for PiBackend {
             }
             Ok(false)
         })?;
+        let uncertain = header
+            .as_ref()
+            .and_then(|value| value.as_ref())
+            .is_some_and(|reference| pi_parent_id(reference).is_none());
         let parent = header
             .flatten()
-            .map(|native_id| self.parent_ref(&native_id))
-            .transpose()?;
+            .map(|reference| self.parent_ref(&reference))
+            .transpose()?
+            .flatten();
         Ok(Lineage {
             parent,
-            notes: skipped_records_note(read.skipped).into_iter().collect(),
+            notes: skipped_records_note(read.skipped)
+                .into_iter()
+                .chain(uncertain.then(|| "Fork parent identity is unestablished.".to_owned()))
+                .collect(),
             ..Lineage::default()
         })
     }
@@ -523,7 +537,7 @@ impl Backend for PiBackend {
             launch = merge_launch(launch, pi_launch_entry(value, &session.id));
             if value["type"] == "session" {
                 if forked_from.is_none() {
-                    forked_from = pi_parent_session(value).map(str::to_owned);
+                    forked_from = pi_parent_session(value);
                 }
                 return Ok(false);
             }
@@ -633,16 +647,30 @@ impl PiBackend {
 
     /// pi records a relationship on the session that has one: its header
     /// names the session it came from.
-    fn parent_ref(&self, native_id: &str) -> Result<ParentRef> {
+    fn parent_ref(&self, reference: &str) -> Result<Option<ParentRef>> {
+        let Some(native_id) = pi_parent_id(reference) else {
+            return Ok(None);
+        };
         let store = self
             .store
             .as_ref()
             .ok_or_else(|| anyhow!("pi store is unavailable"))?;
-        Ok(ParentRef {
-            resolved: store.locate_exact(native_id)?.is_some(),
-            native_id: native_id.to_owned(),
+        let native = store.locate_exact(&native_id)?;
+        let resolved = native.is_some_and(|native| {
+            if reference == native_id {
+                return true;
+            }
+            native
+                .locator()
+                .and_then(|path| path.canonicalize().ok())
+                .zip(Path::new(reference).canonicalize().ok())
+                .is_some_and(|(located, referenced)| located == referenced)
+        });
+        Ok(Some(ParentRef {
+            resolved,
+            native_id,
             source: "session.parentSession".to_owned(),
-        })
+        }))
     }
 }
 
@@ -780,11 +808,13 @@ fn recording_launch(recording: &super::Recording, session_id: &str) -> Option<La
 }
 
 fn abandoned_notes(abandoned: usize) -> Vec<String> {
-    match abandoned {
+    let mut notes = vec!["Active-branch accounting includes assistant-message usage only; it excludes compaction, branch-summary, tool-result, and usage entries.".to_owned()];
+    notes.extend(match abandoned {
         0 => Vec::new(),
         1 => vec!["1 entry belongs to an abandoned branch.".to_owned()],
         count => vec![format!("{count} entries belong to abandoned branches.")],
-    }
+    });
+    notes
 }
 
 /// pi records the working directory once, on the `session` header line.
@@ -795,10 +825,28 @@ fn pi_cwd(value: &Value) -> Option<&str> {
 }
 
 /// The session a fork's header names as the one it was copied from.
-fn pi_parent_session(value: &Value) -> Option<&str> {
+fn pi_parent_session(value: &Value) -> Option<Option<String>> {
     (value["type"] == "session")
         .then(|| value["parentSession"].as_str())
         .flatten()
+        .map(pi_parent_id)
+}
+
+/// Paths contribute only their filename-derived identity. Bare identifiers
+/// remain usable for recordings that name the parent directly.
+fn pi_parent_id(reference: &str) -> Option<String> {
+    let id = if reference.contains('/') || reference.contains('\\') || reference.ends_with(".jsonl")
+    {
+        agent_tapes_discovery::pi_recording_id(Path::new(reference))?
+    } else {
+        reference
+    };
+    (!id.is_empty()
+        && id.len() <= 128
+        && id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_')))
+    .then(|| id.to_owned())
 }
 
 /// The accounting of requests summed along the active branch.
@@ -849,6 +897,7 @@ fn pi_usage(
 }
 
 /// The usage one assistant message recorded for its request.
+#[derive(Clone, Copy)]
 struct PiRequest {
     input: Option<u64>,
     output: Option<u64>,
@@ -1061,6 +1110,7 @@ struct PiConsumption {
     events: ConsumptionEvents,
     identity: ConsumptionIdentity,
     stopped: usize,
+    measurement_coverage: BTreeMap<String, crate::usage::MeasurementCoverage>,
     entries: HashSet<String>,
     responses: HashSet<(String, String)>,
 }
@@ -1076,7 +1126,50 @@ impl PiConsumption {
             self.events.repeats += 1;
             return;
         }
-        self.totals.add(&consumed.usage);
+        let usage = &consumed.usage;
+        for (name, value) in [
+            ("input", usage.input),
+            ("output", usage.output),
+            ("reasoning", usage.reasoning),
+            ("cache_read", usage.cache_read),
+            ("cache_write", usage.cache_write),
+        ] {
+            let coverage = self
+                .measurement_coverage
+                .entry(name.to_owned())
+                .or_default();
+            if value.is_some() {
+                coverage.measured += 1;
+            } else {
+                coverage.missing += 1;
+            }
+        }
+        let nonzero_usage = [
+            usage.input,
+            usage.output,
+            usage.reasoning,
+            usage.cache_read,
+            usage.cache_write,
+        ]
+        .into_iter()
+        .flatten()
+        .any(|value| value > 0);
+        let unpriced = usage.cost == Some(0.0) && nonzero_usage;
+        let coverage = self
+            .measurement_coverage
+            .entry("cost".to_owned())
+            .or_default();
+        if unpriced {
+            coverage.unpriced += 1;
+        } else if usage.cost.is_none() {
+            coverage.missing += 1;
+        } else {
+            coverage.measured += 1;
+        }
+        self.totals.add(&PiRequest {
+            cost: usage.cost.filter(|_| !unpriced),
+            ..*usage
+        });
         self.events.counted += 1;
         if on_branch {
             self.events.active_branch += 1;
@@ -1100,7 +1193,7 @@ impl PiConsumption {
         self,
         coverage: AccountingCoverage,
         unreadable: usize,
-        forked_from: Option<String>,
+        forked_from: Option<Option<String>>,
     ) -> Option<Consumption> {
         if self.events.counted == 0 {
             return None;
@@ -1121,7 +1214,20 @@ impl PiConsumption {
                 "{count} requests stopped on an error or an abort; their recorded usage is partial"
             )),
         }
-        let (tokens, cost) = self.totals.finish();
+        for (counter, coverage) in &self.measurement_coverage {
+            if coverage.missing > 0 || coverage.unpriced > 0 {
+                incomplete.push(format!(
+                    "{counter} is a known subtotal: {}/{} events measured, {} missing, {} unpriced",
+                    coverage.measured, self.events.counted, coverage.missing, coverage.unpriced
+                ));
+            }
+        }
+        let cost = (self.measurement_coverage["cost"].measured > 0
+            || self.measurement_coverage["cost"].unpriced > 0)
+            .then_some(Cost {
+                usd: self.totals.cost,
+            });
+        let (tokens, _) = self.totals.finish();
         Some(Consumption {
             accounting: Accounting {
                 basis: AccountingBasis::SummedRequests,
@@ -1132,9 +1238,13 @@ impl PiConsumption {
             cost,
             events: self.events,
             identity: ConsumptionIdentity {
-                forked_from,
+                fork_parent_unestablished: forked_from == Some(None),
+                forked_from: forked_from.flatten(),
+                provider_account_namespace: (self.identity.provider_response > 0)
+                    .then(|| "unestablished".to_owned()),
                 ..self.identity
             },
+            measurement_coverage: self.measurement_coverage,
             incomplete,
         })
     }

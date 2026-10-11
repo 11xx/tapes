@@ -109,7 +109,7 @@ fn consumed_tokens() -> Value {
 fn a_rewound_recording_reports_active_and_consumption_totals_apart() {
     for (path, view) in both(&fixtures("rewound/pi"), "session-rewound") {
         assert_eq!(view["tokens"], active_tokens(), "{path}: {view}");
-        assert_eq!(view["cost"], json!({ "usd": 0.5 }), "{path}: {view}");
+        assert_eq!(view["cost"]["usd"], json!(0.5), "{path}: {view}");
         assert_eq!(
             view["accounting"],
             json!({
@@ -119,30 +119,18 @@ fn a_rewound_recording_reports_active_and_consumption_totals_apart() {
             }),
             "{path}: {view}"
         );
+        let consumption = &view["consumption"];
+        assert_eq!(consumption["tokens"], consumed_tokens(), "{path}");
+        assert_eq!(consumption["cost"]["usd"], 1.3125, "{path}");
         assert_eq!(
-            view["consumption"],
-            json!({
-                "accounting": {
-                    "basis": "summed-requests",
-                    "coverage": "session",
-                    "selection": "retained-branches"
-                },
-                "tokens": consumed_tokens(),
-                "cost": { "usd": 1.3125 },
-                "events": {
-                    "counted": 5,
-                    "active_branch": 3,
-                    "other_branches": 2,
-                    "repeats": 0
-                },
-                "identity": {
-                    "provider_response": 4,
-                    "recording_entry": 1,
-                    "unidentified": 0
-                }
-            }),
-            "{path}: {view}"
+            consumption["measurement_coverage"]["reasoning"],
+            json!({"measured":4,"missing":1,"unpriced":0}),
+            "{path}"
         );
+        assert_eq!(consumption["events"]["counted"], 5, "{path}");
+        assert_eq!(consumption["events"]["active_branch"], 3, "{path}");
+        assert_eq!(consumption["events"]["other_branches"], 2, "{path}");
+        assert_eq!(consumption["identity"]["provider_response"], 4, "{path}");
     }
 }
 
@@ -172,7 +160,7 @@ fn rereading_or_reimporting_evidence_adds_no_consumption() {
     for (path, view) in both(&store.0, "session-rewound") {
         let consumption = &view["consumption"];
         assert_eq!(consumption["tokens"], consumed_tokens(), "{path}: {view}");
-        assert_eq!(consumption["cost"], json!({ "usd": 1.3125 }), "{path}");
+        assert_eq!(consumption["cost"]["usd"], json!(1.3125), "{path}");
         assert_eq!(
             consumption["events"],
             json!({
@@ -205,7 +193,10 @@ fn an_unreadable_record_limits_only_the_figures_it_could_belong_to() {
         assert_eq!(consumption["tokens"]["input"], 630, "{path}: {view}");
         assert_eq!(
             consumption["incomplete"],
-            json!(["1 record could not be read"]),
+            json!([
+                "1 record could not be read",
+                "reasoning is a known subtotal: 3/4 events measured, 1 missing, 0 unpriced"
+            ]),
             "{path}: {view}"
         );
     }
@@ -225,7 +216,10 @@ fn an_unreadable_record_limits_only_the_figures_it_could_belong_to() {
         );
         assert_eq!(
             view["consumption"]["incomplete"],
-            json!(["1 record could not be read"]),
+            json!([
+                "1 record could not be read",
+                "reasoning is a known subtotal: 4/5 events measured, 1 missing, 0 unpriced"
+            ]),
             "{path}: {view}"
         );
     }
@@ -254,7 +248,10 @@ fn a_failed_request_leaves_consumption_partial() {
         assert_eq!(consumption["events"]["counted"], 5, "{path}: {view}");
         assert_eq!(
             consumption["incomplete"],
-            json!(["1 request stopped on an error or an abort; its recorded usage is partial"]),
+            json!([
+                "1 request stopped on an error or an abort; its recorded usage is partial",
+                "reasoning is a known subtotal: 4/5 events measured, 1 missing, 0 unpriced"
+            ]),
             "{path}: {view}"
         );
     }
@@ -267,13 +264,25 @@ fn a_failed_request_leaves_consumption_partial() {
 fn a_fork_names_the_recording_its_events_may_repeat() {
     for (path, view) in both(&fixtures("pi"), "session-pi") {
         let consumption = &view["consumption"];
+        assert!(
+            !view.to_string().contains("private-owner"),
+            "{path}: {view}"
+        );
+        assert!(
+            !view.to_string().contains("encoded-project"),
+            "{path}: {view}"
+        );
+        assert!(
+            !view.to_string().contains("2025-12-31T10-00-00-000Z"),
+            "{path}: {view}"
+        );
         assert_eq!(
             consumption["identity"],
             json!({
                 "provider_response": 0,
                 "recording_entry": 3,
                 "unidentified": 0,
-                "forked_from": "session-pi-parent"
+                "forked_from": "e0581212-d966-4d00-91c8-235b728a28c1"
             }),
             "{path}: {view}"
         );
@@ -288,8 +297,8 @@ fn a_fork_names_the_recording_its_events_may_repeat() {
             }),
             "{path}: {view}"
         );
-        assert_eq!(consumption["cost"], json!({ "usd": 99.375 }), "{path}");
-        assert_eq!(view["cost"], json!({ "usd": 0.375 }), "{path}");
+        assert_eq!(consumption["cost"]["usd"], json!(99.375), "{path}");
+        assert_eq!(view["cost"]["usd"], json!(0.375), "{path}");
     }
 }
 
@@ -366,7 +375,7 @@ fn a_bounded_read_holds_the_whole_active_branch_but_not_all_consumption() {
     let consumption = &view["consumption"];
     assert_eq!(consumption["accounting"]["coverage"], "session", "{view}");
     assert_eq!(consumption["tokens"]["input"], 1010, "{view}");
-    assert_eq!(consumption["cost"], json!({ "usd": 2.5 }), "{view}");
+    assert_eq!(consumption["cost"]["usd"], json!(2.5), "{view}");
     assert_eq!(
         consumption["events"],
         json!({
@@ -377,4 +386,171 @@ fn a_bounded_read_holds_the_whole_active_branch_but_not_all_consumption() {
         }),
         "{view}"
     );
+}
+
+#[test]
+fn missing_dimensions_qualify_each_known_subtotal() {
+    let store = rewound_variant("missing-dimensions", |lines| {
+        let index = line_index(lines, "assistant-3a");
+        let mut entry: Value = serde_json::from_str(&lines[index]).unwrap();
+        let usage = entry["message"]["usage"].as_object_mut().unwrap();
+        for field in ["input", "output", "reasoning", "cacheRead", "cacheWrite"] {
+            usage.remove(field);
+        }
+        lines[index] = entry.to_string();
+    });
+    for (path, view) in both(&store.0, "session-rewound") {
+        let consumption = &view["consumption"];
+        for field in ["input", "output", "cache_read", "cache_write"] {
+            assert_eq!(
+                consumption["measurement_coverage"][field]["measured"], 4,
+                "{path}: {view}"
+            );
+            assert_eq!(
+                consumption["measurement_coverage"][field]["missing"], 1,
+                "{path}: {view}"
+            );
+        }
+        assert_eq!(
+            consumption["measurement_coverage"]["reasoning"]["measured"], 3,
+            "{path}"
+        );
+        assert_eq!(
+            consumption["measurement_coverage"]["reasoning"]["missing"], 2,
+            "{path}"
+        );
+        assert_eq!(consumption["tokens"]["input"], 630, "{path}");
+        assert_eq!(view["tokens"], active_tokens(), "{path}");
+        assert!(
+            consumption["incomplete"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|v| v.as_str().unwrap().contains("input")),
+            "{view}"
+        );
+    }
+}
+
+#[test]
+fn zero_cost_events_with_usage_are_unpriced_before_aggregation() {
+    for all in [false, true] {
+        let store = rewound_variant("unpriced", |lines| {
+            for line in lines {
+                let mut entry: Value = serde_json::from_str(line).unwrap();
+                let selected = all || entry["id"] == "assistant-3a";
+                let usage = if entry["type"] == "message" {
+                    &mut entry["message"]["usage"]
+                } else {
+                    &mut entry["usage"]
+                };
+                if selected && usage.is_object() {
+                    usage["cost"] =
+                        json!({"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0});
+                }
+                *line = entry.to_string();
+            }
+        });
+        for (path, view) in both(&store.0, "session-rewound") {
+            let consumption = &view["consumption"];
+            assert_eq!(
+                consumption["cost"]["usd"],
+                if all { 0.0 } else { 0.8125 },
+                "{path}"
+            );
+            assert_eq!(
+                consumption["measurement_coverage"]["cost"]["unpriced"],
+                if all { 5 } else { 1 },
+                "{path}: {view}"
+            );
+            assert!(
+                consumption["incomplete"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|v| v.as_str().unwrap().contains("unpriced")),
+                "{path}: {view}"
+            );
+        }
+    }
+}
+
+#[test]
+fn identity_reports_the_unestablished_provider_account_namespace() {
+    for (path, view) in both(&fixtures("rewound/pi"), "session-rewound") {
+        assert_eq!(
+            view["consumption"]["identity"]["provider_account_namespace"], "unestablished",
+            "{path}: {view}"
+        );
+    }
+}
+
+#[test]
+fn fork_lineage_normalizes_paths_and_preserves_uncertainty() {
+    let store = rewound_variant("fork-lineage", |_| {});
+    let parent_file = store.0.join(REWOUND);
+    let child_file = store.0.join("2026-01-06T10-00-00-000Z_child.jsonl");
+    for (reference, expected, resolved) in [
+        (
+            parent_file.to_string_lossy().into_owned(),
+            Some("session-rewound"),
+            true,
+        ),
+        ("session-rewound".to_owned(), Some("session-rewound"), true),
+        (
+            "/outside/2026-01-05T10-00-00-000Z_missing-parent.jsonl".to_owned(),
+            Some("missing-parent"),
+            false,
+        ),
+        (
+            "/outside/2026-01-05T10-00-00-000Z_session-rewound.jsonl".to_owned(),
+            Some("session-rewound"),
+            false,
+        ),
+        ("/private-owner/unrecognized.jsonl".to_owned(), None, false),
+    ] {
+        let header = json!({"type":"session","version":3,"id":"child","parentSession":reference});
+        fs::write(
+            &child_file,
+            format!(
+                "{header}
+"
+            ),
+        )
+        .unwrap();
+        let backend = PiBackend::new(&store.0);
+        let child = backend.locate("child").unwrap().unwrap();
+        for lineage in [
+            backend.lineage(&child).unwrap(),
+            backend.stream_lineage(&child).unwrap(),
+        ] {
+            assert_eq!(
+                lineage.parent.as_ref().map(|p| p.native_id.as_str()),
+                expected
+            );
+            assert_eq!(
+                lineage.parent.as_ref().is_some_and(|p| p.resolved),
+                resolved
+            );
+            assert!(!serde_json::to_string(&lineage)
+                .unwrap()
+                .contains("private-owner"));
+            if expected.is_none() {
+                assert!(!lineage.notes.is_empty());
+            }
+        }
+    }
+}
+
+#[test]
+fn active_accounting_names_excluded_entry_classes() {
+    for (path, view) in both(&fixtures("rewound/pi"), "session-rewound") {
+        assert!(
+            view["notes"].as_array().unwrap().iter().any(|v| v
+                .as_str()
+                .unwrap()
+                .contains("compaction, branch-summary, tool-result, and usage entries")),
+            "{path}: {view}"
+        );
+    }
 }

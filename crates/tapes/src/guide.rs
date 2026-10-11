@@ -527,17 +527,27 @@ PROBE BEFORE EXPORTING
   an entry seen again, or another entry naming the same provider response, is
   a repeat and adds nothing, so a re-read or a copied entry consumes nothing
   new. `events` splits the counted events between the active branch and the
-  others; `identity` says how many are keyed by provider response, which names
-  the event in any recording, and how many only by the recording's own entry,
-  and `forked_from` repeats the parent session a fork's header names, since
-  the entries the fork copied appear in both recordings. Coverage is
-  `session` for a read from the first byte and `read-window` for a bounded
-  tail, independently of the active branch: a branch that restarted from a
-  new root can lie wholly in the tail while what it replaced does not.
-  `incomplete` names unreadable records and requests that stopped on an
-  error or an abort, whose usage stopped with them; the figure is complete
-  only with `session` coverage and no `incomplete` reason. Nothing is counted
-  for a branch the read did not reach.
+  others; `identity` says how many use an observed (provider, response)
+  identifier within the read and how many use the recording's own entry.
+  `provider_account_namespace` is `unestablished`: response identifiers
+  alone do not establish cross-recording equality without an account
+  namespace. `forked_from` is the parent session id derived from the
+  header's recording filename, never its path. A header whose parent id
+  cannot be derived sets `fork_parent_unestablished` instead.
+  Coverage is `session` for a read from the first byte and `read-window`
+  for a bounded tail, independently of the active branch: a branch that
+  restarted from a new root can lie wholly in the tail while what it replaced
+  does not. The active figure includes assistant-message usage only; it
+  excludes compaction, branch-summary, tool-result, and usage entries.
+  `measurement_coverage` counts measured, missing, and unpriced events
+  for each token dimension and cost. Missing dimensions and missing or
+  unpriced costs leave qualified known subtotals. A harness-written cost of
+  zero beside nonzero token usage is unpriced; it is never a zero estimate.
+  `incomplete` names these quantities, unreadable records, and requests
+  that stopped on an error or an abort, whose usage stopped with them.
+  Quantities are complete only with `session` coverage and no
+  `incomplete` reason. Cross-recording identity still needs an established
+  account namespace. Nothing is counted for a branch the read did not reach.
 
   `usage SESSION --series[=N]` opts into a recent bounded suffix of Codex raw
   accounting observations: 200 rows by default, 1 through 10,000 explicitly.

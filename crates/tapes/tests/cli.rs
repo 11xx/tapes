@@ -9004,6 +9004,15 @@ fn pi_usage_reports_active_branch_and_consumption_apart() {
     )
     .unwrap();
 
+    let recording = pi_sessions.join("2026-01-05T10-00-00-000Z_session-rewound.jsonl");
+    let contents = fs::read_to_string(&recording).unwrap();
+    let (header, entries) = contents.split_once('\n').unwrap();
+    let mut header: Value = serde_json::from_str(header).unwrap();
+    header["parentSession"] = serde_json::json!(
+        "/fixtures/private-owner/encoded-project/2025-12-31T10-00-00-000Z_parent-id.jsonl"
+    );
+    fs::write(&recording, format!("{header}\n{entries}")).unwrap();
+
     let run = |arguments: &[&str]| {
         let mut command = tapes();
         command.args(arguments);
@@ -9028,12 +9037,24 @@ fn pi_usage_reports_active_branch_and_consumption_apart() {
             arguments.push("--full");
         }
         let human = run(&arguments);
+        for private in [
+            "private-owner",
+            "encoded-project",
+            "2025-12-31T10-00-00-000Z",
+            ".jsonl",
+        ] {
+            // The recording's own locator is exposed only in JSON.
+            assert!(!human.contains(private), "{human}");
+        }
+        assert!(human.contains("forked from parent-id"), "{human}");
+
         for line in [
             "tokens: input 400, output 40, reasoning 8, cache read 200, cache write 20\n",
             "accounting: a sum of per-request records along the active branch, covering the whole branch\n",
             "consumption: tokens input 1030, output 103, reasoning 20, cache read 500, cache write 50, cost 1.3125 USD; a sum of per-request records over every retained branch, covering the whole recording\n",
             "consumption events: 5 counted, 3 on the active branch, 2 on other branches, 0 repeats\n",
-            "consumption identity: 4 by provider response, 1 by recording entry, 0 unidentified\n",
+            "consumption identity: 4 by observed provider response (account namespace unestablished), 1 by recording entry, 0 unidentified",
+            "consumption reasoning: known subtotal; 4/5 events measured, 1 missing, 0 unpriced\n",
         ] {
             assert!(human.contains(line), "full={full}: {line}in {human}");
         }

@@ -741,6 +741,15 @@ fn codex_filename_id(stem: &str) -> Option<&str> {
         .filter(|id| !id.is_empty())
 }
 
+/// Derive a Pi session identity from its timestamp-prefixed recording filename.
+/// This interprets the filename only and never opens the referenced recording.
+pub fn pi_recording_id(path: &Path) -> Option<&str> {
+    if path.extension()?.to_str()? != "jsonl" {
+        return None;
+    }
+    pi_filename_id(path.file_stem()?.to_str()?)
+}
+
 fn pi_filename_id(stem: &str) -> Option<&str> {
     let (timestamp, id) = stem.rsplit_once('_')?;
     let date = timestamp.get(..10)?;

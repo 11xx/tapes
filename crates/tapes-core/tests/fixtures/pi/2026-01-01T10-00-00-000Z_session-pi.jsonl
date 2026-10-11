@@ -1,4 +1,4 @@
-{"type":"session","version":3,"id":"session-pi","timestamp":"2026-01-01T10:00:00Z","cwd":"/fixtures/project","parentSession":"session-pi-parent"}
+{"type":"session","version":3,"id":"session-pi","timestamp":"2026-01-01T10:00:00Z","cwd":"/fixtures/project","parentSession":"/fixtures/private-owner/encoded-project/2025-12-31T10-00-00-000Z_e0581212-d966-4d00-91c8-235b728a28c1.jsonl"}
 {"type":"model_change","id":"model-1","parentId":null,"timestamp":"2026-01-01T10:00:01Z","provider":"openai-codex","modelId":"gpt-fixture"}
 {"type":"thinking_level_change","id":"thinking-1","parentId":"model-1","timestamp":"2026-01-01T10:00:02Z","thinkingLevel":"high"}
 {"type":"message","id":"user-1","parentId":"thinking-1","timestamp":"2026-01-01T10:00:03Z","message":{"role":"user","timestamp":1767261603000,"content":[{"type":"text","text":"Inspect the fixture."}]}}

@@ -8,7 +8,7 @@ mod file;
 mod opencode;
 
 pub use error::DiscoveryError;
-pub use file::CandidatePage;
+pub use file::{pi_recording_id, CandidatePage};
 pub use opencode::{OpenCodeFlavor, OpenCodeStore};
 
 use std::collections::{HashMap, HashSet};
