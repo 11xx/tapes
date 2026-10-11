@@ -28,7 +28,8 @@ use agent_tapes_core::stats::{
 use agent_tapes_core::stats_summary::SessionRead;
 use agent_tapes_core::usage::{
     Consumption, DisjointSum, Durations, GroupBy, GroupKey, ModelUsage, ObservationClassification,
-    RateLimits, RateWindow, RequestDimensions, TurnCoverage, UsageAttribution, UsageObservation,
+    RateLimits, RateWindow, RecordedUsage, RequestDimensions, TurnCoverage, UsageAttribution,
+    UsageObservation,
     UsageObservationOptions, UsageOptions, UsageTally, UsageView,
 };
 use agent_tapes_core::{BulkExport, Selection, UsageSummary, Where};
@@ -1465,6 +1466,9 @@ enum Command {
         /// not determine. `requests` tallies Claude requests' recorded cache
         /// TTLs, service tier, speed, inference geo, and web search and fetch
         /// counts, with `missing` counting requests per unrecorded dimension.
+        /// A newest Claude cost-state below its request sum is set aside:
+        /// accounting notes name the total and reason, while recorded_total
+        /// retains its counters and dollar facts under its own accounting.
         /// Synthetic assistant records do not count as requests; positive
         /// failure evidence is counted separately with consumption unknown.
         /// Incoming session reports and direct aggregation inputs classify
@@ -3756,6 +3760,9 @@ fn render_usage(usage: &UsageView) -> String {
             usage.request_failures
         ));
     }
+    if let Some(recorded) = &usage.recorded_total {
+        out.push_str(&render_recorded_usage(recorded));
+    }
     if let Some(accounting) = &usage.accounting {
         out.push_str(&format!("accounting: {}\n", render_accounting(accounting)));
     }
@@ -3994,6 +4001,29 @@ fn render_request_dimensions(requests: &RequestDimensions) -> String {
 
 /// The recorded total, the identified union, and each counter's comparison,
 /// then the per-model split and the sources read.
+fn render_recorded_usage(recorded: &RecordedUsage) -> String {
+    let mut out = format!(
+        "set-aside recorded cost-state: {}\n",
+        render_accounting(&recorded.accounting)
+    );
+    if let Some(tokens) = &recorded.tokens {
+        out.push_str(&format!("  recorded tokens: {}\n", render_tokens(tokens)));
+    }
+    if let Some(cost) = &recorded.cost {
+        out.push_str(&format!("  recorded cost: {}\n", render_cost(cost)));
+    }
+    if let Some(coverage) = &recorded.cost_coverage {
+        out.push_str(&format!(
+            "  recorded cost coverage: {}\n",
+            render_cost_coverage(coverage)
+        ));
+    }
+    for model in recorded.by_model.iter().flatten() {
+        out.push_str(&format!("  recorded {}", render_model_usage(model)));
+    }
+    out
+}
+
 fn render_reconciliation(reconciliation: &Reconciliation) -> String {
     let mut out = format!("reconciliation: rules {}", reconciliation.rules);
     match &reconciliation.recorded {
@@ -4008,6 +4038,21 @@ fn render_reconciliation(reconciliation: &Reconciliation) -> String {
             }
         )),
         None => out.push_str("; no recorded total"),
+    }
+    if let Some(recorded) = &reconciliation.recorded {
+        if let Some(cost) = &recorded.cost {
+            out.push_str(&format!(
+                "; recorded cost {} [{}]",
+                render_cost(cost),
+                render_accounting(&recorded.accounting)
+            ));
+        }
+        if let Some(coverage) = &recorded.cost_coverage {
+            out.push_str(&format!(
+                "; recorded cost coverage {}",
+                render_cost_coverage(coverage)
+            ));
+        }
     }
     let identified = &reconciliation.identified;
     out.push_str(&format!(
@@ -4073,6 +4118,22 @@ fn render_reconciliation(reconciliation: &Reconciliation) -> String {
                 .map_or_else(|| "-".to_owned(), render_tokens),
             model.requests
         ));
+        if let Some(cost) = &model.cost {
+            out.push_str(&format!(
+                "    recorded cost: {} [{}]\n",
+                render_cost(cost),
+                model
+                    .accounting
+                    .as_ref()
+                    .map_or_else(String::new, render_accounting)
+            ));
+        }
+        if let Some(coverage) = &model.cost_coverage {
+            out.push_str(&format!(
+                "    recorded cost coverage: {}\n",
+                render_cost_coverage(coverage)
+            ));
+        }
     }
     for source in &reconciliation.sources {
         let role = match source.role {

@@ -13,7 +13,8 @@ use std::collections::{BTreeMap, HashMap};
 
 use serde::Serialize;
 
-use crate::model::Tokens;
+use crate::model::{Accounting, Cost, CostCoverage, Tokens};
+use crate::usage::{ModelUsage, RecordedUsage};
 
 /// The reader rules a reconciliation applies. A report names them so it can
 /// be reproduced from the same source revisions.
@@ -111,6 +112,13 @@ pub struct ReconciledSource {
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct RecordedTotal {
     pub tokens: Tokens,
+    pub accounting: Accounting,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cost: Option<Cost>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub written_cost_usd: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cost_coverage: Option<CostCoverage>,
     pub observations: usize,
     pub resets: usize,
     pub after_last_request: bool,
@@ -177,6 +185,12 @@ pub struct CounterReconciliation {
 pub struct ModelReconciliation {
     pub model: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub cost: Option<Cost>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cost_coverage: Option<CostCoverage>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub accounting: Option<Accounting>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub recorded: Option<Tokens>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub identified: Option<Tokens>,
@@ -228,6 +242,7 @@ pub(crate) struct FamilyLedger {
     budget_exhausted: bool,
     recorded: Vec<Tokens>,
     recorded_by_model: BTreeMap<String, Tokens>,
+    recorded_usage: Option<RecordedUsage>,
     recorded_position: Option<usize>,
     last_parent_request: Option<usize>,
     unenumerated: bool,
@@ -368,8 +383,10 @@ impl FamilyLedger {
         position: usize,
         tokens: Tokens,
         by_model: BTreeMap<String, Tokens>,
+        usage: RecordedUsage,
     ) {
         self.recorded.push(tokens);
+        self.recorded_usage = Some(usage);
         self.recorded_by_model = by_model;
         self.recorded_position = Some(position);
     }
@@ -417,7 +434,20 @@ impl FamilyLedger {
                 })
             })
             .count();
+        let mut costs: BTreeMap<String, ModelUsage> = self
+            .recorded_usage
+            .as_ref()
+            .and_then(|usage| usage.by_model.clone())
+            .unwrap_or_default()
+            .into_iter()
+            .map(|model| (model.model.clone(), model))
+            .collect();
+        let usage = self.recorded_usage.as_ref();
         let recorded = self.recorded.last().cloned().map(|tokens| RecordedTotal {
+            accounting: usage.unwrap().accounting.clone(),
+            cost: usage.and_then(|usage| usage.cost.clone()),
+            written_cost_usd: usage.and_then(|usage| usage.written_cost_usd),
+            cost_coverage: usage.and_then(|usage| usage.cost_coverage.clone()),
             tokens,
             observations: self.recorded.len(),
             resets,
@@ -441,11 +471,29 @@ impl FamilyLedger {
             .collect();
         let mut by_model: BTreeMap<String, ModelReconciliation> = BTreeMap::new();
         for (model, tokens) in self.recorded_by_model {
+            let cost = costs.remove(&model);
             by_model.insert(
                 model.clone(),
                 ModelReconciliation {
                     model,
+                    cost: cost.as_ref().and_then(|model| model.cost.clone()),
+                    cost_coverage: cost.and_then(|model| model.cost_coverage),
+                    accounting: usage.map(|usage| usage.accounting.clone()),
                     recorded: Some(tokens),
+                    identified: None,
+                    requests: 0,
+                },
+            );
+        }
+        for (model, cost) in costs {
+            by_model.insert(
+                model.clone(),
+                ModelReconciliation {
+                    model,
+                    cost: cost.cost,
+                    cost_coverage: cost.cost_coverage,
+                    accounting: usage.map(|usage| usage.accounting.clone()),
+                    recorded: cost.tokens,
                     identified: None,
                     requests: 0,
                 },
@@ -456,6 +504,9 @@ impl FamilyLedger {
                 .entry(model.clone())
                 .or_insert(ModelReconciliation {
                     model,
+                    cost: None,
+                    cost_coverage: None,
+                    accounting: None,
                     recorded: None,
                     identified: None,
                     requests: 0,

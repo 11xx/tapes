@@ -563,6 +563,12 @@ PROBE BEFORE EXPORTING
   `incomplete` reason. Cross-recording identity still needs an established
   account namespace. Nothing is counted for a branch the read did not reach.
 
+  Plain Claude usage chooses a request sum when the newest cost-state is
+  below it or omits its counters. The accounting note names that total and
+  the fallback reason; recorded_total retains its counters and dollar facts
+  under recorded-total/session accounting, separate from the request sum.
+  Requests' dimensions follow the same selected usage witness as their tokens.
+
   `usage SESSION --reconcile` sets a Claude session's recorded total beside
   the requests its recording family identifies, reading the parent and every
   subagent recording whole. The newest cost-state is the recorded total as

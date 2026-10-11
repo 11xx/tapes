@@ -23,12 +23,12 @@ use crate::event::{Bounded, EventKind, ReadLines, ToolEvent};
 use crate::history::PageProjection;
 use crate::lineage::{ChildRef, Lineage, SourceRef};
 use crate::model::{
-    derive_title, AccountingBasis, AccountingCoverage, CacheWrites, Cost, CostCoverage,
+    derive_title, Accounting, AccountingBasis, AccountingCoverage, CacheWrites, Cost, CostCoverage,
     KindDeclaration, Launch, Model, Role, Session, SourceDescriptor, Tokens, TrailingRecord,
     Transcript, Turn, TurnKind, TurnSelection,
 };
 use crate::reconcile::{FamilyLedger, Reconciliation, SourceRole};
-use crate::usage::{Durations, ModelUsage, RequestDimensions, UsageDetail};
+use crate::usage::{Durations, ModelUsage, RecordedUsage, RequestDimensions, UsageDetail};
 use agent_tapes_discovery::{Harness as NativeHarness, IdentityBasis, NativeSession, NativeStore};
 
 #[derive(Clone, Debug)]
@@ -168,8 +168,8 @@ impl ClaudeBackend {
             turns.extend(parsed);
         }
         let requests = claude_request_tokens(&read.values);
-        let cost_state =
-            covering_cost_state(newest_cost_state(&read.values), requests.tokens.as_ref());
+        let observed_cost_state = newest_cost_state(&read.values);
+        let cost_state = covering_cost_state(observed_cost_state, requests.tokens.as_ref());
         let (tokens, cost, basis) = recorded_accounting(cost_state, requests.tokens);
         // A cost-state record is cumulative for the whole session wherever the
         // read reached it; only a sum over the read's requests is bounded by
@@ -180,8 +180,13 @@ impl ClaudeBackend {
             AccountingCoverage::ReadWindow
         };
         let accounting = accounting_for(tokens.as_ref(), cost.as_ref(), basis, coverage);
-        let usage_detail =
-            claude_usage_detail(cost_state, requests.dimensions, requests.failures, basis);
+        let usage_detail = claude_usage_detail(
+            observed_cost_state,
+            requests.dimensions,
+            requests.failures,
+            basis,
+            tokens.as_ref(),
+        );
 
         let session = Session {
             id: native_id.to_owned(),
@@ -865,7 +870,8 @@ impl ClaudeRecords {
     /// activity range to what every folded record states.
     fn apply(self, session: &mut Session) {
         let requests = self.requests.finish();
-        let cost_state = covering_cost_state(self.cost_state.as_ref(), requests.tokens.as_ref());
+        let observed_cost_state = self.cost_state.as_ref();
+        let cost_state = covering_cost_state(observed_cost_state, requests.tokens.as_ref());
         let (tokens, cost, basis) = recorded_accounting(cost_state, requests.tokens);
         session.accounting = accounting_for(
             tokens.as_ref(),
@@ -873,8 +879,13 @@ impl ClaudeRecords {
             basis,
             AccountingCoverage::Session,
         );
-        session.usage_detail =
-            claude_usage_detail(cost_state, requests.dimensions, requests.failures, basis);
+        session.usage_detail = claude_usage_detail(
+            observed_cost_state,
+            requests.dimensions,
+            requests.failures,
+            basis,
+            tokens.as_ref(),
+        );
         session.tokens = tokens;
         session.cost = cost;
         session.model = self.model;
@@ -1068,14 +1079,46 @@ fn claude_usage_detail(
     requests: Option<RequestDimensions>,
     failures: usize,
     basis: AccountingBasis,
+    selected_tokens: Option<&Tokens>,
 ) -> Option<UsageDetail> {
-    let mut detail = cost_state.map(cost_state_detail).unwrap_or_default();
+    let mut detail = if basis == AccountingBasis::RecordedTotal {
+        cost_state.map(cost_state_detail).unwrap_or_default()
+    } else {
+        UsageDetail::default()
+    };
     if basis == AccountingBasis::SummedRequests {
+        if let Some(value) = cost_state {
+            let recorded = recorded_usage(value);
+            detail.accounting_notes.push(format!(
+                "Newest recorded cost-state total {} was set aside because its counters are below or omit the request sum {}; accounting uses summed-requests. Its dollar facts remain separate in recorded_total.",
+                serde_json::to_string(&recorded.tokens).unwrap_or_default(),
+                serde_json::to_string(&selected_tokens).unwrap_or_default(),
+            ));
+            detail.recorded_total = Some(recorded);
+        }
         detail.cache_write_by_ttl = requests.as_ref().map(|requests| requests.cache_write);
     }
     detail.requests = requests;
     detail.request_failures = failures;
     detail.into_option()
+}
+
+fn recorded_usage(value: &Value) -> RecordedUsage {
+    let tokens = cost_state_tokens(value);
+    let detail = cost_state_detail(value);
+    RecordedUsage {
+        accounting: Accounting {
+            basis: AccountingBasis::RecordedTotal,
+            coverage: AccountingCoverage::Session,
+        },
+        cost: value["totalCostUSD"]
+            .as_f64()
+            .and_then(|usd| Cost::from_written(usd, tokens.as_ref())),
+        written_cost_usd: value["totalCostUSD"].as_f64(),
+        tokens,
+        cost_coverage: detail.cost_coverage,
+        by_model: detail.by_model,
+    }
 }
 
 /// The durations and the per-model split a `cost-state` records beside its
@@ -1323,7 +1366,12 @@ fn reconcile_source(
                         .collect()
                 })
                 .unwrap_or_default();
-            ledger.recorded(position, recorded_counters(&by_model), by_model);
+            ledger.recorded(
+                position,
+                recorded_counters(&by_model),
+                by_model,
+                recorded_usage(value),
+            );
         } else if let Some(usage) = assistant_usage(value) {
             if value["answeredWithoutRequest"] == true {
                 ledger.unrequested(source);

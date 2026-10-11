@@ -50,6 +50,8 @@ pub struct UsageDetail {
     /// Consumption over every branch a recording retains, where the
     /// session's counters select only one of them.
     pub consumption: Option<Consumption>,
+    pub recorded_total: Option<RecordedUsage>,
+    pub accounting_notes: Vec<String>,
 }
 
 impl UsageDetail {
@@ -64,6 +66,8 @@ impl UsageDetail {
             && self.cost_coverage.is_none()
             && self.request_failures == 0
             && self.consumption.is_none()
+            && self.recorded_total.is_none()
+            && self.accounting_notes.is_empty()
     }
 
     /// The detail, or nothing when the harness recorded none of it.
@@ -172,6 +176,23 @@ pub struct ModelUsage {
     pub cost_coverage: Option<CostCoverage>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub request_count: Option<usize>,
+}
+
+/// A cumulative cost-state preserved as a separate source fact. Its dollars
+/// and counters follow its own accounting and never join a request sum.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct RecordedUsage {
+    pub accounting: Accounting,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tokens: Option<Tokens>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cost: Option<Cost>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub written_cost_usd: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cost_coverage: Option<CostCoverage>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub by_model: Option<Vec<ModelUsage>>,
 }
 
 /// The most distinct values one request dimension tallies, and the longest
@@ -580,6 +601,8 @@ pub struct UsageView {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub consumption: Option<Consumption>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub recorded_total: Option<RecordedUsage>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub series: Option<UsageObservationSeries>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reconciliation: Option<crate::reconcile::Reconciliation>,
@@ -660,6 +683,8 @@ struct ReadFacts {
 
 fn project(session: &Session, turns: TurnTally, facts: ReadFacts) -> UsageView {
     let detail = session.usage_detail.clone().unwrap_or_default();
+    let mut notes = facts.notes;
+    notes.extend(detail.accounting_notes);
     UsageView {
         schema: USAGE_SCHEMA,
         session: UsageSession {
@@ -688,6 +713,7 @@ fn project(session: &Session, turns: TurnTally, facts: ReadFacts) -> UsageView {
         requests: detail.requests,
         request_failures: detail.request_failures,
         consumption: detail.consumption,
+        recorded_total: detail.recorded_total,
         series: None,
         reconciliation: None,
         read: facts.read,
@@ -696,7 +722,7 @@ fn project(session: &Session, turns: TurnTally, facts: ReadFacts) -> UsageView {
         content: turns.content.into_option(),
         truncated: facts.truncated,
         truncation: facts.truncation,
-        notes: facts.notes,
+        notes,
     }
 }
 
@@ -1306,6 +1332,8 @@ mod tests {
             cost_coverage: None,
             request_failures: 0,
             consumption: None,
+            recorded_total: None,
+            accounting_notes: Vec::new(),
         });
         let transcript = Transcript::new(
             session,

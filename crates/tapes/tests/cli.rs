@@ -10948,7 +10948,8 @@ fn usage_reconcile_sets_the_recorded_total_beside_the_family_requests() {
     let rendered = String::from_utf8(output.stdout).unwrap();
     for line in [
         "reconciliation: rules tapes-claude-reconciliation/1; recorded total from the newest of 1 \
-         cost-states, 0 resets; 3 identified requests across 2 recordings, 1 witnessed in more \
+         cost-states, 0 resets; recorded cost 0.2500 USD (harness-calculated estimate, pricing basis not recorded) \
+         [a recorded total, covering the whole session]; 3 identified requests across 2 recordings, 1 witnessed in more \
          than one, 1 revised, 0 conflicting\n",
         "reconciliation scope: not established; missing recorded-total-membership\n",
         "  output: recorded 190, identified 190, difference 0, reconciled\n",

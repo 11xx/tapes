@@ -2023,6 +2023,68 @@ fn claude_streamed_dimensions_follow_the_selected_usage_witness() {
     fs::remove_dir_all(root).unwrap();
 }
 
+#[test]
+fn ordinary_fallback_explains_and_retains_the_set_aside_cost_state() {
+    let root = std::env::temp_dir().join(format!("tapes-fallback-cost-{}", std::process::id()));
+    let project = root.join("project");
+    fs::create_dir_all(&project).unwrap();
+    let mut recording = claude_dimensions_recording();
+    recording.push_str(&format!("{}\n", serde_json::json!({"type":"cost-state", "sessionId":CLAUDE_DIMENSIONS_SESSION,
+        "totalCostUSD":0.5, "modelUsage":{"claude-fixture":{"inputTokens":1,"outputTokens":40,
+        "thinkingTokens":12,"cacheReadInputTokens":2300,"cacheCreationInputTokens":360,"costUSD":0.5}}})));
+    fs::write(
+        project.join(format!("{CLAUDE_DIMENSIONS_SESSION}.jsonl")),
+        recording,
+    )
+    .unwrap();
+    let backend = ClaudeBackend::new(root.clone());
+    let value = usage_value(&backend, CLAUDE_DIMENSIONS_SESSION);
+    assert_eq!(value["accounting"]["basis"], "summed-requests");
+    assert!(
+        value["notes"]
+            .as_array()
+            .is_some_and(|notes| notes.iter().any(|note| {
+                let note = note.as_str().unwrap();
+                note.contains("cost-state") && note.contains("below") && note.contains("40")
+            })),
+        "{value}"
+    );
+    assert_eq!(value["tokens"]["input"], 5);
+    assert_eq!(value["tokens"]["output"], 65);
+    assert!(value.get("cost").is_none());
+    assert_eq!(value["recorded_total"]["cost"]["usd"], 0.5);
+    assert_eq!(value["recorded_total"]["by_model"][0]["cost"]["usd"], 0.5);
+    assert_eq!(
+        value["recorded_total"]["accounting"]["basis"],
+        "recorded-total"
+    );
+    let backends: Vec<Box<dyn Backend>> = vec![Box::new(backend)];
+    let full = serde_json::to_value(
+        usage_full_with_backends(&backends, Selection::Id(CLAUDE_DIMENSIONS_SESSION)).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(full["recorded_total"], value["recorded_total"]);
+    let reconciled_view = usage_with_options_with_backends(
+        &backends,
+        Selection::Id(CLAUDE_DIMENSIONS_SESSION),
+        UsageOptions {
+            full: false,
+            series: None,
+            reconcile: true,
+        },
+    )
+    .unwrap();
+    let report = serde_json::to_value(reconciled_view.reconciliation.unwrap()).unwrap();
+    assert_eq!(report["recorded"]["cost"]["usd"], 0.5);
+    assert_eq!(report["by_model"][0]["cost"]["usd"], 0.5);
+    assert_eq!(
+        report["by_model"][0]["accounting"]["basis"],
+        "recorded-total"
+    );
+    assert_eq!(report["counters"][1]["difference"], -25);
+    fs::remove_dir_all(root).unwrap();
+}
+
 /// The parent's cost-state counts its subagent's requests too. The family
 /// union, with the request both recordings witness counted once and the
 /// child's streamed partial witness superseded by its final one, equals it.
@@ -2081,12 +2143,16 @@ fn a_parent_total_including_its_children_reconciles_with_the_family_union() {
         serde_json::json!([
             {
                 "model": "claude-fixture",
+                "cost": {"usd": 0.2, "kind": "harness-calculated-estimate", "missing": ["pricing_basis"]},
+                "accounting": {"basis": "recorded-total", "coverage": "session"},
                 "recorded": { "input": 12, "output": 130, "reasoning": 50, "cache_read": 1500, "cache_write": 250 },
                 "identified": { "input": 12, "output": 130, "reasoning": 50, "cache_read": 1500, "cache_write": 250 },
                 "requests": 2
             },
             {
                 "model": "claude-fixture-small",
+                "cost": {"usd": 0.05, "kind": "harness-calculated-estimate", "missing": ["pricing_basis"]},
+                "accounting": {"basis": "recorded-total", "coverage": "session"},
                 "recorded": { "input": 3, "output": 60, "reasoning": 25, "cache_read": 700, "cache_write": 80 },
                 "identified": { "input": 3, "output": 60, "reasoning": 25, "cache_read": 700, "cache_write": 80 },
                 "requests": 1
