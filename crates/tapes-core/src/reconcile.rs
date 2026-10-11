@@ -4,12 +4,12 @@
 //! A harness's cumulative total and the request records beside it are two
 //! observations whose scopes need not match: the total may count children,
 //! background calls, or a counter epoch the records do not. The report keeps
-//! both as source facts, selects request witnesses within each recording,
-//! and subtracts per counter only where identity and frontier evidence make the
-//! subtraction is defined. A difference is signed and never clamped; a
-//! positive one is a discrepancy until the total's membership is established.
+//! both as source facts, selects request witnesses within each recording
+//! and validated family, and subtracts only where identity and frontier
+//! evidence define the comparison. A difference is signed and never clamped;
+//! a positive one is a discrepancy until the total's membership is established.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 
 use chrono::{DateTime, Utc};
 use serde::Serialize;
@@ -72,7 +72,8 @@ pub enum SourceRole {
 /// One recording the reconciliation read whole. `revision`, `length`, and
 /// `sha256` identify the exact bytes read. `records` counts request records
 /// with usage; `requests` the distinct recording-local identities, whose
-/// counters `identified` sums. These local figures are separate observations. `unkeyed` counts records with usage and no request identity,
+/// counters `identified` sums. These local figures are separate observations.
+/// `unkeyed` counts records with usage and no request identity,
 /// `unrequested` records the harness marks as answered without a request,
 /// and `failed` records the harness wrote in place of a response that failed,
 /// whose consumption is unknown. A source is `complete` only when every
@@ -132,9 +133,11 @@ pub struct RecordedTotal {
 /// Request identities selected within each recording. A family union and
 /// its request count require a compatible provider/account namespace;
 /// without that evidence `identity_coverage` is unestablished and union
-/// figures are absent. `revised` and `conflicts` describe recording-local
-/// witnesses. A later witness dominating every earlier counter discharges a
-/// provisional conflict. Unkeyed counters remain separate measurements.
+/// figures are absent. Native children validated below the parent's subagent
+/// directory share its request namespace. `revised` and `conflicts` describe
+/// the selected witnesses in that namespace. A witness dominating every
+/// other counter observation discharges a provisional conflict. Unkeyed
+/// counters remain separate measurements.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct IdentifiedRequests {
     pub identity_coverage: &'static str,
@@ -227,6 +230,7 @@ fn is_zero(value: &usize) -> bool {
 }
 
 /// What one request identity's witnesses established.
+#[derive(Clone)]
 struct Witness {
     tokens: Tokens,
     model: Option<String>,
@@ -235,6 +239,46 @@ struct Witness {
     conflicting_counters: [bool; COUNTERS.len()],
     revised: bool,
     conflicting: bool,
+}
+
+impl Witness {
+    fn observe(&mut self, tokens: &Tokens) {
+        self.revised |= self.tokens != *tokens;
+        if tokens.dominates(&self.envelope) {
+            self.tokens = tokens.clone();
+            self.conflicting = false;
+            self.conflicting_counters = [false; COUNTERS.len()];
+        } else if !self.tokens.dominates(tokens) {
+            for (index, name) in COUNTERS.iter().enumerate() {
+                self.conflicting_counters[index] |=
+                    counter(&self.tokens, name) != counter(tokens, name);
+            }
+            self.conflicting = true;
+            if tokens.dominates(&self.tokens) {
+                self.tokens = tokens.clone();
+            }
+        }
+        extend_envelope(&mut self.envelope, tokens);
+    }
+
+    fn merge(&mut self, other: &Self) {
+        self.observe(&other.tokens);
+        self.revised |= other.revised;
+        extend_envelope(&mut self.envelope, &other.envelope);
+        if self.tokens.dominates(&self.envelope) {
+            self.conflicting = false;
+            self.conflicting_counters = [false; COUNTERS.len()];
+        } else {
+            self.conflicting = true;
+            for (held, incoming) in self
+                .conflicting_counters
+                .iter_mut()
+                .zip(other.conflicting_counters)
+            {
+                *held |= incoming;
+            }
+        }
+    }
 }
 
 fn extend_envelope(envelope: &mut Tokens, tokens: &Tokens) {
@@ -255,7 +299,8 @@ fn extend_envelope(envelope: &mut Tokens, tokens: &Tokens) {
 #[derive(Default)]
 pub(crate) struct FamilyLedger {
     sources: Vec<ReconciledSource>,
-    requests: HashMap<(usize, String), Witness>,
+    family_members: Vec<bool>,
+    requests: BTreeMap<(usize, String), Witness>,
     budget_exhausted: bool,
     recorded: Option<Tokens>,
     recorded_observations: usize,
@@ -279,6 +324,8 @@ impl FamilyLedger {
         agent_id: Option<String>,
         locator: String,
     ) -> usize {
+        self.family_members
+            .push(self.sources.is_empty() && role == SourceRole::Parent);
         self.sources.push(ReconciledSource {
             role,
             agent_id,
@@ -298,6 +345,14 @@ impl FamilyLedger {
             error: None,
         });
         self.sources.len() - 1
+    }
+
+    /// Admit a child whose native parent identity and directory membership
+    /// were positively validated by the family reader.
+    pub(crate) fn validated_child(&mut self, source: usize) {
+        if self.sources[source].role == SourceRole::Child {
+            self.family_members[source] = true;
+        }
     }
 
     /// Record the bytes a source's read covered, and whether it decoded all.
@@ -321,6 +376,7 @@ impl FamilyLedger {
         let entry = &mut self.sources[source];
         entry.complete = false;
         entry.error = Some(error);
+        self.family_members[source] = false;
         entry.requests = 0;
         entry.identified = None;
         entry.unkeyed_tokens = None;
@@ -373,22 +429,7 @@ impl FamilyLedger {
         };
         let key = (source, request_id.to_owned());
         if let Some(witness) = self.requests.get_mut(&key) {
-            witness.revised |= witness.tokens != tokens;
-            if tokens.dominates(&witness.envelope) {
-                witness.tokens = tokens.clone();
-                witness.conflicting = false;
-                witness.conflicting_counters = [false; COUNTERS.len()];
-            } else if !witness.tokens.dominates(&tokens) {
-                for (index, name) in COUNTERS.iter().enumerate() {
-                    witness.conflicting_counters[index] |=
-                        counter(&witness.tokens, name) != counter(&tokens, name);
-                }
-                witness.conflicting = true;
-                if tokens.dominates(&witness.tokens) {
-                    witness.tokens = tokens.clone();
-                }
-            }
-            extend_envelope(&mut witness.envelope, &tokens);
+            witness.observe(&tokens);
             return;
         }
         if self.requests.len() >= MAX_IDENTIFIED_REQUESTS {
@@ -437,7 +478,9 @@ impl FamilyLedger {
 
     pub(crate) fn finish(mut self) -> Reconciliation {
         let mut union = None;
-        let namespace_established = self.sources.len() == 1 && !self.unenumerated;
+        let namespace_established = !self.sources.is_empty()
+            && !self.unenumerated
+            && self.family_members.iter().all(|member| *member);
         let mut conflicting_counters = [false; COUNTERS.len()];
         let mut conflicting = Vec::new();
         let mut conflicts = 0;
@@ -445,10 +488,27 @@ impl FamilyLedger {
         let mut by_source: Vec<Option<Tokens>> = vec![None; self.sources.len()];
         let mut identified_by_model: BTreeMap<String, (Option<Tokens>, usize)> = BTreeMap::new();
         let mut partially_recorded = [false; COUNTERS.len()];
-        for ((source, request_id), witness) in &self.requests {
+        let mut family: BTreeMap<(Option<usize>, &str), (Witness, bool)> = BTreeMap::new();
+        for ((_, request_id), witness) in &self.requests {
+            add_tokens(&mut by_source[witness.first_source], &witness.tokens);
+            let namespace = (!namespace_established).then_some(witness.first_source);
+            match family.entry((namespace, request_id.as_str())) {
+                std::collections::btree_map::Entry::Occupied(mut entry) => {
+                    let (held, cross_recording) = entry.get_mut();
+                    *cross_recording |= held.first_source != witness.first_source;
+                    held.merge(witness);
+                }
+                std::collections::btree_map::Entry::Vacant(entry) => {
+                    entry.insert((witness.clone(), false));
+                }
+            }
+        }
+        let mut cross_recording = 0;
+        for ((_, request_id), (witness, cross)) in &family {
+            cross_recording += usize::from(*cross);
             if witness.conflicting {
                 conflicts += 1;
-                conflicting.push(format!("recording{source}:{request_id}"));
+                conflicting.push(format!("recording{}:{request_id}", witness.first_source));
                 conflicting.sort();
                 conflicting.truncate(MAX_CONFLICT_EXAMPLES);
             }
@@ -462,7 +522,6 @@ impl FamilyLedger {
                 partially_recorded[index] |= counter(&witness.tokens, name).is_none();
             }
             add_tokens(&mut union, &witness.tokens);
-            add_tokens(&mut by_source[witness.first_source], &witness.tokens);
             revised += usize::from(witness.revised);
             if let Some(model) = &witness.model {
                 let entry = identified_by_model.entry(model.clone()).or_default();
@@ -595,18 +654,21 @@ impl FamilyLedger {
         {
             missing.push("comparison-frontier");
         }
+        let family_scope = self.sources.len() > 1;
         Reconciliation {
             rules: RECONCILIATION_RULES,
             sources: self.sources,
             recorded,
             identified: IdentifiedRequests {
-                identity_coverage: if namespace_established {
+                identity_coverage: if namespace_established && family_scope {
+                    "validated-family"
+                } else if namespace_established {
                     "recording-local"
                 } else {
                     "unestablished"
                 },
-                requests: namespace_established.then_some(self.requests.len()),
-                cross_recording: namespace_established.then_some(0),
+                requests: namespace_established.then_some(family.len()),
+                cross_recording: namespace_established.then_some(cross_recording),
                 revised,
                 conflicts,
                 conflicting,
@@ -625,9 +687,9 @@ impl FamilyLedger {
 
 /// Compare one counter. The difference is computed only within one counter
 /// epoch, at a frontier covering every source, with an established identity
-/// namespace, and where every witness of
-/// a request agrees on the counter. The union is complete for a counter when
-/// every source read whole and every identified request recorded it. A
+/// namespace, and where every witness of a request agrees on the counter.
+/// The union is complete for a counter when every source read whole and
+/// every identified request recorded it. A
 /// negative difference is a conflict even over an incomplete union, since
 /// completing it only grows it.
 fn compare(
@@ -747,6 +809,59 @@ mod tests {
         assert_eq!(report.identified.conflicts, 0);
         assert!(report.identified.conflicting.is_empty());
         assert_eq!(report.identified.tokens, Some(tokens(10, 10)));
+    }
+
+    #[test]
+    fn family_deduplication_keeps_each_recordings_conflict_evidence() {
+        for dominant in [false, true] {
+            for conflicting_child in [false, true] {
+                let mut ledger = FamilyLedger::default();
+                let parent = ledger.source(SourceRole::Parent, None, "parent".to_owned());
+                let child = ledger.source(SourceRole::Child, None, "child".to_owned());
+                ledger.validated_child(child);
+                let (conflicting, other) = if conflicting_child {
+                    (child, parent)
+                } else {
+                    (parent, child)
+                };
+                for (position, counters) in [tokens(5, 10), tokens(10, 5)].into_iter().enumerate() {
+                    ledger.request(conflicting, position, Some("request"), None, counters, None);
+                }
+                ledger.request(
+                    other,
+                    0,
+                    Some("request"),
+                    None,
+                    tokens(10, if dominant { 10 } else { 5 }),
+                    None,
+                );
+                let report = ledger.finish();
+                assert_eq!(report.identified.identity_coverage, "validated-family");
+                assert_eq!(report.identified.requests, Some(1));
+                assert_eq!(report.identified.cross_recording, Some(1));
+                assert_eq!(report.identified.conflicts, usize::from(!dominant));
+                if dominant {
+                    assert_eq!(report.identified.tokens, Some(tokens(10, 10)));
+                }
+                assert_eq!(report.sources[parent].requests, 1);
+                assert_eq!(report.sources[child].requests, 1);
+            }
+        }
+    }
+
+    #[test]
+    fn an_additional_parent_cannot_join_the_family_namespace() {
+        let mut ledger = FamilyLedger::default();
+        for _ in 0..2 {
+            let source = ledger.source(SourceRole::Parent, None, "recording".to_owned());
+            ledger.validated_child(source);
+            ledger.request(source, 0, Some("request"), None, tokens(10, 10), None);
+        }
+        let report = ledger.finish();
+        assert_eq!(report.identified.identity_coverage, "unestablished");
+        assert_eq!(report.identified.requests, None);
+        assert_eq!(report.identified.tokens, None);
+        assert!(report.missing.contains(&"request-namespace"));
     }
 
     #[test]

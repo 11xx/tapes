@@ -1440,12 +1440,12 @@ enum Command {
         /// Reconcile one Claude session's recorded total with its request
         /// observations, reading the parent and subagent recordings whole.
         /// The newest cost-state retains its tokens and dollar facts under
-        /// recorded-total/session accounting. Requests deduplicate within
-        /// each recording; a family union requires a compatible request
-        /// namespace, which Claude recordings do not establish. In that case
-        /// per-recording figures remain visible, the union is unestablished,
-        /// and differences are withheld. A child requires matching native
-        /// parent identity before any contribution is admitted. Failed
+        /// recorded-total/session accounting. Requests deduplicate across a
+        /// validated native family: children under the parent's subagents
+        /// directory must positively witness matching native parent identity.
+        /// Per-recording figures remain visible. Foreign, unvalidated or
+        /// unenumerated children, and sources outside the family, withhold
+        /// request-namespace and leave the union unestablished. Failed
         /// assistant records are unmeasured even without a usage object.
         /// Comparable counters retain signed recorded-minus-identified
         /// differences: zero reconciles, a negative value conflicts, and a
@@ -4075,10 +4075,18 @@ fn render_reconciliation(reconciliation: &Reconciliation) -> String {
     }
     let identified = &reconciliation.identified;
     out.push_str(&format!(
-        "; family request count {} across {} recordings; {} revised, {} conflicting local identities{}\n",
-        identified.requests.map_or_else(|| "unestablished".to_owned(), |count| count.to_string()),
-        reconciliation.sources.len(), identified.revised, identified.conflicts,
-        if identified.complete { "" } else { ", incomplete" }
+        "; family request count {} across {} recordings; {} revised, {} conflicting identities{}\n",
+        identified
+            .requests
+            .map_or_else(|| "unestablished".to_owned(), |count| count.to_string()),
+        reconciliation.sources.len(),
+        identified.revised,
+        identified.conflicts,
+        if identified.complete {
+            ""
+        } else {
+            ", incomplete"
+        }
     ));
     out.push_str(&format!(
         "request identity coverage: {}\n",

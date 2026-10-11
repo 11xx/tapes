@@ -2034,6 +2034,7 @@ fn reconciliation_requires_positive_child_parent_identity() {
     assert_eq!(report["sources"][1]["complete"], false);
     assert!(report["sources"][1].get("identified").is_none());
     assert_eq!(report["sources"][1]["requests"], 0);
+    assert_namespace_withheld(&report);
     assert_eq!(report["identified"]["complete"], false);
     fs::remove_dir_all(root).unwrap();
 }
@@ -2053,28 +2054,73 @@ fn reconciliation_rejects_child_contributions_before_a_late_identity_failure() {
     fs::remove_dir_all(root).unwrap();
 }
 
-#[test]
-fn reconciliation_withholds_an_unestablished_cross_recording_namespace() {
-    let report = reconciled(&fixtures("claude-family"));
-    assert_eq!(report["identified"]["complete"], false);
-    assert!(report["identified"].get("cross_recording").is_none());
+fn assert_namespace_withheld(report: &serde_json::Value) {
+    assert_eq!(report["identified"]["identity_coverage"], "unestablished");
+    assert!(!report["identified"]["complete"].as_bool().unwrap());
     assert!(report["identified"].get("tokens").is_none());
     assert!(report["missing"]
         .as_array()
         .unwrap()
         .contains(&serde_json::json!("request-namespace")));
-    assert_eq!(report["sources"][0]["identified"]["output"], 130);
-    assert_eq!(report["sources"][1]["identified"]["output"], 90);
-    assert_eq!(report["sources"][1]["requests"], 2);
+    for row in report["counters"].as_array().unwrap() {
+        assert_eq!(row["status"], "withheld");
+        assert!(row.get("difference").is_none());
+        assert!(row["reasons"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("request-namespace")));
+    }
+}
+
+#[test]
+fn reconciliation_namespace_is_withheld_for_foreign_children() {
+    let root = claude_family("foreign-namespace", |_, child| {
+        *child = child.replace(
+            CLAUDE_FAMILY_SESSION,
+            "60000000-0000-4000-8000-000000000001",
+        );
+    });
+    let report = reconciled(&root);
+    assert_namespace_withheld(&report);
+    assert_eq!(report["sources"][1]["requests"], 0);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn reconciliation_namespace_is_withheld_for_unenumerated_children() {
+    let root = claude_family("unenumerated-namespace", |_, _| {});
+    let directory = root
+        .join("project")
+        .join(CLAUDE_FAMILY_SESSION)
+        .join("subagents");
+    fs::remove_dir_all(&directory).unwrap();
+    fs::write(directory, "enumeration unavailable").unwrap();
+    assert_namespace_withheld(&reconciled(&root));
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn reconciliation_namespace_is_withheld_for_sources_outside_the_family() {
+    for tag in ["another-recording", "import", "fork"] {
+        let root = claude_family(tag, |_, _| {});
+        let child = root
+            .join("project")
+            .join(CLAUDE_FAMILY_SESSION)
+            .join("subagents")
+            .join(format!("{CLAUDE_FAMILY_CHILD}.jsonl"));
+        let outside = root.join(format!("{tag}.jsonl"));
+        fs::rename(&child, &outside).unwrap();
+        std::os::unix::fs::symlink(&outside, &child).unwrap();
+        let report = reconciled(&root);
+        assert_namespace_withheld(&report);
+        assert_eq!(report["sources"][1]["identified"]["output"], 90);
+        fs::remove_dir_all(root).unwrap();
+    }
 }
 
 #[test]
 fn reconciliation_withholds_totals_before_the_child_frontier() {
-    let root = claude_family("late-child", |parent, child| {
-        *parent = parent.replace(
-            r#""type":"cost-state","#,
-            r#""type":"cost-state","timestamp":"2026-01-01T10:00:10Z","#,
-        );
+    let root = claude_family("late-child", |_, child| {
         let value = serde_json::json!({"type":"assistant", "sessionId":CLAUDE_FAMILY_SESSION,
             "requestId":"req_late_child", "timestamp":"2026-01-01T10:00:20Z",
             "message":{"role":"assistant", "model":"claude-fixture-small",
@@ -2082,9 +2128,19 @@ fn reconciliation_withholds_totals_before_the_child_frontier() {
         child.push_str(&format!("{value}\n"));
     });
     let report = reconciled(&root);
+    assert_eq!(
+        report["identified"]["identity_coverage"],
+        "validated-family"
+    );
+    assert_eq!(report["identified"]["tokens"]["output"], 290);
+    assert_eq!(report["scope_established"], false);
     assert_eq!(report["recorded"]["after_last_request"], false);
     assert_eq!(report["counters"][1]["status"], "withheld");
     assert!(report["counters"][1].get("difference").is_none());
+    assert_eq!(
+        report["counters"][1]["reasons"],
+        serde_json::json!(["frontier"])
+    );
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -2446,16 +2502,16 @@ fn ordinary_fallback_explains_and_retains_the_set_aside_cost_state() {
     fs::remove_dir_all(root).unwrap();
 }
 
-/// Local request identities preserve each recording's figures. A shared
-/// opaque identifier establishes no cross-recording request namespace.
+/// Positively validated children share their parent's request namespace;
+/// repeated observations contribute one request to the family union.
 #[test]
-fn a_family_keeps_recording_local_figures_without_an_exact_union() {
+fn a_validated_family_reconciles_its_deduplicated_requests() {
     let report = reconciled(&fixtures("claude-family"));
 
     assert_eq!(report["rules"], "tapes-claude-reconciliation/1");
-    assert_eq!(statuses(&report), all("withheld"));
+    assert_eq!(statuses(&report), all("reconciled"));
     for row in report["counters"].as_array().unwrap() {
-        assert!(row.get("difference").is_none(), "{row}");
+        assert_eq!(row["difference"], 0, "{row}");
     }
     assert_eq!(
         report["recorded"]["tokens"],
@@ -2463,15 +2519,15 @@ fn a_family_keeps_recording_local_figures_without_an_exact_union() {
             "input": 15, "output": 190, "reasoning": 75, "cache_read": 2200, "cache_write": 330
         })
     );
-    assert!(report["identified"].get("requests").is_none());
-    assert!(report["identified"].get("cross_recording").is_none());
+    assert_eq!(report["identified"]["requests"], 3);
+    assert_eq!(report["identified"]["cross_recording"], 1);
     assert_eq!(report["identified"]["revised"], 1);
     assert_eq!(report["identified"]["conflicts"], 0);
-    assert_eq!(report["identified"]["complete"], false);
+    assert_eq!(report["identified"]["complete"], true);
     assert_eq!(report["scope_established"], false);
     assert_eq!(
         report["missing"],
-        serde_json::json!(["recorded-total-membership", "request-namespace"])
+        serde_json::json!(["recorded-total-membership"])
     );
     // Each source retains its own local request sum.
     let sources = report["sources"].as_array().unwrap();
@@ -2500,7 +2556,13 @@ fn a_family_keeps_recording_local_figures_without_an_exact_union() {
     assert_eq!(reconciled(&fixtures("claude-family")), report);
     assert_eq!(report["by_model"][0]["cost"]["usd"], 0.2);
     assert_eq!(report["by_model"][1]["cost"]["usd"], 0.05);
-    assert!(report["by_model"][0].get("identified").is_none());
+    assert_eq!(
+        report["identified"]["identity_coverage"],
+        "validated-family"
+    );
+    assert_eq!(report["identified"]["tokens"], report["recorded"]["tokens"]);
+    assert_eq!(report["by_model"][0]["identified"]["output"], 130);
+    assert_eq!(report["by_model"][1]["identified"]["output"], 60);
     assert_eq!(report["recorded"]["after_last_request"], true);
 }
 

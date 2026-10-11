@@ -10948,10 +10948,10 @@ fn usage_reconcile_sets_the_recorded_total_beside_the_family_requests() {
     let rendered = String::from_utf8(output.stdout).unwrap();
     for line in [
         "reconciliation: rules tapes-claude-reconciliation/1; recorded total from the newest of 1 cost-states, 0 resets; recorded cost 0.2500 USD",
-        "family request count unestablished across 2 recordings; 1 revised, 0 conflicting local identities, incomplete\n",
-        "request identity coverage: unestablished\n",
-        "reconciliation scope: not established; missing recorded-total-membership, request-namespace\n",
-        "  output: recorded 190, identified -, difference -, withheld (request-namespace)\n",
+        "family request count 3 across 2 recordings; 1 revised, 0 conflicting identities\n",
+        "request identity coverage: validated-family\n",
+        "reconciliation scope: not established; missing recorded-total-membership\n",
+        "  output: recorded 190, identified 190, difference 0, reconciled\n",
         "  source child a0123456789abcdef: complete, 3 records, 2 local requests, 0 without identity, 1 answered without request, 0 failed\n",
         "    local request tokens: input 5, output 90, reasoning 35, cache read 1200, cache write 130\n",
     ] {
@@ -10966,14 +10966,16 @@ fn usage_reconcile_sets_the_recorded_total_beside_the_family_requests() {
     ]);
     let value: Value = serde_json::from_slice(&json.stdout).unwrap();
     assert_eq!(value["schema"], "tapes-usage/11");
-    assert_eq!(value["reconciliation"]["counters"][0]["status"], "withheld");
-
-    assert!(value["reconciliation"]["identified"]
-        .get("requests")
-        .is_none());
-    assert!(value["reconciliation"]["identified"]
-        .get("tokens")
-        .is_none());
+    assert_eq!(
+        value["reconciliation"]["counters"][0]["status"],
+        "reconciled"
+    );
+    assert_eq!(value["reconciliation"]["identified"]["requests"], 3);
+    assert_eq!(value["reconciliation"]["identified"]["cross_recording"], 1);
+    assert_eq!(
+        value["reconciliation"]["identified"]["tokens"]["output"],
+        190
+    );
     assert_eq!(value["reconciliation"]["recorded"]["cost"]["usd"], 0.25);
     let codex_directory = root.path().join("codex/sessions/2026/01/01");
     fs::create_dir_all(&codex_directory).unwrap();

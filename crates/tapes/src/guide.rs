@@ -580,12 +580,13 @@ PROBE BEFORE EXPORTING
   `usage SESSION --reconcile` is Claude-only. It reads the parent and every
   subagent recording whole and retains the newest cost-state's counters and
   dollar facts, including per-model estimates, under their own accounting.
-  Request IDs deduplicate within a recording. A compatible provider/account
-  namespace is required for a family union; Claude recordings do not
-  establish one. Per-recording figures remain visible, identity_coverage
-  is unestablished, and family counts, counters and differences are absent.
-  A child must positively witness matching native parent identity before
-  joining the report. Failed assistant records leave consumption unmeasured
+  Request IDs deduplicate across a validated native family: children under
+  the parent's subagents directory must positively witness its native session
+  identity. Such children share the parent's request namespace, reported as
+  validated-family under identity_coverage. Per-recording figures remain
+  visible. Foreign, unvalidated or unenumerated children, and sources outside
+  the family, withhold request-namespace and leave family counts, counters
+  and differences absent. Failed assistant records leave consumption unmeasured
   whether usage is an object, absent or null; hook answers made no request.
   A later witness dominating every earlier counter discharges provisional
   request ambiguity. The newest cumulative observation, count and reset

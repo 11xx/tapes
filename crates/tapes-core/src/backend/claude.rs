@@ -613,10 +613,19 @@ impl Backend for ClaudeBackend {
                         Some(file.agent_id),
                         format!("file:{}", file.transcript.display()),
                     );
-                    if let Err(error) =
-                        reconcile_source(&mut ledger, child, &file.transcript, &session.id, false)
+                    match reconcile_source(&mut ledger, child, &file.transcript, &session.id, false)
                     {
-                        ledger.failed(child, format!("{error:#}"));
+                        Err(error) => ledger.failed(child, format!("{error:#}")),
+                        Ok(()) => {
+                            let directory = path.with_extension("").join("subagents");
+                            if let (Ok(directory), Ok(recording)) =
+                                (directory.canonicalize(), file.transcript.canonicalize())
+                            {
+                                if recording.parent() == Some(directory.as_path()) {
+                                    ledger.validated_child(child);
+                                }
+                            }
+                        }
                     }
                 }
             }
