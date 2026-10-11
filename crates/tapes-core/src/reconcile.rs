@@ -240,7 +240,9 @@ pub(crate) struct FamilyLedger {
     conflicting: Vec<String>,
     conflicts: usize,
     budget_exhausted: bool,
-    recorded: Vec<Tokens>,
+    recorded: Option<Tokens>,
+    recorded_observations: usize,
+    recorded_resets: usize,
     recorded_by_model: BTreeMap<String, Tokens>,
     recorded_usage: Option<RecordedUsage>,
     recorded_position: Option<usize>,
@@ -385,7 +387,16 @@ impl FamilyLedger {
         by_model: BTreeMap<String, Tokens>,
         usage: RecordedUsage,
     ) {
-        self.recorded.push(tokens);
+        if self.recorded.as_ref().is_some_and(|before| {
+            COUNTERS.iter().any(|name| {
+                matches!((counter(before, name), counter(&tokens, name)),
+                (Some(before), Some(after)) if after < before)
+            })
+        }) {
+            self.recorded_resets += 1;
+        }
+        self.recorded = Some(tokens);
+        self.recorded_observations += 1;
         self.recorded_usage = Some(usage);
         self.recorded_by_model = by_model;
         self.recorded_position = Some(position);
@@ -422,18 +433,6 @@ impl FamilyLedger {
             ));
         }
         let complete = !self.unenumerated && self.sources.iter().all(|source| source.complete);
-        let resets = self
-            .recorded
-            .windows(2)
-            .filter(|pair| {
-                COUNTERS.iter().any(|name| {
-                    matches!(
-                        (counter(&pair[0], name), counter(&pair[1], name)),
-                        (Some(before), Some(after)) if after < before
-                    )
-                })
-            })
-            .count();
         let mut costs: BTreeMap<String, ModelUsage> = self
             .recorded_usage
             .as_ref()
@@ -443,14 +442,14 @@ impl FamilyLedger {
             .map(|model| (model.model.clone(), model))
             .collect();
         let usage = self.recorded_usage.as_ref();
-        let recorded = self.recorded.last().cloned().map(|tokens| RecordedTotal {
+        let recorded = self.recorded.clone().map(|tokens| RecordedTotal {
             accounting: usage.unwrap().accounting.clone(),
             cost: usage.and_then(|usage| usage.cost.clone()),
             written_cost_usd: usage.and_then(|usage| usage.written_cost_usd),
             cost_coverage: usage.and_then(|usage| usage.cost_coverage.clone()),
             tokens,
-            observations: self.recorded.len(),
-            resets,
+            observations: self.recorded_observations,
+            resets: self.recorded_resets,
             after_last_request: match (self.recorded_position, self.last_parent_request) {
                 (Some(total), Some(request)) => total > request,
                 _ => true,
@@ -602,5 +601,46 @@ fn compare(
         difference: Some(difference),
         status,
         reasons,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tokens(output: u64, cache_read: u64) -> Tokens {
+        Tokens {
+            input: Some(1),
+            output: Some(output),
+            reasoning: Some(0),
+            cache_read: Some(cache_read),
+            cache_write: Some(0),
+        }
+    }
+
+    #[test]
+    fn cumulative_observations_keep_constant_resident_state() {
+        let mut ledger = FamilyLedger::default();
+        for position in 0..2048 {
+            ledger.recorded(
+                position,
+                tokens(position as u64, 0),
+                BTreeMap::new(),
+                RecordedUsage {
+                    accounting: Accounting {
+                        basis: crate::model::AccountingBasis::RecordedTotal,
+                        coverage: crate::model::AccountingCoverage::Session,
+                    },
+                    tokens: Some(tokens(position as u64, 0)),
+                    cost: None,
+                    written_cost_usd: None,
+                    cost_coverage: None,
+                    by_model: None,
+                },
+            );
+        }
+        assert_eq!(ledger.recorded.iter().count(), 1);
+        let report = ledger.finish();
+        assert_eq!(report.recorded.unwrap().observations, 2048);
     }
 }
