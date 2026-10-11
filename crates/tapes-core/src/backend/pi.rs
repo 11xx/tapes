@@ -1226,11 +1226,9 @@ impl PiConsumption {
                 ));
             }
         }
-        let cost = (self.measurement_coverage["cost"].measured > 0
-            || self.measurement_coverage["cost"].unpriced > 0)
-            .then_some(Cost {
-                usd: self.totals.cost,
-            });
+        let cost = (self.measurement_coverage["cost"].measured > 0).then_some(Cost {
+            usd: self.totals.cost,
+        });
         let (tokens, _) = self.totals.finish();
         Some(Consumption {
             accounting: Accounting {

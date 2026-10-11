@@ -543,7 +543,9 @@ PROBE BEFORE EXPORTING
   for each token dimension and cost. Missing dimensions and missing or
   unpriced costs leave qualified known subtotals. A harness-written cost of
   zero beside nonzero token usage, including a native total without individual
-  dimensions, is unpriced; it is never a zero estimate.
+  dimensions, is unpriced; it is never a zero estimate. Consumption cost is
+  absent when no counted event is priced; its measurement coverage and
+  incomplete reason still report the unpriced events.
   `incomplete` names these quantities, unreadable records, and requests
   that stopped on an error or an abort, whose usage stopped with them.
   Quantities are complete only with `session` coverage and no

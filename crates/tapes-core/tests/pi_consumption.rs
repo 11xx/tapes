@@ -453,10 +453,15 @@ fn zero_cost_events_with_usage_are_unpriced_before_aggregation() {
         });
         for (path, view) in both(&store.0, "session-rewound") {
             let consumption = &view["consumption"];
+            if all {
+                assert!(consumption.get("cost").is_none(), "{path}: {view}");
+            } else {
+                assert_eq!(consumption["cost"]["usd"], 0.8125, "{path}");
+            }
             assert_eq!(
-                consumption["cost"]["usd"],
-                if all { 0.0 } else { 0.8125 },
-                "{path}"
+                consumption["measurement_coverage"]["cost"]["measured"],
+                if all { 0 } else { 4 },
+                "{path}: {view}"
             );
             assert_eq!(
                 consumption["measurement_coverage"]["cost"]["unpriced"],

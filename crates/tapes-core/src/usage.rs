@@ -299,8 +299,9 @@ pub struct Consumption {
     pub accounting: Accounting,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tokens: Option<Tokens>,
-    /// Known cost subtotal. Its measurement coverage qualifies missing and
-    /// unpriced events; a numeric zero beside nonzero usage is unpriced.
+    /// Known cost subtotal, present only when at least one event is priced.
+    /// Its measurement coverage qualifies missing and unpriced events;
+    /// a numeric zero beside nonzero usage is unpriced.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cost: Option<Cost>,
     /// Per-counter coverage among the counted events. Missing dimensions

@@ -1378,8 +1378,8 @@ enum Command {
     /// active branch; its `consumption` sums every retained branch, each
     /// consumption event once, with per-counter measurement coverage for known
     /// subtotals, event split, observed identity (provider account namespace
-    /// unestablished),
-    /// and incompleteness.
+    /// unestablished), and incompleteness. Consumption cost is absent when no
+    /// counted event is priced; coverage still counts unpriced events.
     Usage {
         #[command(flatten)]
         query: SessionQueryArgs,
