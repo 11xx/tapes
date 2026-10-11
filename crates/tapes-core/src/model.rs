@@ -739,6 +739,25 @@ impl DisjointTokens {
 pub struct Accounting {
     pub basis: AccountingBasis,
     pub coverage: AccountingCoverage,
+    /// Which of the recording's records the counters were summed over, where
+    /// a harness retains records its counters do not select. Absent, the
+    /// selection is every record within the coverage.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selection: Option<AccountingSelection>,
+}
+
+/// The records a figure selects from a recording that keeps more than one
+/// conversation path.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum AccountingSelection {
+    /// The conversation the harness would resume: the last entry's ancestry.
+    /// Coverage is `session` when the read linked it from that entry to its
+    /// root.
+    ActiveBranch,
+    /// Every branch the recording retains, rewound ones included, with each
+    /// consumption event counted once.
+    RetainedBranches,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -2160,6 +2179,7 @@ mod tests {
             accounting: Some(Accounting {
                 basis: AccountingBasis::RecordedTotal,
                 coverage: AccountingCoverage::Session,
+                selection: None,
             }),
             start_uncertain: false,
             occurrence: None,
@@ -2237,6 +2257,7 @@ mod tests {
         let accounting = Accounting {
             basis: AccountingBasis::RecordedTotal,
             coverage: AccountingCoverage::Session,
+            selection: None,
         };
         let turn = Turn {
             origin: None,

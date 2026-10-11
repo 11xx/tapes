@@ -1180,6 +1180,7 @@ mod tests {
         spender.accounting = Some(Accounting {
             basis: AccountingBasis::RecordedTotal,
             coverage: AccountingCoverage::Session,
+            selection: None,
         });
         let with_cache = stats(
             transcript(

@@ -1130,6 +1130,7 @@ mod tests {
         session.accounting = Some(Accounting {
             basis: AccountingBasis::RecordedTotal,
             coverage: AccountingCoverage::Session,
+            selection: None,
         });
         session.usage_detail = Some(UsageDetail {
             context_window: Some(828_400),
@@ -1272,7 +1273,11 @@ mod tests {
             model_selections: Vec::new(),
             tokens,
             cost: cost.map(|usd| Cost { usd }),
-            accounting: accounting.map(|(basis, coverage)| Accounting { basis, coverage }),
+            accounting: accounting.map(|(basis, coverage)| Accounting {
+                basis,
+                coverage,
+                selection: None,
+            }),
             ..session()
         }
     }

@@ -12,7 +12,7 @@ use serde_json::Value;
 use crate::event::{self, PairIndex, Pairing};
 use crate::model::{
     human_bytes, human_speaker, human_timestamp, human_title, AccountingBasis, AccountingCoverage,
-    Role, Session, SourceBound, StreamedSessionJson, Transcript, Turn,
+    AccountingSelection, Role, Session, SourceBound, StreamedSessionJson, Transcript, Turn,
 };
 
 /// One exported file: where it landed and how big it is.
@@ -571,7 +571,12 @@ fn write_header(out: &mut String, session: &Session, transcript: &Transcript, ki
                     AccountingCoverage::ReadWindow => "read window",
                     AccountingCoverage::SinceReset => "since observed reset",
                 };
-                format!(" ({basis}, {coverage})")
+                let selection = match accounting.selection {
+                    None => "",
+                    Some(AccountingSelection::ActiveBranch) => ", active branch",
+                    Some(AccountingSelection::RetainedBranches) => ", retained branches",
+                };
+                format!(" ({basis}, {coverage}{selection})")
             });
             let _ = writeln!(
                 out,
@@ -1071,6 +1076,7 @@ mod tests {
         transcript.session.accounting = Some(Accounting {
             basis: AccountingBasis::RecordedTotal,
             coverage: AccountingCoverage::Session,
+            selection: None,
         });
 
         let directory =

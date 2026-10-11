@@ -15,8 +15,8 @@ use agent_tapes_core::event::{EventKind, EventRecord, EventTranscript, Incomplet
 use agent_tapes_core::lineage::{ChildRef, LineageView};
 use agent_tapes_core::model::{
     human_bytes, human_speaker, human_timestamp, human_title, speaker, Accounting, AccountingBasis,
-    AccountingCoverage, CacheWrites, Cost, CostCoverage, DisjointTokens, InputConvention,
-    LiveState, OutputConvention, Projection, Session, SourceBound, SourceDescriptor,
+    AccountingCoverage, AccountingSelection, CacheWrites, Cost, CostCoverage, DisjointTokens,
+    InputConvention, LiveState, OutputConvention, Projection, Session, SourceBound, SourceDescriptor,
     TokenConvention, Tokens, Transcript, Truncation, Turn, TurnKind, TurnSelection,
 };
 use agent_tapes_core::stats::{
@@ -3961,12 +3961,25 @@ fn render_accounting(accounting: &Accounting) -> String {
         AccountingBasis::RecordedTotal => "a recorded total",
         AccountingBasis::SummedRequests => "a sum of per-request records",
     };
-    let coverage = match accounting.coverage {
-        AccountingCoverage::Session => "the whole session",
-        AccountingCoverage::ReadWindow => "the bounded read window",
-        AccountingCoverage::SinceReset => "since the observed counter reset",
+    let (selection, coverage) = match (accounting.selection, accounting.coverage) {
+        (_, AccountingCoverage::SinceReset) => ("", "since the observed counter reset"),
+        (None, AccountingCoverage::Session) => ("", "the whole session"),
+        (None, AccountingCoverage::ReadWindow) => ("", "the bounded read window"),
+        (Some(AccountingSelection::ActiveBranch), AccountingCoverage::Session) => {
+            (" along the active branch", "the whole branch")
+        }
+        (Some(AccountingSelection::ActiveBranch), AccountingCoverage::ReadWindow) => (
+            " along the active branch",
+            "only the part of it the read could link",
+        ),
+        (Some(AccountingSelection::RetainedBranches), AccountingCoverage::Session) => {
+            (" over every retained branch", "the whole recording")
+        }
+        (Some(AccountingSelection::RetainedBranches), AccountingCoverage::ReadWindow) => {
+            (" over every retained branch", "the bounded read window")
+        }
     };
-    format!("{basis}, covering {coverage}")
+    format!("{basis}{selection}, covering {coverage}")
 }
 
 fn render_rate_limits(out: &mut String, limits: &RateLimits) {

@@ -133,7 +133,11 @@ pub(crate) fn accounting_for(
     basis: AccountingBasis,
     coverage: AccountingCoverage,
 ) -> Option<Accounting> {
-    (tokens.is_some() || cost.is_some()).then_some(Accounting { basis, coverage })
+    (tokens.is_some() || cost.is_some()).then_some(Accounting {
+        basis,
+        coverage,
+        selection: None,
+    })
 }
 
 /// What a listing asks for.

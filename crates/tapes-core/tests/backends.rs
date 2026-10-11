@@ -738,6 +738,7 @@ fn opencode_projections_mark_recorded_totals_as_whole_session_accounting() {
         Some(Accounting {
             basis: AccountingBasis::RecordedTotal,
             coverage: AccountingCoverage::Session,
+            selection: None,
         })
     );
 
@@ -749,6 +750,7 @@ fn opencode_projections_mark_recorded_totals_as_whole_session_accounting() {
         Some(Accounting {
             basis: AccountingBasis::RecordedTotal,
             coverage: AccountingCoverage::Session,
+            selection: None,
         })
     );
 }
@@ -1626,6 +1628,7 @@ fn claude_sums_each_request_once_and_marks_the_read_as_summed_requests() {
         Some(Accounting {
             basis: AccountingBasis::SummedRequests,
             coverage: AccountingCoverage::Session,
+            selection: None,
         })
     );
 
@@ -1944,6 +1947,7 @@ fn claude_cost_state_supplies_recorded_totals_over_request_usage() {
         Some(Accounting {
             basis: AccountingBasis::RecordedTotal,
             coverage: AccountingCoverage::Session,
+            selection: None,
         })
     );
 
@@ -2070,6 +2074,7 @@ fn pi_reports_entries_outside_the_active_leaf_path() {
         Some(Accounting {
             basis: AccountingBasis::SummedRequests,
             coverage: AccountingCoverage::Session,
+            selection: None,
         })
     );
     assert_eq!(transcript.session.tokens, session.tokens);
@@ -3163,6 +3168,7 @@ fn transcript_reads_are_capped_at_four_megabytes() {
         Some(Accounting {
             basis: AccountingBasis::SummedRequests,
             coverage: AccountingCoverage::ReadWindow,
+            selection: None,
         })
     );
     fs::remove_dir_all(root).unwrap();
@@ -3724,6 +3730,7 @@ fn codex_reads_cumulative_token_totals_from_the_latest_event_with_usage() {
         Some(Accounting {
             basis: AccountingBasis::RecordedTotal,
             coverage: AccountingCoverage::Session,
+            selection: None,
         })
     );
 
@@ -3929,6 +3936,7 @@ fn codex_terminal_prefers_nested_native_error_fields_and_keeps_later_accounting(
         Some(Accounting {
             basis: AccountingBasis::RecordedTotal,
             coverage: AccountingCoverage::Session,
+            selection: None,
         })
     );
 
@@ -4306,6 +4314,7 @@ fn a_truncated_claude_read_keeps_whole_session_coverage_for_a_cost_state_record(
         Some(Accounting {
             basis: AccountingBasis::RecordedTotal,
             coverage: AccountingCoverage::Session,
+            selection: None,
         })
     );
     assert!(backend.transcript(&session, 1).unwrap().truncated);
