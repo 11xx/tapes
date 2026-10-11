@@ -1376,7 +1376,10 @@ enum Command {
     /// summed; cost is the harness's own estimate, and quota is a separate
     /// fact about the account rather than these sessions. Claude subagent
     /// count notes report failed directory enumeration instead of a count.
-    /// A pi session's counters select its active branch; its `consumption`
+    /// A pi session's counters select its active branch and count usage on
+    /// assistant requests, tool results, compactions, branch summaries, and
+    /// usage entries, with per-counter `measurement_coverage` and
+    /// `measurement_incomplete` qualifications. Its `consumption`
     /// sums every retained branch, each consumption event once, with
     /// per-counter measurement coverage for known
     /// subtotals, event split, observed identity (provider account namespace
@@ -3658,6 +3661,10 @@ fn render_assistant_turns(durations: &AssistantTurnDurations) -> String {
 }
 
 fn render_usage_stats(out: &mut String, usage: &UsageStats) {
+    render_measurement_coverage(out, "active", &usage.measurement_coverage);
+    for reason in &usage.measurement_incomplete {
+        out.push_str(&format!("measurement incomplete: {reason}\n"));
+    }
     if let Some(tokens) = &usage.tokens {
         out.push_str(&format!("tokens: {}\n", render_tokens(tokens)));
     }
@@ -3759,6 +3766,13 @@ fn render_usage(usage: &UsageView) -> String {
         out.push_str(&format!(
             "cost coverage: {}\n",
             render_cost_coverage(coverage)
+        ));
+    }
+    render_measurement_coverage(&mut out, "active", &usage.measurement_coverage);
+    if !usage.measurement_incomplete.is_empty() {
+        out.push_str(&format!(
+            "measurement incomplete: {}\n",
+            usage.measurement_incomplete.join(", ")
         ));
     }
     if usage.request_failures > 0 {
@@ -4267,14 +4281,7 @@ fn render_consumption(consumption: &Consumption) -> String {
         "consumption events: {} counted, {} on the active branch, {} on other branches, {} repeats\n",
         events.counted, events.active_branch, events.other_branches, events.repeats
     ));
-    for (counter, coverage) in &consumption.measurement_coverage {
-        if coverage.missing > 0 || coverage.unpriced > 0 {
-            out.push_str(&format!(
-                "consumption {counter}: known subtotal; {}/{} events measured, {} missing, {} unpriced\n",
-                coverage.measured, events.counted, coverage.missing, coverage.unpriced
-            ));
-        }
-    }
+    render_measurement_coverage(&mut out, "consumption", &consumption.measurement_coverage);
     out.push_str(&format!(
         "consumption identity: {} by observed provider response (account namespace unestablished), {} by recording entry, {} unidentified",
         identity.provider_response, identity.recording_entry, identity.unidentified
@@ -4295,6 +4302,21 @@ fn render_consumption(consumption: &Consumption) -> String {
         ));
     }
     out
+}
+
+fn render_measurement_coverage(
+    out: &mut String,
+    prefix: &str,
+    counters: &std::collections::BTreeMap<String, agent_tapes_core::usage::MeasurementCoverage>,
+) {
+    for (counter, coverage) in counters {
+        if coverage.missing > 0 || coverage.unpriced > 0 {
+            out.push_str(&format!(
+                "{prefix} {counter}: known subtotal; {}/{} events measured, {} missing, {} unpriced\n",
+                coverage.measured, coverage.measured + coverage.missing + coverage.unpriced, coverage.missing, coverage.unpriced
+            ));
+        }
+    }
 }
 
 fn render_rate_limits(out: &mut String, limits: &RateLimits) {
@@ -4398,6 +4420,18 @@ fn render_model_usage(model: &ModelUsage) -> String {
         rendered.push_str(&format!("; {requests} observed requests"));
     }
     rendered.push('\n');
+    render_measurement_coverage(
+        &mut rendered,
+        &format!("model {}", model.model),
+        &model.measurement_coverage,
+    );
+    if !model.measurement_incomplete.is_empty() {
+        rendered.push_str(&format!(
+            "model {} measurement incomplete: {}\n",
+            model.model,
+            model.measurement_incomplete.join(", ")
+        ));
+    }
     rendered
 }
 

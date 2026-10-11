@@ -523,9 +523,10 @@ PROBE BEFORE EXPORTING
   requests were consumed all the same. pi usage therefore carries
   `consumption` beside the active-branch counters: tokens and cost summed over
   every retained branch, with `accounting.selection` `retained-branches`.
-  It counts every entry pi records usage on — assistant requests, tool
-  results, compactions, branch summaries, and usage entries — so it can exceed
-  the active branch's figure even without a rewind. Each event counts once:
+  Both figures count assistant requests, tool results with usage, compactions,
+  branch summaries, and usage entries. They agree when all consumption is on
+  the active branch. Missing usage leaves the affected event unmeasured.
+  Each event counts once:
   an entry seen again, or another entry naming the same provider response, is
   a repeat and adds nothing, so a re-read or a copied entry consumes nothing
   new. `events` splits the counted events between the active branch and the
@@ -544,11 +545,11 @@ PROBE BEFORE EXPORTING
   Coverage is `session` for a read from the first byte and `read-window`
   for a bounded tail, independently of the active branch: a branch that
   restarted from a new root can lie wholly in the tail while what it replaced
-  does not. The active figure includes assistant-message usage only; it
-  excludes compaction, branch-summary, tool-result, and usage entries.
+  does not. Active counters and recorded model splits carry their own
+  `measurement_coverage` and `measurement_incomplete` qualifications.
   `measurement_coverage` counts measured, missing, and unpriced events
   for each token dimension and cost. Missing dimensions and missing or
-  unpriced costs leave qualified known subtotals. A harness-written cost of
+  unpriced costs leave qualified known subtotals in both figures. A harness-written cost of
   zero beside nonzero token usage, including a native total without individual
   dimensions, is unpriced; it is never a zero estimate. Consumption cost is
   absent when no counted event is priced; its measurement coverage and

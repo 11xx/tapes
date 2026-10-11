@@ -9049,7 +9049,7 @@ fn pi_usage_reports_active_branch_and_consumption_apart() {
         assert!(human.contains("forked from parent-id"), "{human}");
 
         for line in [
-            "tokens: input 400, output 40, reasoning 8, cache read 200, cache write 20\n",
+            "tokens: input 430, output 43, reasoning 8, cache read 200, cache write 20\n",
             "accounting: a sum of per-request records along the active branch, covering the whole branch\n",
             "consumption: tokens input 1030, output 103, reasoning 20, cache read 500, cache write 50, cost 1.3125 USD (harness-calculated estimate, pricing basis not recorded); a sum of per-request records over every retained branch, covering the whole recording\n",
             "consumption events: 5 counted, 3 on the active branch, 2 on other branches, 0 repeats\n",
@@ -9071,7 +9071,7 @@ fn pi_usage_reports_active_branch_and_consumption_apart() {
         let value: Value = serde_json::from_str(&rendered).unwrap();
         assert_eq!(value["schema"], "tapes-usage/11");
         assert_eq!(value["accounting"]["selection"], "active-branch", "{value}");
-        assert_eq!(value["cost"]["usd"], 0.5, "{value}");
+        assert_eq!(value["cost"]["usd"], 0.5625, "{value}");
         assert!(value.get("recorded_total").is_none(), "{value}");
         assert!(value.get("reconciliation").is_none(), "{value}");
         assert_eq!(
@@ -9372,7 +9372,7 @@ fn pi_reports_its_model_and_effort_split_through_usage_and_stats() {
         };
         assert_eq!(by_model[0]["model"], "gpt-fixture", "{command}: {value}");
         assert_eq!(by_model[0]["variant"], "high", "{command}: {value}");
-        assert_eq!(by_model[0]["request_count"], 2, "{command}: {value}");
+        assert_eq!(by_model[0]["request_count"], 3, "{command}: {value}");
         assert_eq!(
             by_model[0]["tokens"],
             serde_json::json!({

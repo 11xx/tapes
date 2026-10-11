@@ -1157,6 +1157,8 @@ fn cost_state_detail(value: &Value) -> UsageDetail {
                     model_usage_tokens(usage).as_ref(),
                 ),
                 request_count: None,
+                measurement_coverage: std::collections::BTreeMap::new(),
+                measurement_incomplete: Vec::new(),
             })
             .collect::<Vec<_>>();
         usage.sort_by(|left, right| left.model.cmp(&right.model));

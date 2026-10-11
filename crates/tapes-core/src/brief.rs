@@ -160,11 +160,18 @@ pub struct BriefUsage {
     pub cost: Option<Cost>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub accounting: Option<Accounting>,
+    #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub measurement_coverage: std::collections::BTreeMap<String, usage::MeasurementCoverage>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub measurement_incomplete: Vec<String>,
 }
 
 impl BriefUsage {
     fn is_empty(&self) -> bool {
-        self.tokens.is_none() && self.cost.is_none() && self.accounting.is_none()
+        self.tokens.is_none()
+            && self.cost.is_none()
+            && self.accounting.is_none()
+            && self.measurement_coverage.is_empty()
     }
 }
 
@@ -241,6 +248,8 @@ pub fn brief(transcript: Transcript, lineage: Result<Lineage>, tail: usize) -> B
         tokens: usage.tokens,
         cost: usage.cost,
         accounting: usage.accounting,
+        measurement_coverage: usage.measurement_coverage,
+        measurement_incomplete: usage.measurement_incomplete,
     };
 
     let directory = transcript.session.directory.clone();

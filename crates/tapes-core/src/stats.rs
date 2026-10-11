@@ -254,6 +254,10 @@ pub struct UsageStats {
     /// qualifying it, that spent them, as the usage view states the split.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub by_model: Option<Vec<ModelUsage>>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub measurement_coverage: BTreeMap<String, usage::MeasurementCoverage>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub measurement_incomplete: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cache_read_ratio: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -415,6 +419,7 @@ impl Counted {
             &tools.stats,
             durations_ms.as_ref(),
         );
+        let usage_stats = usage_stats(&usage);
         StatsView {
             schema: STATS_SCHEMA,
             session: usage.session,
@@ -428,7 +433,7 @@ impl Counted {
             tools: tools.stats,
             durations_ms,
             assistant_turns_ms,
-            usage: usage_stats(usage.tokens, usage.cost, usage.accounting, usage.by_model),
+            usage: usage_stats,
             lineage: lineage_stats(lineage),
             warnings,
             notes: usage.notes,
@@ -777,19 +782,26 @@ impl ToolFold {
     }
 }
 
-fn usage_stats(
-    tokens: Option<Tokens>,
-    cost: Option<Cost>,
-    accounting: Option<Accounting>,
-    by_model: Option<Vec<ModelUsage>>,
-) -> Option<UsageStats> {
-    if tokens.is_none() && cost.is_none() && accounting.is_none() {
+fn usage_stats(usage: &UsageView) -> Option<UsageStats> {
+    if usage.tokens.is_none()
+        && usage.cost.is_none()
+        && usage.accounting.is_none()
+        && usage.measurement_coverage.is_empty()
+    {
         return None;
     }
     // The share of the summed input counters each cache counter accounts for.
     // It needs every counter in its denominator, so a harness that recorded
     // only some of them yields no ratio.
-    let context = tokens.as_ref().and_then(|tokens| {
+    let context = usage.tokens.as_ref().and_then(|tokens| {
+        if ["input", "cache_read", "cache_write"].iter().any(|name| {
+            usage
+                .measurement_coverage
+                .get(*name)
+                .is_some_and(|coverage| coverage.missing > 0)
+        }) {
+            return None;
+        }
         let read = tokens.cache_read?;
         let write = tokens.cache_write?;
         let counted = tokens.input? + read + write;
@@ -798,10 +810,12 @@ fn usage_stats(
     Some(UsageStats {
         cache_read_ratio: context.map(|(read, _, counted)| read as f64 / counted as f64),
         cache_write_ratio: context.map(|(_, write, counted)| write as f64 / counted as f64),
-        tokens,
-        cost,
-        accounting,
-        by_model,
+        tokens: usage.tokens.clone(),
+        cost: usage.cost.clone(),
+        accounting: usage.accounting.clone(),
+        by_model: usage.by_model.clone(),
+        measurement_coverage: usage.measurement_coverage.clone(),
+        measurement_incomplete: usage.measurement_incomplete.clone(),
     })
 }
 

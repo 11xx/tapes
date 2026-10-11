@@ -138,6 +138,10 @@ struct SessionWire {
     start_uncertain: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     cost_coverage: Option<CostCoverage>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    measurement_coverage: std::collections::BTreeMap<String, crate::usage::MeasurementCoverage>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    measurement_incomplete: Vec<String>,
 }
 impl From<SessionWire> for Session {
     fn from(wire: SessionWire) -> Self {
@@ -161,10 +165,13 @@ impl From<SessionWire> for Session {
             tokens: wire.tokens,
             accounting: wire.accounting,
             start_uncertain: wire.start_uncertain,
-            usage_detail: wire.cost_coverage.map(|coverage| UsageDetail {
-                cost_coverage: Some(coverage),
+            usage_detail: UsageDetail {
+                cost_coverage: wire.cost_coverage,
+                measurement_coverage: wire.measurement_coverage,
+                measurement_incomplete: wire.measurement_incomplete,
                 ..UsageDetail::default()
-            }),
+            }
+            .into_option(),
         };
         let coverage = session.cost_coverage();
         session.cost = session.estimated_cost();
@@ -182,6 +189,7 @@ impl From<Session> for SessionWire {
     fn from(session: Session) -> Self {
         let cost = session.estimated_cost();
         let cost_coverage = session.cost_coverage();
+        let detail = session.usage_detail.unwrap_or_default();
         Self {
             id: session.id,
             occurrence: session.occurrence,
@@ -203,6 +211,8 @@ impl From<Session> for SessionWire {
             accounting: session.accounting,
             start_uncertain: session.start_uncertain,
             cost_coverage,
+            measurement_coverage: detail.measurement_coverage,
+            measurement_incomplete: detail.measurement_incomplete,
         }
     }
 }
@@ -338,6 +348,14 @@ impl SourceDescriptor {
 impl Session {
     /// The written dollar figure qualified by its paired token measurement.
     pub fn estimated_cost(&self) -> Option<Cost> {
+        if self
+            .usage_detail
+            .as_ref()
+            .and_then(|detail| detail.measurement_coverage.get("cost"))
+            .is_some_and(|coverage| coverage.measured > 0)
+        {
+            return self.cost.clone();
+        }
         self.cost
             .as_ref()
             .and_then(|cost| Cost::from_written(cost.usd, self.tokens.as_ref()))
@@ -350,6 +368,13 @@ impl Session {
             .usage_detail
             .as_ref()
             .and_then(|detail| detail.cost_coverage.clone());
+        if self
+            .usage_detail
+            .as_ref()
+            .is_some_and(|detail| detail.measurement_coverage.contains_key("cost"))
+        {
+            return held;
+        }
         if CostCoverage::written(
             self.cost.as_ref().map(|cost| cost.usd),
             self.tokens.as_ref(),

@@ -947,6 +947,8 @@ impl UsageCandidate {
                 cost: None,
                 cost_coverage: None,
                 request_count: Some(value.request_count),
+                measurement_coverage: std::collections::BTreeMap::new(),
+                measurement_incomplete: Vec::new(),
             })
             .collect::<Vec<_>>();
         (!models.is_empty()).then_some(models)

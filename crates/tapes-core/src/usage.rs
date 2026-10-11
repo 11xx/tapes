@@ -9,7 +9,7 @@
 use std::collections::BTreeMap;
 
 use chrono::{DateTime, Utc};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::backend::{skipped_records_note, StreamedTranscript};
@@ -46,6 +46,9 @@ pub struct UsageDetail {
     /// Price-relevant facts the read's requests recorded beside their tokens.
     pub requests: Option<RequestDimensions>,
     pub cost_coverage: Option<CostCoverage>,
+    /// Per-counter measurement coverage of the session's selected events.
+    pub measurement_coverage: BTreeMap<String, MeasurementCoverage>,
+    pub measurement_incomplete: Vec<String>,
     pub request_failures: usize,
     /// Consumption over every branch a recording retains, where the
     /// session's counters select only one of them.
@@ -64,6 +67,8 @@ impl UsageDetail {
             && self.cache_write_by_ttl.is_none()
             && self.requests.is_none()
             && self.cost_coverage.is_none()
+            && self.measurement_coverage.is_empty()
+            && self.measurement_incomplete.is_empty()
             && self.request_failures == 0
             && self.consumption.is_none()
             && self.recorded_total.is_none()
@@ -176,6 +181,10 @@ pub struct ModelUsage {
     pub cost_coverage: Option<CostCoverage>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub request_count: Option<usize>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub measurement_coverage: BTreeMap<String, MeasurementCoverage>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub measurement_incomplete: Vec<String>,
 }
 
 /// A cumulative cost-state preserved as a separate source fact. Its dollars
@@ -382,7 +391,7 @@ pub struct Consumption {
 
 /// Coverage of one quantity among counted consumption events. The three
 /// counts sum to `events.counted`; zero is measured only when it is priced.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MeasurementCoverage {
     pub measured: usize,
     pub missing: usize,
@@ -590,6 +599,10 @@ pub struct UsageView {
     pub cost: Option<Cost>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cost_coverage: Option<CostCoverage>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub measurement_coverage: BTreeMap<String, MeasurementCoverage>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub measurement_incomplete: Vec<String>,
     pub turns: TurnCounts,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub context_window: Option<u64>,
@@ -711,6 +724,8 @@ fn project(session: &Session, turns: TurnTally, facts: ReadFacts) -> UsageView {
         disjoint: session.disjoint_tokens(),
         cost: session.estimated_cost(),
         cost_coverage: session.cost_coverage(),
+        measurement_coverage: detail.measurement_coverage,
+        measurement_incomplete: detail.measurement_incomplete,
         turns: turns.counts,
         context_window: detail.context_window,
         rate_limits: detail.rate_limits,
@@ -1334,6 +1349,8 @@ mod tests {
                 cost: Some(Cost { usd: 1.5 }),
                 cost_coverage: None,
                 request_count: None,
+                measurement_coverage: std::collections::BTreeMap::new(),
+                measurement_incomplete: Vec::new(),
             }]),
             attribution: None,
             cache_write_by_ttl: None,
@@ -1343,6 +1360,7 @@ mod tests {
             consumption: None,
             recorded_total: None,
             accounting_notes: Vec::new(),
+            ..UsageDetail::default()
         });
         let transcript = Transcript::new(
             session,

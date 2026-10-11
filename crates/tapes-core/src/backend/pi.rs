@@ -163,15 +163,19 @@ impl PiBackend {
             .flat_map(|value| pi_turns(value, &mut thinking))
             .collect::<Vec<_>>();
         let (model_observation, model_selections) = pi_selections(&active, read);
-        let (tokens, cost, by_model, cost_coverage) = pi_usage(&active);
+        let usage = pi_usage(&active);
+        let tokens = usage.tokens;
+        let cost = usage.cost;
         let accounting = branch_accounting(
             tokens.as_ref(),
             cost.as_ref(),
             branch_coverage(rooted, leaf_end, &read.gaps),
         );
         let usage_detail = UsageDetail {
-            by_model,
-            cost_coverage,
+            by_model: usage.by_model,
+            cost_coverage: usage.cost_coverage,
+            measurement_coverage: usage.measurement_coverage,
+            measurement_incomplete: usage.measurement_incomplete,
             consumption,
             ..UsageDetail::default()
         }
@@ -548,7 +552,6 @@ impl Backend for PiBackend {
             entries.push(PiEntry {
                 id,
                 parent: value["parentId"].as_str().map(str::to_owned),
-                request: pi_request(value),
                 consumed: pi_consumed(value),
                 model: pi_model(value).map(str::to_owned),
                 thinking: pi_thinking(value).map(str::to_owned),
@@ -597,8 +600,8 @@ impl Backend for PiBackend {
         let mut variant = None;
         let mut selections = crate::model_observation::Selections::default();
         for entry in active.iter().map(|position| &entries[*position]) {
-            if let Some(request) = &entry.request {
-                usage.add(request, entry.model.as_deref(), variant.as_deref());
+            if let Some(consumed) = &entry.consumed {
+                usage.add(entry.id.as_deref(), consumed, variant.as_deref());
             }
             if let Some(id) = &entry.model {
                 selections.observe(
@@ -615,14 +618,18 @@ impl Backend for PiBackend {
                 variant.clone_from(&entry.thinking);
             }
         }
-        let (tokens, cost, by_model, cost_coverage) = usage.finish();
+        let usage = usage.finish();
+        let tokens = usage.tokens;
+        let cost = usage.cost;
         let mut whole = session.clone();
         whole.accounting = branch_accounting(tokens.as_ref(), cost.as_ref(), coverage);
         whole.tokens = tokens;
         whole.cost = cost;
         whole.usage_detail = UsageDetail {
-            by_model,
-            cost_coverage,
+            by_model: usage.by_model,
+            cost_coverage: usage.cost_coverage,
+            measurement_coverage: usage.measurement_coverage,
+            measurement_incomplete: usage.measurement_incomplete,
             consumption,
             ..UsageDetail::default()
         }
@@ -678,7 +685,6 @@ impl PiBackend {
 struct PiEntry {
     id: Option<String>,
     parent: Option<String>,
-    request: Option<PiRequest>,
     consumed: Option<PiConsumed>,
     model: Option<String>,
     thinking: Option<String>,
@@ -808,13 +814,11 @@ fn recording_launch(recording: &super::Recording, session_id: &str) -> Option<La
 }
 
 fn abandoned_notes(abandoned: usize) -> Vec<String> {
-    let mut notes = vec!["Active-branch accounting includes assistant-message usage only; it excludes compaction, branch-summary, tool-result, and usage entries.".to_owned()];
-    notes.extend(match abandoned {
+    match abandoned {
         0 => Vec::new(),
         1 => vec!["1 entry belongs to an abandoned branch.".to_owned()],
         count => vec![format!("{count} entries belong to abandoned branches.")],
-    });
-    notes
+    }
 }
 
 /// pi records the working directory once, on the `session` header line.
@@ -877,29 +881,22 @@ fn branch_coverage(rooted: bool, leaf_end: Option<u64>, gaps: &[ReadGap]) -> Acc
     }
 }
 
-fn pi_usage(
-    entries: &[&Value],
-) -> (
-    Option<Tokens>,
-    Option<Cost>,
-    Option<Vec<ModelUsage>>,
-    Option<CostCoverage>,
-) {
+fn pi_usage(entries: &[&Value]) -> PiUsageResult {
     let mut usage = PiUsage::default();
     let mut variant = None;
     for entry in entries {
         if let Some(level) = pi_thinking(entry) {
             variant = Some(level);
         }
-        if let Some(request) = pi_request(entry) {
-            usage.add(&request, pi_model(entry), variant);
+        if let Some(consumed) = pi_consumed(entry) {
+            usage.add(entry["id"].as_str(), &consumed, variant);
         }
     }
     usage.finish()
 }
 
-/// The usage one assistant message recorded for its request.
-#[derive(Clone, Copy)]
+/// The usage recorded on one consumption entry.
+#[derive(Clone, Copy, Default)]
 struct PiRequest {
     input: Option<u64>,
     output: Option<u64>,
@@ -928,17 +925,6 @@ impl PiRequest {
     }
 }
 
-fn pi_request(entry: &Value) -> Option<PiRequest> {
-    if entry["type"] != "message" {
-        return None;
-    }
-    let message = entry.get("message")?;
-    if message.get("role").and_then(Value::as_str) != Some("assistant") {
-        return None;
-    }
-    pi_usage_counters(message.get("usage")?)
-}
-
 /// The counters of one usage object, in the shape pi writes on every entry
 /// that records consumption.
 fn pi_usage_counters(usage: &Value) -> Option<PiRequest> {
@@ -959,13 +945,11 @@ fn pi_usage_counters(usage: &Value) -> Option<PiRequest> {
     })
 }
 
-/// The counters one group of requests accumulated. `cost_missing` records
-/// that a request contributed no cost, so the group's sum is unknown rather
-/// than understated.
+/// Known counters accumulated from consumed entries, with missing or unpriced
+/// costs recorded independently of the known estimate subtotal.
 #[derive(Default)]
 struct PiTotals {
     tokens: TokenTotals,
-    requests: usize,
     cost: f64,
     cost_missing: bool,
     zero_written: usize,
@@ -973,7 +957,6 @@ struct PiTotals {
 
 impl PiTotals {
     fn add(&mut self, request: &PiRequest) {
-        self.requests += 1;
         self.tokens.add(
             request.input,
             request.output,
@@ -998,25 +981,26 @@ impl PiTotals {
             zero_written_observations: self.zero_written,
         })
     }
-
-    /// The counters, and the cost only when the group held at least one
-    /// request and every request in it recorded one.
-    fn finish(self) -> (Option<Tokens>, Option<Cost>) {
-        let cost = (self.requests > 0 && !self.cost_missing).then_some(Cost { usd: self.cost });
-        (self.tokens.finish(), cost)
-    }
 }
 
-/// Requests summed in order, each attributed to the model its own message
-/// names and the reasoning level the latest `thinking_level_change` set. A
-/// request without a recorded cost leaves the sum's cost unknown rather than
-/// understated; a request without a recorded model leaves the split absent
-/// rather than partial.
+/// Active consumption counted once, attributed only to a recorded model and
+/// the reasoning level the latest `thinking_level_change` set. Missing model
+/// attribution leaves the model split absent.
 #[derive(Default)]
 struct PiUsage {
-    totals: PiTotals,
+    totals: PiConsumption,
     unattributed: usize,
-    by_model: BTreeMap<PiModelKey, PiTotals>,
+    by_model: BTreeMap<PiModelKey, PiConsumption>,
+}
+
+#[derive(Default)]
+struct PiUsageResult {
+    tokens: Option<Tokens>,
+    cost: Option<Cost>,
+    by_model: Option<Vec<ModelUsage>>,
+    cost_coverage: Option<CostCoverage>,
+    measurement_coverage: BTreeMap<String, crate::usage::MeasurementCoverage>,
+    measurement_incomplete: Vec<String>,
 }
 
 /// The model and reasoning level one request is attributed to, ordered by
@@ -1028,9 +1012,11 @@ struct PiModelKey {
 }
 
 impl PiUsage {
-    fn add(&mut self, request: &PiRequest, model: Option<&str>, variant: Option<&str>) {
-        self.totals.add(request);
-        match model {
+    fn add(&mut self, id: Option<&str>, consumed: &PiConsumed, variant: Option<&str>) {
+        if !self.totals.observe(id, consumed, true) {
+            return;
+        }
+        match consumed.model.as_deref() {
             Some(model) => {
                 self.by_model
                     .entry(PiModelKey {
@@ -1038,43 +1024,45 @@ impl PiUsage {
                         variant: variant.map(str::to_owned),
                     })
                     .or_default()
-                    .add(request);
+                    .observe(id, consumed, true);
             }
             None => self.unattributed += 1,
         }
     }
 
-    fn finish(
-        self,
-    ) -> (
-        Option<Tokens>,
-        Option<Cost>,
-        Option<Vec<ModelUsage>>,
-        Option<CostCoverage>,
-    ) {
-        let cost_coverage = self.totals.cost_coverage();
-        let (tokens, cost) = self.totals.finish();
+    fn finish(self) -> PiUsageResult {
+        let Some(totals) = self.totals.finish(AccountingCoverage::Session, 0, None) else {
+            return PiUsageResult::default();
+        };
         let by_model = (self.unattributed == 0)
             .then(|| {
                 self.by_model
                     .into_iter()
                     .map(|(key, totals)| {
-                        let requests = totals.requests;
-                        let cost_coverage = totals.cost_coverage();
-                        let (tokens, cost) = totals.finish();
+                        let requests = totals.assistant_requests;
+                        let totals = totals.finish(AccountingCoverage::Session, 0, None).unwrap();
                         ModelUsage {
                             model: key.model,
                             variant: key.variant,
-                            tokens,
-                            cost,
-                            cost_coverage,
+                            tokens: totals.tokens,
+                            cost: totals.cost,
+                            cost_coverage: totals.cost_coverage,
                             request_count: Some(requests),
+                            measurement_coverage: totals.measurement_coverage,
+                            measurement_incomplete: totals.incomplete,
                         }
                     })
                     .collect::<Vec<_>>()
             })
             .filter(|models| !models.is_empty());
-        (tokens, cost, by_model, cost_coverage)
+        PiUsageResult {
+            tokens: totals.tokens,
+            cost: totals.cost,
+            by_model,
+            cost_coverage: totals.cost_coverage,
+            measurement_coverage: totals.measurement_coverage,
+            measurement_incomplete: totals.incomplete,
+        }
     }
 }
 
@@ -1084,6 +1072,7 @@ impl PiUsage {
 struct PiConsumed {
     usage: PiRequest,
     assistant_request: bool,
+    model: Option<String>,
     /// The provider and the response identity it returned, which an
     /// assistant message records when the provider supplied one.
     response: Option<(String, String)>,
@@ -1095,7 +1084,11 @@ fn pi_consumed(entry: &Value) -> Option<PiConsumed> {
     let message = &entry["message"];
     let assistant = entry["type"] == "message" && message["role"] == "assistant";
     let usage = match entry["type"].as_str()? {
-        "message" if assistant || message["role"] == "toolResult" => &message["usage"],
+        "message"
+            if assistant || (message["role"] == "toolResult" && message.get("usage").is_some()) =>
+        {
+            &message["usage"]
+        }
         "compaction" | "branch_summary" | "usage" => &entry["usage"],
         _ => return None,
     };
@@ -1108,8 +1101,16 @@ fn pi_consumed(entry: &Value) -> Option<PiConsumed> {
         })
         .flatten();
     Some(PiConsumed {
-        usage: pi_usage_counters(usage)?,
+        usage: pi_usage_counters(usage).unwrap_or_default(),
         assistant_request: assistant,
+        model: if assistant {
+            message["model"].as_str()
+        } else if entry["type"] == "usage" {
+            entry["model"].as_str()
+        } else {
+            None
+        }
+        .map(str::to_owned),
         response,
         stopped: assistant && matches!(message["stopReason"].as_str(), Some("error" | "aborted")),
     })
@@ -1124,13 +1125,14 @@ struct PiConsumption {
     identity: ConsumptionIdentity,
     stopped: usize,
     zero_written_requests: usize,
+    assistant_requests: usize,
     measurement_coverage: BTreeMap<String, crate::usage::MeasurementCoverage>,
     entries: HashSet<String>,
     responses: HashSet<(String, String)>,
 }
 
 impl PiConsumption {
-    fn observe(&mut self, id: Option<&str>, consumed: &PiConsumed, on_branch: bool) {
+    fn observe(&mut self, id: Option<&str>, consumed: &PiConsumed, on_branch: bool) -> bool {
         let repeat = id.is_some_and(|id| !self.entries.insert(id.to_owned()))
             | consumed
                 .response
@@ -1138,7 +1140,7 @@ impl PiConsumption {
                 .is_some_and(|response| !self.responses.insert(response.clone()));
         if repeat {
             self.events.repeats += 1;
-            return;
+            return false;
         }
         let usage = &consumed.usage;
         for (name, value) in [
@@ -1173,6 +1175,7 @@ impl PiConsumption {
         }
         self.totals.add(usage);
         self.events.counted += 1;
+        self.assistant_requests += usize::from(consumed.assistant_request);
         if on_branch {
             self.events.active_branch += 1;
         } else {
@@ -1186,6 +1189,7 @@ impl PiConsumption {
         if consumed.stopped {
             self.stopped += 1;
         }
+        true
     }
 
     /// The figure, absent when the read reached no event. `coverage` is how
@@ -1231,7 +1235,7 @@ impl PiConsumption {
             zero_written_requests: self.zero_written_requests,
             ..coverage
         });
-        let (tokens, _) = self.totals.finish();
+        let tokens = self.totals.tokens.finish();
         Some(Consumption {
             accounting: Accounting {
                 basis: AccountingBasis::SummedRequests,

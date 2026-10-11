@@ -83,12 +83,162 @@ fn both(root: &Path, id: &str) -> [(&'static str, Value); 2] {
 
 fn active_tokens() -> Value {
     json!({
-        "input": 400,
-        "output": 40,
+        "input": 430,
+        "output": 43,
         "reasoning": 8,
         "cache_read": 200,
         "cache_write": 20
     })
+}
+
+#[test]
+fn active_accounting_counts_every_consumption_class_without_a_rewind() {
+    for (path, view) in both(&fixtures("pi-active-consumption"), "active-consumption") {
+        let consumption = &view["consumption"];
+        assert_eq!(view["tokens"], consumption["tokens"], "{path}: {view}");
+        assert_eq!(view["cost"], consumption["cost"], "{path}: {view}");
+        assert_eq!(view["cost"]["usd"], 1.875, "{path}");
+        assert_eq!(view["tokens"]["input"], 150, "{path}");
+        assert_eq!(
+            view["measurement_coverage"], consumption["measurement_coverage"],
+            "{path}"
+        );
+        assert_eq!(consumption["events"]["active_branch"], 5, "{path}");
+        assert_eq!(consumption["events"]["other_branches"], 0, "{path}");
+        assert!(!view.to_string().contains("excludes compaction"), "{path}");
+    }
+}
+
+#[test]
+fn sibling_projections_keep_active_measurement_qualifications() {
+    let backends: Vec<Box<dyn Backend>> = vec![Box::new(PiBackend::new(fixtures("pi")))];
+    let usage =
+        agent_tapes_core::usage_with_backends(&backends, Selection::Id("session-pi")).unwrap();
+    let stats =
+        agent_tapes_core::stats_with_backends(&backends, Selection::Id("session-pi")).unwrap();
+    let value = serde_json::to_value(stats).unwrap();
+    assert_eq!(
+        value["usage"]["measurement_coverage"],
+        serde_json::to_value(&usage.measurement_coverage).unwrap()
+    );
+    assert!(value["usage"].get("cache_read_ratio").is_none(), "{value}");
+    let brief =
+        agent_tapes_core::brief_with_backends(&backends, Selection::Id("session-pi"), 10).unwrap();
+    let value = serde_json::to_value(brief).unwrap();
+    assert_eq!(
+        value["usage"]["measurement_coverage"],
+        serde_json::to_value(&usage.measurement_coverage).unwrap()
+    );
+    let transcript = backends[0]
+        .transcript(
+            &backends[0].locate("session-pi").unwrap().unwrap(),
+            usize::MAX,
+        )
+        .unwrap();
+    let serialized = serde_json::to_string(&transcript).unwrap();
+    let restored: agent_tapes_core::model::Transcript = serde_json::from_str(&serialized).unwrap();
+    assert_eq!(
+        agent_tapes_core::usage::usage(&restored).measurement_coverage,
+        usage.measurement_coverage
+    );
+}
+
+#[test]
+fn active_missing_counters_and_unpriced_entries_keep_healthy_subtotals() {
+    let store = Temp::new("active-partial");
+    let file = "2026-01-14T10-00-00-000Z_active-consumption.jsonl";
+    let lines = fs::read_to_string(fixtures("pi-active-consumption").join(file)).unwrap();
+    let lines = lines
+        .lines()
+        .map(|line| {
+            let mut entry: Value = serde_json::from_str(line).unwrap();
+            if entry["id"] == "compact-1" {
+                entry["usage"].as_object_mut().unwrap().remove("reasoning");
+                entry["usage"]["cost"]["total"] = json!(0);
+            }
+            if entry["id"] == "usage-1" {
+                entry.as_object_mut().unwrap().remove("usage");
+            }
+            entry.to_string()
+        })
+        .collect::<Vec<_>>();
+    fs::write(store.0.join(file), lines.join("\n") + "\n").unwrap();
+    for (path, view) in both(&store.0, "active-consumption") {
+        let consumption = &view["consumption"];
+        assert_eq!(view["tokens"], consumption["tokens"], "{path}");
+        assert_eq!(view["cost"], consumption["cost"], "{path}");
+        assert_eq!(view["cost"]["usd"], 1.0, "{path}");
+        assert_eq!(
+            view["measurement_coverage"], consumption["measurement_coverage"],
+            "{path}"
+        );
+        assert_eq!(
+            view["measurement_coverage"]["reasoning"],
+            json!({"measured":3,"missing":2,"unpriced":0}),
+            "{path}"
+        );
+        assert_eq!(
+            view["measurement_coverage"]["cost"],
+            json!({"measured":3,"missing":1,"unpriced":1}),
+            "{path}"
+        );
+        assert_eq!(consumption["events"]["counted"], 5, "{path}");
+    }
+}
+
+#[test]
+fn a_measured_zero_subtotal_is_not_reclassified_by_unpriced_peer_usage() {
+    let store = rewound_variant("measured-zero-subtotal", |lines| {
+        for line in lines {
+            let mut entry: Value = serde_json::from_str(line).unwrap();
+            if entry["id"] == "assistant-1" || entry["id"] == "summary-1" {
+                let usage = json!({"input":0,"output":0,"reasoning":0,"cacheRead":0,"cacheWrite":0,"totalTokens":0,"cost":{"total":0}});
+                if entry["type"] == "message" {
+                    entry["message"]["usage"] = usage;
+                } else {
+                    entry["usage"] = usage;
+                }
+            }
+            if entry["id"] == "assistant-2b" {
+                entry["message"]["usage"]["cost"]["total"] = json!(0);
+            }
+            *line = entry.to_string();
+        }
+    });
+    for (path, view) in both(&store.0, "session-rewound") {
+        assert_eq!(view["cost"]["usd"], 0.0, "{path}: {view}");
+        assert_eq!(
+            view["measurement_coverage"]["cost"],
+            json!({"measured":2,"missing":0,"unpriced":1}),
+            "{path}"
+        );
+        assert_eq!(view["cost_coverage"]["zero_written_requests"], 1, "{path}");
+        assert_eq!(
+            view["cost_coverage"]["zero_written_observations"], 1,
+            "{path}"
+        );
+    }
+}
+
+#[test]
+fn an_active_repeat_is_an_observation_and_a_pending_event_is_unmeasured() {
+    let store = rewound_variant("active-repeat", |lines| {
+        let mut repeat: Value = serde_json::from_str(lines.last().unwrap()).unwrap();
+        repeat["id"] = json!("assistant-repeat");
+        repeat["parentId"] = json!("assistant-2b");
+        lines.push(repeat.to_string());
+        lines.push(json!({"type":"message","id":"pending","parentId":"assistant-repeat","message":{"role":"assistant","model":"pi-model-a","provider":"fixture-provider","responseId":"response-pending","content":[]}}).to_string());
+    });
+    for (path, view) in both(&store.0, "session-rewound") {
+        assert_eq!(view["tokens"], active_tokens(), "{path}: {view}");
+        assert_eq!(view["cost"]["usd"], 0.5625, "{path}");
+        assert_eq!(
+            view["measurement_coverage"]["cost"],
+            json!({"measured":3,"missing":1,"unpriced":0}),
+            "{path}"
+        );
+        assert_eq!(view["consumption"]["events"]["repeats"], 1, "{path}");
+    }
 }
 
 fn consumed_tokens() -> Value {
@@ -103,13 +253,13 @@ fn consumed_tokens() -> Value {
 
 /// The fixture drafts one approach over two requests, rewinds to the first
 /// reply with a branch summary, and drafts a second approach. The session's
-/// counters are the active branch's requests; consumption adds the abandoned
-/// requests and the summary the rewind paid for.
+/// counters include the active branch's requests and branch summary; consumption
+/// adds the abandoned requests.
 #[test]
 fn a_rewound_recording_reports_active_and_consumption_totals_apart() {
     for (path, view) in both(&fixtures("rewound/pi"), "session-rewound") {
         assert_eq!(view["tokens"], active_tokens(), "{path}: {view}");
-        assert_eq!(view["cost"]["usd"], json!(0.5), "{path}: {view}");
+        assert_eq!(view["cost"]["usd"], json!(0.5625), "{path}: {view}");
         assert_eq!(
             view["accounting"],
             json!({
@@ -285,7 +435,7 @@ fn a_fork_names_the_recording_its_events_may_repeat() {
             consumption["identity"],
             json!({
                 "provider_response": 0,
-                "recording_entry": 3,
+                "recording_entry": 4,
                 "unidentified": 0,
                 "forked_from": "e0581212-d966-4d00-91c8-235b728a28c1"
             }),
@@ -573,13 +723,10 @@ fn fork_lineage_normalizes_paths_and_preserves_uncertainty() {
 }
 
 #[test]
-fn active_accounting_names_excluded_entry_classes() {
+fn active_accounting_does_not_name_excluded_consumption_classes() {
     for (path, view) in both(&fixtures("rewound/pi"), "session-rewound") {
         assert!(
-            view["notes"].as_array().unwrap().iter().any(|v| v
-                .as_str()
-                .unwrap()
-                .contains("compaction, branch-summary, tool-result, and usage entries")),
+            !view.to_string().contains("excludes compaction"),
             "{path}: {view}"
         );
     }
@@ -618,13 +765,10 @@ fn total_only_usage_with_zero_cost_is_unpriced() {
                 "{path}"
             );
             if active {
-                assert!(view.get("cost").is_none(), "{path}: {view}");
+                assert_eq!(view["cost"]["usd"], 0.1875, "{path}: {view}");
                 assert_eq!(view["cost_coverage"]["complete"], false, "{path}");
                 assert_eq!(view["cost_coverage"]["zero_written_requests"], 1, "{path}");
-                let model = &view["by_model"][0];
-                assert!(model.get("cost").is_none(), "{path}: {view}");
-                assert_eq!(model["cost_coverage"]["complete"], false, "{path}");
-                assert_eq!(model["cost_coverage"]["zero_written_requests"], 1, "{path}");
+                assert!(view.get("by_model").is_none(), "{path}: {view}");
             }
         }
     }

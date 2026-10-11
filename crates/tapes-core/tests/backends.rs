@@ -1766,20 +1766,24 @@ fn pi_zero_written_costs_are_unpriced_in_active_and_full_views() {
         fs::write(root.join(name), recording).unwrap();
         let backend = PiBackend::new(root.clone());
         let value = usage_value(&backend, "session-pi");
-        assert!(value.get("cost").is_none(), "{value}");
+        if mixed {
+            assert_eq!(value["cost"]["usd"], 0.25, "{value}");
+        } else {
+            assert!(value.get("cost").is_none(), "{value}");
+        }
         assert_eq!(value["cost_coverage"]["complete"], false);
         assert_eq!(
             value["cost_coverage"]["zero_written_requests"],
             if mixed { 1 } else { 2 }
         );
-        assert!(value["by_model"][0].get("cost").is_none());
+        assert_eq!(value["by_model"][0]["cost"], value["cost"]);
         let backends: Vec<Box<dyn Backend>> = vec![Box::new(backend)];
         let full = serde_json::to_value(
             usage_full_with_backends(&backends, Selection::Id("session-pi")).unwrap(),
         )
         .unwrap();
         assert_eq!(full["cost_coverage"], value["cost_coverage"]);
-        assert!(full.get("cost").is_none());
+        assert_eq!(full["cost"], value["cost"]);
     }
     fs::remove_dir_all(root).unwrap();
 }
@@ -2865,9 +2869,6 @@ fn malformed_lines_leave_parseable_turns_and_a_note() {
             backend.harness()
         );
         let mut expected_notes = Vec::new();
-        if backend.harness() == "pi" {
-            expected_notes.push("Active-branch accounting includes assistant-message usage only; it excludes compaction, branch-summary, tool-result, and usage entries.".to_owned());
-        }
         expected_notes.push("Skipped 1 unparseable line.".to_owned());
         assert_eq!(transcript.notes, expected_notes);
     }
@@ -2927,10 +2928,7 @@ fn pi_reports_entries_outside_the_active_leaf_path() {
 
     assert_eq!(
         transcript.notes,
-        vec![
-            "Active-branch accounting includes assistant-message usage only; it excludes compaction, branch-summary, tool-result, and usage entries.".to_owned(),
-            "1 entry belongs to an abandoned branch.".to_owned()
-        ]
+        vec!["1 entry belongs to an abandoned branch.".to_owned()]
     );
     assert!(transcript
         .turns
@@ -2980,6 +2978,27 @@ fn pi_usage_reports_the_model_and_effort_split() {
             cost: Some(Cost { usd: 0.5 }),
             cost_coverage: None,
             request_count: Some(1),
+            measurement_coverage: [
+                "input",
+                "output",
+                "reasoning",
+                "cache_read",
+                "cache_write",
+                "cost",
+            ]
+            .into_iter()
+            .map(|name| {
+                (
+                    name.to_owned(),
+                    agent_tapes_core::usage::MeasurementCoverage {
+                        measured: 1,
+                        missing: 0,
+                        unpriced: 0,
+                    },
+                )
+            })
+            .collect(),
+            measurement_incomplete: Vec::new(),
         },
         ModelUsage {
             model: "pi-model-b".to_owned(),
@@ -2994,6 +3013,27 @@ fn pi_usage_reports_the_model_and_effort_split() {
             cost: Some(Cost { usd: 0.25 }),
             cost_coverage: None,
             request_count: Some(1),
+            measurement_coverage: [
+                "input",
+                "output",
+                "reasoning",
+                "cache_read",
+                "cache_write",
+                "cost",
+            ]
+            .into_iter()
+            .map(|name| {
+                (
+                    name.to_owned(),
+                    agent_tapes_core::usage::MeasurementCoverage {
+                        measured: 1,
+                        missing: 0,
+                        unpriced: 0,
+                    },
+                )
+            })
+            .collect(),
+            measurement_incomplete: Vec::new(),
         },
         ModelUsage {
             model: "pi-model-b".to_owned(),
@@ -3008,6 +3048,27 @@ fn pi_usage_reports_the_model_and_effort_split() {
             cost: Some(Cost { usd: 0.25 }),
             cost_coverage: None,
             request_count: Some(1),
+            measurement_coverage: [
+                "input",
+                "output",
+                "reasoning",
+                "cache_read",
+                "cache_write",
+                "cost",
+            ]
+            .into_iter()
+            .map(|name| {
+                (
+                    name.to_owned(),
+                    agent_tapes_core::usage::MeasurementCoverage {
+                        measured: 1,
+                        missing: 0,
+                        unpriced: 0,
+                    },
+                )
+            })
+            .collect(),
+            measurement_incomplete: Vec::new(),
         },
     ]);
 
@@ -5641,6 +5702,8 @@ fn codex_usage_reports_the_context_window_and_the_newest_quota_windows() {
             cost: None,
             cost_coverage: None,
             request_count: Some(2),
+            measurement_coverage: std::collections::BTreeMap::new(),
+            measurement_incomplete: Vec::new(),
         }])
     );
     let attribution = view
@@ -6831,6 +6894,8 @@ fn claude_usage_reports_cost_state_durations_and_the_per_model_split() {
                 cost: Some(Cost { usd: 12.0 }),
                 cost_coverage: None,
                 request_count: None,
+                measurement_coverage: std::collections::BTreeMap::new(),
+                measurement_incomplete: Vec::new(),
             },
             ModelUsage {
                 model: "claude-second".to_owned(),
@@ -6845,6 +6910,8 @@ fn claude_usage_reports_cost_state_durations_and_the_per_model_split() {
                 cost: Some(Cost { usd: 0.5 }),
                 cost_coverage: None,
                 request_count: None,
+                measurement_coverage: std::collections::BTreeMap::new(),
+                measurement_incomplete: Vec::new(),
             },
         ])
     );
