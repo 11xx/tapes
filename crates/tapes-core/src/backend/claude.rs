@@ -1121,7 +1121,9 @@ fn claude_request_tokens(values: &[Value]) -> RequestUsage {
 
 /// Per-request usage summed once per request id, since Claude repeats a
 /// request's usage on every record the response spans. The same requests'
-/// cache-write TTL split and price-relevant dimensions are tallied beside it.
+/// cache-write TTL split and price-relevant dimensions are tallied beside it;
+/// a record marked `answeredWithoutRequest` made no request and is no request
+/// in that tally.
 #[derive(Default)]
 struct RequestTokens {
     seen: HashSet<String>,
@@ -1173,7 +1175,9 @@ impl RequestTokens {
                 .get("cache_creation_input_tokens")
                 .and_then(Value::as_u64),
         );
-        request_dimensions(&mut self.dimensions, usage);
+        if value["answeredWithoutRequest"] != true {
+            request_dimensions(&mut self.dimensions, usage);
+        }
     }
 }
 

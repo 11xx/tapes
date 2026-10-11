@@ -1720,9 +1720,16 @@ fn claude_names_the_dimensions_a_request_or_a_recorded_total_did_not_record() {
     let undimensioned = format!(
         r#"{{"type":"assistant","sessionId":"{CLAUDE_DIMENSIONS_SESSION}","uuid":"assistant-4","requestId":"req_fixture_3","timestamp":"2026-01-01T10:00:05Z","cwd":"/fixtures/project","message":{{"id":"msg_fixture_3","role":"assistant","model":"claude-fixture","usage":{{"input_tokens":1,"cache_creation_input_tokens":40,"cache_read_input_tokens":0,"output_tokens":5,"service_tier":null}},"content":[{{"type":"text","text":"Done."}}]}}}}"#
     );
+    // A hook answer is recorded as an assistant message that made no request.
+    let unrequested = format!(
+        r#"{{"type":"assistant","sessionId":"{CLAUDE_DIMENSIONS_SESSION}","uuid":"assistant-5","timestamp":"2026-01-01T10:00:06Z","cwd":"/fixtures/project","isUnmetered":true,"answeredWithoutRequest":true,"message":{{"id":"msg_hook_fixture","role":"assistant","model":"claude-fixture","usage":{{"input_tokens":0,"output_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"service_tier":null,"speed":null,"inference_geo":null}},"content":[{{"type":"text","text":"Hook answered."}}]}}}}"#
+    );
     fs::write(
         &path,
-        format!("{}{undimensioned}\n", claude_dimensions_recording()),
+        format!(
+            "{}{undimensioned}\n{unrequested}\n",
+            claude_dimensions_recording()
+        ),
     )
     .unwrap();
     let backend = ClaudeBackend::new(&root);
@@ -1748,6 +1755,7 @@ fn claude_names_the_dimensions_a_request_or_a_recorded_total_did_not_record() {
             "web_search_requests": 1
         })
     );
+    assert_eq!(summed["requests"]["requests"], 3);
     assert_eq!(
         summed["requests"]["service_tier"],
         serde_json::json!({ "standard": 2 })
