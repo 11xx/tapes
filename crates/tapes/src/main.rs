@@ -3689,6 +3689,12 @@ fn render_usage(usage: &UsageView) -> String {
     if let Some(cost) = &usage.cost {
         out.push_str(&format!("cost: {}\n", render_cost(cost)));
     }
+    if usage.request_failures > 0 {
+        out.push_str(&format!(
+            "failed request observations: {}; consumption unknown\n",
+            usage.request_failures
+        ));
+    }
     if let Some(accounting) = &usage.accounting {
         out.push_str(&format!("accounting: {}\n", render_accounting(accounting)));
     }

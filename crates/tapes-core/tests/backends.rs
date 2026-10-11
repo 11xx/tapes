@@ -1704,6 +1704,42 @@ fn claude_request_sums_keep_cache_write_ttls_apart() {
     assert_eq!(whole["requests"], value["requests"]);
 }
 
+#[test]
+fn synthetic_claude_records_do_not_count_as_requests() {
+    let root =
+        std::env::temp_dir().join(format!("tapes-synthetic-dimensions-{}", std::process::id()));
+    let project = root.join("project");
+    fs::create_dir_all(&project).unwrap();
+    let mut recording = claude_dimensions_recording();
+    recording.push_str(&format!(
+        "{}\n",
+        serde_json::json!({
+            "type": "assistant", "sessionId": CLAUDE_DIMENSIONS_SESSION,
+            "uuid": "synthetic-error", "isApiErrorMessage": true,
+            "message": {"role": "assistant", "model": "<synthetic>",
+                "usage": {"input_tokens": 0, "output_tokens": 0}, "content": "Failed"}
+        })
+    ));
+    fs::write(
+        project.join(format!("{CLAUDE_DIMENSIONS_SESSION}.jsonl")),
+        recording,
+    )
+    .unwrap();
+    let backend = ClaudeBackend::new(root.clone());
+    let value = usage_value(&backend, CLAUDE_DIMENSIONS_SESSION);
+    assert_eq!(value["requests"]["requests"], 2);
+    assert!(value["requests"].get("missing").is_none());
+    assert_eq!(value["request_failures"], 1);
+    let backends: Vec<Box<dyn Backend>> = vec![Box::new(backend)];
+    let full = serde_json::to_value(
+        usage_full_with_backends(&backends, Selection::Id(CLAUDE_DIMENSIONS_SESSION)).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(full["requests"], value["requests"]);
+    assert_eq!(full["request_failures"], 1);
+    fs::remove_dir_all(root).unwrap();
+}
+
 /// A dimension a request did not record is counted as missing for that
 /// request, and a recorded total that merges the TTLs names the TTL missing
 /// rather than assigning its writes one.

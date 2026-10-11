@@ -45,6 +45,7 @@ pub struct UsageDetail {
     pub cache_write_by_ttl: Option<CacheWrites>,
     /// Price-relevant facts the read's requests recorded beside their tokens.
     pub requests: Option<RequestDimensions>,
+    pub request_failures: usize,
 }
 
 impl UsageDetail {
@@ -56,6 +57,7 @@ impl UsageDetail {
             && self.attribution.is_none()
             && self.cache_write_by_ttl.is_none()
             && self.requests.is_none()
+            && self.request_failures == 0
     }
 
     /// The detail, or nothing when the harness recorded none of it.
@@ -447,6 +449,8 @@ pub struct UsageView {
     pub attribution: Option<UsageAttribution>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub requests: Option<RequestDimensions>,
+    #[serde(skip_serializing_if = "is_zero")]
+    pub request_failures: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub series: Option<UsageObservationSeries>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -551,6 +555,7 @@ fn project(session: &Session, turns: TurnTally, facts: ReadFacts) -> UsageView {
         by_model: detail.by_model,
         attribution: detail.attribution,
         requests: detail.requests,
+        request_failures: detail.request_failures,
         series: None,
         read: facts.read,
         terminal: facts.terminal,
@@ -1142,6 +1147,7 @@ mod tests {
             attribution: None,
             cache_write_by_ttl: None,
             requests: None,
+            request_failures: 0,
         });
         let transcript = Transcript::new(
             session,

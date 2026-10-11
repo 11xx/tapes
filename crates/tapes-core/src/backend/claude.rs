@@ -179,7 +179,7 @@ impl ClaudeBackend {
             AccountingCoverage::ReadWindow
         };
         let accounting = accounting_for(tokens.as_ref(), cost.as_ref(), basis, coverage);
-        let usage_detail = claude_usage_detail(cost_state, requests.dimensions, basis);
+        let usage_detail = claude_usage_detail(cost_state, requests.dimensions, requests.failures, basis);
 
         let session = Session {
             id: native_id.to_owned(),
@@ -846,7 +846,7 @@ impl ClaudeRecords {
             basis,
             AccountingCoverage::Session,
         );
-        session.usage_detail = claude_usage_detail(cost_state, requests.dimensions, basis);
+        session.usage_detail = claude_usage_detail(cost_state, requests.dimensions, requests.failures, basis);
         session.tokens = tokens;
         session.cost = cost;
         session.model = self.model;
@@ -1036,6 +1036,7 @@ fn recorded_accounting(
 fn claude_usage_detail(
     cost_state: Option<&Value>,
     requests: Option<RequestDimensions>,
+    failures: usize,
     basis: AccountingBasis,
 ) -> Option<UsageDetail> {
     let mut detail = cost_state.map(cost_state_detail).unwrap_or_default();
@@ -1043,6 +1044,7 @@ fn claude_usage_detail(
         detail.cache_write_by_ttl = requests.as_ref().map(|requests| requests.cache_write);
     }
     detail.requests = requests;
+    detail.request_failures = failures;
     detail.into_option()
 }
 
@@ -1129,18 +1131,21 @@ struct RequestTokens {
     seen: HashSet<String>,
     totals: TokenTotals,
     dimensions: RequestDimensions,
+    failures: usize,
 }
 
 /// What the requests a read reached sum to, and what they recorded beside it.
 struct RequestUsage {
     tokens: Option<Tokens>,
     dimensions: Option<RequestDimensions>,
+    failures: usize,
 }
 
 impl RequestTokens {
     fn finish(self) -> RequestUsage {
         RequestUsage {
             tokens: self.totals.finish(),
+            failures: self.failures,
             dimensions: (self.dimensions.requests > 0).then_some(self.dimensions),
         }
     }
@@ -1153,6 +1158,10 @@ impl RequestTokens {
             return;
         };
         if message.get("role").and_then(Value::as_str) != Some("assistant") {
+            return;
+        }
+        if message["model"] == "<synthetic>" {
+            self.failures += usize::from(value["isApiErrorMessage"] == true);
             return;
         }
         let Some(usage) = message.get("usage").and_then(Value::as_object) else {
