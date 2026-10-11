@@ -23,10 +23,11 @@ use crate::event::{Bounded, EventKind, ReadLines, ToolEvent};
 use crate::history::PageProjection;
 use crate::lineage::{ChildRef, Lineage, SourceRef};
 use crate::model::{
-    derive_title, AccountingBasis, AccountingCoverage, Cost, KindDeclaration, Launch, Model, Role,
-    Session, SourceDescriptor, Tokens, TrailingRecord, Transcript, Turn, TurnKind, TurnSelection,
+    derive_title, AccountingBasis, AccountingCoverage, CacheWrites, Cost, KindDeclaration, Launch,
+    Model, Role, Session, SourceDescriptor, Tokens, TrailingRecord, Transcript, Turn, TurnKind,
+    TurnSelection,
 };
-use crate::usage::{Durations, ModelUsage, UsageDetail};
+use crate::usage::{Durations, ModelUsage, RequestDimensions, UsageDetail};
 use agent_tapes_discovery::{Harness as NativeHarness, IdentityBasis, NativeSession, NativeStore};
 
 #[derive(Clone, Debug)]
@@ -166,8 +167,9 @@ impl ClaudeBackend {
             turns.extend(parsed);
         }
         let requests = claude_request_tokens(&read.values);
-        let cost_state = covering_cost_state(newest_cost_state(&read.values), requests.as_ref());
-        let (tokens, cost, basis) = recorded_accounting(cost_state, requests);
+        let cost_state =
+            covering_cost_state(newest_cost_state(&read.values), requests.tokens.as_ref());
+        let (tokens, cost, basis) = recorded_accounting(cost_state, requests.tokens);
         // A cost-state record is cumulative for the whole session wherever the
         // read reached it; only a sum over the read's requests is bounded by
         // the read.
@@ -177,9 +179,7 @@ impl ClaudeBackend {
             AccountingCoverage::ReadWindow
         };
         let accounting = accounting_for(tokens.as_ref(), cost.as_ref(), basis, coverage);
-        let usage_detail = cost_state
-            .map(cost_state_detail)
-            .and_then(UsageDetail::into_option);
+        let usage_detail = claude_usage_detail(cost_state, requests.dimensions, basis);
 
         let session = Session {
             id: native_id.to_owned(),
@@ -838,17 +838,15 @@ impl ClaudeRecords {
     /// activity range to what every folded record states.
     fn apply(self, session: &mut Session) {
         let requests = self.requests.finish();
-        let cost_state = covering_cost_state(self.cost_state.as_ref(), requests.as_ref());
-        let (tokens, cost, basis) = recorded_accounting(cost_state, requests);
+        let cost_state = covering_cost_state(self.cost_state.as_ref(), requests.tokens.as_ref());
+        let (tokens, cost, basis) = recorded_accounting(cost_state, requests.tokens);
         session.accounting = accounting_for(
             tokens.as_ref(),
             cost.as_ref(),
             basis,
             AccountingCoverage::Session,
         );
-        session.usage_detail = cost_state
-            .map(cost_state_detail)
-            .and_then(UsageDetail::into_option);
+        session.usage_detail = claude_usage_detail(cost_state, requests.dimensions, basis);
         session.tokens = tokens;
         session.cost = cost;
         session.model = self.model;
@@ -1031,6 +1029,23 @@ fn recorded_accounting(
     }
 }
 
+/// What a Claude read carries beside its counters: a covering cost-state's
+/// durations and per-model split, and the dimensions its requests recorded.
+/// The requests' TTL split describes the session's cache writes only when the
+/// session counters are those same requests' sum.
+fn claude_usage_detail(
+    cost_state: Option<&Value>,
+    requests: Option<RequestDimensions>,
+    basis: AccountingBasis,
+) -> Option<UsageDetail> {
+    let mut detail = cost_state.map(cost_state_detail).unwrap_or_default();
+    if basis == AccountingBasis::SummedRequests {
+        detail.cache_write_by_ttl = requests.as_ref().map(|requests| requests.cache_write);
+    }
+    detail.requests = requests;
+    detail.into_option()
+}
+
 /// The durations and the per-model split a `cost-state` records beside its
 /// totals. The durations are milliseconds of wall clock; the split names each
 /// model the session spent on, ordered by model id so one recording reads the
@@ -1062,7 +1077,7 @@ fn cost_state_detail(value: &Value) -> UsageDetail {
         rate_limits: None,
         durations_ms: (!durations.is_empty()).then_some(durations),
         by_model: by_model.filter(|usage| !usage.is_empty()),
-        attribution: None,
+        ..UsageDetail::default()
     }
 }
 
@@ -1096,7 +1111,7 @@ fn cost_state_tokens(value: &Value) -> Option<Tokens> {
     totals.finish()
 }
 
-fn claude_request_tokens(values: &[Value]) -> Option<Tokens> {
+fn claude_request_tokens(values: &[Value]) -> RequestUsage {
     let mut requests = RequestTokens::default();
     for value in values {
         requests.add(value);
@@ -1105,16 +1120,27 @@ fn claude_request_tokens(values: &[Value]) -> Option<Tokens> {
 }
 
 /// Per-request usage summed once per request id, since Claude repeats a
-/// request's usage on every record the response spans.
+/// request's usage on every record the response spans. The same requests'
+/// cache-write TTL split and price-relevant dimensions are tallied beside it.
 #[derive(Default)]
 struct RequestTokens {
     seen: HashSet<String>,
     totals: TokenTotals,
+    dimensions: RequestDimensions,
+}
+
+/// What the requests a read reached sum to, and what they recorded beside it.
+struct RequestUsage {
+    tokens: Option<Tokens>,
+    dimensions: Option<RequestDimensions>,
 }
 
 impl RequestTokens {
-    fn finish(self) -> Option<Tokens> {
-        self.totals.finish()
+    fn finish(self) -> RequestUsage {
+        RequestUsage {
+            tokens: self.totals.finish(),
+            dimensions: (self.dimensions.requests > 0).then_some(self.dimensions),
+        }
     }
 
     fn add(&mut self, value: &Value) {
@@ -1147,6 +1173,49 @@ impl RequestTokens {
                 .get("cache_creation_input_tokens")
                 .and_then(Value::as_u64),
         );
+        request_dimensions(&mut self.dimensions, usage);
+    }
+}
+
+/// Tally one request's price-relevant dimensions. Its cache writes count
+/// toward a TTL only when `cache_creation` splits exactly the writes
+/// `cache_creation_input_tokens` counts; otherwise they are writes without a
+/// recorded TTL. A dimension recorded as null is not recorded.
+fn request_dimensions(dimensions: &mut RequestDimensions, usage: &serde_json::Map<String, Value>) {
+    dimensions.requests += 1;
+    let counter = |value: Option<&Value>, name: &str| value.and_then(|value| value[name].as_u64());
+    if let Some(written) = usage
+        .get("cache_creation_input_tokens")
+        .and_then(Value::as_u64)
+    {
+        let split = usage.get("cache_creation");
+        let request = match (
+            counter(split, "ephemeral_5m_input_tokens"),
+            counter(split, "ephemeral_1h_input_tokens"),
+        ) {
+            (Some(short), Some(long)) if short.checked_add(long) == Some(written) => CacheWrites {
+                ephemeral_5m: Some(short),
+                ephemeral_1h: Some(long),
+                ttl_unrecorded: None,
+            },
+            _ => {
+                if written > 0 {
+                    *dimensions.missing.entry("cache_write_ttl").or_default() += 1;
+                }
+                CacheWrites {
+                    ttl_unrecorded: Some(written),
+                    ..CacheWrites::default()
+                }
+            }
+        };
+        dimensions.cache_write.add(&request);
+    }
+    for name in ["service_tier", "speed", "inference_geo"] {
+        dimensions.tally(name, usage.get(name).and_then(Value::as_str));
+    }
+    let server = usage.get("server_tool_use");
+    for name in ["web_search_requests", "web_fetch_requests"] {
+        dimensions.count(name, counter(server, name));
     }
 }
 

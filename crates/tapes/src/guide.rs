@@ -173,7 +173,9 @@ FIND IT
   activity with the newest rendered turn at that same whole-second precision.
   Whenever cost or tokens are present, JSON also carries accounting stating
   whether the figures are a recorded total or a sum of requests and whether
-  they cover the session or only the bounded read window.
+  they cover the session or only the bounded read window. A cost carries
+  kind: harness-calculated-estimate and lists pricing_basis under missing:
+  the harness priced it, and no recording says on which price table.
 
   JSON omits a fact the harness did not record rather than writing it as
   null, an empty string, or an invented default. `launch` appears only when
@@ -484,11 +486,28 @@ PROBE BEFORE EXPORTING
   whole recording and folds every counter from it, so turns and accounting
   cover the session.
 
+  tokens are the harness's own counters, and what its input and output
+  include differs: Codex input counts cache reads, OpenCode output leaves
+  reasoning out. Never add raw input across harnesses. disjoint restates the
+  same counters as uncached input, cache read, cache write by TTL (5m, 1h, or
+  ttl_unrecorded), and output, with reasoning a share of output, and names the
+  native convention it mapped from. Its total is present only when every
+  category is; missing names each category, and the TTL of nonzero writes,
+  the counters do not determine. A Claude request sum keeps the TTL split; a
+  cost-state total merges it, so its writes are ttl_unrecorded. requests
+  tallies what the read's deduplicated Claude requests recorded beside their
+  tokens — cache writes by TTL, service tier, speed, inference geo, web
+  search and fetch counts — and counts under missing each request that did
+  not record a dimension. It covers the requests read, which need not be a
+  recorded total's scope. A cost is the harness's own estimate: it says
+  kind harness-calculated-estimate, and pricing_basis is missing because no
+  recording states its price table. A token count is never a cost.
+
   `usage SESSION --series[=N]` opts into a recent bounded suffix of Codex raw
   accounting observations: 200 rows by default, 1 through 10,000 explicitly.
   Rows retain source coordinates, native ordinals when recorded, response IDs,
   model context, counters, quota-only events, repeats, and reset/advance
-  classifications. They are observations, not guaranteed request identities;
+  classifications, and restate the row's own request counters as disjoint. They are observations, not guaranteed request identities;
   aggregate attribution covers the actual read even when the suffix evicts
   older rows. `--full --series` uses the pinned recording, while summaries,
   supplied inputs, and unsupported harnesses refuse the option.
@@ -571,7 +590,13 @@ PROBE BEFORE EXPORTING
   counter, and a counter none recorded is absent rather than zero. coverage
   counts the sessions behind a sum by their accounting, including those whose
   harness recorded nothing to sum, and cost is summed only where a harness
-  recorded one.
+  recorded one. Native tokens and cost add only within one harness and
+  accounting; a group spanning more sets mixed_accounting and omits them.
+  disjoint sums each session's disjoint categories across harnesses, names
+  every convention it mapped from, and counts under missing the sessions that
+  could not supply a category; its total needs every session with tokens to
+  supply all four. Sessions of different accounting basis or coverage add in
+  neither form, and partitions keep each harness and accounting's own sums.
 
   Every turn carries an `ordinal`, its zero-based place in the session's
   normalized sequence. On a file-backed session (claude, codex, pi) it is kept

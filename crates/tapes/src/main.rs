@@ -15,8 +15,9 @@ use agent_tapes_core::event::{EventKind, EventRecord, EventTranscript, Incomplet
 use agent_tapes_core::lineage::{ChildRef, LineageView};
 use agent_tapes_core::model::{
     human_bytes, human_speaker, human_timestamp, human_title, speaker, Accounting, AccountingBasis,
-    AccountingCoverage, Cost, LiveState, Projection, Session, SourceBound, SourceDescriptor,
-    Tokens, Transcript, Truncation, Turn, TurnKind, TurnSelection,
+    AccountingCoverage, CacheWrites, Cost, DisjointTokens, InputConvention, LiveState,
+    OutputConvention, Projection, Session, SourceBound, SourceDescriptor, TokenConvention, Tokens,
+    Transcript, Truncation, Turn, TurnKind, TurnSelection,
 };
 use agent_tapes_core::stats::{
     AssistantTurnDurations, Coverage, LineageStats, StatsView, TimeStats, ToolNameStats, ToolStats,
@@ -24,9 +25,9 @@ use agent_tapes_core::stats::{
 };
 use agent_tapes_core::stats_summary::SessionRead;
 use agent_tapes_core::usage::{
-    Durations, GroupBy, GroupKey, ModelUsage, ObservationClassification, RateLimits, RateWindow,
-    TurnCoverage, UsageAttribution, UsageObservation, UsageObservationOptions, UsageOptions,
-    UsageTally, UsageView,
+    DisjointSum, Durations, GroupBy, GroupKey, ModelUsage, ObservationClassification, RateLimits,
+    RateWindow, RequestDimensions, TurnCoverage, UsageAttribution, UsageObservation,
+    UsageObservationOptions, UsageOptions, UsageTally, UsageView,
 };
 use agent_tapes_core::{BulkExport, Selection, UsageSummary, Where};
 use anyhow::{anyhow, Result};
@@ -1363,13 +1364,16 @@ enum Command {
     /// answers that session as tapes-usage/11: its recorded tokens, cost, and
     /// turn counts, plus whatever else its harness recorded — a context
     /// window, a provider quota window, wall-clock durations, a per-model
-    /// split. A scope or listing filter instead answers the whole selection
-    /// as tapes-usage-summary/6, grouped by --by and summing each counter
-    /// over the sessions that recorded it. The accounting basis and coverage
-    /// decide whether figures may be summed; cost is only what the harness
-    /// recorded, and quota is a separate fact about the account rather than
-    /// these sessions. Claude subagent count notes report failed directory
-    /// enumeration instead of a count.
+    /// split, the price-relevant dimensions its requests recorded. A scope or
+    /// listing filter instead answers the whole selection as
+    /// tapes-usage-summary/6, grouped by --by and summing each counter over
+    /// the sessions that recorded it. Native tokens follow each harness's own
+    /// convention and add only within it; the disjoint categories (uncached
+    /// input, cache read, cache write by TTL, output) add across harnesses.
+    /// The accounting basis and coverage decide whether figures may be
+    /// summed; cost is the harness's own estimate, and quota is a separate
+    /// fact about the account rather than these sessions. Claude subagent
+    /// count notes report failed directory enumeration instead of a count.
     Usage {
         #[command(flatten)]
         query: SessionQueryArgs,
@@ -1400,7 +1404,8 @@ enum Command {
         full: bool,
         /// Retain a bounded recent suffix of Codex accounting observations.
         /// With no value, 200 rows are retained; the accepted range is 1..=10000.
-        /// Rows are raw token observations, not guaranteed request identities;
+        /// Rows are raw token observations, not guaranteed request identities,
+        /// each with its own request counters restated as `disjoint`;
         /// source gaps are retained and counted once per distinct gap. Rows
         /// dropped by the row cap, the 8 MiB serialized budget, or their own
         /// size are counted under `omissions`; aggregates and attribution still
@@ -1418,11 +1423,22 @@ enum Command {
         /// whether more than one model and effort was observed (`mixed`) and
         /// whether a gap, partial read or budget kept the split incomplete
         /// (`attribution_uncertain`); the session model is then only the latest
-        /// selection, not the owner of the whole total. A summary keeps one
-        /// `partitions` row per harness and accounting basis and coverage; a
-        /// group or total whose counters span more than one of them sets
-        /// `mixed_accounting: true` and omits `tokens` and `cost` rather than
-        /// add incomparable figures.
+        /// selection, not the owner of the whole total. `disjoint` restates
+        /// `tokens` as `uncached_input`, `cache_read`, `cache_write`
+        /// (`ephemeral_5m`, `ephemeral_1h`, `ttl_unrecorded`), and `output`,
+        /// with `reasoning` a share of output, under the native `convention`;
+        /// `total` needs all four, and `missing` names what the counters do
+        /// not determine. `requests` tallies Claude requests' recorded cache
+        /// TTLs, service tier, speed, inference geo, and web search and fetch
+        /// counts, with `missing` counting requests per unrecorded dimension.
+        /// A `cost` carries `kind: harness-calculated-estimate` and names
+        /// `pricing_basis` missing. A summary keeps one `partitions` row per
+        /// harness and accounting basis and coverage; a group or total whose
+        /// counters span more than one of them sets `mixed_accounting: true`
+        /// and omits `tokens` and `cost` rather than add incomparable
+        /// figures. Its `disjoint` sums across harnesses, naming each
+        /// `conventions` entry and counting `missing` sessions per category,
+        /// and is omitted only where accounting basis or coverage differ.
         #[arg(long)]
         json: bool,
     },
@@ -3667,6 +3683,9 @@ fn render_usage(usage: &UsageView) -> String {
     if let Some(tokens) = &usage.tokens {
         out.push_str(&format!("tokens: {}\n", render_tokens(tokens)));
     }
+    if let Some(disjoint) = &usage.disjoint {
+        out.push_str(&render_disjoint(disjoint));
+    }
     if let Some(cost) = &usage.cost {
         out.push_str(&format!("cost: {}\n", render_cost(cost)));
     }
@@ -3710,6 +3729,9 @@ fn render_usage(usage: &UsageView) -> String {
     }
     if let Some(attribution) = &usage.attribution {
         out.push_str(&render_attribution(attribution));
+    }
+    if let Some(requests) = &usage.requests {
+        out.push_str(&render_request_dimensions(requests));
     }
     if let Some(series) = &usage.series {
         out.push_str(&format!(
@@ -3763,10 +3785,149 @@ fn render_tokens(tokens: &Tokens) -> String {
     .join(", ")
 }
 
+/// The disjoint categories and the native convention they were mapped from.
+fn render_disjoint(disjoint: &DisjointTokens) -> String {
+    let mut out = format!(
+        "disjoint: {} [{}]\n",
+        render_categories(&DisjointCells {
+            uncached_input: disjoint.uncached_input,
+            cache_read: disjoint.cache_read,
+            cache_write: disjoint.cache_write.as_ref(),
+            output: disjoint.output,
+            reasoning: disjoint.reasoning,
+            total: disjoint.total,
+        }),
+        render_convention(&disjoint.convention)
+    );
+    if !disjoint.missing.is_empty() {
+        out.push_str(&format!(
+            "disjoint missing: {}\n",
+            disjoint.missing.join(", ")
+        ));
+    }
+    out
+}
+
+/// The disjoint categories one figure or one sum holds.
+struct DisjointCells<'a> {
+    uncached_input: Option<u64>,
+    cache_read: Option<u64>,
+    cache_write: Option<&'a CacheWrites>,
+    output: Option<u64>,
+    reasoning: Option<u64>,
+    total: Option<u64>,
+}
+
+fn render_categories(cells: &DisjointCells<'_>) -> String {
+    let mut parts = Vec::new();
+    if let Some(count) = cells.uncached_input {
+        parts.push(format!("uncached input {count}"));
+    }
+    if let Some(count) = cells.cache_read {
+        parts.push(format!("cache read {count}"));
+    }
+    if let Some(writes) = cells.cache_write {
+        parts.push(format!("cache write {}", render_cache_writes(writes)));
+    }
+    if let Some(count) = cells.output {
+        parts.push(match cells.reasoning {
+            Some(reasoning) => format!("output {count} (reasoning {reasoning})"),
+            None => format!("output {count}"),
+        });
+    }
+    if let Some(total) = cells.total {
+        parts.push(format!("total {total}"));
+    }
+    parts.join(", ")
+}
+
+fn render_cache_writes(writes: &CacheWrites) -> String {
+    [
+        ("5m", writes.ephemeral_5m),
+        ("1h", writes.ephemeral_1h),
+        ("TTL unrecorded", writes.ttl_unrecorded),
+    ]
+    .into_iter()
+    .filter_map(|(name, count)| count.map(|count| format!("{name} {count}")))
+    .collect::<Vec<_>>()
+    .join(" + ")
+}
+
+fn render_convention(convention: &TokenConvention) -> String {
+    let input = match convention.input {
+        InputConvention::ExcludesCache => "input excludes cache",
+        InputConvention::IncludesCacheRead => "input includes cache read",
+    };
+    let output = match convention.output {
+        OutputConvention::IncludesReasoning => "output includes reasoning",
+        OutputConvention::ExcludesReasoning => "output excludes reasoning",
+    };
+    format!("native {input}, {output}")
+}
+
+fn render_counts(counts: impl IntoIterator<Item = (impl AsRef<str>, usize)>) -> String {
+    counts
+        .into_iter()
+        .map(|(name, count)| format!("{} {count}", name.as_ref()))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// What the read's requests recorded beside their tokens, one dimension per
+/// clause; a dimension no request recorded has no clause.
+fn render_request_dimensions(requests: &RequestDimensions) -> String {
+    let mut parts = vec![format!("{} identified", requests.requests)];
+    if requests.cache_write.total() > 0 {
+        parts.push(format!(
+            "cache write {}",
+            render_cache_writes(&requests.cache_write)
+        ));
+    }
+    for (name, values) in [
+        ("service tier", &requests.service_tier),
+        ("speed", &requests.speed),
+        ("inference geo", &requests.inference_geo),
+    ] {
+        if !values.is_empty() {
+            parts.push(format!(
+                "{name} {}",
+                render_counts(values.iter().map(|(value, count)| (value, *count)))
+            ));
+        }
+    }
+    for (name, count) in [
+        ("web search", requests.web_search_requests),
+        ("web fetch", requests.web_fetch_requests),
+    ] {
+        if let Some(count) = count {
+            parts.push(format!("{name} {count}"));
+        }
+    }
+    let mut out = format!("requests: {}\n", parts.join("; "));
+    if !requests.missing.is_empty() {
+        out.push_str(&format!(
+            "requests missing: {}\n",
+            render_counts(requests.missing.iter().map(|(name, count)| (name, *count)))
+        ));
+    }
+    if requests.omitted_values > 0 {
+        out.push_str(&format!(
+            "requests omitted values: {}\n",
+            requests.omitted_values
+        ));
+    }
+    out
+}
+
 /// Four decimal places, so a fraction of a cent is neither rounded away nor
-/// dressed up as more precision than the harness recorded.
+/// dressed up as more precision than the harness recorded. Every recorded
+/// cost is the harness's own estimate on a basis the recording does not
+/// state.
 fn render_cost(cost: &Cost) -> String {
-    format!("{:.4} USD", cost.usd)
+    format!(
+        "{:.4} USD (harness-calculated estimate, pricing basis not recorded)",
+        cost.usd
+    )
 }
 
 fn render_accounting(accounting: &Accounting) -> String {
@@ -3961,7 +4122,7 @@ fn render_usage_summary(summary: &UsageSummary, by: &[GroupBy]) -> String {
     };
     let mut out = key_columns.join("\t");
     out.push_str(
-        "\tSESSIONS\tINPUT\tOUTPUT\tREASONING\tCACHE READ\tCACHE WRITE\tCOST\t\
+        "\tSESSIONS\tINPUT\tOUTPUT\tREASONING\tCACHE READ\tCACHE WRITE\tDISJOINT TOTAL\tCOST\t\
          COVERAGE (RECORDED/SUMMED/WINDOW/SINCE-RESET/NONE)\n",
     );
     for group in &summary.groups {
@@ -3979,6 +4140,18 @@ fn render_usage_summary(summary: &UsageSummary, by: &[GroupBy]) -> String {
     total.extend(tally_cells(&summary.totals));
     out.push_str(&total.join("\t"));
     out.push('\n');
+    if let Some(disjoint) = &summary.totals.disjoint {
+        out.push_str(&render_disjoint_sum(disjoint));
+    }
+    if summary
+        .groups
+        .iter()
+        .any(|group| group.tally.cost.is_some())
+    {
+        out.push_str(
+            "Cost is each harness's own estimate; no recording states its pricing basis.\n",
+        );
+    }
     if summary.totals.mixed_accounting {
         out.push_str(
             "Mixed accounting: total counters are omitted; compatible partitions follow.\n",
@@ -4002,6 +4175,36 @@ fn render_usage_summary(summary: &UsageSummary, by: &[GroupBy]) -> String {
                 .unwrap_or_else(|| "no accounting".to_owned()),
             partition.tally.sessions,
             tally_cells(&partition.tally).join(" | ")
+        ));
+    }
+    out
+}
+
+/// The selection's disjoint categories, the native conventions they were
+/// mapped from, and how many sessions could not supply each category.
+fn render_disjoint_sum(disjoint: &DisjointSum) -> String {
+    let mut out = format!(
+        "Disjoint total over {} sessions: {}\n",
+        disjoint.sessions,
+        render_categories(&DisjointCells {
+            uncached_input: disjoint.uncached_input,
+            cache_read: disjoint.cache_read,
+            cache_write: disjoint.cache_write.as_ref(),
+            output: disjoint.output,
+            reasoning: disjoint.reasoning,
+            total: disjoint.total,
+        })
+    );
+    for (harness, convention) in &disjoint.conventions {
+        out.push_str(&format!(
+            "Convention {harness}: {}\n",
+            render_convention(convention)
+        ));
+    }
+    if !disjoint.missing.is_empty() {
+        out.push_str(&format!(
+            "Disjoint missing, sessions per category: {}\n",
+            render_counts(disjoint.missing.iter().map(|(name, count)| (name, *count)))
         ));
     }
     out
@@ -4057,7 +4260,20 @@ fn tally_cells(tally: &UsageTally) -> Vec<String> {
             counted.cache_write,
             sessions,
         ),
-        sum_cell(tally.cost.as_ref().map(render_cost), counted.cost, sessions),
+        tally
+            .disjoint
+            .as_ref()
+            .map_or_else(String::new, |disjoint| {
+                counter_cell(disjoint.total, disjoint.sessions, sessions)
+            }),
+        sum_cell(
+            tally
+                .cost
+                .as_ref()
+                .map(|cost| format!("{:.4} USD", cost.usd)),
+            counted.cost,
+            sessions,
+        ),
         format!(
             "{}/{}/{}/{}/{}",
             coverage.recorded_total,

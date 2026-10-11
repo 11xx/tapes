@@ -15,9 +15,10 @@ use serde_json::Value;
 use crate::backend::{skipped_records_note, StreamedTranscript};
 use crate::content::ContentInventory;
 use crate::model::{
-    Accounting, AccountingBasis, AccountingCoverage, Cost, Launch, Model, ModelObservationStatus,
-    ReadEvidence, ReadGap, RecordRef, Role, Session, SessionMetadata, SourceBound,
-    SourceDescriptor, TerminalObservation, TextTailEvidence, Tokens, Transcript, Truncation, Turn,
+    Accounting, AccountingBasis, AccountingCoverage, CacheWrites, Cost, DisjointTokens, Launch,
+    Model, ModelObservationStatus, ReadEvidence, ReadGap, RecordRef, Role, Session,
+    SessionMetadata, SourceBound, SourceDescriptor, TerminalObservation, TextTailEvidence,
+    TokenConvention, Tokens, Transcript, Truncation, Turn,
 };
 
 pub const USAGE_SCHEMA: &str = "tapes-usage/11";
@@ -39,6 +40,11 @@ pub struct UsageDetail {
     /// Request-observation attribution kept separate from the session's
     /// cumulative recorded total.
     pub attribution: Option<UsageAttribution>,
+    /// The session counters' cache writes split by TTL, where the counters
+    /// are a sum over requests that each recorded the split.
+    pub cache_write_by_ttl: Option<CacheWrites>,
+    /// Price-relevant facts the read's requests recorded beside their tokens.
+    pub requests: Option<RequestDimensions>,
 }
 
 impl UsageDetail {
@@ -48,6 +54,8 @@ impl UsageDetail {
             && self.durations_ms.is_none()
             && self.by_model.is_none()
             && self.attribution.is_none()
+            && self.cache_write_by_ttl.is_none()
+            && self.requests.is_none()
     }
 
     /// The detail, or nothing when the harness recorded none of it.
@@ -156,6 +164,72 @@ pub struct ModelUsage {
     pub request_count: Option<usize>,
 }
 
+/// The most distinct values one request dimension tallies, and the longest
+/// value it keeps. A value past either bound is counted in `omitted_values`.
+const MAX_DIMENSION_VALUES: usize = 16;
+const MAX_DIMENSION_VALUE_BYTES: usize = 64;
+
+/// Price-relevant facts the requests a read identified recorded beside their
+/// token counters, tallied once per request. A value tally counts requests by
+/// the value each recorded. A request that recorded no value for a dimension
+/// is counted under `missing` for that dimension and is never assigned one;
+/// `cache_write_ttl` counts requests whose cache writes carry no TTL split.
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+pub struct RequestDimensions {
+    pub requests: usize,
+    pub cache_write: CacheWrites,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub service_tier: BTreeMap<String, usize>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub speed: BTreeMap<String, usize>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub inference_geo: BTreeMap<String, usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub web_search_requests: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub web_fetch_requests: Option<u64>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub missing: BTreeMap<&'static str, usize>,
+    #[serde(skip_serializing_if = "is_zero")]
+    pub omitted_values: usize,
+}
+
+impl RequestDimensions {
+    /// Count one request's recorded value for `dimension`, or its absence.
+    pub fn tally(&mut self, dimension: &'static str, value: Option<&str>) {
+        let Some(value) = value else {
+            *self.missing.entry(dimension).or_default() += 1;
+            return;
+        };
+        let values = match dimension {
+            "service_tier" => &mut self.service_tier,
+            "speed" => &mut self.speed,
+            "inference_geo" => &mut self.inference_geo,
+            _ => return,
+        };
+        if value.len() > MAX_DIMENSION_VALUE_BYTES
+            || (!values.contains_key(value) && values.len() >= MAX_DIMENSION_VALUES)
+        {
+            self.omitted_values += 1;
+            return;
+        }
+        *values.entry(value.to_owned()).or_default() += 1;
+    }
+
+    /// Add one request's count of a server-side tool use, or note its absence.
+    pub fn count(&mut self, dimension: &'static str, value: Option<u64>) {
+        let slot = match dimension {
+            "web_search_requests" => &mut self.web_search_requests,
+            "web_fetch_requests" => &mut self.web_fetch_requests,
+            _ => return,
+        };
+        match value {
+            Some(value) => *slot = Some(slot.unwrap_or(0).saturating_add(value)),
+            None => *self.missing.entry(dimension).or_default() += 1,
+        }
+    }
+}
+
 /// The basis used for observed request accounting in one read. This is not a
 /// claim about the harness's whole history: a bounded read can only choose
 /// among the records it actually reached.
@@ -230,6 +304,10 @@ pub struct UsageObservation {
     pub total_token_usage: Option<Tokens>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_token_usage: Option<Tokens>,
+    /// The row's own request counters, `usage` or else `last_token_usage`,
+    /// in disjoint categories.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub disjoint: Option<DisjointTokens>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub context_window: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -338,8 +416,12 @@ pub struct UsageSession {
 /// own fields, unchanged: a `recorded-total` is cumulative and a
 /// `summed-requests` figure is a sum of per-request records, so either may be
 /// added across sessions, while `coverage` says how much of each session the
-/// figure covers. Cost is only what a harness recorded, and `rate_limits` is
-/// the provider's account-wide quota rather than this session's spend.
+/// figure covers. `tokens` keeps the harness's own convention; `disjoint`
+/// restates the same counters in categories that add across harnesses.
+/// `requests` covers the requests the read identified, which need not be the
+/// scope of a recorded total. Cost is only what a harness recorded, and
+/// `rate_limits` is the provider's account-wide quota rather than this
+/// session's spend.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct UsageView {
     pub schema: &'static str,
@@ -348,6 +430,8 @@ pub struct UsageView {
     pub accounting: Option<Accounting>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tokens: Option<Tokens>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub disjoint: Option<DisjointTokens>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cost: Option<Cost>,
     pub turns: TurnCounts,
@@ -361,6 +445,8 @@ pub struct UsageView {
     pub by_model: Option<Vec<ModelUsage>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub attribution: Option<UsageAttribution>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub requests: Option<RequestDimensions>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub series: Option<UsageObservationSeries>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -456,6 +542,7 @@ fn project(session: &Session, turns: TurnTally, facts: ReadFacts) -> UsageView {
         },
         accounting: session.accounting.clone(),
         tokens: session.tokens.clone(),
+        disjoint: session.disjoint_tokens(),
         cost: session.cost.clone(),
         turns: turns.counts,
         context_window: detail.context_window,
@@ -463,6 +550,7 @@ fn project(session: &Session, turns: TurnTally, facts: ReadFacts) -> UsageView {
         durations_ms: detail.durations_ms,
         by_model: detail.by_model,
         attribution: detail.attribution,
+        requests: detail.requests,
         series: None,
         read: facts.read,
         terminal: facts.terminal,
@@ -471,6 +559,21 @@ fn project(session: &Session, turns: TurnTally, facts: ReadFacts) -> UsageView {
         truncated: facts.truncated,
         truncation: facts.truncation,
         notes: facts.notes,
+    }
+}
+
+impl Session {
+    /// The session counters in disjoint categories, under its harness's
+    /// convention. Absent when the session recorded no tokens or its harness
+    /// has no established convention.
+    pub fn disjoint_tokens(&self) -> Option<DisjointTokens> {
+        let tokens = self.tokens.as_ref()?;
+        let convention = TokenConvention::of(self.harness())?;
+        let by_ttl = self
+            .usage_detail
+            .as_ref()
+            .and_then(|detail| detail.cache_write_by_ttl.as_ref());
+        Some(DisjointTokens::from_native(tokens, convention, by_ttl))
     }
 }
 
@@ -591,7 +694,9 @@ pub struct CoverageCounts {
 
 /// Counters summed over a set of sessions. Every sum is over the sessions
 /// that recorded it, and `counted` says how many those were; a counter no
-/// session recorded is absent rather than zero.
+/// session recorded is absent rather than zero. `tokens` sums native counters
+/// and so is offered only within one harness's convention; `disjoint` is the
+/// sum that adds across harnesses.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct UsageTally {
     #[serde(skip_serializing_if = "std::ops::Not::not")]
@@ -604,9 +709,103 @@ pub struct UsageTally {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tokens: Option<Tokens>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub disjoint: Option<DisjointSum>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub cost: Option<Cost>,
     pub coverage: CoverageCounts,
     pub counted: CountedSessions,
+}
+
+/// Disjoint categories summed over a set of sessions, each converted from its
+/// own harness's convention, which `conventions` names by harness. `sessions`
+/// counts the sessions that recorded tokens. A category sums the sessions
+/// whose counters determine it; `missing` counts, per category, the sessions
+/// whose counters do not, under `convention` for a harness with none
+/// established. `total` is present only when every one of those sessions
+/// determines all four summed categories.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct DisjointSum {
+    pub conventions: BTreeMap<String, TokenConvention>,
+    pub sessions: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub uncached_input: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_read: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_write: Option<CacheWrites>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total: Option<u64>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub missing: BTreeMap<&'static str, usize>,
+}
+
+/// The categories a disjoint total sums, plus the convention that maps a
+/// session onto them. A session missing any of these has no total.
+const SUMMED_CATEGORIES: [&str; 5] = [
+    "convention",
+    "uncached_input",
+    "cache_read",
+    "cache_write",
+    "output",
+];
+
+impl DisjointSum {
+    fn add(&mut self, session: &Session) {
+        if session.tokens.is_none() {
+            return;
+        }
+        self.sessions += 1;
+        let Some(disjoint) = session.disjoint_tokens() else {
+            *self.missing.entry("convention").or_default() += 1;
+            return;
+        };
+        self.conventions
+            .insert(session.harness().to_owned(), disjoint.convention);
+        for (total, value) in [
+            (&mut self.uncached_input, disjoint.uncached_input),
+            (&mut self.cache_read, disjoint.cache_read),
+            (&mut self.output, disjoint.output),
+            (&mut self.reasoning, disjoint.reasoning),
+        ] {
+            if let Some(value) = value {
+                *total = Some(total.unwrap_or(0).saturating_add(value));
+            }
+        }
+        if let Some(writes) = disjoint.cache_write {
+            self.cache_write.get_or_insert_default().add(&writes);
+        }
+        for name in disjoint.missing {
+            *self.missing.entry(name).or_default() += 1;
+        }
+    }
+
+    fn finish(mut self) -> Option<Self> {
+        if self.sessions == 0 {
+            return None;
+        }
+        let complete = !SUMMED_CATEGORIES
+            .iter()
+            .any(|name| self.missing.contains_key(name));
+        self.total = complete
+            .then(|| {
+                [
+                    self.uncached_input,
+                    self.cache_read,
+                    self.cache_write.map(|writes| writes.total()),
+                    self.output,
+                ]
+                .into_iter()
+                .try_fold(0u64, |sum, count| {
+                    count.map(|count| sum.saturating_add(count))
+                })
+            })
+            .flatten();
+        Some(self)
+    }
 }
 
 /// One group of sessions and what they spent.
@@ -685,9 +884,10 @@ impl Counter {
     }
 }
 
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Default)]
 struct Tally {
     sessions: usize,
+    disjoint: DisjointSum,
     input: Counter,
     output: Counter,
     reasoning: Counter,
@@ -703,6 +903,7 @@ struct Tally {
 impl Tally {
     fn add(&mut self, session: &Session) {
         self.sessions += 1;
+        self.disjoint.add(session);
         if let Some(tokens) = &session.tokens {
             self.input.add(tokens.input);
             self.output.add(tokens.output);
@@ -778,6 +979,7 @@ impl Tally {
                 cache_read: self.cache_read.sum(),
                 cache_write: self.cache_write.sum(),
             }),
+            disjoint: self.disjoint.finish(),
             cost: (self.cost_counted > 0).then_some(Cost { usd: self.cost_usd }),
             coverage: self.coverage,
             counted,
@@ -795,7 +997,7 @@ mod tests {
         AccountingBasis, AccountingCoverage, Session, SourceDescriptor, Turn, TurnKind,
     };
 
-    fn session() -> Session {
+    pub(super) fn session() -> Session {
         let ts = Utc.timestamp_opt(1_700_000_000, 0).unwrap();
         Session {
             id: "fixture-session".to_owned(),
@@ -934,6 +1136,8 @@ mod tests {
                 request_count: None,
             }]),
             attribution: None,
+            cache_write_by_ttl: None,
+            requests: None,
         });
         let transcript = Transcript::new(
             session,
@@ -945,7 +1149,11 @@ mod tests {
 
         let value: Value = serde_json::to_value(usage(&transcript)).unwrap();
         assert_eq!(value["tokens"], json!({ "input": 10, "output": 20 }));
-        assert_eq!(value["cost"], json!({ "usd": 1.5 }));
+        assert_eq!(
+            value["cost"],
+            json!({ "usd": 1.5, "kind": "harness-calculated-estimate", "missing": ["pricing_basis"] })
+        );
+        assert!(value.get("disjoint").is_none(), "{value}");
         assert_eq!(
             value["accounting"],
             json!({ "basis": "recorded-total", "coverage": "session" })
@@ -968,7 +1176,7 @@ mod tests {
             json!([{
                 "model": "fixture-model",
                 "tokens": { "input": 10, "output": 20 },
-                "cost": { "usd": 1.5 }
+                "cost": { "usd": 1.5, "kind": "harness-calculated-estimate", "missing": ["pricing_basis"] }
             }])
         );
         assert_eq!(value["turns"]["tool"], 1);
@@ -1096,7 +1304,15 @@ mod tests {
                     "key": { "harness": "claude", "model": "claude-fixture" },
                     "sessions": 1,
                     "tokens": { "cache_read": 7 },
-                    "cost": { "usd": 2.5 },
+                    "disjoint": {
+                        "conventions": {
+                            "claude": { "input": "excludes-cache", "output": "includes-reasoning" }
+                        },
+                        "sessions": 1,
+                        "cache_read": 7,
+                        "missing": { "cache_write": 1, "output": 1, "reasoning": 1, "uncached_input": 1 }
+                    },
+                    "cost": { "usd": 2.5, "kind": "harness-calculated-estimate", "missing": ["pricing_basis"] },
                     "coverage": {
                         "recorded_total": 0,
                         "summed_session": 1,
@@ -1117,7 +1333,16 @@ mod tests {
                     "key": { "harness": "codex", "model": "gpt-fixture" },
                     "sessions": 3,
                     "tokens": { "input": 300, "output": 30, "reasoning": 5 },
-                    "cost": { "usd": 1.0 },
+                    "disjoint": {
+                        "conventions": {
+                            "codex": { "input": "includes-cache-read", "output": "includes-reasoning" }
+                        },
+                        "sessions": 2,
+                        "output": 30,
+                        "reasoning": 5,
+                        "missing": { "cache_read": 2, "cache_write": 2, "reasoning": 1, "uncached_input": 2 }
+                    },
+                    "cost": { "usd": 1.0, "kind": "harness-calculated-estimate", "missing": ["pricing_basis"] },
                     "coverage": {
                         "recorded_total": 1,
                         "summed_session": 0,
@@ -1141,7 +1366,24 @@ mod tests {
             json!({
                 "sessions": 4,
                 "tokens": { "input": 300, "output": 30, "reasoning": 5, "cache_read": 7 },
-                "cost": { "usd": 3.5 },
+                "disjoint": {
+                    "conventions": {
+                        "claude": { "input": "excludes-cache", "output": "includes-reasoning" },
+                        "codex": { "input": "includes-cache-read", "output": "includes-reasoning" }
+                    },
+                    "sessions": 3,
+                    "cache_read": 7,
+                    "output": 30,
+                    "reasoning": 5,
+                    "missing": {
+                        "cache_read": 2,
+                        "cache_write": 3,
+                        "output": 1,
+                        "reasoning": 2,
+                        "uncached_input": 3
+                    }
+                },
+                "cost": { "usd": 3.5, "kind": "harness-calculated-estimate", "missing": ["pricing_basis"] },
                 "coverage": {
                     "recorded_total": 1,
                     "summed_session": 1,
@@ -1210,9 +1452,8 @@ pub fn partitioned_aggregate(
 ) -> (UsageAggregate, Vec<AccountingPartition>) {
     let mut aggregate = aggregate(sessions, by);
     let mut partitions: BTreeMap<(String, String), (Option<Accounting>, Tally)> = BTreeMap::new();
-    let mut domains: BTreeMap<Vec<Option<String>>, std::collections::BTreeSet<(String, String)>> =
-        BTreeMap::new();
-    let mut all = std::collections::BTreeSet::new();
+    let mut domains: BTreeMap<Vec<Option<String>>, Domains> = BTreeMap::new();
+    let mut all = Domains::default();
     for session in sessions {
         let key = (
             session.harness().to_owned(),
@@ -1224,24 +1465,12 @@ pub fn partitioned_aggregate(
             .1
             .add(session);
         let group = by.iter().map(|dimension| dimension.of(session)).collect();
-        let domains = domains.entry(group).or_default();
-        if session.tokens.is_some() || session.cost.is_some() {
-            domains.insert(key.clone());
-            all.insert(key);
-        }
+        domains.entry(group).or_default().add(session, &key);
+        all.add(session, &key);
     }
-    let suppress = |tally: &mut UsageTally| {
-        tally.tokens = None;
-        tally.cost = None;
-        tally.mixed_accounting = true;
-    };
-    if all.len() > 1 {
-        suppress(&mut aggregate.totals);
-    }
+    all.apply(&mut aggregate.totals);
     for (group, domains) in aggregate.groups.iter_mut().zip(domains.into_values()) {
-        if domains.len() > 1 {
-            suppress(&mut group.tally);
-        }
+        domains.apply(&mut group.tally);
     }
     let partitions = partitions
         .into_iter()
@@ -1254,9 +1483,174 @@ pub fn partitioned_aggregate(
     (aggregate, partitions)
 }
 
+/// The accounting domains one group's counters span. Native counters add
+/// only within one harness and accounting; disjoint categories add across
+/// harnesses but still only within one accounting basis and coverage.
+#[derive(Default)]
+struct Domains {
+    native: std::collections::BTreeSet<(String, String)>,
+    accounting: std::collections::BTreeSet<String>,
+}
+
+impl Domains {
+    fn add(&mut self, session: &Session, key: &(String, String)) {
+        if session.tokens.is_some() || session.cost.is_some() {
+            self.native.insert(key.clone());
+        }
+        if session.tokens.is_some() {
+            self.accounting.insert(key.1.clone());
+        }
+    }
+
+    fn apply(&self, tally: &mut UsageTally) {
+        if self.native.len() > 1 {
+            tally.tokens = None;
+            tally.cost = None;
+            tally.mixed_accounting = true;
+        }
+        if self.accounting.len() > 1 {
+            tally.disjoint = None;
+        }
+    }
+}
+
 #[cfg(test)]
 mod partition_tests {
     use super::*;
+    use crate::model::{InputConvention, OutputConvention};
+
+    fn native(
+        input: u64,
+        output: u64,
+        reasoning: u64,
+        cache_read: u64,
+        cache_write: u64,
+    ) -> Tokens {
+        Tokens {
+            input: Some(input),
+            output: Some(output),
+            reasoning: Some(reasoning),
+            cache_read: Some(cache_read),
+            cache_write: Some(cache_write),
+        }
+    }
+
+    fn recorded(harness: &str, tokens: Tokens) -> Session {
+        Session {
+            source: SourceDescriptor::installed(harness, "fixture-recording"),
+            tokens: Some(tokens),
+            accounting: Some(Accounting {
+                basis: AccountingBasis::RecordedTotal,
+                coverage: AccountingCoverage::Session,
+            }),
+            ..super::tests::session()
+        }
+    }
+
+    /// Each harness's native counters land in the same four categories: Codex
+    /// cache reads leave its input, OpenCode reasoning joins its output.
+    #[test]
+    fn each_convention_maps_onto_the_same_disjoint_categories() {
+        let codex = DisjointTokens::from_native(
+            &native(1_200, 300, 50, 1_000, 0),
+            TokenConvention::of("codex").unwrap(),
+            None,
+        );
+        assert_eq!(
+            (codex.uncached_input, codex.output, codex.total),
+            (Some(200), Some(300), Some(1_500))
+        );
+        let opencode = DisjointTokens::from_native(
+            &native(3, 237, 53, 182_960, 1_122),
+            TokenConvention::of("opencode").unwrap(),
+            None,
+        );
+        assert_eq!(
+            opencode.convention,
+            TokenConvention {
+                input: InputConvention::ExcludesCache,
+                output: OutputConvention::ExcludesReasoning,
+            }
+        );
+        assert_eq!(
+            (opencode.output, opencode.reasoning, opencode.total),
+            (Some(290), Some(53), Some(184_375))
+        );
+        assert_eq!(opencode.missing, vec!["cache_write_ttl"]);
+    }
+
+    /// A category the native counters do not determine is named, not filled
+    /// in: Codex input with cache writes may or may not include them, and
+    /// reasoning beyond its output contradicts the convention.
+    #[test]
+    fn an_undetermined_category_is_named_missing_and_withholds_the_total() {
+        let codex = DisjointTokens::from_native(
+            &native(1_200, 300, 400, 1_000, 10),
+            TokenConvention::of("codex").unwrap(),
+            None,
+        );
+        assert_eq!(codex.uncached_input, None);
+        assert_eq!(codex.reasoning, None);
+        assert_eq!(codex.total, None);
+        assert_eq!(
+            codex.missing,
+            vec!["uncached_input", "cache_write_ttl", "reasoning"]
+        );
+        let unsplit = DisjointTokens::from_native(
+            &native(1, 2, 0, 3, 40),
+            TokenConvention::of("claude").unwrap(),
+            Some(&CacheWrites {
+                ephemeral_5m: Some(10),
+                ephemeral_1h: Some(10),
+                ttl_unrecorded: None,
+            }),
+        );
+        assert_eq!(
+            unsplit.cache_write,
+            Some(CacheWrites {
+                ttl_unrecorded: Some(40),
+                ..CacheWrites::default()
+            })
+        );
+    }
+
+    /// A Claude and a Codex total have no raw input sum, but their disjoint
+    /// categories add; sessions of different accounting add in neither form.
+    #[test]
+    fn disjoint_categories_add_across_harnesses_but_not_across_accounting() {
+        let sessions = vec![
+            recorded("claude", native(5, 65, 12, 2_300, 360)),
+            recorded("codex", native(1_200, 300, 50, 1_000, 0)),
+        ];
+        let (aggregate, partitions) = partitioned_aggregate(&sessions, &[]);
+        let totals = &aggregate.totals;
+        assert!(totals.mixed_accounting);
+        assert!(totals.tokens.is_none());
+        let disjoint = totals.disjoint.as_ref().unwrap();
+        assert_eq!(disjoint.sessions, 2);
+        assert_eq!(disjoint.uncached_input, Some(205));
+        assert_eq!(disjoint.cache_read, Some(3_300));
+        assert_eq!(disjoint.output, Some(365));
+        assert_eq!(disjoint.reasoning, Some(62));
+        assert_eq!(disjoint.total, Some(5 + 2_300 + 360 + 65 + 1_500));
+        assert_eq!(
+            disjoint.conventions.keys().collect::<Vec<_>>(),
+            ["claude", "codex"]
+        );
+        assert_eq!(partitions.len(), 2);
+
+        let mut summed = sessions;
+        summed[0].accounting = Some(Accounting {
+            basis: AccountingBasis::SummedRequests,
+            coverage: AccountingCoverage::Session,
+        });
+        let (aggregate, partitions) = partitioned_aggregate(&summed, &[]);
+        assert!(aggregate.totals.disjoint.is_none());
+        assert!(partitions
+            .iter()
+            .all(|partition| partition.tally.disjoint.is_some()));
+    }
+
     #[test]
     fn an_empty_group_does_not_shift_a_later_mixed_group() {
         let sessions = super::tests::spenders()[..3].to_vec();

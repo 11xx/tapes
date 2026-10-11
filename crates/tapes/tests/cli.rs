@@ -8543,16 +8543,31 @@ fn usage_summary_human_output_says_how_many_sessions_are_behind_each_sum() {
 
     assert_eq!(
         lines[0],
-        "HARNESS\tMODEL\tSESSIONS\tINPUT\tOUTPUT\tREASONING\tCACHE READ\tCACHE WRITE\tCOST\t\
-         COVERAGE (RECORDED/SUMMED/WINDOW/SINCE-RESET/NONE)"
+        "HARNESS\tMODEL\tSESSIONS\tINPUT\tOUTPUT\tREASONING\tCACHE READ\tCACHE WRITE\t\
+         DISJOINT TOTAL\tCOST\tCOVERAGE (RECORDED/SUMMED/WINDOW/SINCE-RESET/NONE)"
     );
     assert_eq!(
         lines[2],
-        "codex\tgpt-fixture\t2\t1200 (1 of 2)\t300 (1 of 2)\t\t1000 (1 of 2)\t0 (1 of 2)\t\t1/0/0/0/1"
+        "codex\tgpt-fixture\t2\t1200 (1 of 2)\t300 (1 of 2)\t\t1000 (1 of 2)\t0 (1 of 2)\t\
+         1500 (1 of 2)\t\t1/0/0/0/1"
     );
     assert_eq!(
         lines[4],
-        "TOTAL\t\t4\t1200 (1 of 4)\t300 (1 of 4)\t\t1000 (1 of 4)\t0 (1 of 4)\t\t1/0/0/0/3"
+        "TOTAL\t\t4\t1200 (1 of 4)\t300 (1 of 4)\t\t1000 (1 of 4)\t0 (1 of 4)\t1500 (1 of 4)\t\t\
+         1/0/0/0/3"
+    );
+    assert_eq!(
+        lines[5],
+        "Disjoint total over 1 sessions: uncached input 200, cache read 1000, \
+         cache write TTL unrecorded 0, output 300, total 1500"
+    );
+    assert_eq!(
+        lines[6],
+        "Convention codex: native input includes cache read, output includes reasoning"
+    );
+    assert_eq!(
+        lines[7],
+        "Disjoint missing, sessions per category: reasoning 1"
     );
 
     fs::remove_dir_all(codex_home).unwrap();
@@ -10455,6 +10470,131 @@ fn child_full_streams_a_subagent_recording_past_the_read_bound() {
         "{}",
         String::from_utf8_lossy(&refused.stderr)
     );
+}
+
+const CLAUDE_DIMENSIONS_SESSION: &str = include_str!(
+    "fixtures/claude-request-dimensions/project/30000000-0000-4000-8000-000000000001.jsonl"
+);
+
+/// A Claude and a Codex session count `input` under different conventions,
+/// so a summary over both offers no raw input sum; their disjoint categories
+/// add into one comparable total, with each source convention named.
+#[test]
+fn usage_summary_adds_claude_and_codex_only_in_disjoint_categories() {
+    let root = TemporaryDirectory::new(
+        std::env::temp_dir().join(format!("tapes-usage-disjoint-{}", std::process::id())),
+    );
+    let home = root.path().join("home");
+    let project = home.join(".claude/projects/fixture");
+    fs::create_dir_all(&project).unwrap();
+    let cost_state = r#"{"type":"cost-state","sessionId":"30000000-0000-4000-8000-000000000001","totalCostUSD":0.5,"modelUsage":{"claude-fixture":{"inputTokens":10,"outputTokens":80,"thinkingTokens":12,"cacheReadInputTokens":2400,"cacheCreationInputTokens":500,"webSearchRequests":1,"costUSD":0.5}},"hasUnknownModelCost":false}"#;
+    fs::write(
+        project.join("30000000-0000-4000-8000-000000000001.jsonl"),
+        format!("{CLAUDE_DIMENSIONS_SESSION}{cost_state}\n"),
+    )
+    .unwrap();
+    let codex_home = root.path().join("codex");
+    let sessions = codex_home.join("sessions/2026/01/01");
+    fs::create_dir_all(&sessions).unwrap();
+    fs::write(
+        sessions.join("rollout-2026-01-01T10-00-00-00000000-0000-0000-0000-000000000001.jsonl"),
+        CODEX_SESSION_ONE,
+    )
+    .unwrap();
+    let run = |json: bool| {
+        let mut command = tapes();
+        command.args(["usage", "--global"]);
+        if json {
+            command.arg("--json");
+        }
+        with_fixture_env(&mut command, &codex_home, &home, root.path());
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        output.stdout
+    };
+
+    let report: Value = serde_json::from_slice(&run(true)).unwrap();
+    let totals = &report["totals"];
+    assert_eq!(totals["mixed_accounting"], true);
+    assert!(totals.get("tokens").is_none(), "{totals}");
+    assert_eq!(
+        totals["disjoint"],
+        serde_json::json!({
+            "conventions": {
+                "claude": { "input": "excludes-cache", "output": "includes-reasoning" },
+                "codex": { "input": "includes-cache-read", "output": "includes-reasoning" }
+            },
+            "sessions": 2,
+            "uncached_input": 210,
+            "cache_read": 3400,
+            "cache_write": { "ttl_unrecorded": 500 },
+            "output": 380,
+            "reasoning": 12,
+            "total": 4490,
+            "missing": { "cache_write_ttl": 1, "reasoning": 1 }
+        })
+    );
+    for partition in report["partitions"].as_array().unwrap() {
+        assert!(partition.get("tokens").is_some(), "{partition}");
+        assert!(partition["disjoint"].get("total").is_some(), "{partition}");
+    }
+
+    let rendered = String::from_utf8(run(false)).unwrap();
+    assert!(
+        rendered.contains(
+            "Disjoint total over 2 sessions: uncached input 210, cache read 3400, \
+             cache write TTL unrecorded 500, output 380 (reasoning 12), total 4490\n"
+        ),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains(
+            "Convention codex: native input includes cache read, output includes reasoning\n"
+        ),
+        "{rendered}"
+    );
+}
+
+/// One Claude session's usage keeps its five-minute and one-hour cache
+/// writes apart and names each dimension a request did not record.
+#[test]
+fn usage_names_cache_write_ttls_and_request_dimensions() {
+    let root = TemporaryDirectory::new(std::env::temp_dir().join(format!(
+        "tapes-usage-request-dimensions-{}",
+        std::process::id()
+    )));
+    let home = root.path().join("home");
+    let project = home.join(".claude/projects/fixture");
+    fs::create_dir_all(&project).unwrap();
+    fs::write(
+        project.join("30000000-0000-4000-8000-000000000001.jsonl"),
+        CLAUDE_DIMENSIONS_SESSION,
+    )
+    .unwrap();
+    let mut command = tapes();
+    command.args(["usage", "30000000-0000-4000-8000-000000000001"]);
+    with_fixture_env(&mut command, &root.path().join("codex"), &home, root.path());
+    let output = command.output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let rendered = String::from_utf8(output.stdout).unwrap();
+    for line in [
+        "tokens: input 5, output 65, reasoning 12, cache read 2300, cache write 360\n",
+        "disjoint: uncached input 5, cache read 2300, cache write 5m 150 + 1h 210, \
+         output 65 (reasoning 12), total 2730 [native input excludes cache, output includes reasoning]\n",
+        "requests: 2 identified; cache write 5m 150 + 1h 210; service tier standard 2; \
+         speed fast 1, standard 1; inference geo global 1, not_available 1; web search 1; web fetch 2\n",
+    ] {
+        assert!(rendered.contains(line), "{line} in {rendered}");
+    }
+    assert!(!rendered.contains("disjoint missing"), "{rendered}");
 }
 
 #[test]

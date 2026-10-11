@@ -311,11 +311,37 @@ impl Model {
     }
 }
 
+/// A dollar figure a harness wrote into its recording. It is the harness's
+/// own calculation, never a provider charge, so every serialized cost names
+/// its kind; no recording read states the price table behind it, so the
+/// pricing basis is named missing rather than assumed.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(into = "CostRecord")]
 pub struct Cost {
     pub usd: f64,
 }
 
+#[derive(Serialize)]
+struct CostRecord {
+    usd: f64,
+    kind: &'static str,
+    missing: [&'static str; 1],
+}
+
+impl From<Cost> for CostRecord {
+    fn from(cost: Cost) -> Self {
+        Self {
+            usd: cost.usd,
+            kind: "harness-calculated-estimate",
+            missing: ["pricing_basis"],
+        }
+    }
+}
+
+/// The token counters as the harness wrote them. Their partition is the
+/// harness's own: what `input` and `output` include differs between
+/// harnesses, so these fields add only within one `TokenConvention`.
+/// `DisjointTokens` is the form that adds across harnesses.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Tokens {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -328,6 +354,196 @@ pub struct Tokens {
     pub cache_read: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cache_write: Option<u64>,
+}
+
+/// How a harness's native counters divide a request's tokens.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct TokenConvention {
+    pub input: InputConvention,
+    pub output: OutputConvention,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum InputConvention {
+    /// `input` is uncached input alone; cache reads and writes are counted
+    /// only in `cache_read` and `cache_write`.
+    ExcludesCache,
+    /// `input` also counts the cache reads in `cache_read`. Whether it counts
+    /// cache writes is unestablished.
+    IncludesCacheRead,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum OutputConvention {
+    /// `output` includes the tokens counted in `reasoning`.
+    IncludesReasoning,
+    /// `output` excludes reasoning, which is counted only in `reasoning`.
+    ExcludesReasoning,
+}
+
+impl TokenConvention {
+    /// The convention a harness's recorded counters follow. Claude, pi, and
+    /// OpenCode count uncached input apart from cache reads and writes, while
+    /// Codex counts cache reads inside `input`; OpenCode counts reasoning
+    /// beside `output`, and the others inside it. A harness whose convention
+    /// is not established has none.
+    pub fn of(harness: &str) -> Option<Self> {
+        let (input, output) = match harness {
+            "claude" | "pi" => (
+                InputConvention::ExcludesCache,
+                OutputConvention::IncludesReasoning,
+            ),
+            "codex" => (
+                InputConvention::IncludesCacheRead,
+                OutputConvention::IncludesReasoning,
+            ),
+            "opencode" => (
+                InputConvention::ExcludesCache,
+                OutputConvention::ExcludesReasoning,
+            ),
+            _ => return None,
+        };
+        Some(Self { input, output })
+    }
+}
+
+/// Cache writes by how long the provider keeps the entry. Writes the source
+/// recorded without a TTL are `ttl_unrecorded`; they are never assigned one.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct CacheWrites {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ephemeral_5m: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ephemeral_1h: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ttl_unrecorded: Option<u64>,
+}
+
+impl CacheWrites {
+    pub fn total(&self) -> u64 {
+        [self.ephemeral_5m, self.ephemeral_1h, self.ttl_unrecorded]
+            .into_iter()
+            .flatten()
+            .fold(0, u64::saturating_add)
+    }
+
+    pub fn add(&mut self, other: &Self) {
+        for (total, value) in [
+            (&mut self.ephemeral_5m, other.ephemeral_5m),
+            (&mut self.ephemeral_1h, other.ephemeral_1h),
+            (&mut self.ttl_unrecorded, other.ttl_unrecorded),
+        ] {
+            if let Some(value) = value {
+                *total = Some(total.unwrap_or(0).saturating_add(value));
+            }
+        }
+    }
+}
+
+/// Token counts in categories no token belongs to twice, so they add across
+/// harnesses: uncached input, cache read, cache write by TTL, and output.
+/// Reasoning is a share of output, not a further category. `total` is the
+/// four categories' sum, present only when each of them is. `missing` names
+/// every category, and the cache-write TTL when writes lack one, that the
+/// native counters do not determine under `convention`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct DisjointTokens {
+    pub convention: TokenConvention,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub uncached_input: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_read: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_write: Option<CacheWrites>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total: Option<u64>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub missing: Vec<&'static str>,
+}
+
+impl DisjointTokens {
+    /// Map native counters onto the disjoint categories. `cache_writes` is the
+    /// TTL split of the same writes `tokens.cache_write` counts, where the
+    /// source recorded one; a split that does not sum to that count is not
+    /// that split and is set aside. A counter that would go negative under
+    /// the convention contradicts it and leaves its category missing.
+    pub fn from_native(
+        tokens: &Tokens,
+        convention: TokenConvention,
+        cache_writes: Option<&CacheWrites>,
+    ) -> Self {
+        let mut missing = Vec::new();
+        let cache_write = tokens.cache_write.map(|total| {
+            cache_writes
+                .filter(|split| split.total() == total)
+                .copied()
+                .unwrap_or(CacheWrites {
+                    ttl_unrecorded: Some(total),
+                    ..CacheWrites::default()
+                })
+        });
+        let uncached_input = match convention.input {
+            InputConvention::ExcludesCache => tokens.input,
+            InputConvention::IncludesCacheRead => match tokens.cache_write {
+                Some(0) => tokens
+                    .input
+                    .zip(tokens.cache_read)
+                    .and_then(|(input, read)| input.checked_sub(read)),
+                _ => None,
+            },
+        };
+        let output = match convention.output {
+            OutputConvention::IncludesReasoning => tokens.output,
+            OutputConvention::ExcludesReasoning => tokens
+                .output
+                .zip(tokens.reasoning)
+                .map(|(output, reasoning)| output.saturating_add(reasoning)),
+        };
+        let reasoning = tokens
+            .reasoning
+            .filter(|reasoning| output.is_some_and(|output| *reasoning <= output));
+        for (name, present) in [
+            ("uncached_input", uncached_input.is_some()),
+            ("cache_read", tokens.cache_read.is_some()),
+            ("cache_write", cache_write.is_some()),
+            (
+                "cache_write_ttl",
+                cache_write.is_none_or(|writes| writes.ttl_unrecorded.unwrap_or(0) == 0),
+            ),
+            ("output", output.is_some()),
+            ("reasoning", reasoning.is_some()),
+        ] {
+            if !present {
+                missing.push(name);
+            }
+        }
+        let total = [
+            uncached_input,
+            tokens.cache_read,
+            cache_write.map(|writes| writes.total()),
+            output,
+        ]
+        .into_iter()
+        .try_fold(0u64, |sum, count| {
+            count.map(|count| sum.saturating_add(count))
+        });
+        Self {
+            convention,
+            uncached_input,
+            cache_read: tokens.cache_read,
+            cache_write,
+            output,
+            reasoning,
+            total,
+            missing,
+        }
+    }
 }
 
 /// What the session-level counters are, and how much of the session they cover.

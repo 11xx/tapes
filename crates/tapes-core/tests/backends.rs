@@ -1633,6 +1633,161 @@ fn claude_sums_each_request_once_and_marks_the_read_as_summed_requests() {
     assert_eq!(transcript.session.accounting, session.accounting);
 }
 
+const CLAUDE_DIMENSIONS_SESSION: &str = "30000000-0000-4000-8000-000000000001";
+
+fn claude_dimensions_recording() -> String {
+    fs::read_to_string(
+        fixtures("claude-request-dimensions")
+            .join("project")
+            .join(format!("{CLAUDE_DIMENSIONS_SESSION}.jsonl")),
+    )
+    .unwrap()
+}
+
+fn usage_value(backend: &dyn Backend, id: &str) -> serde_json::Value {
+    let session = located(backend, id);
+    let transcript = backend.transcript(&session, 10).unwrap();
+    serde_json::to_value(usage(&transcript)).unwrap()
+}
+
+/// Claude splits each request's cache writes by TTL. A sum over requests that
+/// each recorded the split keeps the five-minute and one-hour writes apart in
+/// the disjoint categories, beside the native counters that merge them.
+#[test]
+fn claude_request_sums_keep_cache_write_ttls_apart() {
+    let backend = ClaudeBackend::new(fixtures("claude-request-dimensions"));
+    let value = usage_value(&backend, CLAUDE_DIMENSIONS_SESSION);
+
+    assert_eq!(
+        value["tokens"],
+        serde_json::json!({
+            "input": 5,
+            "output": 65,
+            "reasoning": 12,
+            "cache_read": 2300,
+            "cache_write": 360
+        })
+    );
+    assert_eq!(
+        value["disjoint"],
+        serde_json::json!({
+            "convention": { "input": "excludes-cache", "output": "includes-reasoning" },
+            "uncached_input": 5,
+            "cache_read": 2300,
+            "cache_write": { "ephemeral_5m": 150, "ephemeral_1h": 210 },
+            "output": 65,
+            "reasoning": 12,
+            "total": 2730
+        })
+    );
+    assert_eq!(
+        value["requests"],
+        serde_json::json!({
+            "requests": 2,
+            "cache_write": { "ephemeral_5m": 150, "ephemeral_1h": 210 },
+            "service_tier": { "standard": 2 },
+            "speed": { "fast": 1, "standard": 1 },
+            "inference_geo": { "global": 1, "not_available": 1 },
+            "web_search_requests": 1,
+            "web_fetch_requests": 2
+        })
+    );
+
+    let backends: Vec<Box<dyn Backend>> = vec![Box::new(ClaudeBackend::new(fixtures(
+        "claude-request-dimensions",
+    )))];
+    let whole = serde_json::to_value(
+        usage_full_with_backends(&backends, Selection::Id(CLAUDE_DIMENSIONS_SESSION)).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(whole["disjoint"], value["disjoint"]);
+    assert_eq!(whole["requests"], value["requests"]);
+}
+
+/// A dimension a request did not record is counted as missing for that
+/// request, and a recorded total that merges the TTLs names the TTL missing
+/// rather than assigning its writes one.
+#[test]
+fn claude_names_the_dimensions_a_request_or_a_recorded_total_did_not_record() {
+    let root = std::env::temp_dir().join(format!(
+        "tapes-claude-missing-dimensions-{}",
+        std::process::id()
+    ));
+    let project = root.join("project");
+    let path = project.join(format!("{CLAUDE_DIMENSIONS_SESSION}.jsonl"));
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&project).unwrap();
+    let undimensioned = format!(
+        r#"{{"type":"assistant","sessionId":"{CLAUDE_DIMENSIONS_SESSION}","uuid":"assistant-4","requestId":"req_fixture_3","timestamp":"2026-01-01T10:00:05Z","cwd":"/fixtures/project","message":{{"id":"msg_fixture_3","role":"assistant","model":"claude-fixture","usage":{{"input_tokens":1,"cache_creation_input_tokens":40,"cache_read_input_tokens":0,"output_tokens":5,"service_tier":null}},"content":[{{"type":"text","text":"Done."}}]}}}}"#
+    );
+    fs::write(
+        &path,
+        format!("{}{undimensioned}\n", claude_dimensions_recording()),
+    )
+    .unwrap();
+    let backend = ClaudeBackend::new(&root);
+
+    let summed = usage_value(&backend, CLAUDE_DIMENSIONS_SESSION);
+    assert_eq!(
+        summed["disjoint"]["cache_write"],
+        serde_json::json!({ "ephemeral_5m": 150, "ephemeral_1h": 210, "ttl_unrecorded": 40 })
+    );
+    assert_eq!(
+        summed["disjoint"]["missing"],
+        serde_json::json!(["cache_write_ttl"])
+    );
+    assert_eq!(summed["disjoint"]["total"], 2776);
+    assert_eq!(
+        summed["requests"]["missing"],
+        serde_json::json!({
+            "cache_write_ttl": 1,
+            "inference_geo": 1,
+            "service_tier": 1,
+            "speed": 1,
+            "web_fetch_requests": 1,
+            "web_search_requests": 1
+        })
+    );
+    assert_eq!(
+        summed["requests"]["service_tier"],
+        serde_json::json!({ "standard": 2 })
+    );
+
+    let cost_state = format!(
+        r#"{{"type":"cost-state","sessionId":"{CLAUDE_DIMENSIONS_SESSION}","totalCostUSD":0.5,"modelUsage":{{"claude-fixture":{{"inputTokens":10,"outputTokens":80,"thinkingTokens":12,"cacheReadInputTokens":2400,"cacheCreationInputTokens":500,"webSearchRequests":1,"costUSD":0.5}}}},"hasUnknownModelCost":false}}"#
+    );
+    let mut recording = fs::read_to_string(&path).unwrap();
+    recording.push_str(&cost_state);
+    recording.push('\n');
+    fs::write(&path, recording).unwrap();
+
+    let recorded = usage_value(&backend, CLAUDE_DIMENSIONS_SESSION);
+    assert_eq!(recorded["accounting"]["basis"], "recorded-total");
+    assert_eq!(
+        recorded["disjoint"]["cache_write"],
+        serde_json::json!({ "ttl_unrecorded": 500 })
+    );
+    assert_eq!(
+        recorded["disjoint"]["missing"],
+        serde_json::json!(["cache_write_ttl"])
+    );
+    assert_eq!(recorded["disjoint"]["total"], 2990);
+    // The request tally keeps its own scope: the requests the read reached.
+    assert_eq!(
+        recorded["requests"]["cache_write"],
+        serde_json::json!({ "ephemeral_5m": 150, "ephemeral_1h": 210, "ttl_unrecorded": 40 })
+    );
+    assert_eq!(
+        recorded["cost"],
+        serde_json::json!({
+            "usd": 0.5,
+            "kind": "harness-calculated-estimate",
+            "missing": ["pricing_basis"]
+        })
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
 #[test]
 fn claude_cost_state_supplies_recorded_totals_over_request_usage() {
     let root = std::env::temp_dir().join(format!("tapes-claude-cost-state-{}", std::process::id()));
@@ -4549,6 +4704,21 @@ fn codex_modern_usage_records_choose_the_modern_basis_and_keep_native_rows() {
     assert!(!series.rows[2].counted);
     assert!(series.rows[4].rate_limits.is_none());
     assert!(series.rows[5].rate_limits.is_some());
+    // Each row restates its own request counters in disjoint categories:
+    // Codex counts cache reads inside input.
+    let first = series.rows[0].disjoint.as_ref().unwrap();
+    assert_eq!(
+        (
+            first.uncached_input,
+            first.cache_read,
+            first.output,
+            first.total
+        ),
+        (Some(8), Some(2), Some(3), Some(13))
+    );
+    let advance = series.rows[4].disjoint.as_ref().unwrap();
+    assert_eq!(advance.total, Some(37));
+    assert!(series.rows[5].disjoint.is_none());
 }
 
 #[test]

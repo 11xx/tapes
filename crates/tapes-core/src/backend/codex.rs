@@ -18,9 +18,9 @@ use crate::history::PageProjection;
 use crate::lineage::{ChildRef, Lineage, ParentRef, SourceRef};
 use crate::model::{
     is_known_envelope, is_known_notice, AccountingBasis, AccountingCoverage, ByteSpan,
-    KindDeclaration, Launch, Model, ModelObservationStatus, ReadGap, RecordRef, Role, Session,
-    SourceDescriptor, TerminalObservation, Tokens, TrailingRecord, Transcript, Turn, TurnKind,
-    TurnSelection, UserDefault,
+    DisjointTokens, KindDeclaration, Launch, Model, ModelObservationStatus, ReadGap, RecordRef,
+    Role, Session, SourceDescriptor, TerminalObservation, TokenConvention, Tokens, TrailingRecord,
+    Transcript, Turn, TurnKind, TurnSelection, UserDefault,
 };
 use crate::usage::{
     Credits, ModelUsage, ObservationBasis, ObservationClassification, RateLimits, RateWindow,
@@ -1246,6 +1246,7 @@ impl CodexUsageObserver {
             usage: usage.clone(),
             total_token_usage: None,
             last_token_usage: None,
+            disjoint: codex_disjoint(usage.as_ref()),
             context_window: None,
             rate_limits: None,
         };
@@ -1348,6 +1349,7 @@ impl CodexUsageObserver {
             counted,
             usage: None,
             total_token_usage: row_total.clone(),
+            disjoint: codex_disjoint(row_last.as_ref()),
             last_token_usage: row_last.clone(),
             context_window,
             rate_limits: rate_limits.clone(),
@@ -1524,6 +1526,7 @@ impl CodexUsageObserver {
             durations_ms: None,
             by_model,
             attribution,
+            ..UsageDetail::default()
         }
         .into_option();
         let series = self.series.map(|series| series.finish(basis));
@@ -1593,6 +1596,13 @@ fn tokens_from_object(value: &Value) -> Option<Tokens> {
             .and_then(Value::as_u64),
     );
     totals.finish()
+}
+
+/// One observation's request counters in disjoint categories. Codex
+/// records no TTL for its cache writes.
+fn codex_disjoint(tokens: Option<&Tokens>) -> Option<DisjointTokens> {
+    let convention = TokenConvention::of("codex")?;
+    tokens.map(|tokens| DisjointTokens::from_native(tokens, convention, None))
 }
 
 fn codex_last_tokens(value: &Value) -> Option<Tokens> {
