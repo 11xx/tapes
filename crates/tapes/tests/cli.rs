@@ -10953,7 +10953,7 @@ fn usage_reconcile_sets_the_recorded_total_beside_the_family_requests() {
         "reconciliation scope: not established; missing recorded-total-membership\n",
         "  output: recorded 190, identified 190, difference 0, reconciled\n",
         "  source child a0123456789abcdef: complete, 3 records, 1 new requests, 0 without \
-         identity, 1 answered without request\n",
+         identity, 1 answered without request, 0 failed\n",
     ] {
         assert!(rendered.contains(line), "{line} in {rendered}");
     }

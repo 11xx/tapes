@@ -72,9 +72,11 @@ pub enum SourceRole {
 /// with usage; `requests` the distinct identities first witnessed here, whose
 /// counters `identified` sums, so the sources' `identified` partition the
 /// union. `unkeyed` counts records with usage and no request identity,
-/// `unrequested` records the harness marks as answered without a request.
-/// A source is `complete` only when every record decoded and the identity
-/// budget held.
+/// `unrequested` records the harness marks as answered without a request,
+/// and `failed` records the harness wrote in place of a response that failed,
+/// whose consumption is unknown. A source is `complete` only when every
+/// record decoded, none stands for a failed request, and the identity budget
+/// held.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct ReconciledSource {
     pub role: SourceRole,
@@ -92,6 +94,8 @@ pub struct ReconciledSource {
     pub requests: usize,
     pub unkeyed: usize,
     pub unrequested: usize,
+    #[serde(skip_serializing_if = "is_zero")]
+    pub failed: usize,
     #[serde(skip_serializing_if = "is_zero")]
     pub skipped: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -141,9 +145,9 @@ pub struct IdentifiedRequests {
 pub enum CounterStatus {
     /// The total equals the identified union.
     Reconciled,
-    /// The total exceeds the identified union, or a read was incomplete, and
-    /// the total's scope is not established; the difference is not proved
-    /// consumption beyond the identified requests.
+    /// The total exceeds the identified union, or the union is incomplete,
+    /// and the total's scope is not established; the difference is not
+    /// proved consumption beyond the identified requests.
     Discrepancy,
     /// The identified union exceeds the total it should be within.
     Conflict,
@@ -250,6 +254,7 @@ impl FamilyLedger {
             requests: 0,
             unkeyed: 0,
             unrequested: 0,
+            failed: 0,
             skipped: 0,
             identified: None,
             error: None,
@@ -271,7 +276,7 @@ impl FamilyLedger {
         entry.length = Some(length);
         entry.sha256 = Some(sha256);
         entry.skipped = skipped;
-        entry.complete = skipped == 0 && !self.budget_exhausted;
+        entry.complete = skipped == 0 && entry.failed == 0 && !self.budget_exhausted;
     }
 
     pub(crate) fn failed(&mut self, source: usize, error: String) {
@@ -289,6 +294,12 @@ impl FamilyLedger {
 
     pub(crate) fn unrequested(&mut self, source: usize) {
         self.sources[source].unrequested += 1;
+    }
+
+    /// A record standing in for a failed response. Its counters are the
+    /// harness's placeholder, not a measurement, so it joins no union.
+    pub(crate) fn failed_request(&mut self, source: usize) {
+        self.sources[source].failed += 1;
     }
 
     /// One request record's usage. `position` is the record's place in its
@@ -369,7 +380,11 @@ impl FamilyLedger {
         let mut revised = 0;
         let mut by_source: Vec<Option<Tokens>> = vec![None; self.sources.len()];
         let mut identified_by_model: BTreeMap<String, (Option<Tokens>, usize)> = BTreeMap::new();
+        let mut partially_recorded = [false; COUNTERS.len()];
         for witness in self.requests.values() {
+            for (index, name) in COUNTERS.iter().enumerate() {
+                partially_recorded[index] |= counter(&witness.tokens, name).is_none();
+            }
             add_tokens(&mut union, &witness.tokens);
             add_tokens(&mut by_source[witness.first_source], &witness.tokens);
             cross_recording += usize::from(witness.cross_recording);
@@ -419,7 +434,7 @@ impl FamilyLedger {
                     name,
                     recorded.as_ref(),
                     union.as_ref(),
-                    complete,
+                    complete && !partially_recorded[index],
                     self.conflicting_counters[index],
                 )
             })
@@ -475,8 +490,10 @@ impl FamilyLedger {
 
 /// Compare one counter. The difference is computed only within one counter
 /// epoch, at a frontier past every parent request, and where every witness of
-/// a request agrees on the counter. A negative difference is a conflict even
-/// on an incomplete read, since reading more only grows the union.
+/// a request agrees on the counter. The union is complete for a counter when
+/// every source read whole and every identified request recorded it. A
+/// negative difference is a conflict even over an incomplete union, since
+/// completing it only grows it.
 fn compare(
     name: &'static str,
     recorded: Option<&RecordedTotal>,
@@ -519,7 +536,7 @@ fn compare(
     let status = if difference < 0 {
         CounterStatus::Conflict
     } else if !complete {
-        reasons.push("incomplete-read");
+        reasons.push("incomplete-union");
         CounterStatus::Discrepancy
     } else if difference == 0 {
         CounterStatus::Reconciled

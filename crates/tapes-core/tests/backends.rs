@@ -2123,9 +2123,26 @@ fn an_incomplete_source_read_keeps_the_union_from_reconciling() {
     assert_eq!(statuses(&report), all("discrepancy"));
     assert_eq!(
         report["counters"][0]["reasons"],
-        serde_json::json!(["incomplete-read"])
+        serde_json::json!(["incomplete-union"])
     );
-    fs::remove_dir_all(incomplete).unwrap();
+
+    // A failed response's synthetic zero is no measurement of what it used.
+    let failed = claude_family("failed", |parent, _| {
+        let synthetic = r#"{"type":"assistant","sessionId":"40000000-0000-4000-8000-000000000001","uuid":"assistant-error","requestId":"req_failed_1","timestamp":"2026-01-01T10:00:10Z","cwd":"/fixtures/project","isApiErrorMessage":true,"message":{"id":"msg_failed_1","role":"assistant","model":"<synthetic>","usage":{"input_tokens":0,"output_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":0},"stop_reason":"stop_sequence","content":[{"type":"text","text":"API Error"}]}}"#;
+        let (head, tail) = parent.split_at(parent.find(r#"{"type":"cost-state""#).unwrap());
+        *parent = format!(
+            "{head}{synthetic}
+{tail}"
+        );
+    });
+    let report = reconciled(&failed);
+    assert_eq!(report["sources"][0]["failed"], 1);
+    assert_eq!(report["sources"][0]["complete"], false);
+    assert_eq!(report["identified"]["requests"], 3);
+    assert_eq!(statuses(&report), all("discrepancy"));
+    for root in [incomplete, failed] {
+        fs::remove_dir_all(root).unwrap();
+    }
 }
 
 /// Counters compare only where both sides record them under one
@@ -2145,6 +2162,23 @@ fn incompatible_counters_and_conflicting_witnesses_are_withheld() {
         serde_json::json!(["counter-unrecorded"])
     );
     assert_eq!(report["counters"][1]["status"], "reconciled");
+
+    // A request that did not record a counter leaves the union's figure for
+    // it a partial sum, which cannot reconcile.
+    let partial = claude_family("partial", |parent, _| {
+        *parent = parent.replacen(r#""output_tokens_details":{"thinking_tokens":40},"#, "", 1);
+    });
+    let report = reconciled(&partial);
+    let reasoning = &report["counters"][2];
+    assert_eq!(reasoning["identified"], 35);
+    assert_eq!(reasoning["difference"], 40);
+    assert_eq!(reasoning["status"], "discrepancy");
+    assert_eq!(
+        reasoning["reasons"],
+        serde_json::json!(["incomplete-union"])
+    );
+    assert_eq!(report["counters"][1]["status"], "reconciled");
+    fs::remove_dir_all(partial).unwrap();
 
     let conflicting = claude_family("conflicting", |_, child| {
         *child = child.replacen(

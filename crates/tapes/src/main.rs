@@ -1442,9 +1442,10 @@ enum Command {
         /// total as written; requests are deduplicated by request id across
         /// recordings, and hook answers made no request. Each counter's
         /// difference, recorded minus identified, is signed and never clamped:
-        /// `reconciled` at zero, `conflict` below it, `discrepancy` above it or
-        /// over an incomplete read, since no Claude recording states which
-        /// requests its cost-state counts. A counter reset, a cost-state
+        /// `reconciled` at zero, `conflict` below it, `discrepancy` above it,
+        /// since no Claude recording states which requests its cost-state
+        /// counts, or over an incomplete union: a recording that did not
+        /// decode whole, or a request that did not record the counter. A counter reset, a cost-state
         /// before the parent's last request, witnesses that disagree, or a
         /// counter one side lacks make it `withheld`, with no difference.
         /// Each source names the revision, length, and SHA-256 of the bytes
@@ -4081,12 +4082,14 @@ fn render_reconciliation(reconciliation: &Reconciliation) -> String {
             }
         };
         out.push_str(&format!(
-            "  source {role}: {}, {} records, {} new requests, {} without identity, {} answered without request{}\n",
+            "  source {role}: {}, {} records, {} new requests, {} without identity, {} answered without \
+             request, {} failed{}\n",
             if source.complete { "complete" } else { "incomplete" },
             source.records,
             source.requests,
             source.unkeyed,
             source.unrequested,
+            source.failed,
             source
                 .error
                 .as_ref()

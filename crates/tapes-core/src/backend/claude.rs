@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -1285,8 +1285,9 @@ fn assistant_usage(value: &Value) -> Option<&serde_json::Map<String, Value>> {
 }
 
 /// Read one family recording whole into the reconciliation ledger: its
-/// request records, its hook answers, and, for the parent, every cost-state
-/// it recorded. Each record must name the family's session.
+/// request records, its hook answers, the `<synthetic>` records Claude writes
+/// in place of a failed response, and, for the parent, every cost-state it
+/// recorded. Each record must name the family's session.
 fn reconcile_source(
     ledger: &mut FamilyLedger,
     source: usize,
@@ -1310,17 +1311,12 @@ fn reconcile_source(
                         .collect()
                 })
                 .unwrap_or_default();
-            let tokens = cost_state_tokens(value).unwrap_or(Tokens {
-                input: None,
-                output: None,
-                reasoning: None,
-                cache_read: None,
-                cache_write: None,
-            });
-            ledger.recorded(position, tokens, by_model);
+            ledger.recorded(position, recorded_counters(&by_model), by_model);
         } else if let Some(usage) = assistant_usage(value) {
             if value["answeredWithoutRequest"] == true {
                 ledger.unrequested(source);
+            } else if value["message"]["model"] == "<synthetic>" {
+                ledger.failed_request(source);
             } else {
                 ledger.request(
                     source,
@@ -1346,6 +1342,27 @@ fn reconcile_source(
         read.skipped,
     );
     Ok(())
+}
+
+/// A cost-state's counters summed over its models. A counter one model
+/// does not record has no total: a sum over the others would understate it.
+fn recorded_counters(by_model: &BTreeMap<String, Tokens>) -> Tokens {
+    let sum = |counter: fn(&Tokens) -> Option<u64>| {
+        (!by_model.is_empty())
+            .then(|| {
+                by_model.values().map(counter).try_fold(0u64, |sum, count| {
+                    count.map(|count| sum.saturating_add(count))
+                })
+            })
+            .flatten()
+    };
+    Tokens {
+        input: sum(|tokens| tokens.input),
+        output: sum(|tokens| tokens.output),
+        reasoning: sum(|tokens| tokens.reasoning),
+        cache_read: sum(|tokens| tokens.cache_read),
+        cache_write: sum(|tokens| tokens.cache_write),
+    }
 }
 
 /// Tally one request's price-relevant dimensions. Its cache writes count

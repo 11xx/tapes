@@ -570,14 +570,18 @@ PROBE BEFORE EXPORTING
   request's witnesses the one recording the most on every counter is its
   usage, since a streamed response is first written with a partial count,
   and two witnesses that each record more on some counter are a conflict.
-  Hook answers made no request. Each counter's difference, recorded minus
+  Hook answers made no request. A <synthetic> record stands for a failed
+  response whose consumption is unknown: it joins no union and leaves its
+  recording incomplete. Each counter's difference, recorded minus
   identified, is signed and never clamped: reconciled at zero, conflict below
-  it, discrepancy above it or over an incomplete read. A positive difference
-  is never established as consumption: no Claude recording states which
-  requests its cost-state counts, so scope_established is false. A counter
-  reset, a cost-state before the parent's last request, conflicting
-  witnesses, or a counter one side does not record leave a counter withheld,
-  with no difference. by_model sets each model's recorded total beside its
+  it, discrepancy above it or over an incomplete union — a recording that did
+  not decode whole, or a request that did not record the counter. A
+  cost-state model that omits a counter leaves the total without it. A
+  positive difference is never established as consumption: no Claude
+  recording states which requests its cost-state counts, so
+  scope_established is false. A counter reset, a cost-state before the
+  parent's last request, conflicting witnesses, or a counter one side does
+  not record leave a counter withheld, with no difference. by_model sets each model's recorded total beside its
   identified requests, and each source names the revision, length, and
   SHA-256 of the bytes read and the rules applied, so a report reproduces.
 
