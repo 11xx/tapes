@@ -11279,6 +11279,68 @@ fn show_remote_never_joins_the_local_liveness_registry() {
     let _ = fs::remove_dir_all(local_codex);
 }
 
+#[test]
+fn remote_older_reports_keep_written_zero_as_unpriced_evidence() {
+    let root = TemporaryDirectory::new(
+        std::env::temp_dir().join(format!("tapes-remote-zero-{}", std::process::id())),
+    );
+    let native = serde_json::json!({"id":"fixture-zero", "source":{
+        "kind":"installed-recording", "origin":"pi", "recorded_harness":"pi",
+        "representation":"pi-recording", "producer":"pi",
+        "location":{"locator":"/fixtures/recording.jsonl"}},
+        "tokens":{"input":40,"output":60}, "cost":{"usd":0},
+        "accounting":{"basis":"summed-requests","coverage":"session"}});
+    let list = serde_json::json!({"schema":"tapes-list/9","sort":"newest","sessions":[native.clone()],"scanned":1});
+    let show = serde_json::json!({"schema":"tapes-session/19","session":native,"turns":[],"truncated":false});
+    let transport = root.path().join("ssh");
+    fs::write(&transport, format!("#!/bin/sh\ncase \"$2\" in *list*) cat <<'JSON'\n{list}\nJSON\n;; *) cat <<'JSON'\n{show}\nJSON\n;; esac\n")).unwrap();
+    fs::set_permissions(&transport, fs::Permissions::from_mode(0o700)).unwrap();
+    for args in [
+        vec![
+            "list",
+            "--global",
+            "--remote",
+            "fixture-replica",
+            "--harness",
+            "pi",
+            "--json",
+        ],
+        vec![
+            "show",
+            "fixture-zero",
+            "--remote",
+            "fixture-replica",
+            "--json",
+        ],
+    ] {
+        let mut command = tapes();
+        command.args(&args);
+        with_fixture_env(
+            &mut command,
+            &root.path().join("codex"),
+            &root.path().join("home"),
+            root.path(),
+        );
+        command.env("TAPES_SSH", &transport);
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+        let session = if args[0] == "list" {
+            &value["sessions"][0]
+        } else {
+            &value["session"]
+        };
+        assert!(session.get("cost").is_none(), "{value}");
+        assert_eq!(session["cost_coverage"]["complete"], false);
+        assert_eq!(session["cost_coverage"]["zero_written_observations"], 1);
+        assert_eq!(session["cost_coverage"]["zero_written_requests"], 0);
+    }
+}
+
 /// A remote query never prompts. The default ssh is invoked with
 /// `BatchMode=yes`, so an unknown host key or a missing key fails at once
 /// instead of stopping on a /dev/tty read until the deadline; a program named

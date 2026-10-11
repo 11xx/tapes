@@ -32,6 +32,7 @@ impl Launch {
 pub const DERIVED_TITLE_MAX_CHARS: usize = 96;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(from = "SessionWire", into = "SessionWire")]
 pub struct Session {
     pub id: String,
     /// Opaque occurrence within a supplied source. It disambiguates repeated
@@ -88,12 +89,122 @@ pub struct Session {
     /// start is at or before it. Omitted when false.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub start_uncertain: bool,
-    /// Usage facts a harness records beside the normalized counters, filled
-    /// by the backend that holds them. They are harness-shaped rather than
-    /// part of the session contract, so the session wire object does not carry
-    /// them; the usage projection is where they reach a consumer.
+    /// Harness-shaped usage detail reaches consumers through the usage view.
+    /// Its pricing coverage also travels in the session wire object so
+    /// reports preserve written-zero evidence across replicas.
     #[serde(skip)]
     pub usage_detail: Option<UsageDetail>,
+}
+
+/// The session wire carries pricing evidence independently of harness-shaped
+/// usage detail, so forwarding a report preserves an unpriced written zero.
+#[derive(Serialize, Deserialize)]
+struct SessionWire {
+    id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    occurrence: Option<String>,
+    source: SourceDescriptor,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    metadata: Option<SessionMetadata>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    model: Option<Model>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    model_observation: Option<ModelObservationStatus>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    model_selections: Vec<ModelSelectionSpan>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    launch: Option<Launch>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    derived_title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    derived_title_truncated: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    directory: Option<PathBuf>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    started_at: Option<DateTime<Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_activity_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    live: Option<LiveState>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cost: Option<Cost>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tokens: Option<Tokens>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    accounting: Option<Accounting>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    start_uncertain: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    cost_coverage: Option<CostCoverage>,
+}
+impl From<SessionWire> for Session {
+    fn from(wire: SessionWire) -> Self {
+        let mut session = Self {
+            id: wire.id,
+            occurrence: wire.occurrence,
+            source: wire.source,
+            metadata: wire.metadata,
+            model: wire.model,
+            model_observation: wire.model_observation,
+            model_selections: wire.model_selections,
+            launch: wire.launch,
+            title: wire.title,
+            derived_title: wire.derived_title,
+            derived_title_truncated: wire.derived_title_truncated,
+            directory: wire.directory,
+            started_at: wire.started_at,
+            last_activity_at: wire.last_activity_at,
+            live: wire.live,
+            cost: wire.cost,
+            tokens: wire.tokens,
+            accounting: wire.accounting,
+            start_uncertain: wire.start_uncertain,
+            usage_detail: wire.cost_coverage.map(|coverage| UsageDetail {
+                cost_coverage: Some(coverage),
+                ..UsageDetail::default()
+            }),
+        };
+        let coverage = session.cost_coverage();
+        session.cost = session.estimated_cost();
+        if let Some(coverage) = coverage {
+            session
+                .usage_detail
+                .get_or_insert_with(UsageDetail::default)
+                .cost_coverage = Some(coverage);
+        }
+        session
+    }
+}
+
+impl From<Session> for SessionWire {
+    fn from(session: Session) -> Self {
+        let cost = session.estimated_cost();
+        let cost_coverage = session.cost_coverage();
+        Self {
+            id: session.id,
+            occurrence: session.occurrence,
+            source: session.source,
+            metadata: session.metadata,
+            model: session.model,
+            model_observation: session.model_observation,
+            model_selections: session.model_selections,
+            launch: session.launch,
+            title: session.title,
+            derived_title: session.derived_title,
+            derived_title_truncated: session.derived_title_truncated,
+            directory: session.directory,
+            started_at: session.started_at,
+            last_activity_at: session.last_activity_at,
+            live: session.live,
+            cost,
+            tokens: session.tokens,
+            accounting: session.accounting,
+            start_uncertain: session.start_uncertain,
+            cost_coverage,
+        }
+    }
 }
 
 /// Provider metadata attached to a supplied conversation without treating a
@@ -225,6 +336,42 @@ impl SourceDescriptor {
 }
 
 impl Session {
+    /// The written dollar figure qualified by its paired token measurement.
+    pub fn estimated_cost(&self) -> Option<Cost> {
+        self.cost
+            .as_ref()
+            .and_then(|cost| Cost::from_written(cost.usd, self.tokens.as_ref()))
+    }
+
+    /// Pricing completeness and observed written zeros. A cumulative report
+    /// establishes an observation count, not a request count.
+    pub fn cost_coverage(&self) -> Option<CostCoverage> {
+        let held = self
+            .usage_detail
+            .as_ref()
+            .and_then(|detail| detail.cost_coverage.clone());
+        if CostCoverage::written(
+            self.cost.as_ref().map(|cost| cost.usd),
+            self.tokens.as_ref(),
+        )
+        .is_some()
+        {
+            let mut coverage = held.unwrap_or_default();
+            coverage.complete = false;
+            coverage.zero_written_observations = coverage
+                .zero_written_observations
+                .max(1)
+                .max(coverage.zero_written_requests);
+            return Some(coverage);
+        }
+        if self.estimated_cost().is_none() && self.tokens.as_ref().is_some_and(Tokens::has_usage) {
+            let mut coverage = held.unwrap_or_default();
+            coverage.complete = false;
+            return Some(coverage);
+        }
+        held
+    }
+
     /// The harness authority used by existing routing and human labels. A
     /// supplied export has no recorded harness, so its origin is the label.
     pub fn harness(&self) -> &str {
@@ -331,7 +478,7 @@ impl Cost {
 /// Coverage of the harness's written dollar figures. A zero beside nonzero
 /// tokens is unpriced. Request counts require request evidence; cumulative
 /// figures contribute only to the observation count.
-#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct CostCoverage {
     pub complete: bool,
     pub zero_written_requests: usize,
@@ -2018,6 +2165,59 @@ mod tests {
             occurrence: None,
             usage_detail: None,
         }
+    }
+
+    #[test]
+    fn older_serialized_sessions_classify_zero_cost_with_their_tokens() {
+        let mut value = serde_json::to_value(session()).unwrap();
+        value["cost"] = serde_json::json!({"usd": 0});
+        let decoded: Session = serde_json::from_value(value).unwrap();
+        assert!(decoded.cost.is_none());
+        let encoded = serde_json::to_value(&decoded).unwrap();
+        assert!(encoded.get("cost").is_none());
+        assert_eq!(encoded["cost_coverage"]["complete"], false);
+        assert_eq!(encoded["cost_coverage"]["zero_written_observations"], 1);
+        assert_eq!(encoded["cost_coverage"]["zero_written_requests"], 0);
+        let restored: Session = serde_json::from_value(encoded.clone()).unwrap();
+        assert_eq!(serde_json::to_value(restored).unwrap(), encoded);
+    }
+
+    #[test]
+    fn serialized_pricing_evidence_retains_request_counts_without_double_counting() {
+        let mut value = serde_json::to_value(session()).unwrap();
+        value["cost"] = serde_json::json!({"usd": 0});
+        value["cost_coverage"] = serde_json::json!({"complete": false, "zero_written_requests": 2, "zero_written_observations": 2});
+        let decoded: Session = serde_json::from_value(value).unwrap();
+        let encoded = serde_json::to_value(&decoded).unwrap();
+        assert_eq!(encoded["cost_coverage"]["zero_written_requests"], 2);
+        assert_eq!(encoded["cost_coverage"]["zero_written_observations"], 2);
+        assert!(encoded.get("cost").is_none());
+        let mut empty = serde_json::to_value(session()).unwrap();
+        empty["tokens"] = serde_json::json!({"input":0,"output":0});
+        empty["cost"] = serde_json::json!({"usd":0});
+        let empty: Session = serde_json::from_value(empty).unwrap();
+        assert_eq!(empty.cost, Some(Cost { usd: 0.0 }));
+    }
+
+    #[test]
+    fn list_and_transcript_ingest_keep_zero_cost_evidence() {
+        let mut native = serde_json::to_value(session()).unwrap();
+        native["cost"] = serde_json::json!({"usd": 0});
+        let listing: crate::SessionList = serde_json::from_value(serde_json::json!({
+            "schema": crate::LIST_SCHEMA, "sort": "newest", "sessions": [native.clone()], "scanned": 1
+        })).unwrap();
+        assert!(listing.sessions[0].cost.is_none());
+        let transcript: Transcript = serde_json::from_value(serde_json::json!({
+            "schema": SESSION_SCHEMA, "session": native, "turns": [], "truncated": false,
+            "notes": []
+        }))
+        .unwrap();
+        assert!(transcript.session.cost.is_none());
+        let value = serde_json::to_value(transcript).unwrap();
+        assert_eq!(
+            value["session"]["cost_coverage"]["zero_written_observations"],
+            1
+        );
     }
 
     #[test]

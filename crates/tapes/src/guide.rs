@@ -503,6 +503,9 @@ PROBE BEFORE EXPORTING
   kind harness-calculated-estimate, and pricing_basis is missing because no
   recording states its price table. A token count is never a cost.
   A written zero beside nonzero tokens is unpriced and its cost is absent.
+  This pairing is enforced when session reports enter through JSON, remote
+  list/show, and public usage projections or aggregation. Session JSON carries
+  cost_coverage so forwarding a report preserves its written-zero evidence.
   cost_coverage names incomplete pricing and counts zero-written requests
   where request evidence exists, and zero-written cumulative observations
   otherwise. A mixed priced/unpriced sum is a known priced subtotal.

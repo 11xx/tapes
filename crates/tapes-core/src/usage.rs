@@ -419,7 +419,7 @@ pub struct UsageSession {
 }
 
 /// One session's usage. `tokens`, `cost`, and `accounting` are the session's
-/// own fields, unchanged: a `recorded-total` is cumulative and a
+/// own fields, with costs qualified against their tokens: a `recorded-total` is cumulative and a
 /// `summed-requests` figure is a sum of per-request records, so either may be
 /// added across sessions with compatible accounting, while `coverage` says how much of each session the
 /// figure covers. `tokens` keeps the harness's own convention; `disjoint`
@@ -472,17 +472,6 @@ pub struct UsageView {
     pub truncation: Truncation,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub notes: Vec<String>,
-}
-
-fn session_cost_coverage(session: &Session) -> Option<CostCoverage> {
-    session
-        .usage_detail
-        .as_ref()
-        .and_then(|detail| detail.cost_coverage.clone())
-        .or_else(|| {
-            (session.cost.is_none() && session.tokens.as_ref().is_some_and(Tokens::has_usage))
-                .then_some(CostCoverage::default())
-        })
 }
 
 /// Project a read session into its usage answer. Nothing is added to the
@@ -564,8 +553,8 @@ fn project(session: &Session, turns: TurnTally, facts: ReadFacts) -> UsageView {
         accounting: session.accounting.clone(),
         tokens: session.tokens.clone(),
         disjoint: session.disjoint_tokens(),
-        cost: session.cost.clone(),
-        cost_coverage: session_cost_coverage(session),
+        cost: session.estimated_cost(),
+        cost_coverage: session.cost_coverage(),
         turns: turns.counts,
         context_window: detail.context_window,
         rate_limits: detail.rate_limits,
@@ -935,7 +924,7 @@ struct Tally {
 impl Tally {
     fn add(&mut self, session: &Session) {
         self.sessions += 1;
-        if let Some(coverage) = session_cost_coverage(session) {
+        if let Some(coverage) = session.cost_coverage() {
             let total = self.cost_coverage.get_or_insert(CostCoverage {
                 complete: true,
                 ..CostCoverage::default()
@@ -952,7 +941,7 @@ impl Tally {
             self.cache_read.add(tokens.cache_read);
             self.cache_write.add(tokens.cache_write);
         }
-        if let Some(cost) = &session.cost {
+        if let Some(cost) = session.estimated_cost() {
             self.cost_usd += cost.usd;
             self.cost_counted += 1;
         }
@@ -1722,6 +1711,29 @@ mod partition_tests {
         unpriced.cost = None;
         let value = serde_json::to_value(aggregate(&[priced, unpriced], &[])).unwrap();
         assert_eq!(value["totals"]["cost_coverage"]["complete"], false);
+    }
+
+    #[test]
+    fn public_aggregates_classify_incoming_zero_cost_and_keep_priced_subtotals() {
+        let mut zero = recorded("pi", native(40, 60, 10, 12, 14));
+        zero.cost = Some(Cost { usd: 0.0 });
+        let alone = aggregate(&[zero.clone()], &[]);
+        assert!(alone.totals.cost.is_none());
+        let value = serde_json::to_value(&alone).unwrap();
+        assert_eq!(value["totals"]["cost_coverage"]["complete"], false);
+        assert_eq!(
+            value["totals"]["cost_coverage"]["zero_written_observations"],
+            1
+        );
+        assert_eq!(value["totals"]["counted"]["cost"], 0);
+        let mut priced = zero.clone();
+        priced.cost = Some(Cost { usd: 0.5 });
+        let (mixed, partitions) = partitioned_aggregate(&[zero, priced], &[]);
+        assert_eq!(mixed.totals.cost, Some(Cost { usd: 0.5 }));
+        assert_eq!(mixed.totals.counted.cost, 1);
+        let value = serde_json::to_value(&partitions).unwrap();
+        assert_eq!(value[0]["cost_coverage"]["complete"], false);
+        assert_eq!(value[0]["cost_coverage"]["zero_written_observations"], 1);
     }
 
     #[test]

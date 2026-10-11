@@ -1433,6 +1433,8 @@ enum Command {
         /// counts, with `missing` counting requests per unrecorded dimension.
         /// Synthetic assistant records do not count as requests; positive
         /// failure evidence is counted separately with consumption unknown.
+        /// Incoming session reports and direct aggregation inputs classify
+        /// costs against their tokens. Session JSON retains cost_coverage.
         /// A written zero beside nonzero tokens is unpriced: cost is absent,
         /// cost_coverage is incomplete and counts zero-written requests when
         /// request evidence exists, otherwise cumulative observations.
