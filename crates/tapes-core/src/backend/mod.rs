@@ -459,6 +459,20 @@ pub trait Backend {
             self.harness()
         )
     }
+    /// Read bounded consumption identities against the caller's own source
+    /// evidence. Unsupported backends refuse only this opt-in surface.
+    fn consumption_event_keys(
+        &self,
+        session: &Session,
+        read: Option<&crate::model::ReadEvidence>,
+        options: crate::usage::ConsumptionKeyOptions,
+    ) -> Result<crate::usage::ConsumptionEventKeys> {
+        let _ = (session, read, options);
+        anyhow::bail!(
+            "{} sessions do not support consumption event keys",
+            self.harness()
+        )
+    }
     /// Every relationship the whole recording names, read record by record so
     /// memory follows the references kept rather than the file. The default
     /// refuses: a bounded lineage read is not an answer to a whole one.

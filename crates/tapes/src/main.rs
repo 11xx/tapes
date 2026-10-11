@@ -2574,6 +2574,7 @@ fn dispatch(cli: Cli) -> Result<()> {
                                 full: true,
                                 series,
                                 reconcile,
+                                event_keys: None,
                             },
                         )?
                     } else {
@@ -2590,6 +2591,7 @@ fn dispatch(cli: Cli) -> Result<()> {
                             full: false,
                             series,
                             reconcile,
+                            event_keys: None,
                         },
                     )?
                 } else {

@@ -469,6 +469,99 @@ pub struct ConsumptionIdentity {
     pub fork_parent_unestablished: bool,
 }
 
+/// A native entry coordinate is local to the selected recording. Equality
+/// across recordings requires a verified copy relation, not matching ids alone.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct ConsumptionRecordingEntry {
+    pub session_id: String,
+    pub entry_id: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ConsumptionKeyKind {
+    ProviderResponse,
+    RecordingEntry,
+}
+
+/// An observed identity, with its recording coordinate where available.
+/// Provider account equality is unestablished. `copy_of` witnesses a matching
+/// consumption entry in the named fork source; `entry_digest` identifies the
+/// normalized consumption facts used to verify that relation.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct ConsumptionEventKey {
+    pub kind: ConsumptionKeyKind,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub response_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider_account_namespace: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recording_entry: Option<ConsumptionRecordingEntry>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub entry_digest: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub copy_of: Option<ConsumptionRecordingEntry>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct ConsumptionKeyOmissions {
+    #[serde(skip_serializing_if = "is_zero")]
+    pub row_cap: usize,
+    #[serde(skip_serializing_if = "is_zero")]
+    pub byte_budget: usize,
+    #[serde(skip_serializing_if = "is_zero")]
+    pub oversized_key: usize,
+    #[serde(skip_serializing_if = "is_zero")]
+    pub unidentified: usize,
+    #[serde(skip_serializing_if = "is_zero")]
+    pub private_or_invalid_identity: usize,
+    #[serde(skip_serializing_if = "is_zero")]
+    pub unavailable_source: usize,
+}
+
+/// Fixed coverage categories contain no native diagnostic or recording locator.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ConsumptionCopyCoverage {
+    Session,
+    ReadWindow,
+    Unavailable,
+    Unreadable,
+    Unestablished,
+}
+
+/// A recent suffix of counted consumption identities, separate from the
+/// measurements that cover the whole read. Omitted or unidentified keys,
+/// incomplete source reads, and unestablished account equality prevent an
+/// exact cross-recording union unless separate copy evidence establishes it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct ConsumptionEventKeys {
+    pub keys: Vec<ConsumptionEventKey>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub observed: Option<usize>,
+    pub returned: usize,
+    pub omissions: ConsumptionKeyOmissions,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub coverage: Option<AccountingCoverage>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unreadable_records: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unavailable: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub copy_coverage: Option<ConsumptionCopyCoverage>,
+    #[serde(skip_serializing_if = "is_zero")]
+    pub copy_conflicts: usize,
+}
+
+/// Recent event identities, limited to 1..=10000 keys and an 8 MiB serialized
+/// key budget. Measurements remain independent of either output bound.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ConsumptionKeyOptions {
+    pub limit: usize,
+}
+
 /// One raw Codex accounting observation. A row is not necessarily a request:
 /// repeated modern records, unchanged legacy totals, and quota-only events are
 /// retained as observations but do not become counted requests.
@@ -540,14 +633,15 @@ pub struct UsageObservationOptions {
     pub limit: usize,
 }
 
-/// Read options for the core usage entry point. `series` is deliberately
-/// separate from ordinary usage so the default path retains no row ring.
+/// Read options for the core usage entry point. Observation rows and event
+/// keys are opt-in suffixes; ordinary usage retains neither ring.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct UsageOptions {
     pub full: bool,
     pub series: Option<UsageObservationOptions>,
     /// Reconcile the recorded total with the family's identified requests.
     pub reconcile: bool,
+    pub event_keys: Option<ConsumptionKeyOptions>,
 }
 
 /// A backend's bounded, pinned observation result. The returned session owns
@@ -660,6 +754,8 @@ pub struct UsageView {
     pub series: Option<UsageObservationSeries>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reconciliation: Option<crate::reconcile::Reconciliation>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub consumption_event_keys: Option<ConsumptionEventKeys>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub read: Option<ReadEvidence>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -789,6 +885,7 @@ fn project(session: &Session, turns: TurnTally, facts: ReadFacts) -> UsageView {
         recorded_total: detail.recorded_total,
         series: None,
         reconciliation: None,
+        consumption_event_keys: None,
         read: facts.read,
         terminal: facts.terminal,
         text_tail: facts.text_tail,

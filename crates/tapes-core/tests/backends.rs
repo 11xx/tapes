@@ -1964,6 +1964,7 @@ fn reconciled(root: &Path) -> serde_json::Value {
         &backends,
         Selection::Id(CLAUDE_FAMILY_SESSION),
         UsageOptions {
+            event_keys: None,
             full: false,
             series: None,
             reconcile: true,
@@ -2500,6 +2501,7 @@ fn ordinary_fallback_explains_and_retains_the_set_aside_cost_state() {
         &backends,
         Selection::Id(CLAUDE_DIMENSIONS_SESSION),
         UsageOptions {
+            event_keys: None,
             full: false,
             series: None,
             reconcile: true,
@@ -5737,6 +5739,7 @@ fn codex_modern_usage_records_choose_the_modern_basis_and_keep_native_rows() {
         &backend,
         selection,
         UsageOptions {
+            event_keys: None,
             full: false,
             series: Some(UsageObservationOptions { limit: 16 }),
             reconcile: false,
@@ -6249,6 +6252,7 @@ fn codex_usage_with_options(
             full,
             series: series_limit.map(|limit| UsageObservationOptions { limit }),
             reconcile: false,
+            event_keys: None,
         },
     )
 }
@@ -6498,6 +6502,7 @@ fn codex_bounded_prefix_reports_leading_uncounted_observation() {
         &backends,
         Selection::Id(id),
         UsageOptions {
+            event_keys: None,
             full: false,
             series: Some(UsageObservationOptions { limit: 8 }),
             reconcile: false,
@@ -6553,6 +6558,7 @@ fn codex_bounded_modern_reset_evidence_keeps_read_window_coverage() {
         &backends,
         Selection::Id(id),
         UsageOptions {
+            event_keys: None,
             full: false,
             series: Some(UsageObservationOptions { limit: 16 }),
             reconcile: false,
@@ -6652,6 +6658,7 @@ fn public_full_usage_refuses_replacement_or_in_place_source_rewrite_between_pass
             &backends,
             Selection::Id(id),
             UsageOptions {
+                event_keys: None,
                 full: true,
                 series: Some(UsageObservationOptions { limit: 8 }),
                 reconcile: false,

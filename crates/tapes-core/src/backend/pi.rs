@@ -26,6 +26,8 @@ use crate::model::{
 use crate::usage::{Consumption, ConsumptionEvents, ConsumptionIdentity, ModelUsage, UsageDetail};
 use agent_tapes_discovery::{Harness as NativeHarness, IdentityBasis, NativeSession, NativeStore};
 
+mod consumption_keys;
+
 #[derive(Clone, Debug)]
 pub struct PiBackend {
     native_root: Option<PathBuf>,
@@ -365,6 +367,15 @@ impl Backend for PiBackend {
 
     fn supports_full_search(&self) -> bool {
         true
+    }
+
+    fn consumption_event_keys(
+        &self,
+        session: &Session,
+        read: Option<&crate::model::ReadEvidence>,
+        options: crate::usage::ConsumptionKeyOptions,
+    ) -> Result<crate::usage::ConsumptionEventKeys> {
+        consumption_keys::read_keys(self, session, read, options)
     }
 
     fn stream_transcript(
@@ -902,7 +913,7 @@ fn pi_usage(entries: &[&Value]) -> PiUsageResult {
 }
 
 /// The usage recorded on one consumption entry.
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy, Default, serde::Serialize)]
 struct PiRequest {
     input: Option<u64>,
     output: Option<u64>,
@@ -1078,6 +1089,7 @@ impl PiUsage {
 /// One consumption event an entry records: an assistant message's request,
 /// or the usage pi writes on a tool result, a compaction, a branch summary,
 /// or an entry of type `usage`.
+#[derive(serde::Serialize)]
 struct PiConsumed {
     usage: PiRequest,
     assistant_request: bool,
@@ -1104,8 +1116,14 @@ fn pi_consumed(entry: &Value) -> Option<PiConsumed> {
     let response = assistant
         .then(|| {
             Some((
-                message["provider"].as_str()?.to_owned(),
-                message["responseId"].as_str()?.to_owned(),
+                message["provider"]
+                    .as_str()
+                    .filter(|id| !id.is_empty())?
+                    .to_owned(),
+                message["responseId"]
+                    .as_str()
+                    .filter(|id| !id.is_empty())?
+                    .to_owned(),
             ))
         })
         .flatten();
@@ -1142,6 +1160,7 @@ struct PiConsumption {
 
 impl PiConsumption {
     fn observe(&mut self, id: Option<&str>, consumed: &PiConsumed, on_branch: bool) -> bool {
+        let id = id.filter(|id| !id.is_empty());
         let repeat = id.is_some_and(|id| !self.entries.insert(id.to_owned()))
             | consumed
                 .response

@@ -1060,16 +1060,23 @@ pub fn usage_with_backends(
     )?))
 }
 
-/// Read one session's usage with an optional bounded observation suffix. The
-/// bounded form replays the transcript's own source evidence; the full form
-/// pins the observation pass to the first streamed read. A backend that does
-/// not expose accounting observations refuses only when the caller asks for
-/// the opt-in series.
+/// Read one session's usage with optional bounded observation rows or event
+/// keys. The bounded form replays the transcript's own source evidence; the
+/// full form pins the identity pass to the first streamed read. A backend
+/// that does not expose the requested identities refuses that opt-in request.
 pub fn usage_with_options_with_backends(
     backends: &[Box<dyn Backend>],
     selection: Selection,
     options: usage::UsageOptions,
 ) -> Result<usage::UsageView> {
+    if options.series.is_some() && options.event_keys.is_some() {
+        anyhow::bail!("usage observations and consumption event keys are separate read options");
+    }
+    if let Some(keys) = options.event_keys {
+        if !(1..=10_000).contains(&keys.limit) {
+            anyhow::bail!("consumption event keys must be between 1 and 10000");
+        }
+    }
     if let Some(series) = options.series {
         if !(1..=10_000).contains(&series.limit) {
             anyhow::bail!("usage observation rows must be between 1 and 10000");
@@ -1101,6 +1108,10 @@ pub fn usage_with_options_with_backends(
         if options.reconcile {
             view.reconciliation = Some(backend.usage_reconciliation(&resolved.session)?);
         }
+        view.consumption_event_keys = options
+            .event_keys
+            .map(|keys| backend.consumption_event_keys(&session, Some(&read_evidence), keys))
+            .transpose()?;
         Ok(view)
     } else {
         let mut transcript = declared_transcript(backend.as_ref(), &resolved.session, EXPORT_TAIL)?;
@@ -1121,6 +1132,12 @@ pub fn usage_with_options_with_backends(
         if options.reconcile {
             view.reconciliation = Some(backend.usage_reconciliation(&transcript.session)?);
         }
+        view.consumption_event_keys = options
+            .event_keys
+            .map(|keys| {
+                backend.consumption_event_keys(&transcript.session, transcript.read.as_ref(), keys)
+            })
+            .transpose()?;
         Ok(view)
     }
 }
