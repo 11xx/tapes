@@ -10947,14 +10947,13 @@ fn usage_reconcile_sets_the_recorded_total_beside_the_family_requests() {
     );
     let rendered = String::from_utf8(output.stdout).unwrap();
     for line in [
-        "reconciliation: rules tapes-claude-reconciliation/1; recorded total from the newest of 1 \
-         cost-states, 0 resets; recorded cost 0.2500 USD (harness-calculated estimate, pricing basis not recorded) \
-         [a recorded total, covering the whole session]; 3 identified requests across 2 recordings, 1 witnessed in more \
-         than one, 1 revised, 0 conflicting\n",
-        "reconciliation scope: not established; missing recorded-total-membership\n",
-        "  output: recorded 190, identified 190, difference 0, reconciled\n",
-        "  source child a0123456789abcdef: complete, 3 records, 1 new requests, 0 without \
-         identity, 1 answered without request, 0 failed\n",
+        "reconciliation: rules tapes-claude-reconciliation/1; recorded total from the newest of 1 cost-states, 0 resets; recorded cost 0.2500 USD",
+        "family request count unestablished across 2 recordings; 1 revised, 0 conflicting local identities, incomplete\n",
+        "request identity coverage: unestablished\n",
+        "reconciliation scope: not established; missing recorded-total-membership, request-namespace\n",
+        "  output: recorded 190, identified -, difference -, withheld (request-namespace)\n",
+        "  source child a0123456789abcdef: complete, 3 records, 2 local requests, 0 without identity, 1 answered without request, 0 failed\n",
+        "    local request tokens: input 5, output 90, reasoning 35, cache read 1200, cache write 130\n",
     ] {
         assert!(rendered.contains(line), "{line} in {rendered}");
     }
@@ -10967,11 +10966,27 @@ fn usage_reconcile_sets_the_recorded_total_beside_the_family_requests() {
     ]);
     let value: Value = serde_json::from_slice(&json.stdout).unwrap();
     assert_eq!(value["schema"], "tapes-usage/11");
-    assert_eq!(
-        value["reconciliation"]["counters"][0]["status"],
-        "reconciled"
-    );
+    assert_eq!(value["reconciliation"]["counters"][0]["status"], "withheld");
 
+    assert!(value["reconciliation"]["identified"]
+        .get("requests")
+        .is_none());
+    assert!(value["reconciliation"]["identified"]
+        .get("tokens")
+        .is_none());
+    assert_eq!(value["reconciliation"]["recorded"]["cost"]["usd"], 0.25);
+    let codex_directory = root.path().join("codex/sessions/2026/01/01");
+    fs::create_dir_all(&codex_directory).unwrap();
+    fs::write(codex_directory.join("rollout-2026-01-01T10-00-00-50000000-0000-4000-8000-000000000001.jsonl"),
+        "{\"type\":\"session_meta\",\"timestamp\":\"2026-01-01T10:00:00Z\",\"payload\":{\"id\":\"50000000-0000-4000-8000-000000000001\",\"cwd\":\"/fixtures/project\"}}\n").unwrap();
+    let other_harness = run(&[
+        "usage",
+        "50000000-0000-4000-8000-000000000001",
+        "--reconcile",
+    ]);
+    assert!(!other_harness.status.success());
+    assert!(String::from_utf8_lossy(&other_harness.stderr)
+        .contains("codex sessions do not support usage reconciliation"));
     let refused = run(&["usage", "--global", "--reconcile"]);
     assert!(!refused.status.success());
     assert!(

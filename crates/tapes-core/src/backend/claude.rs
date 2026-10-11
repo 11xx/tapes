@@ -1019,9 +1019,9 @@ fn newest_cost_state(values: &[Value]) -> Option<&Value> {
         .find(|value| value["type"] == "cost-state")
 }
 
-/// The `cost-state` to account from: the newest one, unless it states fewer
-/// tokens than the recording's own requests. Some sessions end on a zeroed or
-/// partial one, and a total below the requests read cannot be the session's.
+/// The newest `cost-state` whose counters cover the recording's request sum.
+/// A total below that sum cannot cover the requests read; its recorded
+/// observation remains separate from the selected request accounting.
 fn covering_cost_state<'a>(
     cost_state: Option<&'a Value>,
     requests: Option<&Tokens>,
@@ -1070,10 +1070,9 @@ fn recorded_accounting(
     }
 }
 
-/// What a Claude read carries beside its counters: a covering cost-state's
-/// durations and per-model split, and the dimensions its requests recorded.
-/// The requests' TTL split describes the session's cache writes only when the
-/// session counters are those same requests' sum.
+/// Selected accounting detail, with a set-aside cumulative state kept
+/// separately. Request dimensions describe the requests read; their TTL split
+/// describes the session counters only under request-sum accounting.
 fn claude_usage_detail(
     cost_state: Option<&Value>,
     requests: Option<RequestDimensions>,
@@ -1224,7 +1223,7 @@ fn claude_request_tokens(values: &[Value]) -> RequestUsage {
 /// made no request and is no request in that tally.
 #[derive(Default)]
 struct RequestTokens {
-    requests: HashMap<String, RequestWitness>,
+    requests: BTreeMap<String, RequestWitness>,
     unkeyed: TokenTotals,
     dimensions: RequestDimensions,
     failures: usize,
@@ -1342,7 +1341,8 @@ fn assistant_usage(value: &Value) -> Option<&serde_json::Map<String, Value>> {
 /// Read one family recording whole into the reconciliation ledger: its
 /// request records, its hook answers, the `<synthetic>` records Claude writes
 /// in place of a failed response, and, for the parent, every cost-state it
-/// recorded. Each record must name the family's session.
+/// recorded. A child must positively witness matching native parent identity;
+/// validation pins its bytes before any counters enter the ledger.
 fn reconcile_source(
     ledger: &mut FamilyLedger,
     source: usize,
@@ -1350,8 +1350,16 @@ fn reconcile_source(
     session_id: &str,
     parent: bool,
 ) -> Result<()> {
+    let mut identity_seen = false;
+    let validated = stream_jsonl(path, None, |value, _, _| {
+        identity_seen |= super::validate_native_identity(value, "claude", session_id)?;
+        Ok(false)
+    })?;
+    if !parent && !identity_seen {
+        anyhow::bail!("child recording has no native parent identity evidence");
+    }
     let mut position = 0;
-    let read = stream_jsonl(path, None, |value, _, _| {
+    let read = stream_jsonl(path, Some(validated.pin()), |value, _, _| {
         super::validate_native_identity(value, "claude", session_id)?;
         position += 1;
         if parent && value["type"] == "cost-state" {
@@ -1371,19 +1379,23 @@ fn reconcile_source(
                 recorded_counters(&by_model),
                 by_model,
                 recorded_usage(value),
+                timestamp(&value["timestamp"]),
             );
-        } else if let Some(usage) = assistant_usage(value) {
+        } else if value["type"] == "assistant" && value["message"]["role"] == "assistant" {
             if value["answeredWithoutRequest"] == true {
                 ledger.unrequested(source);
-            } else if value["message"]["model"] == "<synthetic>" {
+            } else if value["isApiErrorMessage"] == true
+                || value["message"]["model"] == "<synthetic>"
+            {
                 ledger.failed_request(source);
-            } else {
+            } else if let Some(usage) = assistant_usage(value) {
                 ledger.request(
                     source,
                     position,
                     value["requestId"].as_str(),
                     value["message"]["model"].as_str(),
                     request_usage_tokens(usage),
+                    timestamp(&value["timestamp"]),
                 );
             }
         }

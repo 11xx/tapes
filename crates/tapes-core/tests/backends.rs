@@ -1937,6 +1937,23 @@ fn claude_family(tag: &str, edit: impl FnOnce(&mut String, &mut String)) -> Path
     root
 }
 
+fn claude_recording(tag: &str, edit: impl FnOnce(&mut String, &mut String)) -> PathBuf {
+    let root = claude_family(tag, edit);
+    let project = root.join("project");
+    let path = project.join(format!("{CLAUDE_FAMILY_SESSION}.jsonl"));
+    let subagents = project.join(CLAUDE_FAMILY_SESSION).join("subagents");
+    let parent = fs::read_to_string(&path).unwrap();
+    let child = fs::read_to_string(subagents.join(format!("{CLAUDE_FAMILY_CHILD}.jsonl"))).unwrap();
+    let position = parent.find(r#"{"type":"cost-state""#).unwrap();
+    fs::write(
+        path,
+        format!("{}{child}{}", &parent[..position], &parent[position..]),
+    )
+    .unwrap();
+    fs::remove_dir_all(subagents).unwrap();
+    root
+}
+
 fn reconciled(root: &Path) -> serde_json::Value {
     let backends: Vec<Box<dyn Backend>> = vec![Box::new(ClaudeBackend::new(root))];
     let view = usage_with_options_with_backends(
@@ -1971,6 +1988,104 @@ fn all(status: &str) -> Vec<(String, String)> {
         .into_iter()
         .map(|counter| (counter.to_owned(), status.to_owned()))
         .collect()
+}
+
+#[test]
+fn reconciliation_failed_assistants_without_usage_remain_unmeasured() {
+    for null_usage in [false, true] {
+        let root = claude_family(
+            if null_usage {
+                "failed-null"
+            } else {
+                "failed-absent"
+            },
+            |parent, _| {
+                let mut value = serde_json::json!({"type":"assistant", "sessionId":CLAUDE_FAMILY_SESSION,
+                "isApiErrorMessage":true, "message":{"role":"assistant", "model":"<synthetic>"}});
+                if null_usage {
+                    value["message"]["usage"] = serde_json::Value::Null;
+                }
+                parent.push_str(&format!("{value}\n"));
+            },
+        );
+        let report = reconciled(&root);
+        assert_eq!(report["sources"][0]["failed"], 1);
+        assert_eq!(report["identified"]["complete"], false);
+        assert!(report["sources"][0].get("failed_tokens").is_none());
+        fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[test]
+fn reconciliation_requires_positive_child_parent_identity() {
+    let root = claude_family("unidentified-child", |_, child| {
+        *child = child
+            .lines()
+            .map(|line| {
+                let mut value: serde_json::Value = serde_json::from_str(line).unwrap();
+                value.as_object_mut().unwrap().remove("sessionId");
+                value.to_string()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n";
+    });
+    let report = reconciled(&root);
+    assert_eq!(report["sources"][1]["complete"], false);
+    assert!(report["sources"][1].get("identified").is_none());
+    assert_eq!(report["sources"][1]["requests"], 0);
+    assert_eq!(report["identified"]["complete"], false);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn reconciliation_rejects_child_contributions_before_a_late_identity_failure() {
+    let root = claude_family("late-foreign-identity", |_, child| {
+        child.push_str(
+            "{\"type\":\"assistant\",\"sessionId\":\"60000000-0000-4000-8000-000000000001\"}\n",
+        );
+    });
+    let report = reconciled(&root);
+    assert_eq!(report["sources"][1]["complete"], false);
+    assert_eq!(report["sources"][1]["requests"], 0);
+    assert!(report["sources"][1].get("identified").is_none());
+    assert!(report["identified"].get("tokens").is_none());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn reconciliation_withholds_an_unestablished_cross_recording_namespace() {
+    let report = reconciled(&fixtures("claude-family"));
+    assert_eq!(report["identified"]["complete"], false);
+    assert!(report["identified"].get("cross_recording").is_none());
+    assert!(report["identified"].get("tokens").is_none());
+    assert!(report["missing"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("request-namespace")));
+    assert_eq!(report["sources"][0]["identified"]["output"], 130);
+    assert_eq!(report["sources"][1]["identified"]["output"], 90);
+    assert_eq!(report["sources"][1]["requests"], 2);
+}
+
+#[test]
+fn reconciliation_withholds_totals_before_the_child_frontier() {
+    let root = claude_family("late-child", |parent, child| {
+        *parent = parent.replace(
+            r#""type":"cost-state","#,
+            r#""type":"cost-state","timestamp":"2026-01-01T10:00:10Z","#,
+        );
+        let value = serde_json::json!({"type":"assistant", "sessionId":CLAUDE_FAMILY_SESSION,
+            "requestId":"req_late_child", "timestamp":"2026-01-01T10:00:20Z",
+            "message":{"role":"assistant", "model":"claude-fixture-small",
+                "usage":{"input_tokens":0,"output_tokens":100,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}});
+        child.push_str(&format!("{value}\n"));
+    });
+    let report = reconciled(&root);
+    assert_eq!(report["recorded"]["after_last_request"], false);
+    assert_eq!(report["counters"][1]["status"], "withheld");
+    assert!(report["counters"][1].get("difference").is_none());
+    fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
@@ -2085,17 +2200,16 @@ fn ordinary_fallback_explains_and_retains_the_set_aside_cost_state() {
     fs::remove_dir_all(root).unwrap();
 }
 
-/// The parent's cost-state counts its subagent's requests too. The family
-/// union, with the request both recordings witness counted once and the
-/// child's streamed partial witness superseded by its final one, equals it.
+/// Local request identities preserve each recording's figures. A shared
+/// opaque identifier establishes no cross-recording request namespace.
 #[test]
-fn a_parent_total_including_its_children_reconciles_with_the_family_union() {
+fn a_family_keeps_recording_local_figures_without_an_exact_union() {
     let report = reconciled(&fixtures("claude-family"));
 
     assert_eq!(report["rules"], "tapes-claude-reconciliation/1");
-    assert_eq!(statuses(&report), all("reconciled"));
+    assert_eq!(statuses(&report), all("withheld"));
     for row in report["counters"].as_array().unwrap() {
-        assert_eq!(row["difference"], 0, "{row}");
+        assert!(row.get("difference").is_none(), "{row}");
     }
     assert_eq!(
         report["recorded"]["tokens"],
@@ -2103,17 +2217,17 @@ fn a_parent_total_including_its_children_reconciles_with_the_family_union() {
             "input": 15, "output": 190, "reasoning": 75, "cache_read": 2200, "cache_write": 330
         })
     );
-    assert_eq!(report["identified"]["requests"], 3);
-    assert_eq!(report["identified"]["cross_recording"], 1);
+    assert!(report["identified"].get("requests").is_none());
+    assert!(report["identified"].get("cross_recording").is_none());
     assert_eq!(report["identified"]["revised"], 1);
     assert_eq!(report["identified"]["conflicts"], 0);
-    assert_eq!(report["identified"]["complete"], true);
+    assert_eq!(report["identified"]["complete"], false);
     assert_eq!(report["scope_established"], false);
     assert_eq!(
         report["missing"],
-        serde_json::json!(["recorded-total-membership"])
+        serde_json::json!(["recorded-total-membership", "request-namespace"])
     );
-    // The sources partition the union by first witness.
+    // Each source retains its own local request sum.
     let sources = report["sources"].as_array().unwrap();
     assert_eq!(sources[0]["role"], "parent");
     assert_eq!(sources[0]["requests"], 2);
@@ -2121,9 +2235,9 @@ fn a_parent_total_including_its_children_reconciles_with_the_family_union() {
     assert_eq!(sources[1]["role"], "child");
     assert_eq!(sources[1]["agent_id"], "a0123456789abcdef");
     assert_eq!(sources[1]["records"], 3);
-    assert_eq!(sources[1]["requests"], 1);
+    assert_eq!(sources[1]["requests"], 2);
     assert_eq!(sources[1]["unrequested"], 1);
-    assert_eq!(sources[1]["identified"]["output"], 60);
+    assert_eq!(sources[1]["identified"]["output"], 90);
     // The report names the exact bytes it read, so it reproduces.
     let parent_bytes = fs::read(
         fixtures("claude-family")
@@ -2138,27 +2252,10 @@ fn a_parent_total_including_its_children_reconciles_with_the_family_union() {
         .collect::<String>();
     assert_eq!(sources[0]["sha256"], digest);
     assert_eq!(reconciled(&fixtures("claude-family")), report);
-    assert_eq!(
-        report["by_model"],
-        serde_json::json!([
-            {
-                "model": "claude-fixture",
-                "cost": {"usd": 0.2, "kind": "harness-calculated-estimate", "missing": ["pricing_basis"]},
-                "accounting": {"basis": "recorded-total", "coverage": "session"},
-                "recorded": { "input": 12, "output": 130, "reasoning": 50, "cache_read": 1500, "cache_write": 250 },
-                "identified": { "input": 12, "output": 130, "reasoning": 50, "cache_read": 1500, "cache_write": 250 },
-                "requests": 2
-            },
-            {
-                "model": "claude-fixture-small",
-                "cost": {"usd": 0.05, "kind": "harness-calculated-estimate", "missing": ["pricing_basis"]},
-                "accounting": {"basis": "recorded-total", "coverage": "session"},
-                "recorded": { "input": 3, "output": 60, "reasoning": 25, "cache_read": 700, "cache_write": 80 },
-                "identified": { "input": 3, "output": 60, "reasoning": 25, "cache_read": 700, "cache_write": 80 },
-                "requests": 1
-            }
-        ])
-    );
+    assert_eq!(report["by_model"][0]["cost"]["usd"], 0.2);
+    assert_eq!(report["by_model"][1]["cost"]["usd"], 0.05);
+    assert!(report["by_model"][0].get("identified").is_none());
+    assert_eq!(report["recorded"]["after_last_request"], true);
 }
 
 /// A total above the identified union is a discrepancy, never asserted as
@@ -2166,7 +2263,7 @@ fn a_parent_total_including_its_children_reconciles_with_the_family_union() {
 /// clamped to zero.
 #[test]
 fn a_difference_is_signed_and_a_positive_one_stays_a_discrepancy() {
-    let above = claude_family("above", |parent, _| {
+    let above = claude_recording("above", |parent, _| {
         *parent = parent.replace(
             r#""modelUsage":{"#,
             r#""modelUsage":{"claude-fixture-background":{"inputTokens":500,"outputTokens":20,"thinkingTokens":0,"cacheReadInputTokens":0,"cacheCreationInputTokens":0},"#,
@@ -2187,7 +2284,7 @@ fn a_difference_is_signed_and_a_positive_one_stays_a_discrepancy() {
     assert_eq!(background["requests"], 0);
     assert!(background.get("identified").is_none(), "{background}");
 
-    let below = claude_family("below", |parent, _| {
+    let below = claude_recording("below", |parent, _| {
         *parent = parent.replace(r#""outputTokens":130"#, r#""outputTokens":100"#);
     });
     let report = reconciled(&below);
@@ -2205,7 +2302,7 @@ fn a_difference_is_signed_and_a_positive_one_stays_a_discrepancy() {
 /// counter is subtracted across it.
 #[test]
 fn a_counter_reset_withholds_every_difference() {
-    let reset = claude_family("reset", |parent, _| {
+    let reset = claude_recording("reset", |parent, _| {
         let earlier = parent
             .lines()
             .find(|line| line.contains("cost-state"))
@@ -2229,13 +2326,13 @@ fn a_counter_reset_withholds_every_difference() {
 /// equal or lower union is then a discrepancy, not a reconciliation.
 #[test]
 fn an_incomplete_source_read_keeps_the_union_from_reconciling() {
-    let incomplete = claude_family("incomplete", |_, child| {
+    let incomplete = claude_recording("incomplete", |_, child| {
         child.push_str("{\"type\":\"assistant\",\"truncated\n");
     });
     let report = reconciled(&incomplete);
     assert_eq!(report["identified"]["complete"], false);
-    assert_eq!(report["sources"][1]["complete"], false);
-    assert_eq!(report["sources"][1]["skipped"], 1);
+    assert_eq!(report["sources"][0]["complete"], false);
+    assert_eq!(report["sources"][0]["skipped"], 1);
     assert_eq!(statuses(&report), all("discrepancy"));
     assert_eq!(
         report["counters"][0]["reasons"],
@@ -2243,7 +2340,7 @@ fn an_incomplete_source_read_keeps_the_union_from_reconciling() {
     );
 
     // A failed response's synthetic zero is no measurement of what it used.
-    let failed = claude_family("failed", |parent, _| {
+    let failed = claude_recording("failed", |parent, _| {
         let synthetic = r#"{"type":"assistant","sessionId":"40000000-0000-4000-8000-000000000001","uuid":"assistant-error","requestId":"req_failed_1","timestamp":"2026-01-01T10:00:10Z","cwd":"/fixtures/project","isApiErrorMessage":true,"message":{"id":"msg_failed_1","role":"assistant","model":"<synthetic>","usage":{"input_tokens":0,"output_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":0},"stop_reason":"stop_sequence","content":[{"type":"text","text":"API Error"}]}}"#;
         let (head, tail) = parent.split_at(parent.find(r#"{"type":"cost-state""#).unwrap());
         *parent = format!(
@@ -2266,7 +2363,7 @@ fn an_incomplete_source_read_keeps_the_union_from_reconciling() {
 /// some counter are alternative observations, never summed or chosen between.
 #[test]
 fn incompatible_counters_and_conflicting_witnesses_are_withheld() {
-    let unrecorded = claude_family("unrecorded", |parent, _| {
+    let unrecorded = claude_recording("unrecorded", |parent, _| {
         *parent = parent
             .replace(r#""thinkingTokens":50,"#, "")
             .replace(r#""thinkingTokens":25,"#, "");
@@ -2281,7 +2378,7 @@ fn incompatible_counters_and_conflicting_witnesses_are_withheld() {
 
     // A request that did not record a counter leaves the union's figure for
     // it a partial sum, which cannot reconcile.
-    let partial = claude_family("partial", |parent, _| {
+    let partial = claude_recording("partial", |parent, _| {
         *parent = parent.replacen(r#""output_tokens_details":{"thinking_tokens":40},"#, "", 1);
     });
     let report = reconciled(&partial);
@@ -2296,7 +2393,7 @@ fn incompatible_counters_and_conflicting_witnesses_are_withheld() {
     assert_eq!(report["counters"][1]["status"], "reconciled");
     fs::remove_dir_all(partial).unwrap();
 
-    let conflicting = claude_family("conflicting", |_, child| {
+    let conflicting = claude_recording("conflicting", |_, child| {
         *child = child.replacen(
             r#""cache_read_input_tokens":700,"output_tokens":60"#,
             r#""cache_read_input_tokens":650,"output_tokens":60"#,
@@ -2307,7 +2404,7 @@ fn incompatible_counters_and_conflicting_witnesses_are_withheld() {
     assert_eq!(report["identified"]["conflicts"], 1);
     assert_eq!(
         report["identified"]["conflicting"],
-        serde_json::json!(["req_child_1"])
+        serde_json::json!(["recording0:req_child_1"])
     );
     let by_counter = statuses(&report);
     assert_eq!(
@@ -2325,7 +2422,7 @@ fn incompatible_counters_and_conflicting_witnesses_are_withheld() {
 /// frontier does not reach the union it would be compared with.
 #[test]
 fn a_total_recorded_before_a_parent_request_is_not_compared() {
-    let early = claude_family("frontier", |parent, _| {
+    let early = claude_recording("frontier", |parent, _| {
         let lines = parent.lines().collect::<Vec<_>>();
         *parent = format!("{}\n{}\n{}\n{}\n", lines[0], lines[1], lines[3], lines[2]);
     });

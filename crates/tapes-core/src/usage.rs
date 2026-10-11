@@ -23,8 +23,8 @@ use crate::model::{
 
 pub const USAGE_SCHEMA: &str = "tapes-usage/11";
 
-/// Usage facts a harness records that the normalized session model has no
-/// field for. Each member is present exactly when the harness recorded it.
+/// Recorded usage facts and measurement notes kept beside the session's
+/// normalized counters. A source fact that was not recorded remains absent.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct UsageDetail {
     /// Tokens the session's model can hold at once, as the harness reports it.

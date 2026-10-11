@@ -4,13 +4,14 @@
 //! A harness's cumulative total and the request records beside it are two
 //! observations whose scopes need not match: the total may count children,
 //! background calls, or a counter epoch the records do not. The report keeps
-//! both as source facts, deduplicates requests by their provider identity
-//! across every recording read, and subtracts per counter only where the
+//! both as source facts, selects request witnesses within each recording,
+//! and subtracts per counter only where identity and frontier evidence make the
 //! subtraction is defined. A difference is signed and never clamped; a
 //! positive one is a discrepancy until the total's membership is established.
 
 use std::collections::{BTreeMap, HashMap};
 
+use chrono::{DateTime, Utc};
 use serde::Serialize;
 
 use crate::model::{Accounting, Cost, CostCoverage, Tokens};
@@ -70,9 +71,8 @@ pub enum SourceRole {
 
 /// One recording the reconciliation read whole. `revision`, `length`, and
 /// `sha256` identify the exact bytes read. `records` counts request records
-/// with usage; `requests` the distinct identities first witnessed here, whose
-/// counters `identified` sums, so the sources' `identified` partition the
-/// union. `unkeyed` counts records with usage and no request identity,
+/// with usage; `requests` the distinct recording-local identities, whose
+/// counters `identified` sums. These local figures are separate observations. `unkeyed` counts records with usage and no request identity,
 /// `unrequested` records the harness marks as answered without a request,
 /// and `failed` records the harness wrote in place of a response that failed,
 /// whose consumption is unknown. A source is `complete` only when every
@@ -94,6 +94,8 @@ pub struct ReconciledSource {
     pub records: usize,
     pub requests: usize,
     pub unkeyed: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unkeyed_tokens: Option<Tokens>,
     pub unrequested: usize,
     #[serde(skip_serializing_if = "is_zero")]
     pub failed: usize,
@@ -108,7 +110,8 @@ pub struct ReconciledSource {
 /// The harness's cumulative total: the newest observation in the parent, kept
 /// as recorded. `resets` counts observations below their predecessor on some
 /// counter, each a new counter epoch. `after_last_request` says whether the
-/// newest observation follows every parent request record.
+/// newest observation reaches every source's request frontier. Parent file
+/// positions order parent requests; child frontiers require timestamps.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct RecordedTotal {
     pub tokens: Tokens,
@@ -122,21 +125,23 @@ pub struct RecordedTotal {
     pub observations: usize,
     pub resets: usize,
     pub after_last_request: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub observed_at: Option<DateTime<Utc>>,
 }
 
-/// The deduplicated union of identified requests across every source read.
-/// A request is identified by its provider request id; one witnessed by more
-/// than one record is one request, and `cross_recording` counts those
-/// witnessed in more than one recording. Of a request's witnesses, the one
-/// that dominates every other on each counter is its usage: `revised` counts
-/// requests whose witnesses differed that way. `conflicts` counts requests
-/// with two witnesses neither of which dominates; `tokens` keeps the first of
-/// those. `unkeyed` sums the records with no identity, which are measured but
-/// cannot be deduplicated.
+/// Request identities selected within each recording. A family union and
+/// its request count require a compatible provider/account namespace;
+/// without that evidence `identity_coverage` is unestablished and union
+/// figures are absent. `revised` and `conflicts` describe recording-local
+/// witnesses. A later witness dominating every earlier counter discharges a
+/// provisional conflict. Unkeyed counters remain separate measurements.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct IdentifiedRequests {
-    pub requests: usize,
-    pub cross_recording: usize,
+    pub identity_coverage: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub requests: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cross_recording: Option<usize>,
     pub revised: usize,
     pub conflicts: usize,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -194,7 +199,8 @@ pub struct ModelReconciliation {
     pub recorded: Option<Tokens>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub identified: Option<Tokens>,
-    pub requests: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub requests: Option<usize>,
 }
 
 /// A recorded total reconciled with a recording family's identified requests.
@@ -225,20 +231,31 @@ struct Witness {
     tokens: Tokens,
     model: Option<String>,
     first_source: usize,
-    cross_recording: bool,
+    envelope: Tokens,
+    conflicting_counters: [bool; COUNTERS.len()],
     revised: bool,
     conflicting: bool,
+}
+
+fn extend_envelope(envelope: &mut Tokens, tokens: &Tokens) {
+    for (held, value) in [
+        (&mut envelope.input, tokens.input),
+        (&mut envelope.output, tokens.output),
+        (&mut envelope.reasoning, tokens.reasoning),
+        (&mut envelope.cache_read, tokens.cache_read),
+        (&mut envelope.cache_write, tokens.cache_write),
+    ] {
+        if let Some(value) = value {
+            *held = Some(held.unwrap_or(0).max(value));
+        }
+    }
 }
 
 /// Request witnesses and recorded totals gathered across a family's sources.
 #[derive(Default)]
 pub(crate) struct FamilyLedger {
     sources: Vec<ReconciledSource>,
-    requests: HashMap<String, Witness>,
-    unkeyed: Option<Tokens>,
-    conflicting_counters: [bool; COUNTERS.len()],
-    conflicting: Vec<String>,
-    conflicts: usize,
+    requests: HashMap<(usize, String), Witness>,
     budget_exhausted: bool,
     recorded: Option<Tokens>,
     recorded_observations: usize,
@@ -247,6 +264,9 @@ pub(crate) struct FamilyLedger {
     recorded_usage: Option<RecordedUsage>,
     recorded_position: Option<usize>,
     last_parent_request: Option<usize>,
+    recorded_at: Option<DateTime<Utc>>,
+    last_child_request: Option<DateTime<Utc>>,
+    child_frontier_missing: bool,
     unenumerated: bool,
     notes: Vec<String>,
 }
@@ -270,6 +290,7 @@ impl FamilyLedger {
             records: 0,
             requests: 0,
             unkeyed: 0,
+            unkeyed_tokens: None,
             unrequested: 0,
             failed: 0,
             skipped: 0,
@@ -300,6 +321,10 @@ impl FamilyLedger {
         let entry = &mut self.sources[source];
         entry.complete = false;
         entry.error = Some(error);
+        entry.requests = 0;
+        entry.identified = None;
+        entry.unkeyed_tokens = None;
+        self.requests.retain(|(owner, _), _| *owner != source);
     }
 
     /// The family's children could not be listed, so the union cannot be
@@ -328,37 +353,42 @@ impl FamilyLedger {
         request_id: Option<&str>,
         model: Option<&str>,
         tokens: Tokens,
+        observed_at: Option<DateTime<Utc>>,
     ) {
         self.sources[source].records += 1;
         if self.sources[source].role == SourceRole::Parent {
             self.last_parent_request = Some(position);
+        } else if let Some(observed_at) = observed_at {
+            self.last_child_request = Some(
+                self.last_child_request
+                    .map_or(observed_at, |held| held.max(observed_at)),
+            );
+        } else {
+            self.child_frontier_missing = true;
         }
         let Some(request_id) = request_id else {
             self.sources[source].unkeyed += 1;
-            add_tokens(&mut self.unkeyed, &tokens);
+            add_tokens(&mut self.sources[source].unkeyed_tokens, &tokens);
             return;
         };
-        if let Some(witness) = self.requests.get_mut(request_id) {
-            witness.cross_recording |= witness.first_source != source;
-            if witness.tokens == tokens || witness.tokens.dominates(&tokens) {
-                witness.revised |= witness.tokens != tokens;
-            } else if tokens.dominates(&witness.tokens) {
-                witness.tokens = tokens;
-                witness.revised = true;
-            } else {
+        let key = (source, request_id.to_owned());
+        if let Some(witness) = self.requests.get_mut(&key) {
+            witness.revised |= witness.tokens != tokens;
+            if tokens.dominates(&witness.envelope) {
+                witness.tokens = tokens.clone();
+                witness.conflicting = false;
+                witness.conflicting_counters = [false; COUNTERS.len()];
+            } else if !witness.tokens.dominates(&tokens) {
                 for (index, name) in COUNTERS.iter().enumerate() {
-                    if counter(&witness.tokens, name) != counter(&tokens, name) {
-                        self.conflicting_counters[index] = true;
-                    }
+                    witness.conflicting_counters[index] |=
+                        counter(&witness.tokens, name) != counter(&tokens, name);
                 }
-                if !witness.conflicting {
-                    witness.conflicting = true;
-                    self.conflicts += 1;
-                    if self.conflicting.len() < MAX_CONFLICT_EXAMPLES {
-                        self.conflicting.push(request_id.to_owned());
-                    }
+                witness.conflicting = true;
+                if tokens.dominates(&witness.tokens) {
+                    witness.tokens = tokens.clone();
                 }
             }
+            extend_envelope(&mut witness.envelope, &tokens);
             return;
         }
         if self.requests.len() >= MAX_IDENTIFIED_REQUESTS {
@@ -367,12 +397,13 @@ impl FamilyLedger {
         }
         self.sources[source].requests += 1;
         self.requests.insert(
-            request_id.to_owned(),
+            key,
             Witness {
+                envelope: tokens.clone(),
+                conflicting_counters: [false; COUNTERS.len()],
                 tokens,
                 model: model.map(str::to_owned),
                 first_source: source,
-                cross_recording: false,
                 revised: false,
                 conflicting: false,
             },
@@ -386,6 +417,7 @@ impl FamilyLedger {
         tokens: Tokens,
         by_model: BTreeMap<String, Tokens>,
         usage: RecordedUsage,
+        observed_at: Option<DateTime<Utc>>,
     ) {
         if self.recorded.as_ref().is_some_and(|before| {
             COUNTERS.iter().any(|name| {
@@ -400,22 +432,37 @@ impl FamilyLedger {
         self.recorded_usage = Some(usage);
         self.recorded_by_model = by_model;
         self.recorded_position = Some(position);
+        self.recorded_at = observed_at;
     }
 
     pub(crate) fn finish(mut self) -> Reconciliation {
         let mut union = None;
-        let mut cross_recording = 0;
+        let namespace_established = self.sources.len() == 1 && !self.unenumerated;
+        let mut conflicting_counters = [false; COUNTERS.len()];
+        let mut conflicting = Vec::new();
+        let mut conflicts = 0;
         let mut revised = 0;
         let mut by_source: Vec<Option<Tokens>> = vec![None; self.sources.len()];
         let mut identified_by_model: BTreeMap<String, (Option<Tokens>, usize)> = BTreeMap::new();
         let mut partially_recorded = [false; COUNTERS.len()];
-        for witness in self.requests.values() {
+        for ((source, request_id), witness) in &self.requests {
+            if witness.conflicting {
+                conflicts += 1;
+                conflicting.push(format!("recording{source}:{request_id}"));
+                conflicting.sort();
+                conflicting.truncate(MAX_CONFLICT_EXAMPLES);
+            }
+            for (total, flag) in conflicting_counters
+                .iter_mut()
+                .zip(witness.conflicting_counters)
+            {
+                *total |= flag;
+            }
             for (index, name) in COUNTERS.iter().enumerate() {
                 partially_recorded[index] |= counter(&witness.tokens, name).is_none();
             }
             add_tokens(&mut union, &witness.tokens);
             add_tokens(&mut by_source[witness.first_source], &witness.tokens);
-            cross_recording += usize::from(witness.cross_recording);
             revised += usize::from(witness.revised);
             if let Some(model) = &witness.model {
                 let entry = identified_by_model.entry(model.clone()).or_default();
@@ -432,7 +479,20 @@ impl FamilyLedger {
                 "The union holds at most {MAX_IDENTIFIED_REQUESTS} request identities; later ones were not counted."
             ));
         }
-        let complete = !self.unenumerated && self.sources.iter().all(|source| source.complete);
+        let complete = namespace_established
+            && !self.unenumerated
+            && self.sources.iter().all(|source| source.complete);
+        let mut unkeyed = None;
+        for source in &self.sources {
+            if let Some(tokens) = &source.unkeyed_tokens {
+                add_tokens(&mut unkeyed, tokens);
+            }
+        }
+        if !namespace_established {
+            union = None;
+            unkeyed = None;
+            identified_by_model.clear();
+        }
         let mut costs: BTreeMap<String, ModelUsage> = self
             .recorded_usage
             .as_ref()
@@ -450,10 +510,19 @@ impl FamilyLedger {
             tokens,
             observations: self.recorded_observations,
             resets: self.recorded_resets,
+            observed_at: self.recorded_at,
             after_last_request: match (self.recorded_position, self.last_parent_request) {
                 (Some(total), Some(request)) => total > request,
                 _ => true,
-            },
+            } && !self.child_frontier_missing
+                && !self.unenumerated
+                && !self.sources.iter().any(|source| {
+                    source.error.is_some()
+                        || (source.role == SourceRole::Child && source.failed > 0)
+                })
+                && self
+                    .last_child_request
+                    .is_none_or(|request| self.recorded_at.is_some_and(|total| total >= request)),
         });
         let counters = COUNTERS
             .iter()
@@ -464,7 +533,8 @@ impl FamilyLedger {
                     recorded.as_ref(),
                     union.as_ref(),
                     complete && !partially_recorded[index],
-                    self.conflicting_counters[index],
+                    conflicting_counters[index],
+                    namespace_established,
                 )
             })
             .collect();
@@ -480,7 +550,7 @@ impl FamilyLedger {
                     accounting: usage.map(|usage| usage.accounting.clone()),
                     recorded: Some(tokens),
                     identified: None,
-                    requests: 0,
+                    requests: namespace_established.then_some(0),
                 },
             );
         }
@@ -494,7 +564,7 @@ impl FamilyLedger {
                     accounting: usage.map(|usage| usage.accounting.clone()),
                     recorded: cost.tokens,
                     identified: None,
-                    requests: 0,
+                    requests: namespace_established.then_some(0),
                 },
             );
         }
@@ -508,38 +578,54 @@ impl FamilyLedger {
                     accounting: None,
                     recorded: None,
                     identified: None,
-                    requests: 0,
+                    requests: namespace_established.then_some(0),
                 });
             row.identified = tokens;
-            row.requests = requests;
+            row.requests = Some(requests);
         }
-        let mut conflicting = self.conflicting;
         conflicting.sort();
+        conflicting.truncate(MAX_CONFLICT_EXAMPLES);
+        let mut missing = vec!["recorded-total-membership"];
+        if !namespace_established {
+            missing.push("request-namespace");
+        }
+        if recorded
+            .as_ref()
+            .is_some_and(|total| !total.after_last_request)
+        {
+            missing.push("comparison-frontier");
+        }
         Reconciliation {
             rules: RECONCILIATION_RULES,
             sources: self.sources,
             recorded,
             identified: IdentifiedRequests {
-                requests: self.requests.len(),
-                cross_recording,
+                identity_coverage: if namespace_established {
+                    "recording-local"
+                } else {
+                    "unestablished"
+                },
+                requests: namespace_established.then_some(self.requests.len()),
+                cross_recording: namespace_established.then_some(0),
                 revised,
-                conflicts: self.conflicts,
+                conflicts,
                 conflicting,
                 tokens: union,
-                unkeyed: self.unkeyed,
+                unkeyed,
                 complete,
             },
             counters,
             by_model: by_model.into_values().collect(),
             scope_established: false,
-            missing: vec!["recorded-total-membership"],
+            missing,
             notes: self.notes,
         }
     }
 }
 
 /// Compare one counter. The difference is computed only within one counter
-/// epoch, at a frontier past every parent request, and where every witness of
+/// epoch, at a frontier covering every source, with an established identity
+/// namespace, and where every witness of
 /// a request agrees on the counter. The union is complete for a counter when
 /// every source read whole and every identified request recorded it. A
 /// negative difference is a conflict even over an incomplete union, since
@@ -550,13 +636,17 @@ fn compare(
     union: Option<&Tokens>,
     complete: bool,
     conflicting: bool,
+    namespace_established: bool,
 ) -> CounterReconciliation {
     let recorded_value = recorded.and_then(|total| counter(&total.tokens, name));
     let identified = union.and_then(|tokens| counter(tokens, name));
     let mut reasons = Vec::new();
+    if !namespace_established {
+        reasons.push("request-namespace");
+    }
     if recorded.is_none() {
         reasons.push("no-recorded-total");
-    } else if recorded_value.is_none() || identified.is_none() {
+    } else if recorded_value.is_none() || (namespace_established && identified.is_none()) {
         reasons.push("counter-unrecorded");
     }
     if recorded.is_some_and(|total| total.resets > 0) {
@@ -619,6 +709,47 @@ mod tests {
     }
 
     #[test]
+    fn a_later_dominant_witness_discharges_provisional_conflicts() {
+        let mut ledger = FamilyLedger::default();
+        let source = ledger.source(SourceRole::Parent, None, "fixture".to_owned());
+        ledger.request(
+            source,
+            1,
+            Some("request"),
+            Some("model"),
+            tokens(5, 10),
+            None,
+        );
+        ledger.request(
+            source,
+            2,
+            Some("request"),
+            Some("model"),
+            tokens(10, 5),
+            None,
+        );
+        ledger.request(
+            source,
+            3,
+            Some("request"),
+            Some("model"),
+            tokens(10, 10),
+            None,
+        );
+        ledger.read(
+            source,
+            "fixture-revision".to_owned(),
+            1,
+            "fixture-digest".to_owned(),
+            0,
+        );
+        let report = ledger.finish();
+        assert_eq!(report.identified.conflicts, 0);
+        assert!(report.identified.conflicting.is_empty());
+        assert_eq!(report.identified.tokens, Some(tokens(10, 10)));
+    }
+
+    #[test]
     fn cumulative_observations_keep_constant_resident_state() {
         let mut ledger = FamilyLedger::default();
         for position in 0..2048 {
@@ -637,6 +768,7 @@ mod tests {
                     cost_coverage: None,
                     by_model: None,
                 },
+                None,
             );
         }
         assert_eq!(ledger.recorded.iter().count(), 1);

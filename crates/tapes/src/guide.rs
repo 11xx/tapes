@@ -569,27 +569,29 @@ PROBE BEFORE EXPORTING
   under recorded-total/session accounting, separate from the request sum.
   Requests' dimensions follow the same selected usage witness as their tokens.
 
-  `usage SESSION --reconcile` sets a Claude session's recorded total beside
-  the requests its recording family identifies, reading the parent and every
-  subagent recording whole. The newest cost-state is the recorded total as
-  written. Requests are deduplicated by request id across recordings; of a
-  request's witnesses the one recording the most on every counter is its
-  usage, since a streamed response is first written with a partial count,
-  and two witnesses that each record more on some counter are a conflict.
-  Hook answers made no request. A <synthetic> record stands for a failed
-  response whose consumption is unknown: it joins no union and leaves its
-  recording incomplete. Each counter's difference, recorded minus
-  identified, is signed and never clamped: reconciled at zero, conflict below
-  it, discrepancy above it or over an incomplete union — a recording that did
-  not decode whole, or a request that did not record the counter. A
-  cost-state model that omits a counter leaves the total without it. A
-  positive difference is never established as consumption: no Claude
-  recording states which requests its cost-state counts, so
-  scope_established is false. A counter reset, a cost-state before the
-  parent's last request, conflicting witnesses, or a counter one side does
-  not record leave a counter withheld, with no difference. by_model sets each model's recorded total beside its
-  identified requests, and each source names the revision, length, and
-  SHA-256 of the bytes read and the rules applied, so a report reproduces.
+  `usage SESSION --reconcile` is Claude-only. It reads the parent and every
+  subagent recording whole and retains the newest cost-state's counters and
+  dollar facts, including per-model estimates, under their own accounting.
+  Request IDs deduplicate within a recording. A compatible provider/account
+  namespace is required for a family union; Claude recordings do not
+  establish one. Per-recording figures remain visible, identity_coverage
+  is unestablished, and family counts, counters and differences are absent.
+  A child must positively witness matching native parent identity before
+  joining the report. Failed assistant records leave consumption unmeasured
+  whether usage is an object, absent or null; hook answers made no request.
+  A later witness dominating every earlier counter discharges provisional
+  request ambiguity. The newest cumulative observation, count and reset
+  evidence are held incrementally with constant observation memory.
+
+  Comparable counters keep a signed recorded-minus-identified difference:
+  zero reconciles, a negative value conflicts, and a positive difference or
+  an incomplete measurement is a discrepancy. No positive difference proves
+  consumption beyond the requests: recorded-total membership is missing.
+  Resets, unresolved witnesses, absent counters or an unmatched comparison
+  frontier withhold differences. Parent file positions order parent requests;
+  child frontiers require timestamps. A missing frontier or a child request
+  after the total cannot contradict that total. Each source names the exact
+  revision, length and SHA-256 read under the report's rules.
 
   `usage SESSION --series[=N]` opts into a recent bounded suffix of Codex raw
   accounting observations: 200 rows by default, 1 through 10,000 explicitly.

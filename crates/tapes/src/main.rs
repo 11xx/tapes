@@ -1437,20 +1437,23 @@ enum Command {
             conflicts_with = "read_bytes"
         )]
         series: Option<Option<usize>>,
-        /// Reconcile one Claude session's recorded total with the requests
-        /// its recording family identifies, reading the parent and every
-        /// subagent recording whole. The newest cost-state stays the recorded
-        /// total as written; requests are deduplicated by request id across
-        /// recordings, and hook answers made no request. Each counter's
-        /// difference, recorded minus identified, is signed and never clamped:
-        /// `reconciled` at zero, `conflict` below it, `discrepancy` above it,
-        /// since no Claude recording states which requests its cost-state
-        /// counts, or over an incomplete union: a recording that did not
-        /// decode whole, or a request that did not record the counter. A counter reset, a cost-state
-        /// before the parent's last request, witnesses that disagree, or a
-        /// counter one side lacks make it `withheld`, with no difference.
-        /// Each source names the revision, length, and SHA-256 of the bytes
-        /// read, so the report reproduces under the named rules.
+        /// Reconcile one Claude session's recorded total with its request
+        /// observations, reading the parent and subagent recordings whole.
+        /// The newest cost-state retains its tokens and dollar facts under
+        /// recorded-total/session accounting. Requests deduplicate within
+        /// each recording; a family union requires a compatible request
+        /// namespace, which Claude recordings do not establish. In that case
+        /// per-recording figures remain visible, the union is unestablished,
+        /// and differences are withheld. A child requires matching native
+        /// parent identity before any contribution is admitted. Failed
+        /// assistant records are unmeasured even without a usage object.
+        /// Comparable counters retain signed recorded-minus-identified
+        /// differences: zero reconciles, a negative value conflicts, and a
+        /// surplus or incomplete measurement is a discrepancy. Resets,
+        /// unresolved witnesses, missing counters or an unmatched frontier
+        /// withhold differences. Child frontiers require timestamps; missing
+        /// or later child observations cannot contradict an earlier total.
+        /// Each source names the revision, length and SHA-256 of its bytes.
         #[arg(long, conflicts_with = "by")]
         reconcile: bool,
         /// Render the versioned tapes-usage/11 object, or tapes-usage-summary/6
@@ -4034,7 +4037,7 @@ fn render_reconciliation(reconciliation: &Reconciliation) -> String {
             if recorded.after_last_request {
                 ""
             } else {
-                ", before the last parent request"
+                ", comparison frontier unestablished"
             }
         )),
         None => out.push_str("; no recorded total"),
@@ -4056,18 +4059,14 @@ fn render_reconciliation(reconciliation: &Reconciliation) -> String {
     }
     let identified = &reconciliation.identified;
     out.push_str(&format!(
-        "; {} identified requests across {} recordings, {} witnessed in more than one, {} revised, \
-         {} conflicting{}\n",
-        identified.requests,
-        reconciliation.sources.len(),
-        identified.cross_recording,
-        identified.revised,
-        identified.conflicts,
-        if identified.complete {
-            ""
-        } else {
-            ", incomplete"
-        }
+        "; family request count {} across {} recordings; {} revised, {} conflicting local identities{}\n",
+        identified.requests.map_or_else(|| "unestablished".to_owned(), |count| count.to_string()),
+        reconciliation.sources.len(), identified.revised, identified.conflicts,
+        if identified.complete { "" } else { ", incomplete" }
+    ));
+    out.push_str(&format!(
+        "request identity coverage: {}\n",
+        identified.identity_coverage
     ));
     if !reconciliation.scope_established {
         out.push_str(&format!(
@@ -4116,7 +4115,9 @@ fn render_reconciliation(reconciliation: &Reconciliation) -> String {
                 .identified
                 .as_ref()
                 .map_or_else(|| "-".to_owned(), render_tokens),
-            model.requests
+            model
+                .requests
+                .map_or_else(|| "unestablished".to_owned(), |count| count.to_string())
         ));
         if let Some(cost) = &model.cost {
             out.push_str(&format!(
@@ -4143,7 +4144,7 @@ fn render_reconciliation(reconciliation: &Reconciliation) -> String {
             }
         };
         out.push_str(&format!(
-            "  source {role}: {}, {} records, {} new requests, {} without identity, {} answered without \
+            "  source {role}: {}, {} records, {} local requests, {} without identity, {} answered without \
              request, {} failed{}\n",
             if source.complete { "complete" } else { "incomplete" },
             source.records,
@@ -4156,6 +4157,18 @@ fn render_reconciliation(reconciliation: &Reconciliation) -> String {
                 .as_ref()
                 .map_or_else(String::new, |error| format!("; {error}"))
         ));
+        if let Some(tokens) = &source.identified {
+            out.push_str(&format!(
+                "    local request tokens: {}\n",
+                render_tokens(tokens)
+            ));
+        }
+        if let Some(tokens) = &source.unkeyed_tokens {
+            out.push_str(&format!(
+                "    without request identity: {}\n",
+                render_tokens(tokens)
+            ));
+        }
     }
     render_notes(&mut out, &reconciliation.notes);
     out
