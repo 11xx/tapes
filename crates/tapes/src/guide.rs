@@ -506,8 +506,13 @@ PROBE BEFORE EXPORTING
   same counters as uncached input, cache read, cache write by TTL (5m, 1h, or
   ttl_unrecorded), and output, with reasoning a share of output, and names the
   native convention it mapped from. Its total is present only when every
-  category is; missing names each category, and the TTL of nonzero writes,
-  the counters do not determine. A Claude request sum keeps the TTL split; a
+  summed category is completely measured. `missing` names absent and
+  incomplete categories, and unestablished TTLs of nonzero writes. A numeric
+  category named in `missing` is a qualified known subtotal. Native measurement
+  coverage follows each category's dependencies; incomplete counters cannot
+  establish a subtraction such as Codex's uncached input. Summary missing counts
+  include selected sessions with no token measurement, while `disjoint.sessions`
+  counts sessions that recorded tokens. A Claude request sum keeps the TTL split; a
   cost-state total merges it, so its writes are ttl_unrecorded. requests
   tallies what the read's deduplicated Claude requests recorded beside their
   tokens — cache writes by TTL, service tier, speed, inference geo, web

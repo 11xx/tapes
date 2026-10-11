@@ -3909,7 +3909,39 @@ fn render_disjoint(disjoint: &DisjointTokens) -> String {
             disjoint.missing.join(", ")
         ));
     }
+    render_disjoint_subtotals(
+        &mut out,
+        &DisjointCells {
+            uncached_input: disjoint.uncached_input,
+            cache_read: disjoint.cache_read,
+            cache_write: disjoint.cache_write.as_ref(),
+            output: disjoint.output,
+            reasoning: disjoint.reasoning,
+            total: disjoint.total,
+        },
+        |name| disjoint.missing.contains(&name),
+    );
     out
+}
+
+fn render_disjoint_subtotals(
+    out: &mut String,
+    cells: &DisjointCells<'_>,
+    incomplete: impl Fn(&'static str) -> bool,
+) {
+    for (category, present) in [
+        ("uncached_input", cells.uncached_input.is_some()),
+        ("cache_read", cells.cache_read.is_some()),
+        ("cache_write", cells.cache_write.is_some()),
+        ("output", cells.output.is_some()),
+        ("reasoning", cells.reasoning.is_some()),
+    ] {
+        if present && incomplete(category) {
+            out.push_str(&format!(
+                "disjoint {category}: known subtotal; measurement incomplete\n"
+            ));
+        }
+    }
 }
 
 /// The disjoint categories one figure or one sum holds.
@@ -4675,6 +4707,18 @@ fn render_disjoint_sum(disjoint: &DisjointSum) -> String {
             render_counts(disjoint.missing.iter().map(|(name, count)| (name, *count)))
         ));
     }
+    render_disjoint_subtotals(
+        &mut out,
+        &DisjointCells {
+            uncached_input: disjoint.uncached_input,
+            cache_read: disjoint.cache_read,
+            cache_write: disjoint.cache_write.as_ref(),
+            output: disjoint.output,
+            reasoning: disjoint.reasoning,
+            total: disjoint.total,
+        },
+        |name| disjoint.missing.contains_key(name),
+    );
     out
 }
 

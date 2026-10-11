@@ -8549,17 +8549,17 @@ fn usage_summary_human_output_says_how_many_sessions_are_behind_each_sum() {
     assert_eq!(
         lines[2],
         "codex\tgpt-fixture\t2\t1200 (1 of 2)\t300 (1 of 2)\t\t1000 (1 of 2)\t0 (1 of 2)\t\
-         1500 (1 of 2)\t\t1/0/0/0/1"
+         \t\t1/0/0/0/1"
     );
     assert_eq!(
         lines[4],
-        "TOTAL\t\t4\t1200 (1 of 4)\t300 (1 of 4)\t\t1000 (1 of 4)\t0 (1 of 4)\t1500 (1 of 4)\t\t\
+        "TOTAL\t\t4\t1200 (1 of 4)\t300 (1 of 4)\t\t1000 (1 of 4)\t0 (1 of 4)\t\t\t\
          1/0/0/0/3"
     );
     assert_eq!(
         lines[5],
         "Disjoint total over 1 sessions: uncached input 200, cache read 1000, \
-         cache write TTL unrecorded 0, output 300, total 1500"
+         cache write TTL unrecorded 0, output 300"
     );
     assert_eq!(
         lines[6],
@@ -8567,7 +8567,7 @@ fn usage_summary_human_output_says_how_many_sessions_are_behind_each_sum() {
     );
     assert_eq!(
         lines[7],
-        "Disjoint missing, sessions per category: reasoning 1"
+        "Disjoint missing, sessions per category: cache_read 3, cache_write 3, output 3, reasoning 4, uncached_input 3"
     );
 
     fs::remove_dir_all(codex_home).unwrap();
@@ -9185,6 +9185,76 @@ fn pi_usage_reports_active_branch_and_consumption_apart() {
     let help = run(&["usage", "--help"]);
     assert!(help.contains("`consumption`"), "{help}");
     assert!(help.contains("`retained-branches`"), "{help}");
+}
+
+#[test]
+fn pi_disjoint_output_qualifies_a_missing_compaction_input() {
+    let root = TemporaryDirectory::new(
+        std::env::temp_dir().join(format!("tapes-cli-disjoint-input-{}", std::process::id())),
+    );
+    let sessions = root.path().join("sessions");
+    fs::create_dir_all(&sessions).unwrap();
+    let file = "2026-01-14T10-00-00-000Z_active-consumption.jsonl";
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../tapes-core/tests/fixtures/pi-active-consumption")
+        .join(file);
+    let lines = fs::read_to_string(fixture)
+        .unwrap()
+        .lines()
+        .map(|line| {
+            let mut entry: Value = serde_json::from_str(line).unwrap();
+            if entry["id"] == "compact-1" {
+                entry["usage"].as_object_mut().unwrap().remove("input");
+            }
+            entry.to_string()
+        })
+        .collect::<Vec<_>>();
+    fs::write(sessions.join(file), lines.join("\n") + "\n").unwrap();
+    for full in [false, true] {
+        for json in [false, true] {
+            let mut command = tapes();
+            command
+                .args([
+                    "usage",
+                    "active-consumption",
+                    "--native-store",
+                    "pi",
+                    "--native-root",
+                ])
+                .arg(root.path());
+            if full {
+                command.arg("--full");
+            }
+            if json {
+                command.arg("--json");
+            }
+            let output = command.output().unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            if json {
+                let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+                assert_eq!(value["disjoint"]["uncached_input"], 130);
+                assert!(value["disjoint"].get("total").is_none());
+                assert!(value["disjoint"]["missing"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|name| name == "uncached_input"));
+            } else {
+                let rendered = String::from_utf8(output.stdout).unwrap();
+                assert!(
+                    rendered.contains(
+                        "disjoint uncached_input: known subtotal; measurement incomplete"
+                    ),
+                    "{rendered}"
+                );
+                assert!(!rendered.contains("total 265"), "{rendered}");
+            }
+        }
+    }
 }
 
 #[test]

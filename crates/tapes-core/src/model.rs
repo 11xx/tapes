@@ -679,9 +679,9 @@ impl CacheWrites {
 /// Token counts in categories no token belongs to twice, so they add across
 /// harnesses: uncached input, cache read, cache write by TTL, and output.
 /// Reasoning is a share of output, not a further category. `total` is the
-/// four categories' sum, present only when each of them is. `missing` names
-/// every category, and the cache-write TTL when writes lack one, that the
-/// native counters do not determine under `convention`.
+/// four categories' sum, present only when each is completely measured.
+/// `missing` names absent or incomplete categories and unestablished cache-write
+/// TTLs. A present category named in `missing` is a known subtotal.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct DisjointTokens {
     pub convention: TokenConvention,
@@ -702,6 +702,46 @@ pub struct DisjointTokens {
 }
 
 impl DisjointTokens {
+    /// Qualify categories by their native counter dependencies. Subtracting
+    /// counters with different measurement coverage establishes no category.
+    pub fn with_measurement_coverage(
+        mut self,
+        coverage: &BTreeMap<String, crate::usage::MeasurementCoverage>,
+    ) -> Self {
+        let incomplete = |name: &str| {
+            coverage
+                .get(name)
+                .is_some_and(|coverage| coverage.missing > 0 || coverage.unpriced > 0)
+        };
+        let uncached_input = incomplete("input")
+            || (self.convention.input == InputConvention::IncludesCacheRead
+                && (incomplete("cache_read") || incomplete("cache_write")));
+        let output = incomplete("output")
+            || (self.convention.output == OutputConvention::ExcludesReasoning
+                && incomplete("reasoning"));
+        for (name, partial) in [
+            ("uncached_input", uncached_input),
+            ("cache_read", incomplete("cache_read")),
+            ("cache_write", incomplete("cache_write")),
+            ("output", output),
+            ("reasoning", incomplete("reasoning")),
+        ] {
+            if partial && !self.missing.contains(&name) {
+                self.missing.push(name);
+            }
+        }
+        if uncached_input && self.convention.input == InputConvention::IncludesCacheRead {
+            self.uncached_input = None;
+        }
+        if ["uncached_input", "cache_read", "cache_write", "output"]
+            .iter()
+            .any(|name| self.missing.contains(name))
+        {
+            self.total = None;
+        }
+        self
+    }
+
     /// Map native counters onto the disjoint categories. `cache_writes` is the
     /// TTL split of the same writes `tokens.cache_write` counts, where the
     /// source recorded one; a split that does not sum to that count is not

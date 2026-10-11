@@ -110,6 +110,176 @@ fn active_accounting_counts_every_consumption_class_without_a_rewind() {
 }
 
 #[test]
+fn incomplete_events_qualify_disjoint_categories_and_selection_subtotals() {
+    for (native, category, subtotal, summed) in [
+        ("input", "uncached_input", 130, true),
+        ("cacheRead", "cache_read", 39, true),
+        ("cacheWrite", "cache_write", 52, true),
+        ("output", "output", 26, true),
+        ("reasoning", "reasoning", 13, false),
+    ] {
+        let store = Temp::new("disjoint-partial");
+        let file = "2026-01-14T10-00-00-000Z_active-consumption.jsonl";
+        let lines = fs::read_to_string(fixtures("pi-active-consumption").join(file))
+            .unwrap()
+            .lines()
+            .map(|line| {
+                let mut entry: Value = serde_json::from_str(line).unwrap();
+                if entry["id"] == "compact-1" {
+                    entry["usage"].as_object_mut().unwrap().remove(native);
+                }
+                entry.to_string()
+            })
+            .collect::<Vec<_>>();
+        fs::write(store.0.join(file), lines.join("\n") + "\n").unwrap();
+        for (path, view) in both(&store.0, "active-consumption") {
+            let disjoint = &view["disjoint"];
+            assert!(
+                disjoint["missing"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|name| name == category),
+                "{path}: {view}"
+            );
+            let amount = if category == "cache_write" {
+                &disjoint[category]["ttl_unrecorded"]
+            } else {
+                &disjoint[category]
+            };
+            assert_eq!(amount, subtotal, "{path}: {view}");
+            if summed {
+                assert!(disjoint.get("total").is_none(), "{path}: {view}");
+            } else {
+                assert_eq!(disjoint["total"], 285, "{path}");
+            }
+            assert_eq!(view["cost"]["usd"], 1.875, "{path}");
+        }
+        let backend = PiBackend::new(&store.0);
+        let session = backend.locate("active-consumption").unwrap().unwrap();
+        let (aggregate, partitions) = agent_tapes_core::usage::partitioned_aggregate(
+            &[session],
+            &[agent_tapes_core::usage::GroupBy::Harness],
+        );
+        for tally in [
+            &aggregate.totals,
+            &aggregate.groups[0].tally,
+            &partitions[0].tally,
+        ] {
+            let value = serde_json::to_value(tally).unwrap();
+            assert_eq!(value["disjoint"]["missing"][category], 1, "{value}");
+            if summed {
+                assert!(value["disjoint"].get("total").is_none(), "{value}");
+            } else {
+                assert_eq!(value["disjoint"]["total"], 285);
+            }
+        }
+    }
+}
+
+#[test]
+fn disjoint_dependencies_follow_each_native_convention() {
+    use agent_tapes_core::model::{SourceDescriptor, Tokens};
+    use agent_tapes_core::usage::MeasurementCoverage;
+    let backend = PiBackend::new(fixtures("pi-active-consumption"));
+    let source = backend.locate("active-consumption").unwrap().unwrap();
+    for native in ["input", "cache_read", "cache_write"] {
+        let mut session = source.clone();
+        session.source = SourceDescriptor::installed("codex", "fixture-recording");
+        session.tokens = Some(Tokens {
+            input: Some(50),
+            cache_read: Some(30),
+            cache_write: Some(0),
+            output: Some(20),
+            reasoning: Some(5),
+        });
+        let coverage = &mut session.usage_detail.as_mut().unwrap().measurement_coverage;
+        coverage.clear();
+        coverage.insert(
+            native.to_owned(),
+            MeasurementCoverage {
+                measured: 4,
+                missing: 1,
+                unpriced: 0,
+            },
+        );
+        let disjoint = session.disjoint_tokens().unwrap();
+        assert!(disjoint.uncached_input.is_none(), "{native}: {disjoint:?}");
+        assert!(disjoint.total.is_none());
+        assert!(disjoint.missing.contains(&"uncached_input"));
+        assert_eq!(disjoint.cache_read, Some(30));
+        assert_eq!(disjoint.output, Some(20));
+    }
+    let mut session = source;
+    session.source = SourceDescriptor::installed("opencode", "fixture-recording");
+    session.tokens = Some(Tokens {
+        input: Some(10),
+        cache_read: Some(0),
+        cache_write: Some(0),
+        output: Some(20),
+        reasoning: Some(5),
+    });
+    let coverage = &mut session.usage_detail.as_mut().unwrap().measurement_coverage;
+    coverage.clear();
+    coverage.insert(
+        "reasoning".to_owned(),
+        MeasurementCoverage {
+            measured: 4,
+            missing: 1,
+            unpriced: 0,
+        },
+    );
+    let disjoint = session.disjoint_tokens().unwrap();
+    assert_eq!(disjoint.output, Some(25));
+    assert!(disjoint.missing.contains(&"output"));
+    assert!(disjoint.missing.contains(&"reasoning"));
+    assert!(disjoint.total.is_none());
+}
+
+#[test]
+fn a_session_with_no_tokens_qualifies_the_selected_disjoint_subtotal() {
+    use agent_tapes_core::model::SourceDescriptor;
+    let backend = PiBackend::new(fixtures("pi-active-consumption"));
+    let mut measured = backend.locate("active-consumption").unwrap().unwrap();
+    measured.source = SourceDescriptor::installed("claude", "fixture-recording");
+    let mut unmeasured = measured.clone();
+    unmeasured.id = "unmeasured".to_owned();
+    unmeasured.tokens = None;
+    unmeasured.cost = None;
+    unmeasured.accounting = None;
+    unmeasured.usage_detail = None;
+    let (aggregate, _) = agent_tapes_core::usage::partitioned_aggregate(
+        &[measured.clone(), unmeasured.clone()],
+        &[],
+    );
+    for tally in [&aggregate.totals, &aggregate.groups[0].tally] {
+        let disjoint = tally.disjoint.as_ref().unwrap();
+        assert!(disjoint.total.is_none());
+        assert_eq!(disjoint.uncached_input, Some(150));
+        for category in [
+            "uncached_input",
+            "cache_read",
+            "cache_write",
+            "output",
+            "reasoning",
+        ] {
+            assert_eq!(disjoint.missing[category], 1);
+        }
+    }
+    unmeasured.accounting = measured.accounting.clone();
+    let (_, partitions) =
+        agent_tapes_core::usage::partitioned_aggregate(&[measured, unmeasured], &[]);
+    assert_eq!(partitions.len(), 1);
+    assert!(partitions[0]
+        .tally
+        .disjoint
+        .as_ref()
+        .unwrap()
+        .total
+        .is_none());
+}
+
+#[test]
 fn sibling_projections_keep_active_measurement_qualifications() {
     let backends: Vec<Box<dyn Backend>> = vec![Box::new(PiBackend::new(fixtures("pi")))];
     let usage =

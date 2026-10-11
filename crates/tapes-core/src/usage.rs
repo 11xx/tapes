@@ -759,7 +759,11 @@ impl Session {
             .usage_detail
             .as_ref()
             .and_then(|detail| detail.cache_write_by_ttl.as_ref());
-        Some(DisjointTokens::from_native(tokens, convention, by_ttl))
+        let disjoint = DisjointTokens::from_native(tokens, convention, by_ttl);
+        Some(match &self.usage_detail {
+            Some(detail) => disjoint.with_measurement_coverage(&detail.measurement_coverage),
+            None => disjoint,
+        })
     }
 }
 
@@ -978,10 +982,10 @@ pub struct UsageIdentityBounds {
 /// Disjoint categories summed over a set of sessions, each converted from its
 /// own harness's convention, which `conventions` names by harness. `sessions`
 /// counts the sessions that recorded tokens. A category sums the sessions
-/// whose counters determine it; `missing` counts, per category, the sessions
-/// whose counters do not, under `convention` for a harness with none
-/// established. `total` is present only when every one of those sessions
-/// determines all four summed categories.
+/// with known category amounts. `missing` counts all selected sessions whose
+/// category is absent or incompletely measured, including sessions with no
+/// token counters; `convention` names an unestablished mapping. `total` requires
+/// complete measurement of all four summed categories in every selected session.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
 pub struct DisjointSum {
     pub conventions: BTreeMap<String, TokenConvention>,
@@ -1015,11 +1019,29 @@ const SUMMED_CATEGORIES: [&str; 5] = [
 impl DisjointSum {
     fn add(&mut self, session: &Session) {
         if session.tokens.is_none() {
+            for name in [
+                "uncached_input",
+                "cache_read",
+                "cache_write",
+                "output",
+                "reasoning",
+            ] {
+                *self.missing.entry(name).or_default() += 1;
+            }
             return;
         }
         self.sessions += 1;
         let Some(disjoint) = session.disjoint_tokens() else {
             *self.missing.entry("convention").or_default() += 1;
+            for name in [
+                "uncached_input",
+                "cache_read",
+                "cache_write",
+                "output",
+                "reasoning",
+            ] {
+                *self.missing.entry(name).or_default() += 1;
+            }
             return;
         };
         self.conventions
@@ -1639,7 +1661,7 @@ mod tests {
                         "sessions": 2,
                         "output": 30,
                         "reasoning": 5,
-                        "missing": { "cache_read": 2, "cache_write": 2, "reasoning": 1, "uncached_input": 2 }
+                        "missing": { "cache_read": 3, "cache_write": 3, "output": 1, "reasoning": 2, "uncached_input": 3 }
                     },
                     "cost": { "usd": 1.0, "kind": "harness-calculated-estimate", "missing": ["pricing_basis"] },
                     "cost_coverage": { "complete": false, "zero_written_requests": 0, "zero_written_observations": 0 },
@@ -1676,11 +1698,11 @@ mod tests {
                     "output": 30,
                     "reasoning": 5,
                     "missing": {
-                        "cache_read": 2,
-                        "cache_write": 3,
-                        "output": 1,
-                        "reasoning": 2,
-                        "uncached_input": 3
+                        "cache_read": 3,
+                        "cache_write": 4,
+                        "output": 2,
+                        "reasoning": 3,
+                        "uncached_input": 4
                     }
                 },
                 "cost": { "usd": 3.5, "kind": "harness-calculated-estimate", "missing": ["pricing_basis"] },
