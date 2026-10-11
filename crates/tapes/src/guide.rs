@@ -176,9 +176,9 @@ FIND IT
   they cover the session or only the bounded read window. A cost carries
   kind: harness-calculated-estimate and lists pricing_basis under missing:
   the harness priced it, and no recording says on which price table.
-  Where a recording
-  keeps more than one conversation path, its selection says which records the
-  figures were summed over: pi's counters are `active-branch`, the last
+  Where a recording keeps more than one conversation path, its selection says
+  which records the figures were summed over: pi's counters are
+  `active-branch`, the last
   entry's ancestry, and cover the session only when the read linked that
   branch from its last entry to its root.
 
@@ -488,8 +488,10 @@ PROBE BEFORE EXPORTING
   without being rebuilt from request rows. Codex quota observations preserve
   credits balances and reached-limit flags exactly as recorded, including false
   and string zero; absent fields remain unknown. `usage --full` streams the
-  whole recording and folds every counter from it, so turns and accounting
-  cover the session.
+  whole recording and folds its counters. Turns and complete request reads
+  cover the session; recorded totals keep their epoch coverage. Pi's active
+  accounting stays `read-window` when an unreadable record cuts its branch
+  or follows its last entry.
 
   tokens are the harness's own counters, and what its input and output
   include differs: Codex input counts cache reads, OpenCode output leaves
@@ -551,6 +553,10 @@ PROBE BEFORE EXPORTING
   dimensions, is unpriced; it is never a zero estimate. Consumption cost is
   absent when no counted event is priced; its measurement coverage and
   incomplete reason still report the unpriced events.
+  Consumption cost uses the same estimate kind and missing pricing basis as
+  every other cost. Its `cost_coverage` marks missing or unpriced event costs
+  incomplete, counts every zero-written event as an observation, and counts
+  assistant-message requests under `zero_written_requests`.
   `incomplete` names these quantities, unreadable records, and requests
   that stopped on an error or an abort, whose usage stopped with them.
   Quantities are complete only with `session` coverage and no

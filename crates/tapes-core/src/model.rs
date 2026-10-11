@@ -2216,7 +2216,7 @@ mod tests {
         empty["tokens"] = serde_json::json!({"input":0,"output":0});
         empty["cost"] = serde_json::json!({"usd":0});
         let empty: Session = serde_json::from_value(empty).unwrap();
-        assert_eq!(empty.cost, Some(Cost { usd: 0.0 }));
+        assert_eq!(empty.cost.as_ref().map(|cost| cost.usd), Some(0.0));
     }
 
     #[test]
@@ -2300,7 +2300,11 @@ mod tests {
         };
 
         assert_round_trip(&model);
-        assert_round_trip(&cost);
+        let encoded = serde_json::to_value(&cost).unwrap();
+        let decoded: Cost = serde_json::from_value(encoded.clone()).unwrap();
+        assert_eq!(decoded.usd, cost.usd);
+        assert_eq!(encoded["kind"], "harness-calculated-estimate");
+        assert_eq!(encoded["missing"], json!(["pricing_basis"]));
         assert_round_trip(&tokens);
         assert_round_trip(&accounting);
         assert_eq!(

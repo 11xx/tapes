@@ -18,9 +18,9 @@ use crate::content::{
 use crate::event::{Bounded, EventKind, ToolEvent};
 use crate::lineage::{Lineage, ParentRef};
 use crate::model::{
-    Accounting, AccountingBasis, AccountingCoverage, AccountingSelection, Cost, CostCoverage, KindDeclaration,
-    Launch, Model, ReadGap, Role, Session, SourceDescriptor, Tokens, TrailingRecord, Transcript,
-    Turn, TurnKind, TurnSelection, UserDefault,
+    Accounting, AccountingBasis, AccountingCoverage, AccountingSelection, Cost, CostCoverage,
+    KindDeclaration, Launch, Model, ReadGap, Role, Session, SourceDescriptor, Tokens,
+    TrailingRecord, Transcript, Turn, TurnKind, TurnSelection, UserDefault,
 };
 use crate::usage::{Consumption, ConsumptionEvents, ConsumptionIdentity, ModelUsage, UsageDetail};
 use agent_tapes_discovery::{Harness as NativeHarness, IdentityBasis, NativeSession, NativeStore};
@@ -911,6 +911,23 @@ struct PiRequest {
     cost: Option<f64>,
 }
 
+impl PiRequest {
+    fn is_unpriced(&self) -> bool {
+        self.cost == Some(0.0)
+            && [
+                self.input,
+                self.output,
+                self.reasoning,
+                self.cache_read,
+                self.cache_write,
+                self.total_tokens,
+            ]
+            .into_iter()
+            .flatten()
+            .any(|count| count > 0)
+    }
+}
+
 fn pi_request(entry: &Value) -> Option<PiRequest> {
     if entry["type"] != "message" {
         return None;
@@ -965,18 +982,7 @@ impl PiTotals {
             request.cache_write,
         );
         match request.cost {
-            Some(0.0)
-                if [
-                    request.input,
-                    request.output,
-                    request.reasoning,
-                    request.cache_read,
-                    request.cache_write,
-                ]
-                .into_iter()
-                .flatten()
-                .any(|count| count > 0) =>
-            {
+            Some(0.0) if request.is_unpriced() => {
                 self.zero_written += 1;
                 self.cost_missing = true;
             }
@@ -1077,6 +1083,7 @@ impl PiUsage {
 /// or an entry of type `usage`.
 struct PiConsumed {
     usage: PiRequest,
+    assistant_request: bool,
     /// The provider and the response identity it returned, which an
     /// assistant message records when the provider supplied one.
     response: Option<(String, String)>,
@@ -1102,6 +1109,7 @@ fn pi_consumed(entry: &Value) -> Option<PiConsumed> {
         .flatten();
     Some(PiConsumed {
         usage: pi_usage_counters(usage)?,
+        assistant_request: assistant,
         response,
         stopped: assistant && matches!(message["stopReason"].as_str(), Some("error" | "aborted")),
     })
@@ -1115,6 +1123,7 @@ struct PiConsumption {
     events: ConsumptionEvents,
     identity: ConsumptionIdentity,
     stopped: usize,
+    zero_written_requests: usize,
     measurement_coverage: BTreeMap<String, crate::usage::MeasurementCoverage>,
     entries: HashSet<String>,
     responses: HashSet<(String, String)>,
@@ -1149,33 +1158,20 @@ impl PiConsumption {
                 coverage.missing += 1;
             }
         }
-        let nonzero_usage = [
-            usage.input,
-            usage.output,
-            usage.reasoning,
-            usage.cache_read,
-            usage.cache_write,
-            usage.total_tokens,
-        ]
-        .into_iter()
-        .flatten()
-        .any(|value| value > 0);
-        let unpriced = usage.cost == Some(0.0) && nonzero_usage;
+        let unpriced = usage.is_unpriced();
         let coverage = self
             .measurement_coverage
             .entry("cost".to_owned())
             .or_default();
         if unpriced {
             coverage.unpriced += 1;
+            self.zero_written_requests += usize::from(consumed.assistant_request);
         } else if usage.cost.is_none() {
             coverage.missing += 1;
         } else {
             coverage.measured += 1;
         }
-        self.totals.add(&PiRequest {
-            cost: usage.cost.filter(|_| !unpriced),
-            ..*usage
-        });
+        self.totals.add(usage);
         self.events.counted += 1;
         if on_branch {
             self.events.active_branch += 1;
@@ -1231,6 +1227,10 @@ impl PiConsumption {
         let cost = (self.measurement_coverage["cost"].measured > 0).then_some(Cost {
             usd: self.totals.cost,
         });
+        let cost_coverage = self.totals.cost_coverage().map(|coverage| CostCoverage {
+            zero_written_requests: self.zero_written_requests,
+            ..coverage
+        });
         let (tokens, _) = self.totals.finish();
         Some(Consumption {
             accounting: Accounting {
@@ -1240,6 +1240,7 @@ impl PiConsumption {
             },
             tokens,
             cost,
+            cost_coverage,
             events: self.events,
             identity: ConsumptionIdentity {
                 fork_parent_unestablished: forked_from == Some(None),

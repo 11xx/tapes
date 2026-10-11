@@ -16,8 +16,9 @@ use agent_tapes_core::lineage::{ChildRef, LineageView};
 use agent_tapes_core::model::{
     human_bytes, human_speaker, human_timestamp, human_title, speaker, Accounting, AccountingBasis,
     AccountingCoverage, AccountingSelection, CacheWrites, Cost, CostCoverage, DisjointTokens,
-    InputConvention, LiveState, OutputConvention, Projection, Session, SourceBound, SourceDescriptor,
-    TokenConvention, Tokens, Transcript, Truncation, Turn, TurnKind, TurnSelection,
+    InputConvention, LiveState, OutputConvention, Projection, Session, SourceBound,
+    SourceDescriptor, TokenConvention, Tokens, Transcript, Truncation, Turn, TurnKind,
+    TurnSelection,
 };
 use agent_tapes_core::stats::{
     AssistantTurnDurations, Coverage, LineageStats, StatsView, TimeStats, ToolNameStats, ToolStats,
@@ -25,8 +26,8 @@ use agent_tapes_core::stats::{
 };
 use agent_tapes_core::stats_summary::SessionRead;
 use agent_tapes_core::usage::{
-    Consumption, DisjointSum, Durations, GroupBy, GroupKey, ModelUsage, ObservationClassification, RateLimits,
-    RateWindow, RequestDimensions, TurnCoverage, UsageAttribution, UsageObservation,
+    Consumption, DisjointSum, Durations, GroupBy, GroupKey, ModelUsage, ObservationClassification,
+    RateLimits, RateWindow, RequestDimensions, TurnCoverage, UsageAttribution, UsageObservation,
     UsageObservationOptions, UsageOptions, UsageTally, UsageView,
 };
 use agent_tapes_core::{BulkExport, Selection, UsageSummary, Where};
@@ -1374,13 +1375,17 @@ enum Command {
     /// summed; cost is the harness's own estimate, and quota is a separate
     /// fact about the account rather than these sessions. Claude subagent
     /// count notes report failed directory enumeration instead of a count.
-    /// A pi session's counters select its
-    /// active branch; its `consumption` sums every retained branch, each
-    /// consumption event once, with per-counter measurement coverage for known
+    /// A pi session's counters select its active branch; its `consumption`
+    /// sums every retained branch, each consumption event once, with
+    /// per-counter measurement coverage for known
     /// subtotals, event split, observed identity (provider account namespace
     /// unestablished), and incompleteness. Consumption cost is absent when no
-    /// counted event is priced; coverage still counts unpriced events. Fork
-    /// parents retain complete native ids, including dots and underscores,
+    /// counted event is priced; `cost_coverage` qualifies missing and unpriced
+    /// events alongside the per-counter measurement counts. Its cost carries
+    /// the same estimate kind and missing pricing basis as every other cost.
+    /// Zero-written consumption events count as observations; assistant
+    /// messages establish request counts. Fork parents retain complete native
+    /// ids, including dots and underscores,
     /// within a 128-byte bound; recording paths and timestamp-prefixed basenames
     /// stay private. Other bare references, such as parent.jsonl, are ids.
     Usage {
@@ -4018,6 +4023,12 @@ fn render_consumption(consumption: &Consumption) -> String {
         figures.join(", "),
         render_accounting(&consumption.accounting)
     );
+    if let Some(coverage) = &consumption.cost_coverage {
+        out.push_str(&format!(
+            "consumption cost coverage: {}\n",
+            render_cost_coverage(coverage)
+        ));
+    }
     out.push_str(&format!(
         "consumption events: {} counted, {} on the active branch, {} on other branches, {} repeats\n",
         events.counted, events.active_branch, events.other_branches, events.repeats

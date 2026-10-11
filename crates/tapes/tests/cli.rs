@@ -9051,7 +9051,7 @@ fn pi_usage_reports_active_branch_and_consumption_apart() {
         for line in [
             "tokens: input 400, output 40, reasoning 8, cache read 200, cache write 20\n",
             "accounting: a sum of per-request records along the active branch, covering the whole branch\n",
-            "consumption: tokens input 1030, output 103, reasoning 20, cache read 500, cache write 50, cost 1.3125 USD; a sum of per-request records over every retained branch, covering the whole recording\n",
+            "consumption: tokens input 1030, output 103, reasoning 20, cache read 500, cache write 50, cost 1.3125 USD (harness-calculated estimate, pricing basis not recorded); a sum of per-request records over every retained branch, covering the whole recording\n",
             "consumption events: 5 counted, 3 on the active branch, 2 on other branches, 0 repeats\n",
             "consumption identity: 4 by observed provider response (account namespace unestablished), 1 by recording entry, 0 unidentified",
             "consumption reasoning: known subtotal; 4/5 events measured, 1 missing, 0 unpriced\n",
@@ -9082,6 +9082,91 @@ fn pi_usage_reports_active_branch_and_consumption_apart() {
             "{value}"
         );
         assert_eq!(value["consumption"]["cost"]["usd"], 1.3125, "{value}");
+        assert_eq!(
+            value["consumption"]["cost"]["kind"], "harness-calculated-estimate",
+            "{value}"
+        );
+        assert_eq!(
+            value["consumption"]["cost"]["missing"],
+            serde_json::json!(["pricing_basis"]),
+            "{value}"
+        );
+    }
+
+    for all in [false, true] {
+        let recording_lines = contents
+            .lines()
+            .map(|line| {
+                let mut entry: Value = serde_json::from_str(line).unwrap();
+                let selected = all || entry["id"] == "assistant-3a";
+                let usage = if entry["type"] == "message" {
+                    &mut entry["message"]["usage"]
+                } else {
+                    &mut entry["usage"]
+                };
+                if selected && usage.is_object() {
+                    usage["cost"]["total"] = serde_json::json!(0);
+                }
+                entry.to_string()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n";
+        fs::write(&recording, recording_lines).unwrap();
+        for full in [false, true] {
+            let mut arguments = vec!["usage", "session-rewound"];
+            if full {
+                arguments.push("--full");
+            }
+            let human = run(&arguments);
+            let requests = if all { 4 } else { 1 };
+            let observations = if all { 5 } else { 1 };
+            assert!(human.contains(&format!(
+                "consumption cost coverage: incomplete; {requests} zero-written requests, {observations} zero-written observations; any cost is a known priced subtotal\n"
+            )), "{human}");
+            if all {
+                assert!(!human.contains("cost 0.0000 USD"), "{human}");
+            } else {
+                assert!(
+                    human.contains(
+                        "cost 0.8125 USD (harness-calculated estimate, pricing basis not recorded)"
+                    ),
+                    "{human}"
+                );
+            }
+            arguments.push("--json");
+            let value: Value = serde_json::from_str(&run(&arguments)).unwrap();
+            let consumption = &value["consumption"];
+            assert_eq!(consumption["cost_coverage"]["complete"], false, "{value}");
+            assert_eq!(
+                consumption["cost_coverage"]["zero_written_requests"], requests,
+                "{value}"
+            );
+            assert_eq!(
+                consumption["cost_coverage"]["zero_written_observations"], observations,
+                "{value}"
+            );
+            assert_eq!(
+                consumption["measurement_coverage"]["cost"]["unpriced"], observations,
+                "{value}"
+            );
+            if all {
+                assert!(consumption.get("cost").is_none(), "{value}");
+                assert!(value.get("cost").is_none(), "{value}");
+                assert_eq!(value["cost_coverage"]["complete"], false, "{value}");
+            } else {
+                assert_eq!(consumption["cost"]["usd"], 0.8125, "{value}");
+                assert_eq!(
+                    consumption["cost"]["kind"], "harness-calculated-estimate",
+                    "{value}"
+                );
+                assert_eq!(
+                    consumption["cost"]["missing"],
+                    serde_json::json!(["pricing_basis"]),
+                    "{value}"
+                );
+            }
+        }
     }
 
     let help = run(&["usage", "--help"]);

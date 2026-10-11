@@ -122,6 +122,11 @@ fn a_rewound_recording_reports_active_and_consumption_totals_apart() {
         let consumption = &view["consumption"];
         assert_eq!(consumption["tokens"], consumed_tokens(), "{path}");
         assert_eq!(consumption["cost"]["usd"], 1.3125, "{path}");
+        for cost in [&view["cost"], &consumption["cost"]] {
+            assert_eq!(cost["kind"], "harness-calculated-estimate", "{path}");
+            assert_eq!(cost["missing"], json!(["pricing_basis"]), "{path}");
+        }
+        assert!(consumption.get("cost_coverage").is_none(), "{path}: {view}");
         assert_eq!(
             consumption["measurement_coverage"]["reasoning"],
             json!({"measured":4,"missing":1,"unpriced":0}),
@@ -457,7 +462,27 @@ fn zero_cost_events_with_usage_are_unpriced_before_aggregation() {
                 assert!(consumption.get("cost").is_none(), "{path}: {view}");
             } else {
                 assert_eq!(consumption["cost"]["usd"], 0.8125, "{path}");
+                assert_eq!(
+                    consumption["cost"]["kind"], "harness-calculated-estimate",
+                    "{path}"
+                );
+                assert_eq!(
+                    consumption["cost"]["missing"],
+                    json!(["pricing_basis"]),
+                    "{path}"
+                );
             }
+            assert_eq!(consumption["cost_coverage"]["complete"], false, "{path}");
+            assert_eq!(
+                consumption["cost_coverage"]["zero_written_requests"],
+                if all { 4 } else { 1 },
+                "{path}"
+            );
+            assert_eq!(
+                consumption["cost_coverage"]["zero_written_observations"],
+                if all { 5 } else { 1 },
+                "{path}"
+            );
             assert_eq!(
                 consumption["measurement_coverage"]["cost"]["measured"],
                 if all { 0 } else { 4 },
@@ -562,20 +587,110 @@ fn active_accounting_names_excluded_entry_classes() {
 
 #[test]
 fn total_only_usage_with_zero_cost_is_unpriced() {
-    let store = rewound_variant("total-only", |lines| {
-        let index = line_index(lines, "assistant-3a");
+    for (id, subtotal, active) in [
+        ("assistant-3a", 0.8125, false),
+        ("assistant-2b", 0.9375, true),
+    ] {
+        let store = rewound_variant("total-only", |lines| {
+            let index = line_index(lines, id);
+            let mut entry: Value = serde_json::from_str(&lines[index]).unwrap();
+            entry["message"]["usage"] = json!({"totalTokens":660,"cost":{"total":0}});
+            lines[index] = entry.to_string();
+        });
+        for (path, view) in both(&store.0, "session-rewound") {
+            let consumption = &view["consumption"];
+            assert_eq!(consumption["cost"]["usd"], subtotal, "{path}");
+            assert_eq!(consumption["cost_coverage"]["complete"], false, "{path}");
+            assert_eq!(
+                consumption["cost_coverage"]["zero_written_requests"], 1,
+                "{path}"
+            );
+            assert_eq!(
+                consumption["cost_coverage"]["zero_written_observations"], 1,
+                "{path}"
+            );
+            assert_eq!(
+                consumption["measurement_coverage"]["cost"]["unpriced"], 1,
+                "{path}"
+            );
+            assert_eq!(
+                consumption["measurement_coverage"]["cost"]["measured"], 4,
+                "{path}"
+            );
+            if active {
+                assert!(view.get("cost").is_none(), "{path}: {view}");
+                assert_eq!(view["cost_coverage"]["complete"], false, "{path}");
+                assert_eq!(view["cost_coverage"]["zero_written_requests"], 1, "{path}");
+                let model = &view["by_model"][0];
+                assert!(model.get("cost").is_none(), "{path}: {view}");
+                assert_eq!(model["cost_coverage"]["complete"], false, "{path}");
+                assert_eq!(model["cost_coverage"]["zero_written_requests"], 1, "{path}");
+            }
+        }
+    }
+}
+
+#[test]
+fn unpriced_non_message_events_are_observations_without_request_evidence() {
+    let store = rewound_variant("unpriced-summary", |lines| {
+        let index = line_index(lines, "summary-1");
         let mut entry: Value = serde_json::from_str(&lines[index]).unwrap();
-        entry["message"]["usage"] = json!({"totalTokens":660,"cost":{"total":0}});
+        entry["usage"]["cost"]["total"] = json!(0);
         lines[index] = entry.to_string();
+        lines.insert(index + 1, lines[index].clone());
     });
     for (path, view) in both(&store.0, "session-rewound") {
-        assert_eq!(view["consumption"]["cost"]["usd"], 0.8125, "{path}");
+        let consumption = &view["consumption"];
+        assert_eq!(consumption["cost"]["usd"], 1.25, "{path}");
+        assert_eq!(consumption["cost_coverage"]["complete"], false, "{path}");
         assert_eq!(
-            view["consumption"]["measurement_coverage"]["cost"]["unpriced"], 1,
-            "{path}: {view}"
+            consumption["cost_coverage"]["zero_written_requests"], 0,
+            "{path}"
         );
         assert_eq!(
-            view["consumption"]["measurement_coverage"]["cost"]["measured"], 4,
+            consumption["cost_coverage"]["zero_written_observations"], 1,
+            "{path}"
+        );
+        assert_eq!(
+            consumption["measurement_coverage"]["cost"]["unpriced"], 1,
+            "{path}"
+        );
+        assert_eq!(consumption["events"]["counted"], 5, "{path}");
+        assert_eq!(consumption["events"]["repeats"], 1, "{path}");
+    }
+}
+
+#[test]
+fn written_zero_with_zero_usage_remains_a_measured_cost() {
+    let store = rewound_variant("zero-usage", |lines| {
+        for line in lines {
+            let mut entry: Value = serde_json::from_str(line).unwrap();
+            let usage = if entry["type"] == "message" {
+                &mut entry["message"]["usage"]
+            } else {
+                &mut entry["usage"]
+            };
+            if usage.is_object() {
+                *usage = json!({"input":0,"output":0,"reasoning":0,"cacheRead":0,"cacheWrite":0,"totalTokens":0,"cost":{"total":0}});
+            }
+            *line = entry.to_string();
+        }
+    });
+    for (path, view) in both(&store.0, "session-rewound") {
+        let consumption = &view["consumption"];
+        for cost in [&view["cost"], &consumption["cost"]] {
+            assert_eq!(cost["usd"], 0.0, "{path}");
+            assert_eq!(cost["kind"], "harness-calculated-estimate", "{path}");
+            assert_eq!(cost["missing"], json!(["pricing_basis"]), "{path}");
+        }
+        assert!(view.get("cost_coverage").is_none(), "{path}: {view}");
+        assert!(consumption.get("cost_coverage").is_none(), "{path}: {view}");
+        assert_eq!(
+            consumption["measurement_coverage"]["cost"]["measured"], 5,
+            "{path}"
+        );
+        assert_eq!(
+            consumption["measurement_coverage"]["cost"]["unpriced"], 0,
             "{path}"
         );
     }
@@ -615,6 +730,15 @@ fn missing_prices_retain_only_the_known_cost_subtotal() {
             );
             assert_eq!(
                 consumption["measurement_coverage"]["cost"]["unpriced"], 0,
+                "{path}"
+            );
+            assert_eq!(consumption["cost_coverage"]["complete"], false, "{path}");
+            assert_eq!(
+                consumption["cost_coverage"]["zero_written_requests"], 0,
+                "{path}"
+            );
+            assert_eq!(
+                consumption["cost_coverage"]["zero_written_observations"], 0,
                 "{path}"
             );
         }

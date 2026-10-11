@@ -1899,13 +1899,11 @@ fn claude_names_the_dimensions_a_request_or_a_recorded_total_did_not_record() {
         recorded["requests"]["cache_write"],
         serde_json::json!({ "ephemeral_5m": 150, "ephemeral_1h": 210, "ttl_unrecorded": 40 })
     );
+    assert_eq!(recorded["cost"]["usd"], 0.5);
+    assert_eq!(recorded["cost"]["kind"], "harness-calculated-estimate");
     assert_eq!(
-        recorded["cost"],
-        serde_json::json!({
-            "usd": 0.5,
-            "kind": "harness-calculated-estimate",
-            "missing": ["pricing_basis"]
-        })
+        recorded["cost"]["missing"],
+        serde_json::json!(["pricing_basis"])
     );
     fs::remove_dir_all(root).unwrap();
 }
@@ -1942,7 +1940,7 @@ fn claude_cost_state_supplies_recorded_totals_over_request_usage() {
             cache_write: Some(505),
         })
     );
-    assert_eq!(session.cost, Some(Cost { usd: 12.5 }));
+    assert_eq!(session.cost.as_ref().map(|cost| cost.usd), Some(12.5));
     assert_eq!(
         session.accounting,
         Some(Accounting {
@@ -2074,7 +2072,7 @@ fn pi_reports_entries_outside_the_active_leaf_path() {
             cache_write: Some(14),
         })
     );
-    assert_eq!(session.cost, Some(Cost { usd: 0.375 }));
+    assert_eq!(session.cost.as_ref().map(|cost| cost.usd), Some(0.375));
     assert_eq!(
         session.accounting,
         Some(Accounting {
@@ -4314,7 +4312,7 @@ fn a_truncated_claude_read_keeps_whole_session_coverage_for_a_cost_state_record(
             cache_write: Some(50),
         })
     );
-    assert_eq!(session.cost, Some(Cost { usd: 3.5 }));
+    assert_eq!(session.cost.as_ref().map(|cost| cost.usd), Some(3.5));
     assert_eq!(
         session.accounting,
         Some(Accounting {

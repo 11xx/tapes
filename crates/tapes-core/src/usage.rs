@@ -304,6 +304,10 @@ pub struct Consumption {
     /// a numeric zero beside nonzero usage is unpriced.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cost: Option<Cost>,
+    /// Pricing completeness among counted events. Assistant-message events
+    /// establish request counts; every zero-written event is an observation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cost_coverage: Option<CostCoverage>,
     /// Per-counter coverage among the counted events. Missing dimensions
     /// leave known subtotals, never complete measurements.
     pub measurement_coverage: BTreeMap<String, MeasurementCoverage>,
@@ -541,6 +545,7 @@ pub struct UsageView {
     pub requests: Option<RequestDimensions>,
     #[serde(skip_serializing_if = "is_zero")]
     pub request_failures: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub consumption: Option<Consumption>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub series: Option<UsageObservationSeries>,
@@ -1179,11 +1184,17 @@ mod tests {
         for absent in [
             "tokens",
             "cost",
+            "cost_coverage",
+            "disjoint",
             "accounting",
             "context_window",
             "rate_limits",
             "durations_ms",
             "by_model",
+            "attribution",
+            "requests",
+            "request_failures",
+            "consumption",
             "truncation",
             "notes",
         ] {
@@ -1271,10 +1282,9 @@ mod tests {
 
         let value: Value = serde_json::to_value(usage(&transcript)).unwrap();
         assert_eq!(value["tokens"], json!({ "input": 10, "output": 20 }));
-        assert_eq!(
-            value["cost"],
-            json!({ "usd": 1.5, "kind": "harness-calculated-estimate", "missing": ["pricing_basis"] })
-        );
+        assert_eq!(value["cost"]["usd"], 1.5);
+        assert_eq!(value["cost"]["kind"], "harness-calculated-estimate");
+        assert_eq!(value["cost"]["missing"], json!(["pricing_basis"]));
         assert!(value.get("disjoint").is_none(), "{value}");
         assert_eq!(
             value["accounting"],
@@ -1293,14 +1303,13 @@ mod tests {
             })
         );
         assert_eq!(value["durations_ms"], json!({ "api": 1000, "total": 2000 }));
-        assert_eq!(
-            value["by_model"],
-            json!([{
-                "model": "fixture-model",
-                "tokens": { "input": 10, "output": 20 },
-                "cost": { "usd": 1.5, "kind": "harness-calculated-estimate", "missing": ["pricing_basis"] }
-            }])
-        );
+        assert_eq!(value["by_model"].as_array().unwrap().len(), 1);
+        let model = &value["by_model"][0];
+        assert_eq!(model["model"], "fixture-model");
+        assert_eq!(model["tokens"], json!({ "input": 10, "output": 20 }));
+        assert_eq!(model["cost"]["usd"], 1.5);
+        assert_eq!(model["cost"]["kind"], "harness-calculated-estimate");
+        assert_eq!(model["cost"]["missing"], json!(["pricing_basis"]));
         assert_eq!(value["turns"]["tool"], 1);
         assert_eq!(value["turns"]["reasoning"], 1);
     }
@@ -1670,6 +1679,7 @@ mod partition_tests {
             accounting: Some(Accounting {
                 basis: AccountingBasis::RecordedTotal,
                 coverage: AccountingCoverage::Session,
+                selection: None,
             }),
             ..super::tests::session()
         }
@@ -1771,6 +1781,7 @@ mod partition_tests {
         summed[0].accounting = Some(Accounting {
             basis: AccountingBasis::SummedRequests,
             coverage: AccountingCoverage::Session,
+            selection: None,
         });
         let (aggregate, partitions) = partitioned_aggregate(&summed, &[]);
         assert!(aggregate.totals.disjoint.is_none());
@@ -1821,7 +1832,7 @@ mod partition_tests {
         let mut priced = zero.clone();
         priced.cost = Some(Cost { usd: 0.5 });
         let (mixed, partitions) = partitioned_aggregate(&[zero, priced], &[]);
-        assert_eq!(mixed.totals.cost, Some(Cost { usd: 0.5 }));
+        assert_eq!(mixed.totals.cost.as_ref().map(|cost| cost.usd), Some(0.5));
         assert_eq!(mixed.totals.counted.cost, 1);
         let value = serde_json::to_value(&partitions).unwrap();
         assert_eq!(value[0]["cost_coverage"]["complete"], false);
