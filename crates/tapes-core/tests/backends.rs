@@ -2088,6 +2088,188 @@ fn reconciliation_withholds_totals_before_the_child_frontier() {
     fs::remove_dir_all(root).unwrap();
 }
 
+fn claude_dimension_witnesses(
+    tag: &str,
+    edit: impl Fn(&mut serde_json::Value, bool),
+) -> (PathBuf, serde_json::Value, serde_json::Value) {
+    let root = std::env::temp_dir().join(format!(
+        "tapes-dimension-witness-{tag}-{}",
+        std::process::id()
+    ));
+    let project = root.join("project");
+    fs::create_dir_all(&project).unwrap();
+    let records = claude_dimensions_recording()
+        .lines()
+        .filter_map(|line| {
+            let mut value: serde_json::Value = serde_json::from_str(line).unwrap();
+            if value["requestId"] == "req_fixture_2" {
+                return None;
+            }
+            if value["requestId"] == "req_fixture_1" {
+                let later = value["uuid"] == "assistant-2";
+                edit(&mut value["message"]["usage"], later);
+            }
+            Some(value.to_string())
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n";
+    fs::write(
+        project.join(format!("{CLAUDE_DIMENSIONS_SESSION}.jsonl")),
+        records,
+    )
+    .unwrap();
+    let backend = ClaudeBackend::new(root.clone());
+    let bounded = usage_value(&backend, CLAUDE_DIMENSIONS_SESSION);
+    let backends: Vec<Box<dyn Backend>> = vec![Box::new(backend)];
+    let full = serde_json::to_value(
+        usage_full_with_backends(&backends, Selection::Id(CLAUDE_DIMENSIONS_SESSION)).unwrap(),
+    )
+    .unwrap();
+    (root, bounded, full)
+}
+
+fn check_sparse_later_dimensions(advancing: bool) {
+    let (root, bounded, full) = claude_dimension_witnesses(
+        if advancing { "advance" } else { "equal" },
+        |usage, later| {
+            if later {
+                for key in [
+                    "cache_creation",
+                    "server_tool_use",
+                    "service_tier",
+                    "speed",
+                    "inference_geo",
+                ] {
+                    usage.as_object_mut().unwrap().remove(key);
+                }
+            } else {
+                usage["output_tokens"] = serde_json::json!(if advancing { 12 } else { 40 });
+                usage["server_tool_use"] =
+                    serde_json::json!({"web_search_requests":2,"web_fetch_requests":1});
+            }
+        },
+    );
+    for value in [&bounded, &full] {
+        assert_eq!(value["tokens"]["output"], 40);
+        let dims = &value["requests"];
+        assert_eq!(dims["requests"], 1);
+        assert_eq!(
+            dims["cache_write"],
+            serde_json::json!({"ephemeral_5m":100,"ephemeral_1h":200})
+        );
+        assert_eq!(dims["web_search_requests"], 2);
+        assert_eq!(dims["web_fetch_requests"], 1);
+        assert_eq!(dims["service_tier"], serde_json::json!({"standard":1}));
+        assert_eq!(dims["speed"], serde_json::json!({"fast":1}));
+        assert_eq!(dims["inference_geo"], serde_json::json!({"global":1}));
+        assert!(dims.get("missing").is_none());
+        assert!(dims.get("conflicting").is_none());
+    }
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn sparse_later_dimensions_preserve_equal_counter_witnesses() {
+    check_sparse_later_dimensions(false);
+}
+
+#[test]
+fn sparse_later_dimensions_preserve_advancing_counter_witnesses() {
+    check_sparse_later_dimensions(true);
+}
+
+#[test]
+fn request_dimension_conflicts_are_qualified_without_summing_alternatives() {
+    let (root, bounded, full) = claude_dimension_witnesses("conflicts", |usage, later| {
+        usage["server_tool_use"] = if later {
+            serde_json::json!({"web_search_requests":1,"web_fetch_requests":2})
+        } else {
+            serde_json::json!({"web_search_requests":2,"web_fetch_requests":1})
+        };
+        if later {
+            usage["service_tier"] = serde_json::json!("alternate");
+            usage["cache_creation"] = serde_json::json!({"ephemeral_5m_input_tokens":200,"ephemeral_1h_input_tokens":100});
+        }
+    });
+    for value in [&bounded, &full] {
+        let dims = &value["requests"];
+        assert_eq!(dims["requests"], 1);
+        assert_eq!(
+            dims["conflicting"],
+            serde_json::json!({"cache_write_ttl":1,"service_tier":1,"web_search_requests":1,"web_fetch_requests":1})
+        );
+        assert_eq!(
+            dims["cache_write"],
+            serde_json::json!({"ttl_unrecorded":300})
+        );
+        assert!(dims.get("web_search_requests").is_none());
+        assert!(dims.get("web_fetch_requests").is_none());
+        assert!(dims.get("service_tier").is_none());
+    }
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn retained_ttl_evidence_must_match_the_selected_cache_write_count() {
+    let (root, bounded, full) = claude_dimension_witnesses("ttl-count", |usage, later| {
+        if later {
+            usage["cache_creation_input_tokens"] = serde_json::json!(400);
+            usage.as_object_mut().unwrap().remove("cache_creation");
+        }
+    });
+    for value in [&bounded, &full] {
+        assert_eq!(
+            value["requests"]["cache_write"],
+            serde_json::json!({"ttl_unrecorded":400})
+        );
+        assert_eq!(value["requests"]["missing"]["cache_write_ttl"], 1);
+    }
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn bounded_ttl_witness_retention_reports_omissions() {
+    let root = std::env::temp_dir().join(format!("tapes-ttl-witness-bound-{}", std::process::id()));
+    let project = root.join("project");
+    fs::create_dir_all(&project).unwrap();
+    let prototype: serde_json::Value = claude_dimensions_recording()
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .find(|value| value["uuid"] == "assistant-1")
+        .unwrap();
+    let records = (1..=17).map(|count| {
+        let mut value = prototype.clone();
+        value["uuid"] = serde_json::json!(format!("assistant-{count}"));
+        value["message"]["usage"]["cache_creation_input_tokens"] = serde_json::json!(count);
+        value["message"]["usage"]["cache_creation"] = serde_json::json!({"ephemeral_5m_input_tokens":count,"ephemeral_1h_input_tokens":0});
+        value.to_string()
+    }).collect::<Vec<_>>().join("\n") + "\n";
+    fs::write(
+        project.join(format!("{CLAUDE_DIMENSIONS_SESSION}.jsonl")),
+        records,
+    )
+    .unwrap();
+    let backend = ClaudeBackend::new(root.clone());
+    let bounded = usage_value(&backend, CLAUDE_DIMENSIONS_SESSION);
+    let backends: Vec<Box<dyn Backend>> = vec![Box::new(backend)];
+    let full = serde_json::to_value(
+        usage_full_with_backends(&backends, Selection::Id(CLAUDE_DIMENSIONS_SESSION)).unwrap(),
+    )
+    .unwrap();
+    for value in [&bounded, &full] {
+        assert_eq!(value["requests"]["requests"], 1);
+        assert_eq!(value["requests"]["omitted_values"], 1);
+        assert_eq!(value["requests"]["missing"]["cache_write_ttl"], 1);
+        assert_eq!(
+            value["requests"]["cache_write"],
+            serde_json::json!({"ttl_unrecorded":17})
+        );
+        assert_eq!(value["requests"]["web_search_requests"], 1);
+    }
+    fs::remove_dir_all(root).unwrap();
+}
+
 #[test]
 fn claude_streamed_dimensions_follow_the_selected_usage_witness() {
     let root =

@@ -1218,9 +1218,10 @@ fn claude_request_tokens(values: &[Value]) -> RequestUsage {
 /// into several records can carry a partial count before its final one, so a
 /// request counts the witness that dominates the others; of two witnesses
 /// neither of which dominates, the first stands. The same requests'
-/// cache-write TTL split and price-relevant dimensions are tallied beside it
-/// from each request's first witness; a record marked `answeredWithoutRequest`
-/// made no request and is no request in that tally.
+/// price dimensions retain compatible observations independently of that
+/// token selection. Absence erases no observed value; a TTL split applies
+/// only to its recorded cache-write count, and incompatible dimensions are
+/// qualified separately. `answeredWithoutRequest` contributes no request.
 #[derive(Default)]
 struct RequestTokens {
     requests: BTreeMap<String, RequestWitness>,
@@ -1232,6 +1233,175 @@ struct RequestTokens {
 struct RequestWitness {
     tokens: Tokens,
     dimensions: RequestDimensions,
+    ttl_witnesses: BTreeMap<u64, Option<CacheWrites>>,
+    tool_envelope: [Option<u64>; 2],
+}
+
+const MAX_TTL_WITNESSES: usize = 16;
+const TOOL_DIMENSIONS: [&str; 2] = ["web_search_requests", "web_fetch_requests"];
+
+impl RequestWitness {
+    fn new(tokens: Tokens, dimensions: RequestDimensions) -> Self {
+        let mut witness = Self {
+            tokens,
+            dimensions,
+            ttl_witnesses: BTreeMap::new(),
+            tool_envelope: [None; 2],
+        };
+        witness.remember_ttl(witness.dimensions.cache_write);
+        witness.tool_envelope = witness.tools();
+        witness
+    }
+
+    fn tools(&self) -> [Option<u64>; 2] {
+        [
+            self.dimensions.web_search_requests,
+            self.dimensions.web_fetch_requests,
+        ]
+    }
+
+    fn remember_ttl(&mut self, split: CacheWrites) {
+        if split.ephemeral_5m.is_none() || split.ephemeral_1h.is_none() {
+            return;
+        }
+        let count = split.total();
+        if let Some(held) = self.ttl_witnesses.get_mut(&count) {
+            if *held != Some(split) {
+                *held = None;
+            }
+        } else if self.ttl_witnesses.len() < MAX_TTL_WITNESSES {
+            self.ttl_witnesses.insert(count, Some(split));
+        } else {
+            self.dimensions.omitted_values += 1;
+        }
+    }
+
+    fn retain_tools(&mut self, incoming: &RequestDimensions) {
+        let held = self.tools();
+        let values = [
+            incoming.web_search_requests.or(held[0]),
+            incoming.web_fetch_requests.or(held[1]),
+        ];
+        let dominates = |left: [Option<u64>; 2], right: [Option<u64>; 2]| {
+            left.into_iter()
+                .zip(right)
+                .all(|(left, right)| match (left, right) {
+                    (_, None) => true,
+                    (Some(left), Some(right)) => left >= right,
+                    _ => false,
+                })
+        };
+        if dominates(values, self.tool_envelope) {
+            self.dimensions.web_search_requests = values[0];
+            self.dimensions.web_fetch_requests = values[1];
+            for name in TOOL_DIMENSIONS {
+                self.dimensions.conflicting.remove(name);
+            }
+        } else if !dominates(held, values) {
+            for (index, name) in TOOL_DIMENSIONS.iter().enumerate() {
+                if held[index] != values[index] {
+                    self.dimensions.conflicting.insert(name, 1);
+                }
+            }
+        }
+        for (bound, value) in self.tool_envelope.iter_mut().zip(values) {
+            if let Some(value) = value {
+                *bound = Some(bound.unwrap_or(0).max(value));
+            }
+        }
+    }
+
+    fn observe(&mut self, tokens: Tokens, dimensions: RequestDimensions) {
+        self.remember_ttl(dimensions.cache_write);
+        self.retain_tools(&dimensions);
+        self.dimensions.requests = self.dimensions.requests.max(dimensions.requests);
+        self.dimensions.omitted_values += dimensions.omitted_values;
+        for (name, held, incoming) in [
+            (
+                "service_tier",
+                &mut self.dimensions.service_tier,
+                dimensions.service_tier,
+            ),
+            ("speed", &mut self.dimensions.speed, dimensions.speed),
+            (
+                "inference_geo",
+                &mut self.dimensions.inference_geo,
+                dimensions.inference_geo,
+            ),
+        ] {
+            if self.dimensions.conflicting.contains_key(name) {
+                continue;
+            }
+            if !incoming.is_empty() {
+                if held.is_empty() {
+                    *held = incoming;
+                } else if *held != incoming {
+                    held.clear();
+                    self.dimensions.conflicting.insert(name, 1);
+                }
+            }
+        }
+        if tokens.dominates(&self.tokens) {
+            self.tokens = tokens;
+        }
+    }
+
+    fn finish(mut self) -> (Tokens, RequestDimensions) {
+        if self.dimensions.requests == 0 {
+            return (self.tokens, self.dimensions);
+        }
+        for (name, missing) in [
+            ("service_tier", self.dimensions.service_tier.is_empty()),
+            ("speed", self.dimensions.speed.is_empty()),
+            ("inference_geo", self.dimensions.inference_geo.is_empty()),
+            (
+                "web_search_requests",
+                self.dimensions.web_search_requests.is_none(),
+            ),
+            (
+                "web_fetch_requests",
+                self.dimensions.web_fetch_requests.is_none(),
+            ),
+        ] {
+            self.dimensions.missing.remove(name);
+            if missing && !self.dimensions.conflicting.contains_key(name) {
+                self.dimensions.missing.insert(name, 1);
+            }
+        }
+        for (name, value) in [
+            (
+                "web_search_requests",
+                &mut self.dimensions.web_search_requests,
+            ),
+            (
+                "web_fetch_requests",
+                &mut self.dimensions.web_fetch_requests,
+            ),
+        ] {
+            if self.dimensions.conflicting.contains_key(name) {
+                *value = None;
+            }
+        }
+        self.dimensions.missing.remove("cache_write_ttl");
+        self.dimensions.cache_write = match self.tokens.cache_write {
+            Some(count) => match self.ttl_witnesses.get(&count) {
+                Some(Some(split)) => *split,
+                held => {
+                    if held.is_some() {
+                        self.dimensions.conflicting.insert("cache_write_ttl", 1);
+                    } else if count > 0 {
+                        self.dimensions.missing.insert("cache_write_ttl", 1);
+                    }
+                    CacheWrites {
+                        ttl_unrecorded: Some(count),
+                        ..CacheWrites::default()
+                    }
+                }
+            },
+            None => CacheWrites::default(),
+        };
+        (self.tokens, self.dimensions)
+    }
 }
 
 /// What the requests a read reached sum to, and what they recorded beside it.
@@ -1246,8 +1416,8 @@ impl RequestTokens {
         let mut totals = self.unkeyed;
         let mut dimensions = self.dimensions;
         for witness in self.requests.into_values() {
-            dimensions.add(witness.dimensions);
-            let tokens = witness.tokens;
+            let (tokens, request_dimensions) = witness.finish();
+            dimensions.add(request_dimensions);
             totals.add(
                 tokens.input,
                 tokens.output,
@@ -1288,14 +1458,14 @@ impl RequestTokens {
         match value["requestId"].as_str() {
             Some(request_id) => match self.requests.get_mut(request_id) {
                 Some(held) => {
-                    if tokens.dominates(&held.tokens) {
-                        *held = RequestWitness { tokens, dimensions };
-                    }
+                    held.observe(tokens, dimensions);
                     return;
                 }
                 None => {
-                    self.requests
-                        .insert(request_id.to_owned(), RequestWitness { tokens, dimensions });
+                    self.requests.insert(
+                        request_id.to_owned(),
+                        RequestWitness::new(tokens, dimensions),
+                    );
                     return;
                 }
             },

@@ -567,7 +567,13 @@ PROBE BEFORE EXPORTING
   below it or omits its counters. The accounting note names that total and
   the fallback reason; recorded_total retains its counters and dollar facts
   under recorded-total/session accounting, separate from the request sum.
-  Requests' dimensions follow the same selected usage witness as their tokens.
+  Requests' dimensions retain compatible source evidence independently of the
+  token witness. A sparse later record erases no known dimension. TTL splits
+  apply only when they match the selected cache-write count; incompatible
+  categorical values, TTL splits and tool observations are withheld and
+  counted per request under conflicting. Tool counters select their own
+  dominant observation without summing alternatives. At most 16 TTL-count
+  witnesses are held per request; excess observations join omitted_values.
 
   `usage SESSION --reconcile` is Claude-only. It reads the parent and every
   subagent recording whole and retains the newest cost-state's counters and

@@ -204,7 +204,9 @@ const MAX_DIMENSION_VALUE_BYTES: usize = 64;
 /// token counters, tallied once per request. A value tally counts requests by
 /// the value each recorded. A request that recorded no value for a dimension
 /// is counted under `missing` for that dimension and is never assigned one;
-/// `cache_write_ttl` counts requests whose cache writes carry no TTL split.
+/// `cache_write_ttl` counts requests whose cache writes carry no usable TTL
+/// split. `conflicting` counts requests with incompatible observations of a
+/// dimension; their ambiguous values are withheld rather than summed.
 #[derive(Clone, Debug, Default, PartialEq, Serialize)]
 pub struct RequestDimensions {
     pub requests: usize,
@@ -221,6 +223,8 @@ pub struct RequestDimensions {
     pub web_fetch_requests: Option<u64>,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub missing: BTreeMap<&'static str, usize>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub conflicting: BTreeMap<&'static str, usize>,
     #[serde(skip_serializing_if = "is_zero")]
     pub omitted_values: usize,
 }
@@ -252,6 +256,9 @@ impl RequestDimensions {
         }
         for (name, count) in other.missing {
             *self.missing.entry(name).or_default() += count;
+        }
+        for (name, count) in other.conflicting {
+            *self.conflicting.entry(name).or_default() += count;
         }
         self.omitted_values += other.omitted_values;
     }

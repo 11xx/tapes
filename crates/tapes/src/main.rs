@@ -1469,6 +1469,11 @@ enum Command {
         /// not determine. `requests` tallies Claude requests' recorded cache
         /// TTLs, service tier, speed, inference geo, and web search and fetch
         /// counts, with `missing` counting requests per unrecorded dimension.
+        /// Compatible observations retain a dimension when a later record
+        /// omits it. TTL splits must match the selected cache-write count;
+        /// conflicting values are withheld and counted under `conflicting`.
+        /// At most 16 TTL-count witnesses are held per request, with excess
+        /// observations counted under `omitted_values`.
         /// A newest Claude cost-state below its request sum is set aside:
         /// accounting notes name the total and reason, while recorded_total
         /// retains its counters and dollar facts under its own accounting.
@@ -3991,6 +3996,17 @@ fn render_request_dimensions(requests: &RequestDimensions) -> String {
         out.push_str(&format!(
             "requests missing: {}\n",
             render_counts(requests.missing.iter().map(|(name, count)| (name, *count)))
+        ));
+    }
+    if !requests.conflicting.is_empty() {
+        out.push_str(&format!(
+            "requests conflicting: {}\n",
+            render_counts(
+                requests
+                    .conflicting
+                    .iter()
+                    .map(|(name, count)| (name, *count))
+            )
         ));
     }
     if requests.omitted_values > 0 {
