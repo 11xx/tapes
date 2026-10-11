@@ -23,9 +23,9 @@ use crate::event::{Bounded, EventKind, ReadLines, ToolEvent};
 use crate::history::PageProjection;
 use crate::lineage::{ChildRef, Lineage, SourceRef};
 use crate::model::{
-    derive_title, AccountingBasis, AccountingCoverage, CacheWrites, Cost, KindDeclaration, Launch,
-    Model, Role, Session, SourceDescriptor, Tokens, TrailingRecord, Transcript, Turn, TurnKind,
-    TurnSelection,
+    derive_title, AccountingBasis, AccountingCoverage, CacheWrites, Cost, CostCoverage,
+    KindDeclaration, Launch, Model, Role, Session, SourceDescriptor, Tokens, TrailingRecord,
+    Transcript, Turn, TurnKind, TurnSelection,
 };
 use crate::usage::{Durations, ModelUsage, RequestDimensions, UsageDetail};
 use agent_tapes_discovery::{Harness as NativeHarness, IdentityBasis, NativeSession, NativeStore};
@@ -179,7 +179,8 @@ impl ClaudeBackend {
             AccountingCoverage::ReadWindow
         };
         let accounting = accounting_for(tokens.as_ref(), cost.as_ref(), basis, coverage);
-        let usage_detail = claude_usage_detail(cost_state, requests.dimensions, requests.failures, basis);
+        let usage_detail =
+            claude_usage_detail(cost_state, requests.dimensions, requests.failures, basis);
 
         let session = Session {
             id: native_id.to_owned(),
@@ -846,7 +847,8 @@ impl ClaudeRecords {
             basis,
             AccountingCoverage::Session,
         );
-        session.usage_detail = claude_usage_detail(cost_state, requests.dimensions, requests.failures, basis);
+        session.usage_detail =
+            claude_usage_detail(cost_state, requests.dimensions, requests.failures, basis);
         session.tokens = tokens;
         session.cost = cost;
         session.model = self.model;
@@ -1022,7 +1024,9 @@ fn recorded_accounting(
     match cost_state {
         Some(cost_state) => (
             cost_state_tokens(cost_state),
-            cost_state["totalCostUSD"].as_f64().map(|usd| Cost { usd }),
+            cost_state["totalCostUSD"]
+                .as_f64()
+                .and_then(|usd| Cost::from_written(usd, cost_state_tokens(cost_state).as_ref())),
             AccountingBasis::RecordedTotal,
         ),
         None => (requests, None, AccountingBasis::SummedRequests),
@@ -1067,18 +1071,38 @@ fn cost_state_detail(value: &Value) -> UsageDetail {
                 model: model.clone(),
                 variant: None,
                 tokens: model_usage_tokens(usage),
-                cost: usage["costUSD"].as_f64().map(|usd| Cost { usd }),
+                cost: usage["costUSD"]
+                    .as_f64()
+                    .and_then(|usd| Cost::from_written(usd, model_usage_tokens(usage).as_ref())),
+                cost_coverage: CostCoverage::written(
+                    usage["costUSD"].as_f64(),
+                    model_usage_tokens(usage).as_ref(),
+                ),
                 request_count: None,
             })
             .collect::<Vec<_>>();
         usage.sort_by(|left, right| left.model.cmp(&right.model));
         usage
     });
+    let mut cost_coverage = CostCoverage::written(
+        value["totalCostUSD"].as_f64(),
+        cost_state_tokens(value).as_ref(),
+    );
+    if let Some(models) = &by_model {
+        for coverage in models
+            .iter()
+            .filter_map(|model| model.cost_coverage.as_ref())
+        {
+            let total = cost_coverage.get_or_insert_with(CostCoverage::default);
+            total.zero_written_observations += coverage.zero_written_observations;
+        }
+    }
     UsageDetail {
         context_window: None,
         rate_limits: None,
         durations_ms: (!durations.is_empty()).then_some(durations),
         by_model: by_model.filter(|usage| !usage.is_empty()),
+        cost_coverage,
         ..UsageDetail::default()
     }
 }

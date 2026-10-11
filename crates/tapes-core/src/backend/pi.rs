@@ -18,8 +18,8 @@ use crate::content::{
 use crate::event::{Bounded, EventKind, ToolEvent};
 use crate::lineage::{Lineage, ParentRef};
 use crate::model::{
-    AccountingBasis, AccountingCoverage, Cost, KindDeclaration, Launch, Model, Role, Session,
-    SourceDescriptor, Tokens, TrailingRecord, Transcript, Turn, TurnKind, TurnSelection,
+    AccountingBasis, AccountingCoverage, Cost, CostCoverage, KindDeclaration, Launch, Model, Role,
+    Session, SourceDescriptor, Tokens, TrailingRecord, Transcript, Turn, TurnKind, TurnSelection,
     UserDefault,
 };
 use crate::usage::{ModelUsage, UsageDetail};
@@ -140,7 +140,7 @@ impl PiBackend {
             .flat_map(|value| pi_turns(value, &mut thinking))
             .collect::<Vec<_>>();
         let (model_observation, model_selections) = pi_selections(&active, read);
-        let (tokens, cost, by_model) = pi_usage(&active);
+        let (tokens, cost, by_model, cost_coverage) = pi_usage(&active);
         let coverage = if read.truncated {
             AccountingCoverage::ReadWindow
         } else {
@@ -154,6 +154,7 @@ impl PiBackend {
         );
         let usage_detail = UsageDetail {
             by_model,
+            cost_coverage,
             ..UsageDetail::default()
         }
         .into_option();
@@ -556,7 +557,7 @@ impl Backend for PiBackend {
                 variant.clone_from(&entry.thinking);
             }
         }
-        let (tokens, cost, by_model) = usage.finish();
+        let (tokens, cost, by_model, cost_coverage) = usage.finish();
         let mut whole = session.clone();
         whole.accounting = accounting_for(
             tokens.as_ref(),
@@ -568,6 +569,7 @@ impl Backend for PiBackend {
         whole.cost = cost;
         whole.usage_detail = UsageDetail {
             by_model,
+            cost_coverage,
             ..UsageDetail::default()
         }
         .into_option();
@@ -749,7 +751,14 @@ fn pi_cwd(value: &Value) -> Option<&str> {
         .flatten()
 }
 
-fn pi_usage(entries: &[&Value]) -> (Option<Tokens>, Option<Cost>, Option<Vec<ModelUsage>>) {
+fn pi_usage(
+    entries: &[&Value],
+) -> (
+    Option<Tokens>,
+    Option<Cost>,
+    Option<Vec<ModelUsage>>,
+    Option<CostCoverage>,
+) {
     let mut usage = PiUsage::default();
     let mut variant = None;
     for entry in entries {
@@ -806,6 +815,7 @@ struct PiTotals {
     requests: usize,
     cost: f64,
     cost_missing: bool,
+    zero_written: usize,
 }
 
 impl PiTotals {
@@ -819,9 +829,32 @@ impl PiTotals {
             request.cache_write,
         );
         match request.cost {
+            Some(0.0)
+                if [
+                    request.input,
+                    request.output,
+                    request.reasoning,
+                    request.cache_read,
+                    request.cache_write,
+                ]
+                .into_iter()
+                .flatten()
+                .any(|count| count > 0) =>
+            {
+                self.zero_written += 1;
+                self.cost_missing = true;
+            }
             Some(cost) => self.cost += cost,
             None => self.cost_missing = true,
         }
+    }
+
+    fn cost_coverage(&self) -> Option<CostCoverage> {
+        self.cost_missing.then_some(CostCoverage {
+            complete: false,
+            zero_written_requests: self.zero_written,
+            zero_written_observations: self.zero_written,
+        })
     }
 
     /// The counters, and the cost only when the group held at least one
@@ -869,7 +902,15 @@ impl PiUsage {
         }
     }
 
-    fn finish(self) -> (Option<Tokens>, Option<Cost>, Option<Vec<ModelUsage>>) {
+    fn finish(
+        self,
+    ) -> (
+        Option<Tokens>,
+        Option<Cost>,
+        Option<Vec<ModelUsage>>,
+        Option<CostCoverage>,
+    ) {
+        let cost_coverage = self.totals.cost_coverage();
         let (tokens, cost) = self.totals.finish();
         let by_model = (self.unattributed == 0)
             .then(|| {
@@ -877,19 +918,21 @@ impl PiUsage {
                     .into_iter()
                     .map(|(key, totals)| {
                         let requests = totals.requests;
+                        let cost_coverage = totals.cost_coverage();
                         let (tokens, cost) = totals.finish();
                         ModelUsage {
                             model: key.model,
                             variant: key.variant,
                             tokens,
                             cost,
+                            cost_coverage,
                             request_count: Some(requests),
                         }
                     })
                     .collect::<Vec<_>>()
             })
             .filter(|models| !models.is_empty());
-        (tokens, cost, by_model)
+        (tokens, cost, by_model, cost_coverage)
     }
 }
 

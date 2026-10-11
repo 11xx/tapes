@@ -15,9 +15,9 @@ use agent_tapes_core::event::{EventKind, EventRecord, EventTranscript, Incomplet
 use agent_tapes_core::lineage::{ChildRef, LineageView};
 use agent_tapes_core::model::{
     human_bytes, human_speaker, human_timestamp, human_title, speaker, Accounting, AccountingBasis,
-    AccountingCoverage, CacheWrites, Cost, DisjointTokens, InputConvention, LiveState,
-    OutputConvention, Projection, Session, SourceBound, SourceDescriptor, TokenConvention, Tokens,
-    Transcript, Truncation, Turn, TurnKind, TurnSelection,
+    AccountingCoverage, CacheWrites, Cost, CostCoverage, DisjointTokens, InputConvention,
+    LiveState, OutputConvention, Projection, Session, SourceBound, SourceDescriptor,
+    TokenConvention, Tokens, Transcript, Truncation, Turn, TurnKind, TurnSelection,
 };
 use agent_tapes_core::stats::{
     AssistantTurnDurations, Coverage, LineageStats, StatsView, TimeStats, ToolNameStats, ToolStats,
@@ -1431,6 +1431,12 @@ enum Command {
         /// not determine. `requests` tallies Claude requests' recorded cache
         /// TTLs, service tier, speed, inference geo, and web search and fetch
         /// counts, with `missing` counting requests per unrecorded dimension.
+        /// Synthetic assistant records do not count as requests; positive
+        /// failure evidence is counted separately with consumption unknown.
+        /// A written zero beside nonzero tokens is unpriced: cost is absent,
+        /// cost_coverage is incomplete and counts zero-written requests when
+        /// request evidence exists, otherwise cumulative observations.
+        /// A mixed priced/unpriced sum is a known priced subtotal.
         /// A `cost` carries `kind: harness-calculated-estimate` and names
         /// `pricing_basis` missing. A summary keeps one `partitions` row per
         /// harness and accounting basis and coverage; a group or total whose
@@ -3689,6 +3695,12 @@ fn render_usage(usage: &UsageView) -> String {
     if let Some(cost) = &usage.cost {
         out.push_str(&format!("cost: {}\n", render_cost(cost)));
     }
+    if let Some(coverage) = &usage.cost_coverage {
+        out.push_str(&format!(
+            "cost coverage: {}\n",
+            render_cost_coverage(coverage)
+        ));
+    }
     if usage.request_failures > 0 {
         out.push_str(&format!(
             "failed request observations: {}; consumption unknown\n",
@@ -3929,6 +3941,12 @@ fn render_request_dimensions(requests: &RequestDimensions) -> String {
 /// dressed up as more precision than the harness recorded. Every recorded
 /// cost is the harness's own estimate on a basis the recording does not
 /// state.
+fn render_cost_coverage(coverage: &CostCoverage) -> String {
+    format!("{}; {} zero-written requests, {} zero-written observations; any cost is a known priced subtotal",
+        if coverage.complete { "complete" } else { "incomplete" },
+        coverage.zero_written_requests, coverage.zero_written_observations)
+}
+
 fn render_cost(cost: &Cost) -> String {
     format!(
         "{:.4} USD (harness-calculated estimate, pricing basis not recorded)",
@@ -4039,6 +4057,12 @@ fn render_model_usage(model: &ModelUsage) -> String {
     }
     if let Some(cost) = &model.cost {
         rendered.push_str(&format!("; {}", render_cost(cost)));
+    }
+    if let Some(coverage) = &model.cost_coverage {
+        rendered.push_str(&format!(
+            "; cost coverage {}",
+            render_cost_coverage(coverage)
+        ));
     }
     if let Some(requests) = model.request_count {
         rendered.push_str(&format!("; {requests} observed requests"));
@@ -4161,6 +4185,12 @@ fn render_usage_summary(summary: &UsageSummary, by: &[GroupBy]) -> String {
         out.push_str(
             "Cost is each harness's own estimate; no recording states its pricing basis.\n",
         );
+    }
+    if let Some(coverage) = &summary.totals.cost_coverage {
+        out.push_str(&format!(
+            "Cost coverage: {}\n",
+            render_cost_coverage(coverage)
+        ));
     }
     if summary.totals.mixed_accounting {
         out.push_str(

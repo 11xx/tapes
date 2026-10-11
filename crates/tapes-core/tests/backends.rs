@@ -1740,6 +1740,80 @@ fn synthetic_claude_records_do_not_count_as_requests() {
     fs::remove_dir_all(root).unwrap();
 }
 
+#[test]
+fn pi_zero_written_costs_are_unpriced_in_active_and_full_views() {
+    let root = std::env::temp_dir().join(format!("tapes-pi-zero-cost-{}", std::process::id()));
+    fs::create_dir_all(&root).unwrap();
+    let name = "2026-01-01T10-00-00-000Z_session-pi.jsonl";
+    let original = fs::read_to_string(fixtures("pi").join(name)).unwrap();
+    for mixed in [false, true] {
+        let recording = original
+            .lines()
+            .map(|line| {
+                let mut value: serde_json::Value = serde_json::from_str(line).unwrap();
+                if value["id"] == "assistant-1" || (!mixed && value["id"] == "assistant-2") {
+                    value["message"]["usage"]["cost"]["total"] = serde_json::json!(0);
+                }
+                value.to_string()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n";
+        fs::write(root.join(name), recording).unwrap();
+        let backend = PiBackend::new(root.clone());
+        let value = usage_value(&backend, "session-pi");
+        assert!(value.get("cost").is_none(), "{value}");
+        assert_eq!(value["cost_coverage"]["complete"], false);
+        assert_eq!(
+            value["cost_coverage"]["zero_written_requests"],
+            if mixed { 1 } else { 2 }
+        );
+        assert!(value["by_model"][0].get("cost").is_none());
+        let backends: Vec<Box<dyn Backend>> = vec![Box::new(backend)];
+        let full = serde_json::to_value(
+            usage_full_with_backends(&backends, Selection::Id("session-pi")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(full["cost_coverage"], value["cost_coverage"]);
+        assert!(full.get("cost").is_none());
+    }
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn claude_zero_written_totals_and_model_costs_are_unpriced() {
+    let root = std::env::temp_dir().join(format!("tapes-claude-zero-cost-{}", std::process::id()));
+    let project = root.join("project");
+    fs::create_dir_all(&project).unwrap();
+    let mut recording = claude_dimensions_recording();
+    recording.push_str(&format!(
+        "{}\n",
+        serde_json::json!({
+            "type": "cost-state", "sessionId": CLAUDE_DIMENSIONS_SESSION, "totalCostUSD": 0,
+            "modelUsage": {"claude-fixture": {"inputTokens": 10, "outputTokens": 80,
+                "cacheReadInputTokens": 2400, "cacheCreationInputTokens": 500, "costUSD": 0}}
+        })
+    ));
+    fs::write(
+        project.join(format!("{CLAUDE_DIMENSIONS_SESSION}.jsonl")),
+        recording,
+    )
+    .unwrap();
+    let backend = ClaudeBackend::new(root.clone());
+    let value = usage_value(&backend, CLAUDE_DIMENSIONS_SESSION);
+    assert!(value.get("cost").is_none(), "{value}");
+    assert_eq!(value["cost_coverage"]["complete"], false);
+    assert!(value["by_model"][0].get("cost").is_none());
+    let backends: Vec<Box<dyn Backend>> = vec![Box::new(backend)];
+    let full = serde_json::to_value(
+        usage_full_with_backends(&backends, Selection::Id(CLAUDE_DIMENSIONS_SESSION)).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(full["cost_coverage"], value["cost_coverage"]);
+    assert!(full.get("cost").is_none());
+    fs::remove_dir_all(root).unwrap();
+}
+
 /// A dimension a request did not record is counted as missing for that
 /// request, and a recorded total that merges the TTLs names the TTL missing
 /// rather than assigning its writes one.
@@ -2021,6 +2095,7 @@ fn pi_usage_reports_the_model_and_effort_split() {
                 cache_write: Some(5),
             }),
             cost: Some(Cost { usd: 0.5 }),
+            cost_coverage: None,
             request_count: Some(1),
         },
         ModelUsage {
@@ -2034,6 +2109,7 @@ fn pi_usage_reports_the_model_and_effort_split() {
                 cache_write: Some(50),
             }),
             cost: Some(Cost { usd: 0.25 }),
+            cost_coverage: None,
             request_count: Some(1),
         },
         ModelUsage {
@@ -2047,6 +2123,7 @@ fn pi_usage_reports_the_model_and_effort_split() {
                 cache_write: Some(5),
             }),
             cost: Some(Cost { usd: 0.25 }),
+            cost_coverage: None,
             request_count: Some(1),
         },
     ]);
@@ -4675,6 +4752,7 @@ fn codex_usage_reports_the_context_window_and_the_newest_quota_windows() {
                 cache_write: Some(0),
             }),
             cost: None,
+            cost_coverage: None,
             request_count: Some(2),
         }])
     );
@@ -5859,6 +5937,7 @@ fn claude_usage_reports_cost_state_durations_and_the_per_model_split() {
                     cache_write: Some(500),
                 }),
                 cost: Some(Cost { usd: 12.0 }),
+                cost_coverage: None,
                 request_count: None,
             },
             ModelUsage {
@@ -5872,6 +5951,7 @@ fn claude_usage_reports_cost_state_durations_and_the_per_model_split() {
                     cache_write: Some(5),
                 }),
                 cost: Some(Cost { usd: 0.5 }),
+                cost_coverage: None,
                 request_count: None,
             },
         ])

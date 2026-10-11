@@ -945,6 +945,7 @@ impl UsageCandidate {
                 variant: key.variant,
                 tokens: value.tokens,
                 cost: None,
+                cost_coverage: None,
                 request_count: Some(value.request_count),
             })
             .collect::<Vec<_>>();

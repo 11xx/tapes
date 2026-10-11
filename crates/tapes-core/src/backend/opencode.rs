@@ -23,9 +23,9 @@ use crate::content::{
 use crate::event::{self, Bounded, EventKind, EventTranscript, ToolEvent};
 use crate::lineage::{ChildRef, Lineage, ParentRef, SourceRef};
 use crate::model::{
-    human_bytes, AccountingBasis, AccountingCoverage, Cost, KindDeclaration, Launch, Model,
-    RecordRef, Role, Session, SourceBound, SourceDescriptor, Tokens, Transcript, Truncation, Turn,
-    TurnKind, TurnSelection, TurnWindow, UserDefault,
+    human_bytes, AccountingBasis, AccountingCoverage, Cost, CostCoverage, KindDeclaration, Launch,
+    Model, RecordRef, Role, Session, SourceBound, SourceDescriptor, Tokens, Transcript, Truncation,
+    Turn, TurnKind, TurnSelection, TurnWindow, UserDefault,
 };
 use agent_tapes_discovery::{
     DiscoveryError, Harness as NativeHarness, NativeSession, NativeStore, NativeStoreKind,
@@ -1666,7 +1666,10 @@ fn parse_database_session(value: &Value) -> Result<Session> {
     let last_activity_at = epoch_millis(&value["time_updated"]);
     let model = database_model(&value["model"]);
     let tokens = database_tokens(value);
-    let cost = value["cost"].as_f64().map(|usd| Cost { usd });
+    let cost = value["cost"]
+        .as_f64()
+        .and_then(|usd| Cost::from_written(usd, tokens.as_ref()));
+    let cost_coverage = CostCoverage::written(value["cost"].as_f64(), tokens.as_ref());
     let accounting = accounting_for(
         tokens.as_ref(),
         cost.as_ref(),
@@ -1697,7 +1700,11 @@ fn parse_database_session(value: &Value) -> Result<Session> {
         accounting,
         start_uncertain: false,
         occurrence: None,
-        usage_detail: None,
+        usage_detail: crate::usage::UsageDetail {
+            cost_coverage,
+            ..crate::usage::UsageDetail::default()
+        }
+        .into_option(),
     })
 }
 
@@ -1737,7 +1744,10 @@ fn parse_session(value: &Value) -> Result<Session> {
         variant: value["model"]["variant"].as_str().map(str::to_owned),
     });
     let tokens = api_tokens(value);
-    let cost = value["cost"].as_f64().map(|usd| Cost { usd });
+    let cost = value["cost"]
+        .as_f64()
+        .and_then(|usd| Cost::from_written(usd, tokens.as_ref()));
+    let cost_coverage = CostCoverage::written(value["cost"].as_f64(), tokens.as_ref());
     let accounting = accounting_for(
         tokens.as_ref(),
         cost.as_ref(),
@@ -1765,7 +1775,11 @@ fn parse_session(value: &Value) -> Result<Session> {
         accounting,
         start_uncertain: false,
         occurrence: None,
-        usage_detail: None,
+        usage_detail: crate::usage::UsageDetail {
+            cost_coverage,
+            ..crate::usage::UsageDetail::default()
+        }
+        .into_option(),
     })
 }
 
@@ -2289,6 +2303,30 @@ fn fold_api_refusals(listing: &mut Listing) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn opencode_zero_written_cost_is_unpriced_in_both_projections() {
+        let database =
+            json!({"id": "ses_fixture", "cost": 0, "tokens_input": 1, "tokens_output": 2});
+        let api = json!({"id": "ses_fixture", "cost": 0, "tokens": {"input": 1, "output": 2}});
+        for session in [
+            parse_database_session(&database).unwrap(),
+            parse_session(&api).unwrap(),
+        ] {
+            assert!(session.cost.is_none());
+            let view = crate::usage::usage(&Transcript::new(
+                session,
+                Vec::new(),
+                Truncation::default(),
+                None,
+                Vec::new(),
+            ));
+            assert_eq!(
+                serde_json::to_value(view).unwrap()["cost_coverage"]["complete"],
+                false
+            );
+        }
+    }
+
     #[test]
     fn launch_metadata_is_session_bound_and_interactive_wins() {
         let rows: Value = serde_json::from_str(include_str!(

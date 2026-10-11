@@ -15,9 +15,9 @@ use serde_json::Value;
 use crate::backend::{skipped_records_note, StreamedTranscript};
 use crate::content::ContentInventory;
 use crate::model::{
-    Accounting, AccountingBasis, AccountingCoverage, CacheWrites, Cost, DisjointTokens, Launch,
-    Model, ModelObservationStatus, ReadEvidence, ReadGap, RecordRef, Role, Session,
-    SessionMetadata, SourceBound, SourceDescriptor, TerminalObservation, TextTailEvidence,
+    Accounting, AccountingBasis, AccountingCoverage, CacheWrites, Cost, CostCoverage,
+    DisjointTokens, Launch, Model, ModelObservationStatus, ReadEvidence, ReadGap, RecordRef, Role,
+    Session, SessionMetadata, SourceBound, SourceDescriptor, TerminalObservation, TextTailEvidence,
     TokenConvention, Tokens, Transcript, Truncation, Turn,
 };
 
@@ -45,6 +45,7 @@ pub struct UsageDetail {
     pub cache_write_by_ttl: Option<CacheWrites>,
     /// Price-relevant facts the read's requests recorded beside their tokens.
     pub requests: Option<RequestDimensions>,
+    pub cost_coverage: Option<CostCoverage>,
     pub request_failures: usize,
 }
 
@@ -57,6 +58,7 @@ impl UsageDetail {
             && self.attribution.is_none()
             && self.cache_write_by_ttl.is_none()
             && self.requests.is_none()
+            && self.cost_coverage.is_none()
             && self.request_failures == 0
     }
 
@@ -162,6 +164,8 @@ pub struct ModelUsage {
     pub tokens: Option<Tokens>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cost: Option<Cost>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cost_coverage: Option<CostCoverage>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub request_count: Option<usize>,
 }
@@ -417,7 +421,7 @@ pub struct UsageSession {
 /// One session's usage. `tokens`, `cost`, and `accounting` are the session's
 /// own fields, unchanged: a `recorded-total` is cumulative and a
 /// `summed-requests` figure is a sum of per-request records, so either may be
-/// added across sessions, while `coverage` says how much of each session the
+/// added across sessions with compatible accounting, while `coverage` says how much of each session the
 /// figure covers. `tokens` keeps the harness's own convention; `disjoint`
 /// restates the same counters in categories that add across harnesses.
 /// `requests` covers the requests the read identified, which need not be the
@@ -436,6 +440,8 @@ pub struct UsageView {
     pub disjoint: Option<DisjointTokens>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cost: Option<Cost>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cost_coverage: Option<CostCoverage>,
     pub turns: TurnCounts,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub context_window: Option<u64>,
@@ -466,6 +472,17 @@ pub struct UsageView {
     pub truncation: Truncation,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub notes: Vec<String>,
+}
+
+fn session_cost_coverage(session: &Session) -> Option<CostCoverage> {
+    session
+        .usage_detail
+        .as_ref()
+        .and_then(|detail| detail.cost_coverage.clone())
+        .or_else(|| {
+            (session.cost.is_none() && session.tokens.as_ref().is_some_and(Tokens::has_usage))
+                .then_some(CostCoverage::default())
+        })
 }
 
 /// Project a read session into its usage answer. Nothing is added to the
@@ -548,6 +565,7 @@ fn project(session: &Session, turns: TurnTally, facts: ReadFacts) -> UsageView {
         tokens: session.tokens.clone(),
         disjoint: session.disjoint_tokens(),
         cost: session.cost.clone(),
+        cost_coverage: session_cost_coverage(session),
         turns: turns.counts,
         context_window: detail.context_window,
         rate_limits: detail.rate_limits,
@@ -717,6 +735,8 @@ pub struct UsageTally {
     pub disjoint: Option<DisjointSum>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cost: Option<Cost>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cost_coverage: Option<CostCoverage>,
     pub coverage: CoverageCounts,
     pub counted: CountedSessions,
 }
@@ -833,7 +853,9 @@ pub struct UsageAggregate {
 /// Group sessions by the requested dimensions and sum their recorded
 /// counters. Nothing is inferred: a cost is only a recorded cost, a token
 /// count is only a recorded token count, and neither is derived from the
-/// other. With no dimensions the whole set is one group under an empty key.
+/// other. Incompatible accounting withholds native sums and cross-basis
+/// disjoint sums; `partitioned_aggregate` also returns compatible subtotals.
+/// With no dimensions the whole set is one group under an empty key.
 pub fn aggregate(sessions: &[Session], by: &[GroupBy]) -> UsageAggregate {
     partitioned_aggregate(sessions, by).0
 }
@@ -904,6 +926,7 @@ struct Tally {
     cache_write: Counter,
     cost_usd: f64,
     cost_counted: usize,
+    cost_coverage: Option<CostCoverage>,
     coverage: CoverageCounts,
     mixed_models: usize,
     attribution_uncertain: usize,
@@ -912,6 +935,15 @@ struct Tally {
 impl Tally {
     fn add(&mut self, session: &Session) {
         self.sessions += 1;
+        if let Some(coverage) = session_cost_coverage(session) {
+            let total = self.cost_coverage.get_or_insert(CostCoverage {
+                complete: true,
+                ..CostCoverage::default()
+            });
+            total.complete &= coverage.complete;
+            total.zero_written_requests += coverage.zero_written_requests;
+            total.zero_written_observations += coverage.zero_written_observations;
+        }
         self.disjoint.add(session);
         if let Some(tokens) = &session.tokens {
             self.input.add(tokens.input);
@@ -990,6 +1022,7 @@ impl Tally {
             }),
             disjoint: self.disjoint.finish(),
             cost: (self.cost_counted > 0).then_some(Cost { usd: self.cost_usd }),
+            cost_coverage: self.cost_coverage,
             coverage: self.coverage,
             counted,
         }
@@ -1142,11 +1175,13 @@ mod tests {
                     cache_write: None,
                 }),
                 cost: Some(Cost { usd: 1.5 }),
+                cost_coverage: None,
                 request_count: None,
             }]),
             attribution: None,
             cache_write_by_ttl: None,
             requests: None,
+            cost_coverage: None,
             request_failures: 0,
         });
         let transcript = Transcript::new(
@@ -1353,6 +1388,7 @@ mod tests {
                         "missing": { "cache_read": 2, "cache_write": 2, "reasoning": 1, "uncached_input": 2 }
                     },
                     "cost": { "usd": 1.0, "kind": "harness-calculated-estimate", "missing": ["pricing_basis"] },
+                    "cost_coverage": { "complete": false, "zero_written_requests": 0, "zero_written_observations": 0 },
                     "coverage": {
                         "recorded_total": 1,
                         "summed_session": 0,
@@ -1394,6 +1430,7 @@ mod tests {
                     }
                 },
                 "cost": { "usd": 3.5, "kind": "harness-calculated-estimate", "missing": ["pricing_basis"] },
+                "cost_coverage": { "complete": false, "zero_written_requests": 0, "zero_written_observations": 0 },
                 "coverage": {
                     "recorded_total": 1,
                     "summed_session": 1,
@@ -1675,6 +1712,16 @@ mod partition_tests {
         let (_, partitions) = partitioned_aggregate(&sessions, &[]);
         assert_eq!(partitions.len(), 2);
         assert!(partitions.iter().all(|part| part.tally.disjoint.is_some()));
+    }
+
+    #[test]
+    fn aggregate_reports_incomplete_cost_and_the_zero_written_count() {
+        let mut priced = recorded("claude", native(1, 2, 0, 0, 0));
+        priced.cost = Some(Cost { usd: 0.5 });
+        let mut unpriced = priced.clone();
+        unpriced.cost = None;
+        let value = serde_json::to_value(aggregate(&[priced, unpriced], &[])).unwrap();
+        assert_eq!(value["totals"]["cost_coverage"]["complete"], false);
     }
 
     #[test]

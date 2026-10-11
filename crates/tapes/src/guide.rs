@@ -502,6 +502,12 @@ PROBE BEFORE EXPORTING
   recorded total's scope. A cost is the harness's own estimate: it says
   kind harness-calculated-estimate, and pricing_basis is missing because no
   recording states its price table. A token count is never a cost.
+  A written zero beside nonzero tokens is unpriced and its cost is absent.
+  cost_coverage names incomplete pricing and counts zero-written requests
+  where request evidence exists, and zero-written cumulative observations
+  otherwise. A mixed priced/unpriced sum is a known priced subtotal.
+  Synthetic assistant records join no request tally; positively witnessed
+  failures are counted separately and their consumption is unknown.
 
   `usage SESSION --series[=N]` opts into a recent bounded suffix of Codex raw
   accounting observations: 200 rows by default, 1 through 10,000 explicitly.

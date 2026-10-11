@@ -321,6 +321,32 @@ pub struct Cost {
     pub usd: f64,
 }
 
+impl Cost {
+    /// A written zero beside measured consumption establishes no price.
+    pub fn from_written(usd: f64, tokens: Option<&Tokens>) -> Option<Self> {
+        (!(usd == 0.0 && tokens.is_some_and(Tokens::has_usage))).then_some(Self { usd })
+    }
+}
+
+/// Coverage of the harness's written dollar figures. A zero beside nonzero
+/// tokens is unpriced. Request counts require request evidence; cumulative
+/// figures contribute only to the observation count.
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+pub struct CostCoverage {
+    pub complete: bool,
+    pub zero_written_requests: usize,
+    pub zero_written_observations: usize,
+}
+
+impl CostCoverage {
+    pub fn written(usd: Option<f64>, tokens: Option<&Tokens>) -> Option<Self> {
+        (usd == Some(0.0) && tokens.is_some_and(Tokens::has_usage)).then_some(Self {
+            zero_written_observations: 1,
+            ..Self::default()
+        })
+    }
+}
+
 #[derive(Serialize)]
 struct CostRecord {
     usd: f64,
@@ -354,6 +380,21 @@ pub struct Tokens {
     pub cache_read: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cache_write: Option<u64>,
+}
+
+impl Tokens {
+    pub fn has_usage(&self) -> bool {
+        [
+            self.input,
+            self.output,
+            self.reasoning,
+            self.cache_read,
+            self.cache_write,
+        ]
+        .into_iter()
+        .flatten()
+        .any(|count| count > 0)
+    }
 }
 
 /// How a harness's native counters divide a request's tokens.
