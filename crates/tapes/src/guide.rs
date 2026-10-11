@@ -492,6 +492,13 @@ PROBE BEFORE EXPORTING
   cover the session; recorded totals keep their epoch coverage. Pi's active
   accounting stays `read-window` when an unreadable record cuts its branch
   or follows its last entry.
+  Pi selections keep each session's figure. Event identity across sessions
+  is unestablished, so a multi-session group withholds exact token and cost
+  unions. Within a compatible accounting partition, `identity_bounds` reports
+  at least the largest known figure and at most their sum; a missing or partial
+  counter leaves its upper bound unmeasured. Different bases have separate
+  partitions, and `session_figures` preserves per-counter coverage without
+  recording locators.
 
   tokens are the harness's own counters, and what its input and output
   include differs: Codex input counts cache reads, OpenCode output leaves

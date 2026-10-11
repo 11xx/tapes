@@ -1392,6 +1392,9 @@ enum Command {
     /// ids, including dots and underscores,
     /// within a 128-byte bound; recording paths and timestamp-prefixed basenames
     /// stay private. Other bare references, such as parent.jsonl, are ids.
+    /// Multi-session Pi figures withhold exact unions, keep `session_figures`,
+    /// and report per-counter `identity_bounds` within compatible accounting
+    /// partitions. An unmeasured or partial counter has no upper bound.
     Usage {
         #[command(flatten)]
         query: SessionQueryArgs,
@@ -4561,6 +4564,7 @@ fn render_usage_summary(summary: &UsageSummary, by: &[GroupBy]) -> String {
             "Mixed accounting: total counters are omitted; compatible partitions follow.\n",
         );
     }
+    render_identity_bounds(&mut out, &summary.totals);
     if summary.totals.mixed_models > 0 || summary.totals.attribution_uncertain > 0 {
         out.push_str(&format!(
             "Model observations: {} mixed, {} attribution-uncertain sessions; grouping uses the latest observed model only.\n",
@@ -4580,8 +4584,68 @@ fn render_usage_summary(summary: &UsageSummary, by: &[GroupBy]) -> String {
             partition.tally.sessions,
             tally_cells(&partition.tally).join(" | ")
         ));
+        render_identity_bounds(&mut out, &partition.tally);
     }
     out
+}
+
+fn render_identity_bounds(out: &mut String, tally: &UsageTally) {
+    if tally.identity_unestablished {
+        out.push_str(
+            "Event equality across these sessions is unestablished; exact totals are withheld.\n",
+        );
+    }
+    if let Some(bounds) = &tally.identity_bounds {
+        for (name, bound) in [
+            ("input", &bounds.input),
+            ("output", &bounds.output),
+            ("reasoning", &bounds.reasoning),
+            ("cache read", &bounds.cache_read),
+            ("cache write", &bounds.cache_write),
+        ] {
+            if let Some(bound) = bound {
+                out.push_str(&format!(
+                    "Identity bound {name}: at least {}",
+                    bound.at_least
+                ));
+                match bound.at_most {
+                    Some(upper) => out.push_str(&format!(", at most {upper}\n")),
+                    None => out.push_str("; upper bound unmeasured\n"),
+                }
+            }
+        }
+        if let Some(bound) = &bounds.cost {
+            out.push_str(&format!(
+                "Identity bound cost: at least {} USD",
+                bound.at_least
+            ));
+            match bound.at_most {
+                Some(upper) => out.push_str(&format!(", at most {upper} USD\n")),
+                None => out.push_str("; upper bound unmeasured\n"),
+            }
+        }
+    }
+    for figure in &tally.session_figures {
+        out.push_str(&format!("Session figure {} {}", figure.harness, figure.id));
+        if let Some(tokens) = &figure.tokens {
+            out.push_str(&format!(": {}", render_tokens(tokens)));
+        }
+        if let Some(cost) = &figure.cost {
+            out.push_str(&format!("; {}", render_cost(cost)));
+        }
+        if figure.tokens.is_none() && figure.cost.is_none() {
+            out.push_str(": unmeasured");
+        }
+        out.push('\n');
+        render_measurement_coverage(
+            out,
+            &format!("session {}", figure.id),
+            &figure.measurement_coverage,
+        );
+        for reason in &figure.measurement_incomplete {
+            out.push_str(&format!("session {}: {reason}\n", figure.id));
+        }
+    }
 }
 
 /// The selection's disjoint categories, the native conventions they were

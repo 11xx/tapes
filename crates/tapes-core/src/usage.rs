@@ -902,6 +902,77 @@ pub struct UsageTally {
     pub cost_coverage: Option<CostCoverage>,
     pub coverage: CoverageCounts,
     pub counted: CountedSessions,
+    /// Exact unions require established equality or disjointness of events.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub identity_unestablished: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub identity_bounds: Option<UsageIdentityBounds>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub session_figures: Vec<SessionUsageFigure>,
+}
+
+/// One session's measurement, with no recording locator or raw diagnostic.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct SessionUsageFigure {
+    pub id: String,
+    pub harness: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub accounting: Option<Accounting>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tokens: Option<Tokens>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cost: Option<Cost>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cost_coverage: Option<CostCoverage>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub measurement_coverage: BTreeMap<String, MeasurementCoverage>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub measurement_incomplete: Vec<String>,
+}
+
+impl From<&Session> for SessionUsageFigure {
+    fn from(session: &Session) -> Self {
+        let detail = session.usage_detail.as_ref();
+        Self {
+            id: session.id.clone(),
+            harness: session.harness().to_owned(),
+            accounting: session.accounting.clone(),
+            tokens: session.tokens.clone(),
+            cost: session.estimated_cost(),
+            cost_coverage: session.cost_coverage(),
+            measurement_coverage: detail
+                .map(|detail| detail.measurement_coverage.clone())
+                .unwrap_or_default(),
+            measurement_incomplete: detail
+                .map(|detail| detail.measurement_incomplete.clone())
+                .unwrap_or_default(),
+        }
+    }
+}
+
+/// Bounds on comparable known measurements when sessions may share events.
+/// Missing measurements leave the upper bound unestablished.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct QuantityBounds<T> {
+    pub at_least: T,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub at_most: Option<T>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+pub struct UsageIdentityBounds {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub input: Option<QuantityBounds<u64>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output: Option<QuantityBounds<u64>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<QuantityBounds<u64>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_read: Option<QuantityBounds<u64>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_write: Option<QuantityBounds<u64>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cost: Option<QuantityBounds<f64>>,
 }
 
 /// Disjoint categories summed over a set of sessions, each converted from its
@@ -1188,6 +1259,9 @@ impl Tally {
             cost_coverage: self.cost_coverage,
             coverage: self.coverage,
             counted,
+            identity_unestablished: false,
+            identity_bounds: None,
+            session_figures: Vec::new(),
         }
     }
 }
@@ -1678,7 +1752,8 @@ pub fn partitioned_aggregate(
     by: &[GroupBy],
 ) -> (UsageAggregate, Vec<AccountingPartition>) {
     let mut aggregate = unchecked_aggregate(sessions, by);
-    let mut partitions: BTreeMap<(String, String), (Option<Accounting>, Tally)> = BTreeMap::new();
+    let mut partitions: BTreeMap<(String, String), (Option<Accounting>, Tally, Domains)> =
+        BTreeMap::new();
     let mut domains: BTreeMap<Vec<Option<String>>, Domains> = BTreeMap::new();
     let mut all = Domains::default();
     for session in sessions {
@@ -1686,11 +1761,15 @@ pub fn partitioned_aggregate(
             session.harness().to_owned(),
             format!("{:?}", session.accounting),
         );
-        partitions
-            .entry(key.clone())
-            .or_insert_with(|| (session.accounting.clone(), Tally::default()))
-            .1
-            .add(session);
+        let partition = partitions.entry(key.clone()).or_insert_with(|| {
+            (
+                session.accounting.clone(),
+                Tally::default(),
+                Domains::default(),
+            )
+        });
+        partition.1.add(session);
+        partition.2.add(session, &key);
         let group = by.iter().map(|dimension| dimension.of(session)).collect();
         domains.entry(group).or_default().add(session, &key);
         all.add(session, &key);
@@ -1701,10 +1780,14 @@ pub fn partitioned_aggregate(
     }
     let partitions = partitions
         .into_iter()
-        .map(|((harness, _), (accounting, tally))| AccountingPartition {
-            harness,
-            accounting,
-            tally: tally.finish(),
+        .map(|((harness, _), (accounting, tally, domains))| {
+            let mut tally = tally.finish();
+            domains.apply(&mut tally);
+            AccountingPartition {
+                harness,
+                accounting,
+                tally,
+            }
         })
         .collect();
     (aggregate, partitions)
@@ -1717,10 +1800,14 @@ pub fn partitioned_aggregate(
 struct Domains {
     native: std::collections::BTreeSet<(String, String)>,
     accounting: std::collections::BTreeSet<String>,
+    pi: bool,
+    figures: Vec<SessionUsageFigure>,
 }
 
 impl Domains {
     fn add(&mut self, session: &Session, key: &(String, String)) {
+        self.pi |= session.harness() == "pi";
+        self.figures.push(SessionUsageFigure::from(session));
         if session.tokens.is_some() || session.cost.is_some() {
             self.native.insert(key.clone());
         }
@@ -1730,6 +1817,9 @@ impl Domains {
     }
 
     fn apply(&self, tally: &mut UsageTally) {
+        if self.pi {
+            tally.session_figures.clone_from(&self.figures);
+        }
         if self.native.len() > 1 {
             tally.tokens = None;
             tally.cost = None;
@@ -1738,6 +1828,80 @@ impl Domains {
         if self.accounting.len() > 1 {
             tally.disjoint = None;
         }
+        if self.pi && self.figures.len() > 1 {
+            tally.identity_unestablished = true;
+            tally.identity_bounds = (self.native.len() == 1).then(|| self.bounds());
+            tally.tokens = None;
+            tally.cost = None;
+            tally.disjoint = None;
+        }
+    }
+
+    fn bounds(&self) -> UsageIdentityBounds {
+        let tokens = |name: &str, counter: fn(&Tokens) -> Option<u64>| {
+            let values = self
+                .figures
+                .iter()
+                .map(|figure| figure.tokens.as_ref().and_then(counter))
+                .collect::<Vec<_>>();
+            values.iter().flatten().copied().max().map(|at_least| {
+                let complete = self
+                    .figures
+                    .iter()
+                    .zip(&values)
+                    .all(|(figure, value)| value.is_some() && figure.counter_complete(name));
+                QuantityBounds {
+                    at_least,
+                    at_most: complete
+                        .then(|| values.into_iter().flatten().fold(0u64, u64::saturating_add)),
+                }
+            })
+        };
+        let costs = self
+            .figures
+            .iter()
+            .filter_map(|figure| figure.cost.as_ref().map(|cost| cost.usd))
+            .collect::<Vec<_>>();
+        UsageIdentityBounds {
+            input: tokens("input", |tokens| tokens.input),
+            output: tokens("output", |tokens| tokens.output),
+            reasoning: tokens("reasoning", |tokens| tokens.reasoning),
+            cache_read: tokens("cache_read", |tokens| tokens.cache_read),
+            cache_write: tokens("cache_write", |tokens| tokens.cache_write),
+            cost: costs
+                .iter()
+                .copied()
+                .reduce(f64::max)
+                .map(|at_least| QuantityBounds {
+                    at_least,
+                    at_most: self
+                        .figures
+                        .iter()
+                        .all(|figure| figure.cost.is_some() && figure.counter_complete("cost"))
+                        .then(|| costs.iter().sum()),
+                }),
+        }
+    }
+}
+
+impl SessionUsageFigure {
+    fn counter_complete(&self, counter: &str) -> bool {
+        self.accounting
+            .as_ref()
+            .is_some_and(|accounting| accounting.coverage == AccountingCoverage::Session)
+            && self
+                .measurement_coverage
+                .get(counter)
+                .is_none_or(|coverage| coverage.missing == 0 && coverage.unpriced == 0)
+            && (counter != "cost"
+                || self
+                    .cost_coverage
+                    .as_ref()
+                    .is_none_or(|coverage| coverage.complete))
+            && !self
+                .measurement_incomplete
+                .iter()
+                .any(|reason| reason.contains("stopped") || reason.contains("could not be read"))
     }
 }
 
@@ -1922,7 +2086,33 @@ mod partition_tests {
         let mut priced = zero.clone();
         priced.cost = Some(Cost { usd: 0.5 });
         let (mixed, partitions) = partitioned_aggregate(&[zero, priced], &[]);
-        assert_eq!(mixed.totals.cost.as_ref().map(|cost| cost.usd), Some(0.5));
+        assert!(mixed.totals.cost.is_none());
+        assert_eq!(
+            mixed
+                .totals
+                .identity_bounds
+                .as_ref()
+                .unwrap()
+                .cost
+                .as_ref()
+                .unwrap()
+                .at_least,
+            0.5
+        );
+        assert!(mixed
+            .totals
+            .identity_bounds
+            .as_ref()
+            .unwrap()
+            .cost
+            .as_ref()
+            .unwrap()
+            .at_most
+            .is_none());
+        assert_eq!(
+            mixed.totals.session_figures[1].cost.as_ref().unwrap().usd,
+            0.5
+        );
         assert_eq!(mixed.totals.counted.cost, 1);
         let value = serde_json::to_value(&partitions).unwrap();
         assert_eq!(value[0]["cost_coverage"]["complete"], false);

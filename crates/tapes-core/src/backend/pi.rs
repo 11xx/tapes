@@ -87,6 +87,9 @@ impl PiBackend {
         // only place either can be read on a file past the bounded tail.
         let opening = recording.opening();
         let read = &recording.tail;
+        if opening.is_empty() && read.values.is_empty() && read.skipped > 0 {
+            anyhow::bail!("recording-unreadable");
+        }
         let mut identity_seen = false;
         for header in opening.iter().filter(|value| value["type"] == "session") {
             identity_seen = true;

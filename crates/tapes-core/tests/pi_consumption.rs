@@ -221,6 +221,113 @@ fn a_measured_zero_subtotal_is_not_reclassified_by_unpriced_peer_usage() {
 }
 
 #[test]
+fn pi_selection_withholds_an_exact_union_and_keeps_session_figures() {
+    let backend = PiBackend::new(fixtures("pi-active-consumption"));
+    let parent = backend.locate("active-consumption").unwrap().unwrap();
+    let mut fork = parent.clone();
+    fork.id = "fork".to_owned();
+    let (aggregate, partitions) =
+        agent_tapes_core::usage::partitioned_aggregate(&[parent, fork], &[]);
+    for tally in [
+        &aggregate.totals,
+        &aggregate.groups[0].tally,
+        &partitions[0].tally,
+    ] {
+        let value = serde_json::to_value(tally).unwrap();
+        assert!(value.get("tokens").is_none(), "{value}");
+        assert!(value.get("cost").is_none(), "{value}");
+        assert!(value.get("disjoint").is_none(), "{value}");
+        assert_eq!(
+            value["identity_bounds"]["input"],
+            json!({"at_least":150,"at_most":300}),
+            "{value}"
+        );
+        assert_eq!(
+            value["identity_bounds"]["cost"],
+            json!({"at_least":1.875,"at_most":3.75}),
+            "{value}"
+        );
+        assert_eq!(value["session_figures"].as_array().unwrap().len(), 2);
+        assert_eq!(value["session_figures"][0]["tokens"]["input"], 150);
+        assert!(!value.to_string().contains(".jsonl"), "{value}");
+    }
+}
+
+#[test]
+fn pi_bounds_keep_bases_separate_and_missing_counters_unmeasured() {
+    let backend = PiBackend::new(fixtures("pi-active-consumption"));
+    let parent = backend.locate("active-consumption").unwrap().unwrap();
+    let mut partial = parent.clone();
+    partial.id = "partial".to_owned();
+    partial.tokens.as_mut().unwrap().reasoning = None;
+    partial
+        .usage_detail
+        .as_mut()
+        .unwrap()
+        .measurement_coverage
+        .get_mut("output")
+        .unwrap()
+        .missing = 1;
+    partial.cost = None;
+    let (aggregate, _) =
+        agent_tapes_core::usage::partitioned_aggregate(&[parent.clone(), partial], &[]);
+    let value = serde_json::to_value(aggregate.totals).unwrap();
+    assert_eq!(value["identity_bounds"]["input"]["at_most"], 300);
+    for counter in ["output", "reasoning", "cost"] {
+        assert!(
+            value["identity_bounds"][counter].get("at_most").is_none(),
+            "{value}"
+        );
+        assert!(
+            value["identity_bounds"][counter].get("at_least").is_some(),
+            "{value}"
+        );
+    }
+    let mut different_basis = parent.clone();
+    different_basis.accounting.as_mut().unwrap().basis =
+        agent_tapes_core::model::AccountingBasis::RecordedTotal;
+    let (aggregate, partitions) =
+        agent_tapes_core::usage::partitioned_aggregate(&[parent, different_basis], &[]);
+    let value = serde_json::to_value(aggregate.totals).unwrap();
+    assert!(value.get("identity_bounds").is_none(), "{value}");
+    assert!(value.get("cost").is_none(), "{value}");
+    assert_eq!(partitions.len(), 2);
+    assert!(partitions
+        .iter()
+        .all(|partition| partition.tally.cost.is_some()));
+}
+
+#[test]
+fn an_unreadable_peer_does_not_hide_healthy_pi_measurements() {
+    let store = Temp::new("unreadable-peer");
+    let file = "2026-01-14T10-00-00-000Z_active-consumption.jsonl";
+    fs::copy(
+        fixtures("pi-active-consumption").join(file),
+        store.0.join(file),
+    )
+    .unwrap();
+    fs::write(
+        store.0.join("2026-01-14T11-00-00-000Z_broken.jsonl"),
+        "{broken\n",
+    )
+    .unwrap();
+    let backends: Vec<Box<dyn Backend>> = vec![Box::new(PiBackend::new(&store.0))];
+    let selection = agent_tapes_core::SessionSelection {
+        harness: Some("pi"),
+        limit: Some(20),
+        ..Default::default()
+    };
+    let summary =
+        agent_tapes_core::usage_summary_with_backends(&backends, &selection, &[]).unwrap();
+    assert_eq!(summary.totals.cost.as_ref().unwrap().usd, 1.875);
+    assert!(!summary.unreadable.is_empty());
+    assert_eq!(summary.totals.session_figures[0].id, "active-consumption");
+    for (path, view) in both(&store.0, "active-consumption") {
+        assert_eq!(view["cost"]["usd"], 1.875, "{path}: {view}");
+    }
+}
+
+#[test]
 fn an_active_repeat_is_an_observation_and_a_pending_event_is_unmeasured() {
     let store = rewound_variant("active-repeat", |lines| {
         let mut repeat: Value = serde_json::from_str(lines.last().unwrap()).unwrap();
