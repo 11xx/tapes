@@ -9167,6 +9167,68 @@ fn pi_cli_preserves_complete_parent_ids_without_paths() {
     }
 }
 
+#[test]
+fn pi_cli_normalizes_a_bare_parent_recording_filename() {
+    let root = TemporaryDirectory::new(std::env::temp_dir().join(format!(
+        "tapes-cli-pi-relative-parent-{}",
+        std::process::id()
+    )));
+    let sessions = root.path().join("sessions");
+    fs::create_dir_all(&sessions).unwrap();
+    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../tapes-core/tests/fixtures/pi-relative-parent");
+    let parent_name = "2026-01-13T10-00-00-000Z_native_parent.jsonl";
+    for name in [parent_name, "2026-01-13T10-00-00-000Z_child.jsonl"] {
+        fs::copy(fixtures.join(name), sessions.join(name)).unwrap();
+    }
+    for full in [false, true] {
+        for action in ["usage", "lineage"] {
+            let run = |json: bool| {
+                let mut command = tapes();
+                command
+                    .current_dir(&sessions)
+                    .args([action, "child", "--native-store", "pi", "--native-root"])
+                    .arg(root.path());
+                if full {
+                    command.arg("--full");
+                }
+                if json {
+                    command.arg("--json");
+                }
+                let output = command.output().unwrap();
+                assert!(
+                    output.status.success(),
+                    "{action}: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                let rendered = String::from_utf8(output.stdout).unwrap();
+                assert!(
+                    !rendered.contains(parent_name),
+                    "{action} full={full}: {rendered}"
+                );
+                rendered
+            };
+            let human = run(false);
+            let value: Value = serde_json::from_str(&run(true)).unwrap();
+            if action == "usage" {
+                assert_eq!(
+                    value["consumption"]["identity"]["forked_from"], "native_parent",
+                    "{value}"
+                );
+                assert!(human.contains("forked from native_parent"), "{human}");
+            } else {
+                assert_eq!(
+                    value["lineage"]["parent"]["native_id"], "native_parent",
+                    "{value}"
+                );
+                assert_eq!(value["lineage"]["parent"]["resolved"], true, "{value}");
+                assert!(human.contains("parent: native_parent "), "{human}");
+                assert!(!human.contains("unresolved"), "{human}");
+            }
+        }
+    }
+}
+
 /// pi records the model on every assistant message, so both `usage` and
 /// `stats` report the per-model split the recording states, qualified by the
 /// effort in effect.

@@ -762,3 +762,19 @@ fn parent_identity_uses_native_grammar_with_a_length_bound() {
         }
     }
 }
+
+#[test]
+fn consumption_normalizes_a_bare_parent_recording_filename() {
+    for (path, view) in both(&fixtures("pi-relative-parent"), "child") {
+        assert_eq!(
+            view["consumption"]["identity"]["forked_from"], "native_parent",
+            "{path}: {view}"
+        );
+        assert!(
+            !view
+                .to_string()
+                .contains("2026-01-13T10-00-00-000Z_native_parent.jsonl"),
+            "{path}: {view}"
+        );
+    }
+}

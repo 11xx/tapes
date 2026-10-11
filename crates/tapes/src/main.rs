@@ -1381,7 +1381,8 @@ enum Command {
     /// unestablished), and incompleteness. Consumption cost is absent when no
     /// counted event is priced; coverage still counts unpriced events. Fork
     /// parents retain complete native ids, including dots and underscores,
-    /// within a 128-byte bound; recording paths stay private.
+    /// within a 128-byte bound; recording paths and timestamp-prefixed basenames
+    /// stay private. Other bare references, such as parent.jsonl, are ids.
     Usage {
         #[command(flatten)]
         query: SessionQueryArgs,
