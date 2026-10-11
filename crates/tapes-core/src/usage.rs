@@ -488,6 +488,8 @@ pub enum ConsumptionKeyKind {
 /// Provider account equality is unestablished. `copy_of` witnesses a matching
 /// consumption entry in the named fork source; `entry_digest` identifies the
 /// normalized consumption facts used to verify that relation.
+/// Keys establish membership only; they carry no per-event amounts, and their
+/// digests cannot recover the measurements needed for a token or cost union.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct ConsumptionEventKey {
     pub kind: ConsumptionKeyKind,
@@ -535,7 +537,8 @@ pub enum ConsumptionCopyCoverage {
 /// A recent suffix of counted consumption identities, separate from the
 /// measurements that cover the whole read. Omitted or unidentified keys,
 /// incomplete source reads, and unestablished account equality prevent an
-/// exact cross-recording union unless separate copy evidence establishes it.
+/// exact cross-recording membership union unless separate copy evidence
+/// establishes it. A measured union also requires normalized per-event amounts.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct ConsumptionEventKeys {
     pub keys: Vec<ConsumptionEventKey>,

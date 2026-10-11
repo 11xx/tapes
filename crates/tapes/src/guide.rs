@@ -676,7 +676,13 @@ PROBE BEFORE EXPORTING
   `copy_conflicts` counts contradictory witnesses. A malformed parent record
   qualifies its copy evidence while healthy matching entries remain available.
   Parent paths and raw read errors are never included in the keys.
-  An exact parent/fork event union requires complete key coverage and verified
+  Keys establish event membership only. They carry no per-event token or cost
+  amounts, and their digests cannot recover those measurements. An exact token
+  or cost union requires normalized per-event amounts with quantity kind,
+  accounting basis, and per-counter coverage; the keys alone leave it
+  unmeasured. Per-event measurement support is tracked by the tapes todo
+  `consumption-key-amounts`.
+  An exact parent/fork membership union requires complete key coverage and verified
   copy equality for shared entries. Missing parents, bounded copy reads,
   conflicts, and unrelated recordings leave cross-recording equality
   unestablished; each recording's own figures remain available.

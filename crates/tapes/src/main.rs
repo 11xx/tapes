@@ -1495,6 +1495,9 @@ enum Command {
         /// Keys contain ids and digests, without recording paths or diagnostics.
         /// Copy coverage and conflicts qualify cross-recording equality.
         /// Unavailable key sources retain measurements and use a fixed reason.
+        /// Keys establish event membership only. Per-event amounts are absent;
+        /// their digests cannot recover them, so measured unions are withheld.
+        /// Per-event measurement support is tracked by consumption-key-amounts.
         #[arg(long, value_name = "N", num_args = 0..=1, default_missing_value = "200", conflicts_with_all = ["read_bytes", "series"])]
         event_keys: Option<Option<usize>>,
         /// Render the versioned tapes-usage/11 object, or tapes-usage-summary/6
