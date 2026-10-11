@@ -2480,7 +2480,18 @@ fn ordinary_fallback_explains_and_retains_the_set_aside_cost_state() {
         usage_full_with_backends(&backends, Selection::Id(CLAUDE_DIMENSIONS_SESSION)).unwrap(),
     )
     .unwrap();
-    assert_eq!(full["recorded_total"], value["recorded_total"]);
+    for view in [&value, &full] {
+        let recorded = &view["recorded_total"];
+        assert_eq!(recorded["accounting"]["basis"], "recorded-total");
+        assert_eq!(recorded["accounting"]["coverage"], "session");
+        assert!(recorded["accounting"].get("selection").is_none());
+        assert_eq!(recorded["tokens"]["output"], 40);
+        assert_eq!(recorded["cost"]["usd"], 0.5);
+        assert_eq!(recorded["cost"]["kind"], "harness-calculated-estimate");
+        assert_eq!(recorded["cost"]["missing"][0], "pricing_basis");
+        assert_eq!(recorded["by_model"][0]["cost"]["usd"], 0.5);
+        assert!(view.get("consumption").is_none());
+    }
     let reconciled_view = usage_with_options_with_backends(
         &backends,
         Selection::Id(CLAUDE_DIMENSIONS_SESSION),
@@ -2492,7 +2503,15 @@ fn ordinary_fallback_explains_and_retains_the_set_aside_cost_state() {
     )
     .unwrap();
     let report = serde_json::to_value(reconciled_view.reconciliation.unwrap()).unwrap();
+    assert_eq!(report["recorded"]["accounting"]["basis"], "recorded-total");
+    assert_eq!(report["recorded"]["accounting"]["coverage"], "session");
+    assert!(report["recorded"]["accounting"].get("selection").is_none());
     assert_eq!(report["recorded"]["cost"]["usd"], 0.5);
+    assert_eq!(
+        report["recorded"]["cost"]["kind"],
+        "harness-calculated-estimate"
+    );
+    assert_eq!(report["recorded"]["cost"]["missing"][0], "pricing_basis");
     assert_eq!(report["by_model"][0]["cost"]["usd"], 0.5);
     assert_eq!(
         report["by_model"][0]["accounting"]["basis"],

@@ -1118,6 +1118,7 @@ fn recorded_usage(value: &Value) -> RecordedUsage {
         accounting: Accounting {
             basis: AccountingBasis::RecordedTotal,
             coverage: AccountingCoverage::Session,
+            selection: None,
         },
         cost: value["totalCostUSD"]
             .as_f64()

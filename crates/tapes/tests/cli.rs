@@ -9072,13 +9072,26 @@ fn pi_usage_reports_active_branch_and_consumption_apart() {
         assert_eq!(value["schema"], "tapes-usage/11");
         assert_eq!(value["accounting"]["selection"], "active-branch", "{value}");
         assert_eq!(value["cost"]["usd"], 0.5, "{value}");
+        assert!(value.get("recorded_total").is_none(), "{value}");
+        assert!(value.get("reconciliation").is_none(), "{value}");
         assert_eq!(
-            value["consumption"]["accounting"],
-            serde_json::json!({
-                "basis": "summed-requests",
-                "coverage": "session",
-                "selection": "retained-branches"
-            }),
+            value["consumption"]["accounting"]["basis"], "summed-requests",
+            "{value}"
+        );
+        assert_eq!(
+            value["consumption"]["accounting"]["coverage"], "session",
+            "{value}"
+        );
+        assert_eq!(
+            value["consumption"]["accounting"]["selection"], "retained-branches",
+            "{value}"
+        );
+        let measured = &value["consumption"]["measurement_coverage"]["cost"];
+        assert_eq!(measured["measured"], 5, "{value}");
+        assert_eq!(measured["missing"], 0, "{value}");
+        assert_eq!(measured["unpriced"], 0, "{value}");
+        assert!(
+            value["consumption"].get("cost_coverage").is_none(),
             "{value}"
         );
         assert_eq!(value["consumption"]["cost"]["usd"], 1.3125, "{value}");
@@ -10977,6 +10990,18 @@ fn usage_reconcile_sets_the_recorded_total_beside_the_family_requests() {
         190
     );
     assert_eq!(value["reconciliation"]["recorded"]["cost"]["usd"], 0.25);
+    assert_eq!(
+        value["reconciliation"]["recorded"]["cost"]["kind"],
+        "harness-calculated-estimate"
+    );
+    assert_eq!(
+        value["reconciliation"]["recorded"]["accounting"]["basis"],
+        "recorded-total"
+    );
+    assert!(value["reconciliation"]["recorded"]["accounting"]
+        .get("selection")
+        .is_none());
+    assert!(value.get("consumption").is_none());
     let codex_directory = root.path().join("codex/sessions/2026/01/01");
     fs::create_dir_all(&codex_directory).unwrap();
     fs::write(codex_directory.join("rollout-2026-01-01T10-00-00-50000000-0000-4000-8000-000000000001.jsonl"),

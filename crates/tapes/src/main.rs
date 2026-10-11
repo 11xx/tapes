@@ -29,8 +29,7 @@ use agent_tapes_core::stats_summary::SessionRead;
 use agent_tapes_core::usage::{
     Consumption, DisjointSum, Durations, GroupBy, GroupKey, ModelUsage, ObservationClassification,
     RateLimits, RateWindow, RecordedUsage, RequestDimensions, TurnCoverage, UsageAttribution,
-    UsageObservation,
-    UsageObservationOptions, UsageOptions, UsageTally, UsageView,
+    UsageObservation, UsageObservationOptions, UsageOptions, UsageTally, UsageView,
 };
 use agent_tapes_core::{BulkExport, Selection, UsageSummary, Where};
 use anyhow::{anyhow, Result};

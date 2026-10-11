@@ -876,6 +876,7 @@ mod tests {
                     accounting: Accounting {
                         basis: crate::model::AccountingBasis::RecordedTotal,
                         coverage: crate::model::AccountingCoverage::Session,
+                        selection: None,
                     },
                     tokens: Some(tokens(position as u64, 0)),
                     cost: None,

@@ -204,10 +204,13 @@ fn unsupported_store_is_reported_once_without_bounded_fallback() {
 
 #[test]
 fn session_read_limit_is_global_across_harnesses() {
-    let mut stores = backends();
-    stores.push(Box::new(agent_tapes_core::backend::pi::PiBackend::new(
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/pi"),
-    )));
+    let fixtures = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+    let stores: Vec<Box<dyn Backend>> = vec![
+        Box::new(CodexBackend::new(fixtures.join("whole-search/codex"))),
+        Box::new(agent_tapes_core::backend::pi::PiBackend::new(
+            fixtures.join("rewound/pi"),
+        )),
+    ];
     let filters = ListFilters {
         search: Some(""),
         ..Default::default()
@@ -227,7 +230,13 @@ fn session_read_limit_is_global_across_harnesses() {
     let report = result.full_search.unwrap();
     assert_eq!(report.sessions_read, 1);
     assert_eq!(report.coverage.len(), 1);
+    assert_eq!(report.coverage[0].harness, "pi");
+    assert_eq!(report.coverage[0].session, "session-rewound");
     assert!(report.coverage[0].matches.is_empty());
-    assert!(report.coverage[0].matches_truncated);
+    assert!(
+        report.coverage[0].matches_truncated,
+        "{:?}",
+        report.coverage[0]
+    );
     assert!(report.selection_truncated);
 }

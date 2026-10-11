@@ -1263,6 +1263,8 @@ mod tests {
             "requests",
             "request_failures",
             "consumption",
+            "recorded_total",
+            "reconciliation",
             "truncation",
             "notes",
         ] {
