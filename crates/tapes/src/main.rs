@@ -28,9 +28,10 @@ use agent_tapes_core::stats::{
 };
 use agent_tapes_core::stats_summary::SessionRead;
 use agent_tapes_core::usage::{
-    Consumption, DisjointSum, Durations, GroupBy, GroupKey, ModelUsage, ObservationClassification,
-    RateLimits, RateWindow, RecordedUsage, RequestDimensions, TurnCoverage, UsageAttribution,
-    UsageObservation, UsageObservationOptions, UsageOptions, UsageTally, UsageView,
+    Consumption, ConsumptionEventKeys, ConsumptionKeyOptions, DisjointSum, Durations, GroupBy,
+    GroupKey, ModelUsage, ObservationClassification, RateLimits, RateWindow, RecordedUsage,
+    RequestDimensions, TurnCoverage, UsageAttribution, UsageObservation, UsageObservationOptions,
+    UsageOptions, UsageTally, UsageView,
 };
 use agent_tapes_core::{BulkExport, Selection, UsageSummary, Where};
 use anyhow::{anyhow, Result};
@@ -129,6 +130,19 @@ fn parse_series(value: Option<Option<usize>>) -> Result<Option<UsageObservationO
         ));
     }
     Ok(Some(UsageObservationOptions { limit }))
+}
+
+fn parse_event_keys(value: Option<Option<usize>>) -> Result<Option<ConsumptionKeyOptions>> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let limit = value.unwrap_or(DEFAULT_SERIES_ROWS);
+    if !(1..=MAX_SERIES_ROWS).contains(&limit) {
+        return Err(anyhow!(
+            "--event-keys must be between 1 and {MAX_SERIES_ROWS}"
+        ));
+    }
+    Ok(Some(ConsumptionKeyOptions { limit }))
 }
 
 #[derive(Parser)]
@@ -1473,6 +1487,16 @@ enum Command {
         /// Each source names the revision, length and SHA-256 of its bytes.
         #[arg(long, conflicts_with = "by")]
         reconcile: bool,
+        /// Retain a recent suffix of Pi consumption event keys. Default: 200;
+        /// range: 1..=10000; serialized key budget: 8 MiB. Omitted identities
+        /// are counted, while measurements cover the whole read. Provider
+        /// account equality is unestablished. Recording coordinates are local;
+        /// copy_of verifies a matching consumption entry in the named parent.
+        /// Keys contain ids and digests, without recording paths or diagnostics.
+        /// Copy coverage and conflicts qualify cross-recording equality.
+        /// Unavailable key sources retain measurements and use a fixed reason.
+        #[arg(long, value_name = "N", num_args = 0..=1, default_missing_value = "200", conflicts_with_all = ["read_bytes", "series"])]
+        event_keys: Option<Option<usize>>,
         /// Render the versioned tapes-usage/11 object, or tapes-usage-summary/6
         /// for a selection, as JSON. `session.model_observation` says
         /// whether more than one model and effort was observed (`mixed`) and
@@ -2533,11 +2557,21 @@ fn dispatch(cli: Cli) -> Result<()> {
             full,
             series,
             reconcile,
+            event_keys,
             json,
         } => {
             query.validate_input()?;
             read.refuse_supplied(&query.input)?;
             let series = parse_series(series)?;
+            let event_keys = parse_event_keys(event_keys)?;
+            if event_keys.is_some() && query.input.supplied() {
+                return Err(anyhow!(
+                    "--event-keys is available only for installed recording sessions"
+                ));
+            }
+            if event_keys.is_some() && query.single().is_none() {
+                return Err(anyhow!("--event-keys answers one installed session; name a session id, --latest, or --title"));
+            }
             if series.is_some() && query.input.supplied() {
                 return Err(anyhow!(
                     "--series is available only for installed recording sessions"
@@ -2566,7 +2600,7 @@ fn dispatch(cli: Cli) -> Result<()> {
             print_selection_warnings(&latest_warnings);
             if let Some(one) = query.single() {
                 let usage = if full {
-                    if series.is_some() || reconcile {
+                    if series.is_some() || reconcile || event_keys.is_some() {
                         agent_tapes_core::usage_with_options_with_backends(
                             &query.input.backends()?,
                             one,
@@ -2574,7 +2608,7 @@ fn dispatch(cli: Cli) -> Result<()> {
                                 full: true,
                                 series,
                                 reconcile,
-                                event_keys: None,
+                                event_keys,
                             },
                         )?
                     } else {
@@ -2583,7 +2617,7 @@ fn dispatch(cli: Cli) -> Result<()> {
                 } else if query.input.supplied() {
                     let backends = query.input.backends()?;
                     agent_tapes_core::usage_with_backends(&backends, one)?
-                } else if series.is_some() || reconcile {
+                } else if series.is_some() || reconcile || event_keys.is_some() {
                     agent_tapes_core::usage_with_options_with_backends(
                         &single_backends,
                         one,
@@ -2591,7 +2625,7 @@ fn dispatch(cli: Cli) -> Result<()> {
                             full: false,
                             series,
                             reconcile,
-                            event_keys: None,
+                            event_keys,
                         },
                     )?
                 } else {
@@ -3861,6 +3895,9 @@ fn render_usage(usage: &UsageView) -> String {
     if let Some(reconciliation) = &usage.reconciliation {
         out.push_str(&render_reconciliation(reconciliation));
     }
+    if let Some(keys) = &usage.consumption_event_keys {
+        out.push_str(&render_consumption_keys(keys));
+    }
     if let Some(series) = &usage.series {
         out.push_str(&format!(
             "series: {} observations returned of {}; basis and counted status are read-local\n",
@@ -4456,6 +4493,58 @@ fn render_measurement_coverage(
             ));
         }
     }
+}
+
+fn render_consumption_keys(series: &ConsumptionEventKeys) -> String {
+    let observed = series
+        .observed
+        .map_or_else(|| "unmeasured".to_owned(), |count| count.to_string());
+    let mut out = format!("consumption event keys: {} returned of {observed}; provider account namespace unestablished, recording entries local\n", series.returned);
+    let omitted = &series.omissions;
+    if omitted.row_cap
+        + omitted.byte_budget
+        + omitted.oversized_key
+        + omitted.unidentified
+        + omitted.private_or_invalid_identity
+        + omitted.unavailable_source
+        > 0
+    {
+        out.push_str(&format!("consumption key omissions: row-cap {}, byte-budget {}, oversized {}, unidentified {}, private-or-invalid {}, unavailable-source {}\n", omitted.row_cap, omitted.byte_budget, omitted.oversized_key, omitted.unidentified, omitted.private_or_invalid_identity, omitted.unavailable_source));
+    }
+    if let Some(reason) = series.unavailable {
+        out.push_str(&format!("consumption keys unavailable: {reason}\n"));
+    }
+    if let (Some(coverage), Some(unreadable)) = (series.coverage, series.unreadable_records) {
+        out.push_str(&format!(
+            "consumption key coverage: {coverage:?}; {unreadable} unreadable records\n"
+        ));
+    }
+    if let Some(coverage) = series.copy_coverage {
+        out.push_str(&format!(
+            "fork copy coverage: {coverage:?}; {} conflicts\n",
+            series.copy_conflicts
+        ));
+    }
+    for key in &series.keys {
+        out.push_str(&format!("  {:?}", key.kind));
+        if let (Some(provider), Some(response)) = (&key.provider, &key.response_id) {
+            out.push_str(&format!(" {provider} {response}"));
+        }
+        if let Some(entry) = &key.recording_entry {
+            out.push_str(&format!(
+                "; recording {} entry {}",
+                entry.session_id, entry.entry_id
+            ));
+        }
+        if let Some(copy) = &key.copy_of {
+            out.push_str(&format!(
+                "; verified copy of {} entry {}",
+                copy.session_id, copy.entry_id
+            ));
+        }
+        out.push('\n');
+    }
+    out
 }
 
 fn render_rate_limits(out: &mut String, limits: &RateLimits) {

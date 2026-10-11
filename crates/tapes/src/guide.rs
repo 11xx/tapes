@@ -648,6 +648,40 @@ PROBE BEFORE EXPORTING
   after the total cannot contradict that total. Each source names the exact
   revision, length and SHA-256 read under the report's rules.
 
+  `usage SESSION --event-keys[=N]` exposes Pi's counted consumption identities
+  under `consumption_event_keys`: 200 recent keys by default, 1..=10000 keys,
+  and an 8 MiB budget over serialized keys. `omissions` counts the row cap,
+  byte budget, oversized keys, unidentified events, private or invalid ids,
+  and unavailable source keys. Measurements still cover the whole read;
+  an omitted key never removes its known usage. `coverage` and
+  `unreadable_records` qualify the key read independently. A source that
+  cannot be replayed sets `unavailable: source-unreadable-or-changed` and keeps
+  the held measurements; unknown identity counts stay absent.
+  Each key names `kind: provider-response` or `kind: recording-entry`.
+  Empty provider, response, or entry ids establish no identity; an available
+  recording coordinate identifies the event when no provider response does.
+  Provider responses carry provider and response ids with
+  `provider_account_namespace: unestablished`. Recording coordinates carry
+  session and entry ids; matching ids alone do not establish equality across
+  recordings. Identity fields contain ASCII letters, digits, dots, colons,
+  hyphens, or underscores, beginning and ending with a letter or digit.
+  Paths, whitespace, and diagnostics are omitted and counted.
+  `copy_of` witnesses a matching entry in the named fork source, verified
+  against its normalized consumption digest; it does not establish a provider
+  account namespace. The digest includes entry type, timestamp, usage,
+  recorded model, observed provider response, and stopped-request state.
+  `copy_coverage` reports how much of that source was checked, and
+  `copy_conflicts` counts contradictory witnesses. A malformed parent record
+  qualifies its copy evidence while healthy matching entries remain available.
+  Parent paths and raw read errors are never included in the keys.
+  An exact parent/fork event union requires complete key coverage and verified
+  copy equality for shared entries. Missing parents, bounded copy reads,
+  conflicts, and unrelated recordings leave cross-recording equality
+  unestablished; each recording's own figures remain available.
+  `--full --event-keys` uses the pinned recording and streams the parent copy
+  check. This option answers one native recording and is separate from
+  `--series`; supplied exports and selection summaries refuse it.
+
   `usage SESSION --series[=N]` opts into a recent bounded suffix of Codex raw
   accounting observations: 200 rows by default, 1 through 10,000 explicitly.
   Rows retain source coordinates, native ordinals when recorded, response IDs,
