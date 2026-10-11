@@ -9,6 +9,165 @@ The format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Added
+
+- `tapes page`, `history-search` and `metadata --pin` follow a recording
+  that keeps growing: the first page hashes the prefix into chunk digests
+  the cursor carries, later pages return only verified bytes and ignore
+  appends, and any rewrite of the pinned prefix is refused at the chunk
+  that reaches it. The strict cursor stays the default.
+
+- `tapes install opencode` adds a plugin that records each OpenCode
+  session's launch mode (TUI or `opencode run`) in its own metadata, so
+  `--launch` covers OpenCode sessions too; `tapes uninstall opencode`
+  removes it.
+
+- `tapes list --search <text> --full` searches whole recordings across a
+  selection, streaming each one, and reports the matching turns'
+  coordinates per session with coverage flags.
+
+- `tapes artifact <session> --reference <token>` reads a Claude persisted
+  tool output through the token its reference carries, confined to the
+  recording's own `tool-results` directory and bounded by `--bytes`
+  (`tapes-artifact/1`).
+
+- `tapes events --command <text>` and `--tool <name>` select tool calls
+  across a session or a selection, with per-session counts (`--count`) and
+  partial-read reporting (`tapes-events-selection/1`).
+
+- Operator turns carry `origin` (`person`, `program` or `harness`) where
+  the recording establishes who sent them, and `show`/`export --origin`
+  select by it; interactive Codex sessions record no sender, so their
+  operator turns carry none.
+
+- `--native-store <claude|codex|pi> --native-root <config root>` reads one
+  materialized native store, such as an archived copy, on every reading
+  command, without falling back to installed stores; such sessions carry
+  the `explicit-native-store` source kind.
+
+- `tapes timeline` lists each turn's `ordinal`, `kind` and `ts` for a
+  session or a selection (`tapes-timeline/1`), and event records name their
+  turn with `turn_ordinal` (`tapes-events/13`).
+
+- Codex tool events carry the recorded process `exit` status, and `tapes
+  show --turn-chars N` caps each turn's text, marking `text_truncated` and
+  the original `text_chars` (`tapes-events/12`, `tapes-session/17`,
+  `tapes-page/10`, `tapes-child/8`).
+
+- `agent-tapes-core` builds backends from explicit native stores
+  (`backends_from_stores`) without consulting the environment, and its
+  history page, search and metadata readers accept injected backends.
+
+- Full file reads (`show --full`, `export --full`, full events, stats and
+  usage) carry `read.source_prefix_digest`, the SHA-256 of the exact source
+  bytes read, which identifies identical copies of a recording
+  independently of its stat-based revision.
+
+- `tapes install pi` installs a pi extension that records each session's
+  launch mode, and `tapes uninstall pi` removes it. With it in place, pi
+  sessions carry `launch` (`tui` interactive; `print` and `json` headless)
+  and `--launch` filters them like Claude and Codex sessions.
+
+- A Claude `Read` carries `content_sha256`, the digest of the file bytes it
+  returned with the line-number decoration removed, beside `sha256` of the
+  returned text, whenever the recording establishes those bytes
+  (`tapes-events/11`).
+
+- `tapes history-search` matches carry the matched turn's `kind`, and its
+  `record_ref`, `native_id` and `ts` when recorded
+  (`tapes-history-search/9`).
+
+- `tapes stats --idle <duration>` (default 45m) reports `active` time and
+  working `stretches` for a session and totals them across a selection
+  (`tapes-stats/12`, `tapes-stats-summary/7`).
+
+- Sessions carry `launch` (`interactive` or `headless`) where the recording
+  says how it was started: Claude's `entrypoint` and Codex's
+  `session_meta.source`. It is omitted for pi and OpenCode recordings,
+  which carry no marker. `tapes list` and `tapes endings` accept `--launch
+  interactive|headless`. Every JSON view that embeds a session takes its
+  next schema version: session 15, list 8, brief 9, usage 8, stats 11,
+  child 6, lineage 3, endings 7, export-manifest 6, stats-summary 6,
+  usage-summary 5, events 10, page 8, history-search 8, metadata-history 8.
+
+- Report observed model and effort selections for Claude, Pi and Codex with
+  ordered native-record spans and explicit partial-read coverage. Claude
+  and Pi assistant turns expose their recorded model and effort. Version
+  the affected JSON outputs and expose the newest selection coordinate
+  through the core library.
+
+- Exported tool records carry stable event identity, recognized file-read
+  locators, outcome and returned-text SHA-256. A capture report names the
+  harness store class and unpinned custody without creating a pin.
+
+### Changed
+
+- The optional liveness source is the `agent-status` command.
+
+- Claude instruction files, environment snapshots and prompt snapshots
+  appear as ambient context (the prompt snapshot as counts only, never its
+  body), each body cut at the field cap and marked when cut.
+
+- `tapes list --search` searches a short bounded read as far as it reaches
+  instead of skipping it, reports only non-matches on partial reads, takes
+  `--search-turns <N|all>` (default 32), folds its diagnostics per harness
+  and reason, and reports an OpenCode API refusal once per store.
+
+- Claude file attachments and compact file references appear as ambient
+  turns carrying an artifact reference (with the attached file's content
+  when recorded), and persisted tool output carries a reference-only
+  descriptor naming the saved file, instead of being dropped as
+  unrecognized records.
+
+- Claude compaction boundaries appear as notice turns carrying a typed
+  `context_event` (trigger, token counts, duration, preserved anchors)
+  instead of unrecognized records (`tapes-session/16`, `tapes-page/9`,
+  `tapes-child/7`).
+
+- `--harness` scopes a session id or prefix lookup to one harness, so a
+  prefix resolves even when another harness's store hit its discovery
+  bound; an incomplete lookup names the incomplete and the completely
+  searched stores. `tapes-discovery`'s `ResolveError::NotFound` carries
+  those diagnostics.
+
+- `docs/` is retired: bare `tapes` and `tapes <command> --help` are the
+  reference. The guide now names where each harness store is found and
+  which variable moves it, and the command help states the reason and
+  warning values the JSON reports carry.
+
+### Fixed
+
+- Validate Claude plugin-child completion against the native parent
+  identity in the bounded opening and tail. Reject non-regular recording
+  and metadata sources without waiting for FIFO writers, validate selected
+  identities at transcript, lineage, history, usage and Codex child-header
+  read boundaries, and defer listing prefilters with uncertain identity to
+  normalization and its diagnostics.
+
+- Codex lineage retains candidate header read failures with their source
+  and I/O diagnostic in coverage notes for bounded and streamed reads.
+
+- Claude lineage reports failed subagent enumeration and required
+  child-ending reads with their source and I/O diagnostic. Parent
+  transcript notes report an unavailable subagent count when enumeration
+  fails.
+
+- Exact native lookup retains filename/header identity mismatches through
+  prefix fallback, inspects later bounded candidates after read failures,
+  and applies the same identity rule to explicit Pi recording files.
+  Correct exact recordings take precedence. Claude child completion skips
+  known housekeeping records while unknown records and read gaps retain
+  uncertainty. Session summaries describe the recorded directory's current
+  checkout commit.
+
+- `tapes lineage` stamps `completed_at` on a Claude subagent a plugin
+  launched and that takes no further input, read from the child's own
+  recording: its final record, when it is an assistant record that stopped
+  on `end_turn`, supplies the timestamp and is cited in `source`. Such a
+  subagent has no `Agent` call in the parent, so it previously never
+  completed. A child with no such ending keeps no completion stamp, and a
+  completion the parent's records state still wins.
+
 ## [2026.9.29] - 2026-09-29
 
 ### Changed
