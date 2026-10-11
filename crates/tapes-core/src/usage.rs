@@ -205,6 +205,36 @@ pub struct RequestDimensions {
 }
 
 impl RequestDimensions {
+    pub(crate) fn add(&mut self, other: Self) {
+        self.requests += other.requests;
+        self.cache_write.add(&other.cache_write);
+        for (values, incoming) in [
+            (&mut self.service_tier, other.service_tier),
+            (&mut self.speed, other.speed),
+            (&mut self.inference_geo, other.inference_geo),
+        ] {
+            for (value, count) in incoming {
+                if !values.contains_key(&value) && values.len() >= MAX_DIMENSION_VALUES {
+                    self.omitted_values += count;
+                } else {
+                    *values.entry(value).or_default() += count;
+                }
+            }
+        }
+        for (total, value) in [
+            (&mut self.web_search_requests, other.web_search_requests),
+            (&mut self.web_fetch_requests, other.web_fetch_requests),
+        ] {
+            if let Some(value) = value {
+                *total = Some(total.unwrap_or(0).saturating_add(value));
+            }
+        }
+        for (name, count) in other.missing {
+            *self.missing.entry(name).or_default() += count;
+        }
+        self.omitted_values += other.omitted_values;
+    }
+
     /// Count one request's recorded value for `dimension`, or its absence.
     pub fn tally(&mut self, dimension: &'static str, value: Option<&str>) {
         let Some(value) = value else {

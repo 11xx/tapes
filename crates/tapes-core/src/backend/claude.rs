@@ -1181,10 +1181,15 @@ fn claude_request_tokens(values: &[Value]) -> RequestUsage {
 /// made no request and is no request in that tally.
 #[derive(Default)]
 struct RequestTokens {
-    requests: HashMap<String, Tokens>,
+    requests: HashMap<String, RequestWitness>,
     unkeyed: TokenTotals,
     dimensions: RequestDimensions,
     failures: usize,
+}
+
+struct RequestWitness {
+    tokens: Tokens,
+    dimensions: RequestDimensions,
 }
 
 /// What the requests a read reached sum to, and what they recorded beside it.
@@ -1197,7 +1202,10 @@ struct RequestUsage {
 impl RequestTokens {
     fn finish(self) -> RequestUsage {
         let mut totals = self.unkeyed;
-        for tokens in self.requests.into_values() {
+        let mut dimensions = self.dimensions;
+        for witness in self.requests.into_values() {
+            dimensions.add(witness.dimensions);
+            let tokens = witness.tokens;
             totals.add(
                 tokens.input,
                 tokens.output,
@@ -1209,7 +1217,7 @@ impl RequestTokens {
         RequestUsage {
             tokens: totals.finish(),
             failures: self.failures,
-            dimensions: (self.dimensions.requests > 0).then_some(self.dimensions),
+            dimensions: (dimensions.requests > 0).then_some(dimensions),
         }
     }
 
@@ -1231,16 +1239,22 @@ impl RequestTokens {
             return;
         };
         let tokens = request_usage_tokens(usage);
+        let mut dimensions = RequestDimensions::default();
+        if value["answeredWithoutRequest"] != true {
+            request_dimensions(&mut dimensions, usage);
+        }
         match value["requestId"].as_str() {
             Some(request_id) => match self.requests.get_mut(request_id) {
                 Some(held) => {
-                    if tokens.dominates(held) {
-                        *held = tokens;
+                    if tokens.dominates(&held.tokens) {
+                        *held = RequestWitness { tokens, dimensions };
                     }
                     return;
                 }
                 None => {
-                    self.requests.insert(request_id.to_owned(), tokens);
+                    self.requests
+                        .insert(request_id.to_owned(), RequestWitness { tokens, dimensions });
+                    return;
                 }
             },
             None => self.unkeyed.add(
@@ -1251,9 +1265,7 @@ impl RequestTokens {
                 tokens.cache_write,
             ),
         }
-        if value["answeredWithoutRequest"] != true {
-            request_dimensions(&mut self.dimensions, usage);
-        }
+        self.dimensions.add(dimensions);
     }
 }
 

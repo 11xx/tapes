@@ -1973,6 +1973,56 @@ fn all(status: &str) -> Vec<(String, String)> {
         .collect()
 }
 
+#[test]
+fn claude_streamed_dimensions_follow_the_selected_usage_witness() {
+    let root =
+        std::env::temp_dir().join(format!("tapes-streamed-dimensions-{}", std::process::id()));
+    let project = root.join("project");
+    fs::create_dir_all(&project).unwrap();
+    let recording = claude_dimensions_recording()
+        .lines()
+        .map(|line| {
+            let mut value: serde_json::Value = serde_json::from_str(line).unwrap();
+            if value["uuid"] == "assistant-1" {
+                let usage = &mut value["message"]["usage"];
+                usage["output_tokens"] = serde_json::json!(0);
+                usage["server_tool_use"] =
+                    serde_json::json!({"web_search_requests":0,"web_fetch_requests":0});
+                usage.as_object_mut().unwrap().remove("cache_creation");
+            } else if value["uuid"] == "assistant-2" {
+                value["message"]["usage"]["server_tool_use"] =
+                    serde_json::json!({"web_search_requests":2,"web_fetch_requests":1});
+            }
+            value.to_string()
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n";
+    fs::write(
+        project.join(format!("{CLAUDE_DIMENSIONS_SESSION}.jsonl")),
+        recording,
+    )
+    .unwrap();
+    let backend = ClaudeBackend::new(root.clone());
+    let value = usage_value(&backend, CLAUDE_DIMENSIONS_SESSION);
+    assert_eq!(value["tokens"]["output"], 65);
+    assert_eq!(value["requests"]["requests"], 2);
+    assert_eq!(value["requests"]["web_search_requests"], 2);
+    assert_eq!(value["requests"]["web_fetch_requests"], 3);
+    assert!(value["requests"].get("missing").is_none());
+    assert_eq!(
+        value["requests"]["cache_write"],
+        serde_json::json!({"ephemeral_5m":150,"ephemeral_1h":210})
+    );
+    let backends: Vec<Box<dyn Backend>> = vec![Box::new(backend)];
+    let full = serde_json::to_value(
+        usage_full_with_backends(&backends, Selection::Id(CLAUDE_DIMENSIONS_SESSION)).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(full["requests"], value["requests"]);
+    fs::remove_dir_all(root).unwrap();
+}
+
 /// The parent's cost-state counts its subagent's requests too. The family
 /// union, with the request both recordings witness counted once and the
 /// child's streamed partial witness superseded by its final one, equals it.
