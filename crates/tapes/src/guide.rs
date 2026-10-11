@@ -653,7 +653,9 @@ PROBE BEFORE EXPORTING
   and an 8 MiB budget over serialized keys. `omissions` counts the row cap,
   byte budget, oversized keys, unidentified events, private or invalid ids,
   and unavailable source keys. Measurements still cover the whole read;
-  an omitted key never removes its known usage. `coverage` and
+  an omitted key never removes its known usage. Keys and measurement figures
+  use the transcript's own source frontier, including
+  entries appended after discovery. `coverage` and
   `unreadable_records` qualify the key read independently. A source that
   cannot be replayed sets `unavailable: source-unreadable-or-changed` and keeps
   the held measurements; unknown identity counts stay absent.

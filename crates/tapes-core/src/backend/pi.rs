@@ -130,29 +130,6 @@ impl PiBackend {
                     .is_some_and(|id| !active_ids.contains(id))
             })
             .count();
-        let leaf_end = read
-            .values
-            .iter()
-            .zip(&read.spans)
-            .rfind(|(value, _)| value["type"] != "session")
-            .map(|(_, span)| span.end);
-        let mut consumption = PiConsumption::default();
-        for entry in &entries {
-            if let Some(consumed) = pi_consumed(entry) {
-                let id = entry["id"].as_str();
-                let on_branch = id.is_some_and(|id| active_ids.contains(id));
-                consumption.observe(id, &consumed, on_branch);
-            }
-        }
-        let consumption = consumption.finish(
-            if read.truncated {
-                AccountingCoverage::ReadWindow
-            } else {
-                AccountingCoverage::Session
-            },
-            read.skipped,
-            opening.iter().find_map(pi_parent_session),
-        );
         let directory = opening.iter().find_map(pi_cwd).map(PathBuf::from);
         let variant = active.iter().rev().find_map(|value| pi_thinking(value));
         let model = active
@@ -169,26 +146,7 @@ impl PiBackend {
             .flat_map(|value| pi_turns(value, &mut thinking))
             .collect::<Vec<_>>();
         let (model_observation, model_selections) = pi_selections(&active, read);
-        let usage = pi_usage(&active);
-        let tokens = usage.tokens;
-        let cost = usage.cost;
-        let accounting = branch_accounting(
-            tokens.as_ref(),
-            cost.as_ref(),
-            branch_coverage(rooted, leaf_end, &read.gaps),
-        );
-        let usage_detail = UsageDetail {
-            by_model: usage.by_model,
-            cost_coverage: usage.cost_coverage,
-            measurement_coverage: usage.measurement_coverage,
-            measurement_incomplete: usage.measurement_incomplete,
-            measurement_completeness: usage.measurement_completeness,
-            consumption,
-            ..UsageDetail::default()
-        }
-        .into_option();
-
-        let session = Session {
+        let mut session = Session {
             id: native.id().to_owned(),
             source: self.source(path),
             metadata: None,
@@ -203,13 +161,14 @@ impl PiBackend {
             started_at,
             last_activity_at,
             live: None,
-            cost,
-            tokens,
-            accounting,
+            cost: None,
+            tokens: None,
+            accounting: None,
             start_uncertain: recording.start_uncertain(),
             occurrence: None,
-            usage_detail,
+            usage_detail: None,
         };
+        apply_recording_usage(&mut session, &recording, &active, rooted);
         // pi rewinds by appending a new branch, so the first user message in
         // the file may sit on a root the active path never reaches. The
         // active path is known only when the whole file is in the tail; past
@@ -330,8 +289,9 @@ impl Backend for PiBackend {
             .iter()
             .filter(|v| v["type"] != "session")
             .collect::<Vec<_>>();
-        let active = active_path(&entries);
+        let (active, rooted) = active_branch(&entries);
         let mut session = session.clone();
+        apply_recording_usage(&mut session, &recording, &active, rooted);
         session.launch = recording_launch(&recording, &session.id);
         (session.model_observation, session.model_selections) =
             pi_selections(&active, &recording.tail);
@@ -896,6 +856,59 @@ fn branch_coverage(rooted: bool, leaf_end: Option<u64>, gaps: &[ReadGap]) -> Acc
     } else {
         AccountingCoverage::ReadWindow
     }
+}
+
+fn apply_recording_usage(
+    session: &mut Session,
+    recording: &super::Recording,
+    active: &[&Value],
+    rooted: bool,
+) {
+    let read = &recording.tail;
+    let active_ids = active
+        .iter()
+        .filter_map(|entry| entry["id"].as_str())
+        .collect::<HashSet<_>>();
+    let leaf_end = read
+        .values
+        .iter()
+        .zip(&read.spans)
+        .rfind(|(value, _)| value["type"] != "session")
+        .map(|(_, span)| span.end);
+    let mut consumption = PiConsumption::default();
+    for entry in &read.values {
+        if let Some(consumed) = pi_consumed(entry) {
+            let id = entry["id"].as_str();
+            consumption.observe(id, &consumed, id.is_some_and(|id| active_ids.contains(id)));
+        }
+    }
+    let consumption = consumption.finish(
+        if read.truncated {
+            AccountingCoverage::ReadWindow
+        } else {
+            AccountingCoverage::Session
+        },
+        read.skipped,
+        recording.opening().iter().find_map(pi_parent_session),
+    );
+    let usage = pi_usage(active);
+    session.accounting = branch_accounting(
+        usage.tokens.as_ref(),
+        usage.cost.as_ref(),
+        branch_coverage(rooted, leaf_end, &read.gaps),
+    );
+    session.tokens = usage.tokens;
+    session.cost = usage.cost;
+    session.usage_detail = UsageDetail {
+        by_model: usage.by_model,
+        cost_coverage: usage.cost_coverage,
+        measurement_coverage: usage.measurement_coverage,
+        measurement_incomplete: usage.measurement_incomplete,
+        measurement_completeness: usage.measurement_completeness,
+        consumption,
+        ..UsageDetail::default()
+    }
+    .into_option();
 }
 
 fn pi_usage(entries: &[&Value]) -> PiUsageResult {
