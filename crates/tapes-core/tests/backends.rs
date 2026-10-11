@@ -1909,6 +1909,285 @@ fn claude_names_the_dimensions_a_request_or_a_recorded_total_did_not_record() {
 }
 
 const CLAUDE_FAMILY_SESSION: &str = "40000000-0000-4000-8000-000000000001";
+const CLAUDE_FAMILY_CHILD: &str = "agent-a0123456789abcdef";
+
+/// A copy of the family fixture whose parent and child recordings `edit`
+/// may rewrite, so each case varies one fact of the same family.
+fn claude_family(tag: &str, edit: impl FnOnce(&mut String, &mut String)) -> PathBuf {
+    let source = fixtures("claude-family").join("project");
+    let root =
+        std::env::temp_dir().join(format!("tapes-claude-family-{tag}-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&root);
+    let project = root.join("project");
+    let subagents = project.join(CLAUDE_FAMILY_SESSION).join("subagents");
+    fs::create_dir_all(&subagents).unwrap();
+    let parent_name = format!("{CLAUDE_FAMILY_SESSION}.jsonl");
+    let child_name = format!("{CLAUDE_FAMILY_CHILD}.jsonl");
+    let mut parent = fs::read_to_string(source.join(&parent_name)).unwrap();
+    let child_source = source.join(CLAUDE_FAMILY_SESSION).join("subagents");
+    let mut child = fs::read_to_string(child_source.join(&child_name)).unwrap();
+    edit(&mut parent, &mut child);
+    fs::write(project.join(parent_name), parent).unwrap();
+    fs::write(subagents.join(child_name), child).unwrap();
+    fs::copy(
+        child_source.join(format!("{CLAUDE_FAMILY_CHILD}.meta.json")),
+        subagents.join(format!("{CLAUDE_FAMILY_CHILD}.meta.json")),
+    )
+    .unwrap();
+    root
+}
+
+fn reconciled(root: &Path) -> serde_json::Value {
+    let backends: Vec<Box<dyn Backend>> = vec![Box::new(ClaudeBackend::new(root))];
+    let view = usage_with_options_with_backends(
+        &backends,
+        Selection::Id(CLAUDE_FAMILY_SESSION),
+        UsageOptions {
+            full: false,
+            series: None,
+            reconcile: true,
+        },
+    )
+    .unwrap();
+    serde_json::to_value(view.reconciliation.unwrap()).unwrap()
+}
+
+fn statuses(report: &serde_json::Value) -> Vec<(String, String)> {
+    report["counters"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| {
+            (
+                row["counter"].as_str().unwrap().to_owned(),
+                row["status"].as_str().unwrap().to_owned(),
+            )
+        })
+        .collect()
+}
+
+fn all(status: &str) -> Vec<(String, String)> {
+    ["input", "output", "reasoning", "cache_read", "cache_write"]
+        .into_iter()
+        .map(|counter| (counter.to_owned(), status.to_owned()))
+        .collect()
+}
+
+/// The parent's cost-state counts its subagent's requests too. The family
+/// union, with the request both recordings witness counted once and the
+/// child's streamed partial witness superseded by its final one, equals it.
+#[test]
+fn a_parent_total_including_its_children_reconciles_with_the_family_union() {
+    let report = reconciled(&fixtures("claude-family"));
+
+    assert_eq!(report["rules"], "tapes-claude-reconciliation/1");
+    assert_eq!(statuses(&report), all("reconciled"));
+    for row in report["counters"].as_array().unwrap() {
+        assert_eq!(row["difference"], 0, "{row}");
+    }
+    assert_eq!(
+        report["recorded"]["tokens"],
+        serde_json::json!({
+            "input": 15, "output": 190, "reasoning": 75, "cache_read": 2200, "cache_write": 330
+        })
+    );
+    assert_eq!(report["identified"]["requests"], 3);
+    assert_eq!(report["identified"]["cross_recording"], 1);
+    assert_eq!(report["identified"]["revised"], 1);
+    assert_eq!(report["identified"]["conflicts"], 0);
+    assert_eq!(report["identified"]["complete"], true);
+    assert_eq!(report["scope_established"], false);
+    assert_eq!(
+        report["missing"],
+        serde_json::json!(["recorded-total-membership"])
+    );
+    // The sources partition the union by first witness.
+    let sources = report["sources"].as_array().unwrap();
+    assert_eq!(sources[0]["role"], "parent");
+    assert_eq!(sources[0]["requests"], 2);
+    assert_eq!(sources[0]["identified"]["output"], 130);
+    assert_eq!(sources[1]["role"], "child");
+    assert_eq!(sources[1]["agent_id"], "a0123456789abcdef");
+    assert_eq!(sources[1]["records"], 3);
+    assert_eq!(sources[1]["requests"], 1);
+    assert_eq!(sources[1]["unrequested"], 1);
+    assert_eq!(sources[1]["identified"]["output"], 60);
+    // The report names the exact bytes it read, so it reproduces.
+    let parent_bytes = fs::read(
+        fixtures("claude-family")
+            .join("project")
+            .join(format!("{CLAUDE_FAMILY_SESSION}.jsonl")),
+    )
+    .unwrap();
+    assert_eq!(sources[0]["length"], parent_bytes.len());
+    let digest = <sha2::Sha256 as sha2::Digest>::digest(&parent_bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    assert_eq!(sources[0]["sha256"], digest);
+    assert_eq!(reconciled(&fixtures("claude-family")), report);
+    assert_eq!(
+        report["by_model"],
+        serde_json::json!([
+            {
+                "model": "claude-fixture",
+                "recorded": { "input": 12, "output": 130, "reasoning": 50, "cache_read": 1500, "cache_write": 250 },
+                "identified": { "input": 12, "output": 130, "reasoning": 50, "cache_read": 1500, "cache_write": 250 },
+                "requests": 2
+            },
+            {
+                "model": "claude-fixture-small",
+                "recorded": { "input": 3, "output": 60, "reasoning": 25, "cache_read": 700, "cache_write": 80 },
+                "identified": { "input": 3, "output": 60, "reasoning": 25, "cache_read": 700, "cache_write": 80 },
+                "requests": 1
+            }
+        ])
+    );
+}
+
+/// A total above the identified union is a discrepancy, never asserted as
+/// consumption beyond the requests, and one below it is a conflict, never
+/// clamped to zero.
+#[test]
+fn a_difference_is_signed_and_a_positive_one_stays_a_discrepancy() {
+    let above = claude_family("above", |parent, _| {
+        *parent = parent.replace(
+            r#""modelUsage":{"#,
+            r#""modelUsage":{"claude-fixture-background":{"inputTokens":500,"outputTokens":20,"thinkingTokens":0,"cacheReadInputTokens":0,"cacheCreationInputTokens":0},"#,
+        );
+    });
+    let report = reconciled(&above);
+    let input = &report["counters"][0];
+    assert_eq!(input["difference"], 500);
+    assert_eq!(input["status"], "discrepancy");
+    assert_eq!(
+        input["reasons"],
+        serde_json::json!(["recorded-total-membership"])
+    );
+    assert_eq!(report["counters"][2]["status"], "reconciled");
+    // The surplus sits on a model no identified request names.
+    let background = &report["by_model"][1];
+    assert_eq!(background["model"], "claude-fixture-background");
+    assert_eq!(background["requests"], 0);
+    assert!(background.get("identified").is_none(), "{background}");
+
+    let below = claude_family("below", |parent, _| {
+        *parent = parent.replace(r#""outputTokens":130"#, r#""outputTokens":100"#);
+    });
+    let report = reconciled(&below);
+    let output = &report["counters"][1];
+    assert_eq!(output["recorded"], 160);
+    assert_eq!(output["identified"], 190);
+    assert_eq!(output["difference"], -30);
+    assert_eq!(output["status"], "conflict");
+    for root in [above, below] {
+        fs::remove_dir_all(root).unwrap();
+    }
+}
+
+/// A cumulative total that went down started a new counter epoch, so no
+/// counter is subtracted across it.
+#[test]
+fn a_counter_reset_withholds_every_difference() {
+    let reset = claude_family("reset", |parent, _| {
+        let earlier = parent
+            .lines()
+            .find(|line| line.contains("cost-state"))
+            .unwrap()
+            .replace(r#""inputTokens":12"#, r#""inputTokens":4000"#);
+        let (head, tail) = parent.split_at(parent.find(r#"{"type":"cost-state""#).unwrap());
+        *parent = format!("{head}{earlier}\n{tail}");
+    });
+    let report = reconciled(&reset);
+    assert_eq!(report["recorded"]["observations"], 2);
+    assert_eq!(report["recorded"]["resets"], 1);
+    assert_eq!(statuses(&report), all("withheld"));
+    for row in report["counters"].as_array().unwrap() {
+        assert!(row.get("difference").is_none(), "{row}");
+        assert_eq!(row["reasons"], serde_json::json!(["counter-reset"]));
+    }
+    fs::remove_dir_all(reset).unwrap();
+}
+
+/// A recording that did not decode whole leaves the union incomplete: an
+/// equal or lower union is then a discrepancy, not a reconciliation.
+#[test]
+fn an_incomplete_source_read_keeps_the_union_from_reconciling() {
+    let incomplete = claude_family("incomplete", |_, child| {
+        child.push_str("{\"type\":\"assistant\",\"truncated\n");
+    });
+    let report = reconciled(&incomplete);
+    assert_eq!(report["identified"]["complete"], false);
+    assert_eq!(report["sources"][1]["complete"], false);
+    assert_eq!(report["sources"][1]["skipped"], 1);
+    assert_eq!(statuses(&report), all("discrepancy"));
+    assert_eq!(
+        report["counters"][0]["reasons"],
+        serde_json::json!(["incomplete-read"])
+    );
+    fs::remove_dir_all(incomplete).unwrap();
+}
+
+/// Counters compare only where both sides record them under one
+/// convention, and two witnesses of one request that each record more on
+/// some counter are alternative observations, never summed or chosen between.
+#[test]
+fn incompatible_counters_and_conflicting_witnesses_are_withheld() {
+    let unrecorded = claude_family("unrecorded", |parent, _| {
+        *parent = parent
+            .replace(r#""thinkingTokens":50,"#, "")
+            .replace(r#""thinkingTokens":25,"#, "");
+    });
+    let report = reconciled(&unrecorded);
+    assert_eq!(report["counters"][2]["status"], "withheld");
+    assert_eq!(
+        report["counters"][2]["reasons"],
+        serde_json::json!(["counter-unrecorded"])
+    );
+    assert_eq!(report["counters"][1]["status"], "reconciled");
+
+    let conflicting = claude_family("conflicting", |_, child| {
+        *child = child.replacen(
+            r#""cache_read_input_tokens":700,"output_tokens":60"#,
+            r#""cache_read_input_tokens":650,"output_tokens":60"#,
+            1,
+        );
+    });
+    let report = reconciled(&conflicting);
+    assert_eq!(report["identified"]["conflicts"], 1);
+    assert_eq!(
+        report["identified"]["conflicting"],
+        serde_json::json!(["req_child_1"])
+    );
+    let by_counter = statuses(&report);
+    assert_eq!(
+        by_counter[3],
+        ("cache_read".to_owned(), "withheld".to_owned())
+    );
+    assert_eq!(by_counter[1], ("output".to_owned(), "withheld".to_owned()));
+    assert_eq!(by_counter[0], ("input".to_owned(), "reconciled".to_owned()));
+    for root in [unrecorded, conflicting] {
+        fs::remove_dir_all(root).unwrap();
+    }
+}
+
+/// A cost-state written before a parent request cannot count it, so its
+/// frontier does not reach the union it would be compared with.
+#[test]
+fn a_total_recorded_before_a_parent_request_is_not_compared() {
+    let early = claude_family("frontier", |parent, _| {
+        let lines = parent.lines().collect::<Vec<_>>();
+        *parent = format!("{}\n{}\n{}\n{}\n", lines[0], lines[1], lines[3], lines[2]);
+    });
+    let report = reconciled(&early);
+    assert_eq!(report["recorded"]["after_last_request"], false);
+    assert_eq!(statuses(&report), all("withheld"));
+    assert_eq!(
+        report["counters"][0]["reasons"],
+        serde_json::json!(["frontier"])
+    );
+    fs::remove_dir_all(early).unwrap();
+}
 
 /// A subagent's streamed response is first written with a partial output
 /// count; the request's usage is the witness that records the most.
@@ -4817,6 +5096,7 @@ fn codex_modern_usage_records_choose_the_modern_basis_and_keep_native_rows() {
         UsageOptions {
             full: false,
             series: Some(UsageObservationOptions { limit: 16 }),
+            reconcile: false,
         },
     )
     .unwrap();
@@ -5325,6 +5605,7 @@ fn codex_usage_with_options(
         UsageOptions {
             full,
             series: series_limit.map(|limit| UsageObservationOptions { limit }),
+            reconcile: false,
         },
     )
 }
@@ -5576,6 +5857,7 @@ fn codex_bounded_prefix_reports_leading_uncounted_observation() {
         UsageOptions {
             full: false,
             series: Some(UsageObservationOptions { limit: 8 }),
+            reconcile: false,
         },
     )
     .unwrap();
@@ -5630,6 +5912,7 @@ fn codex_bounded_modern_reset_evidence_keeps_read_window_coverage() {
         UsageOptions {
             full: false,
             series: Some(UsageObservationOptions { limit: 16 }),
+            reconcile: false,
         },
     )
     .unwrap();
@@ -5728,6 +6011,7 @@ fn public_full_usage_refuses_replacement_or_in_place_source_rewrite_between_pass
             UsageOptions {
                 full: true,
                 series: Some(UsageObservationOptions { limit: 8 }),
+                reconcile: false,
             },
         );
         let error = match result {

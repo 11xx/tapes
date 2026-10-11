@@ -34,6 +34,7 @@ pub mod lineage;
 pub mod model;
 mod model_observation;
 pub mod reader;
+pub mod reconcile;
 pub mod scope;
 pub mod search;
 pub mod stats;
@@ -1096,6 +1097,9 @@ pub fn usage_with_options_with_backends(
         view.notes
             .extend(resolved.diagnostics.latest_warnings(&resolved.session));
         view.series = observations.map(|observations| observations.series);
+        if options.reconcile {
+            view.reconciliation = Some(backend.usage_reconciliation(&resolved.session)?);
+        }
         Ok(view)
     } else {
         let mut transcript = declared_transcript(backend.as_ref(), &resolved.session, EXPORT_TAIL)?;
@@ -1113,6 +1117,9 @@ pub fn usage_with_options_with_backends(
         }
         let mut view = usage::usage(&transcript);
         view.series = observations.map(|observations| observations.series);
+        if options.reconcile {
+            view.reconciliation = Some(backend.usage_reconciliation(&transcript.session)?);
+        }
         Ok(view)
     }
 }

@@ -10898,6 +10898,89 @@ fn usage_summary_adds_claude_and_codex_only_in_disjoint_categories() {
     );
 }
 
+/// Reconciliation answers one Claude session, reading its family whole, and
+/// a selection or another harness refuses it.
+#[test]
+fn usage_reconcile_sets_the_recorded_total_beside_the_family_requests() {
+    let root = TemporaryDirectory::new(
+        std::env::temp_dir().join(format!("tapes-usage-reconcile-{}", std::process::id())),
+    );
+    let home = root.path().join("home");
+    let project = home.join(".claude/projects/fixture");
+    let subagents = project.join("40000000-0000-4000-8000-000000000001/subagents");
+    fs::create_dir_all(&subagents).unwrap();
+    let fixture =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/claude-family/project");
+    fs::copy(
+        fixture.join("40000000-0000-4000-8000-000000000001.jsonl"),
+        project.join("40000000-0000-4000-8000-000000000001.jsonl"),
+    )
+    .unwrap();
+    for name in [
+        "agent-a0123456789abcdef.jsonl",
+        "agent-a0123456789abcdef.meta.json",
+    ] {
+        fs::copy(
+            fixture
+                .join("40000000-0000-4000-8000-000000000001/subagents")
+                .join(name),
+            subagents.join(name),
+        )
+        .unwrap();
+    }
+    let run = |arguments: &[&str]| {
+        let mut command = tapes();
+        command.args(arguments);
+        with_fixture_env(&mut command, &root.path().join("codex"), &home, root.path());
+        command.output().unwrap()
+    };
+
+    let output = run(&[
+        "usage",
+        "40000000-0000-4000-8000-000000000001",
+        "--reconcile",
+    ]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let rendered = String::from_utf8(output.stdout).unwrap();
+    for line in [
+        "reconciliation: rules tapes-claude-reconciliation/1; recorded total from the newest of 1 \
+         cost-states, 0 resets; 3 identified requests across 2 recordings, 1 witnessed in more \
+         than one, 1 revised, 0 conflicting\n",
+        "reconciliation scope: not established; missing recorded-total-membership\n",
+        "  output: recorded 190, identified 190, difference 0, reconciled\n",
+        "  source child a0123456789abcdef: complete, 3 records, 1 new requests, 0 without \
+         identity, 1 answered without request\n",
+    ] {
+        assert!(rendered.contains(line), "{line} in {rendered}");
+    }
+
+    let json = run(&[
+        "usage",
+        "40000000-0000-4000-8000-000000000001",
+        "--reconcile",
+        "--json",
+    ]);
+    let value: Value = serde_json::from_slice(&json.stdout).unwrap();
+    assert_eq!(value["schema"], "tapes-usage/11");
+    assert_eq!(
+        value["reconciliation"]["counters"][0]["status"],
+        "reconciled"
+    );
+
+    let refused = run(&["usage", "--global", "--reconcile"]);
+    assert!(!refused.status.success());
+    assert!(
+        String::from_utf8_lossy(&refused.stderr)
+            .contains("--reconcile answers one installed session"),
+        "{}",
+        String::from_utf8_lossy(&refused.stderr)
+    );
+}
+
 /// One Claude session's usage keeps its five-minute and one-hour cache
 /// writes apart and names each dimension a request did not record.
 #[test]

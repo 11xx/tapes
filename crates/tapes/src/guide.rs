@@ -563,6 +563,24 @@ PROBE BEFORE EXPORTING
   `incomplete` reason. Cross-recording identity still needs an established
   account namespace. Nothing is counted for a branch the read did not reach.
 
+  `usage SESSION --reconcile` sets a Claude session's recorded total beside
+  the requests its recording family identifies, reading the parent and every
+  subagent recording whole. The newest cost-state is the recorded total as
+  written. Requests are deduplicated by request id across recordings; of a
+  request's witnesses the one recording the most on every counter is its
+  usage, since a streamed response is first written with a partial count,
+  and two witnesses that each record more on some counter are a conflict.
+  Hook answers made no request. Each counter's difference, recorded minus
+  identified, is signed and never clamped: reconciled at zero, conflict below
+  it, discrepancy above it or over an incomplete read. A positive difference
+  is never established as consumption: no Claude recording states which
+  requests its cost-state counts, so scope_established is false. A counter
+  reset, a cost-state before the parent's last request, conflicting
+  witnesses, or a counter one side does not record leave a counter withheld,
+  with no difference. by_model sets each model's recorded total beside its
+  identified requests, and each source names the revision, length, and
+  SHA-256 of the bytes read and the rules applied, so a report reproduces.
+
   `usage SESSION --series[=N]` opts into a recent bounded suffix of Codex raw
   accounting observations: 200 rows by default, 1 through 10,000 explicitly.
   Rows retain source coordinates, native ordinals when recorded, response IDs,

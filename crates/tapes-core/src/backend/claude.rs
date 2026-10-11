@@ -27,6 +27,7 @@ use crate::model::{
     KindDeclaration, Launch, Model, Role, Session, SourceDescriptor, Tokens, TrailingRecord,
     Transcript, Turn, TurnKind, TurnSelection,
 };
+use crate::reconcile::{FamilyLedger, Reconciliation, SourceRole};
 use crate::usage::{Durations, ModelUsage, RequestDimensions, UsageDetail};
 use agent_tapes_discovery::{Harness as NativeHarness, IdentityBasis, NativeSession, NativeStore};
 
@@ -592,6 +593,31 @@ impl Backend for ClaudeBackend {
         let mut whole = session.clone();
         records.apply(&mut whole);
         Ok(whole)
+    }
+
+    fn usage_reconciliation(&self, session: &Session) -> Result<Reconciliation> {
+        let path = self.recording(session)?;
+        let mut ledger = FamilyLedger::default();
+        let parent = ledger.source(SourceRole::Parent, None, format!("file:{}", path.display()));
+        reconcile_source(&mut ledger, parent, &path, &session.id, true)?;
+        match subagent_files(&path) {
+            Ok(files) => {
+                for file in files {
+                    let child = ledger.source(
+                        SourceRole::Child,
+                        Some(file.agent_id),
+                        format!("file:{}", file.transcript.display()),
+                    );
+                    if let Err(error) =
+                        reconcile_source(&mut ledger, child, &file.transcript, &session.id, false)
+                    {
+                        ledger.failed(child, format!("{error:#}"));
+                    }
+                }
+            }
+            Err(error) => ledger.unenumerated(format!("{error:#}")),
+        }
+        Ok(ledger.finish())
     }
 
     fn stream_child_transcript(
@@ -1244,6 +1270,82 @@ fn request_usage_tokens(usage: &serde_json::Map<String, Value>) -> Tokens {
         cache_read: counter("cache_read_input_tokens"),
         cache_write: counter("cache_creation_input_tokens"),
     }
+}
+
+/// The usage an assistant record carries for the request it answers.
+fn assistant_usage(value: &Value) -> Option<&serde_json::Map<String, Value>> {
+    if value["type"] != "assistant" {
+        return None;
+    }
+    let message = value.get("message")?;
+    if message.get("role").and_then(Value::as_str) != Some("assistant") {
+        return None;
+    }
+    message.get("usage").and_then(Value::as_object)
+}
+
+/// Read one family recording whole into the reconciliation ledger: its
+/// request records, its hook answers, and, for the parent, every cost-state
+/// it recorded. Each record must name the family's session.
+fn reconcile_source(
+    ledger: &mut FamilyLedger,
+    source: usize,
+    path: &Path,
+    session_id: &str,
+    parent: bool,
+) -> Result<()> {
+    let mut position = 0;
+    let read = stream_jsonl(path, None, |value, _, _| {
+        super::validate_native_identity(value, "claude", session_id)?;
+        position += 1;
+        if parent && value["type"] == "cost-state" {
+            let by_model = value["modelUsage"]
+                .as_object()
+                .map(|models| {
+                    models
+                        .iter()
+                        .filter_map(|(model, usage)| {
+                            model_usage_tokens(usage).map(|tokens| (model.clone(), tokens))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            let tokens = cost_state_tokens(value).unwrap_or(Tokens {
+                input: None,
+                output: None,
+                reasoning: None,
+                cache_read: None,
+                cache_write: None,
+            });
+            ledger.recorded(position, tokens, by_model);
+        } else if let Some(usage) = assistant_usage(value) {
+            if value["answeredWithoutRequest"] == true {
+                ledger.unrequested(source);
+            } else {
+                ledger.request(
+                    source,
+                    position,
+                    value["requestId"].as_str(),
+                    value["message"]["model"].as_str(),
+                    request_usage_tokens(usage),
+                );
+            }
+        }
+        Ok(false)
+    })?;
+    let sha256 = read
+        .prefix_sha256
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    ledger.read(
+        source,
+        read.revision,
+        read.source_length,
+        sha256,
+        read.skipped,
+    );
+    Ok(())
 }
 
 /// Tally one request's price-relevant dimensions. Its cache writes count

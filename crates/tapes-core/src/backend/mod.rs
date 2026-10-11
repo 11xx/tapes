@@ -448,6 +448,17 @@ pub trait Backend {
             self.harness()
         )
     }
+    /// Reconcile the session's recorded usage total with the requests its
+    /// recording family identifies, reading every family recording whole.
+    /// Only a harness that records both a cumulative total and identified
+    /// requests can answer; the default refuses.
+    fn usage_reconciliation(&self, session: &Session) -> Result<crate::reconcile::Reconciliation> {
+        let _ = session;
+        anyhow::bail!(
+            "{} sessions do not support usage reconciliation",
+            self.harness()
+        )
+    }
     /// Every relationship the whole recording names, read record by record so
     /// memory follows the references kept rather than the file. The default
     /// refuses: a bounded lineage read is not an answer to a whole one.

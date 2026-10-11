@@ -447,6 +447,8 @@ pub struct UsageObservationOptions {
 pub struct UsageOptions {
     pub full: bool,
     pub series: Option<UsageObservationOptions>,
+    /// Reconcile the recorded total with the family's identified requests.
+    pub reconcile: bool,
 }
 
 /// A backend's bounded, pinned observation result. The returned session owns
@@ -549,6 +551,8 @@ pub struct UsageView {
     pub consumption: Option<Consumption>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub series: Option<UsageObservationSeries>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reconciliation: Option<crate::reconcile::Reconciliation>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub read: Option<ReadEvidence>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -655,6 +659,7 @@ fn project(session: &Session, turns: TurnTally, facts: ReadFacts) -> UsageView {
         request_failures: detail.request_failures,
         consumption: detail.consumption,
         series: None,
+        reconciliation: None,
         read: facts.read,
         terminal: facts.terminal,
         text_tail: facts.text_tail,

@@ -20,6 +20,7 @@ use agent_tapes_core::model::{
     SourceDescriptor, TokenConvention, Tokens, Transcript, Truncation, Turn, TurnKind,
     TurnSelection,
 };
+use agent_tapes_core::reconcile::{CounterStatus, Reconciliation, SourceRole};
 use agent_tapes_core::stats::{
     AssistantTurnDurations, Coverage, LineageStats, StatsView, TimeStats, ToolNameStats, ToolStats,
     TurnKindCounts, UsageStats, Warning,
@@ -1435,6 +1436,21 @@ enum Command {
             conflicts_with = "read_bytes"
         )]
         series: Option<Option<usize>>,
+        /// Reconcile one Claude session's recorded total with the requests
+        /// its recording family identifies, reading the parent and every
+        /// subagent recording whole. The newest cost-state stays the recorded
+        /// total as written; requests are deduplicated by request id across
+        /// recordings, and hook answers made no request. Each counter's
+        /// difference, recorded minus identified, is signed and never clamped:
+        /// `reconciled` at zero, `conflict` below it, `discrepancy` above it or
+        /// over an incomplete read, since no Claude recording states which
+        /// requests its cost-state counts. A counter reset, a cost-state
+        /// before the parent's last request, witnesses that disagree, or a
+        /// counter one side lacks make it `withheld`, with no difference.
+        /// Each source names the revision, length, and SHA-256 of the bytes
+        /// read, so the report reproduces under the named rules.
+        #[arg(long, conflicts_with = "by")]
+        reconcile: bool,
         /// Render the versioned tapes-usage/11 object, or tapes-usage-summary/6
         /// for a selection, as JSON. `session.model_observation` says
         /// whether more than one model and effort was observed (`mixed`) and
@@ -2486,6 +2502,7 @@ fn dispatch(cli: Cli) -> Result<()> {
             by,
             full,
             series,
+            reconcile,
             json,
         } => {
             query.validate_input()?;
@@ -2501,6 +2518,12 @@ fn dispatch(cli: Cli) -> Result<()> {
                     "--series answers one installed session; name a session id, --latest, or --title"
                 ));
             }
+            if reconcile && (query.input.supplied() || query.single().is_none()) {
+                return Err(anyhow!(
+                    "--reconcile answers one installed session; name a session id, --latest, or \
+                     --title"
+                ));
+            }
             if full {
                 refuse_full_supplied(&query.input)?;
             }
@@ -2513,13 +2536,14 @@ fn dispatch(cli: Cli) -> Result<()> {
             print_selection_warnings(&latest_warnings);
             if let Some(one) = query.single() {
                 let usage = if full {
-                    if let Some(series) = series {
+                    if series.is_some() || reconcile {
                         agent_tapes_core::usage_with_options_with_backends(
                             &query.input.backends()?,
                             one,
                             UsageOptions {
                                 full: true,
-                                series: Some(series),
+                                series,
+                                reconcile,
                             },
                         )?
                     } else {
@@ -2528,13 +2552,14 @@ fn dispatch(cli: Cli) -> Result<()> {
                 } else if query.input.supplied() {
                     let backends = query.input.backends()?;
                     agent_tapes_core::usage_with_backends(&backends, one)?
-                } else if let Some(series) = series {
+                } else if series.is_some() || reconcile {
                     agent_tapes_core::usage_with_options_with_backends(
                         &single_backends,
                         one,
                         UsageOptions {
                             full: false,
-                            series: Some(series),
+                            series,
+                            reconcile,
                         },
                     )?
                 } else {
@@ -3777,6 +3802,9 @@ fn render_usage(usage: &UsageView) -> String {
     if let Some(consumption) = &usage.consumption {
         out.push_str(&render_consumption(consumption));
     }
+    if let Some(reconciliation) = &usage.reconciliation {
+        out.push_str(&render_reconciliation(reconciliation));
+    }
     if let Some(series) = &usage.series {
         out.push_str(&format!(
             "series: {} observations returned of {}; basis and counted status are read-local\n",
@@ -3960,6 +3988,112 @@ fn render_request_dimensions(requests: &RequestDimensions) -> String {
             requests.omitted_values
         ));
     }
+    out
+}
+
+/// The recorded total, the identified union, and each counter's comparison,
+/// then the per-model split and the sources read.
+fn render_reconciliation(reconciliation: &Reconciliation) -> String {
+    let mut out = format!("reconciliation: rules {}", reconciliation.rules);
+    match &reconciliation.recorded {
+        Some(recorded) => out.push_str(&format!(
+            "; recorded total from the newest of {} cost-states, {} resets{}",
+            recorded.observations,
+            recorded.resets,
+            if recorded.after_last_request {
+                ""
+            } else {
+                ", before the last parent request"
+            }
+        )),
+        None => out.push_str("; no recorded total"),
+    }
+    let identified = &reconciliation.identified;
+    out.push_str(&format!(
+        "; {} identified requests across {} recordings, {} witnessed in more than one, {} revised, \
+         {} conflicting{}\n",
+        identified.requests,
+        reconciliation.sources.len(),
+        identified.cross_recording,
+        identified.revised,
+        identified.conflicts,
+        if identified.complete {
+            ""
+        } else {
+            ", incomplete"
+        }
+    ));
+    if !reconciliation.scope_established {
+        out.push_str(&format!(
+            "reconciliation scope: not established; missing {}\n",
+            reconciliation.missing.join(", ")
+        ));
+    }
+    for row in &reconciliation.counters {
+        let figure =
+            |value: Option<u64>| value.map_or_else(|| "-".to_owned(), |value| value.to_string());
+        let status = match row.status {
+            CounterStatus::Reconciled => "reconciled",
+            CounterStatus::Discrepancy => "discrepancy",
+            CounterStatus::Conflict => "conflict",
+            CounterStatus::Withheld => "withheld",
+        };
+        out.push_str(&format!(
+            "  {}: recorded {}, identified {}, difference {}, {status}{}\n",
+            row.counter,
+            figure(row.recorded),
+            figure(row.identified),
+            row.difference
+                .map_or_else(|| "-".to_owned(), |difference| difference.to_string()),
+            if row.reasons.is_empty() {
+                String::new()
+            } else {
+                format!(" ({})", row.reasons.join(", "))
+            }
+        ));
+    }
+    if let Some(unkeyed) = &identified.unkeyed {
+        out.push_str(&format!(
+            "  without request identity: {}\n",
+            render_tokens(unkeyed)
+        ));
+    }
+    for model in &reconciliation.by_model {
+        out.push_str(&format!(
+            "  model {}: recorded {}; identified {} in {} requests\n",
+            model.model,
+            model
+                .recorded
+                .as_ref()
+                .map_or_else(|| "-".to_owned(), render_tokens),
+            model
+                .identified
+                .as_ref()
+                .map_or_else(|| "-".to_owned(), render_tokens),
+            model.requests
+        ));
+    }
+    for source in &reconciliation.sources {
+        let role = match source.role {
+            SourceRole::Parent => "parent".to_owned(),
+            SourceRole::Child => {
+                format!("child {}", source.agent_id.as_deref().unwrap_or_default())
+            }
+        };
+        out.push_str(&format!(
+            "  source {role}: {}, {} records, {} new requests, {} without identity, {} answered without request{}\n",
+            if source.complete { "complete" } else { "incomplete" },
+            source.records,
+            source.requests,
+            source.unkeyed,
+            source.unrequested,
+            source
+                .error
+                .as_ref()
+                .map_or_else(String::new, |error| format!("; {error}"))
+        ));
+    }
+    render_notes(&mut out, &reconciliation.notes);
     out
 }
 
