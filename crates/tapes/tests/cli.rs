@@ -1640,6 +1640,25 @@ fn assert_process_gone(pid_file: &Path) {
     }
 }
 
+/// Whether a mode-000 path is unreadable to this process. A process that
+/// bypasses permission bits, such as root, still reads it, and a test of the
+/// reader's failure path has nothing to run against; the skip says so.
+fn denies_reads(path: &Path, test: &str) -> bool {
+    let denied = if path.is_dir() {
+        fs::read_dir(path).err()
+    } else {
+        fs::File::open(path).err()
+    }
+    .is_some_and(|error| error.kind() == std::io::ErrorKind::PermissionDenied);
+    if !denied {
+        eprintln!(
+            "skipped {test}: mode 000 does not make {} unreadable for this user",
+            path.display()
+        );
+    }
+    denied
+}
+
 fn with_fixture_env(command: &mut Command, codex_home: &Path, home: &Path, bin: &Path) {
     create_opencode_data_directory(home);
     if bin.join("opencode2").is_file() {
@@ -3419,13 +3438,12 @@ fn native_file_read_failure_is_not_reported_as_not_found() {
     )
     .unwrap();
     fs::set_permissions(&recording, fs::Permissions::from_mode(0o000)).unwrap();
-    assert!(
-        matches!(
-            fs::File::open(&recording),
-            Err(ref error) if error.kind() == std::io::ErrorKind::PermissionDenied
-        ),
-        "the permission probe must deny reads for this process"
-    );
+    if !denies_reads(
+        &recording,
+        "native_file_read_failure_is_not_reported_as_not_found",
+    ) {
+        return;
+    }
 
     let backends: Vec<Box<dyn agent_tapes_core::backend::Backend>> = vec![Box::new(
         agent_tapes_core::backend::codex::CodexBackend::new(codex_home.join("sessions")),
@@ -3484,10 +3502,12 @@ fn listing_fills_its_result_limit_after_an_unreadable_native_candidate() {
             .unwrap();
     }
     fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o000)).unwrap();
-    assert!(matches!(
-        fs::File::open(&unreadable),
-        Err(ref error) if error.kind() == std::io::ErrorKind::PermissionDenied
-    ));
+    if !denies_reads(
+        &unreadable,
+        "listing_fills_its_result_limit_after_an_unreadable_native_candidate",
+    ) {
+        return;
+    }
 
     let mut command = tapes();
     command.args([
@@ -13925,6 +13945,13 @@ fn unreadable_claude_children_reach_cli_errors_and_coverage_notes() {
     for path in [&children, &child] {
         let permissions = fs::metadata(path).unwrap().permissions();
         fs::set_permissions(path, fs::Permissions::from_mode(0o000)).unwrap();
+        if !denies_reads(
+            path,
+            "unreadable_claude_children_reach_cli_errors_and_coverage_notes",
+        ) {
+            fs::set_permissions(path, permissions).unwrap();
+            return;
+        }
         let bounded = run(&["lineage", "session-claude", "--json"]);
         let full = run(&["lineage", "session-claude", "--full", "--json"]);
         let brief = run(&["brief", "session-claude", "--json"]);

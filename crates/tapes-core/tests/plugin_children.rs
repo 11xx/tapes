@@ -517,10 +517,27 @@ struct Unreadable {
 }
 
 impl Unreadable {
-    fn new(path: PathBuf) -> Self {
+    /// Withdraw every permission from `path`, or `None` when the fixture
+    /// cannot establish unreadability: a caller that bypasses permission bits,
+    /// such as root, still reads the path, and the reader's failure path has
+    /// nothing to be tested against.
+    fn new(path: PathBuf) -> Option<Self> {
         let permissions = fs::metadata(&path).unwrap().permissions();
         fs::set_permissions(&path, fs::Permissions::from_mode(0o000)).unwrap();
-        Self { path, permissions }
+        let unreadable = Self { path, permissions };
+        let denied = if unreadable.path.is_dir() {
+            fs::read_dir(&unreadable.path).err()
+        } else {
+            fs::File::open(&unreadable.path).err()
+        }
+        .is_some_and(|error| error.kind() == std::io::ErrorKind::PermissionDenied);
+        if !denied {
+            eprintln!(
+                "skipped: mode 000 does not make {} unreadable for this user",
+                unreadable.path.display()
+            );
+        }
+        denied.then_some(unreadable)
     }
 }
 
@@ -554,7 +571,9 @@ fn an_unreadable_child_directory_fails_bounded_and_streamed_lineage() {
         &plugin_meta(),
         &lines(&[brief(FINISHED), ended(FINISHED)]),
     );
-    let _unreadable = Unreadable::new(store.project().join(PARENT).join("subagents"));
+    let Some(_unreadable) = Unreadable::new(store.project().join(PARENT).join("subagents")) else {
+        return;
+    };
 
     assert_lineage_read_failure(&store, "subagents");
 }
@@ -568,13 +587,15 @@ fn an_unreadable_child_transcript_fails_bounded_and_streamed_lineage() {
         &plugin_meta(),
         &lines(&[brief(FINISHED), ended(FINISHED)]),
     );
-    let _unreadable = Unreadable::new(
+    let Some(_unreadable) = Unreadable::new(
         store
             .project()
             .join(PARENT)
             .join("subagents")
             .join(format!("agent-{FINISHED}.jsonl")),
-    );
+    ) else {
+        return;
+    };
 
     assert_lineage_read_failure(&store, &format!("agent-{FINISHED}.jsonl"));
 }
@@ -590,7 +611,9 @@ fn an_unreadable_child_directory_reports_an_unknown_transcript_count() {
     );
     let backend = ClaudeBackend::new(&store.0);
     let session = backend.locate(PARENT).unwrap().unwrap();
-    let _unreadable = Unreadable::new(store.project().join(PARENT).join("subagents"));
+    let Some(_unreadable) = Unreadable::new(store.project().join(PARENT).join("subagents")) else {
+        return;
+    };
 
     let bounded = backend.transcript(&session, 20).unwrap();
     let streamed = backend
@@ -640,13 +663,15 @@ fn an_unreadable_child_body_does_not_invalidate_its_observed_file_count() {
     );
     let backend = ClaudeBackend::new(&store.0);
     let session = backend.locate(PARENT).unwrap().unwrap();
-    let _unreadable = Unreadable::new(
+    let Some(_unreadable) = Unreadable::new(
         store
             .project()
             .join(PARENT)
             .join("subagents")
             .join(format!("agent-{FINISHED}.jsonl")),
-    );
+    ) else {
+        return;
+    };
     let bounded = backend.transcript(&session, 20).unwrap();
     let streamed = backend
         .stream_transcript(&session, None, &mut |_| Ok(()))
