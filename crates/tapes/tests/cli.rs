@@ -8371,7 +8371,10 @@ fn usage_human_output_names_the_recorded_facts_only() {
     );
     assert!(rendered.contains("plan: fixture\n"), "{rendered}");
     for absent in ["cost:", "durations:", "Note:"] {
-        assert!(!rendered.contains(absent), "{absent} in {rendered}");
+        assert!(
+            !rendered.lines().any(|line| line.starts_with(absent)),
+            "{absent} in {rendered}"
+        );
     }
     assert!(rendered.contains("model gpt-fixture (high):"), "{rendered}");
 }
@@ -8548,13 +8551,15 @@ fn usage_summary_human_output_says_how_many_sessions_are_behind_each_sum() {
     );
     assert_eq!(
         lines[2],
-        "codex\tgpt-fixture\t2\t1200 (1 of 2)\t300 (1 of 2)\t\t1000 (1 of 2)\t0 (1 of 2)\t\
-         \t\t1/0/0/0/1"
+        "codex\tgpt-fixture\t2\t1200 (1 of 2) [missing-counter]\t300 (1 of 2) [missing-counter]\t\t\
+         1000 (1 of 2) [missing-counter]\t0 (1 of 2) [missing-counter]\t\
+         withheld [all summed categories: missing-counter]\t\t1/0/0/0/1"
     );
     assert_eq!(
         lines[4],
-        "TOTAL\t\t4\t1200 (1 of 4)\t300 (1 of 4)\t\t1000 (1 of 4)\t0 (1 of 4)\t\t\t\
-         1/0/0/0/3"
+        "TOTAL\t\t4\t1200 (1 of 4) [missing-counter]\t300 (1 of 4) [missing-counter]\t\t\
+         1000 (1 of 4) [missing-counter]\t0 (1 of 4) [missing-counter]\t\
+         withheld [all summed categories: missing-counter]\t\t1/0/0/0/3"
     );
     assert_eq!(
         lines[5],
@@ -9246,15 +9251,154 @@ fn pi_disjoint_output_qualifies_a_missing_compaction_input() {
             } else {
                 let rendered = String::from_utf8(output.stdout).unwrap();
                 assert!(
-                    rendered.contains(
-                        "disjoint uncached_input: known subtotal; measurement incomplete"
-                    ),
+                    rendered.contains("disjoint uncached_input: known subtotal; missing-counter"),
                     "{rendered}"
                 );
                 assert!(!rendered.contains("total 265"), "{rendered}");
             }
         }
     }
+}
+
+/// A store holding the active-consumption fixture with each entry passed
+/// through `edit`.
+fn pi_active_consumption_store(label: &str, edit: impl Fn(&mut Value)) -> TemporaryDirectory {
+    let root = TemporaryDirectory::new(
+        std::env::temp_dir().join(format!("tapes-cli-{label}-{}", std::process::id())),
+    );
+    let sessions = root.path().join("sessions");
+    fs::create_dir_all(&sessions).unwrap();
+    let file = "2026-01-14T10-00-00-000Z_active-consumption.jsonl";
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../tapes-core/tests/fixtures/pi-active-consumption")
+        .join(file);
+    let lines = fs::read_to_string(fixture)
+        .unwrap()
+        .lines()
+        .map(|line| {
+            let mut entry: Value = serde_json::from_str(line).unwrap();
+            edit(&mut entry);
+            entry.to_string()
+        })
+        .collect::<Vec<_>>();
+    fs::write(sessions.join(file), lines.join("\n") + "\n").unwrap();
+    root
+}
+
+fn pi_human(root: &TemporaryDirectory, arguments: &[&str]) -> String {
+    let output = tapes()
+        .args(arguments)
+        .args(["--native-store", "pi", "--native-root"])
+        .arg(root.path())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).unwrap()
+}
+
+/// A counter some event did not record is named with its reason on every
+/// human figure that depends on it, and a withheld disjoint total says what
+/// withheld it.
+#[test]
+fn human_output_names_the_reason_a_counter_is_missing() {
+    let root = pi_active_consumption_store("human-missing", |entry| {
+        if entry["id"] == "compact-1" {
+            entry["usage"].as_object_mut().unwrap().remove("input");
+        }
+    });
+    for full in [false, true] {
+        let mut arguments = vec!["usage", "active-consumption"];
+        if full {
+            arguments.push("--full");
+        }
+        let human = pi_human(&root, &arguments);
+        for line in [
+            "completeness: input: missing-counter\n",
+            "disjoint uncached_input: known subtotal; missing-counter\n",
+            "disjoint total withheld: uncached_input: missing-counter\n",
+            "consumption completeness: input: missing-counter\n",
+            "active input: known subtotal; 4/5 events measured, 1 missing, 0 unpriced\n",
+        ] {
+            assert!(human.contains(line), "full={full}: {line}in {human}");
+        }
+        assert!(!human.contains("total 265"), "{human}");
+    }
+    let stats = pi_human(&root, &["stats", "active-consumption"]);
+    assert!(
+        stats.contains("completeness: input: missing-counter\n"),
+        "{stats}"
+    );
+    let summary = pi_human(
+        &root,
+        &["usage", "--global", "--harness", "pi", "--by", "harness"],
+    );
+    let group = summary
+        .lines()
+        .find(|line| line.starts_with("pi\t"))
+        .unwrap();
+    let cells = group.split('\t').collect::<Vec<_>>();
+    assert_eq!(cells[2], "130 [missing-counter]", "{summary}");
+    assert_eq!(cells[3], "30", "{summary}");
+    assert_eq!(
+        cells[7], "withheld [uncached_input: missing-counter]",
+        "{summary}"
+    );
+    assert!(
+        summary.contains("Disjoint total withheld: uncached_input: missing-counter\n"),
+        "{summary}"
+    );
+    assert!(
+        summary.contains("session active-consumption completeness: input: missing-counter\n"),
+        "{summary}"
+    );
+}
+
+/// A request that stopped on an abort carries its recorded usage as partial,
+/// and the human figures say so for every counter.
+#[test]
+fn human_output_names_the_reason_a_request_stopped() {
+    let root = pi_active_consumption_store("human-stopped", |entry| {
+        if entry["id"] == "request-1" {
+            entry["message"]["stopReason"] = serde_json::json!("aborted");
+        }
+    });
+    for full in [false, true] {
+        let mut arguments = vec!["usage", "active-consumption"];
+        if full {
+            arguments.push("--full");
+        }
+        let human = pi_human(&root, &arguments);
+        for line in [
+            "completeness: all counters: stopped-attempt\n",
+            "disjoint total withheld: all summed categories: stopped-attempt\n",
+        ] {
+            assert!(human.contains(line), "full={full}: {line}in {human}");
+        }
+        assert!(!human.contains("total 285"), "{human}");
+    }
+    let stats = pi_human(&root, &["stats", "active-consumption"]);
+    assert!(
+        stats.contains("completeness: all counters: stopped-attempt\n"),
+        "{stats}"
+    );
+    let summary = pi_human(
+        &root,
+        &["usage", "--global", "--harness", "pi", "--by", "harness"],
+    );
+    let group = summary
+        .lines()
+        .find(|line| line.starts_with("pi\t"))
+        .unwrap();
+    let cells = group.split('\t').collect::<Vec<_>>();
+    for cell in [cells[2], cells[3], cells[4], cells[5], cells[6], cells[8]] {
+        assert!(cell.ends_with("[stopped-attempt]"), "{summary}");
+    }
+    assert!(cells[7].starts_with("withheld ["), "{summary}");
+    assert!(cells[7].contains("stopped-attempt"), "{summary}");
 }
 
 #[test]

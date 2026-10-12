@@ -534,6 +534,17 @@ PROBE BEFORE EXPORTING
   read's coverage, failed requests, incomplete attribution. One model's
   stopped request leaves another model's figure whole, and one session's
   reasons leave another session's figure and group whole.
+  The text output names the same reasons, one line per incomplete figure:
+  `completeness: input: missing-counter; output, cost: stopped-attempt` lists
+  each distinct reason set once with the counters that share it, and `all
+  counters` stands for every counter. The same line follows a model split
+  (`model <name> completeness:`), consumption, and each session figure. A
+  disjoint category that holds an amount reads `known subtotal; <reasons>`,
+  and a withheld disjoint total prints `total withheld:` with the summed
+  categories and reasons that withheld it. A summary row's counter and COST
+  cells end with their reasons in brackets, and a withheld DISJOINT TOTAL
+  cell reads `withheld [<categories: reasons>]`. Coverage lines are labelled
+  `active` for a pi session's active branch and `session` otherwise.
   A Claude request sum keeps the TTL split; a
   cost-state total merges it, so its writes are ttl_unrecorded. requests
   tallies what the read's deduplicated Claude requests recorded beside their

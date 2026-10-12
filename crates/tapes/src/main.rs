@@ -13,12 +13,13 @@ use agent_tapes_core::bundle::{Bundle, BundleFile, GitContext};
 use agent_tapes_core::endings::{Ending, EndingsReport, DEFAULT_ENDINGS_TAIL};
 use agent_tapes_core::event::{EventKind, EventRecord, EventTranscript, Incomplete};
 use agent_tapes_core::lineage::{ChildRef, LineageView};
+use agent_tapes_core::measurement::{MeasurementCompleteness, COUNTERS};
 use agent_tapes_core::model::{
     human_bytes, human_speaker, human_timestamp, human_title, speaker, Accounting, AccountingBasis,
     AccountingCoverage, AccountingSelection, CacheWrites, Cost, CostCoverage, DisjointTokens,
     InputConvention, LiveState, OutputConvention, Projection, Session, SourceBound,
     SourceDescriptor, TokenConvention, Tokens, Transcript, Truncation, Turn, TurnKind,
-    TurnSelection,
+    TurnSelection, SUMMED_CATEGORIES,
 };
 use agent_tapes_core::reconcile::{CounterStatus, Reconciliation, SourceRole};
 use agent_tapes_core::stats::{
@@ -1317,7 +1318,9 @@ enum Command {
     /// harness wrote, and every total says what it covers: turn coverage is
     /// `read-window` when a source bound withheld turns, durations come from
     /// complete pairs only, and a cache ratio is a share of recorded token
-    /// counts rather than of cost. A model response is one source record —
+    /// counts rather than of cost. A `completeness:` line after the token
+    /// and cost lines names each incomplete counter's reasons. A model
+    /// response is one source record —
     /// the model's text, its reasoning, or a tool call it made — and its
     /// duration is the interval from the previous turn's source record to its
     /// own, so a record that normalizes to several turns is one duration and
@@ -1384,7 +1387,11 @@ enum Command {
     /// reasons (a stopped or failed request, missing counters or prices, an
     /// unreadable record, a read window), and every derived figure follows
     /// it: disjoint categories and their total, model splits, summaries,
-    /// identity bounds, brief and stats. A pi session's `consumption`
+    /// identity bounds, brief and stats. Text output prints the reasons
+    /// too: a `completeness:` line per incomplete figure, `known subtotal;
+    /// <reasons>` on a disjoint category, `total withheld:` naming what
+    /// withheld a disjoint total, and the reasons in brackets on a summary
+    /// row's counter and COST cells. A pi session's `consumption`
     /// sums every retained branch, each consumption event once, with
     /// per-counter measurement coverage for known
     /// subtotals, event split, observed identity (provider account namespace
@@ -3669,7 +3676,11 @@ fn render_assistant_turns(durations: &AssistantTurnDurations) -> String {
 }
 
 fn render_usage_stats(out: &mut String, usage: &UsageStats) {
-    render_measurement_coverage(out, "active", &usage.measurement_coverage);
+    render_measurement_coverage(
+        out,
+        coverage_label(usage.accounting.as_ref()),
+        &usage.measurement_coverage,
+    );
     for reason in &usage.measurement_incomplete {
         out.push_str(&format!("measurement incomplete: {reason}\n"));
     }
@@ -3679,6 +3690,7 @@ fn render_usage_stats(out: &mut String, usage: &UsageStats) {
     if let Some(cost) = &usage.cost {
         out.push_str(&format!("cost: {}\n", render_cost(cost)));
     }
+    render_completeness(out, "", &usage.measurement_completeness);
     if let Some(accounting) = &usage.accounting {
         out.push_str(&format!("accounting: {}\n", render_accounting(accounting)));
     }
@@ -3776,13 +3788,18 @@ fn render_usage(usage: &UsageView) -> String {
             render_cost_coverage(coverage)
         ));
     }
-    render_measurement_coverage(&mut out, "active", &usage.measurement_coverage);
+    render_measurement_coverage(
+        &mut out,
+        coverage_label(usage.accounting.as_ref()),
+        &usage.measurement_coverage,
+    );
     if !usage.measurement_incomplete.is_empty() {
         out.push_str(&format!(
             "measurement incomplete: {}\n",
             usage.measurement_incomplete.join(", ")
         ));
     }
+    render_completeness(&mut out, "", &usage.measurement_completeness);
     if usage.request_failures > 0 {
         out.push_str(&format!(
             "failed request observations: {}; consumption unknown\n",
@@ -3916,6 +3933,7 @@ fn render_disjoint(disjoint: &DisjointTokens) -> String {
     }
     render_disjoint_subtotals(
         &mut out,
+        "disjoint",
         &DisjointCells {
             uncached_input: disjoint.uncached_input,
             cache_read: disjoint.cache_read,
@@ -3924,15 +3942,18 @@ fn render_disjoint(disjoint: &DisjointTokens) -> String {
             reasoning: disjoint.reasoning,
             total: disjoint.total,
         },
-        |name| disjoint.missing.contains(&name),
+        &disjoint.measurement_completeness,
     );
     out
 }
 
+/// A line per incompletely measured category that holds a known amount,
+/// then the categories and reasons that withheld the total.
 fn render_disjoint_subtotals(
     out: &mut String,
+    prefix: &str,
     cells: &DisjointCells<'_>,
-    incomplete: impl Fn(&'static str) -> bool,
+    completeness: &MeasurementCompleteness,
 ) {
     for (category, present) in [
         ("uncached_input", cells.uncached_input.is_some()),
@@ -3941,10 +3962,16 @@ fn render_disjoint_subtotals(
         ("output", cells.output.is_some()),
         ("reasoning", cells.reasoning.is_some()),
     ] {
-        if present && incomplete(category) {
-            out.push_str(&format!(
-                "disjoint {category}: known subtotal; measurement incomplete\n"
-            ));
+        if let Some(reasons) = present
+            .then(|| render_reasons(completeness, category))
+            .flatten()
+        {
+            out.push_str(&format!("{prefix} {category}: known subtotal; {reasons}\n"));
+        }
+    }
+    if cells.total.is_none() {
+        if let Some(withheld) = render_withholders(completeness) {
+            out.push_str(&format!("{prefix} total withheld: {withheld}\n"));
         }
     }
 }
@@ -4322,6 +4349,11 @@ fn render_consumption(consumption: &Consumption) -> String {
         events.counted, events.active_branch, events.other_branches, events.repeats
     ));
     render_measurement_coverage(&mut out, "consumption", &consumption.measurement_coverage);
+    render_completeness(
+        &mut out,
+        "consumption ",
+        &consumption.measurement_completeness,
+    );
     out.push_str(&format!(
         "consumption identity: {} by observed provider response (account namespace unestablished), {} by recording entry, {} unidentified",
         identity.provider_response, identity.recording_entry, identity.unidentified
@@ -4342,6 +4374,71 @@ fn render_consumption(consumption: &Consumption) -> String {
         ));
     }
     out
+}
+
+/// What a harness's counters select, as a coverage line names the figure:
+/// the active branch where a recording retains others, else the session.
+fn coverage_label(accounting: Option<&Accounting>) -> &'static str {
+    match accounting.and_then(|accounting| accounting.selection) {
+        Some(AccountingSelection::ActiveBranch) => "active",
+        _ => "session",
+    }
+}
+
+/// The reasons one counter or category is incompletely measured, in the
+/// fixed labels `measurement_completeness` carries.
+fn render_reasons(completeness: &MeasurementCompleteness, name: &str) -> Option<String> {
+    completeness
+        .iter()
+        .find(|(counter, _)| *counter == name)
+        .map(|(_, reasons)| {
+            reasons
+                .iter()
+                .map(|reason| reason.label())
+                .collect::<Vec<_>>()
+                .join(", ")
+        })
+}
+
+/// The incompletely measured `names` of one figure, each distinct reason set
+/// once with the names that share it: `input: missing-counter; output,
+/// cache_read: stopped-attempt`. A set covering all of `names` reads `all
+/// <noun>`.
+fn render_incomplete_names(
+    completeness: &MeasurementCompleteness,
+    names: &[&str],
+    noun: &str,
+) -> Option<String> {
+    let mut groups: std::collections::BTreeMap<String, Vec<&str>> = Default::default();
+    for name in names {
+        if let Some(reasons) = render_reasons(completeness, name) {
+            groups.entry(reasons).or_default().push(name);
+        }
+    }
+    let clauses = groups
+        .into_iter()
+        .map(|(reasons, members)| {
+            let members = if members.len() == names.len() {
+                format!("all {noun}")
+            } else {
+                members.join(", ")
+            };
+            format!("{members}: {reasons}")
+        })
+        .collect::<Vec<_>>();
+    (!clauses.is_empty()).then(|| clauses.join("; "))
+}
+
+/// The line naming a figure's incomplete counters, where it has any.
+fn render_completeness(out: &mut String, prefix: &str, completeness: &MeasurementCompleteness) {
+    if let Some(incomplete) = render_incomplete_names(completeness, &COUNTERS, "counters") {
+        out.push_str(&format!("{prefix}completeness: {incomplete}\n"));
+    }
+}
+
+/// The summed categories that withheld a disjoint total, with their reasons.
+fn render_withholders(completeness: &MeasurementCompleteness) -> Option<String> {
+    render_incomplete_names(completeness, &SUMMED_CATEGORIES, "summed categories")
 }
 
 fn render_measurement_coverage(
@@ -4472,6 +4569,11 @@ fn render_model_usage(model: &ModelUsage) -> String {
             model.measurement_incomplete.join(", ")
         ));
     }
+    render_completeness(
+        &mut rendered,
+        &format!("model {} ", model.model),
+        &model.measurement_completeness,
+    );
     rendered
 }
 
@@ -4682,6 +4784,11 @@ fn render_identity_bounds(out: &mut String, tally: &UsageTally) {
         for reason in &figure.measurement_incomplete {
             out.push_str(&format!("session {}: {reason}\n", figure.id));
         }
+        render_completeness(
+            out,
+            &format!("session {} ", figure.id),
+            &figure.measurement_completeness,
+        );
     }
 }
 
@@ -4714,6 +4821,7 @@ fn render_disjoint_sum(disjoint: &DisjointSum) -> String {
     }
     render_disjoint_subtotals(
         &mut out,
+        "Disjoint",
         &DisjointCells {
             uncached_input: disjoint.uncached_input,
             cache_read: disjoint.cache_read,
@@ -4722,7 +4830,7 @@ fn render_disjoint_sum(disjoint: &DisjointSum) -> String {
             reasoning: disjoint.reasoning,
             total: disjoint.total,
         },
-        |name| disjoint.missing.contains_key(name),
+        &disjoint.measurement_completeness,
     );
     out
 }
@@ -4750,46 +4858,58 @@ fn tally_cells(tally: &UsageTally) -> Vec<String> {
     let sessions = tally.sessions;
     let counted = &tally.counted;
     let coverage = &tally.coverage;
+    let completeness = &tally.measurement_completeness;
+    let counter = |name: &str, sum: Option<u64>, counted: usize| {
+        qualified_cell(
+            counter_cell(sum, counted, sessions),
+            render_reasons(completeness, name),
+        )
+    };
     vec![
         sessions.to_string(),
-        counter_cell(
+        counter(
+            "input",
             tokens.and_then(|tokens| tokens.input),
             counted.input,
-            sessions,
         ),
-        counter_cell(
+        counter(
+            "output",
             tokens.and_then(|tokens| tokens.output),
             counted.output,
-            sessions,
         ),
-        counter_cell(
+        counter(
+            "reasoning",
             tokens.and_then(|tokens| tokens.reasoning),
             counted.reasoning,
-            sessions,
         ),
-        counter_cell(
+        counter(
+            "cache_read",
             tokens.and_then(|tokens| tokens.cache_read),
             counted.cache_read,
-            sessions,
         ),
-        counter_cell(
+        counter(
+            "cache_write",
             tokens.and_then(|tokens| tokens.cache_write),
             counted.cache_write,
-            sessions,
         ),
         tally
             .disjoint
             .as_ref()
-            .map_or_else(String::new, |disjoint| {
-                counter_cell(disjoint.total, disjoint.sessions, sessions)
+            .map_or_else(String::new, |disjoint| match disjoint.total {
+                Some(total) => counter_cell(Some(total), disjoint.sessions, sessions),
+                None => render_withholders(&disjoint.measurement_completeness)
+                    .map_or_else(String::new, |withheld| format!("withheld [{withheld}]")),
             }),
-        sum_cell(
-            tally
-                .cost
-                .as_ref()
-                .map(|cost| format!("{:.4} USD", cost.usd)),
-            counted.cost,
-            sessions,
+        qualified_cell(
+            sum_cell(
+                tally
+                    .cost
+                    .as_ref()
+                    .map(|cost| format!("{:.4} USD", cost.usd)),
+                counted.cost,
+                sessions,
+            ),
+            render_reasons(completeness, "cost"),
         ),
         format!(
             "{}/{}/{}/{}/{}",
@@ -4800,6 +4920,15 @@ fn tally_cells(tally: &UsageTally) -> Vec<String> {
             coverage.no_accounting
         ),
     ]
+}
+
+/// A figure's cell followed by the reasons it is incomplete. A cell with no
+/// figure stays empty.
+fn qualified_cell(cell: String, reasons: Option<String>) -> String {
+    match reasons {
+        Some(reasons) if !cell.is_empty() => format!("{cell} [{reasons}]"),
+        _ => cell,
+    }
 }
 
 fn counter_cell(sum: Option<u64>, counted: usize, sessions: usize) -> String {
@@ -6104,5 +6233,46 @@ mod tests {
 
         let named = render_transcript(&transcript(false), false, None);
         assert!(!named.contains("--exclude"), "{named}");
+    }
+
+    #[test]
+    fn coverage_is_labelled_by_what_the_counters_select() {
+        use agent_tapes_core::model::AccountingBasis;
+        let accounting = |selection| Accounting {
+            basis: AccountingBasis::SummedRequests,
+            coverage: AccountingCoverage::Session,
+            selection,
+        };
+        assert_eq!(
+            coverage_label(Some(&accounting(Some(AccountingSelection::ActiveBranch)))),
+            "active"
+        );
+        assert_eq!(coverage_label(Some(&accounting(None))), "session");
+        assert_eq!(coverage_label(None), "session");
+    }
+
+    #[test]
+    fn incomplete_counters_share_a_clause_by_reason_set() {
+        use agent_tapes_core::measurement::MeasurementReason::{MissingCounter, StoppedAttempt};
+        let mut completeness = MeasurementCompleteness::default();
+        completeness.qualify("input", MissingCounter);
+        completeness.qualify("input", StoppedAttempt);
+        completeness.qualify("output", StoppedAttempt);
+        completeness.qualify("cost", StoppedAttempt);
+        assert_eq!(
+            render_incomplete_names(&completeness, &COUNTERS, "counters").as_deref(),
+            Some("input: missing-counter, stopped-attempt; output, cost: stopped-attempt")
+        );
+        completeness.qualify_all(StoppedAttempt);
+        assert_eq!(
+            render_incomplete_names(&completeness, &COUNTERS, "counters").as_deref(),
+            Some("input: missing-counter, stopped-attempt; output, reasoning, cache_read, cache_write, cost: stopped-attempt")
+        );
+        let mut stopped = MeasurementCompleteness::default();
+        stopped.qualify_all(StoppedAttempt);
+        assert_eq!(
+            render_incomplete_names(&stopped, &COUNTERS, "counters").as_deref(),
+            Some("all counters: stopped-attempt")
+        );
     }
 }
