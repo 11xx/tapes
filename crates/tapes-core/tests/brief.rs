@@ -464,6 +464,18 @@ fn recorded_counters_are_carried_and_absence_stays_absent() {
                 "reasoning": ["missing-counter"], "cache_read": ["missing-counter"],
                 "cache_write": ["missing-counter"], "cost": ["missing-price"]
             },
+            "measurement_coverage": {
+                "input": { "measured": 1, "missing": 0, "unpriced": 0 },
+                "output": { "measured": 1, "missing": 0, "unpriced": 0 },
+                "reasoning": { "measured": 0, "missing": 1, "unpriced": 0 },
+                "cache_read": { "measured": 0, "missing": 1, "unpriced": 0 },
+                "cache_write": { "measured": 0, "missing": 1, "unpriced": 0 }
+            },
+            "measurement_incomplete": [
+                "cache_read was recorded by 0 of 1 events",
+                "cache_write was recorded by 0 of 1 events",
+                "reasoning was recorded by 0 of 1 events"
+            ],
             "accounting": { "basis": "recorded-total", "coverage": "session" },
         })
     );

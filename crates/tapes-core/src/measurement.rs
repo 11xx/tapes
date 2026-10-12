@@ -90,6 +90,26 @@ impl MeasurementReason {
 #[serde(transparent)]
 pub struct MeasurementCompleteness(BTreeMap<String, BTreeSet<MeasurementReason>>);
 
+/// One note per counter whose events did not all record it, saying how many
+/// did.
+pub fn known_subtotal_notes(coverage: &BTreeMap<String, MeasurementCoverage>) -> Vec<String> {
+    coverage
+        .iter()
+        .filter(|(_, coverage)| coverage.missing > 0 || coverage.unpriced > 0)
+        .map(|(counter, coverage)| {
+            let events = coverage.measured + coverage.missing + coverage.unpriced;
+            if coverage.measured == 0 {
+                format!("{counter} was recorded by 0 of {events} events")
+            } else {
+                format!(
+                    "{counter} is a known subtotal: {}/{events} events measured, {} missing, {} unpriced",
+                    coverage.measured, coverage.missing, coverage.unpriced
+                )
+            }
+        })
+        .collect()
+}
+
 /// The facts a figure's own completeness follows from.
 #[derive(Clone, Copy, Default)]
 pub struct Measured<'a> {

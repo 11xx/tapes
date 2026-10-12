@@ -1857,9 +1857,11 @@ fn claude_names_the_dimensions_a_request_or_a_recorded_total_did_not_record() {
         summed["disjoint"]["cache_write"],
         serde_json::json!({ "ephemeral_5m": 150, "ephemeral_1h": 210, "ttl_unrecorded": 40 })
     );
+    // A request that wrote no thinking count leaves reasoning a known
+    // subtotal; reasoning is inside output, so the total stands.
     assert_eq!(
         summed["disjoint"]["missing"],
-        serde_json::json!(["cache_write_ttl"])
+        serde_json::json!(["cache_write_ttl", "reasoning"])
     );
     assert_eq!(summed["disjoint"]["total"], 2776);
     assert_eq!(
@@ -5695,7 +5697,7 @@ fn codex_usage_reports_the_context_window_and_the_newest_quota_windows() {
         view.by_model,
         Some(vec![ModelUsage {
             measurement_completeness: serde_json::from_value(
-                serde_json::json!({"cost": ["missing-price"]})
+                serde_json::json!({"cost": ["missing-price"], "cache_write": ["missing-counter"], "reasoning": ["missing-counter"]})
             )
             .unwrap(),
             model: "gpt-fixture".to_owned(),
@@ -5710,8 +5712,31 @@ fn codex_usage_reports_the_context_window_and_the_newest_quota_windows() {
             cost: None,
             cost_coverage: None,
             request_count: Some(2),
-            measurement_coverage: std::collections::BTreeMap::new(),
-            measurement_incomplete: Vec::new(),
+            measurement_coverage: [
+                ("cache_read", 2, 0),
+                ("cache_write", 1, 1),
+                ("input", 2, 0),
+                ("output", 2, 0),
+                ("reasoning", 1, 1),
+            ]
+            .into_iter()
+            .map(|(counter, measured, missing)| {
+                (
+                    counter.to_owned(),
+                    agent_tapes_core::usage::MeasurementCoverage {
+                        measured,
+                        missing,
+                        unpriced: 0,
+                    },
+                )
+            })
+            .collect(),
+            measurement_incomplete: vec![
+                "cache_write is a known subtotal: 1/2 events measured, 1 missing, 0 unpriced"
+                    .to_owned(),
+                "reasoning is a known subtotal: 1/2 events measured, 1 missing, 0 unpriced"
+                    .to_owned(),
+            ],
         }])
     );
     let attribution = view

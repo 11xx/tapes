@@ -1117,6 +1117,11 @@ pub struct UsageTally {
     /// incompletely or not at all, with every reason among them.
     #[serde(skip_serializing_if = "MeasurementCompleteness::is_empty")]
     pub measurement_completeness: MeasurementCompleteness,
+    /// Per counter, the events the selected sessions' figures sum, by whether
+    /// each recorded it. A session that carries no event coverage adds
+    /// nothing here, and `counted` says how many sessions have an amount.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub measurement_coverage: BTreeMap<String, MeasurementCoverage>,
     /// Exact unions require established equality or disjointness of events.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub identity_unestablished: bool,
@@ -1376,6 +1381,7 @@ impl Counter {
 #[derive(Clone, Default)]
 struct Tally {
     measurement_completeness: MeasurementCompleteness,
+    measurement_coverage: BTreeMap<String, MeasurementCoverage>,
     sessions: usize,
     disjoint: DisjointSum,
     input: Counter,
@@ -1395,6 +1401,19 @@ impl Tally {
     fn add(&mut self, session: &Session) {
         self.measurement_completeness
             .merge(&session.selected_measurement_completeness());
+        for (counter, coverage) in session
+            .usage_detail
+            .iter()
+            .flat_map(|detail| &detail.measurement_coverage)
+        {
+            let sum = self
+                .measurement_coverage
+                .entry(counter.clone())
+                .or_default();
+            sum.measured += coverage.measured;
+            sum.missing += coverage.missing;
+            sum.unpriced += coverage.unpriced;
+        }
         self.sessions += 1;
         if let Some(coverage) = session.cost_coverage() {
             let total = self.cost_coverage.get_or_insert(CostCoverage {
@@ -1471,6 +1490,7 @@ impl Tally {
             > 0;
         UsageTally {
             measurement_completeness: self.measurement_completeness,
+            measurement_coverage: self.measurement_coverage,
             mixed_accounting: false,
             mixed_models: self.mixed_models,
             attribution_uncertain: self.attribution_uncertain,
@@ -2079,6 +2099,7 @@ impl Domains {
         if self.native.len() > 1 {
             tally.tokens = None;
             tally.cost = None;
+            tally.measurement_coverage.clear();
             tally.mixed_accounting = true;
         }
         if self.accounting.len() > 1 {
@@ -2090,6 +2111,7 @@ impl Domains {
             tally.tokens = None;
             tally.cost = None;
             tally.disjoint = None;
+            tally.measurement_coverage.clear();
         }
     }
 

@@ -9740,6 +9740,14 @@ fn stats_json_counts_a_chosen_recording_exactly() {
             },
             "usage": {
                 "measurement_completeness": { "cost": ["missing-price"], "reasoning": ["missing-counter"] },
+                "measurement_coverage": {
+                    "input": { "measured": 1, "missing": 0, "unpriced": 0 },
+                    "output": { "measured": 1, "missing": 0, "unpriced": 0 },
+                    "reasoning": { "measured": 0, "missing": 1, "unpriced": 0 },
+                    "cache_read": { "measured": 1, "missing": 0, "unpriced": 0 },
+                    "cache_write": { "measured": 1, "missing": 0, "unpriced": 0 }
+                },
+                "measurement_incomplete": ["reasoning was recorded by 0 of 1 events"],
                 "tokens": {
                     "input": 2500,
                     "output": 400,

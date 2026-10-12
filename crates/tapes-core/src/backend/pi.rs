@@ -17,7 +17,9 @@ use crate::content::{
 };
 use crate::event::{Bounded, EventKind, ToolEvent};
 use crate::lineage::{Lineage, ParentRef};
-use crate::measurement::{Measured, MeasurementCompleteness, MeasurementReason};
+use crate::measurement::{
+    known_subtotal_notes, Measured, MeasurementCompleteness, MeasurementReason,
+};
 use crate::model::{
     Accounting, AccountingBasis, AccountingCoverage, AccountingSelection, Cost, CostCoverage,
     KindDeclaration, Launch, Model, ReadGap, Role, Session, SourceDescriptor, Tokens,
@@ -1166,7 +1168,9 @@ struct PiConsumption {
     stopped: usize,
     zero_written_requests: usize,
     assistant_requests: usize,
-    measurement_coverage: BTreeMap<String, crate::usage::MeasurementCoverage>,
+    /// Which counted events recorded a price; the token counters' coverage is
+    /// kept by `totals.tokens`.
+    cost_measurement: crate::usage::MeasurementCoverage,
     entries: HashSet<String>,
     responses: HashSet<(String, String)>,
 }
@@ -1184,28 +1188,8 @@ impl PiConsumption {
             return false;
         }
         let usage = &consumed.usage;
-        for (name, value) in [
-            ("input", usage.input),
-            ("output", usage.output),
-            ("reasoning", usage.reasoning),
-            ("cache_read", usage.cache_read),
-            ("cache_write", usage.cache_write),
-        ] {
-            let coverage = self
-                .measurement_coverage
-                .entry(name.to_owned())
-                .or_default();
-            if value.is_some() {
-                coverage.measured += 1;
-            } else {
-                coverage.missing += 1;
-            }
-        }
         let unpriced = usage.is_unpriced();
-        let coverage = self
-            .measurement_coverage
-            .entry("cost".to_owned())
-            .or_default();
+        let coverage = &mut self.cost_measurement;
         if unpriced {
             coverage.unpriced += 1;
             self.zero_written_requests += usize::from(consumed.assistant_request);
@@ -1261,15 +1245,10 @@ impl PiConsumption {
                 "{count} requests stopped on an error or an abort; their recorded usage is partial"
             )),
         }
-        for (counter, coverage) in &self.measurement_coverage {
-            if coverage.missing > 0 || coverage.unpriced > 0 {
-                incomplete.push(format!(
-                    "{counter} is a known subtotal: {}/{} events measured, {} missing, {} unpriced",
-                    coverage.measured, self.events.counted, coverage.missing, coverage.unpriced
-                ));
-            }
-        }
-        let cost = (self.measurement_coverage["cost"].measured > 0).then_some(Cost {
+        let mut measurement_coverage = self.totals.tokens.coverage().clone();
+        measurement_coverage.insert("cost".to_owned(), self.cost_measurement);
+        incomplete.extend(known_subtotal_notes(&measurement_coverage));
+        let cost = (self.cost_measurement.measured > 0).then_some(Cost {
             usd: self.totals.cost,
         });
         let cost_coverage = self.totals.cost_coverage().map(|coverage| CostCoverage {
@@ -1281,7 +1260,7 @@ impl PiConsumption {
             tokens: tokens.as_ref(),
             cost: cost.as_ref(),
             cost_coverage: cost_coverage.as_ref(),
-            coverage: Some(&self.measurement_coverage),
+            coverage: Some(&measurement_coverage),
             scope: Some(coverage),
         });
         if unreadable > 0 {
@@ -1307,7 +1286,7 @@ impl PiConsumption {
                     .then(|| "unestablished".to_owned()),
                 ..self.identity
             },
-            measurement_coverage: self.measurement_coverage,
+            measurement_coverage,
             measurement_completeness,
             incomplete,
         })

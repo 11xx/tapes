@@ -7,15 +7,16 @@ use serde_json::Value;
 use super::{
     accounting_for, default_native_store, enrich_native_session, head_directory, head_jsonl,
     list_discovered_files, list_discovered_files_with_search, read_bounds, read_recording,
-    replay_pin, skipped_records_note, stream_jsonl, stream_jsonl_with_gaps,
-    streamed_trailing_record, terminal_from_values, timestamp, trailing_record,
-    transcript_from_recording, ActivityRange, Backend, Jsonl, Listing, ParsedFile, Query, ReadPin,
-    StreamedTranscript, TokenTotals, UnmappedTally,
+    recorded_total_coverage, replay_pin, skipped_records_note, stream_jsonl,
+    stream_jsonl_with_gaps, streamed_trailing_record, terminal_from_values, timestamp,
+    trailing_record, transcript_from_recording, ActivityRange, Backend, Jsonl, Listing, ParsedFile,
+    Query, ReadPin, StreamedTranscript, TokenTotals, UnmappedTally,
 };
 use crate::content::{parts_from_array, project_text, tool_coverage, tool_part};
 use crate::event::{Bounded, EventKind, ToolEvent};
 use crate::history::PageProjection;
 use crate::lineage::{ChildRef, Lineage, ParentRef, SourceRef};
+use crate::measurement::known_subtotal_notes;
 use crate::model::{
     is_known_envelope, is_known_notice, AccountingBasis, AccountingCoverage, ByteSpan,
     DisjointTokens, KindDeclaration, Launch, Model, ModelObservationStatus, ReadGap, RecordRef,
@@ -845,7 +846,7 @@ impl BoundedReasons {
 
 #[derive(Default)]
 struct CandidateModel {
-    tokens: Option<Tokens>,
+    tokens: TokenTotals,
     request_count: usize,
 }
 
@@ -902,7 +903,15 @@ impl UsageCandidate {
             return true;
         }
         let entry = self.by_model.entry(key).or_default();
-        add_tokens(&mut entry.tokens, tokens);
+        // A counted request that recorded no usage still counts, with every
+        // counter missing.
+        entry.tokens.add(
+            tokens.and_then(|tokens| tokens.input),
+            tokens.and_then(|tokens| tokens.output),
+            tokens.and_then(|tokens| tokens.reasoning),
+            tokens.and_then(|tokens| tokens.cache_read),
+            tokens.and_then(|tokens| tokens.cache_write),
+        );
         entry.request_count += 1;
         self.attributed += 1;
         true
@@ -940,16 +949,19 @@ impl UsageCandidate {
         let models = self
             .by_model
             .into_iter()
-            .map(|(key, value)| ModelUsage {
-                measurement_completeness: Default::default(),
-                model: key.model,
-                variant: key.variant,
-                tokens: value.tokens,
-                cost: None,
-                cost_coverage: None,
-                request_count: Some(value.request_count),
-                measurement_coverage: std::collections::BTreeMap::new(),
-                measurement_incomplete: Vec::new(),
+            .map(|(key, value)| {
+                let (tokens, measurement_coverage) = value.tokens.finish_covered();
+                ModelUsage {
+                    measurement_completeness: Default::default(),
+                    model: key.model,
+                    variant: key.variant,
+                    tokens,
+                    cost: None,
+                    cost_coverage: None,
+                    request_count: Some(value.request_count),
+                    measurement_incomplete: known_subtotal_notes(&measurement_coverage),
+                    measurement_coverage,
+                }
             })
             .collect::<Vec<_>>();
         (!models.is_empty()).then_some(models)
@@ -1524,12 +1536,15 @@ impl CodexUsageObserver {
             AccountingBasis::RecordedTotal,
             accounting_coverage,
         );
+        let measurement_coverage = recorded_total_coverage(self.tokens.as_ref());
         let usage_detail = UsageDetail {
             context_window: self.context_window,
             rate_limits: self.rate_limits,
             durations_ms: None,
             by_model,
             attribution,
+            measurement_incomplete: known_subtotal_notes(&measurement_coverage),
+            measurement_coverage,
             ..UsageDetail::default()
         }
         .into_option();

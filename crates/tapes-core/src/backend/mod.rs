@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::os::unix::fs::MetadataExt;
@@ -17,6 +17,7 @@ use crate::model::{
     TextTailEvidence, Tokens, TrailingRecord, Transcript, TranscriptEvidence, Truncation, Turn,
 };
 use crate::scope::Scope;
+use crate::usage::MeasurementCoverage;
 use agent_tapes_discovery::{
     CandidatePage as NativeCandidatePage, Discovery, DiscoveryError, Harness as NativeHarness,
     IdentityRecord, IdentitySource, NativeSession, NativeStore,
@@ -51,7 +52,9 @@ const HEAD_PROBE_MAX_BYTES: u64 = 1024 * 1024;
 pub const FULL_RECORD_BYTES: u64 = 64 * 1024 * 1024;
 
 /// Accumulates only counters the source actually wrote. A zero is retained as
-/// a present value, while a missing field remains absent in the result.
+/// a present value, while a missing field remains absent in the result. Each
+/// `add` is one counted event: it records, per counter, whether the event
+/// wrote it, so a sum says how many of its events it covers.
 #[derive(Default)]
 pub(crate) struct TokenTotals {
     input: Option<u64>,
@@ -59,6 +62,7 @@ pub(crate) struct TokenTotals {
     reasoning: Option<u64>,
     cache_read: Option<u64>,
     cache_write: Option<u64>,
+    coverage: BTreeMap<String, MeasurementCoverage>,
 }
 
 impl TokenTotals {
@@ -75,6 +79,39 @@ impl TokenTotals {
         add_counter(&mut self.reasoning, reasoning);
         add_counter(&mut self.cache_read, cache_read);
         add_counter(&mut self.cache_write, cache_write);
+        for (counter, value) in [
+            ("input", input),
+            ("output", output),
+            ("reasoning", reasoning),
+            ("cache_read", cache_read),
+            ("cache_write", cache_write),
+        ] {
+            let coverage = self.coverage.entry(counter.to_owned()).or_default();
+            if value.is_some() {
+                coverage.measured += 1;
+            } else {
+                coverage.missing += 1;
+            }
+        }
+    }
+
+    /// Per-counter coverage among the events added so far.
+    pub(crate) fn coverage(&self) -> &BTreeMap<String, MeasurementCoverage> {
+        &self.coverage
+    }
+
+    /// The sums and the coverage of the events behind them. The coverage is
+    /// empty when no counter was written, since there is then no sum for it
+    /// to qualify.
+    pub(crate) fn finish_covered(self) -> (Option<Tokens>, BTreeMap<String, MeasurementCoverage>) {
+        let coverage = self.coverage.clone();
+        let tokens = self.finish();
+        let coverage = if tokens.is_some() {
+            coverage
+        } else {
+            BTreeMap::new()
+        };
+        (tokens, coverage)
     }
 
     pub(crate) fn finish(self) -> Option<Tokens> {
@@ -91,6 +128,24 @@ impl TokenTotals {
             cache_write: self.cache_write,
         })
     }
+}
+
+/// The coverage of a harness-written total: the total is the one event its
+/// counters sum, and each counter it did not write is missing from it.
+pub(crate) fn recorded_total_coverage(
+    tokens: Option<&Tokens>,
+) -> BTreeMap<String, MeasurementCoverage> {
+    let mut totals = TokenTotals::default();
+    if let Some(tokens) = tokens {
+        totals.add(
+            tokens.input,
+            tokens.output,
+            tokens.reasoning,
+            tokens.cache_read,
+            tokens.cache_write,
+        );
+    }
+    totals.finish_covered().1
 }
 
 fn add_counter(total: &mut Option<u64>, value: Option<u64>) {

@@ -1393,10 +1393,15 @@ enum Command {
     /// summed; cost is the harness's own estimate, and quota is a separate
     /// fact about the account rather than these sessions. Claude subagent
     /// count notes report failed directory enumeration instead of a count.
+    /// Every session's `measurement_coverage` counts, per native counter,
+    /// the events its sum covers by whether each recorded the counter: the
+    /// requests of a request sum, the one event of a harness-written total,
+    /// the models of a Claude cost-state total. A counter some events lack
+    /// is a known subtotal, never complete, and `measurement_incomplete`
+    /// says how many recorded it; a summary adds the events of its sessions.
     /// A pi session's counters select its active branch and count usage on
     /// assistant requests, tool results, compactions, branch summaries, and
-    /// usage entries, with per-counter `measurement_coverage` and
-    /// `measurement_incomplete` qualifications. Every session's
+    /// usage entries. Every session's
     /// `measurement_completeness` names each incomplete counter with fixed
     /// reasons (a stopped or failed request, missing counters or prices, an
     /// unreadable record, a read window), and every derived figure follows
@@ -4792,6 +4797,7 @@ fn render_usage_summary(summary: &UsageSummary, by: &[GroupBy]) -> String {
             render_cost_coverage(coverage)
         ));
     }
+    render_measurement_coverage(&mut out, "summed", &summary.totals.measurement_coverage);
     if summary.totals.mixed_accounting {
         out.push_str(
             "Mixed accounting: total counters are omitted; compatible partitions follow.\n",

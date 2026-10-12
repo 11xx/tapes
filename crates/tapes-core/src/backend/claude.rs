@@ -22,13 +22,16 @@ use crate::content::{
 use crate::event::{Bounded, EventKind, ReadLines, ToolEvent};
 use crate::history::PageProjection;
 use crate::lineage::{ChildRef, Lineage, SourceRef};
+use crate::measurement::known_subtotal_notes;
 use crate::model::{
     derive_title, Accounting, AccountingBasis, AccountingCoverage, CacheWrites, Cost, CostCoverage,
     KindDeclaration, Launch, Model, Role, Session, SourceDescriptor, Tokens, TrailingRecord,
     Transcript, Turn, TurnKind, TurnSelection,
 };
 use crate::reconcile::{FamilyLedger, Reconciliation, SourceRole};
-use crate::usage::{Durations, ModelUsage, RecordedUsage, RequestDimensions, UsageDetail};
+use crate::usage::{
+    Durations, MeasurementCoverage, ModelUsage, RecordedUsage, RequestDimensions, UsageDetail,
+};
 use agent_tapes_discovery::{Harness as NativeHarness, IdentityBasis, NativeSession, NativeStore};
 
 #[derive(Clone, Debug)]
@@ -183,6 +186,7 @@ impl ClaudeBackend {
         let usage_detail = claude_usage_detail(
             observed_cost_state,
             requests.dimensions,
+            requests.coverage,
             requests.failures,
             basis,
             tokens.as_ref(),
@@ -891,6 +895,7 @@ impl ClaudeRecords {
         session.usage_detail = claude_usage_detail(
             observed_cost_state,
             requests.dimensions,
+            requests.coverage,
             requests.failures,
             basis,
             tokens.as_ref(),
@@ -1085,6 +1090,7 @@ fn recorded_accounting(
 fn claude_usage_detail(
     cost_state: Option<&Value>,
     requests: Option<RequestDimensions>,
+    request_coverage: BTreeMap<String, MeasurementCoverage>,
     failures: usize,
     basis: AccountingBasis,
     selected_tokens: Option<&Tokens>,
@@ -1094,6 +1100,15 @@ fn claude_usage_detail(
     } else {
         UsageDetail::default()
     };
+    // The counters count the requests read, or the models a recorded total
+    // sums.
+    detail.measurement_coverage = match (basis, cost_state) {
+        (AccountingBasis::RecordedTotal, Some(cost_state)) => {
+            cost_state_totals(cost_state).finish_covered().1
+        }
+        _ => request_coverage,
+    };
+    detail.measurement_incomplete = known_subtotal_notes(&detail.measurement_coverage);
     if basis == AccountingBasis::SummedRequests {
         if let Some(value) = cost_state {
             let recorded = recorded_usage(value);
@@ -1201,6 +1216,11 @@ fn model_usage_tokens(usage: &Value) -> Option<Tokens> {
 }
 
 fn cost_state_tokens(value: &Value) -> Option<Tokens> {
+    cost_state_totals(value).finish()
+}
+
+/// A cost-state's counters summed over the models it names.
+fn cost_state_totals(value: &Value) -> TokenTotals {
     let mut totals = TokenTotals::default();
     if let Some(model_usage) = value["modelUsage"].as_object() {
         for usage in model_usage.values() {
@@ -1215,7 +1235,7 @@ fn cost_state_tokens(value: &Value) -> Option<Tokens> {
             );
         }
     }
-    totals.finish()
+    totals
 }
 
 fn claude_request_tokens(values: &[Value]) -> RequestUsage {
@@ -1423,6 +1443,7 @@ impl RequestWitness {
 /// What the requests a read reached sum to, and what they recorded beside it.
 struct RequestUsage {
     tokens: Option<Tokens>,
+    coverage: BTreeMap<String, MeasurementCoverage>,
     dimensions: Option<RequestDimensions>,
     failures: usize,
 }
@@ -1442,8 +1463,10 @@ impl RequestTokens {
                 tokens.cache_write,
             );
         }
+        let (tokens, coverage) = totals.finish_covered();
         RequestUsage {
-            tokens: totals.finish(),
+            tokens,
+            coverage,
             failures: self.failures,
             dimensions: (dimensions.requests > 0).then_some(dimensions),
         }
@@ -1463,12 +1486,24 @@ impl RequestTokens {
             self.failures += usize::from(value["isApiErrorMessage"] == true);
             return;
         }
-        let Some(usage) = message.get("usage").and_then(Value::as_object) else {
+        let usage = message.get("usage").and_then(Value::as_object);
+        // A request that wrote no usage consumed an unknown amount: it
+        // counts, with every counter missing.
+        if usage.is_none() && value["answeredWithoutRequest"] == true {
             return;
-        };
-        let tokens = request_usage_tokens(usage);
+        }
+        let tokens = usage.map_or(
+            Tokens {
+                input: None,
+                output: None,
+                reasoning: None,
+                cache_read: None,
+                cache_write: None,
+            },
+            request_usage_tokens,
+        );
         let mut dimensions = RequestDimensions::default();
-        if value["answeredWithoutRequest"] != true {
+        if let Some(usage) = usage.filter(|_| value["answeredWithoutRequest"] != true) {
             request_dimensions(&mut dimensions, usage);
         }
         match value["requestId"].as_str() {

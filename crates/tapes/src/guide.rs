@@ -514,6 +514,17 @@ PROBE BEFORE EXPORTING
   include selected sessions with no token measurement, while `disjoint.sessions`
   counts sessions that recorded tokens.
 
+  `measurement_coverage` counts, per native counter, the events a figure's
+  sum covers by whether each recorded the counter. For a request sum
+  (Claude and Pi sessions, a Codex or Pi per-model split) an event is a
+  counted request, and a request that wrote no usage counts with every
+  counter missing; for a harness-written total (a Codex or OpenCode session,
+  or a Claude cost-state, which counts the models it sums) the total is the
+  event. A counter some events lack is a qualified known subtotal, never
+  complete, and `measurement_incomplete` says how many recorded it. A
+  summary's `measurement_coverage` adds its sessions' events and is withheld
+  wherever its tokens are.
+
   `measurement_completeness` answers, counter by counter, whether a figure is
   completely measured and why not. It names each incomplete counter, or
   disjoint category, with fixed reasons: missing-counter (some counted events

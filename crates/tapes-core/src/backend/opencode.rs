@@ -13,8 +13,8 @@ use serde_json::{json, Value};
 
 use super::{
     accounting_for, bounded_launch, filter_listing_search, filter_listing_search_parallel,
-    merge_launch, search_turns, Backend, Listing, Query, SearchCoverage, StreamCoordinates,
-    StreamedTranscript, TokenTotals,
+    merge_launch, recorded_total_coverage, search_turns, Backend, Listing, Query, SearchCoverage,
+    StreamCoordinates, StreamedTranscript, TokenTotals,
 };
 use crate::content::{
     bounded_shape, text_part, tool_coverage, tool_part, ContentAvailability, ContentCarrier,
@@ -22,6 +22,7 @@ use crate::content::{
 };
 use crate::event::{self, Bounded, EventKind, EventTranscript, ToolEvent};
 use crate::lineage::{ChildRef, Lineage, ParentRef, SourceRef};
+use crate::measurement::known_subtotal_notes;
 use crate::model::{
     human_bytes, AccountingBasis, AccountingCoverage, Cost, CostCoverage, KindDeclaration, Launch,
     Model, RecordRef, Role, Session, SourceBound, SourceDescriptor, Tokens, Transcript, Truncation,
@@ -1670,6 +1671,7 @@ fn parse_database_session(value: &Value) -> Result<Session> {
         .as_f64()
         .and_then(|usd| Cost::from_written(usd, tokens.as_ref()));
     let cost_coverage = CostCoverage::written(value["cost"].as_f64(), tokens.as_ref());
+    let measurement_coverage = recorded_total_coverage(tokens.as_ref());
     let accounting = accounting_for(
         tokens.as_ref(),
         cost.as_ref(),
@@ -1702,6 +1704,8 @@ fn parse_database_session(value: &Value) -> Result<Session> {
         occurrence: None,
         usage_detail: crate::usage::UsageDetail {
             cost_coverage,
+            measurement_incomplete: known_subtotal_notes(&measurement_coverage),
+            measurement_coverage,
             ..crate::usage::UsageDetail::default()
         }
         .into_option(),
@@ -1748,6 +1752,7 @@ fn parse_session(value: &Value) -> Result<Session> {
         .as_f64()
         .and_then(|usd| Cost::from_written(usd, tokens.as_ref()));
     let cost_coverage = CostCoverage::written(value["cost"].as_f64(), tokens.as_ref());
+    let measurement_coverage = recorded_total_coverage(tokens.as_ref());
     let accounting = accounting_for(
         tokens.as_ref(),
         cost.as_ref(),
@@ -1777,6 +1782,8 @@ fn parse_session(value: &Value) -> Result<Session> {
         occurrence: None,
         usage_detail: crate::usage::UsageDetail {
             cost_coverage,
+            measurement_incomplete: known_subtotal_notes(&measurement_coverage),
+            measurement_coverage,
             ..crate::usage::UsageDetail::default()
         }
         .into_option(),
@@ -2324,6 +2331,48 @@ mod tests {
                 serde_json::to_value(view).unwrap()["cost_coverage"]["complete"],
                 false
             );
+        }
+    }
+
+    #[test]
+    fn an_opencode_total_counts_each_counter_it_did_not_write_as_missing() {
+        let database = json!({"id": "ses_fixture", "cost": 0.5, "tokens_input": 1,
+            "tokens_output": 2, "tokens_cache_read": 0});
+        let api = json!({"id": "ses_fixture", "cost": 0.5,
+            "tokens": {"input": 1, "output": 2, "cache": {"read": 0}}});
+        for session in [
+            parse_database_session(&database).unwrap(),
+            parse_session(&api).unwrap(),
+        ] {
+            let view = serde_json::to_value(crate::usage::usage(&Transcript::new(
+                session,
+                Vec::new(),
+                Truncation::default(),
+                None,
+                Vec::new(),
+            )))
+            .unwrap();
+            for (counter, measured, missing) in [
+                ("input", 1, 0),
+                ("output", 1, 0),
+                ("cache_read", 1, 0),
+                ("reasoning", 0, 1),
+                ("cache_write", 0, 1),
+            ] {
+                assert_eq!(
+                    view["measurement_coverage"][counter],
+                    json!({"measured": measured, "missing": missing, "unpriced": 0}),
+                    "{counter}: {view}"
+                );
+                assert_eq!(
+                    view["measurement_completeness"][counter] == json!(["missing-counter"]),
+                    missing > 0,
+                    "{counter}: {view}"
+                );
+            }
+            // A counter written as zero is measured; the unwritten cache
+            // write leaves the total unestablished.
+            assert!(view["disjoint"]["total"].is_null(), "{view}");
         }
     }
 
