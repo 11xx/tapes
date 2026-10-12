@@ -2119,6 +2119,14 @@ pub fn partitioned_aggregate(
 #[derive(Default)]
 struct Domains {
     native: std::collections::BTreeSet<(String, String)>,
+    /// The domains of sessions that counted events and hold an accounting,
+    /// with the basis each counts events on: events add only within one
+    /// domain.
+    covered: std::collections::BTreeMap<(String, String), AccountingBasis>,
+    /// The harnesses of sessions that counted events and wrote no counter, so
+    /// hold no accounting. Only a request sum counts events without writing
+    /// an amount: a recorded total is one event that holds its counters.
+    covered_unestablished: std::collections::BTreeSet<String>,
     accounting: std::collections::BTreeSet<String>,
     pi: bool,
     figures: Vec<SessionUsageFigure>,
@@ -2131,6 +2139,21 @@ impl Domains {
         if session.tokens.is_some() || session.cost.is_some() {
             self.native.insert(key.clone());
         }
+        if session
+            .usage_detail
+            .as_ref()
+            .is_some_and(|detail| !detail.measurement_coverage.is_empty())
+        {
+            match &session.accounting {
+                Some(accounting) => {
+                    self.covered.insert(key.clone(), accounting.basis);
+                }
+                None => {
+                    self.covered_unestablished
+                        .insert(session.harness().to_owned());
+                }
+            }
+        }
         if session.tokens.is_some() {
             self.accounting.insert(key.1.clone());
         }
@@ -2139,6 +2162,9 @@ impl Domains {
     fn apply(&self, tally: &mut UsageTally) {
         if self.pi {
             tally.session_figures.clone_from(&self.figures);
+        }
+        if !self.events_share_a_domain() {
+            tally.measurement_coverage.clear();
         }
         if self.native.len() > 1 {
             tally.tokens = None;
@@ -2157,6 +2183,22 @@ impl Domains {
             tally.disjoint = None;
             tally.measurement_coverage.clear();
         }
+    }
+
+    /// Whether every session that counted events counted them in one
+    /// harness and accounting basis, so their events may be added.
+    fn events_share_a_domain(&self) -> bool {
+        let harnesses = self
+            .covered
+            .keys()
+            .map(|(harness, _)| harness)
+            .chain(&self.covered_unestablished)
+            .collect::<std::collections::BTreeSet<_>>();
+        self.covered.len() <= 1
+            && harnesses.len() <= 1
+            && self.covered.values().all(|basis| {
+                self.covered_unestablished.is_empty() || *basis == AccountingBasis::SummedRequests
+            })
     }
 
     fn bounds(&self) -> UsageIdentityBounds {

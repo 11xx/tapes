@@ -678,3 +678,63 @@ fn a_pi_consumption_without_counters_keeps_the_coverage_every_reader_reports() {
         );
     }
 }
+
+#[test]
+fn a_summary_never_adds_the_events_of_a_session_with_no_amount_across_bases() {
+    // Three summed requests that wrote no counter, beside a recorded total:
+    // the empty session holds no amount, yet its events are not the total's.
+    let store = claude_store(
+        "empty-bases",
+        &[
+            ("empty", vec![Vec::new(), Vec::new(), Vec::new()]),
+            ("recorded", vec![TOKENS.to_vec()]),
+        ],
+    );
+    let path = store.0.join("fixture-project/recorded.jsonl");
+    let mut recording = fs::read_to_string(&path).unwrap();
+    recording.push_str(
+        &json!({"type": "cost-state", "sessionId": "recorded", "totalCostUSD": 0.5,
+                "modelUsage": {"model-a": {"inputTokens": 20, "outputTokens": 8,
+                                           "cacheReadInputTokens": 10, "cacheCreationInputTokens": 10,
+                                           "thinkingTokens": 1}}})
+        .to_string(),
+    );
+    recording.push('\n');
+    fs::write(&path, recording).unwrap();
+    let backend = ClaudeBackend::new(&store.0);
+    let sessions = ["empty", "recorded"]
+        .map(|id| backend.locate(id).unwrap().unwrap())
+        .to_vec();
+    assert_eq!(
+        sessions[1].accounting.as_ref().unwrap().basis,
+        agent_tapes_core::model::AccountingBasis::RecordedTotal
+    );
+    let (aggregate, partitions) = usage::partitioned_aggregate(&sessions, &[GroupBy::Harness]);
+    let totals = serde_json::to_value(&aggregate.totals).unwrap();
+    assert!(totals.get("measurement_coverage").is_none(), "{totals}");
+    // The recorded total stays a healthy figure beside the empty session.
+    assert_eq!(totals["tokens"]["input"], 20, "{totals}");
+    assert_eq!(partitions.len(), 2);
+    for partition in partitions {
+        let partition = serde_json::to_value(&partition).unwrap();
+        assert!(
+            partition["measurement_coverage"]["input"].is_object(),
+            "{partition}"
+        );
+        let measured = partition["measurement_coverage"]["input"]["measured"]
+            .as_u64()
+            .unwrap();
+        let missing = partition["measurement_coverage"]["input"]["missing"]
+            .as_u64()
+            .unwrap();
+        assert_eq!(
+            (measured, missing),
+            if partition["sessions"] == 1 && partition["tokens"].is_object() {
+                (1, 0)
+            } else {
+                (0, 3)
+            },
+            "{partition}"
+        );
+    }
+}
