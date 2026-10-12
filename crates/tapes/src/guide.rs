@@ -707,16 +707,33 @@ PROBE BEFORE EXPORTING
   `copy_conflicts` counts contradictory witnesses. A malformed parent record
   qualifies its copy evidence while healthy matching entries remain available.
   Parent paths and raw read errors are never included in the keys.
-  Keys establish event membership only. They carry no per-event token or cost
-  amounts, and their digests cannot recover those measurements. An exact token
-  or cost union requires normalized per-event amounts with quantity kind,
-  accounting basis, and per-counter coverage; the keys alone leave it
-  unmeasured. Per-event measurement support is tracked by the tapes todo
-  `consumption-key-amounts`.
-  An exact parent/fork membership union requires complete key coverage and verified
-  copy equality for shared entries. Missing parents, bounded copy reads,
-  conflicts, and unrelated recordings leave cross-recording equality
-  unestablished; each recording's own figures remain available.
+  Each key carries `measurement`, the event's own amounts: its `disjoint`
+  token categories (uncached input, cache read, cache write by TTL, output,
+  with reasoning a share of output), its `cost` with kind
+  `harness-calculated-estimate` and a missing pricing basis, `cost_coverage`
+  where the price is absent or a written zero beside usage, and
+  `measurement_completeness` naming each category or counter the event did
+  not record, an unpriced zero, or a stopped request. An amount the entry did
+  not record is absent, never zero. A measurement is omitted with its key, so
+  `omissions` account for both, and it carries no recording locator. The
+  digest covers the amounts, so a verified copy holds its source's
+  measurement. `session_id`, `forked_from` and `basis` name the selection.
+  `ConsumptionEventKeys::union` in tapes-core takes two selections' keys and
+  measurements and computes their union exactly only when every key of both
+  is present and measured, both reads cover their recordings with no
+  unreadable record, one names the other as its fork parent with
+  `copy_coverage: session` and no conflicts, each copy is a key the parent
+  holds with an equal digest, and no key shares a provider response with
+  another recording's key without a verified copy. The union then counts each
+  event once and sums categories; one an event did not record is a known
+  subtotal named in `measurement_completeness`, and the total is withheld.
+  Otherwise `withheld` names why (omitted-keys, incomplete-read,
+  unmeasured-event, mixed-basis, unestablished-lineage, unverified-copies,
+  unestablished-identity), each selection keeps its own figure, and `bounds`
+  give at-least and at-most per category and cost: at least the larger known
+  amount, at most their sum only when every key and category of both is
+  present. Missing parents, bounded copy reads, conflicts, and unrelated
+  recordings leave cross-recording equality unestablished.
   `--full --event-keys` uses the pinned recording and streams the parent copy
   check. This option answers one native recording and is separate from
   `--series`; supplied exports and selection summaries refuse it.
