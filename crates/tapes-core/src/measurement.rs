@@ -52,6 +52,9 @@ pub enum MeasurementReason {
     StoppedAttempt,
     /// Records the read could not decode may have carried consumption.
     UnreadableRecord,
+    /// A record the reader has no reading for carried usage-shaped fields, so
+    /// consumption it witnessed is in no counter.
+    UnrecognizedUsage,
     /// The figure covers only the part of the recording the read reached.
     ReadWindow,
     /// The counters restarted inside the recording; the figure covers what
@@ -75,6 +78,7 @@ impl MeasurementReason {
             Self::Unpriced => "unpriced",
             Self::StoppedAttempt => "stopped-attempt",
             Self::UnreadableRecord => "unreadable-record",
+            Self::UnrecognizedUsage => "unrecognized-usage",
             Self::ReadWindow => "read-window",
             Self::SinceReset => "since-reset",
             Self::UnestablishedScope => "unestablished-scope",

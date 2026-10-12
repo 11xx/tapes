@@ -439,6 +439,7 @@ impl Backend for PiBackend {
             terminal: None,
             notes: abandoned_notes(abandoned),
             unmapped: Some(unmapped.finish()),
+            unrecognized_usage: 0,
             kinds: None,
         })
     }
@@ -531,6 +532,7 @@ impl Backend for PiBackend {
                 id,
                 parent: value["parentId"].as_str().map(str::to_owned),
                 consumed: pi_consumed(value),
+                unread_usage: pi_unread_usage(value),
                 model: pi_model(value).map(str::to_owned),
                 thinking: pi_thinking(value).map(str::to_owned),
                 timestamp: timestamp(&value["timestamp"]),
@@ -569,7 +571,12 @@ impl Backend for PiBackend {
                 let id = entry.id.as_deref();
                 consumption.observe(id, consumed, id.is_some_and(|id| seen.contains(id)));
             }
+            consumption.unrecognized_usage += usize::from(entry.unread_usage);
         }
+        let unrecognized_usage = active
+            .iter()
+            .filter(|position| entries[**position].unread_usage)
+            .count();
         let consumption =
             consumption.finish(AccountingCoverage::Session, streamed.skipped, forked_from);
 
@@ -609,6 +616,7 @@ impl Backend for PiBackend {
             measurement_coverage: usage.measurement_coverage,
             measurement_incomplete: usage.measurement_incomplete,
             measurement_completeness: usage.measurement_completeness,
+            unrecognized_usage,
             consumption,
             ..UsageDetail::default()
         }
@@ -665,6 +673,8 @@ struct PiEntry {
     id: Option<String>,
     parent: Option<String>,
     consumed: Option<PiConsumed>,
+    /// The entry carries pi's usage shape that no consumption reading counts.
+    unread_usage: bool,
     model: Option<String>,
     thinking: Option<String>,
     timestamp: Option<chrono::DateTime<chrono::Utc>>,
@@ -883,6 +893,7 @@ fn apply_recording_usage(
             let id = entry["id"].as_str();
             consumption.observe(id, &consumed, id.is_some_and(|id| active_ids.contains(id)));
         }
+        consumption.unrecognized_usage += usize::from(pi_unread_usage(entry));
     }
     let consumption = consumption.finish(
         if read.truncated {
@@ -907,6 +918,7 @@ fn apply_recording_usage(
         measurement_coverage: usage.measurement_coverage,
         measurement_incomplete: usage.measurement_incomplete,
         measurement_completeness: usage.measurement_completeness,
+        unrecognized_usage: active.iter().filter(|entry| pi_unread_usage(entry)).count(),
         consumption,
         ..UsageDetail::default()
     }
@@ -1158,6 +1170,29 @@ fn pi_consumed(entry: &Value) -> Option<PiConsumed> {
     })
 }
 
+/// Whether an entry carries pi's usage shape, a `usage` object on the entry
+/// or its message holding a token counter or a total cost, where no reading
+/// of the entry counts it as consumption.
+fn pi_unread_usage(entry: &Value) -> bool {
+    pi_consumed(entry).is_none()
+        && [&entry["message"]["usage"], &entry["usage"]]
+            .into_iter()
+            .filter_map(Value::as_object)
+            .any(|usage| {
+                [
+                    "input",
+                    "output",
+                    "reasoning",
+                    "cacheRead",
+                    "cacheWrite",
+                    "totalTokens",
+                ]
+                .iter()
+                .any(|counter| usage.get(*counter).is_some_and(Value::is_number))
+                    || usage["cost"]["total"].is_number()
+            })
+}
+
 /// Consumption events summed in recording order, each once. An entry whose
 /// id or provider response was already counted is a repeat of that event.
 #[derive(Default)]
@@ -1168,6 +1203,8 @@ struct PiConsumption {
     stopped: usize,
     zero_written_requests: usize,
     assistant_requests: usize,
+    /// Entries carrying pi's usage shape that no consumption reading counts.
+    unrecognized_usage: usize,
     /// Which counted events recorded a price; the token counters' coverage is
     /// kept by `totals.tokens`.
     cost_measurement: crate::usage::MeasurementCoverage,
@@ -1268,6 +1305,13 @@ impl PiConsumption {
         }
         if self.stopped > 0 {
             measurement_completeness.qualify_all(MeasurementReason::StoppedAttempt);
+        }
+        if self.unrecognized_usage > 0 {
+            measurement_completeness.qualify_all(MeasurementReason::UnrecognizedUsage);
+            incomplete.push(format!(
+                "{} records the reader has no reading for carry usage",
+                self.unrecognized_usage
+            ));
         }
         Some(Consumption {
             accounting: Accounting {

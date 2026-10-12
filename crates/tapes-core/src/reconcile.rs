@@ -76,9 +76,11 @@ pub enum SourceRole {
 /// `unkeyed` counts records with usage and no request identity,
 /// `unrequested` records the harness marks as answered without a request,
 /// and `failed` records the harness wrote in place of a response that failed,
-/// whose consumption is unknown. A source is `complete` only when every
-/// record decoded, none stands for a failed request, and the identity budget
-/// held.
+/// whose consumption is unknown. `unrecognized_usage` counts records the
+/// reader has no reading for that carry usage-shaped fields. A source is
+/// `complete` only when every record decoded, none stands for a failed
+/// request or carries usage no request reading counts, and the identity
+/// budget held.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct ReconciledSource {
     pub role: SourceRole,
@@ -100,6 +102,8 @@ pub struct ReconciledSource {
     pub unrequested: usize,
     #[serde(skip_serializing_if = "is_zero")]
     pub failed: usize,
+    #[serde(skip_serializing_if = "is_zero")]
+    pub unrecognized_usage: usize,
     #[serde(skip_serializing_if = "is_zero")]
     pub skipped: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -340,6 +344,7 @@ impl FamilyLedger {
             unkeyed_tokens: None,
             unrequested: 0,
             failed: 0,
+            unrecognized_usage: 0,
             skipped: 0,
             identified: None,
             error: None,
@@ -369,7 +374,10 @@ impl FamilyLedger {
         entry.length = Some(length);
         entry.sha256 = Some(sha256);
         entry.skipped = skipped;
-        entry.complete = skipped == 0 && entry.failed == 0 && !self.budget_exhausted;
+        entry.complete = skipped == 0
+            && entry.failed == 0
+            && entry.unrecognized_usage == 0
+            && !self.budget_exhausted;
     }
 
     pub(crate) fn failed(&mut self, source: usize, error: String) {
@@ -388,6 +396,12 @@ impl FamilyLedger {
     pub(crate) fn unenumerated(&mut self, error: String) {
         self.unenumerated = true;
         self.notes.push(error);
+    }
+
+    /// A record the reader has no reading for that carries usage-shaped
+    /// fields: consumption the union does not hold.
+    pub(crate) fn unrecognized_usage(&mut self, source: usize) {
+        self.sources[source].unrecognized_usage += 1;
     }
 
     pub(crate) fn unrequested(&mut self, source: usize) {

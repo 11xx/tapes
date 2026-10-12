@@ -188,6 +188,7 @@ impl ClaudeBackend {
             requests.dimensions,
             requests.coverage,
             requests.failures,
+            requests.unrecognized_usage,
             basis,
             tokens.as_ref(),
         );
@@ -547,6 +548,7 @@ impl Backend for ClaudeBackend {
             gaps: read.gaps,
             notes: subagent_notes(path),
             unmapped: Some(unmapped.finish()),
+            unrecognized_usage: 0,
             kinds: None,
         })
     }
@@ -736,6 +738,7 @@ impl Backend for ClaudeBackend {
                 terminal: None,
                 notes: Vec::new(),
                 unmapped: None,
+                unrecognized_usage: 0,
                 kinds: None,
             },
         })
@@ -897,6 +900,7 @@ impl ClaudeRecords {
             requests.dimensions,
             requests.coverage,
             requests.failures,
+            requests.unrecognized_usage,
             basis,
             tokens.as_ref(),
         );
@@ -1092,6 +1096,7 @@ fn claude_usage_detail(
     requests: Option<RequestDimensions>,
     request_coverage: BTreeMap<String, MeasurementCoverage>,
     failures: usize,
+    unrecognized_usage: usize,
     basis: AccountingBasis,
     selected_tokens: Option<&Tokens>,
 ) -> Option<UsageDetail> {
@@ -1123,6 +1128,7 @@ fn claude_usage_detail(
     }
     detail.requests = requests;
     detail.request_failures = failures;
+    detail.unrecognized_usage = unrecognized_usage;
     detail.into_option()
 }
 
@@ -1261,6 +1267,7 @@ struct RequestTokens {
     unkeyed: TokenTotals,
     dimensions: RequestDimensions,
     failures: usize,
+    unrecognized_usage: usize,
 }
 
 struct RequestWitness {
@@ -1446,6 +1453,7 @@ struct RequestUsage {
     coverage: BTreeMap<String, MeasurementCoverage>,
     dimensions: Option<RequestDimensions>,
     failures: usize,
+    unrecognized_usage: usize,
 }
 
 impl RequestTokens {
@@ -1468,11 +1476,16 @@ impl RequestTokens {
             tokens,
             coverage,
             failures: self.failures,
+            unrecognized_usage: self.unrecognized_usage,
             dimensions: (dimensions.requests > 0).then_some(dimensions),
         }
     }
 
     fn add(&mut self, value: &Value) {
+        if claude_unread_usage(value) {
+            self.unrecognized_usage += 1;
+            return;
+        }
         if value["type"] != "assistant" {
             return;
         }
@@ -1532,6 +1545,24 @@ impl RequestTokens {
         }
         self.dimensions.add(dimensions);
     }
+}
+
+/// Whether a record carries Claude's usage shape, a `message.usage` object
+/// holding a token counter, where no reading counts it: the request sum
+/// reads it on an assistant record only.
+fn claude_unread_usage(value: &Value) -> bool {
+    let read = value["type"] == "assistant" && value["message"]["role"] == "assistant";
+    !read
+        && value["message"]["usage"].as_object().is_some_and(|usage| {
+            [
+                "input_tokens",
+                "output_tokens",
+                "cache_read_input_tokens",
+                "cache_creation_input_tokens",
+            ]
+            .iter()
+            .any(|counter| usage.get(*counter).is_some_and(Value::is_number))
+        })
 }
 
 /// One request record's native counters; thinking is a share of output.
@@ -1604,6 +1635,8 @@ fn reconcile_source(
                 recorded_usage(value),
                 timestamp(&value["timestamp"]),
             );
+        } else if claude_unread_usage(value) {
+            ledger.unrecognized_usage(source);
         } else if value["type"] == "assistant" && value["message"]["role"] == "assistant" {
             if value["answeredWithoutRequest"] == true {
                 ledger.unrequested(source);

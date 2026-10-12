@@ -56,6 +56,11 @@ pub struct UsageDetail {
     pub measurement_completeness: MeasurementCompleteness,
     /// Failed request observations, whose consumption is unknown.
     pub request_failures: usize,
+    /// Records the reader has no reading for that carry usage-shaped fields
+    /// for their harness. Their consumption is in no counter, so every
+    /// counter of the figure is qualified; an unrecognized record without
+    /// usage-shaped fields is not counted.
+    pub unrecognized_usage: usize,
     /// Consumption over every branch a recording retains, where the
     /// session's counters select only one of them.
     pub consumption: Option<Consumption>,
@@ -77,6 +82,7 @@ impl UsageDetail {
             && self.measurement_incomplete.is_empty()
             && self.measurement_completeness.is_empty()
             && self.request_failures == 0
+            && self.unrecognized_usage == 0
             && self.consumption.is_none()
             && self.recorded_total.is_none()
             && self.accounting_notes.is_empty()
@@ -758,6 +764,8 @@ pub struct UsageView {
     pub requests: Option<RequestDimensions>,
     #[serde(skip_serializing_if = "is_zero")]
     pub request_failures: usize,
+    #[serde(skip_serializing_if = "is_zero")]
+    pub unrecognized_usage: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub consumption: Option<Consumption>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -902,6 +910,7 @@ fn project(session: &Session, turns: TurnTally, facts: ReadFacts) -> UsageView {
         attribution: detail.attribution,
         requests: detail.requests,
         request_failures: detail.request_failures,
+        unrecognized_usage: detail.unrecognized_usage,
         consumption: detail.consumption,
         recorded_total: detail.recorded_total,
         series: None,
@@ -943,6 +952,9 @@ impl Session {
         if self.request_failures() > 0 {
             completeness.qualify_all(MeasurementReason::StoppedAttempt);
         }
+        if self.unrecognized_usage() > 0 {
+            completeness.qualify_all(MeasurementReason::UnrecognizedUsage);
+        }
         completeness
     }
 
@@ -962,6 +974,9 @@ impl Session {
         if self.request_failures() > 0 {
             shared.qualify_all(MeasurementReason::StoppedAttempt);
         }
+        if self.unrecognized_usage() > 0 {
+            shared.qualify_all(MeasurementReason::UnrecognizedUsage);
+        }
         let attribution = self
             .usage_detail
             .as_ref()
@@ -972,6 +987,12 @@ impl Session {
             shared.qualify_all(MeasurementReason::IncompleteAttribution);
         }
         shared
+    }
+
+    fn unrecognized_usage(&self) -> usize {
+        self.usage_detail
+            .as_ref()
+            .map_or(0, |detail| detail.unrecognized_usage)
     }
 
     fn request_failures(&self) -> usize {
@@ -1620,6 +1641,7 @@ mod tests {
             "attribution",
             "requests",
             "request_failures",
+            "unrecognized_usage",
             "consumption",
             "recorded_total",
             "reconciliation",
@@ -1701,6 +1723,7 @@ mod tests {
             requests: None,
             cost_coverage: None,
             request_failures: 0,
+            unrecognized_usage: 0,
             consumption: None,
             recorded_total: None,
             accounting_notes: Vec::new(),

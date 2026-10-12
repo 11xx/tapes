@@ -1393,6 +1393,10 @@ pub struct StreamedTranscript {
     pub notes: Vec<String>,
     /// The records that produced no turn, where the reader counts them.
     pub unmapped: Option<crate::model::UnmappedRecords>,
+    /// Records the read met that carry usage-shaped fields no counter reads,
+    /// for a reader whose session figure is not recomputed from the records
+    /// themselves. A reader that sums its records counts them in the session.
+    pub unrecognized_usage: usize,
     /// The kinds the harness's records can evidence, set by whoever knows
     /// which backend streamed the read.
     pub kinds: Option<crate::model::KindDeclaration>,

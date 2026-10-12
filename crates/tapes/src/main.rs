@@ -3850,6 +3850,12 @@ fn render_usage(usage: &UsageView) -> String {
             usage.request_failures
         ));
     }
+    if usage.unrecognized_usage > 0 {
+        out.push_str(&format!(
+            "unrecognized records carrying usage: {}; their consumption is in no counter\n",
+            usage.unrecognized_usage
+        ));
+    }
     if let Some(recorded) = &usage.recorded_total {
         out.push_str(&render_recorded_usage(recorded));
     }
@@ -4296,13 +4302,18 @@ fn render_reconciliation(reconciliation: &Reconciliation) -> String {
         };
         out.push_str(&format!(
             "  source {role}: {}, {} records, {} local requests, {} without identity, {} answered without \
-             request, {} failed{}\n",
+             request, {} failed{}{}\n",
             if source.complete { "complete" } else { "incomplete" },
             source.records,
             source.requests,
             source.unkeyed,
             source.unrequested,
             source.failed,
+            if source.unrecognized_usage > 0 {
+                format!(", {} unrecognized with usage", source.unrecognized_usage)
+            } else {
+                String::new()
+            },
             source
                 .error
                 .as_ref()

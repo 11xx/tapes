@@ -842,9 +842,10 @@ impl OpenCodeBackend {
         cuts.count(&message_rows, &parts);
         source.extend(cuts.bounds());
 
+        let unrecognized_usage = database_unread_usage(&message_rows);
         let messages = database_messages(&message_rows, parts)?;
         Ok(parse_transcript(
-            session,
+            with_unrecognized_usage(session, unrecognized_usage),
             &messages,
             tail,
             Vec::new(),
@@ -871,6 +872,7 @@ impl OpenCodeBackend {
         ))?;
         let mut cuts = TextCuts::default();
         let mut read = 0;
+        let mut unrecognized_usage = 0;
         if let Some(newest) = newest.first() {
             let newest = RowKey::from_row(newest)?;
             let mut after = None;
@@ -894,6 +896,7 @@ impl OpenCodeBackend {
                     usize::MAX,
                 )?)?;
                 cuts.count(&rows, &parts);
+                unrecognized_usage += database_unread_usage(&rows);
                 read += rows.len() as u64;
                 let whole_page = rows.len() == MESSAGE_PAGE;
                 for message in database_messages(&rows, parts)? {
@@ -918,6 +921,7 @@ impl OpenCodeBackend {
             terminal: None,
             notes: Vec::new(),
             unmapped: None,
+            unrecognized_usage,
             kinds: None,
         })
     }
@@ -1007,6 +1011,8 @@ impl OpenCodeBackend {
             terminal: None,
             notes: Vec::new(),
             unmapped: None,
+            // The API projection carries no token counters on its messages.
+            unrecognized_usage: 0,
             kinds: None,
         })
     }
@@ -1284,8 +1290,11 @@ impl Backend for OpenCodeBackend {
         ))
     }
 
-    fn stream_session(&self, session: &Session, _read: &StreamedTranscript) -> Result<Session> {
-        Ok(session.clone())
+    fn stream_session(&self, session: &Session, read: &StreamedTranscript) -> Result<Session> {
+        Ok(with_unrecognized_usage(
+            session.clone(),
+            read.unrecognized_usage,
+        ))
     }
 
     /// OpenCode records relationships on session rows rather than in the
@@ -1387,11 +1396,19 @@ fn json_search_predicate(needle: &str) -> String {
 }
 
 /// A message row as a transcript read consumes it: the `role` and `time` of
-/// its data and never the raw data, which can outgrow a query response.
+/// its data, and whether it holds a token counter, never the raw data, which
+/// can outgrow a query response. OpenCode's usage shape is a `tokens` object
+/// of `input`, `output`, `reasoning`, and `cache.read` and `cache.write`.
 const DATABASE_MESSAGE_ROW: &str = "json_object( \
      'id', id, 'time_created', time_created, 'data', \
      json_object('role', json_extract(data, '$.role'), \
-                 'time', json_extract(data, '$.time'))) AS row";
+                 'time', json_extract(data, '$.time'), \
+                 'usage_counters', \
+                 json_type(data, '$.tokens.input') IN ('integer', 'real') \
+                 OR json_type(data, '$.tokens.output') IN ('integer', 'real') \
+                 OR json_type(data, '$.tokens.reasoning') IN ('integer', 'real') \
+                 OR json_type(data, '$.tokens.cache.read') IN ('integer', 'real') \
+                 OR json_type(data, '$.tokens.cache.write') IN ('integer', 'real'))) AS row";
 
 fn database_message_query(id: &str) -> String {
     format!(
@@ -1505,6 +1522,30 @@ fn group_parts(rows: Vec<Value>) -> Result<HashMap<String, Vec<Value>>> {
             .push(database_data(&row)?);
     }
     Ok(parts)
+}
+
+/// How many of these message rows carry OpenCode's usage shape on a message
+/// whose role the reader has no reading for. The session's counters are the
+/// session row's recorded total, so only a message outside the roles the
+/// reader projects can hold consumption its figure does not show.
+fn database_unread_usage(message_rows: &[Value]) -> usize {
+    message_rows
+        .iter()
+        .filter_map(|row| database_data(row).ok())
+        .filter(|data| !matches!(data["role"].as_str(), Some("user" | "assistant")))
+        .filter(|data| data["usage_counters"] == true || data["usage_counters"] == 1)
+        .count()
+}
+
+/// The session with `count` unrecognized usage-bearing records noted.
+fn with_unrecognized_usage(mut session: Session, count: usize) -> Session {
+    if count > 0 {
+        session
+            .usage_detail
+            .get_or_insert_with(Default::default)
+            .unrecognized_usage = count;
+    }
+    session
 }
 
 /// The messages these rows name, in row order, each carrying its parts.

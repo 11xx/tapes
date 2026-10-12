@@ -419,6 +419,7 @@ impl Backend for CodexBackend {
             gaps: read.gaps,
             notes: Vec::new(),
             unmapped: Some(reader.unmapped()),
+            unrecognized_usage: 0,
             kinds: None,
         })
     }
@@ -1112,6 +1113,8 @@ struct CodexUsageObserver {
     legacy: UsageCandidate,
     incomplete: BoundedReasons,
     bounds: BoundedReasons,
+    /// Records carrying codex's usage shape that neither usage reading counts.
+    unrecognized_usage: usize,
     activity: ActivityRange,
     series: Option<SeriesBuffer>,
 }
@@ -1145,6 +1148,7 @@ impl CodexUsageObserver {
             legacy: UsageCandidate::default(),
             incomplete: BoundedReasons::default(),
             bounds: BoundedReasons::default(),
+            unrecognized_usage: 0,
             activity: ActivityRange::default(),
             series: series_limit.map(SeriesBuffer::new),
         }
@@ -1178,6 +1182,8 @@ impl CodexUsageObserver {
             self.observe_modern(value, span, revision);
         } else if is_token_count(value) {
             self.observe_legacy(value, span, revision);
+        } else if codex_unread_usage(value) {
+            self.unrecognized_usage += 1;
         }
     }
 
@@ -1557,6 +1563,7 @@ impl CodexUsageObserver {
             attribution,
             measurement_incomplete: known_subtotal_notes(&measurement_coverage),
             measurement_coverage,
+            unrecognized_usage: self.unrecognized_usage,
             ..UsageDetail::default()
         }
         .into_option();
@@ -1808,6 +1815,31 @@ fn codex_rate_limits(value: &Value) -> Option<RateLimits> {
 
 fn epoch_seconds(seconds: i64) -> Option<chrono::DateTime<chrono::Utc>> {
     chrono::DateTime::from_timestamp(seconds, 0)
+}
+
+/// Whether a record carries codex's usage shape, a `payload.usage` object
+/// holding a token counter or a `payload.info` holding a running or
+/// per-response token usage, on a record that is neither a
+/// `token_usage_record` nor a `token_count` event, the two the usage
+/// readings count.
+fn codex_unread_usage(value: &Value) -> bool {
+    let payload = &value["payload"];
+    let counted = value["type"] == "token_usage_record" || is_token_count(value);
+    !counted
+        && (payload["usage"].as_object().is_some_and(|usage| {
+            [
+                "input_tokens",
+                "output_tokens",
+                "reasoning_output_tokens",
+                "cached_input_tokens",
+                "cache_write_input_tokens",
+                "total_tokens",
+            ]
+            .iter()
+            .any(|counter| usage.get(*counter).is_some_and(Value::is_number))
+        }) || ["total_token_usage", "last_token_usage"]
+            .iter()
+            .any(|usage| payload["info"][*usage].is_object()))
 }
 
 fn is_token_count(value: &Value) -> bool {
