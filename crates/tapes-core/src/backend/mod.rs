@@ -525,6 +525,13 @@ pub trait Backend {
             self.harness()
         )
     }
+    /// The sessions each of `sessions` is declared a fork of or child of, in
+    /// the same order, for a harness whose store records that outside the
+    /// recording a listing reads. The default declares none; a failed read
+    /// leaves the answer to the listing's own evidence.
+    fn declared_origins(&self, sessions: &[&Session]) -> Result<Vec<Vec<String>>> {
+        Ok(vec![Vec::new(); sessions.len()])
+    }
     /// Every relationship the whole recording names, read record by record so
     /// memory follows the references kept rather than the file. The default
     /// refuses: a bounded lineage read is not an answer to a whole one.

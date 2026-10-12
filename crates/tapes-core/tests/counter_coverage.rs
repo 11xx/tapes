@@ -102,7 +102,7 @@ fn claude_store(label: &str, sessions: &[(&str, Vec<Vec<&str>>)]) -> Store {
     let store = Store::new(label);
     for (id, requests) in sessions {
         let mut lines = vec![json!({
-            "type": "user", "sessionId": id, "uuid": "user",
+            "type": "user", "sessionId": id, "uuid": format!("{id}-user"),
             "timestamp": "2026-01-01T10:00:00Z",
             "message": {"role": "user", "content": "fixture"}
         })];
@@ -436,10 +436,21 @@ fn a_summary_sums_event_coverage_and_withholds_what_a_partial_session_qualifies(
     }
 }
 
+/// Declare `session` a fork of the session `origin` ids.
+fn forked_from(session: &mut agent_tapes_core::model::Session, origin: &str) {
+    session
+        .usage_detail
+        .get_or_insert_with(Default::default)
+        .copy_evidence = Some(agent_tapes_core::overlap::CopyEvidence {
+        origins: vec![origin.to_owned()],
+        ..Default::default()
+    });
+}
+
 #[test]
 fn a_summary_withholds_event_coverage_wherever_its_tokens_are_withheld() {
-    // Pi sessions may share events, so no exact union exists; each session's
-    // own coverage stays in its figure.
+    // A fork shares its origin's events, so no exact union exists; each
+    // session's own coverage stays in its figure.
     let store = pi_store(
         "overlap",
         &[
@@ -448,9 +459,10 @@ fn a_summary_withholds_event_coverage_wherever_its_tokens_are_withheld() {
         ],
     );
     let backend = PiBackend::new(&store.0);
-    let sessions = ["first", "second"]
+    let mut sessions = ["first", "second"]
         .map(|id| backend.locate(id).unwrap().unwrap())
         .to_vec();
+    forked_from(&mut sessions[1], "first");
     let summary = serde_json::to_value(usage::aggregate(&sessions, &[GroupBy::Harness])).unwrap();
     for (label, figure) in [
         ("totals", &summary["totals"]),

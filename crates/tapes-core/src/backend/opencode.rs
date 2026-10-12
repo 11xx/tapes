@@ -1289,6 +1289,53 @@ impl Backend for OpenCodeBackend {
         self.api_stream(session, turn)
     }
 
+    /// The session table names a fork's source in `fork_session_id` and a
+    /// child's parent in `parent_id`; the listing's metadata carries neither.
+    /// One query per page of ids reads both, and a store without the fork
+    /// column answers the shorter query.
+    fn declared_origins(&self, sessions: &[&Session]) -> Result<Vec<Vec<String>>> {
+        if !self.uses_database() {
+            return Ok(vec![Vec::new(); sessions.len()]);
+        }
+        let mut declared: HashMap<String, Vec<String>> = HashMap::new();
+        for page in sessions.chunks(MAX_DB_SEARCH_IDS) {
+            let ids = sql_id_list(
+                &page
+                    .iter()
+                    .map(|session| session.id.clone())
+                    .collect::<Vec<_>>(),
+            );
+            let rows = self.first_supported(&[
+                format!(
+                    "SELECT json_object('id', id, 'parent_id', parent_id, \
+                     'fork_session_id', fork_session_id) AS row FROM session \
+                     WHERE id IN ({ids})"
+                ),
+                format!(
+                    "SELECT json_object('id', id, 'parent_id', parent_id) AS row \
+                     FROM session WHERE id IN ({ids})"
+                ),
+            ])?;
+            for row in rows {
+                let Some(id) = row["id"].as_str() else {
+                    continue;
+                };
+                declared.insert(
+                    id.to_owned(),
+                    ["fork_session_id", "parent_id"]
+                        .iter()
+                        .filter_map(|column| row[*column].as_str())
+                        .map(str::to_owned)
+                        .collect(),
+                );
+            }
+        }
+        Ok(sessions
+            .iter()
+            .map(|session| declared.remove(&session.id).unwrap_or_default())
+            .collect())
+    }
+
     fn lineage(&self, session: &Session) -> Result<Lineage> {
         if self.uses_database() {
             return self.database_lineage(session);

@@ -279,6 +279,17 @@ fn apply(shape: Shape, session: &mut Session) -> bool {
     true
 }
 
+/// Declare `session` a fork of the session `origin` ids.
+fn forked_from(session: &mut agent_tapes_core::model::Session, origin: &str) {
+    session
+        .usage_detail
+        .get_or_insert_with(Default::default)
+        .copy_evidence = Some(agent_tapes_core::overlap::CopyEvidence {
+        origins: vec![origin.to_owned()],
+        ..Default::default()
+    });
+}
+
 fn read(store: &Store, bound: Option<u64>, full: bool) -> (Transcript, Value) {
     let backend = PiBackend::new(&store.0);
     let backend = match bound {
@@ -431,9 +442,10 @@ fn every_recorded_reason_qualifies_every_dependent_figure() {
                     case.affected,
                 );
             }
+            let figure = serde_json::to_value(usage::SessionUsageFigure::from(session)).unwrap();
             assert_native(
                 &format!("{label} session figure"),
-                &totals["session_figures"][0],
+                &figure,
                 case.reason,
                 case.affected,
             );
@@ -485,14 +497,14 @@ fn every_recorded_reason_qualifies_every_dependent_figure() {
                 case.affected,
             );
 
-            // Two Pi sessions may share events, so their union is bounded;
-            // the upper bound needs each counter completely measured.
+            // A fork may share its origin's events, so their union is
+            // bounded; the upper bound needs each counter completely measured.
             let mut twin = session.clone();
             twin.id = "twin".to_owned();
+            forked_from(&mut twin, &session.id);
             let unioned =
                 serde_json::to_value(usage::aggregate(&[session.clone(), twin], &[])).unwrap();
             assert!(unioned["totals"].get("tokens").is_none(), "{unioned}");
-            let figure = &totals["session_figures"][0];
             for counter in NATIVE {
                 let bound = &unioned["totals"]["identity_bounds"][counter];
                 let held = if counter == "cost" {
@@ -536,6 +548,7 @@ fn an_affected_session_leaves_a_healthy_sessions_figures_whole() {
         );
         let mut healthy = healthy.session;
         healthy.id = "healthy".to_owned();
+        let healthy_session = healthy.clone();
 
         let summary = serde_json::to_value(usage::aggregate(
             &[affected.session.clone(), healthy],
@@ -555,12 +568,8 @@ fn an_affected_session_leaves_a_healthy_sessions_figures_whole() {
         );
         assert_eq!(group["tokens"]["input"], 10, "{}: {group}", case.name);
         assert_eq!(group["disjoint"]["total"], 22, "{}: {group}", case.name);
-        let figure = summary["totals"]["session_figures"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|figure| figure["id"] == "healthy")
-            .unwrap();
+        let figure =
+            serde_json::to_value(usage::SessionUsageFigure::from(&healthy_session)).unwrap();
         assert!(
             figure.get("measurement_completeness").is_none(),
             "{}: {figure}",

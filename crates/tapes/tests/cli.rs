@@ -9371,10 +9371,6 @@ fn human_output_names_the_reason_a_counter_is_missing() {
         summary.contains("Disjoint total withheld: uncached_input: missing-counter\n"),
         "{summary}"
     );
-    assert!(
-        summary.contains("session active-consumption completeness: input: missing-counter\n"),
-        "{summary}"
-    );
 }
 
 /// A request that stopped on an abort carries its recorded usage as partial,

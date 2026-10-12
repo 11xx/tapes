@@ -390,12 +390,24 @@ fn a_measured_zero_subtotal_is_not_reclassified_by_unpriced_peer_usage() {
     }
 }
 
+/// Declare `session` a fork of the session `origin` ids.
+fn forked_from(session: &mut agent_tapes_core::model::Session, origin: &str) {
+    session
+        .usage_detail
+        .get_or_insert_with(Default::default)
+        .copy_evidence = Some(agent_tapes_core::overlap::CopyEvidence {
+        origins: vec![origin.to_owned()],
+        ..Default::default()
+    });
+}
+
 #[test]
 fn pi_selection_withholds_an_exact_union_and_keeps_session_figures() {
     let backend = PiBackend::new(fixtures("pi-active-consumption"));
     let parent = backend.locate("active-consumption").unwrap().unwrap();
     let mut fork = parent.clone();
     fork.id = "fork".to_owned();
+    forked_from(&mut fork, &parent.id);
     let (aggregate, partitions) =
         agent_tapes_core::usage::partitioned_aggregate(&[parent, fork], &[]);
     for tally in [
@@ -429,6 +441,7 @@ fn pi_bounds_keep_bases_separate_and_missing_counters_unmeasured() {
     let parent = backend.locate("active-consumption").unwrap().unwrap();
     let mut partial = parent.clone();
     partial.id = "partial".to_owned();
+    forked_from(&mut partial, &parent.id);
     partial.tokens.as_mut().unwrap().reasoning = None;
     partial
         .usage_detail
@@ -454,6 +467,8 @@ fn pi_bounds_keep_bases_separate_and_missing_counters_unmeasured() {
         );
     }
     let mut different_basis = parent.clone();
+    different_basis.id = "different-basis".to_owned();
+    forked_from(&mut different_basis, &parent.id);
     different_basis.accounting.as_mut().unwrap().basis =
         agent_tapes_core::model::AccountingBasis::RecordedTotal;
     let (aggregate, partitions) =
@@ -491,7 +506,7 @@ fn an_unreadable_peer_does_not_hide_healthy_pi_measurements() {
         agent_tapes_core::usage_summary_with_backends(&backends, &selection, &[]).unwrap();
     assert_eq!(summary.totals.cost.as_ref().unwrap().usd, 1.875);
     assert!(!summary.unreadable.is_empty());
-    assert_eq!(summary.totals.session_figures[0].id, "active-consumption");
+    assert_eq!(summary.totals.sessions, 1);
     for (path, view) in both(&store.0, "active-consumption") {
         assert_eq!(view["cost"]["usd"], 1.875, "{path}: {view}");
     }

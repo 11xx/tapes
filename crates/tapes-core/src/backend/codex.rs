@@ -23,6 +23,7 @@ use crate::model::{
     Role, Session, SourceDescriptor, TerminalObservation, TokenConvention, Tokens, TrailingRecord,
     Transcript, Turn, TurnKind, TurnSelection, UserDefault,
 };
+use crate::overlap::CopyEvidence;
 use crate::usage::{
     Credits, ModelUsage, ObservationBasis, ObservationClassification, RateLimits, RateWindow,
     UsageAttribution, UsageDetail, UsageObservation, UsageObservationOmissions,
@@ -146,7 +147,7 @@ impl CodexBackend {
         records.observe_read(&read.values, &read.spans, &read.gaps, &read.source_revision);
         let facts = records.finish();
 
-        let session = Session {
+        let mut session = Session {
             id: native.id().to_owned(),
             source: self.source(path),
             metadata: None,
@@ -168,6 +169,16 @@ impl CodexBackend {
             occurrence: None,
             usage_detail: facts.usage_detail,
         };
+        session.record_copy_evidence(CopyEvidence {
+            origins: opening
+                .iter()
+                .find(|value| value["type"] == "session_meta")
+                .and_then(|value| value["payload"]["forked_from_id"].as_str())
+                .map(str::to_owned)
+                .into_iter()
+                .collect(),
+            ..CopyEvidence::default()
+        });
         // The opening is the start of the file, so its first user turn is the
         // session's first user turn even when the tail cannot see it.
         let session = if read.truncated {
@@ -1729,7 +1740,14 @@ impl CodexRecords {
         let facts = self.finish();
         session.accounting = facts.accounting;
         session.tokens = facts.tokens;
+        let copies = session
+            .usage_detail
+            .as_ref()
+            .and_then(|detail| detail.copy_evidence.clone());
         session.usage_detail = facts.usage_detail;
+        if let Some(copies) = copies {
+            session.record_copy_evidence(copies);
+        }
         session.model = facts.model;
         session.model_observation = facts.model_observation;
         session.model_selections = facts.model_selections;

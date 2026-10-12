@@ -35,6 +35,7 @@ pub mod lineage;
 pub mod measurement;
 pub mod model;
 mod model_observation;
+pub mod overlap;
 pub mod reader;
 pub mod reconcile;
 pub mod scope;
@@ -1931,7 +1932,22 @@ pub fn usage_summary_with_backends(
         &selection.filters,
         selection.sort,
     )?;
-    let (aggregate, partitions) = usage::partitioned_aggregate(&listed.sessions, by);
+    let mut sessions = listed.sessions;
+    declare_origins(backends, &listed.origins, &mut sessions);
+    let overlap = overlap::Overlap::of(&sessions, &mut |index| {
+        let backend = backends[listed.origins[index]].as_ref();
+        let transcript = declared_transcript(backend, &sessions[index], EXPORT_TAIL).ok()?;
+        backend
+            .consumption_event_keys(
+                &transcript.session,
+                transcript.read.as_ref(),
+                usage::ConsumptionKeyOptions {
+                    limit: OVERLAP_KEY_LIMIT,
+                },
+            )
+            .ok()
+    });
+    let (aggregate, partitions) = usage::partitioned_aggregate_with(&sessions, by, &overlap);
     Ok(UsageSummary {
         schema: USAGE_SUMMARY_SCHEMA,
         selection: selection_record(selection, limit),
@@ -1946,6 +1962,30 @@ pub fn usage_summary_with_backends(
         scan_truncated: listed.scan_truncated,
         unplaced: Unplaced::from_directories(listed.unplaced),
     })
+}
+
+/// Event keys read per session of a related pair when its exact union is
+/// asked for: the most a key read accepts.
+const OVERLAP_KEY_LIMIT: usize = 10_000;
+
+/// Add to each session the fork origins its harness's store declares outside
+/// the recording a listing reads, one batched question per backend.
+fn declare_origins(backends: &[Box<dyn Backend>], origins: &[usize], sessions: &mut [Session]) {
+    for (index, backend) in backends.iter().enumerate() {
+        let positions: Vec<usize> = (0..sessions.len())
+            .filter(|position| origins[*position] == index)
+            .collect();
+        let held: Vec<&Session> = positions
+            .iter()
+            .map(|position| &sessions[*position])
+            .collect();
+        let Ok(declared) = backend.declared_origins(&held) else {
+            continue;
+        };
+        for (position, declared) in positions.into_iter().zip(declared) {
+            sessions[position].declare_origins(declared);
+        }
+    }
 }
 
 pub(crate) fn selection_record(selection: &SessionSelection<'_>, limit: usize) -> SelectionRecord {

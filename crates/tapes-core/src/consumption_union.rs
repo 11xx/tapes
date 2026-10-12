@@ -36,6 +36,12 @@ pub enum UnionWithheld {
     /// A key of one selection names a provider response another selection's
     /// key names, and no verified copy establishes them as one event.
     UnestablishedIdentity,
+    /// More than two selections are related, and a union is computed for a
+    /// parent and one fork.
+    MoreThanTwoSelections,
+    /// A related selection lies outside the set being summed, so the union
+    /// of the members within it is not the union of their events.
+    PartialSelection,
 }
 
 /// The amounts of a union that is exact in membership. A category or the cost

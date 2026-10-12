@@ -28,6 +28,7 @@ use crate::model::{
     KindDeclaration, Launch, Model, Role, Session, SourceDescriptor, Tokens, TrailingRecord,
     Transcript, Turn, TurnKind, TurnSelection,
 };
+use crate::overlap::CopyEvidence;
 use crate::reconcile::{FailureReason, FamilyLedger, Reconciliation, SourceRole};
 use crate::usage::{
     Durations, MeasurementCoverage, ModelUsage, RecordedUsage, RequestDimensions, UsageDetail,
@@ -198,7 +199,7 @@ impl ClaudeBackend {
             tokens.as_ref(),
         );
 
-        let session = Session {
+        let mut session = Session {
             id: native_id.to_owned(),
             source: self.source(path),
             metadata: None,
@@ -220,6 +221,11 @@ impl ClaudeBackend {
             occurrence: None,
             usage_detail,
         };
+        let mut copies = CopyEvidence::default();
+        for value in opening.iter().chain(&read.values) {
+            observe_copies(&mut copies, value);
+        }
+        session.record_copy_evidence(copies);
         // The opening is the start of the file, so its first user turn is the
         // session's first user turn even when the tail cannot see it.
         let session = if read.truncated {
@@ -871,10 +877,12 @@ struct ClaudeRecords {
     title: Option<String>,
     directory: Option<String>,
     activity: ActivityRange,
+    copies: CopyEvidence,
 }
 
 impl ClaudeRecords {
     fn observe(&mut self, value: &Value) {
+        observe_copies(&mut self.copies, value);
         self.launch = merge_launch(self.launch, claude_entrypoint(value));
         if value["type"] == "cost-state" {
             self.cost_state = Some(value.clone());
@@ -929,7 +937,15 @@ impl ClaudeRecords {
         session.launch = self.launch;
         (session.model_observation, session.model_selections) = self.selections.finish(true);
         self.activity.apply(session);
+        session.record_copy_evidence(self.copies);
     }
+}
+
+/// A forked conversation keeps its origin's records unchanged except for the
+/// session id, so the request ids and message uuids of the history it copied
+/// recur in the fork.
+fn observe_copies(copies: &mut CopyEvidence, value: &Value) {
+    copies.observe_record(value["requestId"].as_str(), value["uuid"].as_str());
 }
 
 fn claude_entrypoint(value: &Value) -> Option<Launch> {

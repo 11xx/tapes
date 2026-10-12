@@ -25,6 +25,7 @@ use crate::model::{
     KindDeclaration, Launch, Model, ReadGap, Role, Session, SourceDescriptor, Tokens,
     TrailingRecord, Transcript, Turn, TurnKind, TurnSelection, UserDefault,
 };
+use crate::overlap::CopyEvidence;
 use crate::usage::{Consumption, ConsumptionEvents, ConsumptionIdentity, ModelUsage, UsageDetail};
 use agent_tapes_discovery::{Harness as NativeHarness, IdentityBasis, NativeSession, NativeStore};
 
@@ -586,6 +587,7 @@ impl Backend for PiBackend {
             .iter()
             .filter(|position| entries[**position].unread_usage)
             .count();
+        let copies = pi_copy_evidence(forked_from.clone());
         let consumption =
             consumption.finish(AccountingCoverage::Session, streamed.skipped, forked_from);
 
@@ -627,6 +629,7 @@ impl Backend for PiBackend {
             measurement_completeness: usage.measurement_completeness,
             unrecognized_usage,
             consumption,
+            copy_evidence: Some(copies).filter(|copies| !copies.is_empty()),
             ..UsageDetail::default()
         }
         .into_option();
@@ -826,6 +829,16 @@ fn pi_cwd(value: &Value) -> Option<&str> {
         .flatten()
 }
 
+/// What a fork's header says about the history it copied: the session it
+/// names, or that it names none that can be identified.
+fn pi_copy_evidence(parent: Option<Option<String>>) -> CopyEvidence {
+    CopyEvidence {
+        origin_unplaced: parent == Some(None),
+        origins: parent.flatten().into_iter().collect(),
+        ..CopyEvidence::default()
+    }
+}
+
 /// The session a fork's header names as the one it was copied from.
 fn pi_parent_session(value: &Value) -> Option<Option<String>> {
     (value["type"] == "session")
@@ -904,6 +917,8 @@ fn apply_recording_usage(
         }
         consumption.unrecognized_usage += usize::from(pi_unread_usage(entry));
     }
+    let parent = recording.opening().iter().find_map(pi_parent_session);
+    let copies = pi_copy_evidence(parent.clone());
     let consumption = consumption.finish(
         if read.truncated {
             AccountingCoverage::ReadWindow
@@ -911,7 +926,7 @@ fn apply_recording_usage(
             AccountingCoverage::Session
         },
         read.skipped,
-        recording.opening().iter().find_map(pi_parent_session),
+        parent,
     );
     let usage = pi_usage(active);
     session.accounting = branch_accounting(
@@ -929,6 +944,7 @@ fn apply_recording_usage(
         measurement_completeness: usage.measurement_completeness,
         unrecognized_usage: active.iter().filter(|entry| pi_unread_usage(entry)).count(),
         consumption,
+        copy_evidence: Some(copies).filter(|copies| !copies.is_empty()),
         ..UsageDetail::default()
     }
     .into_option();

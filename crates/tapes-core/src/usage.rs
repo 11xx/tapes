@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::backend::{skipped_records_note, StreamedTranscript};
+use crate::consumption_union::ConsumptionAmounts;
 use crate::content::ContentInventory;
 use crate::measurement::{Measured, MeasurementCompleteness, MeasurementReason};
 use crate::model::{
@@ -21,6 +22,7 @@ use crate::model::{
     Session, SessionMetadata, SourceBound, SourceDescriptor, TerminalObservation, TextTailEvidence,
     TokenConvention, Tokens, Transcript, Truncation, Turn,
 };
+use crate::overlap::{CopyEvidence, Disjointness, Overlap, RelatedSessions, UsageOverlap};
 
 pub const USAGE_SCHEMA: &str = "tapes-usage/11";
 
@@ -66,6 +68,9 @@ pub struct UsageDetail {
     pub consumption: Option<Consumption>,
     pub recorded_total: Option<RecordedUsage>,
     pub accounting_notes: Vec<String>,
+    /// What the recording says about history it may share with other
+    /// sessions: a declared fork origin, and the ids its read visited.
+    pub copy_evidence: Option<CopyEvidence>,
 }
 
 impl UsageDetail {
@@ -86,6 +91,10 @@ impl UsageDetail {
             && self.consumption.is_none()
             && self.recorded_total.is_none()
             && self.accounting_notes.is_empty()
+            && self
+                .copy_evidence
+                .as_ref()
+                .is_none_or(CopyEvidence::is_empty)
     }
 
     /// The detail, or nothing when the harness recorded none of it.
@@ -1202,8 +1211,14 @@ pub struct UsageTally {
     pub identity_unestablished: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub identity_bounds: Option<UsageIdentityBounds>,
+    /// Each session's own figure, present where an overlap group's amounts
+    /// are not simply the sessions' sum.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub session_figures: Vec<SessionUsageFigure>,
+    /// How the figure knows its sessions share no events, and which sessions
+    /// the recordings relate. Absent for a single session.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub overlap: Option<UsageOverlap>,
 }
 
 /// One session's measurement, with no recording locator or raw diagnostic.
@@ -1316,8 +1331,13 @@ impl DisjointSum {
             self.qualify_every_category(MeasurementReason::Undetermined);
             return;
         };
+        self.add_disjoint(session.harness(), &disjoint);
+    }
+
+    /// Add `disjoint`, one harness's categories, without counting a session.
+    fn add_disjoint(&mut self, harness: &str, disjoint: &DisjointTokens) {
         self.conventions
-            .insert(session.harness().to_owned(), disjoint.convention);
+            .insert(harness.to_owned(), disjoint.convention);
         for (total, value) in [
             (&mut self.uncached_input, disjoint.uncached_input),
             (&mut self.cache_read, disjoint.cache_read),
@@ -1328,12 +1348,12 @@ impl DisjointSum {
                 *total = Some(total.unwrap_or(0).saturating_add(value));
             }
         }
-        if let Some(writes) = disjoint.cache_write {
-            self.cache_write.get_or_insert_default().add(&writes);
+        if let Some(writes) = &disjoint.cache_write {
+            self.cache_write.get_or_insert_default().add(writes);
         }
         self.measurement_completeness
             .merge(&disjoint.measurement_completeness);
-        for name in disjoint.missing {
+        for name in &disjoint.missing {
             *self.missing.entry(name).or_default() += 1;
         }
     }
@@ -1398,6 +1418,9 @@ pub fn aggregate(sessions: &[Session], by: &[GroupBy]) -> UsageAggregate {
     partitioned_aggregate(sessions, by).0
 }
 
+/// The groups and totals as plain sums, before any accounting domain or
+/// overlap withholds them.
+#[cfg(test)]
 fn unchecked_aggregate(sessions: &[Session], by: &[GroupBy]) -> UsageAggregate {
     let mut groups: BTreeMap<Vec<Option<String>>, Tally> = BTreeMap::new();
     let mut totals = Tally::default();
@@ -1474,6 +1497,7 @@ struct Tally {
 
 impl Tally {
     fn add(&mut self, session: &Session) {
+        self.add_facts(session);
         self.measurement_completeness
             .merge(&session.selected_measurement_completeness());
         for (counter, coverage) in session
@@ -1489,15 +1513,8 @@ impl Tally {
             sum.missing += coverage.missing;
             sum.unpriced += coverage.unpriced;
         }
-        self.sessions += 1;
         if let Some(coverage) = session.cost_coverage() {
-            let total = self.cost_coverage.get_or_insert(CostCoverage {
-                complete: true,
-                ..CostCoverage::default()
-            });
-            total.complete &= coverage.complete;
-            total.zero_written_requests += coverage.zero_written_requests;
-            total.zero_written_observations += coverage.zero_written_observations;
+            self.add_cost_coverage(&coverage);
         }
         self.disjoint.add(session);
         if let Some(tokens) = &session.tokens {
@@ -1511,6 +1528,52 @@ impl Tally {
             self.cost_usd += cost.usd;
             self.cost_counted += 1;
         }
+    }
+
+    /// Add sessions whose events overlap by their exact union: the union's
+    /// disjoint categories and cost, and each session's own accounting and
+    /// model facts. The sessions' native counters are not summed, because
+    /// they count the shared events once per session.
+    fn add_union<'a>(
+        &mut self,
+        sessions: impl Iterator<Item = &'a Session>,
+        amounts: &ConsumptionAmounts,
+    ) {
+        let mut harness = None;
+        let mut count = 0;
+        for session in sessions {
+            self.add_facts(session);
+            harness.get_or_insert(session.harness());
+            count += 1;
+        }
+        self.disjoint.sessions += count;
+        if let Some(harness) = harness {
+            self.disjoint.add_disjoint(harness, &amounts.disjoint);
+        }
+        if let Some(coverage) = &amounts.cost_coverage {
+            self.add_cost_coverage(coverage);
+        }
+        if let Some(cost) = &amounts.cost {
+            self.cost_usd += cost.usd;
+            self.cost_counted += count;
+        }
+    }
+
+    fn add_cost_coverage(&mut self, coverage: &CostCoverage) {
+        let total = self.cost_coverage.get_or_insert(CostCoverage {
+            complete: true,
+            ..CostCoverage::default()
+        });
+        total.complete &= coverage.complete;
+        total.zero_written_requests += coverage.zero_written_requests;
+        total.zero_written_observations += coverage.zero_written_observations;
+    }
+
+    /// What a session contributes to a selection whatever amounts are summed:
+    /// that it was selected, how its counters are accounted, and its model
+    /// observations.
+    fn add_facts(&mut self, session: &Session) {
+        self.sessions += 1;
         // Accounting is present exactly when a counter is, so its absence is
         // the session that recorded nothing to sum.
         match session
@@ -1585,6 +1648,7 @@ impl Tally {
             identity_unestablished: false,
             identity_bounds: None,
             session_figures: Vec::new(),
+            overlap: None,
         }
     }
 }
@@ -2104,46 +2168,96 @@ pub fn partitioned_aggregate(
     sessions: &[Session],
     by: &[GroupBy],
 ) -> (UsageAggregate, Vec<AccountingPartition>) {
-    let mut aggregate = unchecked_aggregate(sessions, by);
-    let mut partitions: BTreeMap<(String, String), (Option<Accounting>, Tally, Domains)> =
+    partitioned_aggregate_with(sessions, by, &Overlap::of(sessions, &mut |_| None))
+}
+
+/// As [`partitioned_aggregate`], relating the sessions by `overlap`, which
+/// was computed over the same `sessions`.
+pub fn partitioned_aggregate_with(
+    sessions: &[Session],
+    by: &[GroupBy],
+    overlap: &Overlap,
+) -> (UsageAggregate, Vec<AccountingPartition>) {
+    let mut groups: BTreeMap<Vec<Option<String>>, Vec<usize>> = BTreeMap::new();
+    let mut partitions: BTreeMap<(String, String), (Option<Accounting>, Vec<usize>)> =
         BTreeMap::new();
-    let mut domains: BTreeMap<Vec<Option<String>>, Domains> = BTreeMap::new();
-    let mut all = Domains::default();
-    for session in sessions {
-        let key = (
-            session.harness().to_owned(),
-            format!("{:?}", session.accounting),
-        );
-        let partition = partitions.entry(key.clone()).or_insert_with(|| {
-            (
-                session.accounting.clone(),
-                Tally::default(),
-                Domains::default(),
-            )
-        });
-        partition.1.add(session);
-        partition.2.add(session, &key);
-        let group = by.iter().map(|dimension| dimension.of(session)).collect();
-        domains.entry(group).or_default().add(session, &key);
-        all.add(session, &key);
+    for (index, session) in sessions.iter().enumerate() {
+        groups
+            .entry(by.iter().map(|dimension| dimension.of(session)).collect())
+            .or_default()
+            .push(index);
+        partitions
+            .entry(accounting_key(session))
+            .or_insert_with(|| (session.accounting.clone(), Vec::new()))
+            .1
+            .push(index);
     }
-    all.apply(&mut aggregate.totals);
-    for (group, domains) in aggregate.groups.iter_mut().zip(domains.into_values()) {
-        domains.apply(&mut group.tally);
-    }
+    let everything = (0..sessions.len()).collect::<Vec<_>>();
+    let aggregate = UsageAggregate {
+        groups: groups
+            .into_iter()
+            .map(|(values, members)| UsageGroup {
+                key: group_key(by, &values),
+                tally: summarize(sessions, &members, overlap),
+            })
+            .collect(),
+        totals: summarize(sessions, &everything, overlap),
+    };
     let partitions = partitions
         .into_iter()
-        .map(|((harness, _), (accounting, tally, domains))| {
-            let mut tally = tally.finish();
-            domains.apply(&mut tally);
-            AccountingPartition {
+        .map(
+            |((harness, _), (accounting, members))| AccountingPartition {
                 harness,
                 accounting,
-                tally,
-            }
-        })
+                tally: summarize(sessions, &members, overlap),
+            },
+        )
         .collect();
     (aggregate, partitions)
+}
+
+fn accounting_key(session: &Session) -> (String, String) {
+    (
+        session.harness().to_owned(),
+        format!("{:?}", session.accounting),
+    )
+}
+
+/// The figure of the sessions at `members`. Sessions the overlap relates
+/// within the set are added as one unit: by their exact union where their
+/// event keys establish it, and otherwise not at all, their exact totals
+/// withheld and bounded.
+fn summarize(sessions: &[Session], members: &[usize], overlap: &Overlap) -> UsageTally {
+    let buckets = overlap.buckets(members);
+    let bucketed = buckets
+        .iter()
+        .flat_map(|bucket| bucket.members.iter().copied())
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut tally = Tally::default();
+    let mut domains = Domains::default();
+    let mut position = std::collections::BTreeMap::new();
+    for index in members {
+        let session = &sessions[*index];
+        position.insert(*index, domains.add(session, &accounting_key(session)));
+        if !bucketed.contains(index) {
+            tally.add(session);
+        }
+    }
+    for bucket in &buckets {
+        let held = bucket.members.iter().map(|index| &sessions[*index]);
+        match bucket.exact() {
+            Some(amounts) => tally.add_union(held, amounts),
+            None => held.for_each(|session| tally.add(session)),
+        }
+        domains.relate(
+            bucket.members.iter().map(|index| position[index]).collect(),
+            bucket.related(sessions),
+            bucket.exact().is_some(),
+        );
+    }
+    let mut tally = tally.finish();
+    domains.apply(&mut tally);
+    tally
 }
 
 /// The accounting domains one group's counters span. Native counters add
@@ -2161,13 +2275,19 @@ struct Domains {
     /// an amount: a recorded total is one event that holds its counters.
     covered_unestablished: std::collections::BTreeSet<String>,
     accounting: std::collections::BTreeSet<String>,
-    pi: bool,
     figures: Vec<SessionUsageFigure>,
+    /// The overlap groups among the figures, as positions in `figures`.
+    units: Vec<Vec<usize>>,
+    related: Vec<RelatedSessions>,
+    /// Some overlap group's exact totals are withheld.
+    withheld: bool,
+    /// Some overlap group was added by its exact union.
+    unioned: bool,
 }
 
 impl Domains {
-    fn add(&mut self, session: &Session, key: &(String, String)) {
-        self.pi |= session.harness() == "pi";
+    /// Record `session`, answering the position of its figure.
+    fn add(&mut self, session: &Session, key: &(String, String)) -> usize {
         self.figures.push(SessionUsageFigure::from(session));
         if session.tokens.is_some() || session.cost.is_some() {
             self.native.insert(key.clone());
@@ -2190,10 +2310,18 @@ impl Domains {
         if session.tokens.is_some() {
             self.accounting.insert(key.1.clone());
         }
+        self.figures.len() - 1
     }
 
-    fn apply(&self, tally: &mut UsageTally) {
-        if self.pi {
+    fn relate(&mut self, unit: Vec<usize>, related: RelatedSessions, exact: bool) {
+        self.units.push(unit);
+        self.withheld |= !exact;
+        self.unioned |= exact;
+        self.related.push(related);
+    }
+
+    fn apply(self, tally: &mut UsageTally) {
+        if self.withheld || self.unioned {
             tally.session_figures.clone_from(&self.figures);
         }
         if !self.events_share_a_domain() {
@@ -2208,13 +2336,25 @@ impl Domains {
         if self.accounting.len() > 1 {
             tally.disjoint = None;
         }
-        if self.pi && self.figures.len() > 1 {
+        if self.unioned {
+            // A union has only disjoint categories, so the native counters
+            // that would sum the same sessions again are not offered.
+            tally.tokens = None;
+            tally.measurement_coverage.clear();
+        }
+        if self.withheld {
             tally.identity_unestablished = true;
             tally.identity_bounds = (self.native.len() == 1).then(|| self.bounds());
             tally.tokens = None;
             tally.cost = None;
             tally.disjoint = None;
             tally.measurement_coverage.clear();
+        }
+        if self.figures.len() > 1 {
+            tally.overlap = Some(UsageOverlap {
+                disjointness: Disjointness::InferredFromAbsentCopyEvidence,
+                related: self.related,
+            });
         }
     }
 
@@ -2234,30 +2374,66 @@ impl Domains {
             })
     }
 
+    /// The figures grouped into units that may share events: each overlap
+    /// group, and every other session alone.
+    fn units(&self) -> Vec<Vec<usize>> {
+        let grouped = self
+            .units
+            .iter()
+            .flatten()
+            .copied()
+            .collect::<std::collections::BTreeSet<_>>();
+        self.units
+            .iter()
+            .cloned()
+            .chain(
+                (0..self.figures.len())
+                    .filter(|position| !grouped.contains(position))
+                    .map(|position| vec![position]),
+            )
+            .collect()
+    }
+
+    /// Bounds on what the selection spent. A unit's sessions may share all
+    /// their events, so it spends at least its largest member's amount and at
+    /// most the sum; units share nothing, so they add.
     fn bounds(&self) -> UsageIdentityBounds {
+        let units = self.units();
         let tokens = |name: &str, counter: fn(&Tokens) -> Option<u64>| {
             let values = self
                 .figures
                 .iter()
                 .map(|figure| figure.tokens.as_ref().and_then(counter))
                 .collect::<Vec<_>>();
-            values.iter().flatten().copied().max().map(|at_least| {
-                let complete = self
-                    .figures
-                    .iter()
-                    .zip(&values)
-                    .all(|(figure, value)| value.is_some() && figure.counter_complete(name));
-                QuantityBounds {
-                    at_least,
-                    at_most: complete
-                        .then(|| values.into_iter().flatten().fold(0u64, u64::saturating_add)),
-                }
+            values.iter().flatten().next()?;
+            let at_least = units
+                .iter()
+                .map(|unit| {
+                    unit.iter()
+                        .filter_map(|position| values[*position])
+                        .max()
+                        .unwrap_or(0)
+                })
+                .fold(0u64, u64::saturating_add);
+            let complete = self
+                .figures
+                .iter()
+                .zip(&values)
+                .all(|(figure, value)| value.is_some() && figure.counter_complete(name));
+            Some(QuantityBounds {
+                at_least,
+                at_most: complete.then(|| {
+                    values
+                        .iter()
+                        .flatten()
+                        .fold(0u64, |sum, v| sum.saturating_add(*v))
+                }),
             })
         };
         let costs = self
             .figures
             .iter()
-            .filter_map(|figure| figure.cost.as_ref().map(|cost| cost.usd))
+            .map(|figure| figure.cost.as_ref().map(|cost| cost.usd))
             .collect::<Vec<_>>();
         UsageIdentityBounds {
             input: tokens("input", |tokens| tokens.input),
@@ -2265,18 +2441,22 @@ impl Domains {
             reasoning: tokens("reasoning", |tokens| tokens.reasoning),
             cache_read: tokens("cache_read", |tokens| tokens.cache_read),
             cache_write: tokens("cache_write", |tokens| tokens.cache_write),
-            cost: costs
-                .iter()
-                .copied()
-                .reduce(f64::max)
-                .map(|at_least| QuantityBounds {
-                    at_least,
-                    at_most: self
-                        .figures
-                        .iter()
-                        .all(|figure| figure.cost.is_some() && figure.counter_complete("cost"))
-                        .then(|| costs.iter().sum()),
-                }),
+            cost: costs.iter().flatten().next().map(|_| QuantityBounds {
+                at_least: units
+                    .iter()
+                    .map(|unit| {
+                        unit.iter()
+                            .filter_map(|position| costs[*position])
+                            .reduce(f64::max)
+                            .unwrap_or(0.0)
+                    })
+                    .sum(),
+                at_most: self
+                    .figures
+                    .iter()
+                    .all(|figure| figure.cost.is_some() && figure.counter_complete("cost"))
+                    .then(|| costs.iter().flatten().sum()),
+            }),
         }
     }
 }
@@ -2289,6 +2469,8 @@ impl SessionUsageFigure {
 
 #[cfg(test)]
 mod partition_tests {
+    use serde_json::json;
+
     use super::*;
     use crate::model::{InputConvention, OutputConvention};
 
@@ -2454,7 +2636,7 @@ mod partition_tests {
 
     #[test]
     fn public_aggregates_classify_incoming_zero_cost_and_keep_priced_subtotals() {
-        let mut zero = recorded("pi", native(40, 60, 10, 12, 14));
+        let mut zero = identified("pi", "origin", native(40, 60, 10, 12, 14));
         zero.cost = Some(Cost { usd: 0.0 });
         let alone = aggregate(&[zero.clone()], &[]);
         assert!(alone.totals.cost.is_none());
@@ -2465,7 +2647,8 @@ mod partition_tests {
             1
         );
         assert_eq!(value["totals"]["counted"]["cost"], 0);
-        let mut priced = zero.clone();
+        let mut priced = forked_from(zero.clone(), "origin");
+        priced.id = "fork".to_owned();
         priced.cost = Some(Cost { usd: 0.5 });
         let (mixed, partitions) = partitioned_aggregate(&[zero, priced], &[]);
         assert!(mixed.totals.cost.is_none());
@@ -2512,5 +2695,261 @@ mod partition_tests {
         assert_eq!(high.key.variant.as_deref(), Some("high"));
         assert!(high.tally.mixed_accounting);
         assert!(high.tally.tokens.is_none());
+    }
+
+    fn identified(harness: &str, id: &str, tokens: Tokens) -> Session {
+        Session {
+            id: id.to_owned(),
+            ..recorded(harness, tokens)
+        }
+    }
+
+    fn with_evidence(mut session: Session, edit: impl FnOnce(&mut CopyEvidence)) -> Session {
+        let detail = session
+            .usage_detail
+            .get_or_insert_with(UsageDetail::default);
+        edit(
+            detail
+                .copy_evidence
+                .get_or_insert_with(CopyEvidence::default),
+        );
+        session
+    }
+
+    fn forked_from(session: Session, origin: &str) -> Session {
+        with_evidence(session, |evidence| {
+            evidence.origins = vec![origin.to_owned()]
+        })
+    }
+
+    fn holding_request(session: Session, request: &str) -> Session {
+        with_evidence(session, |evidence| evidence.request_ids.observe(request))
+    }
+
+    /// Every figure a selection reports: the total, its one group, and its
+    /// one partition.
+    fn figures(sessions: &[Session]) -> Vec<serde_json::Value> {
+        let (aggregate, partitions) = partitioned_aggregate(sessions, &[GroupBy::Harness]);
+        [
+            &aggregate.totals,
+            &aggregate.groups[0].tally,
+            &partitions[0].tally,
+        ]
+        .into_iter()
+        .map(|tally| serde_json::to_value(tally).unwrap())
+        .collect()
+    }
+
+    fn assert_withheld(value: &serde_json::Value) {
+        for absent in ["tokens", "cost", "disjoint"] {
+            assert!(value.get(absent).is_none(), "{absent} in {value}");
+        }
+        assert_eq!(value["identity_unestablished"], true, "{value}");
+    }
+
+    /// A Codex fork names its origin in its header, so the two are one
+    /// overlap group whatever their recorded amounts.
+    #[test]
+    fn a_codex_fork_and_its_origin_withhold_their_exact_union_with_bounds() {
+        let origin = identified("codex", "origin", native(1_000, 100, 10, 400, 0));
+        let fork = forked_from(
+            identified("codex", "fork", native(1_300, 150, 20, 700, 0)),
+            "origin",
+        );
+        for value in figures(&[origin, fork]) {
+            assert_withheld(&value);
+            assert_eq!(
+                value["identity_bounds"]["input"],
+                json!({"at_least": 1_300, "at_most": 2_300}),
+                "{value}"
+            );
+            assert_eq!(value["session_figures"].as_array().unwrap().len(), 2);
+            assert_eq!(
+                value["overlap"]["related"],
+                json!([{
+                    "sessions": ["origin", "fork"],
+                    "evidence": ["declared-fork"],
+                    "union": "withheld",
+                    "withheld": ["omitted-keys"],
+                }]),
+                "{value}"
+            );
+        }
+    }
+
+    /// A Claude fork keeps no field naming its origin; the request ids it
+    /// copied are the evidence.
+    #[test]
+    fn claude_sessions_sharing_a_request_id_withhold_their_exact_union() {
+        let first = holding_request(
+            identified("claude", "first", native(5, 65, 12, 2_300, 360)),
+            "req-shared",
+        );
+        let second = holding_request(
+            identified("claude", "second", native(7, 80, 12, 2_400, 360)),
+            "req-shared",
+        );
+        for value in figures(&[first, second]) {
+            assert_withheld(&value);
+            assert_eq!(
+                value["identity_bounds"]["output"],
+                json!({"at_least": 80, "at_most": 145}),
+                "{value}"
+            );
+            assert_eq!(
+                value["overlap"]["related"][0]["evidence"],
+                json!(["shared-request-id"]),
+                "{value}"
+            );
+        }
+    }
+
+    #[test]
+    fn claude_sessions_sharing_a_message_uuid_are_related() {
+        let share = |session: Session| {
+            with_evidence(session, |evidence| evidence.message_uuids.observe("uuid-1"))
+        };
+        let first = share(identified("claude", "first", native(1, 2, 0, 3, 4)));
+        let second = share(identified("claude", "second", native(1, 2, 0, 3, 4)));
+        for value in figures(&[first, second]) {
+            assert_withheld(&value);
+            assert_eq!(
+                value["overlap"]["related"][0]["evidence"],
+                json!(["shared-message-uuid"]),
+                "{value}"
+            );
+        }
+    }
+
+    /// Sessions no recording relates are added, and the figure says its
+    /// disjointness is inferred from the absence of copy evidence.
+    #[test]
+    fn unrelated_sessions_are_summed_and_labelled_inferred() {
+        for harness in ["claude", "pi", "codex", "opencode"] {
+            let first = holding_request(
+                identified(harness, "first", native(5, 65, 12, 2_300, 360)),
+                "req-1",
+            );
+            let second = holding_request(
+                identified(harness, "second", native(7, 80, 12, 2_400, 360)),
+                "req-2",
+            );
+            for value in figures(&[first, second]) {
+                assert_eq!(value["tokens"]["output"], 145, "{harness}: {value}");
+                assert!(value.get("identity_unestablished").is_none(), "{value}");
+                assert!(value.get("session_figures").is_none(), "{value}");
+                assert_eq!(
+                    value["overlap"],
+                    json!({"disjointness": "inferred-from-absent-copy-evidence"}),
+                    "{harness}: {value}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_single_session_states_no_disjointness() {
+        for value in figures(&[identified("pi", "only", native(1, 2, 0, 3, 4))]) {
+            assert!(value.get("overlap").is_none(), "{value}");
+            assert!(value.get("session_figures").is_none(), "{value}");
+        }
+    }
+
+    /// The healthy session keeps its figure and its amount stays in the
+    /// bounds; the group names the part that was withheld.
+    #[test]
+    fn a_healthy_session_beside_a_withheld_pair_keeps_its_figure() {
+        let origin = identified("codex", "origin", native(1_000, 100, 10, 400, 0));
+        let fork = forked_from(
+            identified("codex", "fork", native(1_300, 150, 20, 700, 0)),
+            "origin",
+        );
+        let healthy = identified("codex", "healthy", native(500, 50, 5, 100, 0));
+        for value in figures(&[origin, healthy, fork]) {
+            assert_withheld(&value);
+            assert_eq!(
+                value["identity_bounds"]["input"],
+                json!({"at_least": 1_800, "at_most": 2_800}),
+                "{value}"
+            );
+            let figures = value["session_figures"].as_array().unwrap();
+            let healthy = figures.iter().find(|f| f["id"] == "healthy").unwrap();
+            assert_eq!(healthy["tokens"]["input"], 500, "{value}");
+            assert_eq!(
+                value["overlap"]["related"][0]["sessions"],
+                json!(["origin", "fork"]),
+                "{value}"
+            );
+            assert_eq!(value["overlap"]["related"].as_array().unwrap().len(), 1);
+        }
+    }
+
+    /// Relatedness is transitive: a fork of a fork shares the origin's
+    /// history, and a union is computed for one parent and one fork.
+    #[test]
+    fn a_chain_of_forks_is_one_withheld_group() {
+        let origin = identified("codex", "origin", native(100, 10, 0, 0, 0));
+        let middle = forked_from(
+            identified("codex", "middle", native(120, 12, 0, 0, 0)),
+            "origin",
+        );
+        let last = forked_from(
+            identified("codex", "last", native(140, 14, 0, 0, 0)),
+            "middle",
+        );
+        for value in figures(&[origin, middle, last]) {
+            assert_withheld(&value);
+            assert_eq!(
+                value["overlap"]["related"][0]["sessions"],
+                json!(["origin", "middle", "last"]),
+                "{value}"
+            );
+            assert_eq!(
+                value["overlap"]["related"][0]["withheld"],
+                json!(["more-than-two-selections"]),
+                "{value}"
+            );
+        }
+    }
+
+    /// A recording that says it is a fork without naming an origin cannot be
+    /// shown apart from any session of its harness.
+    #[test]
+    fn a_fork_with_an_unplaced_origin_is_related_to_its_harness() {
+        let fork = with_evidence(
+            identified("pi", "fork", native(100, 10, 0, 0, 0)),
+            |evidence| evidence.origin_unplaced = true,
+        );
+        let peer = identified("pi", "peer", native(200, 20, 0, 0, 0));
+        for value in figures(&[fork, peer]) {
+            assert_withheld(&value);
+            assert_eq!(
+                value["overlap"]["related"][0]["evidence"],
+                json!(["fork-origin-unplaced"]),
+                "{value}"
+            );
+        }
+    }
+
+    /// An overlap group split by a grouping dimension has no related
+    /// members within either group, but the selection's total still sees it.
+    #[test]
+    fn a_pair_split_across_groups_is_withheld_in_the_total() {
+        let mut fork = forked_from(
+            identified("codex", "fork", native(1_300, 150, 20, 700, 0)),
+            "origin",
+        );
+        fork.model = Some(Model {
+            id: "other".to_owned(),
+            variant: None,
+        });
+        let origin = identified("codex", "origin", native(1_000, 100, 10, 400, 0));
+        let aggregate = aggregate(&[origin, fork], &[GroupBy::Model]);
+        assert!(aggregate.totals.identity_unestablished);
+        assert!(aggregate.totals.tokens.is_none());
+        assert!(aggregate
+            .groups
+            .iter()
+            .all(|group| !group.tally.identity_unestablished && group.tally.tokens.is_some()));
     }
 }
