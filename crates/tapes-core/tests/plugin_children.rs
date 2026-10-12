@@ -768,3 +768,90 @@ fn completion_checks_parent_identity_in_the_opening_before_a_bounded_tail() {
     assert!(backend.lineage(&session).is_err());
     assert!(backend.stream_lineage(&session).is_err());
 }
+
+const SIBLING: &str = "a1d4e7f0b3c6a9258";
+
+#[test]
+fn another_childs_records_do_not_complete_a_child() {
+    for (index, agent) in [json!(SIBLING), Value::Null, json!(42)]
+        .into_iter()
+        .enumerate()
+    {
+        for position in 0..3 {
+            let store = Store::new(&format!("child-identity-{index}-{position}"));
+            store.write_parent(&[parent_prompt()]);
+            let mut records = vec![
+                brief(FINISHED),
+                ended(FINISHED),
+                json!({"type": "cost-state", "sessionId": PARENT, "agentId": FINISHED}),
+            ];
+            records[position]["agentId"] = agent.clone();
+            store.write_child(FINISHED, &plugin_meta(), &lines(&records));
+            let backend = ClaudeBackend::new(&store.0);
+            let session = backend.locate(PARENT).unwrap().unwrap();
+            for result in [backend.lineage(&session), backend.stream_lineage(&session)] {
+                let error = result.expect_err("another child's record cannot complete a child");
+                assert!(
+                    format!("{error:#}").contains("native child ID"),
+                    "{error:#}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn a_child_record_that_names_no_agent_still_belongs_to_its_recording() {
+    let store = Store::new("child-identity-unnamed");
+    store.write_parent(&[parent_prompt()]);
+    let mut record = ended(FINISHED);
+    record.as_object_mut().unwrap().remove("agentId");
+    store.write_child(FINISHED, &plugin_meta(), &lines(&[brief(FINISHED), record]));
+    let lineage = store.lineage(&ClaudeBackend::new(&store.0));
+    assert!(store.child(&lineage, FINISHED).completed_at.is_some());
+}
+
+#[test]
+fn completion_checks_the_childs_own_identity_in_the_opening_before_a_bounded_tail() {
+    let store = Store::new("child-opening-identity");
+    store.write_parent(&[parent_prompt()]);
+    let mut first = brief(FINISHED);
+    first["agentId"] = json!(SIBLING);
+    let mut records = vec![first];
+    records
+        .extend((0..100).map(|_| assistant(FINISHED, "work", "2026-10-09T18:35:00Z", Value::Null)));
+    records.push(ended(FINISHED));
+    store.write_child(FINISHED, &plugin_meta(), &lines(&records));
+    let backend = ClaudeBackend::new(&store.0).with_read_bytes(MIN_READ_BYTES);
+    let session = backend.locate(PARENT).unwrap().unwrap();
+    assert!(backend.lineage(&session).is_err());
+    assert!(backend.stream_lineage(&session).is_err());
+}
+
+#[test]
+fn a_child_transcript_rejects_another_childs_records() {
+    for position in 0..2 {
+        let store = Store::new(&format!("child-transcript-identity-{position}"));
+        store.write_parent(&[parent_prompt()]);
+        let mut records = vec![brief(FINISHED), ended(FINISHED)];
+        records[position]["agentId"] = json!(SIBLING);
+        store.write_child(FINISHED, &plugin_meta(), &lines(&records));
+        let backend = ClaudeBackend::new(&store.0);
+        let parent = backend.locate(PARENT).unwrap().unwrap();
+        let error = backend
+            .child_transcript(&parent, FINISHED)
+            .expect_err("a bounded child read rejects another child's record");
+        assert!(
+            format!("{error:#}").contains("native child ID"),
+            "{error:#}"
+        );
+        let error = backend
+            .stream_child_transcript(&parent, FINISHED, &mut |_| Ok(()))
+            .map(|_| ())
+            .expect_err("a streamed child read rejects another child's record");
+        assert!(
+            format!("{error:#}").contains("native child ID"),
+            "{error:#}"
+        );
+    }
+}

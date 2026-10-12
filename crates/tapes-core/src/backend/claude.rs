@@ -93,9 +93,9 @@ impl ClaudeBackend {
         &self,
         path: &Path,
         native_id: &str,
-        parent: Option<&str>,
+        child: &str,
     ) -> Result<(Session, Vec<Turn>, Jsonl)> {
-        self.parse_with_identity(path, native_id, true, parent)
+        self.parse_with_identity(path, native_id, true, Some(child))
     }
 
     fn parse_with_identity(
@@ -103,7 +103,7 @@ impl ClaudeBackend {
         path: &Path,
         native_id: &str,
         require_identity_record: bool,
-        parent: Option<&str>,
+        child: Option<&str>,
     ) -> Result<(Session, Vec<Turn>, Jsonl)> {
         let recording = read_recording(path, self.read_bytes)?;
         let opening = recording.opening();
@@ -113,7 +113,7 @@ impl ClaudeBackend {
             if let Some(id) = value.get("sessionId") {
                 identity_seen = true;
                 if id.as_str() != Some(native_id) {
-                    if parent.is_some() {
+                    if child.is_some() {
                         anyhow::bail!(
                             "child recording contains a different or invalid native parent ID"
                         );
@@ -124,8 +124,13 @@ impl ClaudeBackend {
                 }
             }
         }
+        if let Some(reference) = child {
+            for value in opening.iter().chain(&read.values) {
+                check_child_agent(value, reference)?;
+            }
+        }
         if require_identity_record && !identity_seen {
-            if parent.is_some() {
+            if child.is_some() {
                 anyhow::bail!("child recording has no native parent identity evidence");
             }
             anyhow::bail!("Claude recording has no native session identity evidence");
@@ -298,8 +303,7 @@ impl Backend for ClaudeBackend {
 
     fn child_transcript(&self, parent: &Session, reference: &str) -> Result<Transcript> {
         let path = child_recording(parent, reference)?;
-        let (mut session, turns, read) =
-            self.parse_with_parent(&path, &parent.id, Some(&parent.id))?;
+        let (mut session, turns, read) = self.parse_with_parent(&path, &parent.id, reference)?;
         session.id = format!("{}::{reference}", parent.id);
         if let Some(location) = session.source.location.as_mut() {
             location.native_path = Some(path);
@@ -617,17 +621,22 @@ impl Backend for ClaudeBackend {
         let path = self.recording(session)?;
         let mut ledger = FamilyLedger::default();
         let parent = ledger.source(SourceRole::Parent, None, format!("file:{}", path.display()));
-        reconcile_source(&mut ledger, parent, &path, &session.id, true)?;
+        reconcile_source(&mut ledger, parent, &path, &session.id, None)?;
         match subagent_files(&path) {
             Ok(files) => {
                 for file in files {
                     let child = ledger.source(
                         SourceRole::Child,
-                        Some(file.agent_id),
+                        Some(file.agent_id.clone()),
                         format!("file:{}", file.transcript.display()),
                     );
-                    match reconcile_source(&mut ledger, child, &file.transcript, &session.id, false)
-                    {
+                    match reconcile_source(
+                        &mut ledger,
+                        child,
+                        &file.transcript,
+                        &session.id,
+                        Some(&file.agent_id),
+                    ) {
                         Err(error) => {
                             ledger.failed(child, &session.id, failure_reason(&error));
                         }
@@ -677,6 +686,7 @@ impl Backend for ClaudeBackend {
                 }
                 identified = true;
             }
+            check_child_agent(value, reference)?;
             if span.start != last_end {
                 records.selections.interrupt();
             }
@@ -793,7 +803,7 @@ impl ClaudeBackend {
             ];
             source.extend(call.sources());
             let ending = if file.plugin_steered && call.completed_at.is_none() {
-                child_ending(&file.transcript, parent_id, self.read_bytes)?
+                child_ending(&file.transcript, parent_id, &file.agent_id, self.read_bytes)?
             } else {
                 None
             };
@@ -1630,9 +1640,14 @@ fn failure_reason(error: &anyhow::Error) -> FailureReason {
         })
 }
 
-fn source_identity(value: &Value, session_id: &str) -> Result<bool> {
-    super::validate_native_identity(value, "claude", session_id)
-        .map_err(|_| IdentityFailure(FailureReason::ForeignIdentity).into())
+/// Whether a record states the session's identity. A record in a child's
+/// recording that names another agent is foreign.
+fn source_identity(value: &Value, session_id: &str, agent: Option<&str>) -> Result<bool> {
+    let foreign = || IdentityFailure(FailureReason::ForeignIdentity);
+    if let Some(agent) = agent {
+        check_child_agent(value, agent).map_err(|_| foreign())?;
+    }
+    super::validate_native_identity(value, "claude", session_id).map_err(|_| foreign().into())
 }
 
 fn reconcile_source(
@@ -1640,11 +1655,12 @@ fn reconcile_source(
     source: usize,
     path: &Path,
     session_id: &str,
-    parent: bool,
+    child: Option<&str>,
 ) -> Result<()> {
+    let parent = child.is_none();
     let mut identity_seen = false;
     let validated = stream_jsonl(path, None, |value, _, _| {
-        identity_seen |= source_identity(value, session_id)?;
+        identity_seen |= source_identity(value, session_id, child)?;
         Ok(false)
     })?;
     if !parent && !identity_seen {
@@ -1652,7 +1668,7 @@ fn reconcile_source(
     }
     let mut position = 0;
     let read = stream_jsonl(path, Some(validated.pin()), |value, _, _| {
-        source_identity(value, session_id)?;
+        source_identity(value, session_id, child)?;
         position += 1;
         if parent && value["type"] == "cost-state" {
             let by_model = value["modelUsage"]
@@ -2964,6 +2980,17 @@ fn tool_use_result(value: &Value) -> Option<Value> {
     }
 }
 
+/// A record in a subagent's recording that names an agent names the one the
+/// recording belongs to. Records that name none carry no claim.
+fn check_child_agent(value: &Value, reference: &str) -> Result<()> {
+    match value.get("agentId") {
+        Some(id) if id.as_str() != Some(reference) => {
+            anyhow::bail!("child recording contains a different or invalid native child ID")
+        }
+        _ => Ok(()),
+    }
+}
+
 /// Where a subagent's own recording ends its turn.
 struct ChildEnding {
     at: chrono::DateTime<chrono::Utc>,
@@ -2976,9 +3003,14 @@ struct ChildEnding {
 /// Claude appends after the conversation do not reopen it. A recording whose
 /// final line cannot be parsed, whose final record lies outside the read bound,
 /// or whose ending carries no timestamp states no ending. The opening and tail
-/// must carry matching native parent identity evidence. Identity and I/O failures
-/// are errors.
-fn child_ending(path: &Path, parent_id: &str, read_bytes: u64) -> Result<Option<ChildEnding>> {
+/// must carry matching native parent identity evidence, and no record in either may
+/// name another agent. Identity and I/O failures are errors.
+fn child_ending(
+    path: &Path,
+    parent_id: &str,
+    reference: &str,
+    read_bytes: u64,
+) -> Result<Option<ChildEnding>> {
     let recording = read_recording(path, read_bytes)
         .with_context(|| format!("Subagent ending {} unavailable", path.display()))?;
     let mut identified = false;
@@ -2989,6 +3021,7 @@ fn child_ending(path: &Path, parent_id: &str, read_bytes: u64) -> Result<Option<
             }
             identified = true;
         }
+        check_child_agent(value, reference)?;
     }
     if !identified {
         anyhow::bail!("child recording has no native parent identity evidence");

@@ -2061,6 +2061,30 @@ fn reconciliation_rejects_child_contributions_before_a_late_identity_failure() {
     fs::remove_dir_all(root).unwrap();
 }
 
+#[test]
+fn reconciliation_rejects_a_child_recording_that_names_another_agent() {
+    for late in [false, true] {
+        let root = claude_family(if late { "late-sibling" } else { "sibling" }, |_, child| {
+            if late {
+                child.push_str(&format!(
+                    "{{\"type\":\"assistant\",\"sessionId\":\"{CLAUDE_FAMILY_SESSION}\",\"agentId\":\"a9999999999999999\"}}\n"
+                ));
+            } else {
+                *child = child.replace("a0123456789abcdef", "a9999999999999999");
+            }
+        });
+        let report = reconciled(&root);
+        assert_eq!(
+            report["sources"][1]["error"],
+            format!("Claude session {CLAUDE_FAMILY_SESSION}: foreign-identity")
+        );
+        assert_eq!(report["sources"][1]["complete"], false);
+        assert_eq!(report["sources"][1]["requests"], 0);
+        assert!(report["sources"][1].get("identified").is_none());
+        fs::remove_dir_all(root).unwrap();
+    }
+}
+
 /// Every place a reconciliation can carry a failure holds a fixed reason and
 /// the session id, never the error text, which may hold a recording path.
 #[test]

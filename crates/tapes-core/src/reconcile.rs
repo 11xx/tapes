@@ -74,7 +74,8 @@ pub enum SourceRole {
 /// path, so none of its text reaches the report.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum FailureReason {
-    /// The recording names a native session other than the family's.
+    /// The recording names a native session other than the family's, or a child
+    /// recording names another agent.
     ForeignIdentity,
     /// A child recording carries no native parent identity evidence.
     NoIdentity,
