@@ -13,8 +13,8 @@ use serde_json::{json, Value};
 
 use super::{
     accounting_for, bounded_launch, filter_listing_search, filter_listing_search_parallel,
-    merge_launch, recorded_total_coverage, search_turns, Backend, Listing, Query, SearchCoverage,
-    StreamCoordinates, StreamedTranscript, TokenTotals,
+    merge_launch, recorded_total_coverage, search_turns, skipped_records_note, Backend, Listing,
+    Query, SearchCoverage, StreamCoordinates, StreamedTranscript, TokenTotals,
 };
 use crate::content::{
     bounded_shape, text_part, tool_coverage, tool_part, ContentAvailability, ContentCarrier,
@@ -22,11 +22,12 @@ use crate::content::{
 };
 use crate::event::{self, Bounded, EventKind, EventTranscript, ToolEvent};
 use crate::lineage::{ChildRef, Lineage, ParentRef, SourceRef};
-use crate::measurement::known_subtotal_notes;
+use crate::measurement::{known_subtotal_notes, MeasurementReason};
 use crate::model::{
-    human_bytes, AccountingBasis, AccountingCoverage, Cost, CostCoverage, KindDeclaration, Launch,
-    Model, RecordRef, Role, Session, SourceBound, SourceDescriptor, Tokens, Transcript, Truncation,
-    Turn, TurnKind, TurnSelection, TurnWindow, UserDefault,
+    human_bytes, AccountingBasis, AccountingCoverage, ByteSpan, Cost, CostCoverage,
+    KindDeclaration, Launch, Model, ReadGap, RecordRef, Role, Session, SourceBound,
+    SourceDescriptor, Tokens, Transcript, Truncation, Turn, TurnKind, TurnSelection, TurnWindow,
+    UserDefault,
 };
 use agent_tapes_discovery::{
     DiscoveryError, Harness as NativeHarness, NativeSession, NativeStore, NativeStoreKind,
@@ -843,12 +844,15 @@ impl OpenCodeBackend {
         source.extend(cuts.bounds());
 
         let unrecognized_usage = database_unread_usage(&message_rows);
-        let messages = database_messages(&message_rows, parts)?;
+        let (messages, unreadable) = database_messages(&message_rows, parts);
         Ok(parse_transcript(
-            with_unrecognized_usage(session, unrecognized_usage),
+            with_unreadable_records(
+                with_unrecognized_usage(session, unrecognized_usage),
+                unreadable.len(),
+            ),
             &messages,
             tail,
-            Vec::new(),
+            skipped_records_note(unreadable.len()).into_iter().collect(),
             |returned, total| Truncation {
                 window: Truncation::window(returned, total, tail),
                 source,
@@ -873,6 +877,7 @@ impl OpenCodeBackend {
         let mut cuts = TextCuts::default();
         let mut read = 0;
         let mut unrecognized_usage = 0;
+        let mut gaps = Vec::new();
         if let Some(newest) = newest.first() {
             let newest = RowKey::from_row(newest)?;
             let mut after = None;
@@ -897,9 +902,17 @@ impl OpenCodeBackend {
                 )?)?;
                 cuts.count(&rows, &parts);
                 unrecognized_usage += database_unread_usage(&rows);
+                let (messages, unreadable) = database_messages(&rows, parts);
+                gaps.extend(unreadable.into_iter().map(|row| ReadGap {
+                    span: ByteSpan {
+                        start: read + row as u64,
+                        end: read + row as u64 + 1,
+                    },
+                    reason: "malformed-record".to_owned(),
+                }));
                 read += rows.len() as u64;
                 let whole_page = rows.len() == MESSAGE_PAGE;
-                for message in database_messages(&rows, parts)? {
+                for message in messages {
                     for parsed in message_turns(&message, session) {
                         turn(parsed)?;
                     }
@@ -915,8 +928,8 @@ impl OpenCodeBackend {
             source_bounds: cuts.bounds(),
             source_revision: None,
             source_prefix_sha256: None,
-            skipped: 0,
-            gaps: Vec::new(),
+            skipped: gaps.len(),
+            gaps,
             trailing_record: None,
             terminal: None,
             notes: Vec::new(),
@@ -1295,9 +1308,9 @@ impl Backend for OpenCodeBackend {
     }
 
     fn stream_session(&self, session: &Session, read: &StreamedTranscript) -> Result<Session> {
-        Ok(with_unrecognized_usage(
-            session.clone(),
-            read.unrecognized_usage,
+        Ok(with_unreadable_records(
+            with_unrecognized_usage(session.clone(), read.unrecognized_usage),
+            read.skipped,
         ))
     }
 
@@ -1552,17 +1565,38 @@ fn with_unrecognized_usage(mut session: Session, count: usize) -> Session {
     session
 }
 
-/// The messages these rows name, in row order, each carrying its parts.
+/// The session with `count` unreadable records noted: a record that did not
+/// decode may have carried consumption the figure does not show.
+fn with_unreadable_records(mut session: Session, count: usize) -> Session {
+    if count > 0 {
+        session
+            .usage_detail
+            .get_or_insert_with(Default::default)
+            .measurement_completeness
+            .qualify_all(MeasurementReason::UnreadableRecord);
+    }
+    session
+}
+
+/// The messages these rows name, in row order, each carrying its parts, and
+/// the positions of the rows whose data did not decode.
 fn database_messages(
     message_rows: &[Value],
     mut parts: HashMap<String, Vec<Value>>,
-) -> Result<Vec<Value>> {
-    message_rows
-        .iter()
-        .filter_map(|row| {
-            database_message(row, parts.remove(row["id"].as_str()?).unwrap_or_default())
-        })
-        .collect()
+) -> (Vec<Value>, Vec<usize>) {
+    let mut messages = Vec::new();
+    let mut unreadable = Vec::new();
+    for (position, row) in message_rows.iter().enumerate() {
+        let Some(id) = row["id"].as_str() else {
+            continue;
+        };
+        match database_message(row, parts.remove(id).unwrap_or_default()) {
+            Some(Ok(message)) => messages.push(message),
+            Some(Err(_)) => unreadable.push(position),
+            None => {}
+        }
+    }
+    (messages, unreadable)
 }
 
 /// Normalized turns whose text the part projection cut. Text and tool parts
