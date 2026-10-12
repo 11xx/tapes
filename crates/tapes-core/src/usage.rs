@@ -499,13 +499,32 @@ pub enum ConsumptionKeyKind {
     RecordingEntry,
 }
 
+/// What one consumption event measured, on the terms a figure is measured:
+/// the disjoint token categories, and the cost with its kind and coverage.
+/// A category or the cost the event did not record is absent, never zero,
+/// and `measurement_completeness` names it. The measurement carries no
+/// recording locator.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct ConsumptionEventMeasurement {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub disjoint: Option<DisjointTokens>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cost: Option<Cost>,
+    /// Present when the event's price is absent or written as a zero beside
+    /// usage.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cost_coverage: Option<CostCoverage>,
+    /// The event's incompletely measured counters and categories, and why.
+    #[serde(skip_serializing_if = "MeasurementCompleteness::is_empty")]
+    pub measurement_completeness: MeasurementCompleteness,
+}
+
 /// An observed identity, with its recording coordinate where available.
 /// Provider account equality is unestablished. `copy_of` witnesses a matching
 /// consumption entry in the named fork source; `entry_digest` identifies the
-/// normalized consumption facts used to verify that relation.
-/// Keys establish membership only; they carry no per-event amounts, and their
-/// digests cannot recover the measurements needed for a token or cost union.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+/// normalized consumption facts used to verify that relation. `measurement`
+/// is the event's own amounts, bounded and omitted with the key.
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct ConsumptionEventKey {
     pub kind: ConsumptionKeyKind,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -520,6 +539,8 @@ pub struct ConsumptionEventKey {
     pub entry_digest: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub copy_of: Option<ConsumptionRecordingEntry>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub measurement: Option<ConsumptionEventMeasurement>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
@@ -549,13 +570,24 @@ pub enum ConsumptionCopyCoverage {
     Unestablished,
 }
 
-/// A recent suffix of counted consumption identities, separate from the
-/// measurements that cover the whole read. Omitted or unidentified keys,
-/// incomplete source reads, and unestablished account equality prevent an
-/// exact cross-recording membership union unless separate copy evidence
-/// establishes it. A measured union also requires normalized per-event amounts.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+/// A recent suffix of counted consumption identities with each event's own
+/// measurement, separate from the figures that cover the whole read. Omitted
+/// or unidentified keys, incomplete source reads, and unestablished account
+/// equality prevent an exact cross-recording union unless separate copy
+/// evidence establishes it; [`ConsumptionEventKeys::union`] applies that rule
+/// to the keys and measurements of two selections.
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct ConsumptionEventKeys {
+    /// The selected session's own id, absent when it is not a portable
+    /// identifier, as a key's own coordinate is then omitted.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    /// The parent session id derived from a fork's header, where it names one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub forked_from: Option<String>,
+    /// The basis the keys' measurements are on: amounts of different bases
+    /// never join one union.
+    pub basis: AccountingBasis,
     pub keys: Vec<ConsumptionEventKey>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub observed: Option<usize>,
@@ -573,8 +605,9 @@ pub struct ConsumptionEventKeys {
     pub copy_conflicts: usize,
 }
 
-/// Recent event identities, limited to 1..=10000 keys and an 8 MiB serialized
-/// key budget. Measurements remain independent of either output bound.
+/// Recent event identities with their measurements, limited to 1..=10000 keys
+/// and an 8 MiB serialized key budget. The figures that cover the whole read
+/// remain independent of either output bound.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ConsumptionKeyOptions {
     pub limit: usize,

@@ -28,10 +28,10 @@ use agent_tapes_core::stats::{
 };
 use agent_tapes_core::stats_summary::SessionRead;
 use agent_tapes_core::usage::{
-    Consumption, ConsumptionEventKeys, ConsumptionKeyOptions, DisjointSum, Durations, GroupBy,
-    GroupKey, ModelUsage, ObservationClassification, RateLimits, RateWindow, RecordedUsage,
-    RequestDimensions, TurnCoverage, UsageAttribution, UsageObservation, UsageObservationOptions,
-    UsageOptions, UsageTally, UsageView,
+    Consumption, ConsumptionEventKeys, ConsumptionEventMeasurement, ConsumptionKeyOptions,
+    DisjointSum, Durations, GroupBy, GroupKey, ModelUsage, ObservationClassification, RateLimits,
+    RateWindow, RecordedUsage, RequestDimensions, TurnCoverage, UsageAttribution, UsageObservation,
+    UsageObservationOptions, UsageOptions, UsageTally, UsageView,
 };
 use agent_tapes_core::{BulkExport, Selection, UsageSummary, Where};
 use anyhow::{anyhow, Result};
@@ -1501,9 +1501,13 @@ enum Command {
         /// Keys contain ids and digests, without recording paths or diagnostics.
         /// Copy coverage and conflicts qualify cross-recording equality.
         /// Unavailable key sources retain measurements and use a fixed reason.
-        /// Keys establish event membership only. Per-event amounts are absent;
-        /// their digests cannot recover them, so measured unions are withheld.
-        /// Per-event measurement support is tracked by consumption-key-amounts.
+        /// Each key carries its event's own measurement: disjoint token
+        /// categories, cost with kind and coverage, and the reasons any is
+        /// incomplete. A measurement is omitted with its key, carries no
+        /// locator, and an unrecorded amount is absent, never zero. A union of
+        /// two selections is exact only when every key of both is present and
+        /// measured and the copies are verified; otherwise it is withheld and
+        /// bounded.
         #[arg(long, value_name = "N", num_args = 0..=1, default_missing_value = "200", conflicts_with_all = ["read_bytes", "series"])]
         event_keys: Option<Option<usize>>,
         /// Render the versioned tapes-usage/11 object, or tapes-usage-summary/6
@@ -4562,7 +4566,36 @@ fn render_consumption_keys(series: &ConsumptionEventKeys) -> String {
                 copy.session_id, copy.entry_id
             ));
         }
+        if let Some(measurement) = &key.measurement {
+            out.push_str(&render_event_measurement(measurement));
+        }
         out.push('\n');
+    }
+    out
+}
+
+/// One event's amounts on its key's line: the disjoint total or the
+/// categories it holds, the cost, and the counters it did not record.
+fn render_event_measurement(measurement: &ConsumptionEventMeasurement) -> String {
+    let mut out = String::new();
+    match &measurement.disjoint {
+        Some(disjoint) => match disjoint.total {
+            Some(total) => out.push_str(&format!("; tokens {total}")),
+            None => out.push_str("; tokens known subtotal"),
+        },
+        None => out.push_str("; tokens unmeasured"),
+    }
+    match &measurement.cost {
+        Some(cost) => out.push_str(&format!("; cost ${:.4}", cost.usd)),
+        None => out.push_str("; cost unmeasured"),
+    }
+    if !measurement.measurement_completeness.is_empty() {
+        let incomplete = measurement
+            .measurement_completeness
+            .iter()
+            .map(|(counter, _)| counter)
+            .collect::<Vec<_>>();
+        out.push_str(&format!("; incomplete: {}", incomplete.join(", ")));
     }
     out
 }

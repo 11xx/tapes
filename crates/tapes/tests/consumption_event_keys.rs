@@ -675,3 +675,67 @@ fn event_keys_refuse_selections_supplied_inputs_and_other_harnesses() {
         .to_string()
         .contains("do not support consumption event keys"));
 }
+
+/// A consumer's union over the JSON of two selections: each distinct
+/// coordinate once, summed from the per-event measurements, and withheld
+/// unless every key of both is present.
+fn json_union(selections: [&Value; 2]) -> Option<(f64, u64)> {
+    let mut events = std::collections::BTreeMap::new();
+    for series in selections {
+        let series = &series["consumption_event_keys"];
+        if series["observed"] != series["returned"] {
+            return None;
+        }
+        for key in series["keys"].as_array().unwrap() {
+            let coordinate = key.get("copy_of").unwrap_or(&key["recording_entry"]);
+            let measurement = &key["measurement"];
+            events.insert(
+                (
+                    coordinate["session_id"].as_str().unwrap().to_owned(),
+                    coordinate["entry_id"].as_str().unwrap().to_owned(),
+                ),
+                (
+                    measurement["cost"]["usd"].as_f64()?,
+                    measurement["disjoint"]["total"].as_u64()?,
+                ),
+            );
+        }
+    }
+    Some(
+        events
+            .values()
+            .fold((0.0, 0), |(cost, tokens), (usd, total)| {
+                (cost + usd, tokens + total)
+            }),
+    )
+}
+
+#[test]
+fn per_event_measurements_give_the_parent_fork_union_and_an_omission_withholds_it() {
+    let store = Store::new();
+    for full in [false, true] {
+        let mut options = vec!["--event-keys"];
+        options.extend(full.then_some("--full"));
+        let parent = store.usage("keys-parent", &options);
+        let fork = store.usage("keys-fork", &options);
+        assert_eq!(json_union([&parent, &fork]), Some((1.25, 110)));
+        for view in [&parent, &fork] {
+            for key in view["consumption_event_keys"]["keys"].as_array().unwrap() {
+                let measurement = &key["measurement"];
+                assert_eq!(measurement["cost"]["kind"], "harness-calculated-estimate");
+                assert!(measurement.get("measurement_completeness").is_none());
+            }
+        }
+
+        let mut capped = vec!["--event-keys=2"];
+        capped.extend(full.then_some("--full"));
+        let capped_parent = store.usage("keys-parent", &capped);
+        assert_eq!(
+            capped_parent["consumption_event_keys"]["omissions"]["row_cap"],
+            1
+        );
+        assert_eq!(json_union([&capped_parent, &fork]), None);
+        // The healthy selection keeps its own figure beside the withheld union.
+        assert_eq!(fork["consumption"]["cost"]["usd"], 0.875);
+    }
+}

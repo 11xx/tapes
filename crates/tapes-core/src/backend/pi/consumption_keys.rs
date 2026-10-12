@@ -9,10 +9,15 @@ use super::{pi_consumed, pi_parent_id, PiBackend, PiConsumed, PiConsumption};
 use crate::backend::{
     read_recording, read_recording_at, stream_jsonl, validate_native_identity, ReadPin,
 };
-use crate::model::{AccountingCoverage, ReadEvidence, Session};
+use crate::measurement::{Measured, MeasurementCompleteness, MeasurementReason};
+use crate::model::{
+    AccountingBasis, AccountingCoverage, Cost, CostCoverage, DisjointTokens, ReadEvidence, Session,
+    TokenConvention, Tokens,
+};
 use crate::usage::{
-    ConsumptionCopyCoverage, ConsumptionEventKey, ConsumptionEventKeys, ConsumptionKeyKind,
-    ConsumptionKeyOmissions, ConsumptionKeyOptions, ConsumptionRecordingEntry,
+    ConsumptionCopyCoverage, ConsumptionEventKey, ConsumptionEventKeys,
+    ConsumptionEventMeasurement, ConsumptionKeyKind, ConsumptionKeyOmissions,
+    ConsumptionKeyOptions, ConsumptionRecordingEntry,
 };
 
 const MAX_KEY_BYTES: usize = 8 * 1024 * 1024;
@@ -55,6 +60,9 @@ pub(super) fn read_keys(
                 .and_then(|detail| detail.consumption.as_ref())
                 .map(|consumption| consumption.events.counted);
             ConsumptionEventKeys {
+                session_id: public_id(&session.id).then(|| session.id.clone()),
+                forked_from: None,
+                basis: AccountingBasis::SummedRequests,
                 keys: Vec::new(),
                 observed,
                 returned: 0,
@@ -146,6 +154,10 @@ fn read_keys_at(
             recording.tail.skipped,
         )
     };
+    let forked_from = match &parent {
+        Some(ForkSource::Named(reference)) => pi_parent_id(reference),
+        _ => None,
+    };
     let (copy_coverage, copy_conflicts) = match parent {
         Some(ForkSource::Absent) => (None, 0),
         Some(ForkSource::Named(reference)) => {
@@ -155,6 +167,9 @@ fn read_keys_at(
     };
     let (keys, omissions) = buffer.finish();
     Ok(ConsumptionEventKeys {
+        session_id: public_id(&session.id).then(|| session.id.clone()),
+        forked_from,
+        basis: AccountingBasis::SummedRequests,
         observed: Some(consumed.events.counted),
         returned: keys.len(),
         keys,
@@ -188,6 +203,48 @@ fn entry_digest(entry: &Value, consumed: &PiConsumed) -> String {
         "{:x}",
         Sha256::digest(serde_json::to_vec(&facts).expect("normalized consumption facts serialize"))
     )
+}
+
+/// What one event measured: its disjoint categories and its price, each
+/// absent where the entry did not record it, with the reasons it is not
+/// complete. An entry that wrote a zero price beside usage is unpriced, and
+/// a stopped request's amounts are partial.
+fn event_measurement(consumed: &PiConsumed) -> ConsumptionEventMeasurement {
+    let usage = &consumed.usage;
+    let tokens = Tokens {
+        input: usage.input,
+        output: usage.output,
+        reasoning: usage.reasoning,
+        cache_read: usage.cache_read,
+        cache_write: usage.cache_write,
+    };
+    let unpriced = usage.is_unpriced();
+    let cost = usage.cost.filter(|_| !unpriced).map(|usd| Cost { usd });
+    let cost_coverage = cost.is_none().then_some(CostCoverage {
+        complete: false,
+        zero_written_requests: usize::from(unpriced && consumed.assistant_request),
+        zero_written_observations: usize::from(unpriced),
+    });
+    let mut completeness = MeasurementCompleteness::assess(Measured {
+        tokens: Some(&tokens),
+        cost: cost.as_ref(),
+        cost_coverage: cost_coverage.as_ref(),
+        scope: Some(AccountingCoverage::Session),
+        events: 1,
+        ..Measured::default()
+    });
+    if consumed.stopped {
+        completeness.qualify_all(MeasurementReason::StoppedAttempt);
+    }
+    let disjoint = TokenConvention::of("pi").map(|convention| {
+        DisjointTokens::from_native(&tokens, convention, None).with_completeness(&completeness)
+    });
+    ConsumptionEventMeasurement {
+        disjoint,
+        cost,
+        cost_coverage,
+        measurement_completeness: completeness,
+    }
 }
 
 struct KeyBuffer {
@@ -244,6 +301,7 @@ impl KeyBuffer {
             }),
             entry_digest: id.map(|_| entry_digest(entry, consumed)),
             copy_of: None,
+            measurement: Some(event_measurement(consumed)),
         };
         self.push(key);
     }

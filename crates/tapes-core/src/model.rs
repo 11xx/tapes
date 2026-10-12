@@ -798,6 +798,44 @@ impl DisjointTokens {
         .settle()
     }
 
+    /// The categories of `parts` summed over distinct consumption. Each
+    /// category carries the reasons of every part's category, so a part that
+    /// did not measure one leaves the sum a known subtotal, and the total is
+    /// present only when every summed category is complete. Parts under
+    /// different conventions have no common mapping and sum to nothing.
+    pub fn sum<'a>(parts: impl IntoIterator<Item = &'a Self>) -> Option<Self> {
+        let mut parts = parts.into_iter();
+        let first = parts.next()?;
+        let mut sum = Self {
+            total: None,
+            missing: Vec::new(),
+            ..first.clone()
+        };
+        for part in parts {
+            if part.convention != sum.convention {
+                return None;
+            }
+            for (total, value) in [
+                (&mut sum.uncached_input, part.uncached_input),
+                (&mut sum.cache_read, part.cache_read),
+                (&mut sum.output, part.output),
+                (&mut sum.reasoning, part.reasoning),
+            ] {
+                if let Some(value) = value {
+                    *total = Some(total.unwrap_or(0).saturating_add(value));
+                }
+            }
+            if let Some(writes) = &part.cache_write {
+                sum.cache_write
+                    .get_or_insert_with(CacheWrites::default)
+                    .add(writes);
+            }
+            sum.measurement_completeness
+                .merge(&part.measurement_completeness);
+        }
+        Some(sum.settle())
+    }
+
     /// Name every qualified category and unestablished TTL in `missing`, and
     /// sum the total only over completely measured categories.
     fn settle(mut self) -> Self {
