@@ -516,14 +516,17 @@ PROBE BEFORE EXPORTING
 
   `measurement_coverage` counts, per native counter, the events a figure's
   sum covers by whether each recorded the counter. For a request sum
-  (Claude and Pi sessions, a Codex or Pi per-model split) an event is a
-  counted request, and a request that wrote no usage counts with every
-  counter missing; for a harness-written total (a Codex or OpenCode session,
-  or a Claude cost-state, which counts the models it sums) the total is the
+  (Claude and Pi sessions, a Codex or Pi per-model split, Codex's
+  unattributed requests under `attribution.unattributed_coverage`) an event
+  is a counted request, and a request that wrote no usage counts with every
+  counter missing, even when no request wrote any counter and the figure has
+  no sum; for a harness-written total (a Codex or OpenCode session, or a
+  Claude cost-state, which counts the models it sums) the total is the
   event. A counter some events lack is a qualified known subtotal, never
   complete, and `measurement_incomplete` says how many recorded it. A
-  summary's `measurement_coverage` adds its sessions' events and is withheld
-  wherever its tokens are.
+  summary's `measurement_coverage` adds the events of every session it sums,
+  those that recorded no counter included, and is withheld wherever its
+  tokens are.
 
   `measurement_completeness` answers, counter by counter, whether a figure is
   completely measured and why not. It names each incomplete counter, or
@@ -531,10 +534,13 @@ PROBE BEFORE EXPORTING
   did not record it, or the figure has none), missing-price, unpriced (a
   written zero beside usage), stopped-attempt (a request stopped on an error
   or an abort, or failed, so its consumption is partial or unknown, even with
-  every counter populated), unreadable-record, read-window, since-reset,
+  every counter populated), unreadable-record, unrecognized-usage (a record
+  the reader has no reading for carries its harness's usage fields, so its
+  consumption is in no counter), read-window, since-reset,
   unestablished-scope, incomplete-attribution (a model split whose read could
   not attribute every request), and undetermined (the convention cannot
-  derive the category). A counter it does not name is complete; a present
+  derive the category). A figure that counted events and measured nothing
+  qualifies every counter missing-counter. A counter it does not name is complete; a present
   amount it names is a known subtotal. Usage, consumption, model splits,
   summary totals, groups and partitions, session figures, brief, stats, and
   session JSON all carry it, and every figure derived from a counter follows
@@ -545,6 +551,20 @@ PROBE BEFORE EXPORTING
   read's coverage, failed requests, incomplete attribution. One model's
   stopped request leaves another model's figure whole, and one session's
   reasons leave another session's figure and group whole.
+  `read.unmapped` counts records by type and says nothing of their usage, so
+  an unrecognized type alone qualifies no figure: Claude's attachments are
+  unrecognized and carry none. `unrecognized-usage` is raised, with the count
+  in `unrecognized_usage`, only for a record no reading counts that carries
+  its harness's usage fields: for Claude a `message.usage` counter object on a
+  record that is not an assistant request; for Pi a `usage` object on an
+  entry or its message holding a counter or total cost; for Codex a
+  `payload.usage` counter object or a `payload.info` usage on a record other
+  than a token record or a `token_count`; for OpenCode a `tokens` counter on a
+  message outside the projected roles. It qualifies every native counter and
+  cost of the figure. A Pi entry on an abandoned branch qualifies the
+  consumption, not the active branch.
+  A harness can attach only some accounting bases: Claude summed-requests or
+  recorded-total, Codex and OpenCode recorded-total, Pi summed-requests.
   The text output names the same reasons, one line per incomplete figure:
   `completeness: input: missing-counter; output, cost: stopped-attempt` lists
   each distinct reason set once with the counters that share it, and `all

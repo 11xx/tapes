@@ -1404,7 +1404,8 @@ enum Command {
     /// usage entries. Every session's
     /// `measurement_completeness` names each incomplete counter with fixed
     /// reasons (a stopped or failed request, missing counters or prices, an
-    /// unreadable record, a read window), and every derived figure follows
+    /// unreadable record, an unrecognized record that carries its harness's
+    /// usage fields, a read window), and every derived figure follows
     /// it: disjoint categories and their total, model splits, summaries,
     /// identity bounds, brief and stats. Text output prints the reasons
     /// too: a `completeness:` line per incomplete figure, `known subtotal;
