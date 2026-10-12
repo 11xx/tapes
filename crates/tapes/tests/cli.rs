@@ -6590,6 +6590,240 @@ FROM n, m;
     }
 }
 
+const ROW_GAP_SESSION: &str = "ses_row_gap_fixture";
+
+/// The rows of a stable OpenCode database session that reads whole: one user
+/// message, one assistant message, `fillers` further user messages after
+/// them, and `extra` beside them.
+fn row_gap_inserts(fillers: usize, extra: &str) -> String {
+    let last = fillers.saturating_sub(1);
+    let fill = if fillers == 0 {
+        String::new()
+    } else {
+        format!(
+            r#"
+WITH RECURSIVE n(i) AS (SELECT 0 UNION ALL SELECT i + 1 FROM n WHERE i < {last})
+INSERT INTO message SELECT printf('msg_gap_fill_%03d', i), '{ROW_GAP_SESSION}',
+  1784663200000 + i * 1000, 1784663200000 + i * 1000,
+  json_object('role', 'user', 'time', json_object('created', 1784663200000 + i * 1000))
+FROM n;
+WITH RECURSIVE n(i) AS (SELECT 0 UNION ALL SELECT i + 1 FROM n WHERE i < {last})
+INSERT INTO part SELECT printf('prt_gap_fill_%03d', i), printf('msg_gap_fill_%03d', i),
+  '{ROW_GAP_SESSION}', 1784663200000 + i * 1000, 1784663200000 + i * 1000,
+  json_object('type', 'text', 'text', printf('Filler %03d.', i),
+              'time', json_object('start', 1784663200000 + i * 1000))
+FROM n;"#
+        )
+    };
+    format!(
+        r#"
+INSERT INTO message VALUES
+  ('msg_gap_user', '{ROW_GAP_SESSION}', 1784663100000, 1784663100000,
+   '{{"role":"user","time":{{"created":1784663100000}}}}'),
+  ('msg_gap_assistant', '{ROW_GAP_SESSION}', 1784663110000, 1784663110000,
+   '{{"role":"assistant","time":{{"created":1784663110000}}}}');
+INSERT INTO part VALUES
+  ('prt_gap_user', 'msg_gap_user', '{ROW_GAP_SESSION}', 1784663100001, 1784663100001,
+   '{{"type":"text","text":"Healthy question.","time":{{"start":1784663100001}}}}'),
+  ('prt_gap_answer', 'msg_gap_assistant', '{ROW_GAP_SESSION}', 1784663110001, 1784663110001,
+   '{{"type":"text","text":"Healthy answer.","time":{{"start":1784663110001}}}}');
+{fill}
+{extra}
+"#
+    )
+}
+
+/// One session read every way a transcript and its figures are read.
+struct RowGapReads {
+    bounded: Value,
+    full: Value,
+    usage: Value,
+    usage_full: Value,
+}
+
+impl RowGapReads {
+    fn new(root: &Path) -> Self {
+        let json = |args: &[&str]| -> Value {
+            serde_json::from_str(&opencode_stdout(root, args)).unwrap()
+        };
+        let id = ROW_GAP_SESSION;
+        Self {
+            bounded: json(&["show", id, "--tail", "5000", "--json"]),
+            full: json(&["show", id, "--full", "--json"]),
+            usage: json(&["usage", id, "--json"]),
+            usage_full: json(&["usage", id, "--full", "--json"]),
+        }
+    }
+
+    fn texts(read: &Value) -> Vec<String> {
+        read["turns"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|turn| turn["text"].as_str().unwrap().to_owned())
+            .collect()
+    }
+
+    fn reasons(usage: &Value, counter: &str) -> Vec<String> {
+        usage["measurement_completeness"][counter]
+            .as_array()
+            .map(|reasons| {
+                reasons
+                    .iter()
+                    .filter_map(|reason| reason.as_str().map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+}
+
+/// A session with `extra` beside its healthy rows reads exactly as the session
+/// without them, except that it names `unreadable` unreadable records: a gap
+/// each in a whole read, a note in a bounded one, and the
+/// `unreadable-record` reason on every counter of its figures.
+fn assert_row_gaps_are_local(
+    name: &str,
+    fillers: usize,
+    extra: &str,
+    unreadable: usize,
+    length: u64,
+) {
+    let root = TemporaryDirectory::new(std::env::temp_dir().join(format!(
+        "tapes-cli-opencode-row-gaps-{name}-{}",
+        std::process::id()
+    )));
+    let _program = opencode_program(root.path(), "opencode");
+    for sqlite3 in sqlite3_binaries() {
+        use_sqlite3(root.path(), &sqlite3);
+        create_opencode_database(root.path(), ROW_GAP_SESSION, &row_gap_inserts(fillers, ""));
+        let healthy = RowGapReads::new(root.path());
+        create_opencode_database(
+            root.path(),
+            ROW_GAP_SESSION,
+            &row_gap_inserts(fillers, extra),
+        );
+        let broken = RowGapReads::new(root.path());
+
+        let expected = RowGapReads::texts(&healthy.full);
+        assert_eq!(expected.len(), 2 + fillers);
+        assert_eq!(RowGapReads::texts(&broken.bounded), expected);
+        assert_eq!(RowGapReads::texts(&broken.full), expected);
+        let notes = broken.bounded["notes"].to_string();
+        assert!(
+            notes.contains(&format!("Skipped {unreadable} unreadable record")),
+            "{notes}"
+        );
+
+        assert!(healthy.full["read"]["gaps"]
+            .as_array()
+            .is_none_or(Vec::is_empty));
+        let read = &broken.full["read"];
+        assert_eq!(read["source_length"], length);
+        let gaps = read["gaps"].as_array().unwrap();
+        assert_eq!(gaps.len(), unreadable, "{read}");
+        assert!(
+            gaps.iter().all(|gap| gap["reason"] == "malformed-record"),
+            "{read}"
+        );
+        let mut spans: Vec<_> = gaps.iter().map(|gap| gap["span"].clone()).collect();
+        spans.dedup();
+        assert_eq!(spans.len(), unreadable, "{read}");
+
+        for (label, healthy, broken) in [
+            ("usage", &healthy.usage, &broken.usage),
+            ("usage --full", &healthy.usage_full, &broken.usage_full),
+        ] {
+            assert_eq!(broken["tokens"], healthy["tokens"], "{label}");
+            for counter in [
+                "input",
+                "output",
+                "reasoning",
+                "cache_read",
+                "cache_write",
+                "cost",
+            ] {
+                assert!(
+                    !RowGapReads::reasons(healthy, counter).contains(&"unreadable-record".into()),
+                    "{label} × {counter}: {healthy}"
+                );
+                assert!(
+                    RowGapReads::reasons(broken, counter).contains(&"unreadable-record".into()),
+                    "{label} × {counter}: {broken}"
+                );
+            }
+        }
+    }
+}
+
+const GAP_MESSAGE_DATA: &str = r#"'{"role":"user","time":{"created":1784663105000}}'"#;
+
+#[test]
+fn an_opencode_message_row_without_an_id_is_one_unreadable_record() {
+    let extra = format!(
+        "INSERT INTO message VALUES (NULL, '{ROW_GAP_SESSION}', 1784663105000, 1784663105000, \
+         {GAP_MESSAGE_DATA});"
+    );
+    assert_row_gaps_are_local("no-id", 0, &extra, 1, 3);
+}
+
+#[test]
+fn an_opencode_message_row_without_a_time_created_is_one_unreadable_record() {
+    let extra = format!(
+        "INSERT INTO message VALUES ('msg_gap_untimed', '{ROW_GAP_SESSION}', 'unknown', \
+         'unknown', {GAP_MESSAGE_DATA});"
+    );
+    assert_row_gaps_are_local("no-time", 0, &extra, 1, 3);
+}
+
+/// With 57 further messages the session has 59 keyed rows, and the row without
+/// an id sorts fiftieth: the last row of the first page of 50.
+#[test]
+fn a_keyless_opencode_message_row_ending_a_page_is_neither_read_twice_nor_skipped() {
+    let extra = format!(
+        "INSERT INTO message VALUES (NULL, '{ROW_GAP_SESSION}', 1784663246500, 1784663246500, \
+         {GAP_MESSAGE_DATA});"
+    );
+    assert_row_gaps_are_local("page-end", 57, &extra, 1, 60);
+}
+
+#[test]
+fn keyless_opencode_message_rows_among_whole_pages_of_rows_are_each_one_unreadable_record() {
+    let extra = format!(
+        "INSERT INTO message VALUES (NULL, '{ROW_GAP_SESSION}', 1784663246500, 1784663246500, \
+         {GAP_MESSAGE_DATA}), \
+         (NULL, '{ROW_GAP_SESSION}', 1784663246500, 1784663246500, {GAP_MESSAGE_DATA}), \
+         ('msg_gap_untimed', '{ROW_GAP_SESSION}', 'unknown', 'unknown', {GAP_MESSAGE_DATA});"
+    );
+    assert_row_gaps_are_local("whole-pages", 120, &extra, 3, 125);
+}
+
+#[test]
+fn an_opencode_message_row_whose_data_is_not_json_is_one_unreadable_record() {
+    let extra = format!(
+        "INSERT INTO message VALUES ('msg_gap_broken', '{ROW_GAP_SESSION}', 1784663105000, \
+         1784663105000, '{{not json');"
+    );
+    assert_row_gaps_are_local("message-json", 0, &extra, 1, 3);
+}
+
+#[test]
+fn an_opencode_part_row_whose_data_is_not_json_is_one_unreadable_record() {
+    let extra = format!(
+        "INSERT INTO part VALUES ('prt_gap_broken', 'msg_gap_assistant', '{ROW_GAP_SESSION}', \
+         1784663110002, 1784663110002, '{{not json');"
+    );
+    assert_row_gaps_are_local("part-json", 0, &extra, 1, 2);
+}
+
+#[test]
+fn an_opencode_part_row_without_an_id_is_one_unreadable_record() {
+    let extra = format!(
+        "INSERT INTO part VALUES (NULL, 'msg_gap_assistant', '{ROW_GAP_SESSION}', \
+         1784663110002, 1784663110002, '{{\"type\":\"text\",\"text\":\"Keyless part.\"}}');"
+    );
+    assert_row_gaps_are_local("part-id", 0, &extra, 1, 2);
+}
+
 /// The normalized totals reach every surface unchanged: list, show, and the
 /// export bundle carry the same counters, with absent ones omitted.
 #[test]

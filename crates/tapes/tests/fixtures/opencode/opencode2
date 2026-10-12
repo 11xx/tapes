@@ -300,6 +300,10 @@ if [ "$mode" = database ] || [ "$mode" = database-malformed ]; then
           ;;
       esac
       ;;
+    *"NOT (typeof("*)
+      # Rows without a place in order: the fixture stores none.
+      printf '%s\n' row
+      ;;
     *"FROM message WHERE session_id = "*)
       case "$query" in
         *"'data', data"*)

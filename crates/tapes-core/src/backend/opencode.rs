@@ -43,6 +43,10 @@ const MAX_API_MESSAGES: usize = 1_000;
 /// Messages per API page. Small enough that a page of a heavy session fits
 /// the transport bound, large enough that a default `show` needs few pages.
 const MESSAGE_PAGE: usize = 50;
+/// SQL true for a row with a place in `time_created, id` order: an integer
+/// creation time and a text id. A row without both cannot be the cursor a page
+/// resumes from, so reads page only these rows and count the others apart.
+const KEYED: &str = "typeof(time_created) = 'integer' AND typeof(id) = 'text'";
 /// Fewer messages than this per page would spend a process spawn per turn on
 /// a session whose newest messages carry no text.
 const MIN_MESSAGE_PAGE: usize = 8;
@@ -837,22 +841,25 @@ impl OpenCodeBackend {
             });
         }
         part_rows.reverse();
-        let parts = group_parts(part_rows)?;
+        part_rows.extend(self.database_unkeyed_parts(&id, &message_rows)?);
+        let parts = group_parts(part_rows);
 
         let mut cuts = TextCuts::default();
-        cuts.count(&message_rows, &parts);
+        cuts.count(&message_rows, &parts.by_message);
         source.extend(cuts.bounds());
 
         let unrecognized_usage = database_unread_usage(&message_rows);
+        let unplaced = self.database_unkeyed_messages(&id)? + parts.unattributed;
         let (messages, unreadable) = database_messages(&message_rows, parts);
+        let unreadable = unreadable.len() + unplaced;
         Ok(parse_transcript(
             with_unreadable_records(
                 with_unrecognized_usage(session, unrecognized_usage),
-                unreadable.len(),
+                unreadable,
             ),
             &messages,
             tail,
-            skipped_records_note(unreadable.len()).into_iter().collect(),
+            skipped_records_note(unreadable).into_iter().collect(),
             |returned, total| Truncation {
                 window: Truncation::window(returned, total, tail),
                 source,
@@ -872,19 +879,20 @@ impl OpenCodeBackend {
         let id = sql_literal(&session.id);
         let newest = self.database(&format!(
             "SELECT json_object('time_created', time_created, 'id', id) AS row FROM message \
-             WHERE session_id = {id} ORDER BY time_created DESC, id DESC LIMIT 1"
+             WHERE session_id = {id} AND {KEYED} ORDER BY time_created DESC, id DESC LIMIT 1"
         ))?;
         let mut cuts = TextCuts::default();
         let mut read = 0;
         let mut unrecognized_usage = 0;
         let mut gaps = Vec::new();
+        let mut unplaced = 0;
         if let Some(newest) = newest.first() {
             let newest = RowKey::from_row(newest)?;
             let mut after = None;
             loop {
                 let rows = self.database(&format!(
                     "SELECT {DATABASE_MESSAGE_ROW} FROM message WHERE session_id = {id} \
-                     AND {}{} ORDER BY time_created, id LIMIT {MESSAGE_PAGE}",
+                     AND {KEYED} AND {}{} ORDER BY time_created, id LIMIT {MESSAGE_PAGE}",
                     newest.at_or_before(),
                     after
                         .as_ref()
@@ -894,14 +902,13 @@ impl OpenCodeBackend {
                     break;
                 };
                 after = Some(RowKey::from_row(last)?);
-                let parts = group_parts(self.database_message_parts(
-                    &id,
-                    &rows,
-                    RowOrder::OldestFirst,
-                    usize::MAX,
-                )?)?;
-                cuts.count(&rows, &parts);
+                let mut part_rows =
+                    self.database_message_parts(&id, &rows, RowOrder::OldestFirst, usize::MAX)?;
+                part_rows.extend(self.database_unkeyed_parts(&id, &rows)?);
+                let parts = group_parts(part_rows);
+                cuts.count(&rows, &parts.by_message);
                 unrecognized_usage += database_unread_usage(&rows);
+                unplaced += parts.unattributed;
                 let (messages, unreadable) = database_messages(&rows, parts);
                 gaps.extend(unreadable.into_iter().map(|row| ReadGap {
                     span: ByteSpan {
@@ -922,6 +929,15 @@ impl OpenCodeBackend {
                 }
             }
         }
+        unplaced += self.database_unkeyed_messages(&id)?;
+        gaps.extend((0..unplaced as u64).map(|row| ReadGap {
+            span: ByteSpan {
+                start: read + row,
+                end: read + row + 1,
+            },
+            reason: "malformed-record".to_owned(),
+        }));
+        read += unplaced as u64;
         Ok(StreamedTranscript {
             coordinates: StreamCoordinates::OpenCodeMessages,
             source_length: read,
@@ -964,8 +980,8 @@ impl OpenCodeBackend {
                 None => String::new(),
             };
             let page = self.database(&format!(
-                "SELECT {} FROM part WHERE session_id = {session} AND message_id IN ({ids}){past} \
-                 ORDER BY {} LIMIT {limit}",
+                "SELECT {} FROM part WHERE session_id = {session} AND message_id IN ({ids}) \
+                 AND {KEYED}{past} ORDER BY {} LIMIT {limit}",
                 database_part_row(),
                 order.sql(),
             ))?;
@@ -976,6 +992,36 @@ impl OpenCodeBackend {
             }
         }
         Ok(rows)
+    }
+
+    /// How many message rows of this session have no place in order.
+    fn database_unkeyed_messages(&self, session: &str) -> Result<usize> {
+        let rows = self.database(&format!(
+            "SELECT json_object('unkeyed', count(*)) AS row FROM message \
+             WHERE session_id = {session} AND NOT ({KEYED})"
+        ))?;
+        Ok(rows
+            .first()
+            .and_then(|row| row["unkeyed"].as_u64())
+            .unwrap_or(0) as usize)
+    }
+
+    /// One row, carrying only its message id, for each message of `messages`
+    /// that has a part row with no place in order. Such a part cannot be
+    /// read, so the row it stands for has no data.
+    fn database_unkeyed_parts(&self, session: &str, messages: &[Value]) -> Result<Vec<Value>> {
+        let ids = messages
+            .iter()
+            .filter_map(|row| row["id"].as_str().map(str::to_owned))
+            .collect::<Vec<_>>();
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.database(&format!(
+            "SELECT DISTINCT json_object('message_id', message_id) AS row FROM part \
+             WHERE session_id = {session} AND message_id IN ({}) AND NOT ({KEYED})",
+            sql_id_list(&ids)
+        ))
     }
 
     /// Every message the API projects, oldest first, a page at a time. The
@@ -1465,18 +1511,18 @@ fn json_search_predicate(needle: &str) -> String {
 /// of `input`, `output`, `reasoning`, and `cache.read` and `cache.write`.
 const DATABASE_MESSAGE_ROW: &str = "json_object( \
      'id', id, 'time_created', time_created, 'data', \
-     json_object('role', json_extract(data, '$.role'), \
+     CASE WHEN json_valid(data) THEN json_object('role', json_extract(data, '$.role'), \
                  'time', json_extract(data, '$.time'), \
                  'usage_counters', \
                  json_type(data, '$.tokens.input') IN ('integer', 'real') \
                  OR json_type(data, '$.tokens.output') IN ('integer', 'real') \
                  OR json_type(data, '$.tokens.reasoning') IN ('integer', 'real') \
                  OR json_type(data, '$.tokens.cache.read') IN ('integer', 'real') \
-                 OR json_type(data, '$.tokens.cache.write') IN ('integer', 'real'))) AS row";
+                 OR json_type(data, '$.tokens.cache.write') IN ('integer', 'real')) END) AS row";
 
 fn database_message_query(id: &str) -> String {
     format!(
-        "SELECT {DATABASE_MESSAGE_ROW} FROM message WHERE session_id = {id} \
+        "SELECT {DATABASE_MESSAGE_ROW} FROM message WHERE session_id = {id} AND {KEYED} \
          ORDER BY time_created DESC, id DESC LIMIT {}",
         MAX_DB_MESSAGES + 1
     )
@@ -1489,7 +1535,7 @@ fn database_part_row() -> String {
     format!(
         "json_object( \
              'id', id, 'message_id', message_id, 'time_created', time_created, 'data', \
-             CASE json_extract(data, '$.type') \
+             CASE WHEN NOT json_valid(data) THEN NULL ELSE CASE json_extract(data, '$.type') \
          WHEN 'text' THEN json_object( \
              'type', 'text', \
              'text', substr(json_extract(data, '$.text'), 1, {MAX_DB_TEXT_CHARS}), \
@@ -1514,7 +1560,7 @@ fn database_part_row() -> String {
                  length(json_extract(data, '$.state.output')) > {MAX_DB_TOOL_CHARS} OR \
                  length(json_extract(data, '$.state.error')) > {MAX_DB_TOOL_CHARS}, \
              'time', json_extract(data, '$.time')) \
-             ELSE json_object('type', json_extract(data, '$.type')) END) AS row"
+             ELSE json_object('type', json_extract(data, '$.type')) END END) AS row"
     )
 }
 
@@ -1575,17 +1621,32 @@ impl RowKey {
     }
 }
 
-/// Part rows grouped by message id, each message's parts in row order.
-fn group_parts(rows: Vec<Value>) -> Result<HashMap<String, Vec<Value>>> {
-    let mut parts = HashMap::<String, Vec<Value>>::new();
+/// Part rows grouped by message id.
+#[derive(Default)]
+struct GroupedParts {
+    /// Each message's readable parts, in row order.
+    by_message: HashMap<String, Vec<Value>>,
+    /// Messages with a part row whose data does not decode.
+    unreadable: HashSet<String>,
+    /// Part rows that name no message.
+    unattributed: usize,
+}
+
+fn group_parts(rows: Vec<Value>) -> GroupedParts {
+    let mut parts = GroupedParts::default();
     for row in rows {
-        let message_id = required_string(&row, "message_id")?;
-        parts
-            .entry(message_id)
-            .or_default()
-            .push(database_data(&row)?);
+        let Ok(message_id) = required_string(&row, "message_id") else {
+            parts.unattributed += 1;
+            continue;
+        };
+        match database_data(&row) {
+            Ok(data) => parts.by_message.entry(message_id).or_default().push(data),
+            Err(_) => {
+                parts.unreadable.insert(message_id);
+            }
+        }
     }
-    Ok(parts)
+    parts
 }
 
 /// How many of these message rows carry OpenCode's usage shape on a message
@@ -1626,21 +1687,26 @@ fn with_unreadable_records(mut session: Session, count: usize) -> Session {
 }
 
 /// The messages these rows name, in row order, each carrying its parts, and
-/// the positions of the rows whose data did not decode.
-fn database_messages(
-    message_rows: &[Value],
-    mut parts: HashMap<String, Vec<Value>>,
-) -> (Vec<Value>, Vec<usize>) {
+/// the positions of the rows that hold an unreadable record: a message whose
+/// data does not decode, or one with a part whose data does not decode.
+fn database_messages(message_rows: &[Value], mut parts: GroupedParts) -> (Vec<Value>, Vec<usize>) {
     let mut messages = Vec::new();
     let mut unreadable = Vec::new();
     for (position, row) in message_rows.iter().enumerate() {
         let Some(id) = row["id"].as_str() else {
             continue;
         };
-        match database_message(row, parts.remove(id).unwrap_or_default()) {
-            Some(Ok(message)) => messages.push(message),
-            Some(Err(_)) => unreadable.push(position),
-            None => {}
+        let readable = match database_message(row, parts.by_message.remove(id).unwrap_or_default())
+        {
+            Some(Ok(message)) => {
+                messages.push(message);
+                true
+            }
+            Some(Err(_)) => false,
+            None => true,
+        };
+        if !readable || parts.unreadable.contains(id) {
+            unreadable.push(position);
         }
     }
     (messages, unreadable)
@@ -2627,6 +2693,7 @@ mod tests {
         assert!(query.contains("json_extract(data, '$.time')"));
         assert!(!query.contains("'data', data"));
         assert!(query.contains("LIMIT 1001"));
+        assert!(query.contains(KEYED));
     }
 
     #[test]

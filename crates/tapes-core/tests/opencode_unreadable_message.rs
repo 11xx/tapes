@@ -1,6 +1,7 @@
-//! One message row whose data does not decode is an unreadable record: the
-//! read keeps every other row's turns and figures, marks a gap where the row
-//! was, and qualifies the session's counters with `unreadable-record`.
+//! A database record that cannot be read is an unreadable record: a message
+//! row whose data does not decode, or a part row whose data does not decode or
+//! that names no message. The read keeps every other row's turns and figures,
+//! marks a gap, and qualifies the session's counters with `unreadable-record`.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -25,11 +26,16 @@ const NATIVE: [&str; 6] = [
 ];
 
 /// A copy of the OpenCode fixtures whose database message rows are extended
-/// by `rows`, served by a program the copy resolves its responses from.
+/// by `rows` and part rows by `parts`, served by a program the copy resolves
+/// its responses from.
 struct Fixtures(PathBuf);
 
 impl Fixtures {
     fn new(rows: &[Value]) -> Self {
+        Self::with_parts(rows, &[])
+    }
+
+    fn with_parts(rows: &[Value], parts: &[Value]) -> Self {
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -46,13 +52,18 @@ impl Fixtures {
                 fs::copy(entry.path(), root.join(entry.file_name())).unwrap();
             }
         }
-        let messages = root.join("database-messages-database-only.json");
-        let mut body = fs::read_to_string(&messages).unwrap();
-        for row in rows {
-            body.push_str(&row.to_string());
-            body.push('\n');
+        for (name, rows) in [
+            ("database-messages-database-only.json", rows),
+            ("database-parts-database-only.json", parts),
+        ] {
+            let path = root.join(name);
+            let mut body = fs::read_to_string(&path).unwrap();
+            for row in rows {
+                body.push_str(&row.to_string());
+                body.push('\n');
+            }
+            fs::write(&path, body).unwrap();
         }
-        fs::write(&messages, body).unwrap();
         std::os::unix::fs::symlink(root.join("opencode2"), root.join("bin/opencode")).unwrap();
         let data = root.join("data/opencode");
         fs::create_dir_all(&data).unwrap();
@@ -165,4 +176,71 @@ fn an_unreadable_message_row_qualifies_every_counter_of_the_figure() {
             );
         }
     }
+}
+
+/// A part row of the healthy assistant message whose data is not JSON.
+fn unreadable_part() -> Value {
+    json!({
+        "message_id": "msg_database_assistant",
+        "time_created": 1784663109000_u64,
+        "data": "{not json",
+    })
+}
+
+/// A part row that names no message.
+fn orphan_part() -> Value {
+    json!({
+        "time_created": 1784663109000_u64,
+        "data": {"type": "text", "text": "Orphan.", "truncated": 0},
+    })
+}
+
+fn assert_part_gap_is_local(part: Value) {
+    let healthy = Fixtures::new(&[]);
+    let broken = Fixtures::with_parts(&[], &[part]);
+
+    let whole = show_with_backends(&[healthy.backend()], Selection::Id(SESSION), 100).unwrap();
+    let kept = show_with_backends(&[broken.backend()], Selection::Id(SESSION), 100).unwrap();
+    assert!(!whole.turns.is_empty());
+    assert_eq!(texts(&kept.turns), texts(&whole.turns));
+    assert!(
+        kept.notes
+            .iter()
+            .any(|note| note.contains("1 unreadable record")),
+        "{:?}",
+        kept.notes
+    );
+
+    let mut expected = Turns::default();
+    show_full_with_backends(&[healthy.backend()], Selection::Id(SESSION), &mut expected).unwrap();
+    let mut streamed = Turns::default();
+    let read = show_full_with_backends(&[broken.backend()], Selection::Id(SESSION), &mut streamed)
+        .unwrap();
+    assert_eq!(texts(&streamed.0), texts(&expected.0));
+    assert_eq!(read.skipped, 1);
+    assert_eq!(read.gaps.len(), 1);
+    assert_eq!(read.gaps[0].reason, "malformed-record");
+
+    for full in [false, true] {
+        let label = format!("opencode full={full}");
+        let healthy = view(&healthy, full);
+        let broken = view(&broken, full);
+        assert_eq!(broken["tokens"], healthy["tokens"], "{label}: {broken}");
+        for counter in NATIVE {
+            assert!(
+                reasons(&broken, counter).contains(&"unreadable-record"),
+                "{label} × {counter}: {broken}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_part_row_whose_data_does_not_decode_leaves_every_other_part_readable() {
+    assert_part_gap_is_local(unreadable_part());
+}
+
+#[test]
+fn a_part_row_without_a_message_leaves_every_message_readable() {
+    assert_part_gap_is_local(orphan_part());
 }

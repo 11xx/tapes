@@ -582,11 +582,16 @@ PROBE BEFORE EXPORTING
   than a token record or a `token_count`; for OpenCode a `tokens` counter on a
   message outside the projected roles. It qualifies every native counter and
   cost of the figure. A Pi entry on an abandoned branch qualifies the
-  consumption, not the active branch. An OpenCode database message row whose
-  data does not decode is an unreadable record: its turns are absent, every
-  other row's stay, and it qualifies every counter `unreadable-record`. A
-  `show --full` read counts it in `skipped` and marks a `malformed-record`
-  gap at its message position.
+  consumption, not the active branch. An OpenCode database record that cannot
+  be read is an unreadable record: a message row whose data does not decode,
+  a message row without an id or an integer `time_created`, a part row whose
+  data does not decode, a part row without an id or an integer
+  `time_created`, or a part row that names no message. Its turns are absent,
+  every other row's stay, and it qualifies every counter
+  `unreadable-record`. A `show --full` read counts it in `skipped` and marks a
+  `malformed-record` gap at its message position; a row with no place in the
+  message order, or a part that names no message, takes a position after the
+  last message.
   A harness can attach only some accounting bases: Claude summed-requests or
   recorded-total, Codex and OpenCode recorded-total, Pi summed-requests.
   The text output names the same reasons, one line per incomplete figure:
