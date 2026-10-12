@@ -493,13 +493,28 @@ PROBE BEFORE EXPORTING
   cover the session; recorded totals keep their epoch coverage. Pi's active
   accounting stays `read-window` when an unreadable record cuts its branch
   or follows its last entry.
-  Pi selections keep each session's figure. Event identity across sessions
-  is unestablished, so a multi-session group withholds exact token and cost
-  unions. Within a compatible accounting partition, `identity_bounds` reports
-  at least the largest known figure and at most their sum; a missing or partial
-  counter leaves its upper bound unmeasured. Different bases have separate
-  partitions, and `session_figures` preserves per-counter coverage without
-  recording locators.
+  A summary adds sessions only where no recording relates them. Two sessions
+  are related when one declares the other as its fork origin or parent (Codex
+  `forked_from_id`, Pi's parent header, OpenCode `fork_session_id` and
+  `parent_id`), transitively, or when both recorded the same request id or
+  message uuid, which is how a Claude fork shows: it keeps its origin's ids.
+  Related sessions form an overlap group. A group of two whose consumption
+  event keys establish their union adds by that exact union; any other group
+  withholds the summary's exact token, cost and disjoint totals, keeps each
+  session's own figure in `session_figures`, and reports `identity_bounds`
+  within a compatible accounting partition: at least the largest member of
+  each group, at most the sum. A missing or partial counter leaves its upper
+  bound unmeasured. `overlap.related` lists each group with its sessions, its
+  `evidence` (declared-fork, fork-origin-unplaced, shared-request-id,
+  shared-message-uuid), whether its `union` is exact or withheld, and why.
+  Unrelated sessions beside a withheld group stay summed in the bounds.
+  `overlap.disjointness` is `inferred-from-absent-copy-evidence` for every
+  multi-session figure: the recordings hold no sign that unrelated sessions
+  share events, which is evidence of absence and not proof. The id check reads
+  the ids the usage read visits and keeps a bounded sample of each recording's,
+  so a copy that is a small part of a very long recording can go unseen.
+  Different bases have separate partitions, and `session_figures` preserves
+  per-counter coverage without recording locators.
 
   tokens are the harness's own counters, and what its input and output
   include differs: Codex input counts cache reads, OpenCode output leaves

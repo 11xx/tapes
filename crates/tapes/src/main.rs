@@ -21,6 +21,7 @@ use agent_tapes_core::model::{
     SourceDescriptor, TokenConvention, Tokens, Transcript, Truncation, Turn, TurnKind,
     TurnSelection, SUMMED_CATEGORIES,
 };
+use agent_tapes_core::overlap::Disjointness;
 use agent_tapes_core::reconcile::{CounterStatus, Reconciliation, SourceRole};
 use agent_tapes_core::stats::{
     AssistantTurnDurations, Coverage, LineageStats, StatsView, TimeStats, ToolNameStats, ToolStats,
@@ -1429,9 +1430,19 @@ enum Command {
     /// ids, including dots and underscores,
     /// within a 128-byte bound; recording paths and timestamp-prefixed basenames
     /// stay private. Other bare references, such as parent.jsonl, are ids.
-    /// Multi-session Pi figures withhold exact unions, keep `session_figures`,
-    /// and report per-counter `identity_bounds` within compatible accounting
-    /// partitions. An unmeasured or partial counter has no upper bound.
+    /// Sessions a recording relates form overlap groups within a summary: one
+    /// declares the other as its fork origin or parent (Codex `forked_from_id`,
+    /// Pi's parent header, OpenCode `fork_session_id` and `parent_id`), or both
+    /// recorded the same request id or message uuid, which is how a Claude fork
+    /// shows. An overlap group of two with consumption event keys adds by
+    /// their exact union; otherwise the summary withholds its exact totals,
+    /// keeps `session_figures`, and reports per-counter `identity_bounds`
+    /// within compatible accounting partitions, from the largest member of
+    /// each group to the sum. An unmeasured or partial counter has no upper
+    /// bound. `overlap.related` names each group, its evidence, and whether
+    /// its union is exact. Sessions no evidence relates are summed, and
+    /// `overlap.disjointness` says that is inferred from absent copy evidence,
+    /// not established.
     Usage {
         #[command(flatten)]
         query: SessionQueryArgs,
@@ -4883,7 +4894,44 @@ fn render_usage_summary(summary: &UsageSummary, by: &[GroupBy]) -> String {
     out
 }
 
+fn render_overlap(out: &mut String, tally: &UsageTally) {
+    let Some(overlap) = &tally.overlap else {
+        return;
+    };
+    match overlap.disjointness {
+        Disjointness::InferredFromAbsentCopyEvidence => out.push_str(
+            "Sessions no recording relates are summed as disjoint, inferred from absent copy evidence.\n",
+        ),
+    }
+    for related in &overlap.related {
+        let evidence = related
+            .evidence
+            .iter()
+            .map(serde_kebab)
+            .collect::<Vec<_>>()
+            .join(", ");
+        out.push_str(&format!(
+            "Related sessions {} ({evidence}): union {}",
+            related.sessions.join(", "),
+            serde_kebab(&related.union),
+        ));
+        if !related.withheld.is_empty() {
+            let reasons = related.withheld.iter().map(serde_kebab).collect::<Vec<_>>();
+            out.push_str(&format!(" [{}]", reasons.join(", ")));
+        }
+        out.push('\n');
+    }
+}
+
+fn serde_kebab(value: &impl serde::Serialize) -> String {
+    serde_json::to_value(value)
+        .ok()
+        .and_then(|value| value.as_str().map(str::to_owned))
+        .unwrap_or_default()
+}
+
 fn render_identity_bounds(out: &mut String, tally: &UsageTally) {
+    render_overlap(out, tally);
     if tally.identity_unestablished {
         out.push_str(
             "Event equality across these sessions is unestablished; exact totals are withheld.\n",
