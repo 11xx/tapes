@@ -664,11 +664,11 @@ PROBE BEFORE EXPORTING
   dollar facts, including per-model estimates, under their own accounting.
   Request IDs deduplicate across a validated native family: children under
   the parent's subagents directory must positively witness its native session
-  identity and name no agent but their own. Such children share the parent's request namespace, reported as
-  validated-family under identity_coverage. Per-recording figures remain
-  visible. Foreign, unvalidated or unenumerated children, and sources outside
-  the family, withhold request-namespace and leave family counts, counters
-  and differences absent. Failed assistant records leave consumption unmeasured
+  identity and name no agent but their own. Such children share the parent's
+  request namespace, reported as validated-family under identity_coverage.
+  Per-recording figures remain visible. Foreign, unvalidated or unenumerated
+  children, and sources outside the family, withhold request-namespace and
+  leave family counts, counters and differences absent. Failed assistant records leave consumption unmeasured
   whether usage is an object, absent or null; hook answers made no request.
   A later witness dominating every earlier counter discharges provisional
   request ambiguity. The newest cumulative observation, count and reset
@@ -819,8 +819,9 @@ PROBE BEFORE EXPORTING
   turn_duration/stop_hook_summary, are skipped), with that record's id in source
   after the recording's file. Identity-bearing records in the bounded opening
   and tail must name the selected native parent, and a record that names an agent
-  must name this child; absent or conflicting identity fails the ending read. Recording and child metadata reads accept only regular
-  opened files and never wait for a FIFO writer. Without that ending there is no completion
+  must name this child; absent or conflicting identity fails the ending read.
+  Recording and child metadata reads accept only regular opened files and never
+  wait for a FIFO writer. Without that ending there is no completion
   stamp, which means not seen to finish rather than running: a child killed
   mid-turn reads the same. A completion the parent's own records state is
   preferred, and the spawn stays unstamped, since the child's first record is
