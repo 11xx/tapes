@@ -10,8 +10,10 @@ use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use agent_tapes_core::backend::{pi::PiBackend, Backend};
-use agent_tapes_core::model::{AccountingCoverage, Session, Transcript};
-use agent_tapes_core::usage::{self, GroupBy};
+use agent_tapes_core::model::{
+    Accounting, AccountingBasis, AccountingCoverage, Cost, Session, Tokens, Transcript,
+};
+use agent_tapes_core::usage::{self, GroupBy, ModelUsage, RecordedUsage};
 use serde_json::{json, Value};
 
 const ID: &str = "completeness-fixture";
@@ -300,6 +302,15 @@ fn read(store: &Store, bound: Option<u64>, full: bool) -> (Transcript, Value) {
     }
 }
 
+/// A column's figure exists. A missing figure has no reasons for any
+/// counter, so every cell check over it would pass without examining it.
+fn assert_present(label: &str, figure: &Value) {
+    assert!(
+        figure.as_object().is_some_and(|figure| !figure.is_empty()),
+        "{label}: no figure"
+    );
+}
+
 fn reasons<'a>(figure: &'a Value, counter: &str) -> Vec<&'a str> {
     figure["measurement_completeness"][counter]
         .as_array()
@@ -310,6 +321,7 @@ fn reasons<'a>(figure: &'a Value, counter: &str) -> Vec<&'a str> {
 /// The figure's native counters carry the case's reason exactly where the
 /// case affects them, and no others are qualified.
 fn assert_native(label: &str, figure: &Value, reason: &str, affected: &[&str]) {
+    assert_present(label, figure);
     for counter in NATIVE {
         let found = reasons(figure, counter);
         if affected.contains(&counter) {
@@ -326,6 +338,7 @@ fn assert_native(label: &str, figure: &Value, reason: &str, affected: &[&str]) {
 /// The figure's disjoint categories follow their native counters, and the
 /// total stands only when every summed category is complete.
 fn assert_disjoint(label: &str, disjoint: &Value, reason: &str, affected: &[&str]) {
+    assert_present(label, disjoint);
     for (category, native) in CATEGORIES {
         let found = reasons(disjoint, category);
         let missing = disjoint["missing"].as_array().map_or_else(
@@ -436,11 +449,13 @@ fn every_recorded_reason_qualifies_every_dependent_figure() {
                 case.reason,
                 case.affected,
             );
-            assert_eq!(
-                stats["usage"].get("cache_read_ratio").is_none(),
-                RATIO.iter().any(|counter| case.affected.contains(counter)),
-                "{label} stats ratio: {stats}"
-            );
+            for ratio in ["cache_read_ratio", "cache_write_ratio"] {
+                assert_eq!(
+                    stats["usage"].get(ratio).is_none(),
+                    RATIO.iter().any(|counter| case.affected.contains(counter)),
+                    "{label} stats {ratio}: {stats}"
+                );
+            }
             let brief = serde_json::to_value(agent_tapes_core::brief::brief(
                 transcript.clone(),
                 Ok(Default::default()),
@@ -627,4 +642,91 @@ fn an_unattributed_request_qualifies_every_model_share() {
         assert!(reasons(&view, counter).is_empty(), "{counter}: {view}");
     }
     assert_eq!(view["disjoint"]["total"], 22);
+}
+
+/// A cumulative cost-state kept beside the request sum splits by model, and
+/// each share follows the cost-state's own coverage and the failures every
+/// model shares, not the session counters' scope.
+#[test]
+fn a_recorded_models_share_follows_the_recorded_accounting() {
+    let recorded = |coverage, cache_read| RecordedUsage {
+        accounting: Accounting {
+            basis: AccountingBasis::RecordedTotal,
+            coverage,
+            selection: None,
+        },
+        tokens: None,
+        cost: None,
+        written_cost_usd: None,
+        cost_coverage: None,
+        by_model: Some(vec![ModelUsage {
+            model: "recorded-model".to_owned(),
+            variant: None,
+            tokens: Some(Tokens {
+                input: Some(10),
+                output: Some(5),
+                reasoning: Some(2),
+                cache_read,
+                cache_write: Some(4),
+            }),
+            cost: Some(Cost { usd: 0.5 }),
+            cost_coverage: None,
+            request_count: None,
+            measurement_coverage: Default::default(),
+            measurement_incomplete: Vec::new(),
+            measurement_completeness: Default::default(),
+        }]),
+    };
+    let store = Store::new("recorded-model");
+    store.write(&[header("/fixtures/recorded"), request(None).to_string()]);
+    let view = |coverage, cache_read, failures| {
+        let (mut transcript, _) = read(&store, None, false);
+        let detail = transcript.session.usage_detail.as_mut().unwrap();
+        detail.recorded_total = Some(recorded(coverage, cache_read));
+        detail.request_failures = failures;
+        serde_json::to_value(usage::usage(&transcript)).unwrap()
+    };
+    let share = |view: &Value| {
+        let model = view["recorded_total"]["by_model"][0].clone();
+        assert_eq!(model["model"], "recorded-model", "{view}");
+        model
+    };
+
+    let whole = view(AccountingCoverage::Session, Some(3), 0);
+    assert!(
+        share(&whole).get("measurement_completeness").is_none(),
+        "{whole}"
+    );
+
+    let missing = share(&view(AccountingCoverage::Session, None, 0));
+    assert_native(
+        "recorded missing counter",
+        &missing,
+        "missing-counter",
+        &["cache_read"],
+    );
+
+    let windowed = view(AccountingCoverage::ReadWindow, Some(3), 0);
+    assert_native(
+        "recorded read window",
+        &share(&windowed),
+        "read-window",
+        &NATIVE,
+    );
+    // The session's own split covers the whole session, whatever the
+    // cost-state covers.
+    assert!(
+        windowed["by_model"][0]
+            .get("measurement_completeness")
+            .is_none(),
+        "{windowed}"
+    );
+
+    let stopped = view(AccountingCoverage::Session, Some(3), 1);
+    assert_native(
+        "recorded stopped",
+        &share(&stopped),
+        "stopped-attempt",
+        &NATIVE,
+    );
 }
