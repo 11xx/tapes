@@ -10,6 +10,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use agent_tapes_core::backend::{
     claude::ClaudeBackend, codex::CodexBackend, pi::PiBackend, Backend,
 };
+use agent_tapes_core::measurement::{Measured, MeasurementCompleteness};
 use agent_tapes_core::usage::{self, GroupBy};
 use agent_tapes_core::{usage_full_with_backends, usage_with_backends, Selection};
 use serde_json::{json, Value};
@@ -512,6 +513,168 @@ fn a_summary_never_adds_event_coverage_across_accounting_bases() {
         assert!(
             partition["measurement_coverage"]["input"].is_object(),
             "{partition}"
+        );
+    }
+}
+
+#[test]
+fn a_summary_counts_the_events_of_sessions_with_no_amount_as_missing() {
+    // Three requests that wrote no counter, beside one that wrote `input`.
+    let store = claude_store(
+        "no-amount",
+        &[
+            ("empty", vec![Vec::new(), Vec::new(), Vec::new()]),
+            ("one", vec![vec!["input"]]),
+        ],
+    );
+    let backend = ClaudeBackend::new(&store.0);
+    let sessions = ["empty", "one"]
+        .map(|id| backend.locate(id).unwrap().unwrap())
+        .to_vec();
+    let summary = serde_json::to_value(usage::aggregate(&sessions, &[GroupBy::Harness])).unwrap();
+    for (label, figure) in [
+        ("totals", &summary["totals"]),
+        ("group", &summary["groups"][0]),
+    ] {
+        assert_eq!(
+            figure["measurement_coverage"]["input"],
+            coverage(1, 3),
+            "{label}: {figure}"
+        );
+        assert_eq!(
+            figure["measurement_coverage"]["output"],
+            coverage(0, 4),
+            "{label}: {figure}"
+        );
+        assert_eq!(reasons(figure, "input"), ["missing-counter"], "{label}");
+    }
+}
+
+#[test]
+fn a_session_of_counter_less_requests_reports_every_counter_missing() {
+    for harness in ["claude", "pi"] {
+        let sessions = [("empty", vec![Vec::new(), Vec::new()])];
+        let store = if harness == "claude" {
+            claude_store("empty", &sessions)
+        } else {
+            pi_store("empty", &sessions)
+        };
+        let backend: Box<dyn Backend> = if harness == "claude" {
+            Box::new(ClaudeBackend::new(&store.0))
+        } else {
+            Box::new(PiBackend::new(&store.0))
+        };
+        let figure = view(backend, "empty", false);
+        for counter in TOKENS {
+            assert_eq!(
+                figure["measurement_coverage"][counter],
+                coverage(0, 2),
+                "{harness} × {counter}: {figure}"
+            );
+        }
+        assert_eq!(
+            figure["measurement_coverage"]["cost"],
+            if harness == "pi" {
+                coverage(0, 2)
+            } else {
+                Value::Null
+            },
+            "{harness}: {figure}"
+        );
+    }
+}
+
+#[test]
+fn a_figure_that_counted_events_and_measured_nothing_qualifies_every_counter() {
+    let completeness = MeasurementCompleteness::assess(Measured {
+        events: 2,
+        scope: Some(agent_tapes_core::model::AccountingCoverage::Session),
+        ..Measured::default()
+    });
+    assert!(!completeness.is_complete(&["input"]));
+    for counter in TOKENS {
+        assert!(!completeness.is_complete(&[counter]), "{counter}");
+    }
+    assert!(!completeness.is_complete(&["cost"]));
+    let none = MeasurementCompleteness::assess(Measured::default());
+    assert!(none.is_empty(), "a figure with no events has no counter");
+}
+
+#[test]
+fn codex_unattributed_tokens_report_per_counter_coverage() {
+    let id = "70000000-0000-0000-0000-00000000000b";
+    // No `turn_context`: no request can be attributed to a model.
+    let store = Store::new("codex-unattributed");
+    let mut lines = vec![
+        json!({"type": "session_meta", "payload": {"id": id, "timestamp": "2026-01-01T10:00:00Z"}}),
+    ];
+    for (index, recorded) in partial().iter().take(2).enumerate() {
+        let usage = counters(recorded);
+        let mut payload = json!({"response_id": format!("response-{index}")});
+        if !recorded.is_empty() {
+            payload["usage"] = json!({
+                "input_tokens": usage.get("input"),
+                "output_tokens": usage.get("output"),
+                "reasoning_output_tokens": usage.get("reasoning"),
+                "cached_input_tokens": usage.get("cache_read"),
+                "cache_write_input_tokens": usage.get("cache_write"),
+            });
+        }
+        lines.push(json!({"type": "token_usage_record", "payload": payload}));
+    }
+    store.write(
+        &format!("2026/01/01/rollout-2026-01-01T10-00-00-{id}.jsonl"),
+        &lines,
+    );
+    let figure = view(Box::new(CodexBackend::new(&store.0)), id, false);
+    let attribution = &figure["attribution"];
+    assert_eq!(attribution["unattributed"], 2, "{figure}");
+    assert_eq!(attribution["unattributed_tokens"]["input"], 20, "{figure}");
+    for (counter, measured, missing) in [
+        ("input", 2, 0),
+        ("output", 2, 0),
+        ("reasoning", 1, 1),
+        ("cache_read", 1, 1),
+        ("cache_write", 2, 0),
+    ] {
+        assert_eq!(
+            attribution["unattributed_coverage"][counter],
+            coverage(measured, missing),
+            "{counter}: {attribution}"
+        );
+        let qualified =
+            json!({"measurement_completeness": attribution["unattributed_completeness"]});
+        assert_eq!(
+            reasons(&qualified, counter),
+            if missing > 0 {
+                vec!["missing-counter"]
+            } else {
+                Vec::new()
+            },
+            "{counter}: {attribution}"
+        );
+    }
+}
+
+#[test]
+fn a_pi_consumption_without_counters_keeps_the_coverage_every_reader_reports() {
+    let store = pi_store("pi-empty", &[("empty", vec![Vec::new(), Vec::new()])]);
+    let figure = view(Box::new(PiBackend::new(&store.0)), "empty", true);
+    let consumption = &figure["consumption"];
+    for counter in TOKENS {
+        assert_eq!(
+            consumption["measurement_coverage"][counter],
+            coverage(0, 2),
+            "{counter}: {consumption}"
+        );
+        assert_eq!(
+            figure["measurement_coverage"][counter], consumption["measurement_coverage"][counter],
+            "{counter}: {figure}"
+        );
+        assert_eq!(
+            reasons(consumption, counter),
+            ["missing-counter"],
+            "{counter}"
         );
     }
 }

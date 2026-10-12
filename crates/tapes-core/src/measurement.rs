@@ -121,6 +121,9 @@ pub struct Measured<'a> {
     pub coverage: Option<&'a BTreeMap<String, MeasurementCoverage>>,
     /// How much of its session the figure covers; absent, unestablished.
     pub scope: Option<AccountingCoverage>,
+    /// How many events the figure counted, so a figure that counted some and
+    /// measured nothing still qualifies every counter.
+    pub events: usize,
 }
 
 impl MeasurementCompleteness {
@@ -167,6 +170,9 @@ impl MeasurementCompleteness {
     pub fn assess(figure: Measured<'_>) -> Self {
         let mut result = Self::default();
         if figure.tokens.is_none() && figure.cost.is_none() {
+            if figure.events > 0 {
+                result.include_absent(None, None);
+            }
             return result;
         }
         result.include_absent(figure.tokens, figure.cost);

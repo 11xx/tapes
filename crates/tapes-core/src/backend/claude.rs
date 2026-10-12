@@ -1488,7 +1488,9 @@ impl RequestTokens {
         }
         let usage = message.get("usage").and_then(Value::as_object);
         // A request that wrote no usage consumed an unknown amount: it
-        // counts, with every counter missing.
+        // counts, with every counter missing. The one exception is a hook
+        // answer, `answeredWithoutRequest`, which made no request and so
+        // returns here before counting.
         if usage.is_none() && value["answeredWithoutRequest"] == true {
             return;
         }

@@ -55,7 +55,7 @@ pub const FULL_RECORD_BYTES: u64 = 64 * 1024 * 1024;
 /// a present value, while a missing field remains absent in the result. Each
 /// `add` is one counted event: it records, per counter, whether the event
 /// wrote it, so a sum says how many of its events it covers.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(crate) struct TokenTotals {
     input: Option<u64>,
     output: Option<u64>,
@@ -95,23 +95,12 @@ impl TokenTotals {
         }
     }
 
-    /// Per-counter coverage among the events added so far.
-    pub(crate) fn coverage(&self) -> &BTreeMap<String, MeasurementCoverage> {
-        &self.coverage
-    }
-
-    /// The sums and the coverage of the events behind them. The coverage is
-    /// empty when no counter was written, since there is then no sum for it
-    /// to qualify.
+    /// The sums and the coverage of the events behind them. Events that wrote
+    /// no counter still count, each missing every counter, so a figure with
+    /// no sum says how many events it measured nothing for.
     pub(crate) fn finish_covered(self) -> (Option<Tokens>, BTreeMap<String, MeasurementCoverage>) {
         let coverage = self.coverage.clone();
-        let tokens = self.finish();
-        let coverage = if tokens.is_some() {
-            coverage
-        } else {
-            BTreeMap::new()
-        };
-        (tokens, coverage)
+        (self.finish(), coverage)
     }
 
     pub(crate) fn finish(self) -> Option<Tokens> {

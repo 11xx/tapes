@@ -859,7 +859,7 @@ struct UsageCandidate {
     leading_uncounted: usize,
     resets: usize,
     by_model: BTreeMap<ModelKey, CandidateModel>,
-    unattributed_tokens: Option<Tokens>,
+    unattributed_tokens: TokenTotals,
     incomplete: BoundedReasons,
     bounds: BoundedReasons,
 }
@@ -871,7 +871,15 @@ impl UsageCandidate {
 
     fn add_unattributed(&mut self, tokens: Option<&Tokens>) {
         self.unattributed += 1;
-        add_tokens(&mut self.unattributed_tokens, tokens);
+        // An unattributed request that recorded no usage still counts, with
+        // every counter missing.
+        self.unattributed_tokens.add(
+            tokens.and_then(|tokens| tokens.input),
+            tokens.and_then(|tokens| tokens.output),
+            tokens.and_then(|tokens| tokens.reasoning),
+            tokens.and_then(|tokens| tokens.cache_read),
+            tokens.and_then(|tokens| tokens.cache_write),
+        );
     }
 
     fn count_request(
@@ -930,6 +938,8 @@ impl UsageCandidate {
         let mut bounds = BoundedReasons::default();
         bounds.extend(&self.bounds);
         bounds.extend(global_bounds);
+        let (unattributed_tokens, unattributed_coverage) =
+            self.unattributed_tokens.clone().finish_covered();
         UsageAttribution {
             basis,
             coverage,
@@ -939,7 +949,9 @@ impl UsageCandidate {
             unattributed: self.unattributed,
             leading_uncounted: self.leading_uncounted,
             resets: self.resets,
-            unattributed_tokens: self.unattributed_tokens.clone(),
+            unattributed_tokens,
+            unattributed_coverage,
+            unattributed_completeness: Default::default(),
             incomplete: incomplete.into_inner(),
             bounds: bounds.into_inner(),
         }
@@ -1571,33 +1583,6 @@ struct CodexUsageFacts {
     usage_detail: Option<UsageDetail>,
     activity: ActivityRange,
     series: Option<UsageObservationSeries>,
-}
-
-fn add_counter(total: &mut Option<u64>, value: Option<u64>) {
-    if let Some(value) = value {
-        *total = Some(total.unwrap_or_default().saturating_add(value));
-    }
-}
-
-fn add_tokens(total: &mut Option<Tokens>, value: Option<&Tokens>) {
-    let Some(value) = value else {
-        return;
-    };
-    if total.is_none() {
-        *total = Some(Tokens {
-            input: None,
-            output: None,
-            reasoning: None,
-            cache_read: None,
-            cache_write: None,
-        });
-    }
-    let total = total.as_mut().expect("initialized above");
-    add_counter(&mut total.input, value.input);
-    add_counter(&mut total.output, value.output);
-    add_counter(&mut total.reasoning, value.reasoning);
-    add_counter(&mut total.cache_read, value.cache_read);
-    add_counter(&mut total.cache_write, value.cache_write);
 }
 
 fn tokens_from_object(value: &Value) -> Option<Tokens> {

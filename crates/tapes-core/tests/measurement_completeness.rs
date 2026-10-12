@@ -630,6 +630,8 @@ fn an_unattributed_request_qualifies_every_model_share() {
         leading_uncounted: 0,
         resets: 0,
         unattributed_tokens: None,
+        unattributed_coverage: Default::default(),
+        unattributed_completeness: Default::default(),
         incomplete: vec!["model-attribution-unknown".to_owned()],
         bounds: Vec::new(),
     });
@@ -729,4 +731,36 @@ fn a_recorded_models_share_follows_the_recorded_accounting() {
         "stopped-attempt",
         &NATIVE,
     );
+}
+
+/// A model that counted requests and recorded no counter has no amount to
+/// qualify, yet it is no complete measurement of what it counted.
+#[test]
+fn a_model_that_counted_requests_and_recorded_nothing_is_incomplete() {
+    let store = Store::new("counted-nothing");
+    store.write(&[
+        header("/fixtures/counted-nothing"),
+        request(None).to_string(),
+    ]);
+    let (mut transcript, _) = read(&store, None, false);
+    let detail = transcript.session.usage_detail.as_mut().unwrap();
+    detail.by_model = Some(vec![ModelUsage {
+        model: "counted-model".to_owned(),
+        variant: None,
+        tokens: None,
+        cost: None,
+        cost_coverage: None,
+        request_count: Some(2),
+        measurement_coverage: Default::default(),
+        measurement_incomplete: Vec::new(),
+        measurement_completeness: Default::default(),
+    }]);
+    let view = serde_json::to_value(usage::usage(&transcript)).unwrap();
+    let model = &view["by_model"][0];
+    for counter in TOKENS {
+        assert!(
+            reasons(model, counter).contains(&"missing-counter"),
+            "{counter}: {model}"
+        );
+    }
 }

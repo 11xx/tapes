@@ -209,6 +209,7 @@ impl ModelUsage {
             cost_coverage: self.cost_coverage.as_ref(),
             coverage: Some(&self.measurement_coverage),
             scope,
+            events: self.request_count.unwrap_or(0),
         });
         self.measurement_completeness.merge(&assessed);
         self.measurement_completeness.merge(shared);
@@ -375,6 +376,14 @@ pub struct UsageAttribution {
     pub resets: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub unattributed_tokens: Option<Tokens>,
+    /// Per-counter coverage among the unattributed requests, so their sum is
+    /// a known subtotal wherever a request did not record a counter.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub unattributed_coverage: BTreeMap<String, MeasurementCoverage>,
+    /// The unattributed counters that are incompletely measured and why; the
+    /// usage view fills it from their coverage and the attribution's scope.
+    #[serde(skip_serializing_if = "MeasurementCompleteness::is_empty")]
+    pub unattributed_completeness: MeasurementCompleteness,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub incomplete: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -847,6 +856,15 @@ fn project(session: &Session, turns: TurnTally, facts: ReadFacts) -> UsageView {
     for model in detail.by_model.iter_mut().flatten() {
         model.qualify(scope, &shared);
     }
+    if let Some(attribution) = &mut detail.attribution {
+        attribution.unattributed_completeness = MeasurementCompleteness::assess(Measured {
+            tokens: attribution.unattributed_tokens.as_ref(),
+            coverage: Some(&attribution.unattributed_coverage),
+            scope: Some(attribution.coverage),
+            events: attribution.unattributed,
+            ..Measured::default()
+        });
+    }
     if let Some(recorded) = &mut detail.recorded_total {
         for model in recorded.by_model.iter_mut().flatten() {
             model.qualify(Some(recorded.accounting.coverage), &shared);
@@ -915,6 +933,9 @@ impl Session {
                 .accounting
                 .as_ref()
                 .map(|accounting| accounting.coverage),
+            events: detail
+                .and_then(|detail| detail.requests.as_ref())
+                .map_or(0, |requests| requests.requests),
         });
         if let Some(detail) = detail {
             completeness.merge(&detail.measurement_completeness);

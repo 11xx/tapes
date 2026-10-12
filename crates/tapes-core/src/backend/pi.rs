@@ -1245,23 +1245,23 @@ impl PiConsumption {
                 "{count} requests stopped on an error or an abort; their recorded usage is partial"
             )),
         }
-        let mut measurement_coverage = self.totals.tokens.coverage().clone();
+        let cost_coverage = self.totals.cost_coverage().map(|coverage| CostCoverage {
+            zero_written_requests: self.zero_written_requests,
+            ..coverage
+        });
+        let (tokens, mut measurement_coverage) = self.totals.tokens.finish_covered();
         measurement_coverage.insert("cost".to_owned(), self.cost_measurement);
         incomplete.extend(known_subtotal_notes(&measurement_coverage));
         let cost = (self.cost_measurement.measured > 0).then_some(Cost {
             usd: self.totals.cost,
         });
-        let cost_coverage = self.totals.cost_coverage().map(|coverage| CostCoverage {
-            zero_written_requests: self.zero_written_requests,
-            ..coverage
-        });
-        let tokens = self.totals.tokens.finish();
         let mut measurement_completeness = MeasurementCompleteness::assess(Measured {
             tokens: tokens.as_ref(),
             cost: cost.as_ref(),
             cost_coverage: cost_coverage.as_ref(),
             coverage: Some(&measurement_coverage),
             scope: Some(coverage),
+            events: self.events.counted,
         });
         if unreadable > 0 {
             measurement_completeness.qualify_all(MeasurementReason::UnreadableRecord);
