@@ -28,7 +28,7 @@ use crate::model::{
     KindDeclaration, Launch, Model, Role, Session, SourceDescriptor, Tokens, TrailingRecord,
     Transcript, Turn, TurnKind, TurnSelection,
 };
-use crate::reconcile::{FamilyLedger, Reconciliation, SourceRole};
+use crate::reconcile::{FailureReason, FamilyLedger, Reconciliation, SourceRole};
 use crate::usage::{
     Durations, MeasurementCoverage, ModelUsage, RecordedUsage, RequestDimensions, UsageDetail,
 };
@@ -628,7 +628,9 @@ impl Backend for ClaudeBackend {
                     );
                     match reconcile_source(&mut ledger, child, &file.transcript, &session.id, false)
                     {
-                        Err(error) => ledger.failed(child, format!("{error:#}")),
+                        Err(error) => {
+                            ledger.failed(child, &session.id, failure_reason(&error));
+                        }
                         Ok(()) => {
                             let directory = path.with_extension("").join("subagents");
                             if let (Ok(directory), Ok(recording)) =
@@ -642,7 +644,7 @@ impl Backend for ClaudeBackend {
                     }
                 }
             }
-            Err(error) => ledger.unenumerated(format!("{error:#}")),
+            Err(_) => ledger.unenumerated(&session.id, FailureReason::SubagentsUnenumerated),
         }
         Ok(ledger.finish())
     }
@@ -1604,6 +1606,35 @@ fn assistant_usage(value: &Value) -> Option<&serde_json::Map<String, Value>> {
 /// in place of a failed response, and, for the parent, every cost-state it
 /// recorded. A child must positively witness matching native parent identity;
 /// validation pins its bytes before any counters enter the ledger.
+/// A recording whose native identity rules it out of a reconciliation.
+#[derive(Debug)]
+struct IdentityFailure(FailureReason);
+
+impl std::fmt::Display for IdentityFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self.0 {
+            FailureReason::NoIdentity => "child recording has no native parent identity evidence",
+            _ => "claude recording contains a different or invalid native session ID",
+        })
+    }
+}
+
+impl std::error::Error for IdentityFailure {}
+
+/// The fixed category of a source's read failure.
+fn failure_reason(error: &anyhow::Error) -> FailureReason {
+    error
+        .downcast_ref::<IdentityFailure>()
+        .map_or(FailureReason::SourceUnreadableOrChanged, |failure| {
+            failure.0
+        })
+}
+
+fn source_identity(value: &Value, session_id: &str) -> Result<bool> {
+    super::validate_native_identity(value, "claude", session_id)
+        .map_err(|_| IdentityFailure(FailureReason::ForeignIdentity).into())
+}
+
 fn reconcile_source(
     ledger: &mut FamilyLedger,
     source: usize,
@@ -1613,15 +1644,15 @@ fn reconcile_source(
 ) -> Result<()> {
     let mut identity_seen = false;
     let validated = stream_jsonl(path, None, |value, _, _| {
-        identity_seen |= super::validate_native_identity(value, "claude", session_id)?;
+        identity_seen |= source_identity(value, session_id)?;
         Ok(false)
     })?;
     if !parent && !identity_seen {
-        anyhow::bail!("child recording has no native parent identity evidence");
+        return Err(IdentityFailure(FailureReason::NoIdentity).into());
     }
     let mut position = 0;
     let read = stream_jsonl(path, Some(validated.pin()), |value, _, _| {
-        super::validate_native_identity(value, "claude", session_id)?;
+        source_identity(value, session_id)?;
         position += 1;
         if parent && value["type"] == "cost-state" {
             let by_model = value["modelUsage"]

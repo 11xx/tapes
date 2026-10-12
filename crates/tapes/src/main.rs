@@ -1491,6 +1491,10 @@ enum Command {
         /// withhold differences. Child frontiers require timestamps; missing
         /// or later child observations cannot contradict an earlier total.
         /// Each source names the revision, length and SHA-256 of its bytes.
+        /// A source that could not be used carries `error` and an
+        /// unenumerated family a note, each a session id and a fixed reason
+        /// (foreign-identity, no-identity, source-unreadable-or-changed,
+        /// subagents-unenumerated), never the underlying error text.
         #[arg(long, conflicts_with = "by")]
         reconcile: bool,
         /// Retain a recent suffix of Pi consumption event keys. Default: 200;

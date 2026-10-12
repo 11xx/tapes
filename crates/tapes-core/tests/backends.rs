@@ -2061,6 +2061,69 @@ fn reconciliation_rejects_child_contributions_before_a_late_identity_failure() {
     fs::remove_dir_all(root).unwrap();
 }
 
+/// Every place a reconciliation can carry a failure holds a fixed reason and
+/// the session id, never the error text, which may hold a recording path.
+#[test]
+fn reconciliation_failures_carry_reasons_and_no_error_text() {
+    let session_prefix = format!("Claude session {CLAUDE_FAMILY_SESSION}: ");
+    let without_locators = |report: &serde_json::Value, root: &Path| {
+        let root_text = root.to_string_lossy().into_owned();
+        report.to_string().replace(&format!("file:{root_text}"), "")
+    };
+    for (tag, reason) in [
+        ("foreign-failure", "foreign-identity"),
+        ("no-identity-failure", "no-identity"),
+        ("unreadable-failure", "source-unreadable-or-changed"),
+    ] {
+        let root = claude_family(tag, |_, child| match tag {
+            "foreign-failure" => {
+                *child = child.replace(
+                    CLAUDE_FAMILY_SESSION,
+                    "60000000-0000-4000-8000-000000000001",
+                );
+            }
+            "no-identity-failure" => {
+                *child = child.replace(&format!("\"sessionId\":\"{CLAUDE_FAMILY_SESSION}\","), "");
+            }
+            _ => {}
+        });
+        if tag == "unreadable-failure" {
+            let child = root
+                .join("project")
+                .join(CLAUDE_FAMILY_SESSION)
+                .join("subagents")
+                .join(format!("{CLAUDE_FAMILY_CHILD}.jsonl"));
+            fs::remove_file(&child).unwrap();
+            fs::create_dir(&child).unwrap();
+        }
+        let report = reconciled(&root);
+        assert_eq!(
+            report["sources"][1]["error"],
+            format!("{session_prefix}{reason}"),
+            "{tag}"
+        );
+        let rendered = without_locators(&report, &root);
+        assert!(!rendered.contains(&*root.to_string_lossy()), "{rendered}");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    let root = claude_family("unenumerated-failure", |_, _| {});
+    let directory = root
+        .join("project")
+        .join(CLAUDE_FAMILY_SESSION)
+        .join("subagents");
+    fs::remove_dir_all(&directory).unwrap();
+    fs::write(directory, "enumeration unavailable").unwrap();
+    let report = reconciled(&root);
+    assert_eq!(
+        report["notes"],
+        serde_json::json!([format!("{session_prefix}subagents-unenumerated")])
+    );
+    let rendered = without_locators(&report, &root);
+    assert!(!rendered.contains(&*root.to_string_lossy()), "{rendered}");
+    fs::remove_dir_all(root).unwrap();
+}
+
 fn assert_namespace_withheld(report: &serde_json::Value) {
     assert_eq!(report["identified"]["identity_coverage"], "unestablished");
     assert!(!report["identified"]["complete"].as_bool().unwrap());

@@ -677,7 +677,11 @@ PROBE BEFORE EXPORTING
   frontier withhold differences. Parent file positions order parent requests;
   child frontiers require timestamps. A missing frontier or a child request
   after the total cannot contradict that total. Each source names the exact
-  revision, length and SHA-256 read under the report's rules.
+  revision, length and SHA-256 read under the report's rules. A source that
+  could not be used carries `error`, and an unenumerated family a note: the
+  session id and one fixed reason (foreign-identity, no-identity,
+  source-unreadable-or-changed, subagents-unenumerated), never error text,
+  which can name a recording path.
 
   `usage SESSION --event-keys[=N]` exposes Pi's counted consumption identities
   under `consumption_event_keys`: 200 recent keys by default, 1..=10000 keys,

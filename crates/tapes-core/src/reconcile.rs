@@ -69,6 +69,32 @@ pub enum SourceRole {
     Child,
 }
 
+/// Why a reconciliation could not use a source or enumerate a family. A
+/// reason is a fixed category: the error that caused it can name a recording
+/// path, so none of its text reaches the report.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum FailureReason {
+    /// The recording names a native session other than the family's.
+    ForeignIdentity,
+    /// A child recording carries no native parent identity evidence.
+    NoIdentity,
+    /// The recording could not be opened, read, or replayed unchanged.
+    SourceUnreadableOrChanged,
+    /// The family's subagent recordings could not be listed.
+    SubagentsUnenumerated,
+}
+
+impl FailureReason {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::ForeignIdentity => "foreign-identity",
+            Self::NoIdentity => "no-identity",
+            Self::SourceUnreadableOrChanged => "source-unreadable-or-changed",
+            Self::SubagentsUnenumerated => "subagents-unenumerated",
+        }
+    }
+}
+
 /// One recording the reconciliation read whole. `revision`, `length`, and
 /// `sha256` identify the exact bytes read. `records` counts request records
 /// with usage; `requests` the distinct recording-local identities, whose
@@ -229,6 +255,10 @@ pub struct Reconciliation {
     pub notes: Vec<String>,
 }
 
+fn failure_text(session_id: &str, reason: FailureReason) -> String {
+    format!("Claude session {session_id}: {}", reason.as_str())
+}
+
 fn is_zero(value: &usize) -> bool {
     *value == 0
 }
@@ -380,10 +410,10 @@ impl FamilyLedger {
             && !self.budget_exhausted;
     }
 
-    pub(crate) fn failed(&mut self, source: usize, error: String) {
+    pub(crate) fn failed(&mut self, source: usize, session_id: &str, reason: FailureReason) {
         let entry = &mut self.sources[source];
         entry.complete = false;
-        entry.error = Some(error);
+        entry.error = Some(failure_text(session_id, reason));
         self.family_members[source] = false;
         entry.requests = 0;
         entry.identified = None;
@@ -393,9 +423,9 @@ impl FamilyLedger {
 
     /// The family's children could not be listed, so the union cannot be
     /// complete.
-    pub(crate) fn unenumerated(&mut self, error: String) {
+    pub(crate) fn unenumerated(&mut self, session_id: &str, reason: FailureReason) {
         self.unenumerated = true;
-        self.notes.push(error);
+        self.notes.push(failure_text(session_id, reason));
     }
 
     /// A record the reader has no reading for that carries usage-shaped
