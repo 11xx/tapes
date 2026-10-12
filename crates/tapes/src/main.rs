@@ -1442,7 +1442,9 @@ enum Command {
     /// bound. `overlap.related` names each group, its evidence, and whether
     /// its union is exact. Sessions no evidence relates are summed, and
     /// `overlap.disjointness` says that is inferred from absent copy evidence,
-    /// not established.
+    /// not established, or from sampled copy evidence when a long recording's
+    /// id check kept only a sample of its ids, with `overlap.sampled` naming
+    /// those sessions.
     Usage {
         #[command(flatten)]
         query: SessionQueryArgs,
@@ -4899,9 +4901,15 @@ fn render_overlap(out: &mut String, tally: &UsageTally) {
         return;
     };
     match overlap.disjointness {
-        Disjointness::InferredFromAbsentCopyEvidence => out.push_str(
+        Some(Disjointness::InferredFromAbsentCopyEvidence) => out.push_str(
             "Sessions no recording relates are summed as disjoint, inferred from absent copy evidence.\n",
         ),
+        Some(Disjointness::InferredFromSampledCopyEvidence) => out.push_str(&format!(
+            "Sessions no recording relates are summed as disjoint, inferred from sampled copy evidence: \
+             the id check kept only a sample of the ids of {}.\n",
+            overlap.sampled.join(", ")
+        )),
+        None => {}
     }
     for related in &overlap.related {
         let evidence = related

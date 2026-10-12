@@ -508,11 +508,15 @@ PROBE BEFORE EXPORTING
   `evidence` (declared-fork, fork-origin-unplaced, shared-request-id,
   shared-message-uuid), whether its `union` is exact or withheld, and why.
   Unrelated sessions beside a withheld group stay summed in the bounds.
-  `overlap.disjointness` is `inferred-from-absent-copy-evidence` for every
-  multi-session figure: the recordings hold no sign that unrelated sessions
-  share events, which is evidence of absence and not proof. The id check reads
-  the ids the usage read visits and keeps a bounded sample of each recording's,
-  so a copy that is a small part of a very long recording can go unseen.
+  `overlap.disjointness` states how the unrelated sessions and groups were
+  added as disjoint, and is absent when every session is in one overlap
+  group. It is `inferred-from-absent-copy-evidence`: the recordings hold no
+  sign that they share events, which is evidence of absence and not proof.
+  The id check reads the ids the usage read visits and keeps a bounded sample
+  of a very long recording's, so a copy sharing only a few ids with it can go
+  unseen. When any summed session was sampled the basis is
+  `inferred-from-sampled-copy-evidence` and `overlap.sampled` names those
+  sessions by id.
   Different bases have separate partitions, and `session_figures` preserves
   per-counter coverage without recording locators.
 

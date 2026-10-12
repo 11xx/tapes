@@ -92,6 +92,11 @@ impl CopyEvidence {
         }
     }
 
+    /// Whether either kind of id check left some identifier out.
+    pub fn sampled(&self) -> bool {
+        self.request_ids.sampled() || self.message_uuids.sampled()
+    }
+
     pub fn is_empty(&self) -> bool {
         self.origins.is_empty()
             && !self.origin_unplaced
@@ -152,6 +157,10 @@ pub enum Disjointness {
     /// holds an id another holds. Absence of copy evidence is not proof, so
     /// the figure is inferred, not established.
     InferredFromAbsentCopyEvidence,
+    /// As above, but some session's id check kept only a bounded sample of
+    /// its ids, so a copy sharing a few ids with it can go unseen. The
+    /// figure's `sampled` names those sessions.
+    InferredFromSampledCopyEvidence,
 }
 
 /// Whether the amounts of an overlap group were added as an exact union.
@@ -182,7 +191,15 @@ pub struct RelatedSessions {
 /// the recordings relate.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct UsageOverlap {
-    pub disjointness: Disjointness,
+    /// How the figure's unrelated sessions and groups are known to share no
+    /// events. Absent when every session is in one overlap group, so nothing
+    /// was added as disjoint.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub disjointness: Option<Disjointness>,
+    /// The sessions whose id check kept only a sample of their ids; present
+    /// exactly when the disjointness is inferred from sampled evidence.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub sampled: Vec<String>,
     /// The overlap groups among the figure's sessions.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub related: Vec<RelatedSessions>,

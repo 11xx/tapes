@@ -2279,6 +2279,8 @@ struct Domains {
     /// The overlap groups among the figures, as positions in `figures`.
     units: Vec<Vec<usize>>,
     related: Vec<RelatedSessions>,
+    /// The sessions whose id check kept only a sample of their ids.
+    sampled: Vec<String>,
     /// Some overlap group's exact totals are withheld.
     withheld: bool,
     /// Some overlap group was added by its exact union.
@@ -2289,6 +2291,14 @@ impl Domains {
     /// Record `session`, answering the position of its figure.
     fn add(&mut self, session: &Session, key: &(String, String)) -> usize {
         self.figures.push(SessionUsageFigure::from(session));
+        if session
+            .usage_detail
+            .as_ref()
+            .and_then(|detail| detail.copy_evidence.as_ref())
+            .is_some_and(CopyEvidence::sampled)
+        {
+            self.sampled.push(session.id.clone());
+        }
         if session.tokens.is_some() || session.cost.is_some() {
             self.native.insert(key.clone());
         }
@@ -2351,8 +2361,15 @@ impl Domains {
             tally.measurement_coverage.clear();
         }
         if self.figures.len() > 1 {
+            let disjoint = self.units().len() > 1;
+            let sampled = if disjoint { self.sampled } else { Vec::new() };
             tally.overlap = Some(UsageOverlap {
-                disjointness: Disjointness::InferredFromAbsentCopyEvidence,
+                disjointness: disjoint.then_some(if sampled.is_empty() {
+                    Disjointness::InferredFromAbsentCopyEvidence
+                } else {
+                    Disjointness::InferredFromSampledCopyEvidence
+                }),
+                sampled,
                 related: self.related,
             });
         }
@@ -2844,6 +2861,58 @@ mod partition_tests {
                     "{harness}: {value}"
                 );
             }
+        }
+    }
+
+    /// An id check that kept only a sample of a recording's ids is weaker
+    /// than a complete one, and the figure names the recordings it applies to.
+    #[test]
+    fn a_sampled_id_check_names_its_sessions_in_the_disjointness_basis() {
+        let long = with_evidence(
+            identified("claude", "long", native(5, 65, 12, 2_300, 360)),
+            |evidence| {
+                for index in 0..crate::overlap::Witnesses::CAP * 2 {
+                    evidence.request_ids.observe(&format!("req-{index}"));
+                }
+            },
+        );
+        let other = holding_request(
+            identified("claude", "other", native(7, 80, 12, 2_400, 360)),
+            "elsewhere",
+        );
+        for value in figures(&[long, other]) {
+            assert_eq!(value["tokens"]["output"], 145, "{value}");
+            assert_eq!(
+                value["overlap"],
+                json!({
+                    "disjointness": "inferred-from-sampled-copy-evidence",
+                    "sampled": ["long"],
+                }),
+                "{value}"
+            );
+        }
+    }
+
+    /// When every session is in one overlap group nothing was added as
+    /// disjoint, so no disjointness is stated, sampled or not.
+    #[test]
+    fn a_figure_with_nothing_added_as_disjoint_states_no_disjointness() {
+        let origin = with_evidence(
+            identified("codex", "origin", native(1_000, 100, 10, 400, 0)),
+            |evidence| {
+                for index in 0..crate::overlap::Witnesses::CAP * 2 {
+                    evidence.request_ids.observe(&format!("req-{index}"));
+                }
+            },
+        );
+        let fork = forked_from(
+            identified("codex", "fork", native(1_300, 150, 20, 700, 0)),
+            "origin",
+        );
+        for value in figures(&[origin, fork]) {
+            assert_withheld(&value);
+            assert!(value["overlap"].get("disjointness").is_none(), "{value}");
+            assert!(value["overlap"].get("sampled").is_none(), "{value}");
         }
     }
 
