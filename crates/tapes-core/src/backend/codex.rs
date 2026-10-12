@@ -283,6 +283,10 @@ impl Backend for CodexBackend {
         "codex"
     }
 
+    fn accounting_bases(&self) -> &'static [AccountingBasis] {
+        &[AccountingBasis::RecordedTotal]
+    }
+
     fn available(&self) -> bool {
         self.store.as_ref().is_some_and(NativeStore::available)
     }

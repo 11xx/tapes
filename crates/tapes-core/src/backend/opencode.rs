@@ -1110,6 +1110,10 @@ impl Backend for OpenCodeBackend {
         "opencode"
     }
 
+    fn accounting_bases(&self) -> &'static [AccountingBasis] {
+        &[AccountingBasis::RecordedTotal]
+    }
+
     fn available(&self) -> bool {
         self.store.available()
     }

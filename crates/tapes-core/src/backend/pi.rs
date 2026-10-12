@@ -212,6 +212,10 @@ impl Backend for PiBackend {
         "pi"
     }
 
+    fn accounting_bases(&self) -> &'static [AccountingBasis] {
+        &[AccountingBasis::SummedRequests]
+    }
+
     fn available(&self) -> bool {
         self.store.as_ref().is_some_and(NativeStore::available)
     }

@@ -372,6 +372,14 @@ pub trait Backend {
     }
 
     fn harness(&self) -> &'static str;
+    /// The accounting bases this backend's reader can attach to a figure: a
+    /// session's counters, a set-aside recorded total, or a consumption. A
+    /// consumer uses it to say which basis totals a run it could not measure
+    /// may belong to. A backend whose sessions carry no accounting declares
+    /// none.
+    fn accounting_bases(&self) -> &'static [AccountingBasis] {
+        &[]
+    }
     /// Report whether listing is likely to work for this backend.
     ///
     /// This is an advisory listing hint, not a precondition for other
