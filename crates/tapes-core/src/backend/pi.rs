@@ -96,8 +96,13 @@ impl PiBackend {
             anyhow::bail!("recording-unreadable");
         }
         let mut identity_seen = false;
-        for header in opening.iter().filter(|value| value["type"] == "session") {
-            identity_seen = true;
+        for (in_opening, header) in opening
+            .iter()
+            .map(|value| (true, value))
+            .chain(read.values.iter().map(|value| (false, value)))
+            .filter(|(_, value)| value["type"] == "session")
+        {
+            identity_seen |= in_opening;
             let id = header["id"]
                 .as_str()
                 .ok_or_else(|| anyhow!("{} has an invalid session identity", path.display()))?;

@@ -101,11 +101,13 @@ impl CodexBackend {
         let opening = recording.opening();
         let read = &recording.tail;
         let mut identity_seen = false;
-        for value in opening
+        for (in_opening, value) in opening
             .iter()
-            .filter(|value| value["type"] == "session_meta")
+            .map(|value| (true, value))
+            .chain(read.values.iter().map(|value| (false, value)))
+            .filter(|(_, value)| value["type"] == "session_meta")
         {
-            identity_seen = true;
+            identity_seen |= in_opening;
             let id = value["payload"]["id"].as_str().ok_or_else(|| {
                 anyhow!("{} has an invalid session_meta identity", path.display())
             })?;
