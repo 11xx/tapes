@@ -941,6 +941,7 @@ impl UsageCandidate {
             .by_model
             .into_iter()
             .map(|(key, value)| ModelUsage {
+                measurement_completeness: Default::default(),
                 model: key.model,
                 variant: key.variant,
                 tokens: value.tokens,

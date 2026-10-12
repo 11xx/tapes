@@ -1379,7 +1379,12 @@ enum Command {
     /// A pi session's counters select its active branch and count usage on
     /// assistant requests, tool results, compactions, branch summaries, and
     /// usage entries, with per-counter `measurement_coverage` and
-    /// `measurement_incomplete` qualifications. Its `consumption`
+    /// `measurement_incomplete` qualifications. Every session's
+    /// `measurement_completeness` names each incomplete counter with fixed
+    /// reasons (a stopped or failed request, missing counters or prices, an
+    /// unreadable record, a read window), and every derived figure follows
+    /// it: disjoint categories and their total, model splits, summaries,
+    /// identity bounds, brief and stats. A pi session's `consumption`
     /// sums every retained branch, each consumption event once, with
     /// per-counter measurement coverage for known
     /// subtotals, event split, observed identity (provider account namespace

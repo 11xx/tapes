@@ -460,6 +460,10 @@ fn recorded_counters_are_carried_and_absence_stays_absent() {
         value["usage"],
         json!({
             "tokens": { "input": 120, "output": 34 },
+            "measurement_completeness": {
+                "reasoning": ["missing-counter"], "cache_read": ["missing-counter"],
+                "cache_write": ["missing-counter"], "cost": ["missing-price"]
+            },
             "accounting": { "basis": "recorded-total", "coverage": "session" },
         })
     );

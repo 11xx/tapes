@@ -17,6 +17,7 @@ use crate::content::{
 };
 use crate::event::{Bounded, EventKind, ToolEvent};
 use crate::lineage::{Lineage, ParentRef};
+use crate::measurement::{Measured, MeasurementCompleteness, MeasurementReason};
 use crate::model::{
     Accounting, AccountingBasis, AccountingCoverage, AccountingSelection, Cost, CostCoverage,
     KindDeclaration, Launch, Model, ReadGap, Role, Session, SourceDescriptor, Tokens,
@@ -179,6 +180,7 @@ impl PiBackend {
             cost_coverage: usage.cost_coverage,
             measurement_coverage: usage.measurement_coverage,
             measurement_incomplete: usage.measurement_incomplete,
+            measurement_completeness: usage.measurement_completeness,
             consumption,
             ..UsageDetail::default()
         }
@@ -633,6 +635,7 @@ impl Backend for PiBackend {
             cost_coverage: usage.cost_coverage,
             measurement_coverage: usage.measurement_coverage,
             measurement_incomplete: usage.measurement_incomplete,
+            measurement_completeness: usage.measurement_completeness,
             consumption,
             ..UsageDetail::default()
         }
@@ -1004,6 +1007,7 @@ struct PiUsageResult {
     cost_coverage: Option<CostCoverage>,
     measurement_coverage: BTreeMap<String, crate::usage::MeasurementCoverage>,
     measurement_incomplete: Vec<String>,
+    measurement_completeness: MeasurementCompleteness,
 }
 
 /// The model and reasoning level one request is attributed to, ordered by
@@ -1045,6 +1049,7 @@ impl PiUsage {
                         let requests = totals.assistant_requests;
                         let totals = totals.finish(AccountingCoverage::Session, 0, None).unwrap();
                         ModelUsage {
+                            measurement_completeness: totals.measurement_completeness,
                             model: key.model,
                             variant: key.variant,
                             tokens: totals.tokens,
@@ -1065,6 +1070,7 @@ impl PiUsage {
             cost_coverage: totals.cost_coverage,
             measurement_coverage: totals.measurement_coverage,
             measurement_incomplete: totals.incomplete,
+            measurement_completeness: totals.measurement_completeness,
         }
     }
 }
@@ -1239,6 +1245,19 @@ impl PiConsumption {
             ..coverage
         });
         let tokens = self.totals.tokens.finish();
+        let mut measurement_completeness = MeasurementCompleteness::assess(Measured {
+            tokens: tokens.as_ref(),
+            cost: cost.as_ref(),
+            cost_coverage: cost_coverage.as_ref(),
+            coverage: Some(&self.measurement_coverage),
+            scope: Some(coverage),
+        });
+        if unreadable > 0 {
+            measurement_completeness.qualify_all(MeasurementReason::UnreadableRecord);
+        }
+        if self.stopped > 0 {
+            measurement_completeness.qualify_all(MeasurementReason::StoppedAttempt);
+        }
         Some(Consumption {
             accounting: Accounting {
                 basis: AccountingBasis::SummedRequests,
@@ -1257,6 +1276,7 @@ impl PiConsumption {
                 ..self.identity
             },
             measurement_coverage: self.measurement_coverage,
+            measurement_completeness,
             incomplete,
         })
     }

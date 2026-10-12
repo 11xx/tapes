@@ -512,7 +512,29 @@ PROBE BEFORE EXPORTING
   coverage follows each category's dependencies; incomplete counters cannot
   establish a subtraction such as Codex's uncached input. Summary missing counts
   include selected sessions with no token measurement, while `disjoint.sessions`
-  counts sessions that recorded tokens. A Claude request sum keeps the TTL split; a
+  counts sessions that recorded tokens.
+
+  `measurement_completeness` answers, counter by counter, whether a figure is
+  completely measured and why not. It names each incomplete counter, or
+  disjoint category, with fixed reasons: missing-counter (some counted events
+  did not record it, or the figure has none), missing-price, unpriced (a
+  written zero beside usage), stopped-attempt (a request stopped on an error
+  or an abort, or failed, so its consumption is partial or unknown, even with
+  every counter populated), unreadable-record, read-window, since-reset,
+  unestablished-scope, incomplete-attribution (a model split whose read could
+  not attribute every request), and undetermined (the convention cannot
+  derive the category). A counter it does not name is complete; a present
+  amount it names is a known subtotal. Usage, consumption, model splits,
+  summary totals, groups and partitions, session figures, brief, stats, and
+  session JSON all carry it, and every figure derived from a counter follows
+  it: a disjoint category carries its native dependencies' reasons, the
+  disjoint total and an identity upper bound need complete counters, and a
+  stats cache ratio needs complete input and cache counters. A model split
+  carries its own reasons plus those no single model can be spared: the
+  read's coverage, failed requests, incomplete attribution. One model's
+  stopped request leaves another model's figure whole, and one session's
+  reasons leave another session's figure and group whole.
+  A Claude request sum keeps the TTL split; a
   cost-state total merges it, so its writes are ttl_unrecorded. requests
   tallies what the read's deduplicated Claude requests recorded beside their
   tokens — cache writes by TTL, service tier, speed, inference geo, web

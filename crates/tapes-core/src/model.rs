@@ -8,6 +8,7 @@ use serde_json::Value;
 use crate::content::ContentInventory;
 use crate::content::{ContentCoverage, ContentPart};
 use crate::event::ToolEvent;
+use crate::measurement::{MeasurementCompleteness, MeasurementReason};
 use crate::usage::UsageDetail;
 
 pub const SESSION_SCHEMA: &str = "tapes-session/19";
@@ -142,6 +143,11 @@ struct SessionWire {
     measurement_coverage: std::collections::BTreeMap<String, crate::usage::MeasurementCoverage>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     measurement_incomplete: Vec<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "crate::measurement::MeasurementCompleteness::is_empty"
+    )]
+    measurement_completeness: crate::measurement::MeasurementCompleteness,
 }
 impl From<SessionWire> for Session {
     fn from(wire: SessionWire) -> Self {
@@ -169,6 +175,7 @@ impl From<SessionWire> for Session {
                 cost_coverage: wire.cost_coverage,
                 measurement_coverage: wire.measurement_coverage,
                 measurement_incomplete: wire.measurement_incomplete,
+                measurement_completeness: wire.measurement_completeness,
                 ..UsageDetail::default()
             }
             .into_option(),
@@ -189,6 +196,7 @@ impl From<Session> for SessionWire {
     fn from(session: Session) -> Self {
         let cost = session.estimated_cost();
         let cost_coverage = session.cost_coverage();
+        let measurement_completeness = session.measurement_completeness();
         let detail = session.usage_detail.unwrap_or_default();
         Self {
             id: session.id,
@@ -213,6 +221,7 @@ impl From<Session> for SessionWire {
             cost_coverage,
             measurement_coverage: detail.measurement_coverage,
             measurement_incomplete: detail.measurement_incomplete,
+            measurement_completeness,
         }
     }
 }
@@ -680,7 +689,8 @@ impl CacheWrites {
 /// harnesses: uncached input, cache read, cache write by TTL, and output.
 /// Reasoning is a share of output, not a further category. `total` is the
 /// four categories' sum, present only when each is completely measured.
-/// `missing` names absent or incomplete categories and unestablished cache-write
+/// `measurement_completeness` gives each incompletely measured category its
+/// reasons; `missing` names those categories and unestablished cache-write
 /// TTLs. A present category named in `missing` is a known subtotal.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct DisjointTokens {
@@ -697,62 +707,42 @@ pub struct DisjointTokens {
     pub reasoning: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub total: Option<u64>,
+    #[serde(skip_serializing_if = "MeasurementCompleteness::is_empty")]
+    pub measurement_completeness: MeasurementCompleteness,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub missing: Vec<&'static str>,
 }
 
+/// The categories a disjoint total sums.
+pub const SUMMED_CATEGORIES: [&str; 4] = ["uncached_input", "cache_read", "cache_write", "output"];
+
 impl DisjointTokens {
-    /// Qualify categories by their native counter dependencies. Subtracting
-    /// counters with different measurement coverage establishes no category.
-    pub fn with_measurement_coverage(
-        mut self,
-        coverage: &BTreeMap<String, crate::usage::MeasurementCoverage>,
-    ) -> Self {
-        let incomplete = |name: &str| {
-            coverage
-                .get(name)
-                .is_some_and(|coverage| coverage.missing > 0 || coverage.unpriced > 0)
-        };
-        let uncached_input = incomplete("input")
-            || (self.convention.input == InputConvention::IncludesCacheRead
-                && (incomplete("cache_read") || incomplete("cache_write")));
-        let output = incomplete("output")
-            || (self.convention.output == OutputConvention::ExcludesReasoning
-                && incomplete("reasoning"));
-        for (name, partial) in [
-            ("uncached_input", uncached_input),
-            ("cache_read", incomplete("cache_read")),
-            ("cache_write", incomplete("cache_write")),
-            ("output", output),
-            ("reasoning", incomplete("reasoning")),
-        ] {
-            if partial && !self.missing.contains(&name) {
-                self.missing.push(name);
-            }
-        }
-        if uncached_input && self.convention.input == InputConvention::IncludesCacheRead {
+    /// Qualify each category by the native counters it is derived from, as
+    /// `native` qualifies them. A difference between incompletely measured
+    /// counters establishes no category.
+    pub fn with_completeness(mut self, native: &MeasurementCompleteness) -> Self {
+        self.measurement_completeness
+            .merge(&native.disjoint(&self.convention));
+        if self.convention.input == InputConvention::IncludesCacheRead
+            && !self
+                .measurement_completeness
+                .is_complete(&["uncached_input"])
+        {
             self.uncached_input = None;
         }
-        if ["uncached_input", "cache_read", "cache_write", "output"]
-            .iter()
-            .any(|name| self.missing.contains(name))
-        {
-            self.total = None;
-        }
-        self
+        self.settle()
     }
 
     /// Map native counters onto the disjoint categories. `cache_writes` is the
     /// TTL split of the same writes `tokens.cache_write` counts, where the
     /// source recorded one; a split that does not sum to that count is not
     /// that split and is set aside. A counter that would go negative under
-    /// the convention contradicts it and leaves its category missing.
+    /// the convention contradicts it and leaves its category undetermined.
     pub fn from_native(
         tokens: &Tokens,
         convention: TokenConvention,
         cache_writes: Option<&CacheWrites>,
     ) -> Self {
-        let mut missing = Vec::new();
         let cache_write = tokens.cache_write.map(|total| {
             cache_writes
                 .filter(|split| split.total() == total)
@@ -782,31 +772,18 @@ impl DisjointTokens {
         let reasoning = tokens
             .reasoning
             .filter(|reasoning| output.is_some_and(|output| *reasoning <= output));
-        for (name, present) in [
+        let mut absent = MeasurementCompleteness::default();
+        absent.include_absent(Some(tokens), None);
+        let mut completeness = absent.disjoint(&convention);
+        for (category, present) in [
             ("uncached_input", uncached_input.is_some()),
-            ("cache_read", tokens.cache_read.is_some()),
-            ("cache_write", cache_write.is_some()),
-            (
-                "cache_write_ttl",
-                cache_write.is_none_or(|writes| writes.ttl_unrecorded.unwrap_or(0) == 0),
-            ),
             ("output", output.is_some()),
             ("reasoning", reasoning.is_some()),
         ] {
-            if !present {
-                missing.push(name);
+            if !present && completeness.is_complete(&[category]) {
+                completeness.qualify(category, MeasurementReason::Undetermined);
             }
         }
-        let total = [
-            uncached_input,
-            tokens.cache_read,
-            cache_write.map(|writes| writes.total()),
-            output,
-        ]
-        .into_iter()
-        .try_fold(0u64, |sum, count| {
-            count.map(|count| sum.saturating_add(count))
-        });
         Self {
             convention,
             uncached_input,
@@ -814,9 +791,50 @@ impl DisjointTokens {
             cache_write,
             output,
             reasoning,
-            total,
-            missing,
+            total: None,
+            measurement_completeness: completeness,
+            missing: Vec::new(),
         }
+        .settle()
+    }
+
+    /// Name every qualified category and unestablished TTL in `missing`, and
+    /// sum the total only over completely measured categories.
+    fn settle(mut self) -> Self {
+        let ttl_unrecorded = self
+            .cache_write
+            .is_some_and(|writes| writes.ttl_unrecorded.unwrap_or(0) > 0);
+        self.missing = [
+            "uncached_input",
+            "cache_read",
+            "cache_write",
+            "cache_write_ttl",
+            "output",
+            "reasoning",
+        ]
+        .into_iter()
+        .filter(|name| match *name {
+            "cache_write_ttl" => ttl_unrecorded,
+            category => !self.measurement_completeness.is_complete(&[category]),
+        })
+        .collect();
+        self.total = self
+            .measurement_completeness
+            .is_complete(&SUMMED_CATEGORIES)
+            .then(|| {
+                [
+                    self.uncached_input,
+                    self.cache_read,
+                    self.cache_write.map(|writes| writes.total()),
+                    self.output,
+                ]
+                .into_iter()
+                .try_fold(0u64, |sum, count| {
+                    count.map(|count| sum.saturating_add(count))
+                })
+            })
+            .flatten();
+        self
     }
 }
 

@@ -31,6 +31,7 @@ pub mod evidence;
 pub mod history;
 pub mod input;
 pub mod lineage;
+pub mod measurement;
 pub mod model;
 mod model_observation;
 pub mod reader;

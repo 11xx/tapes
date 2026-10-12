@@ -258,6 +258,8 @@ pub struct UsageStats {
     pub measurement_coverage: BTreeMap<String, usage::MeasurementCoverage>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub measurement_incomplete: Vec<String>,
+    #[serde(skip_serializing_if = "crate::measurement::MeasurementCompleteness::is_empty")]
+    pub measurement_completeness: crate::measurement::MeasurementCompleteness,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cache_read_ratio: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -787,6 +789,7 @@ fn usage_stats(usage: &UsageView) -> Option<UsageStats> {
         && usage.cost.is_none()
         && usage.accounting.is_none()
         && usage.measurement_coverage.is_empty()
+        && usage.measurement_completeness.is_empty()
     {
         return None;
     }
@@ -794,12 +797,10 @@ fn usage_stats(usage: &UsageView) -> Option<UsageStats> {
     // It needs every counter in its denominator, so a harness that recorded
     // only some of them yields no ratio.
     let context = usage.tokens.as_ref().and_then(|tokens| {
-        if ["input", "cache_read", "cache_write"].iter().any(|name| {
-            usage
-                .measurement_coverage
-                .get(*name)
-                .is_some_and(|coverage| coverage.missing > 0)
-        }) {
+        if !usage
+            .measurement_completeness
+            .is_complete(&["input", "cache_read", "cache_write"])
+        {
             return None;
         }
         let read = tokens.cache_read?;
@@ -816,6 +817,7 @@ fn usage_stats(usage: &UsageView) -> Option<UsageStats> {
         by_model: usage.by_model.clone(),
         measurement_coverage: usage.measurement_coverage.clone(),
         measurement_incomplete: usage.measurement_incomplete.clone(),
+        measurement_completeness: usage.measurement_completeness.clone(),
     })
 }
 

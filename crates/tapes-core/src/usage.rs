@@ -14,6 +14,7 @@ use serde_json::Value;
 
 use crate::backend::{skipped_records_note, StreamedTranscript};
 use crate::content::ContentInventory;
+use crate::measurement::{Measured, MeasurementCompleteness, MeasurementReason};
 use crate::model::{
     Accounting, AccountingBasis, AccountingCoverage, CacheWrites, Cost, CostCoverage,
     DisjointTokens, Launch, Model, ModelObservationStatus, ReadEvidence, ReadGap, RecordRef, Role,
@@ -49,6 +50,11 @@ pub struct UsageDetail {
     /// Per-counter measurement coverage of the session's selected events.
     pub measurement_coverage: BTreeMap<String, MeasurementCoverage>,
     pub measurement_incomplete: Vec<String>,
+    /// Reasons the reader recorded that the session's counters do not show,
+    /// such as a stopped request. `Session::measurement_completeness` adds
+    /// what the counters, their coverage and their accounting establish.
+    pub measurement_completeness: MeasurementCompleteness,
+    /// Failed request observations, whose consumption is unknown.
     pub request_failures: usize,
     /// Consumption over every branch a recording retains, where the
     /// session's counters select only one of them.
@@ -69,6 +75,7 @@ impl UsageDetail {
             && self.cost_coverage.is_none()
             && self.measurement_coverage.is_empty()
             && self.measurement_incomplete.is_empty()
+            && self.measurement_completeness.is_empty()
             && self.request_failures == 0
             && self.consumption.is_none()
             && self.recorded_total.is_none()
@@ -185,6 +192,27 @@ pub struct ModelUsage {
     pub measurement_coverage: BTreeMap<String, MeasurementCoverage>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub measurement_incomplete: Vec<String>,
+    /// The model's incompletely measured counters. A reader sets the reasons
+    /// its counters do not show; the usage view adds the rest.
+    #[serde(skip_serializing_if = "MeasurementCompleteness::is_empty")]
+    pub measurement_completeness: MeasurementCompleteness,
+}
+
+impl ModelUsage {
+    /// Add what the model's own facts establish, over `scope`, to the
+    /// reasons its reader recorded, and `shared`, the reasons no single
+    /// model carries.
+    fn qualify(&mut self, scope: Option<AccountingCoverage>, shared: &MeasurementCompleteness) {
+        let assessed = MeasurementCompleteness::assess(Measured {
+            tokens: self.tokens.as_ref(),
+            cost: self.cost.as_ref(),
+            cost_coverage: self.cost_coverage.as_ref(),
+            coverage: Some(&self.measurement_coverage),
+            scope,
+        });
+        self.measurement_completeness.merge(&assessed);
+        self.measurement_completeness.merge(shared);
+    }
 }
 
 /// A cumulative cost-state preserved as a separate source fact. Its dollars
@@ -378,6 +406,10 @@ pub struct Consumption {
     /// Per-counter coverage among the counted events. Missing dimensions
     /// leave known subtotals, never complete measurements.
     pub measurement_coverage: BTreeMap<String, MeasurementCoverage>,
+    /// The incompletely measured counters and why: their coverage, the read's
+    /// reach, unreadable records, and stopped requests.
+    #[serde(skip_serializing_if = "MeasurementCompleteness::is_empty")]
+    pub measurement_completeness: MeasurementCompleteness,
     pub events: ConsumptionEvents,
     pub identity: ConsumptionIdentity,
     /// Why the figure is not a complete measurement of what it covers: records
@@ -603,6 +635,8 @@ pub struct UsageView {
     pub measurement_coverage: BTreeMap<String, MeasurementCoverage>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub measurement_incomplete: Vec<String>,
+    #[serde(skip_serializing_if = "MeasurementCompleteness::is_empty")]
+    pub measurement_completeness: MeasurementCompleteness,
     pub turns: TurnCounts,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub context_window: Option<u64>,
@@ -702,7 +736,23 @@ struct ReadFacts {
 }
 
 fn project(session: &Session, turns: TurnTally, facts: ReadFacts) -> UsageView {
-    let detail = session.usage_detail.clone().unwrap_or_default();
+    let mut detail = session.usage_detail.clone().unwrap_or_default();
+    let shared = session.shared_model_reasons();
+    let scope = match &detail.attribution {
+        Some(attribution) => Some(attribution.coverage),
+        None => session
+            .accounting
+            .as_ref()
+            .map(|accounting| accounting.coverage),
+    };
+    for model in detail.by_model.iter_mut().flatten() {
+        model.qualify(scope, &shared);
+    }
+    if let Some(recorded) = &mut detail.recorded_total {
+        for model in recorded.by_model.iter_mut().flatten() {
+            model.qualify(Some(recorded.accounting.coverage), &shared);
+        }
+    }
     let mut notes = facts.notes;
     notes.extend(detail.accounting_notes);
     UsageView {
@@ -726,6 +776,7 @@ fn project(session: &Session, turns: TurnTally, facts: ReadFacts) -> UsageView {
         cost_coverage: session.cost_coverage(),
         measurement_coverage: detail.measurement_coverage,
         measurement_incomplete: detail.measurement_incomplete,
+        measurement_completeness: session.measurement_completeness(),
         turns: turns.counts,
         context_window: detail.context_window,
         rate_limits: detail.rate_limits,
@@ -749,6 +800,65 @@ fn project(session: &Session, turns: TurnTally, facts: ReadFacts) -> UsageView {
 }
 
 impl Session {
+    /// Which of the session's counters are incompletely measured, and why:
+    /// the single answer every figure derived from them asks.
+    pub fn measurement_completeness(&self) -> MeasurementCompleteness {
+        let detail = self.usage_detail.as_ref();
+        let cost = self.estimated_cost();
+        let cost_coverage = self.cost_coverage();
+        let mut completeness = MeasurementCompleteness::assess(Measured {
+            tokens: self.tokens.as_ref(),
+            cost: cost.as_ref(),
+            cost_coverage: cost_coverage.as_ref(),
+            coverage: detail.map(|detail| &detail.measurement_coverage),
+            scope: self
+                .accounting
+                .as_ref()
+                .map(|accounting| accounting.coverage),
+        });
+        if let Some(detail) = detail {
+            completeness.merge(&detail.measurement_completeness);
+        }
+        if self.request_failures() > 0 {
+            completeness.qualify_all(MeasurementReason::StoppedAttempt);
+        }
+        completeness
+    }
+
+    /// The session's completeness as a member of a selection, where a
+    /// counter it holds no amount for leaves the selection's sum a known
+    /// subtotal.
+    fn selected_measurement_completeness(&self) -> MeasurementCompleteness {
+        let mut completeness = self.measurement_completeness();
+        completeness.include_absent(self.tokens.as_ref(), self.estimated_cost().as_ref());
+        completeness
+    }
+
+    /// Reasons that qualify every model's share, because the read could not
+    /// place them on one model.
+    fn shared_model_reasons(&self) -> MeasurementCompleteness {
+        let mut shared = MeasurementCompleteness::default();
+        if self.request_failures() > 0 {
+            shared.qualify_all(MeasurementReason::StoppedAttempt);
+        }
+        let attribution = self
+            .usage_detail
+            .as_ref()
+            .and_then(|detail| detail.attribution.as_ref());
+        if attribution.is_some_and(|attribution| {
+            attribution.unattributed > 0 || !attribution.incomplete.is_empty()
+        }) {
+            shared.qualify_all(MeasurementReason::IncompleteAttribution);
+        }
+        shared
+    }
+
+    fn request_failures(&self) -> usize {
+        self.usage_detail
+            .as_ref()
+            .map_or(0, |detail| detail.request_failures)
+    }
+
     /// The session counters in disjoint categories, under its harness's
     /// convention. Absent when the session recorded no tokens or its harness
     /// has no established convention.
@@ -760,10 +870,7 @@ impl Session {
             .as_ref()
             .and_then(|detail| detail.cache_write_by_ttl.as_ref());
         let disjoint = DisjointTokens::from_native(tokens, convention, by_ttl);
-        Some(match &self.usage_detail {
-            Some(detail) => disjoint.with_measurement_coverage(&detail.measurement_coverage),
-            None => disjoint,
-        })
+        Some(disjoint.with_completeness(&self.measurement_completeness()))
     }
 }
 
@@ -906,6 +1013,10 @@ pub struct UsageTally {
     pub cost_coverage: Option<CostCoverage>,
     pub coverage: CoverageCounts,
     pub counted: CountedSessions,
+    /// The summed native counters some selected session measured
+    /// incompletely or not at all, with every reason among them.
+    #[serde(skip_serializing_if = "MeasurementCompleteness::is_empty")]
+    pub measurement_completeness: MeasurementCompleteness,
     /// Exact unions require established equality or disjointness of events.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub identity_unestablished: bool,
@@ -932,6 +1043,8 @@ pub struct SessionUsageFigure {
     pub measurement_coverage: BTreeMap<String, MeasurementCoverage>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub measurement_incomplete: Vec<String>,
+    #[serde(skip_serializing_if = "MeasurementCompleteness::is_empty")]
+    pub measurement_completeness: MeasurementCompleteness,
 }
 
 impl From<&Session> for SessionUsageFigure {
@@ -950,6 +1063,7 @@ impl From<&Session> for SessionUsageFigure {
             measurement_incomplete: detail
                 .map(|detail| detail.measurement_incomplete.clone())
                 .unwrap_or_default(),
+            measurement_completeness: session.measurement_completeness(),
         }
     }
 }
@@ -982,10 +1096,12 @@ pub struct UsageIdentityBounds {
 /// Disjoint categories summed over a set of sessions, each converted from its
 /// own harness's convention, which `conventions` names by harness. `sessions`
 /// counts the sessions that recorded tokens. A category sums the sessions
-/// with known category amounts. `missing` counts all selected sessions whose
-/// category is absent or incompletely measured, including sessions with no
-/// token counters; `convention` names an unestablished mapping. `total` requires
-/// complete measurement of all four summed categories in every selected session.
+/// with known category amounts. `measurement_completeness` gives each
+/// category the reasons any selected session's category is incomplete,
+/// including sessions with no token counters. `missing` counts those
+/// sessions per category; `convention` names an unestablished mapping.
+/// `total` requires complete measurement of all four summed categories in
+/// every selected session.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
 pub struct DisjointSum {
     pub conventions: BTreeMap<String, TokenConvention>,
@@ -1002,46 +1118,22 @@ pub struct DisjointSum {
     pub reasoning: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub total: Option<u64>,
+    #[serde(skip_serializing_if = "MeasurementCompleteness::is_empty")]
+    pub measurement_completeness: MeasurementCompleteness,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub missing: BTreeMap<&'static str, usize>,
 }
 
-/// The categories a disjoint total sums, plus the convention that maps a
-/// session onto them. A session missing any of these has no total.
-const SUMMED_CATEGORIES: [&str; 5] = [
-    "convention",
-    "uncached_input",
-    "cache_read",
-    "cache_write",
-    "output",
-];
-
 impl DisjointSum {
     fn add(&mut self, session: &Session) {
         if session.tokens.is_none() {
-            for name in [
-                "uncached_input",
-                "cache_read",
-                "cache_write",
-                "output",
-                "reasoning",
-            ] {
-                *self.missing.entry(name).or_default() += 1;
-            }
+            self.qualify_every_category(MeasurementReason::MissingCounter);
             return;
         }
         self.sessions += 1;
         let Some(disjoint) = session.disjoint_tokens() else {
             *self.missing.entry("convention").or_default() += 1;
-            for name in [
-                "uncached_input",
-                "cache_read",
-                "cache_write",
-                "output",
-                "reasoning",
-            ] {
-                *self.missing.entry(name).or_default() += 1;
-            }
+            self.qualify_every_category(MeasurementReason::Undetermined);
             return;
         };
         self.conventions
@@ -1059,8 +1151,19 @@ impl DisjointSum {
         if let Some(writes) = disjoint.cache_write {
             self.cache_write.get_or_insert_default().add(&writes);
         }
+        self.measurement_completeness
+            .merge(&disjoint.measurement_completeness);
         for name in disjoint.missing {
             *self.missing.entry(name).or_default() += 1;
+        }
+    }
+
+    /// A selected session that establishes no category leaves every
+    /// category's sum a known subtotal.
+    fn qualify_every_category(&mut self, reason: MeasurementReason) {
+        for category in crate::measurement::CATEGORIES {
+            self.measurement_completeness.qualify(category, reason);
+            *self.missing.entry(category).or_default() += 1;
         }
     }
 
@@ -1068,10 +1171,9 @@ impl DisjointSum {
         if self.sessions == 0 {
             return None;
         }
-        let complete = !SUMMED_CATEGORIES
-            .iter()
-            .any(|name| self.missing.contains_key(name));
-        self.total = complete
+        self.total = self
+            .measurement_completeness
+            .is_complete(&crate::model::SUMMED_CATEGORIES)
             .then(|| {
                 [
                     self.uncached_input,
@@ -1173,6 +1275,7 @@ impl Counter {
 
 #[derive(Clone, Default)]
 struct Tally {
+    measurement_completeness: MeasurementCompleteness,
     sessions: usize,
     disjoint: DisjointSum,
     input: Counter,
@@ -1190,6 +1293,8 @@ struct Tally {
 
 impl Tally {
     fn add(&mut self, session: &Session) {
+        self.measurement_completeness
+            .merge(&session.selected_measurement_completeness());
         self.sessions += 1;
         if let Some(coverage) = session.cost_coverage() {
             let total = self.cost_coverage.get_or_insert(CostCoverage {
@@ -1265,6 +1370,7 @@ impl Tally {
             + counted.cache_write
             > 0;
         UsageTally {
+            measurement_completeness: self.measurement_completeness,
             mixed_accounting: false,
             mixed_models: self.mixed_models,
             attribution_uncertain: self.attribution_uncertain,
@@ -1433,6 +1539,7 @@ mod tests {
                 total: Some(2_000),
             }),
             by_model: Some(vec![ModelUsage {
+                measurement_completeness: Default::default(),
                 model: "fixture-model".to_owned(),
                 variant: None,
                 tokens: Some(Tokens {
@@ -1618,6 +1725,21 @@ mod tests {
         let aggregate = unchecked_aggregate(&spenders(), &[GroupBy::Harness, GroupBy::Model]);
         let value = serde_json::to_value(&aggregate).unwrap();
 
+        let codex_native = json!({
+            "input": ["missing-counter", "read-window"],
+            "output": ["missing-counter", "read-window"],
+            "reasoning": ["missing-counter", "read-window"],
+            "cache_read": ["missing-counter", "read-window"],
+            "cache_write": ["missing-counter", "read-window"],
+            "cost": ["missing-price", "read-window"]
+        });
+        let codex_disjoint = json!({
+            "uncached_input": ["missing-counter", "read-window"],
+            "output": ["missing-counter", "read-window"],
+            "reasoning": ["missing-counter", "read-window"],
+            "cache_read": ["missing-counter", "read-window"],
+            "cache_write": ["missing-counter", "read-window"]
+        });
         assert_eq!(
             value["groups"],
             json!([
@@ -1625,12 +1747,20 @@ mod tests {
                     "key": { "harness": "claude", "model": "claude-fixture" },
                     "sessions": 1,
                     "tokens": { "cache_read": 7 },
+                    "measurement_completeness": {
+                        "input": ["missing-counter"], "output": ["missing-counter"],
+                        "reasoning": ["missing-counter"], "cache_write": ["missing-counter"]
+                    },
                     "disjoint": {
                         "conventions": {
                             "claude": { "input": "excludes-cache", "output": "includes-reasoning" }
                         },
                         "sessions": 1,
                         "cache_read": 7,
+                        "measurement_completeness": {
+                            "uncached_input": ["missing-counter"], "output": ["missing-counter"],
+                            "reasoning": ["missing-counter"], "cache_write": ["missing-counter"]
+                        },
                         "missing": { "cache_write": 1, "output": 1, "reasoning": 1, "uncached_input": 1 }
                     },
                     "cost": { "usd": 2.5, "kind": "harness-calculated-estimate", "missing": ["pricing_basis"] },
@@ -1654,6 +1784,7 @@ mod tests {
                     "key": { "harness": "codex", "model": "gpt-fixture" },
                     "sessions": 3,
                     "tokens": { "input": 300, "output": 30, "reasoning": 5 },
+                    "measurement_completeness": codex_native,
                     "disjoint": {
                         "conventions": {
                             "codex": { "input": "includes-cache-read", "output": "includes-reasoning" }
@@ -1661,7 +1792,8 @@ mod tests {
                         "sessions": 2,
                         "output": 30,
                         "reasoning": 5,
-                        "missing": { "cache_read": 3, "cache_write": 3, "output": 1, "reasoning": 2, "uncached_input": 3 }
+                        "measurement_completeness": codex_disjoint,
+                        "missing": { "cache_read": 3, "cache_write": 3, "output": 2, "reasoning": 2, "uncached_input": 3 }
                     },
                     "cost": { "usd": 1.0, "kind": "harness-calculated-estimate", "missing": ["pricing_basis"] },
                     "cost_coverage": { "complete": false, "zero_written_requests": 0, "zero_written_observations": 0 },
@@ -1687,6 +1819,7 @@ mod tests {
             value["totals"],
             json!({
                 "sessions": 4,
+                "measurement_completeness": codex_native,
                 "tokens": { "input": 300, "output": 30, "reasoning": 5, "cache_read": 7 },
                 "disjoint": {
                     "conventions": {
@@ -1697,10 +1830,11 @@ mod tests {
                     "cache_read": 7,
                     "output": 30,
                     "reasoning": 5,
+                    "measurement_completeness": codex_disjoint,
                     "missing": {
                         "cache_read": 3,
                         "cache_write": 4,
-                        "output": 2,
+                        "output": 3,
                         "reasoning": 3,
                         "uncached_input": 4
                     }
@@ -1908,22 +2042,7 @@ impl Domains {
 
 impl SessionUsageFigure {
     fn counter_complete(&self, counter: &str) -> bool {
-        self.accounting
-            .as_ref()
-            .is_some_and(|accounting| accounting.coverage == AccountingCoverage::Session)
-            && self
-                .measurement_coverage
-                .get(counter)
-                .is_none_or(|coverage| coverage.missing == 0 && coverage.unpriced == 0)
-            && (counter != "cost"
-                || self
-                    .cost_coverage
-                    .as_ref()
-                    .is_none_or(|coverage| coverage.complete))
-            && !self
-                .measurement_incomplete
-                .iter()
-                .any(|reason| reason.contains("stopped") || reason.contains("could not be read"))
+        self.measurement_completeness.is_complete(&[counter])
     }
 }
 

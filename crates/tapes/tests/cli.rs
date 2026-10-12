@@ -9595,6 +9595,7 @@ fn stats_json_counts_a_chosen_recording_exactly() {
                 "max": 2_000
             },
             "usage": {
+                "measurement_completeness": { "cost": ["missing-price"], "reasoning": ["missing-counter"] },
                 "tokens": {
                     "input": 2500,
                     "output": 400,
@@ -10948,6 +10949,7 @@ fn usage_summary_adds_claude_and_codex_only_in_disjoint_categories() {
             "output": 380,
             "reasoning": 12,
             "total": 4490,
+            "measurement_completeness": { "reasoning": ["missing-counter"] },
             "missing": { "cache_write_ttl": 1, "reasoning": 1 }
         })
     );

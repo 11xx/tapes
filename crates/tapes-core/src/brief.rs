@@ -164,6 +164,8 @@ pub struct BriefUsage {
     pub measurement_coverage: std::collections::BTreeMap<String, usage::MeasurementCoverage>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub measurement_incomplete: Vec<String>,
+    #[serde(skip_serializing_if = "crate::measurement::MeasurementCompleteness::is_empty")]
+    pub measurement_completeness: crate::measurement::MeasurementCompleteness,
 }
 
 impl BriefUsage {
@@ -172,6 +174,8 @@ impl BriefUsage {
             && self.cost.is_none()
             && self.accounting.is_none()
             && self.measurement_coverage.is_empty()
+            && self.measurement_incomplete.is_empty()
+            && self.measurement_completeness.is_empty()
     }
 }
 
@@ -250,6 +254,7 @@ pub fn brief(transcript: Transcript, lineage: Result<Lineage>, tail: usize) -> B
         accounting: usage.accounting,
         measurement_coverage: usage.measurement_coverage,
         measurement_incomplete: usage.measurement_incomplete,
+        measurement_completeness: usage.measurement_completeness,
     };
 
     let directory = transcript.session.directory.clone();

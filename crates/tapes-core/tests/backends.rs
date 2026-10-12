@@ -2965,6 +2965,7 @@ fn pi_usage_reports_the_model_and_effort_split() {
     let id = "session-model-split";
     let expected = Some(vec![
         ModelUsage {
+            measurement_completeness: Default::default(),
             model: "pi-model-a".to_owned(),
             variant: Some("low".to_owned()),
             tokens: Some(Tokens {
@@ -3000,6 +3001,7 @@ fn pi_usage_reports_the_model_and_effort_split() {
             measurement_incomplete: Vec::new(),
         },
         ModelUsage {
+            measurement_completeness: Default::default(),
             model: "pi-model-b".to_owned(),
             variant: Some("high".to_owned()),
             tokens: Some(Tokens {
@@ -3035,6 +3037,7 @@ fn pi_usage_reports_the_model_and_effort_split() {
             measurement_incomplete: Vec::new(),
         },
         ModelUsage {
+            measurement_completeness: Default::default(),
             model: "pi-model-b".to_owned(),
             variant: Some("medium".to_owned()),
             tokens: Some(Tokens {
@@ -5689,6 +5692,10 @@ fn codex_usage_reports_the_context_window_and_the_newest_quota_windows() {
     assert_eq!(
         view.by_model,
         Some(vec![ModelUsage {
+            measurement_completeness: serde_json::from_value(
+                serde_json::json!({"cost": ["missing-price"]})
+            )
+            .unwrap(),
             model: "gpt-fixture".to_owned(),
             variant: Some("high".to_owned()),
             tokens: Some(Tokens {
@@ -6881,6 +6888,7 @@ fn claude_usage_reports_cost_state_durations_and_the_per_model_split() {
         view.by_model,
         Some(vec![
             ModelUsage {
+                measurement_completeness: Default::default(),
                 model: "claude-first".to_owned(),
                 variant: None,
                 tokens: Some(Tokens {
@@ -6897,6 +6905,7 @@ fn claude_usage_reports_cost_state_durations_and_the_per_model_split() {
                 measurement_incomplete: Vec::new(),
             },
             ModelUsage {
+                measurement_completeness: Default::default(),
                 model: "claude-second".to_owned(),
                 variant: None,
                 tokens: Some(Tokens {

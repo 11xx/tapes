@@ -1146,6 +1146,7 @@ fn cost_state_detail(value: &Value) -> UsageDetail {
         let mut usage = models
             .iter()
             .map(|(model, usage)| ModelUsage {
+                measurement_completeness: Default::default(),
                 model: model.clone(),
                 variant: None,
                 tokens: model_usage_tokens(usage),
