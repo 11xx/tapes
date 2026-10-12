@@ -941,8 +941,11 @@ enum Command {
     /// column. If agent-status is unavailable, malformed, oversized, or
     /// slower than its 250 ms deadline, LIVE is blank. Native recording probes
     /// accept only regular opened files and never wait for FIFO writers.
-    /// Identity-bearing records must match the discovered native session;
-    /// uncertain prefilters defer to normalization and its diagnostics.
+    /// Identity-bearing records must match the discovered native session in
+    /// a recording's opening and in its retained tail; a recording whose tail
+    /// names another session is reported unavailable, never listed under the
+    /// opening's identity. Uncertain prefilters defer to normalization and its
+    /// diagnostics.
     List {
         /// Restrict results to one harness.
         #[arg(long)]
@@ -1193,8 +1196,8 @@ enum Command {
         tail: usize,
         /// Stream the child's whole recording instead of its bounded tail.
         /// Usage counts every turn and folds its counters from every record,
-        /// and every record's native parent identity is checked; the
-        /// transcript and ending keep only the newest --tail turns.
+        /// and every record's native parent identity and agent id is checked;
+        /// the transcript and ending keep only the newest --tail turns.
         #[arg(long, conflicts_with = "read_bytes")]
         full: bool,
         #[arg(long)]
@@ -1282,7 +1285,8 @@ enum Command {
     /// housekeeping, including cost-state and system turn_duration/stop_hook_summary,
     /// is skipped; unknown records and read gaps do not establish completion. Otherwise
     /// it has no completion stamp, which does not say it is still running.
-    /// Child-ending opening and tail identity records must name the native parent;
+    /// Child-ending opening and tail identity records must name the native
+    /// parent, and a record that names an agent must name the child itself;
     /// missing or conflicting identity fails. Only regular opened recording and
     /// metadata files supply evidence; FIFO reads never wait for a writer.
     /// Failed Claude subagent enumeration or a required child-ending read fails
@@ -1480,7 +1484,8 @@ enum Command {
         /// The newest cost-state retains its tokens and dollar facts under
         /// recorded-total/session accounting. Requests deduplicate across a
         /// validated native family: children under the parent's subagents
-        /// directory must positively witness matching native parent identity.
+        /// directory must positively witness matching native parent identity
+        /// and name no agent but their own.
         /// Per-recording figures remain visible. Foreign, unvalidated or
         /// unenumerated children, and sources outside the family, withhold
         /// request-namespace and leave the union unestablished. Failed

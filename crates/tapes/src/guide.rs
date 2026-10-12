@@ -36,8 +36,9 @@ SELECT A MATERIALIZED NATIVE STORE
   source.kind is explicit-native-store, source.location.container names PATH,
   and source.location.locator names the exact recording. Recording reads accept
   only regular opened files, without waiting for FIFO writers. Identity-bearing
-  records must match the selected native session (the parent for Claude children).
-  Bounded reads check the opening and retained tail; full reads check every record.
+  records must match the selected native session (the parent for Claude children,
+  whose records must also name no agent but the child). Bounded reads and listings
+  check the opening and retained tail; full reads check every record.
   Directory and raw-text prefilters validate the probed native identity before
   excluding a candidate; uncertain probes defer to normalization and its diagnostics.
   This is a selected
@@ -663,7 +664,7 @@ PROBE BEFORE EXPORTING
   dollar facts, including per-model estimates, under their own accounting.
   Request IDs deduplicate across a validated native family: children under
   the parent's subagents directory must positively witness its native session
-  identity. Such children share the parent's request namespace, reported as
+  identity and name no agent but their own. Such children share the parent's request namespace, reported as
   validated-family under identity_coverage. Per-recording figures remain
   visible. Foreign, unvalidated or unenumerated children, and sources outside
   the family, withhold request-namespace and leave family counts, counters
@@ -817,8 +818,8 @@ PROBE BEFORE EXPORTING
   (known trailing housekeeping records, including cost-state and system
   turn_duration/stop_hook_summary, are skipped), with that record's id in source
   after the recording's file. Identity-bearing records in the bounded opening
-  and tail must name the selected native parent; absent or conflicting identity
-  fails the ending read. Recording and child metadata reads accept only regular
+  and tail must name the selected native parent, and a record that names an agent
+  must name this child; absent or conflicting identity fails the ending read. Recording and child metadata reads accept only regular
   opened files and never wait for a FIFO writer. Without that ending there is no completion
   stamp, which means not seen to finish rather than running: a child killed
   mid-turn reads the same. A completion the parent's own records state is
