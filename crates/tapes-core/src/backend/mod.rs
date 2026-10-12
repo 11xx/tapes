@@ -2035,10 +2035,11 @@ pub(crate) fn head_jsonl_from(file: &mut File, source_length: u64) -> Result<Hea
         window = HEAD_PROBE_MAX_BYTES;
     }
     // A read that filled the window stopped somewhere inside a line, so the
-    // remainder after the last newline is a fragment. A shorter read reached
-    // the end of the file, where a final line without a trailing newline is
-    // whole.
-    let complete = if bytes.len() as u64 == window {
+    // remainder after the last newline is a fragment. A read that came up
+    // short of the window, or that took the whole file, reached its end,
+    // where a final line without a trailing newline is whole.
+    let reached_end = (bytes.len() as u64) < window || bytes.len() as u64 >= source_length;
+    let complete = if !reached_end {
         bytes
             .iter()
             .rposition(|byte| *byte == b'\n')
