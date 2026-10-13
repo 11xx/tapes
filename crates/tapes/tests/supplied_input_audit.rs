@@ -1084,3 +1084,85 @@ fn records_from_a_member_that_fails_verification_are_withheld() {
         .iter()
         .any(|entry| entry.as_str().unwrap().contains("failed verification")));
 }
+
+#[test]
+fn standalone_and_collection_records_export_matching_source_digests() {
+    use sha2::{Digest, Sha256};
+    let root = TempRoot::new("standalone-digests");
+    let record: Value = serde_json::from_slice(&conversation("record", "fixture content")).unwrap();
+    let mut record = record[0].clone();
+    for metadata in [
+        Value::Null,
+        json!({}),
+        json!({"padding": "x".repeat(70 * 1024)}),
+    ] {
+        record["mapping"]["message"]["message"]["metadata"] = metadata;
+        for shape in [
+            record.clone(),
+            json!([record]),
+            json!({"conversations": [record]}),
+        ] {
+            for pretty in [false, true] {
+                let bytes = if pretty {
+                    serde_json::to_vec_pretty(&shape).unwrap()
+                } else {
+                    serde_json::to_vec(&shape).unwrap()
+                };
+                let bytes = if shape.is_object() && shape.get("conversations").is_none() {
+                    [b"{\"probe\":2e1,".as_slice(), &bytes[1..]].concat()
+                } else {
+                    bytes
+                };
+                let input = root.path().join("input.json");
+                let source = [b" \n".as_slice(), &bytes, b" \n".as_slice()].concat();
+                fs::write(&input, &source).unwrap();
+                let bundle = root.path().join("bundle");
+                let exported = run(&[
+                    "export".to_owned(),
+                    "record".to_owned(),
+                    "--input".to_owned(),
+                    input.display().to_string(),
+                    "--bundle".to_owned(),
+                    bundle.display().to_string(),
+                    "--evidence".to_owned(),
+                ]);
+                assert!(
+                    exported.status.success(),
+                    "{}",
+                    String::from_utf8_lossy(&exported.stderr)
+                );
+                let json = fs::read_dir(&bundle)
+                    .unwrap()
+                    .map(|entry| entry.unwrap().path())
+                    .find(|path| {
+                        path.extension()
+                            .is_some_and(|extension| extension == "json")
+                    })
+                    .unwrap();
+                let projection: Value = serde_json::from_slice(&fs::read(&json).unwrap()).unwrap();
+                let evidence = json.with_extension("evidence");
+                let manifest: Value =
+                    serde_json::from_slice(&fs::read(evidence.join("manifest.json")).unwrap())
+                        .unwrap();
+                assert_eq!(manifest["gaps"], json!([]), "{manifest}");
+                let files = manifest["files"].as_array().unwrap();
+                assert_eq!(files.len(), 1);
+                let span = &projection["read"]["records"][0];
+                let expected = &source[span["start"].as_u64().unwrap() as usize
+                    ..span["end"].as_u64().unwrap() as usize];
+                let copied = fs::read(evidence.join(files[0]["file"].as_str().unwrap())).unwrap();
+                assert_eq!(copied, expected);
+                assert_eq!(files[0]["bytes"], expected.len());
+                let digest = format!("{:x}", Sha256::digest(expected));
+                assert_eq!(files[0]["sha256"], digest);
+                assert_eq!(projection["read"]["record_sha256"][0], digest);
+                assert_eq!(manifest["input"]["bytes"], source.len());
+                assert_eq!(
+                    manifest["input"]["sha256"],
+                    format!("{:x}", Sha256::digest(&source))
+                );
+                fs::remove_dir_all(&bundle).unwrap();
+            }
+        }
+    }
+}

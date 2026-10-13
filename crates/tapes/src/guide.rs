@@ -279,7 +279,9 @@ READ A SUPPLIED EXPORT
   the input, keyed by the path as spelled and the file's identity, so they are
   cursors and never a conversation's or record's persistent identity. What
   survives the input moving is its bytes: read.record_sha256 holds the
-  SHA-256 of each span in read.records, in order.
+  SHA-256 of the original bytes in each span in read.records, in order,
+  including standalone objects and records inside collections. Whitespace and
+  object key order are part of those source bytes.
 
   Source, member, pointer, and byte-span evidence stays attached to the
   normalized result. Scan, decoded, record, member, resident, and

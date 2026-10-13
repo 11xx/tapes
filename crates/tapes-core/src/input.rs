@@ -18,6 +18,7 @@ use std::sync::OnceLock;
 use anyhow::{anyhow, bail, Context, Result};
 use chrono::{DateTime, Utc};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 #[cfg(feature = "zip")]
 use zip::ZipArchive;
 
@@ -781,6 +782,8 @@ struct Scanner<'a, R> {
     length: usize,
     offset: u64,
     pending: Option<u8>,
+    object_digest: Option<Sha256>,
+    digest_position: usize,
 }
 
 impl<'a, R: Read> Scanner<'a, R> {
@@ -793,6 +796,8 @@ impl<'a, R: Read> Scanner<'a, R> {
             length: 0,
             offset: 0,
             pending: None,
+            object_digest: None,
+            digest_position: 0,
         }
     }
 
@@ -802,6 +807,7 @@ impl<'a, R: Read> Scanner<'a, R> {
             return Ok(Some(byte));
         }
         if self.position == self.length {
+            self.hash_object_buffer();
             let remaining = self.budget.remaining_decoded();
             if remaining == 0 {
                 self.budget.decoded_blocked.set(true);
@@ -818,11 +824,19 @@ impl<'a, R: Read> Scanner<'a, R> {
             self.budget.charge_decoded(read as u64)?;
             self.position = 0;
             self.length = read;
+            self.digest_position = 0;
         }
         let byte = self.buffer[self.position];
         self.position += 1;
         self.offset += 1;
         Ok(Some(byte))
+    }
+
+    fn hash_object_buffer(&mut self) {
+        if let Some(digest) = &mut self.object_digest {
+            digest.update(&self.buffer[self.digest_position..self.position]);
+        }
+        self.digest_position = self.position;
     }
 
     fn non_whitespace(&mut self) -> io::Result<Option<(u8, u64)>> {
@@ -1257,6 +1271,9 @@ fn scan_root_object<R: Read>(
     gaps: &mut Vec<crate::model::ReadGap>,
     stopped: &mut bool,
 ) -> Result<bool> {
+    scanner.object_digest = Some(Sha256::new());
+    scanner.object_digest.as_mut().unwrap().update(b"{");
+    scanner.digest_position = scanner.position;
     let mut fields = serde_json::Map::new();
     let mut has_conversations = false;
     let mut field_bytes = 0u64;
@@ -1440,6 +1457,8 @@ fn scan_root_object<R: Read>(
             return Ok(false);
         }
     }
+    scanner.hash_object_buffer();
+    let digest = format!("{:x}", scanner.object_digest.take().unwrap().finalize());
     if has_conversations {
         return Ok(true);
     }
@@ -1449,7 +1468,7 @@ fn scan_root_object<R: Read>(
     }
     let bytes = serde_json::to_vec(&Value::Object(fields))?;
     *scanned += 1;
-    if bytes.len() as u64 > options.record_bytes {
+    if scanner.offset - start > options.record_bytes || bytes.len() as u64 > options.record_bytes {
         diagnostics.push(format!(
             "{locator}: top-level object exceeds --record-bytes at {}..{}",
             start, scanner.offset
@@ -1476,12 +1495,13 @@ fn scan_root_object<R: Read>(
         });
         return Ok(true);
     }
-    parse_record(
+    parse_record_spanning(
         &bytes,
         ByteSpan {
             start,
             end: scanner.offset,
         },
+        &digest,
         locator,
         member,
         container,

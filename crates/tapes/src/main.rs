@@ -1729,7 +1729,8 @@ enum Command {
         remote: Option<String>,
         /// Beside each supplied conversation's bundle, copy the source bytes
         /// behind it into `<bundle>.evidence/`: the conversation record's own
-        /// span and each associated report's whole member, byte for byte and
+        /// span (a standalone object or a collection record) and each associated
+        /// report's whole member, byte for byte and
         /// named by their SHA-256, with a tapes-evidence/2 manifest naming
         /// the input's length and digest, each file's member, size, CRC, and
         /// span, whether the input could hold associated reports at all, and
