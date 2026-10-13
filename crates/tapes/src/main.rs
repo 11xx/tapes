@@ -239,6 +239,17 @@ struct InputArgs {
     /// --here, --project, or --global gives a scope. No live state is attached.
     #[arg(long, value_name = "PATH", requires = "native_store")]
     native_root: Option<PathBuf>,
+    /// Select this exact native recording instead of enumerating the root.
+    /// Use the source.location.locator returned by list. The path is opened
+    /// read-only and its recorded session identity is checked. Missing,
+    /// unreadable, or mismatched files refuse without selecting another source.
+    #[arg(
+        long,
+        value_name = "PATH",
+        requires = "native_store",
+        conflicts_with = "input"
+    )]
+    native_file: Option<PathBuf>,
     /// Read one or more files, directories, or ZIP archives as supplied
     /// conversation exports. Supplying this option never consults installed
     /// harness stores. Source and archive files must be regular opened files;
@@ -307,11 +318,14 @@ impl InputArgs {
             .as_ref()
             .ok_or_else(|| anyhow!("--native-store requires --native-root"))?;
         use agent_tapes_core::NativeStore;
-        let store = match self.native_store.as_deref() {
-            Some("claude") => NativeStore::claude(root.join("projects")),
-            Some("codex") => NativeStore::codex(root.join("sessions")),
-            Some("pi") => NativeStore::pi(root.join("sessions")),
-            Some("opencode") => return Err(anyhow!("OpenCode uses an API or database, not a configuration root; --native-store opencode is unsupported")),
+        let store = match (self.native_store.as_deref(), self.native_file.as_ref()) {
+            (Some("claude"), Some(path)) => NativeStore::claude_file(path),
+            (Some("codex"), Some(path)) => NativeStore::codex_file(path),
+            (Some("pi"), Some(path)) => NativeStore::pi_file(path),
+            (Some("claude"), None) => NativeStore::claude(root.join("projects")),
+            (Some("codex"), None) => NativeStore::codex(root.join("sessions")),
+            (Some("pi"), None) => NativeStore::pi(root.join("sessions")),
+            (Some("opencode"), _) => return Err(anyhow!("OpenCode uses an API or database, not a configuration root; --native-store opencode is unsupported")),
             _ => return Err(anyhow!("--native-store must be claude, codex, or pi")),
         };
         agent_tapes_core::backend::backends_from_native_root(store, root.clone(), bytes)
@@ -598,7 +612,9 @@ struct SelectionArgs {
     /// also applies to Pi's explicit recording file. Recording reads accept only
     /// regular opened files and never wait for FIFO writers. Identity-bearing
     /// records must match the selected native session in the opening and bounded
-    /// tail, or throughout a full read. Listing prefilters with uncertain native
+    /// tail, or throughout a full read. Repeated directory recording IDs choose the newest
+    /// modification time, then the lexically first locator, as listing does.
+    /// --native-file selects one locator explicitly. Listing prefilters with uncertain native
     /// identity defer to normalization and its diagnostics.
     #[arg(
         required_unless_present_any = ["latest", "title", "occurrence"],
@@ -694,7 +710,9 @@ struct SessionQueryArgs {
     /// also applies to Pi's explicit recording file. Recording reads accept only
     /// regular opened files and never wait for FIFO writers. Identity-bearing
     /// records must match the selected native session in the opening and bounded
-    /// tail, or throughout a full read. Listing prefilters with uncertain native
+    /// tail, or throughout a full read. Repeated directory recording IDs choose the newest
+    /// modification time, then the lexically first locator, as listing does.
+    /// --native-file selects one locator explicitly. Listing prefilters with uncertain native
     /// identity defer to normalization and its diagnostics.
     #[arg(conflicts_with_all = ["title", "latest", "occurrence", "exclude", "here", "project", "global"])]
     session: Option<String>,
@@ -928,7 +946,9 @@ enum Command {
         /// also applies to Pi's explicit recording file. Recording reads accept only
         /// regular opened files and never wait for FIFO writers. Identity-bearing
         /// records must match the selected native session in the opening and bounded
-        /// tail, or throughout a full read. Listing prefilters with uncertain native
+        /// tail, or throughout a full read. Repeated directory recording IDs choose the newest
+        /// modification time, then the lexically first locator, as listing does.
+        /// --native-file selects one locator explicitly. Listing prefilters with uncertain native
         /// identity defer to normalization and its diagnostics.
         session: String,
         /// Restrict ID or prefix lookup to one harness.

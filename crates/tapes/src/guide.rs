@@ -28,6 +28,13 @@ SELECT A MATERIALIZED NATIVE STORE
   --input and --remote conflict with the pair. --harness may name the selected
   harness and refuses another. OpenCode uses an API or database, not a root,
   so --native-store opencode refuses.
+  --native-file <PATH> selects the exact recording at the locator returned by
+  list, alongside --native-store and --native-root. Only that file is inspected;
+  a missing, unreadable or identity-mismatched file never selects another source.
+  Repeated directory recording IDs choose the newest modification time, with the
+  lexically first locator breaking ties, for both listing and exact lookup.
+  Codex resumed filenames retain their canonical ID before the occurrence suffix.
+  Discovery and read bounds remain explicit; a locator does not pin growing bytes.
   IDs and prefixes resolve only in the selected store. `self` uses the caller's
   exported identity but must resolve within that store. --latest and --title
   default to the selected store across all recorded projects; --here,

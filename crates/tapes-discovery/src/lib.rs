@@ -63,6 +63,8 @@ pub enum NativeStoreKind {
 pub enum NativeStore {
     Claude { root: PathBuf },
     Codex { root: PathBuf },
+    ClaudeFile { path: PathBuf },
+    CodexFile { path: PathBuf },
     Pi { root: PathBuf },
     PiFile { path: PathBuf },
     PiWithFile { root: PathBuf, path: PathBuf },
@@ -76,6 +78,16 @@ impl NativeStore {
 
     pub fn codex(root: impl Into<PathBuf>) -> Self {
         Self::Codex { root: root.into() }
+    }
+
+    /// Use one explicit Claude recording without scanning a directory.
+    pub fn claude_file(path: impl Into<PathBuf>) -> Self {
+        Self::ClaudeFile { path: path.into() }
+    }
+
+    /// Use one explicit Codex recording without scanning a directory.
+    pub fn codex_file(path: impl Into<PathBuf>) -> Self {
+        Self::CodexFile { path: path.into() }
     }
 
     pub fn pi(root: impl Into<PathBuf>) -> Self {
@@ -123,8 +135,8 @@ impl NativeStore {
 
     pub fn harness(&self) -> Harness {
         match self {
-            Self::Claude { .. } => Harness::Claude,
-            Self::Codex { .. } => Harness::Codex,
+            Self::Claude { .. } | Self::ClaudeFile { .. } => Harness::Claude,
+            Self::Codex { .. } | Self::CodexFile { .. } => Harness::Codex,
             Self::Pi { .. } | Self::PiFile { .. } | Self::PiWithFile { .. } => Harness::Pi,
             Self::OpenCode(_) => Harness::OpenCode,
         }
@@ -147,13 +159,19 @@ impl NativeStore {
             | Self::Codex { root }
             | Self::Pi { root }
             | Self::PiWithFile { root, .. } => Some(root),
-            Self::PiFile { .. } | Self::OpenCode(_) => None,
+            Self::ClaudeFile { .. }
+            | Self::CodexFile { .. }
+            | Self::PiFile { .. }
+            | Self::OpenCode(_) => None,
         }
     }
 
     pub(crate) fn file(&self) -> Option<&Path> {
         match self {
-            Self::PiFile { path } | Self::PiWithFile { path, .. } => Some(path),
+            Self::ClaudeFile { path }
+            | Self::CodexFile { path }
+            | Self::PiFile { path }
+            | Self::PiWithFile { path, .. } => Some(path),
             _ => None,
         }
     }
@@ -163,7 +181,9 @@ impl NativeStore {
             Self::Claude { root } | Self::Codex { root } | Self::Pi { root } => {
                 format!("{}:{}", self.harness(), root.display())
             }
-            Self::PiFile { path } => format!("{}:{}", self.harness(), path.display()),
+            Self::ClaudeFile { path } | Self::CodexFile { path } | Self::PiFile { path } => {
+                format!("{}:{}", self.harness(), path.display())
+            }
             Self::PiWithFile { root, path } => {
                 format!(
                     "{}:{} plus {}",
@@ -178,8 +198,8 @@ impl NativeStore {
 
     pub fn kind(&self) -> NativeStoreKind {
         match self {
-            Self::Claude { .. } => NativeStoreKind::ClaudeFiles,
-            Self::Codex { .. } => NativeStoreKind::CodexFiles,
+            Self::Claude { .. } | Self::ClaudeFile { .. } => NativeStoreKind::ClaudeFiles,
+            Self::Codex { .. } | Self::CodexFile { .. } => NativeStoreKind::CodexFiles,
             Self::Pi { .. } | Self::PiFile { .. } | Self::PiWithFile { .. } => {
                 NativeStoreKind::PiFiles
             }

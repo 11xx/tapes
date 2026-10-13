@@ -716,6 +716,7 @@ fn filename_id(harness: Harness, path: &Path) -> Option<String> {
 }
 
 fn codex_filename_id(stem: &str) -> Option<&str> {
+    let stem = stem.split('_').next()?;
     let rollout = stem.strip_prefix("rollout-")?;
     let stamp = rollout.get(..19)?.as_bytes();
     if !stamp[..4].iter().all(u8::is_ascii_digit)
@@ -1413,6 +1414,61 @@ mod tests {
             Discovery::new([store]).resolve(target).unwrap().id(),
             target
         );
+    }
+
+    #[test]
+    fn resumed_codex_occurrences_share_canonical_identity_and_failure_coverage() {
+        use std::time::{Duration, UNIX_EPOCH};
+        let temp = Temp::new();
+        let root = temp.path().join("codex");
+        let id = "00000000-0000-4000-8000-000000000001";
+        let suffix = "00000000-0000-4000-8000-000000000002";
+        let body = format!("{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"{id}\"}}}}\n");
+        let older = write(
+            &root,
+            &format!("rollout-2026-01-01T00-00-00-{id}.jsonl"),
+            &body,
+        );
+        let newer = write(
+            &root,
+            &format!("rollout-2026-01-02T00-00-00-{id}_{suffix}.jsonl"),
+            &body,
+        );
+        let broken = write(
+            &root,
+            &format!("rollout-2026-01-03T00-00-00-{id}_{suffix}.jsonl"),
+            "{\"type\":\"session_meta\",\"payload\":{\"id\":null}}\n",
+        );
+        for (path, seconds) in [(&older, 1), (&newer, 2), (&broken, 3)] {
+            File::open(path)
+                .unwrap()
+                .set_times(
+                    fs::FileTimes::new().set_modified(UNIX_EPOCH + Duration::from_secs(seconds)),
+                )
+                .unwrap();
+        }
+        let store = NativeStore::codex(&root);
+        let page = store.candidates(10);
+        assert!(!page.complete);
+        assert!(page.unreadable_ids.contains(&id.to_owned()));
+        assert_eq!(page.records.len(), 1);
+        assert_eq!(page.records[0].locator(), Some(newer.as_path()));
+        assert_eq!(
+            store.locate_exact(id).unwrap().unwrap().locator(),
+            Some(newer.as_path())
+        );
+        assert!(store.locate_exact(suffix).unwrap().is_none());
+        assert_eq!(
+            NativeStore::codex_file(&older)
+                .locate_exact(id)
+                .unwrap()
+                .unwrap()
+                .locator(),
+            Some(older.as_path())
+        );
+        let partial = store.candidates(1);
+        assert!(!partial.complete);
+        assert!(partial.records.is_empty());
     }
 
     #[test]

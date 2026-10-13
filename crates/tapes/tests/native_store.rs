@@ -305,3 +305,125 @@ fn native_store_conflicts_refuse_before_reading_or_remote_transport() {
         }
     }
 }
+
+#[test]
+fn repeated_codex_ids_select_the_same_occurrence_and_allow_an_explicit_locator() {
+    use sha2::Digest;
+    use std::time::{Duration, UNIX_EPOCH};
+    let stores = Stores::new("codex");
+    let newer = stores.recording.with_file_name(format!(
+        "rollout-2026-01-02T10-00-00-{}_00000000-0000-4000-8000-000000000002.jsonl",
+        stores.id
+    ));
+    let old_bytes = fs::read(&stores.recording).unwrap();
+    let new_bytes = String::from_utf8(old_bytes.clone())
+        .unwrap()
+        .replace("2026-01-01", "2026-01-02")
+        .replace("selected", "newer occurrence");
+    fs::write(&newer, &new_bytes).unwrap();
+    for (path, seconds) in [(&stores.recording, 1), (&newer, 2)] {
+        fs::File::open(path)
+            .unwrap()
+            .set_times(fs::FileTimes::new().set_modified(UNIX_EPOCH + Duration::from_secs(seconds)))
+            .unwrap();
+    }
+    let listing = stores.json(&["list", "--json"], "selected");
+    assert_eq!(listing["sessions"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        listing["sessions"][0]["source"]["location"]["locator"],
+        newer.to_str().unwrap()
+    );
+    for args in [
+        vec!["show", stores.id, "--json"],
+        vec!["show", stores.id, "--full", "--json"],
+    ] {
+        let view = stores.json(&args, "selected");
+        assert!(
+            serde_json::to_string(&view)
+                .unwrap()
+                .contains(newer.to_str().unwrap()),
+            "{view}"
+        );
+    }
+    for (label, locator, expected) in [
+        ("default", None, &newer),
+        ("older", Some(&stores.recording), &stores.recording),
+        ("newer", Some(&newer), &newer),
+    ] {
+        let mut show = stores.command(&["show", stores.id, "--full", "--json"], "selected");
+        let mut export = stores.command(&["export", stores.id, "--full"], "selected");
+        if let Some(locator) = locator {
+            show.arg("--native-file").arg(locator);
+            export.arg("--native-file").arg(locator);
+        }
+        let shown = json_output(show.output().unwrap());
+        assert_eq!(
+            shown["session"]["source"]["location"]["locator"],
+            expected.to_str().unwrap()
+        );
+        let mut page = stores.command(
+            &["page", stores.id, "--pin", "--bytes", "64KiB", "--json"],
+            "selected",
+        );
+        if let Some(locator) = locator {
+            page.arg("--native-file").arg(locator);
+        }
+        let pinned = json_output(page.output().unwrap());
+        let expected_bytes = fs::read(expected).unwrap();
+        let digest = format!("{:x}", sha2::Sha256::digest(&expected_bytes));
+        assert_eq!(
+            pinned["read"]["source_prefix_digest"]["value"], digest,
+            "{pinned}"
+        );
+        let bundle = stores.root.join(label);
+        let output = export.arg("--bundle").arg(&bundle).output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let json = fs::read_dir(bundle)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .find(|path| {
+                path.extension()
+                    .is_some_and(|extension| extension == "json")
+            })
+            .unwrap();
+        let exported: Value = serde_json::from_slice(&fs::read(json).unwrap()).unwrap();
+        assert_eq!(exported["session"]["source"], shown["session"]["source"]);
+        assert_eq!(exported["turns"], shown["turns"]);
+    }
+    let wrong = stores
+        .command(&["show", "missing-id", "--json"], "selected")
+        .arg("--native-file")
+        .arg(&newer)
+        .output()
+        .unwrap();
+    assert!(!wrong.status.success());
+    fs::remove_file(&newer).unwrap();
+    let missing = stores
+        .command(&["show", stores.id, "--json"], "selected")
+        .arg("--native-file")
+        .arg(&newer)
+        .output()
+        .unwrap();
+    assert!(!missing.status.success());
+    assert_eq!(fs::read(&stores.recording).unwrap(), old_bytes);
+}
+
+#[test]
+fn explicit_native_files_work_for_each_file_harness() {
+    for harness in ["claude", "codex", "pi"] {
+        let stores = Stores::new(harness);
+        let shown = json_output(
+            stores
+                .command(&["show", stores.id, "--json"], "selected")
+                .arg("--native-file")
+                .arg(&stores.recording)
+                .output()
+                .unwrap(),
+        );
+        stores.source(&shown["session"]["source"]);
+    }
+}
