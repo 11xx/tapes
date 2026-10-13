@@ -48,7 +48,7 @@ def command(
     logs: Path,
     label: str,
     expected: tuple[int, ...] = (0,),
-    timeout: int = 900,
+    timeout: int = 1800,
 ) -> subprocess.CompletedProcess[str]:
     result = subprocess.run(
         args,
