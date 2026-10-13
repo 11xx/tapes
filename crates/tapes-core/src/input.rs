@@ -8,7 +8,7 @@
 use std::cell::Cell;
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::fs::{self, File, Metadata};
+use std::fs::{self, Metadata};
 use std::hash::{Hash, Hasher};
 use std::io::{self, Read, Seek, SeekFrom};
 use std::os::unix::fs::MetadataExt;
@@ -2936,7 +2936,8 @@ fn is_zip_path(path: &Path, budget: &Budget) -> Result<bool> {
     {
         return Ok(true);
     }
-    let mut file = File::open(path).with_context(|| format!("open input {}", path.display()))?;
+    let mut file = crate::backend::open_regular_file(path)
+        .with_context(|| format!("open input {}", path.display()))?;
     let mut magic = [0; 4];
     let read = file.read(&mut magic)?;
     budget.charge_scan(read as u64)?;
@@ -2960,7 +2961,8 @@ fn scan_file(
     discovery_incomplete: &mut bool,
     collection_gaps: &mut Vec<crate::model::ReadGap>,
 ) -> Result<()> {
-    let file = File::open(path).with_context(|| format!("open input {}", path.display()))?;
+    let file = crate::backend::open_regular_file(path)
+        .with_context(|| format!("open input {}", path.display()))?;
     let metadata = file.metadata()?;
     let revision = metadata_revision(&metadata);
     let locator = path.display().to_string();
@@ -3030,7 +3032,7 @@ fn scan_directory_report(
     discovery_incomplete: &mut bool,
     association: Option<&LibraryAssociation>,
 ) -> Result<()> {
-    let file = File::open(&member.path)
+    let file = crate::backend::open_regular_file(&member.path)
         .with_context(|| format!("open associated report {}", member.path.display()))?;
     let mut reader = BudgetedSourceReader::new(file, budget);
     let report = read_associated_report(
@@ -3083,7 +3085,7 @@ fn read_directory_json(
     diagnostics: &mut Vec<String>,
     collection_gaps: &mut Vec<crate::model::ReadGap>,
 ) -> Result<Option<Value>> {
-    let file = File::open(&member.path)
+    let file = crate::backend::open_regular_file(&member.path)
         .with_context(|| format!("open native export manifest {}", member.path.display()))?;
     let mut reader = BudgetedSourceReader::new(file, budget);
     let Some(bytes) = read_member_bytes(
@@ -3235,7 +3237,7 @@ fn read_directory_value(
     diagnostics: &mut Vec<String>,
     collection_gaps: &mut Vec<crate::model::ReadGap>,
 ) -> Result<Option<Value>> {
-    let file = File::open(&member.path)
+    let file = crate::backend::open_regular_file(&member.path)
         .with_context(|| format!("open library metadata {}", member.path.display()))?;
     let mut reader = BudgetedSourceReader::new(file, budget);
     let Some(bytes) = read_member_bytes(
@@ -3654,8 +3656,8 @@ fn scan_zip(
             member.crc32
         ));
     }
-    let file =
-        File::open(path).with_context(|| format!("open input archive {}", path.display()))?;
+    let file = crate::backend::open_regular_file(path)
+        .with_context(|| format!("open input archive {}", path.display()))?;
     let mut archive = ZipArchive::new(BudgetedSourceReader::new(file, budget))
         .context("read supplied ZIP central directory")?;
     if archive.len() != members.len() {
@@ -3719,8 +3721,8 @@ fn scan_zip(
 
 #[cfg(feature = "zip")]
 fn preflight_zip(path: &Path, budget: &Budget) -> Result<Vec<ZipMemberMetadata>> {
-    let file =
-        File::open(path).with_context(|| format!("open input archive {}", path.display()))?;
+    let file = crate::backend::open_regular_file(path)
+        .with_context(|| format!("open input archive {}", path.display()))?;
     let metadata = file.metadata()?;
     let file_length = metadata.len();
     let mut reader = BudgetedSourceReader::new(file, budget);
@@ -5104,4 +5106,94 @@ fn decode_component(value: &str) -> Result<String> {
         })
         .collect::<Result<Vec<_>>>()?;
     String::from_utf8(bytes).context("occurrence source revision is not UTF-8")
+}
+
+#[cfg(test)]
+mod admission_tests {
+    use super::*;
+
+    #[test]
+    fn input_readers_refuse_fifos() {
+        crate::test_support::with_fifo(
+            "input::admission_tests::input_readers_refuse_fifos",
+            |path| {
+                let options = InputOptions::new(vec![path.to_owned()], InputFormat::Auto);
+                let budget = Budget::new(&options);
+                let mut occurrences = Vec::new();
+                let mut diagnostics = Vec::new();
+                let mut gaps = Vec::new();
+                let mut scanned = 0;
+                let mut truncated = false;
+                let mut incomplete = false;
+                #[cfg(feature = "zip")]
+                assert!(is_zip_path(path, &budget).is_err());
+                assert!(scan_file(
+                    path,
+                    None,
+                    None,
+                    &options,
+                    &budget,
+                    &mut occurrences,
+                    &mut diagnostics,
+                    &mut scanned,
+                    &mut truncated,
+                    &mut incomplete,
+                    &mut gaps
+                )
+                .is_err());
+                let member = DirectoryMember {
+                    name: "record.json".to_owned(),
+                    path: path.to_owned(),
+                    size: 1,
+                    revision: "fixture".to_owned(),
+                };
+                assert!(read_directory_json(
+                    &member,
+                    &options,
+                    &budget,
+                    &mut diagnostics,
+                    &mut gaps
+                )
+                .is_err());
+                assert!(read_directory_value(
+                    &member,
+                    &options,
+                    &budget,
+                    &mut diagnostics,
+                    &mut gaps
+                )
+                .is_err());
+                assert!(scan_directory_report(
+                    &member,
+                    &options,
+                    &budget,
+                    &mut Vec::new(),
+                    &mut diagnostics,
+                    &mut gaps,
+                    &mut truncated,
+                    &mut incomplete,
+                    None
+                )
+                .is_err());
+                #[cfg(feature = "zip")]
+                {
+                    assert!(preflight_zip(path, &budget).is_err());
+                    assert!(scan_zip(
+                        path,
+                        &options,
+                        &budget,
+                        &mut occurrences,
+                        &mut diagnostics,
+                        &mut Vec::new(),
+                        &mut Vec::new(),
+                        &mut gaps,
+                        &mut scanned,
+                        &mut truncated,
+                        &mut incomplete
+                    )
+                    .is_err());
+                }
+            },
+        );
+    }
 }

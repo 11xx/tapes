@@ -121,7 +121,7 @@ pub fn read(session: &Session, reference: &str, budget: usize) -> Result<Artifac
     if span.is_empty() || span.len() > 16 * 1024 * 1024 {
         bail!("artifact record exceeds the bounded verification read");
     }
-    let mut file = std::fs::File::open(recording)?;
+    let mut file = crate::backend::open_regular_file(recording)?;
     file.seek(SeekFrom::Start(span.start))?;
     let mut record = Vec::new();
     file.take(span.len()).read_to_end(&mut record)?;
@@ -210,4 +210,54 @@ fn confined_open(root: &Path, name: &str) -> Result<std::fs::File> {
 #[cfg(not(unix))]
 fn confined_open(_root: &Path, _name: &str) -> Result<std::fs::File> {
     bail!("confined no-follow artifact reads are unsupported on this platform")
+}
+
+#[cfg(test)]
+mod admission_tests {
+    use super::*;
+    use crate::backend::Backend;
+
+    #[test]
+    fn artifact_record_verification_refuses_fifos() {
+        crate::test_support::with_fifo(
+            "artifact::admission_tests::artifact_record_verification_refuses_fifos",
+            |fifo| {
+                let id = fifo.file_stem().unwrap().to_str().unwrap();
+                let root = fifo.with_extension("store");
+                let project = root.join("project");
+                std::fs::create_dir_all(&project).unwrap();
+                let recording = project.join(format!("{id}.jsonl"));
+                std::fs::write(&recording, format!("{{\"type\":\"user\",\"sessionId\":\"{id}\",\"message\":{{\"role\":\"user\",\"content\":\"fixture\"}}}}\n")).unwrap();
+                let backend = crate::backend::claude::ClaudeBackend::new(&root);
+                let session = backend.locate(id).unwrap().unwrap();
+                let coordinate = Coordinate {
+                    session: id.to_owned(),
+                    source: hex(&Sha256::digest(
+                        serde_json::to_vec(&session.source).unwrap(),
+                    )),
+                    record: RecordRef {
+                        domain: format!("file:{}", recording.display()),
+                        revision: None,
+                        span: Some(crate::model::ByteSpan { start: 0, end: 1 }),
+                        native_id: None,
+                        pointer: None,
+                        part_index: 0,
+                        content_part_index: None,
+                    },
+                    path: "tool-results/result.txt".to_owned(),
+                };
+                let reference = format!("ta1:{}", hex(&serde_json::to_vec(&coordinate).unwrap()));
+                std::fs::remove_file(&recording).unwrap();
+                std::os::unix::fs::symlink(fifo, &recording).unwrap();
+                let Err(error) = read(&session, &reference, 1) else {
+                    panic!("FIFO must be refused");
+                };
+                assert!(
+                    error.to_string().contains("not a regular file"),
+                    "{error:#}"
+                );
+                std::fs::remove_dir_all(root).unwrap();
+            },
+        );
+    }
 }

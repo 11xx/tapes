@@ -241,7 +241,8 @@ struct InputArgs {
     native_root: Option<PathBuf>,
     /// Read one or more files, directories, or ZIP archives as supplied
     /// conversation exports. Supplying this option never consults installed
-    /// harness stores.
+    /// harness stores. Source and archive files must be regular opened files;
+    /// FIFO writers are never awaited.
     #[arg(long = "input", value_name = "PATH")]
     input: Vec<PathBuf>,
     /// Detect the supplied representation structurally, or require the named

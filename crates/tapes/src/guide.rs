@@ -248,7 +248,8 @@ READ A SUPPLIED EXPORT
   tapes export <id> --input <path> --bundle <dir> --evidence
 
   `--input` reads files, extracted directories, and, with the optional `zip`
-  feature, ZIP archives as a separate
+  feature, ZIP archives. Input, evidence and artifact reads require regular
+  opened files and never wait for FIFO writers. Supplied exports form a separate
   source collection. It never falls back to installed harness stores. `auto`
   detects OpenAI, ChatGPT Exporter, and Perplexity shapes; a declared format never hands a
   failed record to another parser. Auto-detected overlapping representations

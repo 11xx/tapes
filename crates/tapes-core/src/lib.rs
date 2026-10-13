@@ -42,6 +42,8 @@ pub mod scope;
 pub mod search;
 pub mod stats;
 pub mod stats_summary;
+#[cfg(test)]
+mod test_support;
 pub mod timeline;
 pub mod title;
 pub mod usage;

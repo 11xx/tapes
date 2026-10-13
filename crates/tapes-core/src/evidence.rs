@@ -29,6 +29,24 @@ use crate::reader::ReaderIdentity;
 
 pub const EVIDENCE_SCHEMA: &str = "tapes-evidence/2";
 
+#[cfg(test)]
+mod admission_tests {
+    #[test]
+    fn evidence_readers_refuse_fifos() {
+        crate::test_support::with_fifo(
+            "evidence::admission_tests::evidence_readers_refuse_fifos",
+            |path| {
+                assert!(super::observe(path).is_err());
+                assert!(
+                    super::read_span(path, crate::model::ByteSpan { start: 0, end: 1 }).is_err()
+                );
+                #[cfg(feature = "zip")]
+                assert!(super::read_member(path, "record.json").is_err());
+            },
+        );
+    }
+}
+
 /// The most bytes one copied member may hold. A member larger than this is
 /// a gap, so an evidence set stays bounded like every other read.
 const MAX_MEMBER_BYTES: u64 = 512 * 1024 * 1024;
@@ -329,7 +347,8 @@ fn associated_reports(transcript: &Transcript) -> Vec<&ArtifactReference> {
 fn observe(path: &Path) -> Result<InputObservation> {
     let mut file = BufReader::with_capacity(
         256 * 1024,
-        File::open(path).with_context(|| format!("failed to open {}", path.display()))?,
+        crate::backend::open_regular_file(path)
+            .with_context(|| format!("failed to open {}", path.display()))?,
     );
     let mut hasher = Sha256::new();
     let mut buffer = vec![0; 256 * 1024];
@@ -590,7 +609,8 @@ fn copy_member(
 }
 
 fn read_span(path: &Path, span: ByteSpan) -> std::result::Result<Vec<u8>, String> {
-    let mut file = File::open(path).map_err(|error| format!("{}: {error}", path.display()))?;
+    let mut file = crate::backend::open_regular_file(path)
+        .map_err(|error| format!("{}: {error}", path.display()))?;
     file.seek(SeekFrom::Start(span.start))
         .map_err(|error| error.to_string())?;
     let mut bytes = Vec::new();
@@ -614,7 +634,8 @@ fn read_member(
     archive: &Path,
     member: &str,
 ) -> std::result::Result<(Vec<u8>, MemberFacts), String> {
-    let file = File::open(archive).map_err(|error| format!("{}: {error}", archive.display()))?;
+    let file = crate::backend::open_regular_file(archive)
+        .map_err(|error| format!("{}: {error}", archive.display()))?;
     let mut archive = zip::ZipArchive::new(file).map_err(|error| error.to_string())?;
     let mut entry = archive
         .by_name(member)
