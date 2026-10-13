@@ -635,6 +635,7 @@ struct SelectionArgs {
     #[arg(long, requires = "latest")]
     exclude: Vec<String>,
     /// Restrict ID, prefix, title, or latest lookup to one harness.
+    /// Incomplete prefix lookups identify the stores searched and their completeness.
     #[arg(long)]
     harness: Option<String>,
     #[command(flatten)]

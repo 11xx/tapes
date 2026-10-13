@@ -388,7 +388,18 @@ impl Discovery {
     }
 }
 
+/// Candidate enumeration coverage for one present or unreadable store.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LookupCoverage {
+    pub harness: String,
+    /// Store generation label, when the source supplies one.
+    pub store: Option<String>,
+    /// Whether candidate enumeration covered the entire store.
+    pub complete: bool,
+}
+
 /// Aggregate exact/prefix outcomes for the closed native store set.
+/// Failure and diagnostic vectors contain causes; coverage records searches.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ResolveError {
     InvalidQuery,
@@ -396,10 +407,12 @@ pub enum ResolveError {
         query: String,
         truncated: bool,
         diagnostics: Vec<String>,
+        coverage: Vec<LookupCoverage>,
     },
     Incomplete {
         query: String,
         diagnostics: Vec<String>,
+        coverage: Vec<LookupCoverage>,
     },
     Ambiguous {
         query: String,
@@ -408,6 +421,7 @@ pub enum ResolveError {
     BackendFailed {
         query: String,
         failures: Vec<String>,
+        coverage: Vec<LookupCoverage>,
     },
     StoreFailed {
         query: String,
@@ -420,30 +434,31 @@ impl std::fmt::Display for ResolveError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::InvalidQuery => f.write_str("query must be non-empty and contain no NUL"),
-            Self::NotFound { query, truncated, diagnostics } => {
+            Self::NotFound { query, truncated, diagnostics, coverage } => {
                 write!(f, "session {query} was not found")?;
                 if *truncated {
                     f.write_str(
                         " (candidate coverage is incomplete; pass the full ID or --harness <h> for a direct lookup)",
                     )?;
                 }
-                if !diagnostics.is_empty() {
-                    write!(f, " ({})", diagnostics.join("; "))?;
+                let details = lookup_diagnostics(diagnostics, coverage);
+                if !details.is_empty() {
+                    write!(f, " ({details})")?;
                 }
                 Ok(())
             }
-            Self::Incomplete { query, diagnostics } => write!(
+            Self::Incomplete { query, diagnostics, coverage } => write!(
                 f,
                 "cannot prove a unique native session for {query:?}; use the full ID or --harness <h> ({})",
-                diagnostics.join("; ")
+                lookup_diagnostics(diagnostics, coverage)
             ),
             Self::Ambiguous { query, candidates } => {
                 write!(f, "native session query {query:?} is ambiguous among {} candidates", candidates.len())
             }
-            Self::BackendFailed { query, failures } => write!(
+            Self::BackendFailed { query, failures, coverage } => write!(
                 f,
                 "native session query {query:?} could not be completed: {}",
-                failures.join("; ")
+                lookup_diagnostics(failures, coverage)
             ),
             Self::StoreFailed { query, answered_by, failures } => write!(
                 f,
@@ -455,6 +470,42 @@ impl std::fmt::Display for ResolveError {
 }
 
 impl std::error::Error for ResolveError {}
+
+fn lookup_diagnostics(causes: &[String], coverage: &[LookupCoverage]) -> String {
+    let mut details = causes.to_vec();
+    if coverage.iter().any(|store| !store.complete) {
+        for (complete, label) in [
+            (false, "incomplete harness stores"),
+            (true, "completely searched harness stores"),
+        ] {
+            let stores = coverage
+                .iter()
+                .filter(|store| store.complete == complete)
+                .map(|store| {
+                    let shared_harness = coverage
+                        .iter()
+                        .filter(|other| other.harness == store.harness)
+                        .count()
+                        > 1;
+                    match store.store.as_deref().filter(|_| shared_harness) {
+                        Some(label) => format!("{} ({label})", store.harness),
+                        None => store.harness.clone(),
+                    }
+                })
+                .collect::<Vec<_>>();
+            details.push(format!(
+                "{label}: {}",
+                if stores.is_empty() {
+                    "none".to_owned()
+                } else {
+                    stores.join(", ")
+                }
+            ));
+        }
+        details.push("use the full ID or --harness <h> to scope native lookup".to_owned());
+    }
+    details.join("; ")
+}
 
 /// Public identity projection for resolver ambiguity diagnostics.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -763,6 +814,7 @@ pub fn resolve_with_sources<R: IdentityRecord + Clone>(
         return Err(ResolveError::BackendFailed {
             query: query.to_owned(),
             failures: failure_messages(failures.iter()),
+            coverage: Vec::new(),
         });
     }
 
@@ -796,43 +848,16 @@ pub fn resolve_with_sources<R: IdentityRecord + Clone>(
         diagnostics.extend(page.failures.iter().cloned());
         pages.push(page);
     }
-    let mut coverage = Vec::new();
-    if truncated {
-        for (complete, label) in [
-            (false, "incomplete harness stores"),
-            (true, "completely searched harness stores"),
-        ] {
-            let stores = pages
-                .iter()
-                .enumerate()
-                .filter(|(index, page)| {
-                    page.complete == complete && (!complete || sources[*index].available())
-                })
-                .map(|(index, _)| {
-                    let source = sources[index];
-                    let harness = source.harness();
-                    let shared_harness = sources
-                        .iter()
-                        .filter(|source| source.harness() == harness)
-                        .count()
-                        > 1;
-                    match source.store_label().filter(|_| shared_harness) {
-                        Some(label) => format!("{harness} ({label})"),
-                        None => harness.to_owned(),
-                    }
-                })
-                .collect::<Vec<_>>();
-            coverage.push(format!(
-                "{label}: {}",
-                if stores.is_empty() {
-                    "none".to_owned()
-                } else {
-                    stores.join(", ")
-                }
-            ));
-        }
-        coverage.push("use the full ID or --harness <h> to scope native lookup".to_owned());
-    }
+    let coverage = pages
+        .iter()
+        .enumerate()
+        .filter(|(index, page)| !page.complete || sources[*index].available())
+        .map(|(index, page)| LookupCoverage {
+            harness: sources[index].harness().to_owned(),
+            store: sources[index].store_label().map(str::to_owned),
+            complete: page.complete,
+        })
+        .collect::<Vec<_>>();
     for (source_index, page) in pages.iter().enumerate() {
         let source = sources[source_index];
         if !source.shares_session_ids() {
@@ -940,6 +965,7 @@ pub fn resolve_with_sources<R: IdentityRecord + Clone>(
         return Err(ResolveError::BackendFailed {
             query: query.to_owned(),
             failures: failure_messages(failures.iter()),
+            coverage,
         });
     }
     if matches.len() > 1 {
@@ -956,26 +982,25 @@ pub fn resolve_with_sources<R: IdentityRecord + Clone>(
         0 if !diagnostics.is_empty() || !failures.is_empty() => {
             let mut failures = failure_messages(failures.iter());
             failures.extend(diagnostics);
-            failures.extend(coverage);
             failures.sort();
             failures.dedup();
             Err(ResolveError::BackendFailed {
                 query: query.to_owned(),
                 failures,
+                coverage,
             })
         }
         0 => Err(ResolveError::NotFound {
             query: query.to_owned(),
             truncated,
-            diagnostics: coverage,
+            diagnostics: Vec::new(),
+            coverage,
         }),
-        1 if truncated || !diagnostics.is_empty() => {
-            diagnostics.extend(coverage);
-            Err(ResolveError::Incomplete {
-                query: query.to_owned(),
-                diagnostics,
-            })
-        }
+        1 if truncated || !diagnostics.is_empty() => Err(ResolveError::Incomplete {
+            query: query.to_owned(),
+            diagnostics,
+            coverage,
+        }),
         1 => Ok(matches.remove(0)),
         _ => unreachable!("multiple matches returned above"),
     }

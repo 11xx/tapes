@@ -77,6 +77,15 @@ ambiguity, backend failures, and a failed higher-precedence shared store.
 and failures. `IdentitySource::locate_for_resolution` retains whether an exact
 failure refuses prefix fallback; native identity mismatches carry that policy.
 
+`NotFound`, `Incomplete`, and `BackendFailed` carry a separate `coverage`
+vector of `LookupCoverage` records. Each record names the harness, an optional
+store generation, and whether candidate enumeration was complete. Absent
+stores are omitted unless inspecting them failed. A terminal exact-lookup
+failure has an empty vector because candidate enumeration did not run.
+`failures` and `diagnostics` contain only causes. Consumers can select causes
+and inspect coverage directly; `Display` adds the store coverage and lookup
+advice for people reading an incomplete search diagnostic.
+
 ## Dependency
 
 The package carries the workspace's calendar version and has no default features. Its

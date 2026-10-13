@@ -1,6 +1,6 @@
 use agent_tapes_discovery::{
-    resolve_with_sources, CandidatePage, IdentityRecord, IdentitySource, ResolveError, Resolved,
-    SharedStorePrecedence,
+    resolve_with_sources, CandidatePage, IdentityRecord, IdentitySource, LookupCoverage,
+    ResolveError, Resolved, SharedStorePrecedence,
 };
 
 #[derive(Clone, Debug, PartialEq)]
@@ -226,12 +226,18 @@ fn failed_unavailable_source_makes_a_single_prefix_candidate_incomplete() {
         true,
     ));
     let error = resolve(&[&unreadable, &candidate], "prefix-").unwrap_err();
-    let ResolveError::Incomplete { diagnostics, .. } = error else {
+    let ResolveError::Incomplete {
+        diagnostics,
+        coverage,
+        ..
+    } = error
+    else {
         panic!("expected incomplete coverage, got {error:?}");
     };
-    assert!(diagnostics
-        .iter()
-        .any(|diagnostic| diagnostic.contains("store inspection failed")));
+    assert_eq!(diagnostics, vec!["claude: store inspection failed"]);
+    assert_eq!(coverage.len(), 2);
+    assert!(!coverage[0].complete);
+    assert!(coverage[1].complete);
 }
 
 #[test]
@@ -311,6 +317,55 @@ fn complete_match_refuses_when_another_harness_hits_its_bound() {
     assert!(message.contains("incomplete harness stores: codex"));
     assert!(message.contains("completely searched harness stores: claude"));
     assert!(message.contains("full ID or --harness <h>"));
+    let ResolveError::Incomplete {
+        diagnostics,
+        coverage,
+        ..
+    } = error
+    else {
+        unreachable!()
+    };
+    assert!(diagnostics.is_empty());
+    assert_eq!(
+        coverage,
+        vec![
+            LookupCoverage {
+                harness: "claude".to_owned(),
+                store: None,
+                complete: true,
+            },
+            LookupCoverage {
+                harness: "codex".to_owned(),
+                store: None,
+                complete: false,
+            },
+        ]
+    );
+}
+
+#[test]
+fn backend_failures_keep_causes_separate_from_search_coverage() {
+    let broken = Source::empty("codex")
+        .with_exact(Err("store inspection failed".to_owned()))
+        .unavailable();
+    let searched = Source::empty("claude");
+    let error = resolve(&[&broken, &searched], "missing").unwrap_err();
+    let message = error.to_string();
+    let ResolveError::BackendFailed {
+        failures, coverage, ..
+    } = error
+    else {
+        panic!("expected backend failure, got {error:?}");
+    };
+    assert_eq!(failures, vec!["codex: store inspection failed"]);
+    assert_eq!(coverage.len(), 2);
+    assert_eq!(coverage[0].harness, "codex");
+    assert!(!coverage[0].complete);
+    assert_eq!(coverage[1].harness, "claude");
+    assert!(coverage[1].complete);
+    assert!(message.contains(&failures[0]));
+    assert!(message.contains("incomplete harness stores: codex"));
+    assert!(message.contains("completely searched harness stores: claude"));
 }
 
 #[test]
@@ -366,6 +421,48 @@ fn coverage_distinguishes_only_stores_of_the_same_harness() {
     assert!(message.contains("completely searched harness stores: opencode (v2), claude"));
     assert!(!message.contains("unused-detail"));
     assert!(!message.contains("[source"));
+    let ResolveError::NotFound {
+        diagnostics,
+        coverage,
+        ..
+    } = error
+    else {
+        panic!("expected not found, got {error:?}");
+    };
+    assert!(diagnostics.is_empty());
+    assert_eq!(coverage[0].store.as_deref(), Some("stable"));
+    assert!(!coverage[0].complete);
+    assert_eq!(coverage[1].store.as_deref(), Some("v2"));
+    assert!(coverage[1].complete);
+    assert_eq!(coverage[2].store.as_deref(), Some("unused-detail"));
+}
+
+#[test]
+fn coverage_omits_absent_stores_and_unperformed_candidate_searches() {
+    let missing = Source::empty("pi").unavailable();
+    let searched = Source::empty("codex");
+    let error = resolve(&[&missing, &searched], "missing").unwrap_err();
+    let ResolveError::NotFound { coverage, .. } = error else {
+        panic!("expected not found, got {error:?}");
+    };
+    assert_eq!(coverage.len(), 1);
+    assert_eq!(coverage[0].harness, "codex");
+    assert!(coverage[0].complete);
+    assert_eq!(missing.lists.get(), 0);
+
+    let terminal = Source::empty("input")
+        .terminal()
+        .with_exact(Err("ambiguous occurrence".to_owned()));
+    let error = resolve(&[&terminal], "missing").unwrap_err();
+    let ResolveError::BackendFailed {
+        failures, coverage, ..
+    } = error
+    else {
+        panic!("expected terminal failure, got {error:?}");
+    };
+    assert_eq!(failures, vec!["input: ambiguous occurrence"]);
+    assert!(coverage.is_empty());
+    assert_eq!(terminal.lists.get(), 0);
 }
 
 #[test]

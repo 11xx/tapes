@@ -208,8 +208,10 @@ FIND IT
   when candidate enumeration finds only prefix matches. A prefix is accepted only when
   bounded candidate coverage proves it unique; an ambiguous prefix lists its
   candidates. --harness <h> restricts ID and prefix lookup to that harness's
-  stores. Incomplete coverage names incomplete and completely searched harness
-  stores and asks for the full id or --harness <h>; a single observed prefix
+  stores. Lookup diagnostics retain the failure causes alongside incomplete
+  and completely searched harness stores, distinguishing store generations
+  when a harness has several. Incomplete coverage asks for the full id or
+  --harness <h>; a single observed prefix
   match cannot prove uniqueness across incomplete stores. A harness whose
   binary or store is absent reports itself unavailable and never fails a
   listing. If one stored session row cannot be read, listing keeps every other
