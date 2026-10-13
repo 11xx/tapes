@@ -856,6 +856,9 @@ PROBE BEFORE EXPORTING
   after the recording's file. Identity-bearing records in the bounded opening
   and tail must name the selected native parent, and a record that names an agent
   must name this child; absent or conflicting identity fails the ending read.
+  Plugin child endings inspect a 64 KiB tail and the bounded opening first,
+  expanding to the configured read bound when no complete substantive tail
+  record is available. Counting children reads transcript filenames only.
   Recording and child metadata reads accept only regular opened files and never
   wait for a FIFO writer. Without that ending there is no completion
   stamp, which means not seen to finish rather than running: a child killed

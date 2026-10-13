@@ -1830,7 +1830,9 @@ fn claude_trailing_kind(value: &Value) -> Option<&'static str> {
 
 /// Count transcript filenames only when the entire child directory is readable.
 fn subagent_transcript_count(path: &Path) -> Result<usize> {
-    Ok(subagent_files(path)?.len())
+    let mut count = 0;
+    visit_subagent_transcripts(path, |_, _| count += 1)?;
+    Ok(count)
 }
 
 pub(crate) fn parse_turns(value: &Value) -> Vec<Turn> {
@@ -3027,7 +3029,7 @@ fn child_ending(
     reference: &str,
     read_bytes: u64,
 ) -> Result<Option<ChildEnding>> {
-    let recording = read_recording(path, read_bytes)
+    let recording = child_ending_recording(path, read_bytes)
         .with_context(|| format!("Subagent ending {} unavailable", path.display()))?;
     let mut identified = false;
     for value in recording.opening().iter().chain(&recording.tail.values) {
@@ -3068,24 +3070,37 @@ fn child_ending(
     }))
 }
 
-/// The subagent transcripts recorded under a session's own directory. Each
-/// carries a meta record naming the agent, and the file's stem carries the
-/// agent id the parent's completion record repeats.
-fn subagent_files(path: &Path) -> Result<Vec<SubagentFile>> {
+fn child_ending_recording(path: &Path, read_bytes: u64) -> Result<super::Recording> {
+    const ENDING_BYTES: u64 = 64 * 1024;
+    let recording = read_recording(path, read_bytes.min(ENDING_BYTES))?;
+    if read_bytes > ENDING_BYTES
+        && recording.tail.truncated
+        && !recording
+            .tail
+            .values
+            .iter()
+            .any(|value| claude_trailing_kind(value).is_none())
+    {
+        return read_recording(path, read_bytes);
+    }
+    Ok(recording)
+}
+
+/// Transcript filenames under the session's subagent directory, without metadata reads.
+fn visit_subagent_transcripts(path: &Path, mut visit: impl FnMut(String, PathBuf)) -> Result<()> {
     let session = path
         .file_stem()
         .ok_or_else(|| anyhow!("Claude recording has no file stem"))?;
     let directory = path.with_file_name(session).join("subagents");
     let entries = match fs::read_dir(&directory) {
         Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(error) => {
             return Err(error).with_context(|| {
                 format!("Subagent enumeration {} unavailable", directory.display())
             });
         }
     };
-    let mut files = Vec::new();
     for entry in entries {
         let entry = entry
             .with_context(|| format!("Subagent enumeration {} unavailable", directory.display()))?;
@@ -3104,6 +3119,14 @@ fn subagent_files(path: &Path) -> Result<Vec<SubagentFile>> {
             continue;
         };
         let agent_id = agent_id.to_owned();
+        visit(agent_id, path);
+    }
+    Ok(())
+}
+
+fn subagent_files(path: &Path) -> Result<Vec<SubagentFile>> {
+    let mut files = Vec::new();
+    visit_subagent_transcripts(path, |agent_id, path| {
         let meta = path.with_file_name(format!("agent-{agent_id}.meta.json"));
         let (recorded, metadata_note) = subagent_metadata(&meta);
         files.push(SubagentFile {
@@ -3117,7 +3140,7 @@ fn subagent_files(path: &Path) -> Result<Vec<SubagentFile>> {
             plugin_steered: recorded["pluginSteered"] == true
                 && recorded["requestNonInteractive"] != false,
         });
-    }
+    })?;
     files.sort_by(|left, right| left.agent_id.cmp(&right.agent_id));
     Ok(files)
 }
@@ -3405,5 +3428,47 @@ mod read_content_tests {
         assert!(
             persisted_tool_output(&json!({"content":[{"type":"text","text":envelope}]})).is_none()
         );
+    }
+}
+
+#[cfg(test)]
+mod child_ending_cost_tests {
+    use super::*;
+
+    #[test]
+    fn ending_reads_use_a_small_tail_and_expand_for_an_oversized_final_record() {
+        let root =
+            std::env::temp_dir().join(format!("tapes-child-ending-cost-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("agent-fixture.jsonl");
+        let opening =
+            serde_json::json!({"type": "user", "sessionId": "parent", "agentId": "fixture"});
+        let mut ending = serde_json::json!({"type": "assistant", "sessionId": "parent", "agentId": "fixture",
+            "uuid": "ending", "timestamp": "2026-01-01T00:01:00Z", "message": {"stop_reason": "end_turn"}});
+        let middle = serde_json::json!({"type": "user", "sessionId": "parent", "message": {"content": "x".repeat(128 * 1024)}});
+        let housekeeping = serde_json::json!({"type": "cost-state"});
+        fs::write(
+            &path,
+            format!("{opening}\n{middle}\n{ending}\n{housekeeping}\n"),
+        )
+        .unwrap();
+        let read = child_ending_recording(&path, super::super::DEFAULT_READ_BYTES).unwrap();
+        assert_eq!(read.tail.configured_bound, 64 * 1024);
+        assert!(read.tail.truncated);
+        assert!(
+            child_ending(&path, "parent", "fixture", super::super::DEFAULT_READ_BYTES)
+                .unwrap()
+                .is_some()
+        );
+        ending["message"]["content"] = serde_json::json!("x".repeat(128 * 1024));
+        fs::write(&path, format!("{opening}\n{ending}\n{housekeeping}\n")).unwrap();
+        let read = child_ending_recording(&path, super::super::DEFAULT_READ_BYTES).unwrap();
+        assert_eq!(read.tail.configured_bound, super::super::DEFAULT_READ_BYTES);
+        assert!(
+            child_ending(&path, "parent", "fixture", super::super::DEFAULT_READ_BYTES)
+                .unwrap()
+                .is_some()
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 }

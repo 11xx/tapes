@@ -1309,6 +1309,9 @@ enum Command {
     /// housekeeping, including cost-state and system turn_duration/stop_hook_summary,
     /// is skipped; unknown records and read gaps do not establish completion. Otherwise
     /// it has no completion stamp, which does not say it is still running.
+    /// Endings first inspect a 64 KiB tail and bounded opening, expanding to
+    /// --read-bytes when no complete substantive tail record is available.
+    /// Child counts enumerate transcript filenames without reading metadata.
     /// Child-ending opening and tail identity records must name the native
     /// parent, and a record that names an agent must name the child itself;
     /// missing or conflicting identity fails. Only regular opened recording and
