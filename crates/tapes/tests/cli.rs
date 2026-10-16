@@ -8080,6 +8080,23 @@ fn the_guide_names_where_a_plugin_steered_subagents_completion_comes_from() {
     assert!(text.contains("stopped on end_turn"), "{text}");
 }
 
+/// A continuation of a long session, or one with relatives, is pointed at
+/// agent-delegate pickup from the section that teaches continuing a session.
+#[test]
+fn the_continuation_section_points_long_sessions_at_pickup() {
+    let guide = tapes().output().unwrap();
+    let text = String::from_utf8_lossy(&guide.stdout);
+    let start = text
+        .find("CONTINUE A COLD SESSION")
+        .expect("continuation section");
+    let end = text[start..]
+        .find("FREEZE A WORKING SET")
+        .map_or(text.len(), |at| start + at);
+    let section = &text[start..end];
+    assert!(section.contains("agent-delegate pickup"), "{section}");
+    assert!(section.contains("tapes workset"), "{section}");
+}
+
 /// The command reports the relationships a store recorded, keeps a reference
 /// the store cannot resolve, and never reads a child's transcript.
 #[test]

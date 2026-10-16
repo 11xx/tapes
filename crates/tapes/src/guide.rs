@@ -1136,6 +1136,13 @@ CONTINUE A COLD SESSION
   Resuming the session in place is cheaper than any of this while its cache is
   warm; a brief is what a cold session is worth reading through instead.
 
+  A brief's bounded tail cannot carry a long session, or one whose relatives,
+  executors or delegated runs hold half the work. `agent-delegate pickup`
+  does: it freezes the session with tapes workset, fans cheap read-only scouts
+  over the lanes, and keeps only the facts tapes locate verifies, then names
+  what the lead rereads before writing the continuation. Its guide (bare
+  `agent-delegate`, PICK UP A SESSION) carries the procedure.
+
 FREEZE A WORKING SET
   tapes workset <id> --bundle /tmp/<id>-workset
   tapes workset <id> --bundle DIR --lane-bytes 256KiB
