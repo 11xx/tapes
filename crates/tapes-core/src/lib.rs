@@ -36,6 +36,7 @@ pub mod measurement;
 pub mod model;
 mod model_observation;
 pub mod overlap;
+pub mod projection;
 pub mod reader;
 pub mod reconcile;
 pub mod scope;
@@ -47,6 +48,7 @@ mod test_support;
 pub mod timeline;
 pub mod title;
 pub mod usage;
+pub mod workset;
 
 pub const LIST_SCHEMA: &str = "tapes-list/9";
 pub const EXPORT_MANIFEST_SCHEMA: &str = "tapes-export-manifest/7";
