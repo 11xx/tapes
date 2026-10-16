@@ -5,13 +5,15 @@
 //! projection. Sources are streamed one at a time; no source's turns are held
 //! beyond the turn being measured.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
+use std::path::{Path, PathBuf};
 
-use anyhow::{bail, Result};
+use anyhow::{anyhow, bail, Result};
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 
 use crate::backend::{Backend, StreamedChild, StreamedTranscript};
+use crate::lane_file::{self, LaneSource, MarginPair};
 use crate::lineage::Lineage;
 use crate::model::{
     ByteSpan, ContextEvent, LiveState, Session, SourceDescriptor, SourcePrefixDigest, Turn,
@@ -24,6 +26,12 @@ pub const WORKSET_SCHEMA: &str = "tapes-workset/1";
 pub const DEFAULT_LANE_BYTES: u64 = 64 * 1024;
 pub const MIN_LANE_BYTES: u64 = 8 * 1024;
 pub const MAX_LANE_BYTES: u64 = 4 * 1024 * 1024;
+/// The bundle directory's lane-file subdirectory.
+pub const LANES_DIR: &str = "lanes";
+/// The bundle directory's manifest.
+pub const MANIFEST_FILE: &str = "workset.json";
+/// Operator turns, each with its first reply, a lane's margin holds.
+pub const MARGIN_PAIRS: usize = 2;
 
 #[derive(Debug, Serialize)]
 pub struct Workset {
@@ -91,6 +99,9 @@ pub struct Lane {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub byte_range: Option<ByteSpan>,
     pub projected_bytes: u64,
+    /// The lane file, relative to the bundle directory, when one was written.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file: Option<String>,
     pub turns_by_kind: BTreeMap<TurnKind, usize>,
     /// Text bytes the projection's per-turn cap left out, by turn kind.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
@@ -160,12 +171,24 @@ impl WorksetSource {
 
 /// Cuts a stream of turns into lanes: a turn that would push the open lane
 /// past the bound starts a new one, and a turn larger than the bound gets a
-/// lane of its own.
+/// lane of its own. With lane files, each lane is written when it closes:
+/// only the open lane's body and a ring of the latest operator turns with
+/// their first replies are held.
 pub struct LaneCutter {
     key: String,
     bound: u64,
     lanes: Vec<Lane>,
     open: Option<OpenLane>,
+    files: Option<LaneFiles>,
+}
+
+struct LaneFiles {
+    directory: PathBuf,
+    source: LaneSource,
+    body: String,
+    margin: Vec<MarginPair>,
+    ring: VecDeque<MarginPair>,
+    written: Vec<PathBuf>,
 }
 
 struct OpenLane {
@@ -180,10 +203,26 @@ impl LaneCutter {
             bound,
             lanes: Vec::new(),
             open: None,
+            files: None,
         }
     }
 
-    pub fn push(&mut self, turn: &Turn) {
+    /// A cutter that writes each lane to `<directory>/<lane-id>.md`.
+    pub fn with_files(source: LaneSource, bound: u64, directory: &Path) -> Self {
+        Self {
+            files: Some(LaneFiles {
+                directory: directory.to_owned(),
+                source: source.clone(),
+                body: String::new(),
+                margin: Vec::new(),
+                ring: VecDeque::with_capacity(MARGIN_PAIRS + 1),
+                written: Vec::new(),
+            }),
+            ..Self::new(&source.key, bound)
+        }
+    }
+
+    pub fn push(&mut self, turn: &Turn) -> Result<()> {
         let projection = projection::project(&self.key, turn);
         let bytes = projection.text.len() as u64;
         if self
@@ -191,7 +230,30 @@ impl LaneCutter {
             .as_ref()
             .is_some_and(|open| open.lane.projected_bytes + bytes > self.bound)
         {
-            self.close();
+            self.close()?;
+        }
+        if let Some(files) = &mut self.files {
+            if self.open.is_none() {
+                files.margin = files.ring.iter().cloned().collect();
+            }
+            files.body.push_str(&projection.text);
+            match turn.kind {
+                TurnKind::Operator => {
+                    files.ring.push_back(MarginPair {
+                        operator: projection.text.clone(),
+                        reply: None,
+                    });
+                    if files.ring.len() > MARGIN_PAIRS {
+                        files.ring.pop_front();
+                    }
+                }
+                TurnKind::Assistant => {
+                    for pair in files.ring.iter_mut().filter(|pair| pair.reply.is_none()) {
+                        pair.reply = Some(projection.text.clone());
+                    }
+                }
+                _ => {}
+            }
         }
         let span = turn.record_ref.as_ref().and_then(|record| record.span);
         let open = self.open.get_or_insert_with(|| OpenLane {
@@ -201,6 +263,7 @@ impl LaneCutter {
                 last_turn: turn.ordinal,
                 byte_range: span,
                 projected_bytes: 0,
+                file: None,
                 turns_by_kind: BTreeMap::new(),
                 omitted_bytes: BTreeMap::new(),
             },
@@ -220,21 +283,48 @@ impl LaneCutter {
             (Some(span), None) => open.lane.byte_range = Some(span),
             (None, _) => open.spanned = false,
         }
+        Ok(())
     }
 
-    pub fn finish(mut self) -> Vec<Lane> {
-        self.close();
-        self.lanes
+    pub fn finish(mut self) -> Result<Vec<Lane>> {
+        self.close()?;
+        Ok(self.lanes)
     }
 
-    fn close(&mut self) {
+    /// Remove every lane file this cutter wrote, for a source whose read
+    /// failed after some of its lanes closed.
+    pub fn discard(self) {
+        for path in self.files.into_iter().flat_map(|files| files.written) {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+
+    fn close(&mut self) -> Result<()> {
         if let Some(open) = self.open.take() {
             let mut lane = open.lane;
             if !open.spanned {
                 lane.byte_range = None;
             }
+            if let Some(files) = &mut self.files {
+                let name = format!("{}.md", lane.id);
+                let path = files.directory.join(&name);
+                let text = lane_file::render(
+                    &files.source,
+                    &lane.id,
+                    lane.first_turn,
+                    lane.last_turn,
+                    &files.margin,
+                    &files.body,
+                );
+                std::fs::write(&path, text)
+                    .map_err(|error| anyhow!("write {}: {error}", path.display()))?;
+                files.written.push(path);
+                files.body.clear();
+                lane.file = Some(format!("{LANES_DIR}/{name}"));
+            }
             self.lanes.push(lane);
         }
+        Ok(())
     }
 }
 
@@ -250,9 +340,12 @@ struct SourceFold {
 }
 
 impl SourceFold {
-    fn new(key: &str, bound: u64) -> Self {
+    fn new(key: &str, bound: u64, files: Option<(&Path, LaneSource)>) -> Self {
         Self {
-            cutter: LaneCutter::new(key, bound),
+            cutter: match files {
+                Some((directory, source)) => LaneCutter::with_files(source, bound, directory),
+                None => LaneCutter::new(key, bound),
+            },
             coverage: Coverage::default(),
             spanned: true,
             records: 0,
@@ -262,8 +355,8 @@ impl SourceFold {
         }
     }
 
-    fn turn(&mut self, turn: &Turn) {
-        self.cutter.push(turn);
+    fn turn(&mut self, turn: &Turn) -> Result<()> {
+        self.cutter.push(turn)?;
         self.coverage.turns += 1;
         *self.coverage.turns_by_kind.entry(turn.kind).or_default() += 1;
         if matches!(turn.context_event, Some(ContextEvent::Compaction(_))) {
@@ -287,9 +380,10 @@ impl SourceFold {
             }
             None => self.spanned = false,
         }
+        Ok(())
     }
 
-    fn finish(mut self, key: String, role: SourceRole, read: Read) -> WorksetSource {
+    fn finish(mut self, key: String, role: SourceRole, read: Read) -> Result<WorksetSource> {
         let file = read.streamed.source_revision.is_some();
         self.coverage.records_skipped = read.streamed.skipped;
         self.coverage.unmapped = read.streamed.unmapped.clone();
@@ -303,7 +397,7 @@ impl SourceFold {
             }
         }
         self.coverage.notes = read.streamed.notes.clone();
-        let lanes = self.cutter.finish();
+        let lanes = self.cutter.finish()?;
         self.coverage.omitted_bytes = lanes
             .iter()
             .flat_map(|lane| lane.omitted_bytes.values())
@@ -311,7 +405,7 @@ impl SourceFold {
         let evidence = read
             .streamed
             .read_evidence(read.session.source.producer.clone());
-        WorksetSource {
+        Ok(WorksetSource {
             key,
             harness: read.harness,
             session_id: read.session.id.clone(),
@@ -325,7 +419,7 @@ impl SourceFold {
             lanes: Some(lanes),
             coverage: Some(self.coverage),
             diagnostic: None,
-        }
+        })
     }
 }
 
@@ -370,28 +464,71 @@ pub fn check_lane_bytes(lane_bytes: u64) -> Result<()> {
 
 /// Read the selected session and every relative its lineage resolves, each
 /// in full, and cut each into lanes of at most `lane_bytes` projected bytes.
-/// The root must be readable; a relative that is not is reported with its
-/// diagnostic.
+/// With a bundle directory, each lane is also written to
+/// `<bundle>/lanes/<lane-id>.md`; a bundle that already holds a manifest or a
+/// lanes directory is refused. The root must be readable; a relative that is
+/// not is reported with its diagnostic and has no lane files.
 pub fn build_with_backends(
     backends: &[Box<dyn Backend>],
     selection: Selection,
     lane_bytes: u64,
+    bundle: Option<&Path>,
 ) -> Result<Workset> {
     check_lane_bytes(lane_bytes)?;
+    let lanes = bundle.map(prepare_bundle).transpose()?;
+    let built = build(backends, selection, lane_bytes, lanes.as_deref());
+    if let (Err(_), Some(lanes)) = (&built, &lanes) {
+        let _ = std::fs::remove_dir_all(lanes);
+    }
+    built
+}
+
+/// Create the bundle's lanes directory, refusing a bundle a workset was
+/// already written into.
+fn prepare_bundle(bundle: &Path) -> Result<PathBuf> {
+    let manifest = bundle.join(MANIFEST_FILE);
+    let lanes = bundle.join(LANES_DIR);
+    if manifest.exists() || lanes.exists() {
+        bail!(
+            "{} already holds a workset; choose an empty bundle directory",
+            bundle.display()
+        );
+    }
+    std::fs::create_dir_all(bundle)
+        .map_err(|error| anyhow!("create {}: {error}", bundle.display()))?;
+    std::fs::create_dir(&lanes).map_err(|error| anyhow!("create {}: {error}", lanes.display()))?;
+    Ok(lanes)
+}
+
+fn build(
+    backends: &[Box<dyn Backend>],
+    selection: Selection,
+    lane_bytes: u64,
+    lanes: Option<&Path>,
+) -> Result<Workset> {
     let observed_at = Utc::now();
     let resolved = selection.resolve(backends)?;
     let backend = backends[resolved.backend_index].as_ref();
+    let harness = backend.harness().to_owned();
     let root_key = key(0);
-    let mut fold = SourceFold::new(&root_key, lane_bytes);
+    let files = lanes.map(|directory| {
+        (
+            directory,
+            LaneSource {
+                key: root_key.clone(),
+                harness: harness.clone(),
+                session: resolved.session.id.clone(),
+            },
+        )
+    });
+    let mut fold = SourceFold::new(&root_key, lane_bytes, files);
     let mut streamed = crate::stream_numbered(backend, &resolved.session, None, &mut |turn| {
-        fold.turn(&turn);
-        Ok(())
+        fold.turn(&turn)
     })?;
     streamed
         .notes
         .extend(resolved.diagnostics.latest_warnings(&resolved.session));
     let session = resolved.session;
-    let harness = backend.harness().to_owned();
 
     let (relatives, unresolved, failures) = match backend.stream_lineage(&session) {
         Ok(lineage) => relatives(lineage, &harness),
@@ -408,7 +545,7 @@ pub fn build_with_backends(
             reference: None,
             streamed,
         },
-    );
+    )?;
 
     let mut sources = vec![root];
     let mut seen = vec![(harness.clone(), session.id.clone())];
@@ -421,7 +558,7 @@ pub fn build_with_backends(
         seen.push(identity);
         let key = key(sources.len());
         sources.push(read_relative(
-            backends, backend, &session, relative, key, lane_bytes,
+            backends, backend, &session, relative, key, lane_bytes, lanes,
         ));
     }
 
@@ -496,8 +633,26 @@ fn read_relative(
     relative: Relative,
     key: String,
     lane_bytes: u64,
+    lanes: Option<&Path>,
 ) -> WorksetSource {
-    let mut fold = SourceFold::new(&key, lane_bytes);
+    let (harness, id) = relative.identity();
+    let child = matches!(relative.target, Target::ChildOfRoot(_));
+    let label = if child {
+        format!("{} child {id}", root.id)
+    } else {
+        id.to_owned()
+    };
+    let files = lanes.map(|directory| {
+        (
+            directory,
+            LaneSource {
+                key: key.clone(),
+                harness: harness.to_owned(),
+                session: label,
+            },
+        )
+    });
+    let mut fold = SourceFold::new(&key, lane_bytes, files);
     let read = match &relative.target {
         Target::Session(id) => Selection::IdInHarness {
             id,
@@ -507,8 +662,7 @@ fn read_relative(
         .and_then(|resolved| {
             let backend = backends[resolved.backend_index].as_ref();
             let streamed = crate::stream_numbered(backend, &resolved.session, None, &mut |turn| {
-                fold.turn(&turn);
-                Ok(())
+                fold.turn(&turn)
             })?;
             Ok(Read {
                 harness: backend.harness().to_owned(),
@@ -523,8 +677,7 @@ fn read_relative(
                 .stream_child_transcript(root, reference, &mut |mut turn| {
                     turn.ordinal = ordinal;
                     ordinal += 1;
-                    fold.turn(&turn);
-                    Ok(())
+                    fold.turn(&turn)
                 })
                 .map(|StreamedChild { session, read }| Read {
                     harness: root_backend.harness().to_owned(),
@@ -534,29 +687,34 @@ fn read_relative(
                 })
         }
     };
-    match read {
-        Ok(read) => fold.finish(key, relative.role, read),
+    let error = match read {
+        Ok(read) => match fold.finish(key.clone(), relative.role, read) {
+            Ok(source) => return source,
+            Err(error) => error,
+        },
         Err(error) => {
-            let (harness, id) = relative.identity();
-            WorksetSource {
-                key,
-                harness: harness.to_owned(),
-                session_id: match &relative.target {
-                    Target::Session(id) => id.clone(),
-                    Target::ChildOfRoot(_) => root.id.clone(),
-                },
-                role: relative.role,
-                reference: matches!(relative.target, Target::ChildOfRoot(_)).then(|| id.to_owned()),
-                source: None,
-                source_length: None,
-                source_revision: None,
-                source_prefix_digest: None,
-                live: None,
-                lanes: None,
-                coverage: None,
-                diagnostic: Some(format!("{error:#}")),
-            }
+            fold.cutter.discard();
+            error
         }
+    };
+    let (harness, id) = relative.identity();
+    WorksetSource {
+        key,
+        harness: harness.to_owned(),
+        session_id: match &relative.target {
+            Target::Session(id) => id.clone(),
+            Target::ChildOfRoot(_) => root.id.clone(),
+        },
+        role: relative.role,
+        reference: child.then(|| id.to_owned()),
+        source: None,
+        source_length: None,
+        source_revision: None,
+        source_prefix_digest: None,
+        live: None,
+        lanes: None,
+        coverage: None,
+        diagnostic: Some(format!("{error:#}")),
     }
 }
 
@@ -585,6 +743,7 @@ mod tests {
             relative,
             key(1),
             DEFAULT_LANE_BYTES,
+            None,
         );
         assert_eq!(source.session_id, "absent-parent");
         assert!(source.diagnostic.is_some(), "{source:?}");

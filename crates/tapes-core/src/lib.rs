@@ -31,6 +31,7 @@ pub mod event;
 pub mod evidence;
 pub mod history;
 pub mod input;
+pub mod lane_file;
 pub mod lineage;
 pub mod measurement;
 pub mod model;
