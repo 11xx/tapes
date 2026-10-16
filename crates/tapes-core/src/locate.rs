@@ -383,7 +383,10 @@ pub fn locate_with_backends(
     }
 
     let root = workset.sources.first();
-    let mut text_budget = MAX_REPORT_TEXT_BYTES;
+    // Text held from the reads, bounded once per distinct turn, and text
+    // emitted into the report, charged once per citation.
+    let mut held_budget = MAX_REPORT_TEXT_BYTES;
+    let mut emit_budget = MAX_REPORT_TEXT_BYTES;
     let mut checks = Vec::with_capacity(workset.sources.len());
     for (index, source) in workset.sources.iter().enumerate() {
         let frozen_turns = source.coverage.as_ref().map(|coverage| coverage.turns);
@@ -397,11 +400,8 @@ pub fn locate_with_backends(
             }
             let text = (text_bytes > 0).then(|| {
                 let whole = projection::project_whole(&source.key, &turn);
-                let mut end = whole.len().min(text_bytes).min(text_budget);
-                while !whole.is_char_boundary(end) {
-                    end -= 1;
-                }
-                text_budget -= end;
+                let end = char_floor(&whole, whole.len().min(text_bytes).min(held_budget));
+                held_budget -= end;
                 let length = whole.len();
                 let mut whole = whole;
                 whole.truncate(end);
@@ -435,9 +435,11 @@ pub fn locate_with_backends(
                 entry.ts = hit.ts;
                 entry.record_ref = hit.record_ref.clone();
                 if let Some((text, length)) = &hit.text {
+                    let end = char_floor(text, text.len().min(emit_budget));
+                    emit_budget -= end;
                     entry.text_bytes = Some(*length);
-                    entry.text_truncated = Some(text.len() < *length);
-                    entry.text = Some(text.clone());
+                    entry.text_truncated = Some(end < *length);
+                    entry.text = Some(text[..end].to_owned());
                 }
             }
         }
@@ -459,6 +461,15 @@ pub fn locate_with_backends(
         references: located,
         counts,
     })
+}
+
+/// The largest character boundary of `text` at or below `limit`.
+fn char_floor(text: &str, limit: usize) -> usize {
+    let mut end = limit.min(text.len());
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    end
 }
 
 /// What a resolved reference reports about its turn, kept from the read

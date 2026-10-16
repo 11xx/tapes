@@ -11,7 +11,7 @@ use agent_tapes_core::backend::Backend;
 use agent_tapes_core::lane_file::{LANE_MARKER, MARGIN_MARKER};
 use agent_tapes_core::locate::{
     locate_with_backends, read_manifest, read_refs, read_refs_from, Locate, Located, Outcome,
-    RefLine, SourceState, MAX_REF_LINE_BYTES,
+    RefLine, SourceState, MAX_REF_LINE_BYTES, MAX_REPORT_TEXT_BYTES, MAX_TEXT_BYTES,
 };
 use agent_tapes_core::model::TurnKind;
 use agent_tapes_core::workset::{build_with_backends, write_manifest, MIN_LANE_BYTES};
@@ -381,4 +381,43 @@ fn an_overlong_refs_line_is_skipped_in_bounded_memory() {
         "{:?}",
         read.lines
     );
+}
+
+/// Twenty citations of one turn longer than a mebibyte, each asking for a
+/// mebibyte of text, return no more than the report's text budget.
+#[test]
+fn the_text_budget_is_charged_per_citation() {
+    let root = scratch("budget");
+    let project = root.join("claude/project");
+    fs::create_dir_all(&project).unwrap();
+    let record = serde_json::json!({
+        "type": "user", "sessionId": CLAUDE_ID, "uuid": "user-1", "parentUuid": null,
+        "promptSource": "typed", "timestamp": "2026-01-01T11:00:00Z", "cwd": "/fixtures/project",
+        "message": {"role": "user", "content": "w".repeat(1536 * 1024)},
+    });
+    fs::write(
+        project.join(format!("{CLAUDE_ID}.jsonl")),
+        format!("{record}\n"),
+    )
+    .unwrap();
+    let store = root.join("claude");
+    let bundle = root.join("bundle");
+    freeze(claude(&store), CLAUDE_ID, &bundle);
+    let refs = "{\"ref\":\"s0#0\"}\n".repeat(20);
+    let report = locate(claude(&store), &bundle, &refs, MAX_TEXT_BYTES);
+    let total: usize = report
+        .references
+        .iter()
+        .map(|entry| entry.text.as_ref().map_or(0, String::len))
+        .sum();
+    assert!(
+        total <= MAX_REPORT_TEXT_BYTES,
+        "returned {total} bytes of text"
+    );
+    assert!(report
+        .references
+        .iter()
+        .all(|entry| entry.text_truncated == Some(true)));
+    assert_eq!(report.references.last().unwrap().text.as_deref(), Some(""));
+    fs::remove_dir_all(root).unwrap();
 }
