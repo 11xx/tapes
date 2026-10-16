@@ -33,6 +33,7 @@ pub mod history;
 pub mod input;
 pub mod lane_file;
 pub mod lineage;
+pub mod locate;
 pub mod measurement;
 pub mod model;
 mod model_observation;

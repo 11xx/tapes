@@ -670,9 +670,19 @@ impl Backend for ClaudeBackend {
         reference: &str,
         turn: &mut dyn FnMut(Turn) -> Result<()>,
     ) -> Result<StreamedChild> {
+        self.replay_child_transcript(parent, reference, None, turn)
+    }
+
+    fn replay_child_transcript(
+        &self,
+        parent: &Session,
+        reference: &str,
+        replay: Option<&StreamedTranscript>,
+        turn: &mut dyn FnMut(Turn) -> Result<()>,
+    ) -> Result<StreamedChild> {
         let path = child_recording(parent, reference)?;
         let mut launch = None;
-        let opening = stream_jsonl(&path, None, |value, _, _| {
+        let opening = stream_jsonl(&path, replay_pin(replay)?, |value, _, _| {
             launch = merge_launch(launch, claude_entrypoint(value));
             Ok(false)
         })?;

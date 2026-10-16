@@ -558,6 +558,23 @@ pub trait Backend {
             self.harness()
         )
     }
+    /// [`stream_child_transcript`](Self::stream_child_transcript), pinned to
+    /// an earlier read of the same child when `replay` names one.
+    fn replay_child_transcript(
+        &self,
+        parent: &Session,
+        reference: &str,
+        replay: Option<&StreamedTranscript>,
+        turn: &mut dyn FnMut(Turn) -> Result<()>,
+    ) -> Result<StreamedChild> {
+        if replay.is_some() {
+            anyhow::bail!(
+                "{} does not support pinned child-qualified transcript reads",
+                self.harness()
+            );
+        }
+        self.stream_child_transcript(parent, reference, turn)
+    }
     /// Project tool events after parsing the whole source read but before its
     /// turn window is applied. Paged backends override this so the supplied
     /// tail also bounds how many source pages are fetched.
@@ -1417,7 +1434,41 @@ pub struct StreamedTranscript {
     pub kinds: Option<crate::model::KindDeclaration>,
 }
 
+/// A pinned read found its file replaced, shortened, or rewritten within the
+/// pinned prefix: the source is no longer the one the pin observed.
+#[derive(Debug)]
+pub struct SourceChanged(pub &'static str);
+
+impl std::fmt::Display for SourceChanged {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.0)
+    }
+}
+
+impl std::error::Error for SourceChanged {}
+
 impl StreamedTranscript {
+    /// A replay pin rebuilt from a recorded file read: its length, revision,
+    /// and prefix SHA-256. Replaying it reads exactly those bytes and refuses
+    /// with [`SourceChanged`] when they are no longer there.
+    pub fn frozen(source_length: u64, source_revision: String, prefix_sha256: [u8; 32]) -> Self {
+        Self {
+            coordinates: StreamCoordinates::FileBytes,
+            source_length,
+            source_bounds: Vec::new(),
+            source_revision: Some(source_revision),
+            source_prefix_sha256: Some(prefix_sha256),
+            skipped: 0,
+            gaps: Vec::new(),
+            trailing_record: None,
+            terminal: None,
+            notes: Vec::new(),
+            unmapped: None,
+            unrecognized_usage: 0,
+            kinds: None,
+        }
+    }
+
     /// Where a replay of this file read stops, and the revision it reports.
     pub(crate) fn pin(&self) -> Result<ReadPin<'_>> {
         let revision = self
@@ -1678,7 +1729,9 @@ fn stream_jsonl_within(
                 .revision
                 .starts_with(&format!("stat:{}:{}:", metadata.dev(), metadata.ino()))
         {
-            anyhow::bail!("recording source was replaced or shortened between reads");
+            return Err(
+                SourceChanged("recording source was replaced or shortened between reads").into(),
+            );
         }
     }
     let revision = pin.map_or_else(|| stat_revision(&metadata), |pin| pin.revision.to_owned());
@@ -1745,13 +1798,15 @@ fn stream_jsonl_within(
     streamed.prefix_sha256 = reader.get_ref().get_ref().digest.clone().finalize().into();
     if let Some(expected) = pin.and_then(|pin| pin.prefix_sha256) {
         if expected != &streamed.prefix_sha256 {
-            anyhow::bail!("recording source changed between pinned reads");
+            return Err(SourceChanged("recording source changed between pinned reads").into());
         }
     }
     let after = reader.get_ref().get_ref().inner.metadata()?;
     if after.dev() != metadata.dev() || after.ino() != metadata.ino() || after.len() < source_length
     {
-        anyhow::bail!("recording source was replaced or shortened during the read");
+        return Err(
+            SourceChanged("recording source was replaced or shortened during the read").into(),
+        );
     }
     Ok(streamed)
 }
@@ -1952,7 +2007,7 @@ fn same_source(before: &std::fs::Metadata, after: &std::fs::Metadata) -> bool {
         && before.ctime_nsec() == after.ctime_nsec()
 }
 
-fn stat_revision(metadata: &std::fs::Metadata) -> String {
+pub(crate) fn stat_revision(metadata: &std::fs::Metadata) -> String {
     format!(
         "stat:{}:{}:{}:{}:{}:{}:{}",
         metadata.dev(),

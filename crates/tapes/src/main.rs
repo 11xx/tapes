@@ -2872,15 +2872,7 @@ fn dispatch(cli: Cli) -> Result<()> {
                 Some(&bundle),
             )?;
             liveness::annotate_workset(&mut workset);
-            let path = bundle.join(agent_tapes_core::workset::MANIFEST_FILE);
-            let mut body = serde_json::to_vec_pretty(&workset)?;
-            body.push(b'\n');
-            std::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&path)
-                .and_then(|mut file| std::io::Write::write_all(&mut file, &body))
-                .map_err(|error| anyhow!("write {}: {error}", path.display()))?;
+            let path = agent_tapes_core::workset::write_manifest(&bundle, &workset)?;
             print!("{}", render_workset(&workset, &path));
         }
         Command::Endings {

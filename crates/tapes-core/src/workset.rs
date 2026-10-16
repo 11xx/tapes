@@ -483,6 +483,21 @@ pub fn build_with_backends(
     built
 }
 
+/// Write the manifest into the bundle as a new file, refusing to replace one.
+pub fn write_manifest(bundle: &Path, workset: &Workset) -> Result<PathBuf> {
+    use std::io::Write as _;
+    let path = bundle.join(MANIFEST_FILE);
+    let mut body = serde_json::to_vec_pretty(workset)?;
+    body.push(b'\n');
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+        .and_then(|mut file| file.write_all(&body))
+        .map_err(|error| anyhow!("write {}: {error}", path.display()))?;
+    Ok(path)
+}
+
 /// Create the bundle's lanes directory, refusing a bundle a workset was
 /// already written into.
 fn prepare_bundle(bundle: &Path) -> Result<PathBuf> {

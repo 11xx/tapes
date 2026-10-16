@@ -44,6 +44,15 @@ pub fn project_turn(key: &str, turn: &Turn) -> String {
 
 /// [`project_turn`], with the count of text bytes the cap left out.
 pub fn project(key: &str, turn: &Turn) -> Projection {
+    render(key, turn, text_cap(turn.kind))
+}
+
+/// The turn rendered as [`project_turn`] renders it, with its whole text.
+pub fn project_whole(key: &str, turn: &Turn) -> String {
+    render(key, turn, usize::MAX).text
+}
+
+fn render(key: &str, turn: &Turn, cap: usize) -> Projection {
     let mut out = format!("## {} {}", reference(key, turn.ordinal), turn.kind.label());
     if let Some(origin) = turn.origin {
         let _ = write!(out, " ({})", origin.label());
@@ -77,7 +86,7 @@ pub fn project(key: &str, turn: &Turn) -> Projection {
             }
         }
     }
-    let mut end = turn.text.len().min(text_cap(turn.kind));
+    let mut end = turn.text.len().min(cap);
     while !turn.text.is_char_boundary(end) {
         end -= 1;
     }
