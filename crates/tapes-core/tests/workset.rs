@@ -266,3 +266,76 @@ fn pi_store_with_resolvable_parent() -> PathBuf {
 fn workset_of(backend: impl Backend + 'static, id: &str) -> Workset {
     workset(Box::new(backend), id)
 }
+
+fn turn_of(kind: &str, text: &str) -> Turn {
+    serde_json::from_value(serde_json::json!({
+        "role": if kind == "operator" { "user" } else { "assistant" },
+        "kind": kind,
+        "text": text,
+        "ordinal": 7,
+    }))
+    .unwrap()
+}
+
+#[test]
+fn an_oversized_tool_result_renders_within_its_cap_and_a_marker() {
+    let rendered = project_turn("s0", &turn_of("tool", &"x".repeat(1_000_000)));
+    assert!(rendered.len() < 2 * 1024 + 200, "{} bytes", rendered.len());
+    assert!(rendered.contains("[… 997952 bytes omitted; cite s0#7 to read the whole turn]"));
+}
+
+#[test]
+fn an_operator_turn_is_cut_at_sixteen_kibibytes_on_a_character_boundary() {
+    let rendered = project_turn("s0", &turn_of("operator", &"y".repeat(20 * 1024)));
+    let body = rendered.split("[…").next().unwrap();
+    assert_eq!(body.matches('y').count(), 16 * 1024);
+    assert!(rendered.contains("[… 4096 bytes omitted;"), "{rendered}");
+
+    // A two-byte character straddles the 16 KiB cut; it is kept out whole.
+    let text = format!("{}é{}", "z".repeat(16 * 1024 - 1), "z".repeat(100));
+    let rendered = project_turn("s0", &turn_of("assistant", &text));
+    assert!(!rendered.contains('é'));
+    let body = rendered.split("[…").next().unwrap();
+    assert_eq!(body.matches('z').count(), 16 * 1024 - 1);
+    assert!(
+        rendered.contains(&format!("[… {} bytes omitted;", 2 + 100)),
+        "{rendered}"
+    );
+}
+
+#[test]
+fn omitted_bytes_add_up_from_turns_to_lanes_to_coverage() {
+    let turns = [
+        turn_of("tool", &"t".repeat(5000)),
+        turn_of("operator", &"o".repeat(17 * 1024)),
+        turn_of("assistant", "short"),
+    ];
+    let mut cutter = LaneCutter::new("s0", 1);
+    for (ordinal, turn) in turns.iter().enumerate() {
+        let mut turn = turn.clone();
+        turn.ordinal = ordinal;
+        cutter.push(&turn);
+    }
+    let lanes = cutter.finish();
+    let by_lane: Vec<u64> = lanes
+        .iter()
+        .map(|l| l.omitted_bytes.values().sum())
+        .collect();
+    assert_eq!(by_lane, [5000 - 2048, 1024, 0]);
+    assert!(lanes[2].omitted_bytes.is_empty());
+
+    let workset = workset(
+        Box::new(ClaudeBackend::new(fixtures("claude"))),
+        "session-claude",
+    );
+    for source in workset.sources.iter().filter(|s| s.lanes.is_some()) {
+        let lanes: u64 = source
+            .lanes
+            .as_ref()
+            .unwrap()
+            .iter()
+            .flat_map(|l| l.omitted_bytes.values())
+            .sum();
+        assert_eq!(source.coverage.as_ref().unwrap().omitted_bytes, lanes);
+    }
+}

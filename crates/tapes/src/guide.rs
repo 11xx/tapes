@@ -1139,18 +1139,25 @@ FREEZE A WORKING SET
   tapes workset <id> --bundle /tmp/<id>-workset
   tapes workset <id> --bundle DIR --lane-bytes 256KiB
 
-  workset freezes a session and every relative its lineage resolves — parent,
-  forked-from session, children — reading each in full, and writes
-  DIR/workset.json as tapes-workset/1. Each source gets a short key (s0 is the
-  root) and is cut into lanes: contiguous turn-ordinal ranges whose rendering,
-  the lane projection, stays within --lane-bytes (64KiB by default, 8KiB to
-  4MiB). A turn is cited `<key>#<ordinal>`. The manifest pins each source's
-  length, revision and prefix digest, and its coverage says what the read
-  could not turn into turns: skipped records, bytes no turn covers, notices,
-  references the store cannot resolve, and failed child enumeration. A
-  relative that cannot be read is listed with its diagnostic; only an
-  unreadable root fails. Lanes partition the turns exactly, so dividing the
-  reading of a long session along them leaves no turn unread or read twice.
+  workset freezes a session and the relatives its own lineage resolves —
+  its parent, the session it was forked from, its children; lineage is
+  followed one level, never to a parent's parent or a child's children — reads
+  each in full, and writes DIR/workset.json as tapes-workset/1. Each source
+  gets a short key (s0 is the root) and is cut into lanes: contiguous
+  turn-ordinal ranges sized by the lane projection, the per-turn rendering a
+  lane carries. The projection caps each turn's text at 16KiB for operator
+  and assistant turns and 2KiB for every other kind, marking the bytes it
+  left out; each lane and source counts them. A lane holds as many turns as
+  fit in --lane-bytes (64KiB by default, 8KiB to 4MiB); a single turn whose
+  capped rendering exceeds the bound, possible only when --lane-bytes is
+  below that size, gets a lane of its own and is the one lane over it. A turn
+  is cited `<key>#<ordinal>`. The manifest pins each source's length,
+  revision and prefix digest, and its coverage says what the read could not
+  turn into turns: skipped records, bytes no turn covers, notices, references
+  the store cannot resolve, and failed child enumeration. A relative that
+  cannot be read is listed with its diagnostic; only an unreadable root
+  fails. Lanes partition the turns exactly, so dividing the reading of a long
+  session along them leaves no turn unread or read twice.
 
 CARRY IT FORWARD
   Bundles are working material, not artifacts — leave them in /tmp. What

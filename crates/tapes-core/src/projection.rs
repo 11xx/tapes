@@ -5,7 +5,27 @@
 use std::fmt::Write as _;
 
 use crate::content::{ArtifactReference, ContentPart};
-use crate::model::Turn;
+use crate::model::{Turn, TurnKind};
+
+/// The most text bytes one operator or assistant turn renders.
+pub const EXCHANGE_TEXT_BYTES: usize = 16 * 1024;
+/// The most text bytes any other turn renders: tool calls and results,
+/// reasoning, ambient context, notices.
+pub const OTHER_TEXT_BYTES: usize = 2 * 1024;
+
+/// The text-byte cap a turn of this kind renders under.
+pub fn text_cap(kind: TurnKind) -> usize {
+    match kind {
+        TurnKind::Operator | TurnKind::Assistant => EXCHANGE_TEXT_BYTES,
+        _ => OTHER_TEXT_BYTES,
+    }
+}
+
+/// One rendered turn and the bytes of its text the cap left out.
+pub struct Projection {
+    pub text: String,
+    pub omitted_bytes: u64,
+}
 
 /// The workset reference a turn is cited by: `<key>#<ordinal>`.
 pub fn reference(key: &str, ordinal: usize) -> String {
@@ -14,9 +34,16 @@ pub fn reference(key: &str, ordinal: usize) -> String {
 
 /// Render one turn deterministically: a header naming its workset reference,
 /// kind and origin; a compact line for a tool call or result with the
-/// artifact references it carries; then the turn's text. Every rendering ends
-/// with a blank line, so concatenated turns stay separated.
+/// artifact references it carries; then the turn's text, cut at its kind's
+/// cap on a character boundary with a marker naming the bytes left out.
+/// Every rendering ends with a blank line, so concatenated turns stay
+/// separated.
 pub fn project_turn(key: &str, turn: &Turn) -> String {
+    project(key, turn).text
+}
+
+/// [`project_turn`], with the count of text bytes the cap left out.
+pub fn project(key: &str, turn: &Turn) -> Projection {
     let mut out = format!("## {} {}", reference(key, turn.ordinal), turn.kind.label());
     if let Some(origin) = turn.origin {
         let _ = write!(out, " ({})", origin.label());
@@ -50,14 +77,30 @@ pub fn project_turn(key: &str, turn: &Turn) -> String {
             }
         }
     }
-    if !turn.text.is_empty() {
-        out.push_str(&turn.text);
-        if !turn.text.ends_with('\n') {
+    let mut end = turn.text.len().min(text_cap(turn.kind));
+    while !turn.text.is_char_boundary(end) {
+        end -= 1;
+    }
+    let kept = &turn.text[..end];
+    let omitted_bytes = (turn.text.len() - end) as u64;
+    if !kept.is_empty() {
+        out.push_str(kept);
+        if !kept.ends_with('\n') {
             out.push('\n');
         }
     }
+    if omitted_bytes > 0 {
+        let _ = writeln!(
+            out,
+            "[… {omitted_bytes} bytes omitted; cite {} to read the whole turn]",
+            reference(key, turn.ordinal)
+        );
+    }
     out.push('\n');
-    out
+    Projection {
+        text: out,
+        omitted_bytes,
+    }
 }
 
 fn artifact_token(artifact: &ArtifactReference) -> Option<&str> {

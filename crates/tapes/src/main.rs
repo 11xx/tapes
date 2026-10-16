@@ -1631,23 +1631,28 @@ enum Command {
         json: bool,
     },
     /// Freeze one session's working set and plan its lanes, writing
-    /// DIR/workset.json as tapes-workset/1. The root session and every
-    /// relative its whole-recording lineage resolves (parent, forked-from
-    /// session, children) are each read in full, one at a time, and cut into
-    /// lanes: contiguous ranges of turn ordinals whose lane projection, the
-    /// per-turn rendering a lane carries, stays within --lane-bytes. A turn
-    /// larger than the bound gets a lane of its own. Each source is keyed
-    /// `s0` (the root), `s1`, ...; a turn is cited `<key>#<ordinal>`, and a
-    /// lane is `<key>-<n>`. Each source records its locator, source length,
-    /// revision and prefix digest where the read establishes them, live state
-    /// when the session-status authority reports one, its lanes with the
-    /// file-byte range each covers where every turn carries a record span,
-    /// and coverage: turns by kind, records decoded and skipped, bytes no
-    /// turn covers, compaction boundaries and injected notices, unresolved
-    /// lineage references, and failed child enumeration with its diagnostic.
-    /// A figure the source cannot supply is omitted. A relative that cannot
-    /// be read is listed with its diagnostic and no lanes; only an unreadable
-    /// root fails. Installed recordings only.
+    /// DIR/workset.json as tapes-workset/1. The root session and the
+    /// relatives its own whole-recording lineage resolves (parent,
+    /// forked-from session, children; one level, never a parent's parent or
+    /// a child's children) are each read in full, one at a time, and cut into
+    /// lanes: contiguous ranges of turn ordinals sized by the lane projection,
+    /// the per-turn rendering a lane carries. The projection caps each turn's
+    /// text at 16KiB for operator and assistant turns and 2KiB for every
+    /// other kind, marking what it left out; lanes count the omitted bytes by
+    /// kind and coverage totals them. A lane holds as many turns as fit in
+    /// --lane-bytes; a turn whose capped rendering alone exceeds the bound,
+    /// possible only when --lane-bytes is below that size, gets a lane of its
+    /// own. Each source is keyed `s0` (the root), `s1`, ...; a turn is cited
+    /// `<key>#<ordinal>`, and a lane is `<key>-<n>`. Each source records its
+    /// locator, source length, revision and prefix digest where the read
+    /// establishes them, live state when the session-status authority reports
+    /// one, its lanes with the file-byte range each covers where every turn
+    /// carries a record span, and coverage: turns by kind, records decoded
+    /// and skipped, bytes no turn covers, compaction boundaries and injected
+    /// notices, unresolved lineage references, and failed child enumeration
+    /// with its diagnostic. A figure the source cannot supply is omitted. A
+    /// relative that cannot be read is listed with its diagnostic and no
+    /// lanes; only an unreadable root fails. Installed recordings only.
     Workset {
         #[command(flatten)]
         selection: SelectionArgs,

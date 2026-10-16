@@ -1,4 +1,5 @@
-//! A frozen working set: one session and every relative its lineage resolves,
+//! A frozen working set: one session and the relatives its own lineage resolves
+//! (one level: not a parent's parent nor a child's children),
 //! each read in full and cut into lanes. A lane is a contiguous range of turn
 //! ordinals in one source's normalized read, sized in the bytes of the lane
 //! projection. Sources are streamed one at a time; no source's turns are held
@@ -91,6 +92,9 @@ pub struct Lane {
     pub byte_range: Option<ByteSpan>,
     pub projected_bytes: u64,
     pub turns_by_kind: BTreeMap<TurnKind, usize>,
+    /// Text bytes the projection's per-turn cap left out, by turn kind.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub omitted_bytes: BTreeMap<TurnKind, u64>,
 }
 
 #[derive(Debug, Default, Serialize)]
@@ -110,6 +114,8 @@ pub struct Coverage {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bytes_without_turn: Option<u64>,
     pub notices: Notices,
+    /// Text bytes the projection's per-turn cap left out of every lane.
+    pub omitted_bytes: u64,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub unresolved_references: Vec<UnresolvedReference>,
     /// Lineage enumeration that failed, with its diagnostic; the relatives
@@ -178,7 +184,8 @@ impl LaneCutter {
     }
 
     pub fn push(&mut self, turn: &Turn) {
-        let bytes = projected_bytes(&self.key, turn);
+        let projection = projection::project(&self.key, turn);
+        let bytes = projection.text.len() as u64;
         if self
             .open
             .as_ref()
@@ -195,12 +202,16 @@ impl LaneCutter {
                 byte_range: span,
                 projected_bytes: 0,
                 turns_by_kind: BTreeMap::new(),
+                omitted_bytes: BTreeMap::new(),
             },
             spanned: true,
         });
         open.lane.last_turn = turn.ordinal;
         open.lane.projected_bytes += bytes;
         *open.lane.turns_by_kind.entry(turn.kind).or_default() += 1;
+        if projection.omitted_bytes > 0 {
+            *open.lane.omitted_bytes.entry(turn.kind).or_default() += projection.omitted_bytes;
+        }
         match (span, &mut open.lane.byte_range) {
             (Some(span), Some(range)) => {
                 range.start = range.start.min(span.start);
@@ -292,6 +303,11 @@ impl SourceFold {
             }
         }
         self.coverage.notes = read.streamed.notes.clone();
+        let lanes = self.cutter.finish();
+        self.coverage.omitted_bytes = lanes
+            .iter()
+            .flat_map(|lane| lane.omitted_bytes.values())
+            .sum();
         let evidence = read
             .streamed
             .read_evidence(read.session.source.producer.clone());
@@ -306,7 +322,7 @@ impl SourceFold {
             source_revision: evidence.source_revision,
             source_prefix_digest: evidence.source_prefix_digest,
             live: None,
-            lanes: Some(self.cutter.finish()),
+            lanes: Some(lanes),
             coverage: Some(self.coverage),
             diagnostic: None,
         }
@@ -542,10 +558,6 @@ fn read_relative(
             }
         }
     }
-}
-
-fn projected_bytes(key: &str, turn: &Turn) -> u64 {
-    projection::project_turn(key, turn).len() as u64
 }
 
 #[cfg(test)]
