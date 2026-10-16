@@ -10,7 +10,8 @@ use agent_tapes_core::backend::codex::CodexBackend;
 use agent_tapes_core::backend::Backend;
 use agent_tapes_core::lane_file::{LANE_MARKER, MARGIN_MARKER};
 use agent_tapes_core::locate::{
-    locate_with_backends, read_manifest, read_refs, Locate, Located, Outcome, SourceState,
+    locate_with_backends, read_manifest, read_refs, read_refs_from, Locate, Located, Outcome,
+    RefLine, SourceState, MAX_REF_LINE_BYTES,
 };
 use agent_tapes_core::model::TurnKind;
 use agent_tapes_core::workset::{build_with_backends, write_manifest, MIN_LANE_BYTES};
@@ -354,4 +355,30 @@ fn a_claude_child_read_through_its_root_checks_unchanged() {
     }
     assert_eq!(report.references[0].outcome, Outcome::Resolved);
     fs::remove_dir_all(root).unwrap();
+}
+
+/// A refs line tens of MiB long is malformed, and is skipped without ever
+/// being held past the line bound.
+#[test]
+fn an_overlong_refs_line_is_skipped_in_bounded_memory() {
+    use std::io::Read as _;
+    let long = std::io::repeat(b'x').take(40 * 1024 * 1024);
+    let input = std::io::BufReader::new(
+        std::io::Cursor::new(b"{\"ref\":\"s0#1\"}\n".to_vec())
+            .chain(long)
+            .chain(std::io::Cursor::new(b"\n{\"ref\":\"s0#2\"}\n".to_vec())),
+    );
+    let read = read_refs_from(input).unwrap();
+    assert!(
+        read.peak_line_bytes <= MAX_REF_LINE_BYTES + 1,
+        "held {} bytes for one line",
+        read.peak_line_bytes
+    );
+    assert!(matches!(read.lines[0], RefLine::Cited { line: 1, .. }));
+    assert!(matches!(read.lines[1], RefLine::Malformed { line: 2 }));
+    assert!(
+        matches!(read.lines[2], RefLine::Cited { line: 3, .. }),
+        "{:?}",
+        read.lines
+    );
 }

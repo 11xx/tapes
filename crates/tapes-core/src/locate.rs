@@ -245,16 +245,29 @@ pub fn read_manifest(bundle: &Path) -> Result<FrozenWorkset> {
 pub fn read_refs(path: &Path) -> Result<Vec<RefLine>> {
     let file =
         std::fs::File::open(path).map_err(|error| anyhow!("open {}: {error}", path.display()))?;
-    let mut reader = BufReader::new(file);
+    read_refs_from(BufReader::new(file))
+        .map(|read| read.lines)
+        .map_err(|error| anyhow!("read {}: {error:#}", path.display()))
+}
+
+/// The lines a refs read produced, and the most bytes it held for one line.
+#[derive(Debug)]
+pub struct RefsRead {
+    pub lines: Vec<RefLine>,
+    pub peak_line_bytes: usize,
+}
+
+/// [`read_refs`] over any buffered reader.
+pub fn read_refs_from(mut reader: impl BufRead) -> Result<RefsRead> {
     let mut lines = Vec::new();
     let mut buffer = Vec::new();
+    let mut peak_line_bytes = 0;
     let mut number = 0;
     loop {
         buffer.clear();
         let read = (&mut reader)
             .take(MAX_REF_LINE_BYTES as u64 + 1)
-            .read_until(b'\n', &mut buffer)
-            .map_err(|error| anyhow!("read {}: {error}", path.display()))?;
+            .read_until(b'\n', &mut buffer)?;
         if read == 0 {
             break;
         }
@@ -262,16 +275,11 @@ pub fn read_refs(path: &Path) -> Result<Vec<RefLine>> {
         let mut overlong = false;
         if buffer.len() > MAX_REF_LINE_BYTES && buffer.last() != Some(&b'\n') {
             overlong = true;
-            let mut rest = Vec::new();
-            reader
-                .read_until(b'\n', &mut rest)
-                .map_err(|error| anyhow!("read {}: {error}", path.display()))?;
+            skip_line(&mut reader)?;
         }
+        peak_line_bytes = peak_line_bytes.max(buffer.len());
         if lines.len() == MAX_REFERENCES {
-            bail!(
-                "{} holds more than {MAX_REFERENCES} references",
-                path.display()
-            );
+            bail!("more than {MAX_REFERENCES} references");
         }
         lines.push(if overlong {
             RefLine::Malformed { line: number }
@@ -279,7 +287,31 @@ pub fn read_refs(path: &Path) -> Result<Vec<RefLine>> {
             parse_ref_line(number, &buffer)
         });
     }
-    Ok(lines)
+    Ok(RefsRead {
+        lines,
+        peak_line_bytes,
+    })
+}
+
+/// Discard through the next newline, a buffer-full at a time, holding none
+/// of what it skips.
+fn skip_line(reader: &mut impl BufRead) -> std::io::Result<()> {
+    loop {
+        let available = reader.fill_buf()?;
+        if available.is_empty() {
+            return Ok(());
+        }
+        match available.iter().position(|byte| *byte == b'\n') {
+            Some(at) => {
+                reader.consume(at + 1);
+                return Ok(());
+            }
+            None => {
+                let length = available.len();
+                reader.consume(length);
+            }
+        }
+    }
 }
 
 fn parse_ref_line(line: usize, bytes: &[u8]) -> RefLine {
