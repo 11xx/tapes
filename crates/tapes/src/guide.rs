@@ -1170,7 +1170,8 @@ FREEZE A WORKING SET
   projected turns. A turn is cited `<key>#<ordinal>`, and only turns in a
   lane section are cited from that lane. Markers and turn headings are whole
   lines that transcript text cannot forge: a text line beginning with `## `,
-  `=== ` or a backslash is rendered with one more backslash in front.
+  `=== `, `[… `, `tool: `, `artifact: ` or a backslash is rendered with one
+  more backslash in front.
 
   The manifest pins each source's length, revision and file prefix digest
   where the store has a file, and for every source a content digest: SHA-256

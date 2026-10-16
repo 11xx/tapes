@@ -1650,9 +1650,10 @@ enum Command {
     /// assistant reply (saying so when no operator turn precedes the lane);
     /// and a marked lane section whose body is exactly the lane's projected
     /// turns, `projected_bytes` long. Only lane-section turns are cited.
-    /// A turn text line beginning with `## `, `=== ` or a backslash gains a
-    /// leading backslash, so transcript text cannot forge a turn heading or
-    /// a section marker.
+    /// A turn text line beginning with `## `, `=== `, `[… `, `tool: `,
+    /// `artifact: ` or a backslash gains a leading backslash, so transcript
+    /// text cannot forge a turn heading, a section marker, an omission
+    /// marker, or a tool or artifact line.
     /// Each source is keyed `s0` (the root), `s1`, ...; a turn is cited
     /// `<key>#<ordinal>`, and a lane is `<key>-<n>` with its `file` relative
     /// to DIR. Each source records its
@@ -1896,6 +1897,7 @@ fn main() -> Result<()> {
 }
 
 fn render_locate(report: &agent_tapes_core::locate::Locate) -> String {
+    use agent_tapes_core::projection::single_line;
     use std::fmt::Write as _;
     let mut out = String::new();
     for source in &report.sources {
@@ -1904,7 +1906,7 @@ fn render_locate(report: &agent_tapes_core::locate::Locate) -> String {
             let _ = write!(out, " length={length}");
         }
         if let Some(diagnostic) = &source.diagnostic {
-            let _ = write!(out, ": {diagnostic}");
+            let _ = write!(out, ": {}", single_line(diagnostic));
         }
         out.push('\n');
     }
@@ -1918,6 +1920,7 @@ fn render_locate(report: &agent_tapes_core::locate::Locate) -> String {
 }
 
 fn render_workset(workset: &agent_tapes_core::workset::Workset, path: &std::path::Path) -> String {
+    use agent_tapes_core::projection::single_line;
     use std::fmt::Write as _;
     let mut out = format!("{}\n", path.display());
     for source in &workset.sources {
@@ -1927,17 +1930,17 @@ fn render_workset(workset: &agent_tapes_core::workset::Workset, path: &std::path
             source.key,
             source.role_label(),
             source.harness,
-            source.session_id
+            single_line(&source.session_id)
         );
         if let Some(reference) = &source.reference {
-            let _ = write!(out, " ({reference})");
+            let _ = write!(out, " ({})", single_line(reference));
         }
         match (&source.lanes, &source.coverage, &source.diagnostic) {
             (Some(lanes), Some(coverage), _) => {
                 let _ = writeln!(out, ": {} turns in {} lanes", coverage.turns, lanes.len());
             }
             (_, _, Some(diagnostic)) => {
-                let _ = writeln!(out, ": unreadable: {diagnostic}");
+                let _ = writeln!(out, ": unreadable: {}", single_line(diagnostic));
             }
             _ => out.push('\n'),
         }

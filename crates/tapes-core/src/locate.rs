@@ -29,6 +29,9 @@ pub const MAX_MANIFEST_BYTES: u64 = 64 * 1024 * 1024;
 pub const MAX_REFERENCES: usize = 100_000;
 /// A refs line longer than this is malformed.
 pub const MAX_REF_LINE_BYTES: usize = 64 * 1024;
+/// A `ref` or `lane` longer than this is malformed: no workset reference or
+/// lane id comes near it, and a read keeps only these fields of each line.
+pub const MAX_REF_FIELD_BYTES: usize = 256;
 
 /// The parts of a `tapes-workset/1` manifest locate needs.
 #[derive(Debug, Deserialize)]
@@ -325,6 +328,15 @@ fn parse_ref_line(line: usize, bytes: &[u8]) -> RefLine {
         lane: Option<String>,
     }
     match serde_json::from_slice::<Cited>(bytes) {
+        Ok(cited)
+            if cited.reference.len() > MAX_REF_FIELD_BYTES
+                || cited
+                    .lane
+                    .as_ref()
+                    .is_some_and(|lane| lane.len() > MAX_REF_FIELD_BYTES) =>
+        {
+            RefLine::Malformed { line }
+        }
         Ok(cited) => RefLine::Cited {
             line,
             reference: cited.reference,

@@ -477,3 +477,18 @@ fn an_edited_opencode_message_reads_changed() {
     assert!(report.stale);
     fs::remove_dir_all(root).unwrap();
 }
+
+/// A `ref` or `lane` longer than any workset identifier is malformed, so a
+/// refs read keeps a bounded amount per line.
+#[test]
+fn an_oversized_ref_field_is_malformed() {
+    use agent_tapes_core::locate::MAX_REF_FIELD_BYTES;
+    let long = "x".repeat(MAX_REF_FIELD_BYTES + 1);
+    let input = format!(
+        "{{\"ref\":\"s0#{long}\"}}\n{{\"ref\":\"s0#1\",\"lane\":\"{long}\"}}\n{{\"ref\":\"s0#1\",\"lane\":\"s0-0\"}}\n"
+    );
+    let read = read_refs_from(std::io::Cursor::new(input)).unwrap();
+    assert!(matches!(read.lines[0], RefLine::Malformed { line: 1 }));
+    assert!(matches!(read.lines[1], RefLine::Malformed { line: 2 }));
+    assert!(matches!(read.lines[2], RefLine::Cited { line: 3, .. }));
+}

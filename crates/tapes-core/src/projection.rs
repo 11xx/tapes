@@ -13,16 +13,23 @@ pub const EXCHANGE_TEXT_BYTES: usize = 16 * 1024;
 /// reasoning, ambient context, notices.
 pub const OTHER_TEXT_BYTES: usize = 2 * 1024;
 
-/// Prepended to a text line that could be read as structure. A turn's text
-/// line that begins with `## ` (a projected turn's heading), `=== ` (a lane
-/// file's section marker), or this prefix itself is rendered with one more
-/// prefix in front, so no transcript text forges a heading or a marker and
-/// removing one prefix from such a line restores the text.
+/// Prepended to a text line that could be read as structure.
 pub const ESCAPE_PREFIX: &str = "\\";
+
+/// Line starts the projection itself writes: a turn heading, a lane file's
+/// section marker, the omission marker, and the tool and artifact lines. A
+/// turn's text line beginning with one of these, or with [`ESCAPE_PREFIX`],
+/// is rendered with one more prefix in front, so transcript text forges none
+/// of them and removing one prefix from such a line restores the text.
+pub const STRUCTURAL_LINE_STARTS: [&str; 5] = ["## ", "=== ", "[… ", "tool: ", "artifact: "];
 
 /// Escape one line of turn text, line ending included, by [`ESCAPE_PREFIX`].
 pub fn escape_text_line(line: &str) -> std::borrow::Cow<'_, str> {
-    if line.starts_with("## ") || line.starts_with("=== ") || line.starts_with(ESCAPE_PREFIX) {
+    if line.starts_with(ESCAPE_PREFIX)
+        || STRUCTURAL_LINE_STARTS
+            .iter()
+            .any(|start| line.starts_with(start))
+    {
         std::borrow::Cow::Owned(format!("{ESCAPE_PREFIX}{line}"))
     } else {
         std::borrow::Cow::Borrowed(line)
