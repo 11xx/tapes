@@ -586,8 +586,17 @@ fn check_source(
     }
     let frozen_length = source.source_length;
     if pin.is_none() {
+        if frozen_length.is_some_and(|frozen| read.source_length < frozen) {
+            return check(
+                SourceState::Changed,
+                Some(read.source_length),
+                Some("the source is shorter than when it was frozen".to_owned()),
+            );
+        }
         return match (content_matches, digested) {
-            (Some(true), Some(turns)) if seen == turns => {
+            (Some(true), Some(turns))
+                if seen == turns && Some(read.source_length) == frozen_length =>
+            {
                 check(SourceState::Unchanged, Some(read.source_length), None)
             }
             (Some(true), Some(_)) => check(SourceState::Grown, Some(read.source_length), None),

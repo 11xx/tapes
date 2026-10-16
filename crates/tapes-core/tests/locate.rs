@@ -478,6 +478,33 @@ fn an_edited_opencode_message_reads_changed() {
     fs::remove_dir_all(root).unwrap();
 }
 
+/// An unpinned source that is shorter than when it was frozen reads
+/// `changed`, even when the dropped messages produced no turn and the frozen
+/// turns' content digest still matches. The freeze is made to record one more
+/// message than the store now holds, which is what deleting a message without
+/// content leaves behind.
+#[test]
+fn a_shortened_unpinned_source_reads_changed() {
+    use agent_tapes_core::backend::opencode::OpenCodeBackend;
+    let root = scratch("opencode-shortened");
+    let program = opencode_store(&root);
+    let opencode = || Box::new(OpenCodeBackend::new(program.clone())) as Box<dyn Backend>;
+    let id = "ses_000000fixtureSharedSession";
+    let bundle = root.join("bundle");
+    freeze(opencode(), id, &bundle);
+    let manifest = bundle.join("workset.json");
+    let mut workset: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&manifest).unwrap()).unwrap();
+    let frozen = workset["sources"][0]["source_length"].as_u64().unwrap();
+    workset["sources"][0]["source_length"] = serde_json::json!(frozen + 1);
+    fs::write(&manifest, serde_json::to_string(&workset).unwrap()).unwrap();
+
+    let report = locate(opencode(), &bundle, "", 0);
+    assert_eq!(report.sources[0].state, SourceState::Changed, "{report:?}");
+    assert!(report.stale);
+    fs::remove_dir_all(root).unwrap();
+}
+
 /// A `ref` or `lane` longer than any workset identifier is malformed, so a
 /// refs read keeps a bounded amount per line.
 #[test]
