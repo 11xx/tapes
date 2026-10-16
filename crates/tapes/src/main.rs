@@ -1650,6 +1650,9 @@ enum Command {
     /// assistant reply (saying so when no operator turn precedes the lane);
     /// and a marked lane section whose body is exactly the lane's projected
     /// turns, `projected_bytes` long. Only lane-section turns are cited.
+    /// A turn text line beginning with `## `, `=== ` or a backslash gains a
+    /// leading backslash, so transcript text cannot forge a turn heading or
+    /// a section marker.
     /// Each source is keyed `s0` (the root), `s1`, ...; a turn is cited
     /// `<key>#<ordinal>`, and a lane is `<key>-<n>` with its `file` relative
     /// to DIR. Each source records its

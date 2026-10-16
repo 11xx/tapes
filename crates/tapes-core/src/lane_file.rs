@@ -1,11 +1,13 @@
 //! A lane file: the lane's turns as the lane projection renders them, after a
 //! header and a read-only margin of earlier context from the same source.
 //! The lane section's body is exactly the projection of the lane's turns, so
-//! its length is the lane's `projected_bytes`.
+//! its length is the lane's `projected_bytes`. Markers are whole lines; the
+//! projection escapes every text line that could equal one or pass for a
+//! turn heading, so the first whole line equal to a marker is the marker.
 
 use std::fmt::Write as _;
 
-use crate::projection::reference;
+use crate::projection::{reference, single_line};
 
 /// Opens the margin section. No projected turn starts with `=`.
 pub const MARGIN_MARKER: &str =
@@ -45,7 +47,9 @@ pub fn render(
     let _ = writeln!(
         out,
         "source: {} ({}, session {})",
-        source.key, source.harness, source.session
+        source.key,
+        single_line(&source.harness),
+        single_line(&source.session)
     );
     let _ = writeln!(
         out,

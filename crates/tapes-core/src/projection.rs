@@ -13,6 +13,43 @@ pub const EXCHANGE_TEXT_BYTES: usize = 16 * 1024;
 /// reasoning, ambient context, notices.
 pub const OTHER_TEXT_BYTES: usize = 2 * 1024;
 
+/// Prepended to a text line that could be read as structure. A turn's text
+/// line that begins with `## ` (a projected turn's heading), `=== ` (a lane
+/// file's section marker), or this prefix itself is rendered with one more
+/// prefix in front, so no transcript text forges a heading or a marker and
+/// removing one prefix from such a line restores the text.
+pub const ESCAPE_PREFIX: &str = "\\";
+
+/// Escape one line of turn text, line ending included, by [`ESCAPE_PREFIX`].
+pub fn escape_text_line(line: &str) -> std::borrow::Cow<'_, str> {
+    if line.starts_with("## ") || line.starts_with("=== ") || line.starts_with(ESCAPE_PREFIX) {
+        std::borrow::Cow::Owned(format!("{ESCAPE_PREFIX}{line}"))
+    } else {
+        std::borrow::Cow::Borrowed(line)
+    }
+}
+
+/// A field rendered inside a single line, with line breaks and other control
+/// characters replaced by spaces so it cannot start a line of its own.
+pub fn single_line(field: &str) -> std::borrow::Cow<'_, str> {
+    if field.chars().any(char::is_control) {
+        std::borrow::Cow::Owned(
+            field
+                .chars()
+                .map(|character| {
+                    if character.is_control() {
+                        ' '
+                    } else {
+                        character
+                    }
+                })
+                .collect(),
+        )
+    } else {
+        std::borrow::Cow::Borrowed(field)
+    }
+}
+
 /// The text-byte cap a turn of this kind renders under.
 pub fn text_cap(kind: TurnKind) -> usize {
     match kind {
@@ -35,7 +72,8 @@ pub fn reference(key: &str, ordinal: usize) -> String {
 /// Render one turn deterministically: a header naming its workset reference,
 /// kind and origin; a compact line for a tool call or result with the
 /// artifact references it carries; then the turn's text, cut at its kind's
-/// cap on a character boundary with a marker naming the bytes left out.
+/// cap on a character boundary with a marker naming the bytes left out, and
+/// each text line escaped by [`escape_text_line`].
 /// Every rendering ends with a blank line, so concatenated turns stay
 /// separated.
 pub fn project_turn(key: &str, turn: &Turn) -> String {
@@ -69,20 +107,20 @@ fn render(key: &str, turn: &Turn, cap: usize) -> Projection {
             .into_iter()
             .flatten()
         {
-            let _ = write!(out, " {field}");
+            let _ = write!(out, " {}", single_line(field));
         }
         if let Some(exit) = tool.exit {
             let _ = write!(out, " exit={exit}");
         }
         for artifact in tool.artifact_references.iter().filter_map(artifact_token) {
-            let _ = write!(out, " artifact={artifact}");
+            let _ = write!(out, " artifact={}", single_line(artifact));
         }
         out.push('\n');
     }
     for part in &turn.parts {
         if let ContentPart::FileReference { reference, .. } = part {
             if let Some(token) = artifact_token(reference) {
-                let _ = writeln!(out, "artifact: {token}");
+                let _ = writeln!(out, "artifact: {}", single_line(token));
             }
         }
     }
@@ -93,7 +131,9 @@ fn render(key: &str, turn: &Turn, cap: usize) -> Projection {
     let kept = &turn.text[..end];
     let omitted_bytes = (turn.text.len() - end) as u64;
     if !kept.is_empty() {
-        out.push_str(kept);
+        for line in kept.split_inclusive('\n') {
+            out.push_str(&escape_text_line(line));
+        }
         if !kept.ends_with('\n') {
             out.push('\n');
         }

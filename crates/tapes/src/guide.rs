@@ -1168,7 +1168,9 @@ FREEZE A WORKING SET
   source, each with its first assistant reply, or a line saying none
   precedes the lane — then a marked lane section holding exactly the lane's
   projected turns. A turn is cited `<key>#<ordinal>`, and only turns in a
-  lane section are cited from that lane. The manifest pins each source's length,
+  lane section are cited from that lane. Markers and turn headings are whole
+  lines that transcript text cannot forge: a text line beginning with `## `,
+  `=== ` or a backslash is rendered with one more backslash in front. The manifest pins each source's length,
   revision and prefix digest, and its coverage says what the read could not
   turn into turns: skipped records, bytes no turn covers, notices, references
   the store cannot resolve, and failed child enumeration. A relative that
