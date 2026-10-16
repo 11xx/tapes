@@ -1158,9 +1158,11 @@ FREEZE A WORKING SET
   lane carries. The projection caps each turn's text at 16KiB for operator
   and assistant turns and 2KiB for every other kind, marking the bytes it
   left out; each lane and source counts them. A lane holds as many turns as
-  fit in --lane-bytes (64KiB by default, 8KiB to 4MiB); a single turn whose
-  capped rendering exceeds the bound, possible only when --lane-bytes is
-  below that size, gets a lane of its own and is the one lane over it. A lane
+  fit in --lane-bytes (64KiB by default, 8KiB to 4MiB) and is never cut
+  inside a source record: the turns one record yields (a message with
+  several text blocks, say) stay in one lane, so file-byte ranges tile. A
+  record, or a single turn, whose capped rendering exceeds the bound gets a
+  lane of its own and is the one lane over it. A lane
   file names its lane, source and turn range, then a marked margin of
   read-only context — the last two operator turns earlier in the same
   source, each with its first assistant reply, or a line saying none

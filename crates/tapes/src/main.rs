@@ -1642,9 +1642,9 @@ enum Command {
     /// text at 16KiB for operator and assistant turns and 2KiB for every
     /// other kind, marking what it left out; lanes count the omitted bytes by
     /// kind and coverage totals them. A lane holds as many turns as fit in
-    /// --lane-bytes; a turn whose capped rendering alone exceeds the bound,
-    /// possible only when --lane-bytes is below that size, gets a lane of its
-    /// own. A lane file holds a header naming the lane, its source and its
+    /// --lane-bytes and is never cut between turns of one source record, so
+    /// file-byte ranges tile; a record or turn whose capped rendering alone
+    /// exceeds the bound gets a lane of its own. A lane file holds a header naming the lane, its source and its
     /// turn range; a marked margin of read-only context, the last two
     /// operator turns earlier in the same source each with its first
     /// assistant reply (saying so when no operator turn precedes the lane);

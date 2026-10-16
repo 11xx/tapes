@@ -169,10 +169,12 @@ impl WorksetSource {
     }
 }
 
-/// Cuts a stream of turns into lanes: a turn that would push the open lane
-/// past the bound starts a new one, and a turn larger than the bound gets a
-/// lane of its own. With lane files, each lane is written when it closes:
-/// only the open lane's body and a ring of the latest operator turns with
+/// Cuts a stream of turns into lanes, a source record at a time: a record
+/// whose turns would push the open lane past the bound starts a new one, so
+/// a lane is never cut inside a record and file-byte ranges tile. A record,
+/// or a turn, larger than the bound gets a lane of its own. With lane files,
+/// each lane is written when it closes: only the open lane's body, the
+/// pending record's turns, and a ring of the latest operator turns with
 /// their first replies are held.
 pub struct LaneCutter {
     key: String,
@@ -180,6 +182,17 @@ pub struct LaneCutter {
     lanes: Vec<Lane>,
     open: Option<OpenLane>,
     files: Option<LaneFiles>,
+    /// The turns of the record being read, placed once the record ends so
+    /// a lane is never cut inside it. Each holds a capped projection.
+    record: Vec<Pending>,
+}
+
+struct Pending {
+    ordinal: usize,
+    kind: TurnKind,
+    span: Option<ByteSpan>,
+    text: String,
+    omitted_bytes: u64,
 }
 
 struct LaneFiles {
@@ -204,6 +217,7 @@ impl LaneCutter {
             lanes: Vec::new(),
             open: None,
             files: None,
+            record: Vec::new(),
         }
     }
 
@@ -224,7 +238,25 @@ impl LaneCutter {
 
     pub fn push(&mut self, turn: &Turn) -> Result<()> {
         let projection = projection::project(&self.key, turn);
-        let bytes = projection.text.len() as u64;
+        let span = turn.record_ref.as_ref().and_then(|record| record.span);
+        if span.is_none() || span != self.record.first().and_then(|pending| pending.span) {
+            self.flush()?;
+        }
+        self.record.push(Pending {
+            ordinal: turn.ordinal,
+            kind: turn.kind,
+            span,
+            text: projection.text,
+            omitted_bytes: projection.omitted_bytes,
+        });
+        Ok(())
+    }
+
+    /// Place the pending record's turns: in the open lane when they fit
+    /// beside it, otherwise at the start of a new one.
+    fn flush(&mut self) -> Result<()> {
+        let record = std::mem::take(&mut self.record);
+        let bytes: u64 = record.iter().map(|pending| pending.text.len() as u64).sum();
         if self
             .open
             .as_ref()
@@ -232,15 +264,23 @@ impl LaneCutter {
         {
             self.close()?;
         }
+        for pending in record {
+            self.place(pending);
+        }
+        Ok(())
+    }
+
+    fn place(&mut self, turn: Pending) {
+        let bytes = turn.text.len() as u64;
         if let Some(files) = &mut self.files {
             if self.open.is_none() {
                 files.margin = files.ring.iter().cloned().collect();
             }
-            files.body.push_str(&projection.text);
+            files.body.push_str(&turn.text);
             match turn.kind {
                 TurnKind::Operator => {
                     files.ring.push_back(MarginPair {
-                        operator: projection.text.clone(),
+                        operator: turn.text.clone(),
                         reply: None,
                     });
                     if files.ring.len() > MARGIN_PAIRS {
@@ -249,19 +289,18 @@ impl LaneCutter {
                 }
                 TurnKind::Assistant => {
                     for pair in files.ring.iter_mut().filter(|pair| pair.reply.is_none()) {
-                        pair.reply = Some(projection.text.clone());
+                        pair.reply = Some(turn.text.clone());
                     }
                 }
                 _ => {}
             }
         }
-        let span = turn.record_ref.as_ref().and_then(|record| record.span);
         let open = self.open.get_or_insert_with(|| OpenLane {
             lane: Lane {
                 id: format!("{}-{}", self.key, self.lanes.len()),
                 first_turn: turn.ordinal,
                 last_turn: turn.ordinal,
-                byte_range: span,
+                byte_range: turn.span,
                 projected_bytes: 0,
                 file: None,
                 turns_by_kind: BTreeMap::new(),
@@ -272,10 +311,10 @@ impl LaneCutter {
         open.lane.last_turn = turn.ordinal;
         open.lane.projected_bytes += bytes;
         *open.lane.turns_by_kind.entry(turn.kind).or_default() += 1;
-        if projection.omitted_bytes > 0 {
-            *open.lane.omitted_bytes.entry(turn.kind).or_default() += projection.omitted_bytes;
+        if turn.omitted_bytes > 0 {
+            *open.lane.omitted_bytes.entry(turn.kind).or_default() += turn.omitted_bytes;
         }
-        match (span, &mut open.lane.byte_range) {
+        match (turn.span, &mut open.lane.byte_range) {
             (Some(span), Some(range)) => {
                 range.start = range.start.min(span.start);
                 range.end = range.end.max(span.end);
@@ -283,10 +322,10 @@ impl LaneCutter {
             (Some(span), None) => open.lane.byte_range = Some(span),
             (None, _) => open.spanned = false,
         }
-        Ok(())
     }
 
     pub fn finish(mut self) -> Result<Vec<Lane>> {
+        self.flush()?;
         self.close()?;
         Ok(self.lanes)
     }

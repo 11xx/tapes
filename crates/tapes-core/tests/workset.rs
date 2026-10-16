@@ -95,6 +95,19 @@ impl TurnSink for Collect {
     }
 }
 
+fn span(turn: &Turn) -> Option<agent_tapes_core::model::ByteSpan> {
+    turn.record_ref.as_ref().and_then(|record| record.span)
+}
+
+/// Whether a lane's turns all came from one source record.
+fn one_record(turns: &[Turn], lane: &Lane) -> bool {
+    let first = span(&turns[lane.first_turn]);
+    first.is_some()
+        && turns[lane.first_turn..=lane.last_turn]
+            .iter()
+            .all(|turn| span(turn) == first)
+}
+
 fn turns(backend: Box<dyn Backend>, id: &str) -> Vec<Turn> {
     let mut sink = Collect::default();
     show_full_with_backends(&[backend], Selection::Id(id), &mut sink).unwrap();
@@ -137,14 +150,28 @@ fn lanes_partition_turns_cut_far_below_the_workset_bound() {
             assert_partition(&lanes, turns.len(), &format!("{id} at {bound}"));
             for lane in &lanes {
                 assert!(
-                    lane.projected_bytes <= bound || lane.first_turn == lane.last_turn,
+                    lane.projected_bytes <= bound
+                        || lane.first_turn == lane.last_turn
+                        || one_record(&turns, lane),
                     "{id}: {lane:?} exceeds {bound}"
                 );
             }
             for pair in lanes.windows(2) {
                 let next = &turns[pair[1].first_turn];
+                let last = &turns[pair[0].last_turn];
                 assert!(
-                    pair[0].projected_bytes + project_turn("s0", next).len() as u64 > bound,
+                    span(next).is_none() || span(next) != span(last),
+                    "{id}: lane {} was cut inside a record",
+                    pair[0].id
+                );
+                let record: u64 = turns[pair[1].first_turn..]
+                    .iter()
+                    .take_while(|turn| span(next).is_some() && span(turn) == span(next))
+                    .map(|turn| project_turn("s0", turn).len() as u64)
+                    .sum::<u64>()
+                    .max(project_turn("s0", next).len() as u64);
+                assert!(
+                    pair[0].projected_bytes + record > bound,
                     "{id}: lane {} closed before it was full",
                     pair[0].id
                 );
@@ -153,6 +180,8 @@ fn lanes_partition_turns_cut_far_below_the_workset_bound() {
     }
 }
 
+/// A turn, or one record's turns together, larger than the bound gets a lane
+/// of its own.
 #[test]
 fn a_turn_larger_than_the_bound_gets_a_lane_of_its_own() {
     let turns = turns(
@@ -162,13 +191,21 @@ fn a_turn_larger_than_the_bound_gets_a_lane_of_its_own() {
     let mut cutter = LaneCutter::new("s0", 1);
     turns.iter().for_each(|turn| cutter.push(turn).unwrap());
     let lanes = cutter.finish().unwrap();
-    assert_eq!(lanes.len(), turns.len());
-    for (lane, turn) in lanes.iter().zip(&turns) {
-        assert_eq!(
-            lane.projected_bytes,
-            project_turn("s0", turn).len() as u64,
+    let records = 1 + turns
+        .windows(2)
+        .filter(|pair| span(&pair[1]).is_none() || span(&pair[1]) != span(&pair[0]))
+        .count();
+    assert_eq!(lanes.len(), records);
+    for lane in &lanes {
+        assert!(
+            lane.first_turn == lane.last_turn || one_record(&turns, lane),
             "{lane:?}"
         );
+        let projected: u64 = turns[lane.first_turn..=lane.last_turn]
+            .iter()
+            .map(|turn| project_turn("s0", turn).len() as u64)
+            .sum();
+        assert_eq!(lane.projected_bytes, projected, "{lane:?}");
     }
 }
 
@@ -563,4 +600,43 @@ fn child_turns(backend: &dyn Backend, root: &str, reference: &str) -> Vec<Turn> 
         })
         .unwrap();
     turns
+}
+
+/// One Claude assistant record carrying two 6,000-byte text blocks becomes
+/// two turns sharing the record's span; a lane never cuts between them, so
+/// file-byte ranges tile instead of overlapping.
+#[test]
+fn lane_byte_ranges_tile_when_one_record_yields_several_turns() {
+    let root = scratch("record-cut");
+    let project = root.join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    let id = "60000000-0000-4000-8000-000000000001";
+    let lines = [
+        serde_json::json!({"type": "user", "sessionId": id, "uuid": "user-1", "parentUuid": null,
+            "promptSource": "typed", "timestamp": "2026-01-01T12:00:00Z", "cwd": "/fixtures/project",
+            "message": {"role": "user", "content": "Write two long paragraphs."}}),
+        serde_json::json!({"type": "assistant", "sessionId": id, "uuid": "assistant-1", "parentUuid": "user-1",
+            "timestamp": "2026-01-01T12:00:01Z", "cwd": "/fixtures/project",
+            "message": {"role": "assistant", "model": "claude-fixture", "content": [
+                {"type": "text", "text": "a".repeat(6000)},
+                {"type": "text", "text": "b".repeat(6000)}]}}),
+        serde_json::json!({"type": "user", "sessionId": id, "uuid": "user-2", "parentUuid": "assistant-1",
+            "promptSource": "typed", "timestamp": "2026-01-01T12:00:02Z", "cwd": "/fixtures/project",
+            "message": {"role": "user", "content": "Thanks."}}),
+    ];
+    let body: String = lines.iter().map(|line| format!("{line}\n")).collect();
+    std::fs::write(project.join(format!("{id}.jsonl")), body).unwrap();
+
+    let workset = workset(Box::new(ClaudeBackend::new(root.clone())), id);
+    let source = &workset.sources[0];
+    let lanes = source.lanes.as_ref().unwrap();
+    assert_partition(lanes, source.coverage.as_ref().unwrap().turns, id);
+    let ranges: Vec<_> = lanes.iter().map(|lane| lane.byte_range.unwrap()).collect();
+    for pair in ranges.windows(2) {
+        assert!(
+            pair[0].end <= pair[1].start,
+            "overlapping ranges {ranges:?}"
+        );
+    }
+    std::fs::remove_dir_all(root).unwrap();
 }
