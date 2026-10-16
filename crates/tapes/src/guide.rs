@@ -1142,7 +1142,9 @@ FREEZE A WORKING SET
   workset freezes a session and the relatives its own lineage resolves —
   its parent, the session it was forked from, its children; lineage is
   followed one level, never to a parent's parent or a child's children — reads
-  each in full, and writes DIR/workset.json as tapes-workset/1. Each source
+  each in full, and writes DIR/workset.json as tapes-workset/1 beside one
+  lane file per lane, DIR/lanes/<lane-id>.md. A DIR that already holds either
+  is refused, never overwritten: rerun against a fresh directory. Each source
   gets a short key (s0 is the root) and is cut into lanes: contiguous
   turn-ordinal ranges sized by the lane projection, the per-turn rendering a
   lane carries. The projection caps each turn's text at 16KiB for operator
@@ -1150,8 +1152,13 @@ FREEZE A WORKING SET
   left out; each lane and source counts them. A lane holds as many turns as
   fit in --lane-bytes (64KiB by default, 8KiB to 4MiB); a single turn whose
   capped rendering exceeds the bound, possible only when --lane-bytes is
-  below that size, gets a lane of its own and is the one lane over it. A turn
-  is cited `<key>#<ordinal>`. The manifest pins each source's length,
+  below that size, gets a lane of its own and is the one lane over it. A lane
+  file names its lane, source and turn range, then a marked margin of
+  read-only context — the last two operator turns earlier in the same
+  source, each with its first assistant reply, or a line saying none
+  precedes the lane — then a marked lane section holding exactly the lane's
+  projected turns. A turn is cited `<key>#<ordinal>`, and only turns in a
+  lane section are cited from that lane. The manifest pins each source's length,
   revision and prefix digest, and its coverage says what the read could not
   turn into turns: skipped records, bytes no turn covers, notices, references
   the store cannot resolve, and failed child enumeration. A relative that

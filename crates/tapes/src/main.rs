@@ -1631,7 +1631,9 @@ enum Command {
         json: bool,
     },
     /// Freeze one session's working set and plan its lanes, writing
-    /// DIR/workset.json as tapes-workset/1. The root session and the
+    /// DIR/workset.json as tapes-workset/1 and one lane file per lane,
+    /// DIR/lanes/<lane-id>.md. A DIR that already holds workset.json or
+    /// lanes/ is refused and left as it is. The root session and the
     /// relatives its own whole-recording lineage resolves (parent,
     /// forked-from session, children; one level, never a parent's parent or
     /// a child's children) are each read in full, one at a time, and cut into
@@ -1642,8 +1644,15 @@ enum Command {
     /// kind and coverage totals them. A lane holds as many turns as fit in
     /// --lane-bytes; a turn whose capped rendering alone exceeds the bound,
     /// possible only when --lane-bytes is below that size, gets a lane of its
-    /// own. Each source is keyed `s0` (the root), `s1`, ...; a turn is cited
-    /// `<key>#<ordinal>`, and a lane is `<key>-<n>`. Each source records its
+    /// own. A lane file holds a header naming the lane, its source and its
+    /// turn range; a marked margin of read-only context, the last two
+    /// operator turns earlier in the same source each with its first
+    /// assistant reply (saying so when no operator turn precedes the lane);
+    /// and a marked lane section whose body is exactly the lane's projected
+    /// turns, `projected_bytes` long. Only lane-section turns are cited.
+    /// Each source is keyed `s0` (the root), `s1`, ...; a turn is cited
+    /// `<key>#<ordinal>`, and a lane is `<key>-<n>` with its `file` relative
+    /// to DIR. Each source records its
     /// locator, source length, revision and prefix digest where the read
     /// establishes them, live state when the session-status authority reports
     /// one, its lanes with the file-byte range each covers where every turn
@@ -1652,11 +1661,13 @@ enum Command {
     /// notices, unresolved lineage references, and failed child enumeration
     /// with its diagnostic. A figure the source cannot supply is omitted. A
     /// relative that cannot be read is listed with its diagnostic and no
-    /// lanes; only an unreadable root fails. Installed recordings only.
+    /// lanes or lane files; only an unreadable root fails. Installed
+    /// recordings only.
     Workset {
         #[command(flatten)]
         selection: SelectionArgs,
-        /// Directory to write workset.json into; created when missing.
+        /// Directory to write workset.json and lanes/ into; created when
+        /// missing, refused when it already holds either.
         #[arg(long, value_name = "DIR")]
         bundle: PathBuf,
         /// Upper bound on one lane's projected bytes, from 8KiB to 4MiB.
@@ -2858,14 +2869,17 @@ fn dispatch(cli: Cli) -> Result<()> {
                 &backends,
                 selection.selection(),
                 lane_bytes.get(),
+                Some(&bundle),
             )?;
             liveness::annotate_workset(&mut workset);
-            std::fs::create_dir_all(&bundle)
-                .map_err(|error| anyhow!("create {}: {error}", bundle.display()))?;
-            let path = bundle.join("workset.json");
+            let path = bundle.join(agent_tapes_core::workset::MANIFEST_FILE);
             let mut body = serde_json::to_vec_pretty(&workset)?;
             body.push(b'\n');
-            std::fs::write(&path, body)
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)
+                .and_then(|mut file| std::io::Write::write_all(&mut file, &body))
                 .map_err(|error| anyhow!("write {}: {error}", path.display()))?;
             print!("{}", render_workset(&workset, &path));
         }

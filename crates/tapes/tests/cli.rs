@@ -14233,7 +14233,8 @@ fn unreadable_claude_children_reach_cli_errors_and_coverage_notes() {
     }
 }
 
-/// `workset` writes its manifest into the bundle directory and refuses a lane
+/// `workset` writes its manifest and lane files into the bundle directory,
+/// refuses to write into a bundle that already holds them, and refuses a lane
 /// bound outside 8KiB to 4MiB before reading anything.
 #[test]
 fn workset_writes_its_manifest_and_refuses_an_out_of_range_lane_bound() {
@@ -14257,6 +14258,19 @@ fn workset_writes_its_manifest_and_refuses_an_out_of_range_lane_bound() {
     assert_eq!(root["role"], "root");
     assert_eq!(root["lanes"][0]["id"], "s0-0");
     assert_eq!(root["lanes"][0]["first_turn"], 0);
+    assert_eq!(root["lanes"][0]["file"], "lanes/s0-0.md");
+    let lane = fs::read(bundle.path().join("bundle/lanes/s0-0.md")).unwrap();
+
+    let again = fixture_command("workset-again", &["workset", id, "--bundle", bundle_arg]);
+    assert!(!again.status.success(), "{again:?}");
+    assert!(
+        String::from_utf8_lossy(&again.stderr).contains("already holds a workset"),
+        "{again:?}"
+    );
+    assert_eq!(
+        fs::read(bundle.path().join("bundle/lanes/s0-0.md")).unwrap(),
+        lane
+    );
 
     for bound in ["8191", "4194305"] {
         let output = fixture_command(
