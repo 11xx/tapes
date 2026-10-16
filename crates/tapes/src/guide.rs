@@ -353,6 +353,7 @@ PROBE BEFORE EXPORTING
   tapes stats <id> --json        The same recording, counted with its read evidence.
   tapes lineage <id> --json      The sessions this one names as relatives.
   tapes brief <id> --json        What a continuation of it needs.
+  tapes workset <id> --bundle DIR  The session and its relatives, read whole and cut into lanes.
   tapes usage --here --json      The same counters summed over a project.
   tapes endings --here --json    What each session of a project ends on.
 
@@ -1133,6 +1134,23 @@ CONTINUE A COLD SESSION
 
   Resuming the session in place is cheaper than any of this while its cache is
   warm; a brief is what a cold session is worth reading through instead.
+
+FREEZE A WORKING SET
+  tapes workset <id> --bundle /tmp/<id>-workset
+  tapes workset <id> --bundle DIR --lane-bytes 256KiB
+
+  workset freezes a session and every relative its lineage resolves — parent,
+  forked-from session, children — reading each in full, and writes
+  DIR/workset.json as tapes-workset/1. Each source gets a short key (s0 is the
+  root) and is cut into lanes: contiguous turn-ordinal ranges whose rendering,
+  the lane projection, stays within --lane-bytes (64KiB by default, 8KiB to
+  4MiB). A turn is cited `<key>#<ordinal>`. The manifest pins each source's
+  length, revision and prefix digest, and its coverage says what the read
+  could not turn into turns: skipped records, bytes no turn covers, notices,
+  references the store cannot resolve, and failed child enumeration. A
+  relative that cannot be read is listed with its diagnostic; only an
+  unreadable root fails. Lanes partition the turns exactly, so dividing the
+  reading of a long session along them leaves no turn unread or read twice.
 
 CARRY IT FORWARD
   Bundles are working material, not artifacts — leave them in /tmp. What

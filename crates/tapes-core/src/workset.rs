@@ -135,6 +135,23 @@ pub struct UnresolvedReference {
     pub reference: String,
 }
 
+impl SourceRole {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Root => "root",
+            Self::Parent => "parent",
+            Self::ForkedFrom => "forked-from",
+            Self::Child => "child",
+        }
+    }
+}
+
+impl WorksetSource {
+    pub fn role_label(&self) -> &'static str {
+        self.role.label()
+    }
+}
+
 /// Cuts a stream of turns into lanes: a turn that would push the open lane
 /// past the bound starts a new one, and a turn larger than the bound gets a
 /// lane of its own.

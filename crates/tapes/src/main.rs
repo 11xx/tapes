@@ -570,7 +570,8 @@ impl Command {
             | Command::Metadata { selection, .. }
             | Command::Child { selection, .. }
             | Command::Lineage { selection, .. }
-            | Command::Brief { selection, .. } => Some(selection),
+            | Command::Brief { selection, .. }
+            | Command::Workset { selection, .. } => Some(selection),
             Command::Events {
                 selection: query, ..
             }
@@ -1629,6 +1630,38 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Freeze one session's working set and plan its lanes, writing
+    /// DIR/workset.json as tapes-workset/1. The root session and every
+    /// relative its whole-recording lineage resolves (parent, forked-from
+    /// session, children) are each read in full, one at a time, and cut into
+    /// lanes: contiguous ranges of turn ordinals whose lane projection, the
+    /// per-turn rendering a lane carries, stays within --lane-bytes. A turn
+    /// larger than the bound gets a lane of its own. Each source is keyed
+    /// `s0` (the root), `s1`, ...; a turn is cited `<key>#<ordinal>`, and a
+    /// lane is `<key>-<n>`. Each source records its locator, source length,
+    /// revision and prefix digest where the read establishes them, live state
+    /// when the session-status authority reports one, its lanes with the
+    /// file-byte range each covers where every turn carries a record span,
+    /// and coverage: turns by kind, records decoded and skipped, bytes no
+    /// turn covers, compaction boundaries and injected notices, unresolved
+    /// lineage references, and failed child enumeration with its diagnostic.
+    /// A figure the source cannot supply is omitted. A relative that cannot
+    /// be read is listed with its diagnostic and no lanes; only an unreadable
+    /// root fails. Installed recordings only.
+    Workset {
+        #[command(flatten)]
+        selection: SelectionArgs,
+        /// Directory to write workset.json into; created when missing.
+        #[arg(long, value_name = "DIR")]
+        bundle: PathBuf,
+        /// Upper bound on one lane's projected bytes, from 8KiB to 4MiB.
+        #[arg(
+            long,
+            value_name = "BYTES",
+            default_value_t = ByteSize::new(agent_tapes_core::workset::DEFAULT_LANE_BYTES)
+        )]
+        lane_bytes: ByteSize,
+    },
     /// What each session of a selection ends on, one bounded record each, as
     /// tapes-endings/10, including a session's recognized launch mode when one
     /// was recorded. The selection uses the flags `list` and `export` take,
@@ -1803,6 +1836,34 @@ fn main() -> Result<()> {
     );
     let matches = Cli::command().long_version(long_version).get_matches();
     dispatch(Cli::from_arg_matches(&matches)?)
+}
+
+fn render_workset(workset: &agent_tapes_core::workset::Workset, path: &std::path::Path) -> String {
+    use std::fmt::Write as _;
+    let mut out = format!("{}\n", path.display());
+    for source in &workset.sources {
+        let _ = write!(
+            out,
+            "{} {} {} {}",
+            source.key,
+            source.role_label(),
+            source.harness,
+            source.session_id
+        );
+        if let Some(reference) = &source.reference {
+            let _ = write!(out, " ({reference})");
+        }
+        match (&source.lanes, &source.coverage, &source.diagnostic) {
+            (Some(lanes), Some(coverage), _) => {
+                let _ = writeln!(out, ": {} turns in {} lanes", coverage.turns, lanes.len());
+            }
+            (_, _, Some(diagnostic)) => {
+                let _ = writeln!(out, ": unreadable: {diagnostic}");
+            }
+            _ => out.push('\n'),
+        }
+    }
+    out
 }
 
 fn print_json<T: Serialize>(value: &T, input: &InputArgs) -> Result<()> {
@@ -2773,6 +2834,35 @@ fn dispatch(cli: Cli) -> Result<()> {
             } else {
                 print!("{}", render_brief(&brief));
             }
+        }
+        Command::Workset {
+            selection,
+            bundle,
+            lane_bytes,
+        } => {
+            selection.validate_input()?;
+            if selection.input.supplied() {
+                return Err(anyhow!(
+                    "workset reads installed recordings in full; a supplied input is not one"
+                ));
+            }
+            agent_tapes_core::workset::check_lane_bytes(lane_bytes.get())?;
+            let backends = selection.input.backends()?;
+            print_selection_warnings(&selection.latest_warnings(&backends)?);
+            let mut workset = agent_tapes_core::workset::build_with_backends(
+                &backends,
+                selection.selection(),
+                lane_bytes.get(),
+            )?;
+            liveness::annotate_workset(&mut workset);
+            std::fs::create_dir_all(&bundle)
+                .map_err(|error| anyhow!("create {}: {error}", bundle.display()))?;
+            let path = bundle.join("workset.json");
+            let mut body = serde_json::to_vec_pretty(&workset)?;
+            body.push(b'\n');
+            std::fs::write(&path, body)
+                .map_err(|error| anyhow!("write {}: {error}", path.display()))?;
+            print!("{}", render_workset(&workset, &path));
         }
         Command::Endings {
             harness,

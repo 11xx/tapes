@@ -229,3 +229,16 @@ pub fn annotate_brief(brief: &mut Brief) {
         brief.session.live = snapshot().get(&brief.session.id).cloned();
     }
 }
+
+/// The same join onto every installed source of a workset.
+pub fn annotate_workset(workset: &mut agent_tapes_core::workset::Workset) {
+    let live = snapshot();
+    for source in &mut workset.sources {
+        let installed = source.source.as_ref().is_some_and(|descriptor| {
+            descriptor.kind == agent_tapes_core::model::SourceKind::InstalledRecording
+        });
+        if installed {
+            source.live = live.get(&source.session_id).cloned();
+        }
+    }
+}

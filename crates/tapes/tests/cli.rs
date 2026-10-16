@@ -14232,3 +14232,41 @@ fn unreadable_claude_children_reach_cli_errors_and_coverage_notes() {
         }
     }
 }
+
+/// `workset` writes its manifest into the bundle directory and refuses a lane
+/// bound outside 8KiB to 4MiB before reading anything.
+#[test]
+fn workset_writes_its_manifest_and_refuses_an_out_of_range_lane_bound() {
+    let bundle = TemporaryDirectory::new(
+        std::env::temp_dir().join(format!("tapes-cli-workset-{}", std::process::id())),
+    );
+    let bundle_arg = bundle.path().join("bundle");
+    let bundle_arg = bundle_arg.to_str().unwrap();
+    let id = "00000000-0000-0000-0000-000000000001";
+
+    let output = fixture_command("workset", &["workset", id, "--bundle", bundle_arg]);
+    assert!(output.status.success(), "{output:?}");
+    let manifest: Value =
+        serde_json::from_slice(&fs::read(bundle.path().join("bundle/workset.json")).unwrap())
+            .unwrap();
+    assert_eq!(manifest["schema"], "tapes-workset/1");
+    assert_eq!(manifest["root"], id);
+    assert_eq!(manifest["lane_bytes"], 65536);
+    let root = &manifest["sources"][0];
+    assert_eq!(root["key"], "s0");
+    assert_eq!(root["role"], "root");
+    assert_eq!(root["lanes"][0]["id"], "s0-0");
+    assert_eq!(root["lanes"][0]["first_turn"], 0);
+
+    for bound in ["8191", "4194305"] {
+        let output = fixture_command(
+            "workset-bound",
+            &["workset", id, "--bundle", bundle_arg, "--lane-bytes", bound],
+        );
+        assert!(!output.status.success(), "{bound}: {output:?}");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("--lane-bytes must be between"),
+            "{bound}: {output:?}"
+        );
+    }
+}
