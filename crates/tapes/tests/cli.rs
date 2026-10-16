@@ -14284,3 +14284,92 @@ fn workset_writes_its_manifest_and_refuses_an_out_of_range_lane_bound() {
         );
     }
 }
+
+/// `locate` reports outcomes as data with exit 0, and exits 1 only when the
+/// workset or the refs file cannot be read.
+#[test]
+fn locate_reports_outcomes_and_refuses_only_an_unreadable_input() {
+    let scratch = TemporaryDirectory::new(
+        std::env::temp_dir().join(format!("tapes-cli-locate-{}", std::process::id())),
+    );
+    let bundle = scratch.path().join("bundle");
+    let bundle_arg = bundle.to_str().unwrap();
+    let id = "00000000-0000-0000-0000-000000000001";
+    // One store for every run: rebuilding it would replace the frozen file.
+    let (codex_home, home) = fixture_store("locate");
+    let fixture_command = |_: &str, args: &[&str]| {
+        let mut command = tapes();
+        command.args(args);
+        with_fixture_env(
+            &mut command,
+            &codex_home,
+            &home,
+            Path::new("/definitely/missing"),
+        );
+        command.output().unwrap()
+    };
+    let output = fixture_command("locate", &["workset", id, "--bundle", bundle_arg]);
+    assert!(output.status.success(), "{output:?}");
+
+    let refs = scratch.path().join("refs.jsonl");
+    fs::write(
+        &refs,
+        "{\"ref\":\"s0#0\",\"lane\":\"s0-0\"}\nnot json\n{\"ref\":\"s7#1\"}\n",
+    )
+    .unwrap();
+    let refs_arg = refs.to_str().unwrap();
+    let output = fixture_command(
+        "locate",
+        &[
+            "locate",
+            "--workset",
+            bundle_arg,
+            "--refs",
+            refs_arg,
+            "--text-bytes",
+            "64",
+            "--json",
+        ],
+    );
+    assert!(output.status.success(), "{output:?}");
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["schema"], "tapes-locate/1");
+    assert_eq!(report["stale"], false);
+    assert_eq!(report["sources"][0]["state"], "unchanged");
+    let outcomes: Vec<_> = report["references"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|entry| entry["outcome"].as_str().unwrap())
+        .collect();
+    assert_eq!(outcomes, ["resolved", "malformed", "unknown"]);
+    assert!(report["references"][0]["text"].as_str().unwrap().len() <= 64);
+
+    let human = fixture_command(
+        "locate",
+        &["locate", "--workset", bundle_arg, "--refs", refs_arg],
+    );
+    assert!(human.status.success(), "{human:?}");
+    let human = String::from_utf8_lossy(&human.stdout);
+    assert!(human.contains("s0 unchanged"), "{human}");
+    assert!(human.contains("malformed 1"), "{human}");
+
+    let missing = scratch.path().join("missing");
+    let output = fixture_command(
+        "locate",
+        &["locate", "--workset", missing.to_str().unwrap()],
+    );
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    let output = fixture_command(
+        "locate",
+        &[
+            "locate",
+            "--workset",
+            bundle_arg,
+            "--refs",
+            missing.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    fs::remove_dir_all(codex_home).unwrap();
+}

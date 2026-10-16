@@ -354,6 +354,7 @@ PROBE BEFORE EXPORTING
   tapes lineage <id> --json      The sessions this one names as relatives.
   tapes brief <id> --json        What a continuation of it needs.
   tapes workset <id> --bundle DIR  The session and its relatives, read whole and cut into lanes.
+  tapes locate --workset DIR --refs FILE --json  Whether a frozen workset still holds, and what its cited references are.
   tapes usage --here --json      The same counters summed over a project.
   tapes endings --here --json    What each session of a project ends on.
 
@@ -1165,6 +1166,31 @@ FREEZE A WORKING SET
   cannot be read is listed with its diagnostic; only an unreadable root
   fails. Lanes partition the turns exactly, so dividing the reading of a long
   session along them leaves no turn unread or read twice.
+
+LOCATE WHAT A WORKSET CITES
+  tapes locate --workset DIR
+  tapes locate --workset DIR --refs facts.jsonl --text-bytes 64KiB --json
+
+  locate checks a frozen workset against its sources and resolves the
+  references cited from its lanes, as tapes-locate/1. Each source is replayed
+  once, pinned to the length, revision and prefix digest the workset froze:
+  `unchanged`; `grown` when only appended bytes follow a frozen prefix that
+  still matches, the normal case for a live session; `changed` when it is
+  shorter, its frozen prefix differs, or, with no prefix pin, its length or
+  revision moved; `unreadable`, with the diagnostic. Any `changed` source
+  makes the workset `stale`: freeze a new one rather than trust its lanes.
+
+  --refs takes JSON lines whose `ref` is `<key>#<ordinal>` and whose
+  optional `lane` is the lane the citation came from; any other field is
+  ignored, so a scout's fact file passes as it is. Each reference is
+  `resolved` — kind, origin, timestamp, the lane holding it, and its record
+  reference — or `unknown` (no such key, or past the frozen turn count even
+  when the source grew), `outside-lane` (not in the cited lane; a margin
+  turn never is), or `source-changed`. A blank or non-JSON line is
+  `malformed`, named by its line number. --text-bytes returns a resolved
+  turn's whole text, past the lane projection's cap, up to the bound and
+  marked when cut. Outcomes are data: locate exits 0 whenever it reports,
+  and 1 only when workset.json or the refs file cannot be read.
 
 CARRY IT FORWARD
   Bundles are working material, not artifacts — leave them in /tmp. What

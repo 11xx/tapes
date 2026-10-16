@@ -1678,6 +1678,42 @@ enum Command {
         )]
         lane_bytes: ByteSize,
     },
+    /// Check a frozen workset against its sources and resolve the workset
+    /// references cited from its lanes, as tapes-locate/1. Each source is
+    /// re-opened the way the workset read it (a Claude child through its
+    /// root) and replayed pinned to its frozen length, revision and prefix
+    /// digest, one pass per source serving every reference into it. A source
+    /// is `unchanged`; `grown` when bytes were appended after the frozen
+    /// prefix, which still matches; `changed` when it is shorter, its frozen
+    /// prefix no longer matches, or, with no prefix pin, its length or
+    /// revision differs; or `unreadable`, with its diagnostic. The workset is
+    /// `stale` when any source is `changed`. With --refs, each line of FILE
+    /// is a JSON object whose `ref` is `<key>#<ordinal>` and whose optional
+    /// `lane` is a lane id; other fields are ignored. Each reference is
+    /// `resolved` (kind, origin, timestamp, the lane holding it, and its
+    /// record reference), `unknown` (no such key, or past the frozen turn
+    /// count, even in a grown source), `outside-lane` (not in the cited lane;
+    /// a margin turn always is), or `source-changed`; a blank, non-JSON or
+    /// `ref`-less line is `malformed`, by line number. Exit 0 whenever the
+    /// report is produced; a missing or unparseable workset.json or an
+    /// unreadable refs file exits 1.
+    Locate {
+        /// The bundle directory `tapes workset` wrote.
+        #[arg(long, value_name = "DIR")]
+        workset: PathBuf,
+        /// JSON lines of cited references; at most 100000, each line at most
+        /// 64KiB.
+        #[arg(long, value_name = "FILE")]
+        refs: Option<PathBuf>,
+        /// Return each resolved turn's whole projected text, without the
+        /// lane projection's per-kind cap, up to this many bytes (at most
+        /// 1MiB; 16MiB across the report). 0 returns no text.
+        #[arg(long, value_name = "BYTES", default_value_t = ByteSize::new(0))]
+        text_bytes: ByteSize,
+        /// Render the versioned tapes-locate/1 object as JSON.
+        #[arg(long)]
+        json: bool,
+    },
     /// What each session of a selection ends on, one bounded record each, as
     /// tapes-endings/10, including a session's recognized launch mode when one
     /// was recorded. The selection uses the flags `list` and `export` take,
@@ -1852,6 +1888,28 @@ fn main() -> Result<()> {
     );
     let matches = Cli::command().long_version(long_version).get_matches();
     dispatch(Cli::from_arg_matches(&matches)?)
+}
+
+fn render_locate(report: &agent_tapes_core::locate::Locate) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::new();
+    for source in &report.sources {
+        let _ = write!(out, "{} {}", source.key, source.state.label());
+        if let Some(length) = source.source_length {
+            let _ = write!(out, " length={length}");
+        }
+        if let Some(diagnostic) = &source.diagnostic {
+            let _ = write!(out, ": {diagnostic}");
+        }
+        out.push('\n');
+    }
+    if report.stale {
+        out.push_str("stale: a source changed since the workset was frozen\n");
+    }
+    for (outcome, count) in &report.counts {
+        let _ = writeln!(out, "{} {count}", outcome.label());
+    }
+    out
 }
 
 fn render_workset(workset: &agent_tapes_core::workset::Workset, path: &std::path::Path) -> String {
@@ -2874,6 +2932,38 @@ fn dispatch(cli: Cli) -> Result<()> {
             liveness::annotate_workset(&mut workset);
             let path = agent_tapes_core::workset::write_manifest(&bundle, &workset)?;
             print!("{}", render_workset(&workset, &path));
+        }
+        Command::Locate {
+            workset,
+            refs,
+            text_bytes,
+            json,
+        } => {
+            use agent_tapes_core::locate;
+            if text_bytes.get_usize() > locate::MAX_TEXT_BYTES {
+                return Err(anyhow!(
+                    "--text-bytes must be at most {} bytes; got {}",
+                    locate::MAX_TEXT_BYTES,
+                    text_bytes.get()
+                ));
+            }
+            let frozen = locate::read_manifest(&workset)?;
+            let refs = refs
+                .as_deref()
+                .map(locate::read_refs)
+                .transpose()?
+                .unwrap_or_default();
+            let report = locate::locate_with_backends(
+                &agent_tapes_core::backend::backends(),
+                &frozen,
+                &refs,
+                text_bytes.get_usize(),
+            )?;
+            if json {
+                println!("{}", serde_json::to_string(&report)?);
+            } else {
+                print!("{}", render_locate(&report));
+            }
         }
         Command::Endings {
             harness,
