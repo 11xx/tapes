@@ -10,14 +10,15 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, bail, Result};
 use chrono::{DateTime, Utc};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::backend::{Backend, StreamedChild, StreamedTranscript};
 use crate::lane_file::{self, LaneSource, MarginPair};
 use crate::lineage::Lineage;
 use crate::model::{
-    ByteSpan, ContextEvent, LiveState, Session, SourceDescriptor, SourcePrefixDigest, Turn,
-    TurnKind, UnmappedRecords,
+    ByteSpan, ContextEvent, DigestAlgorithm, LiveState, Session, SourceDescriptor,
+    SourcePrefixDigest, Turn, TurnKind, UnmappedRecords,
 };
 use crate::projection;
 use crate::Selection;
@@ -75,6 +76,10 @@ pub struct WorksetSource {
     pub source_revision: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_prefix_digest: Option<SourcePrefixDigest>,
+    /// The digest of the source's normalized content, which pins a source
+    /// that has no file prefix to pin and checks one that has.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content_digest: Option<ContentDigest>,
     /// Present-tense state from the session-status authority, when it
     /// reports one.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -135,6 +140,52 @@ pub struct Coverage {
     pub child_enumeration_failures: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub notes: Vec<String>,
+}
+
+/// SHA-256 over [`projection::project_whole`] of each of the first `turns`
+/// turns, in ordinal order: the source's normalized content, whatever store
+/// it came from.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContentDigest {
+    pub algorithm: DigestAlgorithm,
+    pub value: String,
+    pub turns: usize,
+}
+
+/// Folds turns, in ordinal order, into a [`ContentDigest`].
+pub struct ContentDigester {
+    key: String,
+    hasher: Sha256,
+    turns: usize,
+}
+
+impl ContentDigester {
+    pub fn new(key: &str) -> Self {
+        Self {
+            key: key.to_owned(),
+            hasher: Sha256::new(),
+            turns: 0,
+        }
+    }
+
+    pub fn turn(&mut self, turn: &Turn) {
+        self.hasher
+            .update(projection::project_whole(&self.key, turn).as_bytes());
+        self.turns += 1;
+    }
+
+    pub fn finish(self) -> ContentDigest {
+        ContentDigest {
+            algorithm: DigestAlgorithm::Sha256,
+            value: self
+                .hasher
+                .finalize()
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect(),
+            turns: self.turns,
+        }
+    }
 }
 
 /// Turns that interrupt the exchange rather than carry it.
@@ -370,6 +421,7 @@ impl LaneCutter {
 /// Folds one source's turns into lanes and coverage as they stream.
 struct SourceFold {
     cutter: LaneCutter,
+    content: ContentDigester,
     coverage: Coverage,
     spanned: bool,
     records: usize,
@@ -381,6 +433,7 @@ struct SourceFold {
 impl SourceFold {
     fn new(key: &str, bound: u64, files: Option<(&Path, LaneSource)>) -> Self {
         Self {
+            content: ContentDigester::new(key),
             cutter: match files {
                 Some((directory, source)) => LaneCutter::with_files(source, bound, directory),
                 None => LaneCutter::new(key, bound),
@@ -396,6 +449,7 @@ impl SourceFold {
 
     fn turn(&mut self, turn: &Turn) -> Result<()> {
         self.cutter.push(turn)?;
+        self.content.turn(turn);
         self.coverage.turns += 1;
         *self.coverage.turns_by_kind.entry(turn.kind).or_default() += 1;
         if matches!(turn.context_event, Some(ContextEvent::Compaction(_))) {
@@ -454,6 +508,7 @@ impl SourceFold {
             source_length: Some(evidence.source_length),
             source_revision: evidence.source_revision,
             source_prefix_digest: evidence.source_prefix_digest,
+            content_digest: Some(self.content.finish()),
             live: None,
             lanes: Some(lanes),
             coverage: Some(self.coverage),
@@ -765,6 +820,7 @@ fn read_relative(
         source_length: None,
         source_revision: None,
         source_prefix_digest: None,
+        content_digest: None,
         live: None,
         lanes: None,
         coverage: None,

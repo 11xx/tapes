@@ -1657,7 +1657,8 @@ enum Command {
     /// `<key>#<ordinal>`, and a lane is `<key>-<n>` with its `file` relative
     /// to DIR. Each source records its
     /// locator, source length, revision and prefix digest where the read
-    /// establishes them, live state when the session-status authority reports
+    /// establishes them, a content digest (SHA-256 over each turn's whole
+    /// rendering, with the turn count it covers), live state when the session-status authority reports
     /// one, its lanes with the file-byte range each covers where every turn
     /// carries a record span, and coverage: turns by kind, records decoded
     /// and skipped, bytes no turn covers, compaction boundaries and injected
@@ -1685,11 +1686,12 @@ enum Command {
     /// references cited from its lanes, as tapes-locate/1. Each source is
     /// re-opened the way the workset read it (a Claude child through its
     /// root) and replayed pinned to its frozen length, revision and prefix
-    /// digest, one pass per source serving every reference into it. A source
-    /// is `unchanged`; `grown` when bytes were appended after the frozen
-    /// prefix, which still matches; `changed` when it is shorter, its frozen
-    /// prefix no longer matches, or, with no prefix pin, its length or
-    /// revision differs; or `unreadable`, with its diagnostic. The workset is
+    /// digest where it has a file, with its content digest recomputed over
+    /// the frozen turns, one pass per source serving every reference into
+    /// it. A source is `unchanged`; `grown` when content was appended after
+    /// frozen content that still matches; `changed` when it is shorter, its
+    /// frozen prefix or frozen content differs, or it has neither to
+    /// compare; or `unreadable`, with its diagnostic. The workset is
     /// `stale` when any source is `changed`. With --refs, each line of FILE
     /// is a JSON object whose `ref` is `<key>#<ordinal>` and whose optional
     /// `lane` is a lane id; other fields are ignored. Each reference is

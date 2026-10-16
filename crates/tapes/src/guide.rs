@@ -1170,8 +1170,12 @@ FREEZE A WORKING SET
   projected turns. A turn is cited `<key>#<ordinal>`, and only turns in a
   lane section are cited from that lane. Markers and turn headings are whole
   lines that transcript text cannot forge: a text line beginning with `## `,
-  `=== ` or a backslash is rendered with one more backslash in front. The manifest pins each source's length,
-  revision and prefix digest, and its coverage says what the read could not
+  `=== ` or a backslash is rendered with one more backslash in front.
+
+  The manifest pins each source's length, revision and file prefix digest
+  where the store has a file, and for every source a content digest: SHA-256
+  over each turn's whole rendering, in order, with the turn count it covers.
+  Its coverage says what the read could not
   turn into turns: skipped records, bytes no turn covers, notices, references
   the store cannot resolve, and failed child enumeration. A relative that
   cannot be read is listed with its diagnostic; only an unreadable root
@@ -1184,11 +1188,12 @@ LOCATE WHAT A WORKSET CITES
 
   locate checks a frozen workset against its sources and resolves the
   references cited from its lanes, as tapes-locate/1. Each source is replayed
-  once, pinned to the length, revision and prefix digest the workset froze:
-  `unchanged`; `grown` when only appended bytes follow a frozen prefix that
-  still matches, the normal case for a live session; `changed` when it is
-  shorter, its frozen prefix differs, or, with no prefix pin, its length or
-  revision moved; `unreadable`, with the diagnostic. Any `changed` source
+  once, pinned to the length, revision and prefix digest the workset froze
+  where it has a file, and its content digest is recomputed over the same
+  first turns in that pass: `unchanged`; `grown` when only appended content
+  follows frozen content that still matches, the normal case for a live
+  session; `changed` when it is shorter, its frozen prefix or frozen content
+  differs, or it has neither to compare; `unreadable`, with the diagnostic. Any `changed` source
   makes the workset `stale`: freeze a new one rather than trust its lanes.
 
   --refs takes JSON lines whose `ref` is `<key>#<ordinal>` and whose

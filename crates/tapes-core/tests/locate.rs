@@ -421,3 +421,59 @@ fn the_text_budget_is_charged_per_citation() {
     assert_eq!(report.references.last().unwrap().text.as_deref(), Some(""));
     fs::remove_dir_all(root).unwrap();
 }
+
+/// A copy of the OpenCode fixture program and its response files, so a test
+/// can edit what the store answers.
+fn opencode_store(root: &Path) -> PathBuf {
+    let xdg = root.join("xdg");
+    fs::create_dir_all(xdg.join("opencode")).unwrap();
+    fs::File::create(xdg.join("opencode/opencode.db")).unwrap();
+    std::env::set_var("XDG_DATA_HOME", &xdg);
+    let copy = root.join("opencode");
+    fs::create_dir_all(&copy).unwrap();
+    for entry in fs::read_dir(fixtures("opencode")).unwrap() {
+        let entry = entry.unwrap();
+        if entry.file_type().unwrap().is_file() {
+            fs::copy(entry.path(), copy.join(entry.file_name())).unwrap();
+        }
+    }
+    copy.join("opencode2")
+}
+
+/// OpenCode records no file prefix to pin, so an edited message must be
+/// caught by the normalized content digest.
+#[test]
+fn an_edited_opencode_message_reads_changed() {
+    use agent_tapes_core::backend::opencode::OpenCodeBackend;
+    let root = scratch("opencode-edit");
+    let program = opencode_store(&root);
+    let opencode = || Box::new(OpenCodeBackend::new(program.clone())) as Box<dyn Backend>;
+    let id = "ses_000000fixtureSharedSession";
+    let bundle = root.join("bundle");
+    freeze(opencode(), id, &bundle);
+    let unchanged = locate(opencode(), &bundle, "", 0);
+    assert_eq!(
+        unchanged.sources[0].state,
+        SourceState::Unchanged,
+        "{unchanged:?}"
+    );
+
+    let mut edited = 0;
+    for entry in fs::read_dir(program.parent().unwrap()).unwrap() {
+        let path = entry.unwrap().path();
+        let text = fs::read_to_string(&path).unwrap_or_default();
+        if text.contains("Inspect the fixture.") {
+            fs::write(
+                &path,
+                text.replace("Inspect the fixture.", "Destroy the fixture."),
+            )
+            .unwrap();
+            edited += 1;
+        }
+    }
+    assert!(edited > 0);
+    let report = locate(opencode(), &bundle, "", 0);
+    assert_eq!(report.sources[0].state, SourceState::Changed, "{report:?}");
+    assert!(report.stale);
+    fs::remove_dir_all(root).unwrap();
+}

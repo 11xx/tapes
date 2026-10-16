@@ -15,7 +15,7 @@ use crate::backend::{Backend, SourceChanged, StreamedTranscript};
 use crate::model::{
     OperatorOrigin, RecordRef, SourceDescriptor, SourcePrefixDigest, Turn, TurnKind,
 };
-use crate::workset::MANIFEST_FILE;
+use crate::workset::{ContentDigest, ContentDigester, MANIFEST_FILE};
 use crate::{projection, Selection};
 
 pub const LOCATE_SCHEMA: &str = "tapes-locate/1";
@@ -53,6 +53,8 @@ pub struct FrozenSource {
     pub source_revision: Option<String>,
     #[serde(default)]
     pub source_prefix_digest: Option<SourcePrefixDigest>,
+    #[serde(default)]
+    pub content_digest: Option<ContentDigest>,
     #[serde(default)]
     pub lanes: Option<Vec<FrozenLane>>,
     #[serde(default)]
@@ -537,7 +539,16 @@ fn check_source(
         );
     }
     let pin = frozen_pin(source);
-    let read = read_source(backends, root, source, pin.as_ref(), turn);
+    let digested = source.content_digest.as_ref().map(|digest| digest.turns);
+    let mut content = ContentDigester::new(&source.key);
+    let mut seen = 0;
+    let read = read_source(backends, root, source, pin.as_ref(), &mut |streamed| {
+        seen += 1;
+        if digested.is_some_and(|turns| streamed.ordinal < turns) {
+            content.turn(&streamed);
+        }
+        turn(streamed);
+    });
     let read = match read {
         Ok(read) => read,
         Err(error) => {
@@ -549,16 +560,31 @@ fn check_source(
             return check(state, None, Some(format!("{error:#}")));
         }
     };
+    // The frozen turns' normalized content, recomputed over the same turns.
+    let content_matches = source.content_digest.as_ref().map(|frozen| {
+        let now = content.finish();
+        now.turns == frozen.turns && now.value == frozen.value
+    });
+    if content_matches == Some(false) {
+        return check(
+            SourceState::Changed,
+            Some(read.source_length),
+            Some("the frozen turns' normalized content differs".to_owned()),
+        );
+    }
     let frozen_length = source.source_length;
     if pin.is_none() {
-        let same = Some(read.source_length) == frozen_length
-            && read.source_revision == source.source_revision;
-        let state = if same {
-            SourceState::Unchanged
-        } else {
-            SourceState::Changed
+        return match (content_matches, digested) {
+            (Some(true), Some(turns)) if seen == turns => {
+                check(SourceState::Unchanged, Some(read.source_length), None)
+            }
+            (Some(true), Some(_)) => check(SourceState::Grown, Some(read.source_length), None),
+            _ => check(
+                SourceState::Changed,
+                Some(read.source_length),
+                Some("the workset recorded neither a prefix pin nor a content digest".to_owned()),
+            ),
         };
-        return check(state, Some(read.source_length), None);
     }
     let locator = source
         .source
