@@ -1,7 +1,7 @@
 //! The union of two consumption selections' amounts, computed from their
 //! event keys and per-event measurements. A union is exact only when every
 //! key of both selections is present and measured, both reads cover their
-//! recordings, and the selections' overlap is established by verified copy
+//! recordings and hold no usage outside the keys, and the selections' overlap is established by verified copy
 //! evidence rather than by matching identifiers. Otherwise the exact amounts
 //! are withheld, each selection keeps its own figure, and the union is
 //! bounded.
@@ -26,6 +26,10 @@ pub enum UnionWithheld {
     IncompleteRead,
     /// A key carries no measurement.
     UnmeasuredEvent,
+    /// A selection's read holds records carrying usage that no reading
+    /// counts, or did not establish that it holds none, so some of its
+    /// consumption has no key.
+    UnrecognizedUsage,
     /// The selections are of different accounting bases or token conventions.
     MixedBasis,
     /// Neither selection is established as the other's fork parent, so the
@@ -101,6 +105,9 @@ impl ConsumptionEventKeys {
                 || selection.unreadable_records != Some(0)
             {
                 withheld.insert(UnionWithheld::IncompleteRead);
+            }
+            if selection.unrecognized_usage != Some(0) {
+                withheld.insert(UnionWithheld::UnrecognizedUsage);
             }
             if selection.keys.iter().any(|key| {
                 key.measurement
@@ -257,7 +264,8 @@ fn known<T: Copy>(
     let mut sum = None;
     let mut whole = selection.is_whole()
         && selection.coverage == Some(AccountingCoverage::Session)
-        && selection.unreadable_records == Some(0);
+        && selection.unreadable_records == Some(0)
+        && selection.unrecognized_usage == Some(0);
     for key in &selection.keys {
         match amount(key) {
             Some(value) => sum = Some(add(sum.unwrap_or(zero), value)),

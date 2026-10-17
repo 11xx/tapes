@@ -52,6 +52,16 @@ impl Store {
         fs::write(path, change(text)).unwrap();
     }
 
+    /// Insert `line` after the line holding `after`.
+    fn insert(&self, file: &str, after: &str, line: &str) {
+        self.edit(file, |text| {
+            let mut lines: Vec<&str> = text.lines().collect();
+            let at = lines.iter().position(|held| held.contains(after)).unwrap();
+            lines.insert(at + 1, line);
+            lines.join("\n") + "\n"
+        });
+    }
+
     fn keys(&self, id: &str, full: bool) -> ConsumptionEventKeys {
         let backends: Vec<Box<dyn Backend>> = vec![Box::new(PiBackend::new(&self.0))];
         usage_with_options_with_backends(
@@ -129,6 +139,68 @@ fn a_stopped_request_with_a_price_bounds_cost_only_from_below() {
             let measurement = key.measurement.as_ref().unwrap();
             assert!(measurement.measurement_completeness.is_empty());
             assert!(measurement.cost.is_some());
+        }
+    }
+}
+
+/// A Pi entry whose usage no reading counts, on the leaf's branch when it
+/// follows the leaf and on an abandoned branch when the leaf follows it.
+const MYSTERY_ACTIVE: (&str, &str) = (
+    r#""id":"parent-request""#,
+    r#"{"type":"mystery","id":"unknown","parentId":"parent-request","timestamp":"2026-01-15T10:00:04Z","usage":{"input":7,"cost":{"total":0.2}}}"#,
+);
+const MYSTERY_ABANDONED: (&str, &str) = (
+    r#""id":"shared-request""#,
+    r#"{"type":"mystery","id":"unknown","parentId":"shared-request","timestamp":"2026-01-15T10:00:01Z","usage":{"input":7,"cost":{"total":0.2}}}"#,
+);
+
+#[test]
+fn unrecognized_usage_withholds_the_exact_union_and_its_upper_bounds() {
+    for (branch, (after, line)) in [("active", MYSTERY_ACTIVE), ("abandoned", MYSTERY_ABANDONED)] {
+        let store = Store::new("unrecognized");
+        store.insert(PARENT, after, line);
+        let clean = Store::new("recognized");
+        for full in [false, true] {
+            let label = format!("{branch} full={full}");
+            let parent = store.keys("keys-parent", full);
+            let fork = store.keys("keys-fork", full);
+            assert_eq!(parent.unrecognized_usage, Some(1), "{label}");
+            assert_eq!(fork.unrecognized_usage, Some(0), "{label}");
+            let value = serde_json::to_value(&parent).unwrap();
+            assert_eq!(value["unrecognized_usage"], 1, "{label}: {value}");
+            for union in [parent.union(&fork), fork.union(&parent)] {
+                assert!(union.amounts.is_none(), "{label}: {union:?}");
+                assert_eq!(
+                    union.withheld,
+                    [UnionWithheld::UnrecognizedUsage],
+                    "{label}"
+                );
+                let json = serde_json::to_value(&union).unwrap();
+                assert_eq!(json["withheld"][0], "unrecognized-usage", "{label}");
+                let bounds = &union.bounds;
+                let healthy = clean
+                    .keys("keys-parent", full)
+                    .union(&clean.keys("keys-fork", full))
+                    .bounds;
+                for (name, bound, peer) in [
+                    (
+                        "uncached_input",
+                        &bounds.uncached_input,
+                        &healthy.uncached_input,
+                    ),
+                    ("output", &bounds.output, &healthy.output),
+                ] {
+                    let bound = bound.as_ref().unwrap();
+                    assert!(bound.at_most.is_none(), "{label} {name}: {bounds:?}");
+                    // The lower bounds are the healthy selections' own.
+                    assert_eq!(bound.at_least, peer.as_ref().unwrap().at_least, "{name}");
+                }
+                let cost = bounds.cost.as_ref().unwrap();
+                assert!(cost.at_most.is_none(), "{label}: {cost:?}");
+                assert_eq!(cost.at_least, healthy.cost.unwrap().at_least);
+            }
+            // Every healthy event keeps its key and its measurement.
+            assert_eq!(parent.keys, clean.keys("keys-parent", full).keys, "{label}");
         }
     }
 }

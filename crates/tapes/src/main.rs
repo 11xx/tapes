@@ -1558,8 +1558,9 @@ enum Command {
         /// incomplete. A measurement is omitted with its key, carries no
         /// locator, and an unrecorded amount is absent, never zero. A union of
         /// two selections is exact only when every key of both is present and
-        /// measured and the copies are verified; otherwise it is withheld and
-        /// bounded.
+        /// measured, no record carries usage outside the keys
+        /// (unrecognized_usage), and the copies are verified; otherwise it is
+        /// withheld and bounded. A partial price bounds only from below.
         #[arg(long, value_name = "N", num_args = 0..=1, default_missing_value = "200", conflicts_with_all = ["read_bytes", "series"])]
         event_keys: Option<Option<usize>>,
         /// Render the versioned tapes-usage/11 object, or tapes-usage-summary/6

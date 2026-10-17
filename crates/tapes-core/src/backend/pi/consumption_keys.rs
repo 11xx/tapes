@@ -5,7 +5,7 @@ use anyhow::{anyhow, Result};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-use super::{pi_consumed, pi_parent_id, PiBackend, PiConsumed, PiConsumption};
+use super::{pi_consumed, pi_parent_id, pi_unread_usage, PiBackend, PiConsumed, PiConsumption};
 use crate::backend::{
     read_recording, read_recording_at, stream_jsonl, validate_native_identity, ReadPin,
 };
@@ -72,6 +72,7 @@ pub(super) fn read_keys(
                 },
                 coverage: None,
                 unreadable_records: None,
+                unrecognized_usage: None,
                 unavailable: Some("source-unreadable-or-changed"),
                 copy_coverage: None,
                 copy_conflicts: 0,
@@ -90,6 +91,7 @@ fn read_keys_at(
     let mut buffer = KeyBuffer::new(options.limit);
     let mut consumed = PiConsumption::default();
     let mut parent = None;
+    let mut unrecognized = 0;
     let full = evidence.is_some_and(|read| {
         read.projection_options
             .iter()
@@ -104,6 +106,7 @@ fn read_keys_at(
                 _ => observed,
             });
         }
+        unrecognized += usize::from(pi_unread_usage(entry));
         if let Some(event) = pi_consumed(entry) {
             let id = entry["id"].as_str();
             if consumed.observe(id, &event, false) {
@@ -176,6 +179,7 @@ fn read_keys_at(
         omissions,
         coverage: Some(coverage),
         unreadable_records: Some(unreadable),
+        unrecognized_usage: Some(unrecognized),
         unavailable: None,
         copy_coverage,
         copy_conflicts,

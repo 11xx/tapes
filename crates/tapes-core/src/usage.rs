@@ -606,6 +606,11 @@ pub struct ConsumptionEventKeys {
     pub coverage: Option<AccountingCoverage>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub unreadable_records: Option<usize>,
+    /// Records the read reached that carry usage no reading counts as
+    /// consumption, so the selection's consumption is unknown beyond its
+    /// keys; absent when the read did not establish it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unrecognized_usage: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub unavailable: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]

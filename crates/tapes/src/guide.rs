@@ -743,7 +743,9 @@ PROBE BEFORE EXPORTING
   an omitted key never removes its known usage. Keys and measurement figures
   use the transcript's own source frontier, including
   entries appended after discovery. `coverage` and
-  `unreadable_records` qualify the key read independently. A source that
+  `unreadable_records` qualify the key read independently, and
+  `unrecognized_usage` counts records in the read that carry usage no reading
+  counts as consumption, which therefore have no key. A source that
   cannot be replayed sets `unavailable: source-unreadable-or-changed` and keeps
   the held measurements; unknown identity counts stay absent.
   Each key names `kind: provider-response` or `kind: recording-entry`.
@@ -777,18 +779,19 @@ PROBE BEFORE EXPORTING
   `ConsumptionEventKeys::union` in tapes-core takes two selections' keys and
   measurements and computes their union exactly only when every key of both
   is present and measured, both reads cover their recordings with no
-  unreadable record, one names the other as its fork parent with
+  unreadable record and no unrecognized usage, one names the other as its fork parent with
   `copy_coverage: session` and no conflicts, each copy is a key the parent
   holds with an equal digest, and no key shares a provider response with
   another recording's key without a verified copy. The union then counts each
   event once and sums categories; one an event did not record is a known
   subtotal named in `measurement_completeness`, and the total is withheld.
   Otherwise `withheld` names why (omitted-keys, incomplete-read,
-  unmeasured-event, mixed-basis, unestablished-lineage, unverified-copies,
+  unmeasured-event, unrecognized-usage, mixed-basis, unestablished-lineage, unverified-copies,
   unestablished-identity), each selection keeps its own figure, and `bounds`
   give at-least and at-most per category and cost: at least the larger known
-  amount, at most their sum only when every key of both is present and
-  every event measured that category or price completely; a stopped
+  amount, at most their sum only when every key of both is present, neither
+  read holds unrecognized usage, and every event measured that category or
+  price completely; a stopped
   request's partial price bounds only from below. Missing parents, bounded copy reads, conflicts, and unrelated
   recordings leave cross-recording equality unestablished.
   `--full --event-keys` uses the pinned recording and streams the parent copy
