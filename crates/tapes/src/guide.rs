@@ -186,9 +186,10 @@ FIND IT
   title metadata stays absent in list, show, and export. Human timestamps use whole
   RFC 3339 seconds with Z; JSON keeps recorded precision. show compares store
   activity with the newest rendered turn at that same whole-second precision.
-  Whenever cost or tokens are present, JSON also carries accounting stating
-  whether the figures are a recorded total or a sum of requests and whether
-  they cover the session or only the bounded read window. A cost carries
+  Whenever cost or tokens are present, or the read counted requests that
+  recorded no amount, JSON also carries accounting stating whether the
+  figures are a recorded total or a sum of requests and whether they cover
+  the session or only the bounded read window. A cost carries
   kind: harness-calculated-estimate and lists pricing_basis under missing:
   the harness priced it, and no recording says on which price table.
   Where a recording keeps more than one conversation path, its selection says

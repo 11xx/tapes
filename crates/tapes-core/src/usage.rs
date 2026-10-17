@@ -454,6 +454,15 @@ pub struct MeasurementCoverage {
     pub unpriced: usize,
 }
 
+impl MeasurementCoverage {
+    /// Whether any counter's coverage counted an event, measured or not.
+    pub fn counted_any(coverage: &BTreeMap<String, Self>) -> bool {
+        coverage
+            .values()
+            .any(|counter| counter.measured + counter.missing + counter.unpriced > 0)
+    }
+}
+
 /// The consumption events behind a figure, by the branch that holds them.
 /// `active_branch` plus `other_branches` is `counted`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]

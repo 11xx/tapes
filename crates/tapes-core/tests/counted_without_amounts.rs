@@ -199,15 +199,18 @@ fn claude_store(label: &str, sessions: &[(&str, bool)]) -> Store {
     store
 }
 
+/// Every counter missing, and nothing else: the read covered the session.
 fn assert_every_counter_missing(label: &str, completeness: &Value) {
     for counter in &COUNTERS[..5] {
-        assert!(
-            reasons(completeness, counter).contains(&"missing-counter".to_owned()),
+        assert_eq!(
+            reasons(completeness, counter),
+            ["missing-counter"],
             "{label} × {counter}: {completeness}"
         );
     }
-    assert!(
-        reasons(completeness, "cost").contains(&"missing-price".to_owned()),
+    assert_eq!(
+        reasons(completeness, "cost"),
+        ["missing-price"],
         "{label} × cost: {completeness}"
     );
 }
@@ -225,6 +228,11 @@ fn a_claude_session_whose_requests_all_lack_usage_is_qualified_everywhere() {
         let view = serde_json::to_value(view).unwrap();
         assert!(view.get("tokens").is_none(), "{view}");
         assert!(view.get("cost").is_none(), "{view}");
+        assert_eq!(
+            view["accounting"],
+            json!({"basis": "summed-requests", "coverage": "session"}),
+            "{view}"
+        );
         assert_every_counter_missing(
             &format!("usage full={full}"),
             &view["measurement_completeness"],

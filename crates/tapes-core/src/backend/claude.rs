@@ -188,7 +188,13 @@ impl ClaudeBackend {
         } else {
             AccountingCoverage::ReadWindow
         };
-        let accounting = accounting_for(tokens.as_ref(), cost.as_ref(), basis, coverage);
+        let accounting = accounting_for(
+            tokens.as_ref(),
+            cost.as_ref(),
+            &requests.coverage,
+            basis,
+            coverage,
+        );
         let usage_detail = claude_usage_detail(
             observed_cost_state,
             requests.dimensions,
@@ -929,6 +935,7 @@ impl ClaudeRecords {
         session.accounting = accounting_for(
             tokens.as_ref(),
             cost.as_ref(),
+            &requests.coverage,
             basis,
             AccountingCoverage::Session,
         );

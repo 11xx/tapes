@@ -172,13 +172,19 @@ pub(crate) fn merge_launch(
     }
 }
 
+/// The accounting of a figure that holds an amount or, by `counted`, its
+/// per-counter coverage, counted an event. A figure that counted no event
+/// and holds no amount has no accounting to state.
 pub(crate) fn accounting_for(
     tokens: Option<&Tokens>,
     cost: Option<&Cost>,
+    counted: &BTreeMap<String, MeasurementCoverage>,
     basis: AccountingBasis,
     coverage: AccountingCoverage,
 ) -> Option<Accounting> {
-    (tokens.is_some() || cost.is_some()).then_some(Accounting {
+    let established =
+        tokens.is_some() || cost.is_some() || MeasurementCoverage::counted_any(counted);
+    established.then_some(Accounting {
         basis,
         coverage,
         selection: None,

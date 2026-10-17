@@ -558,12 +558,7 @@ fn a_summary_counts_the_events_of_sessions_with_no_amount_as_missing() {
             coverage(0, 4),
             "{label}: {figure}"
         );
-        // The empty session has no accounting to establish its scope.
-        assert_eq!(
-            reasons(figure, "input"),
-            ["missing-counter", "unestablished-scope"],
-            "{label}"
-        );
+        assert_eq!(reasons(figure, "input"), ["missing-counter"], "{label}");
     }
 }
 

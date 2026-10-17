@@ -176,11 +176,10 @@ impl MeasurementCompleteness {
     /// coverage among them, whether or not it measured an amount.
     pub fn assess(figure: Measured<'_>) -> Self {
         let mut result = Self::default();
-        let counted =
-            figure.events > 0
-                || figure.coverage.into_iter().flatten().any(|(_, measured)| {
-                    measured.measured + measured.missing + measured.unpriced > 0
-                });
+        let counted = figure.events > 0
+            || figure
+                .coverage
+                .is_some_and(MeasurementCoverage::counted_any);
         if figure.tokens.is_none() && figure.cost.is_none() && !counted {
             return result;
         }

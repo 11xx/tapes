@@ -1892,6 +1892,7 @@ fn parse_database_session(value: &Value) -> Result<Session> {
     let accounting = accounting_for(
         tokens.as_ref(),
         cost.as_ref(),
+        &measurement_coverage,
         AccountingBasis::RecordedTotal,
         AccountingCoverage::Session,
     );
@@ -1973,6 +1974,7 @@ fn parse_session(value: &Value) -> Result<Session> {
     let accounting = accounting_for(
         tokens.as_ref(),
         cost.as_ref(),
+        &measurement_coverage,
         AccountingBasis::RecordedTotal,
         AccountingCoverage::Session,
     );

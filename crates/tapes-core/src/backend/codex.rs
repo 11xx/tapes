@@ -1567,13 +1567,14 @@ impl CodexUsageObserver {
                     .is_some_and(|s| s.distinct_observed.is_some()))
             .then(|| self.model_budget.retained()),
         });
+        let measurement_coverage = recorded_total_coverage(self.tokens.as_ref());
         let accounting = accounting_for(
             self.tokens.as_ref(),
             None,
+            &measurement_coverage,
             AccountingBasis::RecordedTotal,
             accounting_coverage,
         );
-        let measurement_coverage = recorded_total_coverage(self.tokens.as_ref());
         let usage_detail = UsageDetail {
             context_window: self.context_window,
             rate_limits: self.rate_limits,

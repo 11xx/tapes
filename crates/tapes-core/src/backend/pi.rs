@@ -619,7 +619,12 @@ impl Backend for PiBackend {
         let tokens = usage.tokens;
         let cost = usage.cost;
         let mut whole = session.clone();
-        whole.accounting = branch_accounting(tokens.as_ref(), cost.as_ref(), coverage);
+        whole.accounting = branch_accounting(
+            tokens.as_ref(),
+            cost.as_ref(),
+            &usage.measurement_coverage,
+            coverage,
+        );
         whole.tokens = tokens;
         whole.cost = cost;
         whole.usage_detail = UsageDetail {
@@ -872,13 +877,19 @@ fn pi_parent_id(reference: &str) -> Option<String> {
 fn branch_accounting(
     tokens: Option<&Tokens>,
     cost: Option<&Cost>,
+    counted: &BTreeMap<String, crate::usage::MeasurementCoverage>,
     coverage: AccountingCoverage,
 ) -> Option<Accounting> {
-    accounting_for(tokens, cost, AccountingBasis::SummedRequests, coverage).map(|accounting| {
-        Accounting {
-            selection: Some(AccountingSelection::ActiveBranch),
-            ..accounting
-        }
+    accounting_for(
+        tokens,
+        cost,
+        counted,
+        AccountingBasis::SummedRequests,
+        coverage,
+    )
+    .map(|accounting| Accounting {
+        selection: Some(AccountingSelection::ActiveBranch),
+        ..accounting
     })
 }
 
@@ -934,6 +945,7 @@ fn apply_recording_usage(
     session.accounting = branch_accounting(
         usage.tokens.as_ref(),
         usage.cost.as_ref(),
+        &usage.measurement_coverage,
         branch_coverage(rooted, leaf_end, &read.gaps),
     );
     session.tokens = usage.tokens;
