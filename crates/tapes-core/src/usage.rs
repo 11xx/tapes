@@ -1540,8 +1540,8 @@ impl Tally {
     }
 
     /// Add sessions whose events overlap by their exact union: the union's
-    /// disjoint categories and cost, and each session's own accounting and
-    /// model facts. The sessions' native counters are not summed, because
+    /// disjoint categories, cost and the reasons its events are incompletely
+    /// measured, and each session's own accounting and model facts. The sessions' native counters are not summed, because
     /// they count the shared events once per session.
     fn add_union<'a>(
         &mut self,
@@ -1556,6 +1556,8 @@ impl Tally {
             count += 1;
         }
         self.disjoint.sessions += count;
+        self.measurement_completeness
+            .merge(&amounts.measurement_completeness);
         if let Some(harness) = harness {
             self.disjoint.add_disjoint(harness, &amounts.disjoint);
         }
