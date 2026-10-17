@@ -8080,6 +8080,18 @@ fn the_guide_names_where_a_plugin_steered_subagents_completion_comes_from() {
     assert!(text.contains("stopped on end_turn"), "{text}");
 }
 
+/// An agent that reads only the head of the guide still learns where picking
+/// up a session's work goes, short or long.
+#[test]
+fn the_guide_names_session_pickup_in_its_first_screen() {
+    let guide = tapes().output().unwrap();
+    let text = String::from_utf8_lossy(&guide.stdout);
+    let head: String = text.lines().take(40).collect::<Vec<_>>().join("\n");
+    assert!(head.contains("agent-delegate"), "{head}");
+    assert!(head.contains("pickup"), "{head}");
+    assert!(head.contains("tapes brief"), "{head}");
+}
+
 /// A continuation of a long session, or one with relatives, is pointed at
 /// agent-delegate pickup from the section that teaches continuing a session.
 #[test]

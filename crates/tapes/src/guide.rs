@@ -14,6 +14,13 @@ API, pi as an append-only tree. tapes finds one, normalizes it into a single mod
 hands it back. It never writes to a harness store, so no command here can
 disturb a live session.
 
+PICKING UP A SESSION'S WORK
+  Short and cold: `tapes brief <id|--latest>` (CONTINUE A COLD SESSION below).
+  Long, or with relatives, executors or delegated runs: `agent-delegate
+  pickup --latest --here --harness <h> --backend <scout backend>`, which
+  freezes it, fans cheap scouts over it and verifies their facts; bare
+  `agent-delegate` (PICK UP A SESSION) carries the procedure.
+
 SELECT A MATERIALIZED NATIVE STORE
   tapes list --native-store claude --native-root archive/claude --limit 5
   tapes show --native-store codex --native-root archive/codex --latest --tail 10
