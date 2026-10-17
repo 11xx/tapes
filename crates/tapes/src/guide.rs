@@ -517,8 +517,11 @@ PROBE BEFORE EXPORTING
   A summary adds sessions only where no recording relates them. Two sessions
   are related when one declares the other as its fork origin or parent (Codex
   `forked_from_id`, Pi's parent header, OpenCode `fork_session_id` and
-  `parent_id`), transitively, or when both recorded the same request id or
-  message uuid, which is how a Claude fork shows: it keeps its origin's ids.
+  `parent_id`), transitively, when both are forks of the same source (Codex
+  `forked_from_id`, Pi's parent header, OpenCode `fork_session_id`), whether
+  or not that source is selected, or when both recorded the same request id
+  or message uuid, which is how a Claude fork shows: it keeps its origin's
+  ids.
   Related sessions form an overlap group. A group of two whose consumption
   event keys establish their union adds by that exact union, its keys
   confined to each session's active branch like the counters beside it; a
@@ -528,8 +531,8 @@ PROBE BEFORE EXPORTING
   within a compatible accounting partition: at least the largest member of
   each group, at most the sum. A missing or partial counter leaves its upper
   bound unmeasured. `overlap.related` lists each group with its sessions, its
-  `evidence` (declared-fork, fork-origin-unplaced, shared-request-id,
-  shared-message-uuid), whether its `union` is exact or withheld, and why.
+  `evidence` (declared-fork, fork-origin-unplaced, shared-declared-origin,
+  shared-request-id, shared-message-uuid), whether its `union` is exact or withheld, and why.
   Unrelated sessions beside a withheld group stay summed in the bounds.
   `overlap.disjointness` states how the unrelated sessions and groups were
   added as disjoint, and is absent when every session is in one overlap

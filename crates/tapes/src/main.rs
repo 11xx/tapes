@@ -1461,10 +1461,12 @@ enum Command {
     /// stay private. Other bare references, such as parent.jsonl, are ids.
     /// Sessions a recording relates form overlap groups within a summary: one
     /// declares the other as its fork origin or parent (Codex `forked_from_id`,
-    /// Pi's parent header, OpenCode `fork_session_id` and `parent_id`), or both
-    /// recorded the same request id or message uuid, which is how a Claude fork
-    /// shows. An overlap group of two with consumption event keys adds by
-    /// their exact union over the sessions' active branches; otherwise the summary withholds its exact totals,
+    /// Pi's parent header, OpenCode `fork_session_id` and `parent_id`), both
+    /// are forks of the same source, selected or not, or both recorded the
+    /// same request id or message uuid, which is how a Claude fork shows. An
+    /// overlap group of two with consumption event keys adds by their exact
+    /// union over the sessions' active branches; otherwise the summary
+    /// withholds its exact totals,
     /// keeps `session_figures`, and reports per-counter `identity_bounds`
     /// within compatible accounting partitions, from the largest member of
     /// each group to the sum. An unmeasured or partial counter has no upper

@@ -29,6 +29,7 @@ use crate::model::{
     SourceDescriptor, Tokens, Transcript, Truncation, Turn, TurnKind, TurnSelection, TurnWindow,
     UserDefault,
 };
+use crate::overlap::DeclaredOrigin;
 use agent_tapes_discovery::{
     DiscoveryError, Harness as NativeHarness, NativeSession, NativeStore, NativeStoreKind,
     OpenCodeFlavor,
@@ -1343,11 +1344,11 @@ impl Backend for OpenCodeBackend {
     /// child's parent in `parent_id`; the listing's metadata carries neither.
     /// One query per page of ids reads both, and a store without the fork
     /// column answers the shorter query.
-    fn declared_origins(&self, sessions: &[&Session]) -> Result<Vec<Vec<String>>> {
+    fn declared_origins(&self, sessions: &[&Session]) -> Result<Vec<Vec<DeclaredOrigin>>> {
         if !self.uses_database() {
             return Ok(vec![Vec::new(); sessions.len()]);
         }
-        let mut declared: HashMap<String, Vec<String>> = HashMap::new();
+        let mut declared: HashMap<String, Vec<DeclaredOrigin>> = HashMap::new();
         for page in sessions.chunks(MAX_DB_SEARCH_IDS) {
             let ids = sql_id_list(
                 &page
@@ -1372,10 +1373,16 @@ impl Backend for OpenCodeBackend {
                 };
                 declared.insert(
                     id.to_owned(),
-                    ["fork_session_id", "parent_id"]
+                    // A fork holds a copy of its source's history; a child
+                    // only names the session that started it.
+                    [("fork_session_id", true), ("parent_id", false)]
                         .iter()
-                        .filter_map(|column| row[*column].as_str())
-                        .map(str::to_owned)
+                        .filter_map(|(column, copied)| {
+                            row[*column].as_str().map(|id| DeclaredOrigin {
+                                id: id.to_owned(),
+                                copied: *copied,
+                            })
+                        })
                         .collect(),
                 );
             }

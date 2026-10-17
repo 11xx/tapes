@@ -16,6 +16,7 @@ use crate::model::{
     ReadRange, ReadRangeKind, RecordRef, Session, SourceBound, TerminalObservation,
     TextTailEvidence, Tokens, TrailingRecord, Transcript, TranscriptEvidence, Truncation, Turn,
 };
+use crate::overlap::DeclaredOrigin;
 use crate::scope::Scope;
 use crate::usage::MeasurementCoverage;
 use agent_tapes_discovery::{
@@ -543,10 +544,11 @@ pub trait Backend {
         )
     }
     /// The sessions each of `sessions` is declared a fork of or child of, in
-    /// the same order, for a harness whose store records that outside the
+    /// the same order, each marked copied where the session holds a copy of
+    /// its history, for a harness whose store records that outside the
     /// recording a listing reads. The default declares none; a failed read
     /// leaves the answer to the listing's own evidence.
-    fn declared_origins(&self, sessions: &[&Session]) -> Result<Vec<Vec<String>>> {
+    fn declared_origins(&self, sessions: &[&Session]) -> Result<Vec<Vec<DeclaredOrigin>>> {
         Ok(vec![Vec::new(); sessions.len()])
     }
     /// Every relationship the whole recording names, read record by record so

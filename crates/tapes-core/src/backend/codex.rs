@@ -169,14 +169,16 @@ impl CodexBackend {
             occurrence: None,
             usage_detail: facts.usage_detail,
         };
+        let forked_from: Vec<String> = opening
+            .iter()
+            .find(|value| value["type"] == "session_meta")
+            .and_then(|value| value["payload"]["forked_from_id"].as_str())
+            .map(str::to_owned)
+            .into_iter()
+            .collect();
         session.record_copy_evidence(CopyEvidence {
-            origins: opening
-                .iter()
-                .find(|value| value["type"] == "session_meta")
-                .and_then(|value| value["payload"]["forked_from_id"].as_str())
-                .map(str::to_owned)
-                .into_iter()
-                .collect(),
+            origins: forked_from.clone(),
+            copied_origins: forked_from,
             ..CopyEvidence::default()
         });
         // The opening is the start of the file, so its first user turn is the

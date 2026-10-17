@@ -835,7 +835,8 @@ fn pi_cwd(value: &Value) -> Option<&str> {
 fn pi_copy_evidence(parent: Option<Option<String>>) -> CopyEvidence {
     CopyEvidence {
         origin_unplaced: parent == Some(None),
-        origins: parent.flatten().into_iter().collect(),
+        origins: parent.clone().flatten().into_iter().collect(),
+        copied_origins: parent.flatten().into_iter().collect(),
         ..CopyEvidence::default()
     }
 }

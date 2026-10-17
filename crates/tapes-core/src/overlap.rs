@@ -3,8 +3,9 @@
 //! A summary adds sessions' figures, so a session that holds a copy of
 //! another's history would be counted twice. Two sessions are related when
 //! the recordings say so: one declares the other as its fork origin or
-//! parent, or both recorded the same request id or message uuid. Relatedness
-//! is transitive, so related sessions form overlap groups. Sessions no
+//! parent, both are forks of the same source, selected or not, or both
+//! recorded the same request id or message uuid. Relatedness is transitive,
+//! so related sessions form overlap groups. Sessions no
 //! evidence relates are added as disjoint, and the summary says that
 //! disjointness is inferred from the absence of copy evidence.
 
@@ -71,6 +72,10 @@ impl Witnesses {
 pub struct CopyEvidence {
     /// The sessions the recording declares as its fork origin or parent.
     pub origins: Vec<String>,
+    /// The declared origins whose history the recording holds a copy of, as
+    /// a fork holds its source's. Two sessions copying the same origin share
+    /// that history.
+    pub copied_origins: Vec<String>,
     /// The recording says it is a fork, but names no origin that can be
     /// identified, so any session of its harness may hold the history it
     /// copied.
@@ -117,17 +122,28 @@ impl Session {
     }
 }
 
+/// A session a store declares another one a fork or child of.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DeclaredOrigin {
+    pub id: String,
+    /// The declaring session holds a copy of the origin's history.
+    pub copied: bool,
+}
+
 impl Session {
     /// Note sessions the store declares this one a fork or child of.
-    pub(crate) fn declare_origins(&mut self, origins: Vec<String>) {
+    pub(crate) fn declare_origins(&mut self, origins: Vec<DeclaredOrigin>) {
         if origins.is_empty() {
             return;
         }
         let detail = self.usage_detail.get_or_insert_with(Default::default);
         let evidence = detail.copy_evidence.get_or_insert_with(Default::default);
         for origin in origins {
-            if !evidence.origins.contains(&origin) {
-                evidence.origins.push(origin);
+            if origin.copied && !evidence.copied_origins.contains(&origin.id) {
+                evidence.copied_origins.push(origin.id.clone());
+            }
+            if !evidence.origins.contains(&origin.id) {
+                evidence.origins.push(origin.id);
             }
         }
     }
@@ -143,6 +159,9 @@ pub enum OverlapEvidence {
     /// A recording declares a fork whose origin it does not identify, so it
     /// cannot be shown apart from any session of its harness.
     ForkOriginUnplaced,
+    /// Both recordings declare themselves forks of the same source, so each
+    /// holds a copy of its history, whether or not the source is selected.
+    SharedDeclaredOrigin,
     /// Both recordings hold the same request id.
     SharedRequestId,
     /// Both recordings hold the same message uuid.
@@ -309,10 +328,23 @@ impl Overlap {
                 .or_default()
                 .push(index);
         }
+        let mut siblings: HashMap<(&str, &str), usize> = HashMap::new();
         for (index, session) in sessions.iter().enumerate() {
             let Some(evidence) = evidence_of(session) else {
                 continue;
             };
+            for origin in &evidence.copied_origins {
+                match siblings.get(&(session.harness(), origin.as_str())) {
+                    Some(&first) if first != index => {
+                        components.join(first, index);
+                        edges.push((index, OverlapEvidence::SharedDeclaredOrigin));
+                    }
+                    Some(_) => {}
+                    None => {
+                        siblings.insert((session.harness(), origin.as_str()), index);
+                    }
+                }
+            }
             for origin in &evidence.origins {
                 for other in by_id
                     .get(&(session.harness(), origin.as_str()))
