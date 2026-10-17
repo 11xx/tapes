@@ -520,7 +520,9 @@ PROBE BEFORE EXPORTING
   `parent_id`), transitively, or when both recorded the same request id or
   message uuid, which is how a Claude fork shows: it keeps its origin's ids.
   Related sessions form an overlap group. A group of two whose consumption
-  event keys establish their union adds by that exact union; any other group
+  event keys establish their union adds by that exact union, its keys
+  confined to each session's active branch like the counters beside it; a
+  fork's verified copy of an entry its parent rewound past counts once; any other group
   withholds the summary's exact token, cost and disjoint totals, keeps each
   session's own figure in `session_figures`, and reports `identity_bounds`
   within a compatible accounting partition: at least the largest member of
@@ -775,7 +777,9 @@ PROBE BEFORE EXPORTING
   not record is absent, never zero. A measurement is omitted with its key, so
   `omissions` account for both, and it carries no recording locator. The
   digest covers the amounts, so a verified copy holds its source's
-  measurement. `session_id`, `forked_from` and `basis` name the selection.
+  measurement. `session_id`, `forked_from` and `basis` name the selection,
+  and `selection: retained-branches` its branch domain: these keys cover
+  every retained branch, as `consumption` does.
   `ConsumptionEventKeys::union` in tapes-core takes two selections' keys and
   measurements and computes their union exactly only when every key of both
   is present and measured, both reads cover their recordings with no
@@ -787,7 +791,8 @@ PROBE BEFORE EXPORTING
   subtotal named in `measurement_completeness`, and the total is withheld.
   Otherwise `withheld` names why (omitted-keys, incomplete-read,
   unmeasured-event, unrecognized-usage, mixed-basis, unestablished-lineage, unverified-copies,
-  unestablished-identity), each selection keeps its own figure, and `bounds`
+  unestablished-identity, mixed-selection for keys of different branch
+  domains), each selection keeps its own figure, and `bounds`
   give at-least and at-most per category and cost: at least the larger known
   amount, at most their sum only when every key of both is present, neither
   read holds unrecognized usage, and every event measured that category or

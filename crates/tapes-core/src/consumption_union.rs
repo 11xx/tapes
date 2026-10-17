@@ -11,7 +11,9 @@ use std::collections::BTreeSet;
 use serde::Serialize;
 
 use crate::measurement::MeasurementCompleteness;
-use crate::model::{AccountingCoverage, CacheWrites, Cost, CostCoverage, DisjointTokens};
+use crate::model::{
+    AccountingCoverage, AccountingSelection, CacheWrites, Cost, CostCoverage, DisjointTokens,
+};
 use crate::usage::{ConsumptionEventKey, ConsumptionEventKeys, QuantityBounds};
 
 /// Why a union's exact amounts are withheld. The set is fixed and carries no
@@ -32,6 +34,9 @@ pub enum UnionWithheld {
     UnrecognizedUsage,
     /// The selections are of different accounting bases or token conventions.
     MixedBasis,
+    /// The selections cover different branch domains: one the active branch,
+    /// the other every retained branch.
+    MixedSelection,
     /// Neither selection is established as the other's fork parent, so the
     /// events they share are unknown.
     UnestablishedLineage,
@@ -120,6 +125,9 @@ impl ConsumptionEventKeys {
         if self.basis != other.basis {
             withheld.insert(UnionWithheld::MixedBasis);
         }
+        if self.selection != other.selection {
+            withheld.insert(UnionWithheld::MixedSelection);
+        }
         let bounds = bounds(self, other);
         let events = if names(self.forked_from.as_deref(), other.session_id.as_deref()) {
             distinct_events(other, self, &mut withheld)
@@ -166,7 +174,9 @@ fn names(parent: Option<&str>, session: Option<&str>) -> bool {
 }
 
 /// The parent's events and the fork's own, each once, or nothing when the
-/// fork's copies of its parent's events are not established.
+/// fork's copies of its parent's events are not established. A verified copy
+/// of a parent event off the parent's active branch is in the fork's active
+/// domain alone, so an active-branch union counts it from the fork.
 fn distinct_events<'a>(
     parent: &'a ConsumptionEventKeys,
     fork: &'a ConsumptionEventKeys,
@@ -185,7 +195,11 @@ fn distinct_events<'a>(
                     candidate.recording_entry.as_ref() == Some(copy)
                         && candidate.entry_digest == key.entry_digest
                 });
-                if !held {
+                let off_branch = parent.selection == AccountingSelection::ActiveBranch
+                    && fork.selection == AccountingSelection::ActiveBranch;
+                if !held && off_branch {
+                    events.push(key);
+                } else if !held {
                     withheld.insert(UnionWithheld::UnverifiedCopies);
                 }
             }

@@ -9,8 +9,12 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use agent_tapes_core::backend::{pi::PiBackend, Backend};
 use agent_tapes_core::consumption_union::UnionWithheld;
 use agent_tapes_core::measurement::MeasurementReason;
+use agent_tapes_core::model::AccountingSelection;
 use agent_tapes_core::usage::{ConsumptionEventKeys, ConsumptionKeyOptions, UsageOptions};
-use agent_tapes_core::{usage_with_options_with_backends, Selection};
+use agent_tapes_core::{
+    usage_summary_with_backends, usage_with_options_with_backends, Selection, SessionSelection,
+};
+use serde_json::Value;
 
 const PARENT: &str = "2026-01-15T10-00-00-000Z_keys-parent.jsonl";
 const FORK: &str = "2026-01-15T11-00-00-000Z_keys-fork.jsonl";
@@ -60,6 +64,48 @@ impl Store {
             lines.insert(at + 1, line);
             lines.join("\n") + "\n"
         });
+    }
+
+    fn backends(&self) -> Vec<Box<dyn Backend>> {
+        vec![Box::new(PiBackend::new(&self.0))]
+    }
+
+    /// `id`'s keys over `selection`'s branches, against the read a usage
+    /// view of the session makes.
+    fn selected(
+        &self,
+        id: &str,
+        full: bool,
+        selection: AccountingSelection,
+    ) -> ConsumptionEventKeys {
+        let backend = PiBackend::new(&self.0);
+        let session = backend.locate(id).unwrap().unwrap();
+        let read = full.then(|| {
+            backend
+                .stream_transcript(&session, None, &mut |_| Ok(()))
+                .unwrap()
+                .read_evidence(None)
+        });
+        backend
+            .selected_consumption_event_keys(
+                &session,
+                read.as_ref(),
+                ConsumptionKeyOptions { limit: 200 },
+                selection,
+            )
+            .unwrap()
+    }
+
+    fn summary(&self) -> Value {
+        let selection = SessionSelection {
+            harness: Some("pi"),
+            limit: Some(20),
+            ..Default::default()
+        };
+        serde_json::to_value(
+            usage_summary_with_backends(&self.backends(), &selection, &[]).unwrap(),
+        )
+        .unwrap()
     }
 
     fn keys(&self, id: &str, full: bool) -> ConsumptionEventKeys {
@@ -203,4 +249,122 @@ fn unrecognized_usage_withholds_the_exact_union_and_its_upper_bounds() {
             assert_eq!(parent.keys, clean.keys("keys-parent", full).keys, "{label}");
         }
     }
+}
+
+/// A measured parent request on a branch the parent rewound past.
+const ABANDONED_REQUEST: &str = r#"{"type":"message","id":"parent-abandoned","parentId":"shared-request","timestamp":"2026-01-15T10:00:01Z","message":{"role":"assistant","provider":"fixture-provider","model":"fixture-model","responseId":"response-abandoned","stopReason":"stop","usage":{"input":50,"output":5,"reasoning":0,"cacheRead":0,"cacheWrite":0,"totalTokens":55,"cost":{"total":0.625}},"content":[{"type":"text","text":"An abandoned response."}]}}"#;
+
+/// An unrelated session whose leaf rewound past a large measured request.
+const OTHER: &str = "2026-01-15T12-00-00-000Z_keys-other.jsonl";
+const OTHER_LINES: &str = concat!(
+    r#"{"type":"session","version":3,"id":"keys-other","timestamp":"2026-01-15T12:00:00Z","cwd":"/fixtures/project"}"#,
+    "\n",
+    r#"{"type":"message","id":"other-root","parentId":null,"timestamp":"2026-01-15T12:00:01Z","message":{"role":"assistant","provider":"fixture-provider","model":"fixture-model","responseId":"response-other-root","stopReason":"stop","usage":{"input":2,"output":1,"reasoning":0,"cacheRead":0,"cacheWrite":0,"totalTokens":3,"cost":{"total":0.25}},"content":[]}}"#,
+    "\n",
+    r#"{"type":"message","id":"other-abandoned","parentId":"other-root","timestamp":"2026-01-15T12:00:02Z","message":{"role":"assistant","provider":"fixture-provider","model":"fixture-model","responseId":"response-other-abandoned","stopReason":"stop","usage":{"input":100,"output":100,"reasoning":0,"cacheRead":0,"cacheWrite":0,"totalTokens":200,"cost":{"total":8}},"content":[]}}"#,
+    "\n",
+    r#"{"type":"message","id":"other-leaf","parentId":"other-root","timestamp":"2026-01-15T12:00:03Z","message":{"role":"assistant","provider":"fixture-provider","model":"fixture-model","responseId":"response-other-leaf","stopReason":"stop","usage":{"input":4,"output":1,"reasoning":0,"cacheRead":0,"cacheWrite":0,"totalTokens":5,"cost":{"total":0.25}},"content":[]}}"#,
+    "\n",
+);
+
+#[test]
+fn an_overlap_union_adds_active_branch_amounts_beside_unrelated_sessions() {
+    let store = Store::new("domain-summary");
+    store.insert(PARENT, r#""id":"shared-request""#, ABANDONED_REQUEST);
+    fs::write(store.0.join(OTHER), OTHER_LINES).unwrap();
+    let value = store.summary();
+    let totals = &value["totals"];
+    let related = &totals["overlap"]["related"];
+    assert_eq!(related[0]["union"], "exact", "{totals}");
+    // The pair's active branches hold four events; the unrelated session's
+    // active branch holds two. Neither abandoned request is counted.
+    assert_eq!(totals["sessions"], 3, "{totals}");
+    assert_eq!(totals["cost"]["usd"], 1.25 + 0.5, "{totals}");
+    assert_eq!(totals["disjoint"]["uncached_input"], 100 + 6, "{totals}");
+    assert_eq!(totals["disjoint"]["total"], 110 + 8, "{totals}");
+    let partitions = value["partitions"].as_array().unwrap();
+    assert!(!partitions.is_empty(), "{value}");
+    for partition in partitions {
+        assert_eq!(
+            partition["accounting"]["selection"], "active-branch",
+            "{partition}"
+        );
+    }
+}
+
+#[test]
+fn keys_name_their_branch_domain_and_unions_stay_within_it() {
+    let store = Store::new("domain-keys");
+    store.insert(PARENT, r#""id":"shared-request""#, ABANDONED_REQUEST);
+    for full in [false, true] {
+        let label = format!("full={full}");
+        let active = |id| store.selected(id, full, AccountingSelection::ActiveBranch);
+        let (parent, fork) = (active("keys-parent"), active("keys-fork"));
+        assert_eq!(parent.selection, AccountingSelection::ActiveBranch);
+        assert_eq!(parent.observed, Some(3), "{label}");
+        assert!(parent
+            .keys
+            .iter()
+            .all(|key| key.response_id.as_deref() != Some("response-abandoned")));
+        for union in [parent.union(&fork), fork.union(&parent)] {
+            let amounts = union.amounts.expect(&label);
+            assert_eq!(amounts.events, 4, "{label}");
+            assert_eq!(amounts.cost.unwrap().usd, 1.25, "{label}");
+            assert_eq!(amounts.disjoint.total, Some(110), "{label}");
+        }
+        // The retained surface names its selection and holds the abandoned
+        // request.
+        let retained = store.keys("keys-parent", full);
+        assert_eq!(retained.selection, AccountingSelection::RetainedBranches);
+        let json = serde_json::to_value(&retained).unwrap();
+        assert_eq!(json["selection"], "retained-branches", "{label}");
+        let union = retained.union(&store.keys("keys-fork", full));
+        assert_eq!(union.amounts.unwrap().events, 5, "{label}");
+        let mixed = retained.union(&fork);
+        assert!(mixed.amounts.is_none(), "{label}");
+        assert_eq!(mixed.withheld, [UnionWithheld::MixedSelection], "{label}");
+    }
+}
+
+#[test]
+fn a_fork_copy_of_an_entry_its_parent_rewound_past_counts_once() {
+    // The parent rewinds past the compaction its fork copied.
+    let store = Store::new("domain-rewound");
+    store.edit(PARENT, |text| {
+        text.replace(
+            r#""id":"parent-request","parentId":"shared-compaction""#,
+            r#""id":"parent-request","parentId":"shared-request""#,
+        )
+    });
+    for full in [false, true] {
+        let active = |id| store.selected(id, full, AccountingSelection::ActiveBranch);
+        let (parent, fork) = (active("keys-parent"), active("keys-fork"));
+        assert_eq!(parent.observed, Some(2));
+        for union in [parent.union(&fork), fork.union(&parent)] {
+            let amounts = union.amounts.expect("exact active union");
+            assert_eq!(amounts.events, 4);
+            assert_eq!(amounts.disjoint.total, Some(110));
+            assert_eq!(amounts.cost.unwrap().usd, 1.25);
+        }
+    }
+}
+
+#[test]
+fn unrecognized_usage_off_the_active_branch_leaves_the_active_union_exact() {
+    let store = Store::new("domain-unrecognized");
+    store.insert(PARENT, MYSTERY_ABANDONED.0, MYSTERY_ABANDONED.1);
+    for full in [false, true] {
+        let active = |id| store.selected(id, full, AccountingSelection::ActiveBranch);
+        let parent = active("keys-parent");
+        assert_eq!(parent.unrecognized_usage, Some(0));
+        let union = parent.union(&active("keys-fork"));
+        assert_eq!(union.amounts.expect("exact").events, 4);
+    }
+    // On the active branch it withholds the active union too.
+    let store = Store::new("domain-unrecognized-active");
+    store.insert(PARENT, MYSTERY_ACTIVE.0, MYSTERY_ACTIVE.1);
+    let parent = store.selected("keys-parent", false, AccountingSelection::ActiveBranch);
+    let union =
+        parent.union(&store.selected("keys-fork", false, AccountingSelection::ActiveBranch));
+    assert_eq!(union.withheld, [UnionWithheld::UnrecognizedUsage]);
 }

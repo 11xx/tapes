@@ -597,6 +597,10 @@ pub struct ConsumptionEventKeys {
     /// The basis the keys' measurements are on: amounts of different bases
     /// never join one union.
     pub basis: AccountingBasis,
+    /// The branches the keys and their figures cover: the active branch the
+    /// session's own counters sum, or every retained branch its consumption
+    /// sums. Selections of different branch domains never join one union.
+    pub selection: crate::model::AccountingSelection,
     pub keys: Vec<ConsumptionEventKey>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub observed: Option<usize>,

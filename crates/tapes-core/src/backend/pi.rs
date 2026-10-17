@@ -341,13 +341,14 @@ impl Backend for PiBackend {
         true
     }
 
-    fn consumption_event_keys(
+    fn selected_consumption_event_keys(
         &self,
         session: &Session,
         read: Option<&crate::model::ReadEvidence>,
         options: crate::usage::ConsumptionKeyOptions,
+        selection: AccountingSelection,
     ) -> Result<crate::usage::ConsumptionEventKeys> {
-        consumption_keys::read_keys(self, session, read, options)
+        consumption_keys::read_keys(self, session, read, options, selection)
     }
 
     fn stream_transcript(

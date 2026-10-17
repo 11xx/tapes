@@ -1,18 +1,21 @@
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::path::Path;
 
 use anyhow::{anyhow, Result};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-use super::{pi_consumed, pi_parent_id, pi_unread_usage, PiBackend, PiConsumed, PiConsumption};
+use super::{
+    active_branch, branch_coverage, pi_consumed, pi_parent_id, pi_unread_usage, PiBackend,
+    PiConsumed, PiConsumption,
+};
 use crate::backend::{
     read_recording, read_recording_at, stream_jsonl, validate_native_identity, ReadPin,
 };
 use crate::measurement::{Measured, MeasurementCompleteness, MeasurementReason};
 use crate::model::{
-    AccountingBasis, AccountingCoverage, Cost, CostCoverage, DisjointTokens, ReadEvidence, Session,
-    TokenConvention, Tokens,
+    AccountingBasis, AccountingCoverage, AccountingSelection, Cost, CostCoverage, DisjointTokens,
+    ReadEvidence, Session, TokenConvention, Tokens,
 };
 use crate::usage::{
     ConsumptionCopyCoverage, ConsumptionEventKey, ConsumptionEventKeys,
@@ -48,21 +51,26 @@ pub(super) fn read_keys(
     session: &Session,
     evidence: Option<&ReadEvidence>,
     options: ConsumptionKeyOptions,
+    selection: AccountingSelection,
 ) -> Result<ConsumptionEventKeys> {
     if !(1..=10_000).contains(&options.limit) {
         anyhow::bail!("consumption event keys must be between 1 and 10000");
     }
     Ok(
-        read_keys_at(backend, session, evidence, options).unwrap_or_else(|_| {
+        read_keys_at(backend, session, evidence, options, selection).unwrap_or_else(|_| {
             let observed = session
                 .usage_detail
                 .as_ref()
                 .and_then(|detail| detail.consumption.as_ref())
-                .map(|consumption| consumption.events.counted);
+                .map(|consumption| match selection {
+                    AccountingSelection::ActiveBranch => consumption.events.active_branch,
+                    AccountingSelection::RetainedBranches => consumption.events.counted,
+                });
             ConsumptionEventKeys {
                 session_id: public_id(&session.id).then(|| session.id.clone()),
                 forked_from: None,
                 basis: AccountingBasis::SummedRequests,
+                selection,
                 keys: Vec::new(),
                 observed,
                 returned: 0,
@@ -86,8 +94,10 @@ fn read_keys_at(
     session: &Session,
     evidence: Option<&ReadEvidence>,
     options: ConsumptionKeyOptions,
+    selection: AccountingSelection,
 ) -> Result<ConsumptionEventKeys> {
     let path = backend.recording(session)?;
+    let active_only = selection == AccountingSelection::ActiveBranch;
     let mut buffer = KeyBuffer::new(options.limit);
     let mut consumed = PiConsumption::default();
     let mut parent = None;
@@ -97,7 +107,7 @@ fn read_keys_at(
             .iter()
             .any(|option| option == "full")
     });
-    let mut observe = |entry: &Value| -> Result<()> {
+    let mut observe = |entry: &Value, branch: Option<&HashSet<String>>| -> Result<()> {
         validate_native_identity(entry, "pi", &session.id)?;
         if entry["type"] == "session" {
             let observed = ForkSource::observed(entry);
@@ -105,6 +115,11 @@ fn read_keys_at(
                 Some(previous) if previous != observed => ForkSource::Unestablished,
                 _ => observed,
             });
+            return Ok(());
+        }
+        if branch.is_some_and(|branch| !entry["id"].as_str().is_some_and(|id| branch.contains(id)))
+        {
+            return Ok(());
         }
         unrecognized += usize::from(pi_unread_usage(entry));
         if let Some(event) = pi_consumed(entry) {
@@ -128,11 +143,17 @@ fn read_keys_at(
                     anyhow!("the full usage read has no prefix integrity evidence")
                 })?),
             };
+        let branch = active_only
+            .then(|| streamed_branch(&path, pin))
+            .transpose()?;
         let streamed = stream_jsonl(&path, Some(pin), |entry, _, _| {
-            observe(entry)?;
+            observe(entry, branch.as_ref().map(|(ids, _)| ids))?;
             Ok(false)
         })?;
-        (AccountingCoverage::Session, streamed.skipped)
+        (
+            branch.map_or(AccountingCoverage::Session, |(_, coverage)| coverage),
+            streamed.skipped,
+        )
     } else {
         let recording = if let Some(evidence) = evidence {
             read_recording_at(&path, evidence)?
@@ -140,21 +161,45 @@ fn read_keys_at(
             read_recording(&path, backend.read_bytes)?
         };
         crate::backend::validate_recording_identity(&recording, "pi", &session.id)?;
+        let read = &recording.tail;
+        let branch = active_only.then(|| {
+            let entries = read
+                .values
+                .iter()
+                .filter(|value| value["type"] != "session")
+                .collect::<Vec<_>>();
+            let (active, rooted) = active_branch(&entries);
+            let leaf_end = read
+                .values
+                .iter()
+                .zip(&read.spans)
+                .rfind(|(value, _)| value["type"] != "session")
+                .map(|(_, span)| span.end);
+            let ids = active
+                .iter()
+                .filter_map(|entry| entry["id"].as_str().map(str::to_owned))
+                .collect::<HashSet<_>>();
+            (ids, branch_coverage(rooted, leaf_end, &read.gaps))
+        });
         for entry in recording
             .opening()
             .iter()
             .filter(|entry| entry["type"] == "session")
-            .chain(&recording.tail.values)
+            .chain(&read.values)
         {
-            observe(entry)?;
+            observe(entry, branch.as_ref().map(|(ids, _)| ids))?;
         }
+        let coverage = if read.truncated {
+            AccountingCoverage::ReadWindow
+        } else {
+            AccountingCoverage::Session
+        };
         (
-            if recording.tail.truncated {
-                AccountingCoverage::ReadWindow
-            } else {
-                AccountingCoverage::Session
+            match branch {
+                Some((_, branch)) if coverage == AccountingCoverage::Session => branch,
+                _ => coverage,
             },
-            recording.tail.skipped,
+            read.skipped,
         )
     };
     let forked_from = match &parent {
@@ -173,6 +218,7 @@ fn read_keys_at(
         session_id: public_id(&session.id).then(|| session.id.clone()),
         forked_from,
         basis: AccountingBasis::SummedRequests,
+        selection,
         observed: Some(consumed.events.counted),
         returned: keys.len(),
         keys,
@@ -184,6 +230,39 @@ fn read_keys_at(
         copy_coverage,
         copy_conflicts,
     })
+}
+
+/// The ids on the active branch of a pinned recording, and how much of that
+/// branch the recording establishes, read in a pass of its own so the key
+/// pass can confine itself to the branch.
+fn streamed_branch(path: &Path, pin: ReadPin<'_>) -> Result<(HashSet<String>, AccountingCoverage)> {
+    let mut parents = HashMap::<String, Option<String>>::new();
+    let mut leaf = None;
+    let streamed = stream_jsonl(path, Some(pin), |entry, span, _| {
+        if entry["type"] != "session" {
+            let id = entry["id"].as_str().map(str::to_owned);
+            if let Some(id) = &id {
+                parents.insert(id.clone(), entry["parentId"].as_str().map(str::to_owned));
+            }
+            leaf = Some((id, span.end));
+        }
+        Ok(false)
+    })?;
+    let mut ids = HashSet::new();
+    let mut rooted = false;
+    let mut current = leaf.as_ref().and_then(|(id, _)| id.clone());
+    while let Some(id) = current {
+        let Some(parent) = parents.get(&id) else {
+            break;
+        };
+        if !ids.insert(id) {
+            break;
+        }
+        rooted = parent.is_none();
+        current = parent.clone();
+    }
+    let coverage = branch_coverage(rooted, leaf.map(|(_, end)| end), &streamed.gaps);
+    Ok((ids, coverage))
 }
 
 /// Portable identity fields exclude path syntax, whitespace and diagnostics.

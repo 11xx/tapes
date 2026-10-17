@@ -1943,13 +1943,15 @@ pub fn usage_summary_with_backends(
     let overlap = overlap::Overlap::of(&sessions, &mut |index| {
         let backend = backends[listed.origins[index]].as_ref();
         let transcript = declared_transcript(backend, &sessions[index], EXPORT_TAIL).ok()?;
+        // The session figures a union joins sum the active branch.
         backend
-            .consumption_event_keys(
+            .selected_consumption_event_keys(
                 &transcript.session,
                 transcript.read.as_ref(),
                 usage::ConsumptionKeyOptions {
                     limit: OVERLAP_KEY_LIMIT,
                 },
+                model::AccountingSelection::ActiveBranch,
             )
             .ok()
     });

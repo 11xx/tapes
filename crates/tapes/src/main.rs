@@ -1464,7 +1464,7 @@ enum Command {
     /// Pi's parent header, OpenCode `fork_session_id` and `parent_id`), or both
     /// recorded the same request id or message uuid, which is how a Claude fork
     /// shows. An overlap group of two with consumption event keys adds by
-    /// their exact union; otherwise the summary withholds its exact totals,
+    /// their exact union over the sessions' active branches; otherwise the summary withholds its exact totals,
     /// keeps `session_figures`, and reports per-counter `identity_bounds`
     /// within compatible accounting partitions, from the largest member of
     /// each group to the sum. An unmeasured or partial counter has no upper
@@ -1550,7 +1550,8 @@ enum Command {
         /// are counted, while measurements cover the whole read. Provider
         /// account equality is unestablished. Recording coordinates are local;
         /// copy_of verifies a matching consumption entry in the named parent.
-        /// Keys contain ids and digests, without recording paths or diagnostics.
+        /// Keys contain ids and digests, without recording paths or diagnostics,
+        /// and cover every retained branch (selection: retained-branches).
         /// Copy coverage and conflicts qualify cross-recording equality.
         /// Unavailable key sources retain measurements and use a fixed reason.
         /// Each key carries its event's own measurement: disjoint token

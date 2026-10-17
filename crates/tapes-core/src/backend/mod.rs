@@ -512,14 +512,31 @@ pub trait Backend {
         )
     }
     /// Read bounded consumption identities against the caller's own source
-    /// evidence. Unsupported backends refuse only this opt-in surface.
+    /// evidence, over every retained branch. Unsupported backends refuse only
+    /// this opt-in surface.
     fn consumption_event_keys(
         &self,
         session: &Session,
         read: Option<&crate::model::ReadEvidence>,
         options: crate::usage::ConsumptionKeyOptions,
     ) -> Result<crate::usage::ConsumptionEventKeys> {
-        let _ = (session, read, options);
+        self.selected_consumption_event_keys(
+            session,
+            read,
+            options,
+            crate::model::AccountingSelection::RetainedBranches,
+        )
+    }
+    /// Consumption identities confined to `selection`'s branches, so a union
+    /// of them lies in the same accounting domain as the figures it joins.
+    fn selected_consumption_event_keys(
+        &self,
+        session: &Session,
+        read: Option<&crate::model::ReadEvidence>,
+        options: crate::usage::ConsumptionKeyOptions,
+        selection: crate::model::AccountingSelection,
+    ) -> Result<crate::usage::ConsumptionEventKeys> {
+        let _ = (session, read, options, selection);
         anyhow::bail!(
             "{} sessions do not support consumption event keys",
             self.harness()
