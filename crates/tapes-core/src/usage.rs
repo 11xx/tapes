@@ -904,6 +904,7 @@ struct ReadFacts {
 
 fn project(session: &Session, turns: TurnTally, facts: ReadFacts) -> UsageView {
     let mut detail = session.usage_detail.clone().unwrap_or_default();
+    let session_wide = session.session_wide_reasons();
     let shared = session.shared_model_reasons();
     let scope = match &detail.attribution {
         Some(attribution) => Some(attribution.coverage),
@@ -923,6 +924,7 @@ fn project(session: &Session, turns: TurnTally, facts: ReadFacts) -> UsageView {
             events: attribution.unattributed,
             ..Measured::default()
         });
+        attribution.unattributed_completeness.merge(&session_wide);
     }
     if let Some(recorded) = &mut detail.recorded_total {
         for model in recorded.by_model.iter_mut().flatten() {
@@ -1021,13 +1023,7 @@ impl Session {
     /// Reasons that qualify every model's share, because the read could not
     /// place them on one model.
     fn shared_model_reasons(&self) -> MeasurementCompleteness {
-        let mut shared = MeasurementCompleteness::default();
-        if self.request_failures() > 0 {
-            shared.qualify_all(MeasurementReason::StoppedAttempt);
-        }
-        if self.unrecognized_usage() > 0 {
-            shared.qualify_all(MeasurementReason::UnrecognizedUsage);
-        }
+        let mut shared = self.session_wide_reasons();
         let attribution = self
             .usage_detail
             .as_ref()
@@ -1038,6 +1034,20 @@ impl Session {
             shared.qualify_all(MeasurementReason::IncompleteAttribution);
         }
         shared
+    }
+
+    /// The reasons no part of the session's usage can be spared: a failed
+    /// request or unrecognized usage belongs to no established model, so any
+    /// model's share and the unattributed share alike may lack it.
+    fn session_wide_reasons(&self) -> MeasurementCompleteness {
+        let mut reasons = MeasurementCompleteness::default();
+        if self.request_failures() > 0 {
+            reasons.qualify_all(MeasurementReason::StoppedAttempt);
+        }
+        if self.unrecognized_usage() > 0 {
+            reasons.qualify_all(MeasurementReason::UnrecognizedUsage);
+        }
+        reasons
     }
 
     fn unrecognized_usage(&self) -> usize {

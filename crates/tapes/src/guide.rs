@@ -595,7 +595,10 @@ PROBE BEFORE EXPORTING
   disjoint total and an identity upper bound need complete counters, and a
   stats cache ratio needs complete input and cache counters. A model split
   carries its own reasons plus those no single model can be spared: the
-  read's coverage, failed requests, incomplete attribution. One model's
+  read's coverage, failed requests, unrecognized usage, incomplete
+  attribution. The unattributed share (`attribution.unattributed_completeness`)
+  carries its own reasons, the read's coverage, failed requests and
+  unrecognized usage, but not incomplete attribution. One model's
   stopped request leaves another model's figure whole, and one session's
   reasons leave another session's figure and group whole.
   `read.unmapped` counts records by type and says nothing of their usage, so

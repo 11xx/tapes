@@ -6,7 +6,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use agent_tapes_core::backend::{claude::ClaudeBackend, Backend};
+use agent_tapes_core::backend::{claude::ClaudeBackend, codex::CodexBackend, Backend};
 use agent_tapes_core::measurement::{Measured, MeasurementCompleteness, MeasurementReason};
 use agent_tapes_core::model::{AccountingCoverage, CostCoverage};
 use agent_tapes_core::usage::{self, GroupBy, MeasurementCoverage};
@@ -289,4 +289,60 @@ fn a_claude_session_whose_requests_all_lack_usage_is_qualified_everywhere() {
             .all(|counter| reasons(&group["measurement_completeness"], counter).is_empty()),
         "{group}"
     );
+}
+
+fn codex_unattributed(extra: &[Value], full: bool) -> Value {
+    let id = "70000000-0000-0000-0000-0000000000c1";
+    let store = Store::new("codex-unattributed");
+    // No `turn_context`: the response is attributed to no model.
+    let mut lines = vec![
+        json!({"type": "session_meta", "payload": {"id": id, "timestamp": "2026-01-01T10:00:00Z"}}),
+        json!({"type": "token_usage_record", "payload": {"response_id": "response-0", "usage": {
+            "input_tokens": 10, "output_tokens": 4, "reasoning_output_tokens": 2,
+            "cached_input_tokens": 3, "cache_write_input_tokens": 5}}}),
+    ];
+    lines.extend_from_slice(extra);
+    store.write(
+        &format!("2026/01/01/rollout-2026-01-01T10-00-00-{id}.jsonl"),
+        &lines,
+    );
+    let backends: Vec<Box<dyn Backend>> = vec![Box::new(CodexBackend::new(&store.0))];
+    let view = if full {
+        usage_full_with_backends(&backends, Selection::Id(id)).unwrap()
+    } else {
+        usage_with_backends(&backends, Selection::Id(id)).unwrap()
+    };
+    serde_json::to_value(view).unwrap()
+}
+
+#[test]
+fn codex_unattributed_usage_follows_unrecognized_usage() {
+    let unknown =
+        json!({"type": "event_msg", "payload": {"type": "mystery", "usage": {"input_tokens": 7}}});
+    let lifecycle = json!({"type": "event_msg", "payload": {"type": "task_started"}});
+    for full in [false, true] {
+        let figure = codex_unattributed(std::slice::from_ref(&unknown), full);
+        let attribution = &figure["attribution"];
+        assert_eq!(attribution["unattributed"], 1, "{figure}");
+        assert_eq!(attribution["unattributed_tokens"]["input"], 10, "{figure}");
+        for counter in &COUNTERS[..5] {
+            let found = reasons(&attribution["unattributed_completeness"], counter);
+            assert!(
+                found.contains(&"unrecognized-usage".to_owned()),
+                "full={full} × {counter}: {attribution}"
+            );
+            assert!(
+                !found.contains(&"incomplete-attribution".to_owned()),
+                "full={full} × {counter}: {attribution}"
+            );
+        }
+
+        let whole = codex_unattributed(std::slice::from_ref(&lifecycle), full);
+        for counter in &COUNTERS[..5] {
+            assert!(
+                reasons(&whole["attribution"]["unattributed_completeness"], counter).is_empty(),
+                "full={full} × {counter}: {whole}"
+            );
+        }
+    }
 }
