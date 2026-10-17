@@ -316,10 +316,12 @@ fn bounds(first: &ConsumptionEventKeys, second: &ConsumptionEventKeys) -> Consum
             0.0,
             |left, right| left + right,
         );
-        whole &= selection
-            .keys
-            .iter()
-            .all(|key| key.measurement.as_ref().is_some_and(|m| m.cost.is_some()));
+        // A recorded price that is partial still bounds from below.
+        whole &= selection.keys.iter().all(|key| {
+            key.measurement.as_ref().is_some_and(|m| {
+                m.cost.is_some() && m.measurement_completeness.is_complete(&["cost"])
+            })
+        });
         (sum, whole)
     };
     let (first_cost, first_whole) = cost_of(first);

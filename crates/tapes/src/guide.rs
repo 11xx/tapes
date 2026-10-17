@@ -787,8 +787,9 @@ PROBE BEFORE EXPORTING
   unmeasured-event, mixed-basis, unestablished-lineage, unverified-copies,
   unestablished-identity), each selection keeps its own figure, and `bounds`
   give at-least and at-most per category and cost: at least the larger known
-  amount, at most their sum only when every key and category of both is
-  present. Missing parents, bounded copy reads, conflicts, and unrelated
+  amount, at most their sum only when every key of both is present and
+  every event measured that category or price completely; a stopped
+  request's partial price bounds only from below. Missing parents, bounded copy reads, conflicts, and unrelated
   recordings leave cross-recording equality unestablished.
   `--full --event-keys` uses the pinned recording and streams the parent copy
   check. This option answers one native recording and is separate from
