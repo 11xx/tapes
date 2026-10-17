@@ -168,15 +168,14 @@ impl MeasurementCompleteness {
         }
     }
 
-    /// What a figure's own facts establish. A figure that measured nothing
-    /// has no counter to qualify; a summary qualifies its absence with
-    /// `include_absent`.
+    /// What a figure's own facts establish. A figure that counted no event
+    /// and measured nothing has no counter to qualify; a summary qualifies
+    /// its absence with `include_absent`. A figure that counted events
+    /// carries every reason that applies to it, its scope, pricing and
+    /// coverage among them, whether or not it measured an amount.
     pub fn assess(figure: Measured<'_>) -> Self {
         let mut result = Self::default();
-        if figure.tokens.is_none() && figure.cost.is_none() {
-            if figure.events > 0 {
-                result.include_absent(None, None);
-            }
+        if figure.tokens.is_none() && figure.cost.is_none() && figure.events == 0 {
             return result;
         }
         result.include_absent(figure.tokens, figure.cost);

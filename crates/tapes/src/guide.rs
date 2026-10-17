@@ -586,7 +586,8 @@ PROBE BEFORE EXPORTING
   unestablished-scope, incomplete-attribution (a model split whose read could
   not attribute every request), and undetermined (the convention cannot
   derive the category). A figure that counted events and measured nothing
-  qualifies every counter missing-counter. A counter it does not name is complete; a present
+  qualifies every counter missing-counter and keeps every other reason that
+  applies to it: its scope, pricing and coverage. A counter it does not name is complete; a present
   amount it names is a known subtotal. Usage, consumption, model splits,
   summary totals, groups and partitions, session figures, brief, stats, and
   session JSON all carry it, and every figure derived from a counter follows
