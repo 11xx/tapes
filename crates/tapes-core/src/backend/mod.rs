@@ -1415,7 +1415,8 @@ pub struct StreamedTranscript {
     /// Internal hash of the observed file prefix used by same-process replays.
     pub(crate) source_prefix_sha256: Option<[u8; 32]>,
     /// Records that could not be decoded: malformed, or longer than
-    /// [`FULL_RECORD_BYTES`]. Each is also a gap.
+    /// [`FULL_RECORD_BYTES`]. Each lies in a gap; an OpenCode message
+    /// position is one gap however many of its records are unreadable.
     pub skipped: usize,
     pub gaps: Vec<ReadGap>,
     pub trailing_record: Option<TrailingRecord>,

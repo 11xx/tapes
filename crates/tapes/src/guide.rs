@@ -609,8 +609,10 @@ PROBE BEFORE EXPORTING
   data does not decode, a part row without an id or an integer
   `time_created`, or a part row that names no message. Its turns are absent,
   every other row's stay, and it qualifies every counter
-  `unreadable-record`. A `show --full` read counts it in `skipped` and marks a
-  `malformed-record` gap at its message position; a row with no place in the
+  `unreadable-record`. A `show --full` read counts each such row in `skipped`
+  and marks one `malformed-record` gap at each message position that holds
+  any, so a message with two unreadable parts is two skipped records in one
+  gap; a row with no place in the
   message order, or a part that names no message, takes a position after the
   last message.
   A harness can attach only some accounting bases: Claude summed-requests or

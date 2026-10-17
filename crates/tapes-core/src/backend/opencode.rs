@@ -851,7 +851,7 @@ impl OpenCodeBackend {
         let unrecognized_usage = database_unread_usage(&message_rows);
         let unplaced = self.database_unkeyed_messages(&id)? + parts.unattributed;
         let (messages, unreadable) = database_messages(&message_rows, parts);
-        let unreadable = unreadable.len() + unplaced;
+        let unreadable = unreadable.records + unplaced;
         Ok(parse_transcript(
             with_unreadable_records(
                 with_unrecognized_usage(session, unrecognized_usage),
@@ -886,6 +886,7 @@ impl OpenCodeBackend {
         let mut unrecognized_usage = 0;
         let mut gaps = Vec::new();
         let mut unplaced = 0;
+        let mut skipped = 0;
         if let Some(newest) = newest.first() {
             let newest = RowKey::from_row(newest)?;
             let mut after = None;
@@ -910,7 +911,8 @@ impl OpenCodeBackend {
                 unrecognized_usage += database_unread_usage(&rows);
                 unplaced += parts.unattributed;
                 let (messages, unreadable) = database_messages(&rows, parts);
-                gaps.extend(unreadable.into_iter().map(|row| ReadGap {
+                skipped += unreadable.records;
+                gaps.extend(unreadable.positions.into_iter().map(|row| ReadGap {
                     span: ByteSpan {
                         start: read + row as u64,
                         end: read + row as u64 + 1,
@@ -938,13 +940,14 @@ impl OpenCodeBackend {
             reason: "malformed-record".to_owned(),
         }));
         read += unplaced as u64;
+        skipped += unplaced;
         Ok(StreamedTranscript {
             coordinates: StreamCoordinates::OpenCodeMessages,
             source_length: read,
             source_bounds: cuts.bounds(),
             source_revision: None,
             source_prefix_sha256: None,
-            skipped: gaps.len(),
+            skipped,
             gaps,
             trailing_record: None,
             terminal: None,
@@ -1006,9 +1009,9 @@ impl OpenCodeBackend {
             .unwrap_or(0) as usize)
     }
 
-    /// One row, carrying only its message id, for each message of `messages`
-    /// that has a part row with no place in order. Such a part cannot be
-    /// read, so the row it stands for has no data.
+    /// One row for each message of `messages` that has part rows with no
+    /// place in order, carrying its message id and how many such parts it
+    /// has. Such a part cannot be read, so the row has no data.
     fn database_unkeyed_parts(&self, session: &str, messages: &[Value]) -> Result<Vec<Value>> {
         let ids = messages
             .iter()
@@ -1018,8 +1021,9 @@ impl OpenCodeBackend {
             return Ok(Vec::new());
         }
         self.database(&format!(
-            "SELECT DISTINCT json_object('message_id', message_id) AS row FROM part \
-             WHERE session_id = {session} AND message_id IN ({}) AND NOT ({KEYED})",
+            "SELECT json_object('message_id', message_id, 'unkeyed', count(*)) AS row FROM part \
+             WHERE session_id = {session} AND message_id IN ({}) AND NOT ({KEYED}) \
+             GROUP BY message_id",
             sql_id_list(&ids)
         ))
     }
@@ -1626,8 +1630,8 @@ impl RowKey {
 struct GroupedParts {
     /// Each message's readable parts, in row order.
     by_message: HashMap<String, Vec<Value>>,
-    /// Messages with a part row whose data does not decode.
-    unreadable: HashSet<String>,
+    /// How many unreadable part rows each message has.
+    unreadable: HashMap<String, usize>,
     /// Part rows that name no message.
     unattributed: usize,
 }
@@ -1642,7 +1646,8 @@ fn group_parts(rows: Vec<Value>) -> GroupedParts {
         match database_data(&row) {
             Ok(data) => parts.by_message.entry(message_id).or_default().push(data),
             Err(_) => {
-                parts.unreadable.insert(message_id);
+                let count = row["unkeyed"].as_u64().map_or(1, |count| count as usize);
+                *parts.unreadable.entry(message_id).or_default() += count;
             }
         }
     }
@@ -1686,12 +1691,23 @@ fn with_unreadable_records(mut session: Session, count: usize) -> Session {
     session
 }
 
+/// The unreadable records of some message rows: how many there are, and the
+/// positions of the rows that hold them. A message whose data does not decode
+/// is one record; each of its parts whose data does not decode is another.
+#[derive(Default)]
+struct UnreadableRecords {
+    records: usize,
+    positions: Vec<usize>,
+}
+
 /// The messages these rows name, in row order, each carrying its parts, and
-/// the positions of the rows that hold an unreadable record: a message whose
-/// data does not decode, or one with a part whose data does not decode.
-fn database_messages(message_rows: &[Value], mut parts: GroupedParts) -> (Vec<Value>, Vec<usize>) {
+/// their unreadable records.
+fn database_messages(
+    message_rows: &[Value],
+    mut parts: GroupedParts,
+) -> (Vec<Value>, UnreadableRecords) {
     let mut messages = Vec::new();
-    let mut unreadable = Vec::new();
+    let mut unreadable = UnreadableRecords::default();
     for (position, row) in message_rows.iter().enumerate() {
         let Some(id) = row["id"].as_str() else {
             continue;
@@ -1705,8 +1721,10 @@ fn database_messages(message_rows: &[Value], mut parts: GroupedParts) -> (Vec<Va
             Some(Err(_)) => false,
             None => true,
         };
-        if !readable || parts.unreadable.contains(id) {
-            unreadable.push(position);
+        let records = usize::from(!readable) + parts.unreadable.get(id).copied().unwrap_or(0);
+        if records > 0 {
+            unreadable.records += records;
+            unreadable.positions.push(position);
         }
     }
     (messages, unreadable)
