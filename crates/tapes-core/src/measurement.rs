@@ -126,7 +126,8 @@ pub struct Measured<'a> {
     /// How much of its session the figure covers; absent, unestablished.
     pub scope: Option<AccountingCoverage>,
     /// How many events the figure counted, so a figure that counted some and
-    /// measured nothing still qualifies every counter.
+    /// measured nothing still qualifies every counter. Nonzero coverage also
+    /// shows counted events, for a figure that keeps no separate count.
     pub events: usize,
 }
 
@@ -175,7 +176,12 @@ impl MeasurementCompleteness {
     /// coverage among them, whether or not it measured an amount.
     pub fn assess(figure: Measured<'_>) -> Self {
         let mut result = Self::default();
-        if figure.tokens.is_none() && figure.cost.is_none() && figure.events == 0 {
+        let counted =
+            figure.events > 0
+                || figure.coverage.into_iter().flatten().any(|(_, measured)| {
+                    measured.measured + measured.missing + measured.unpriced > 0
+                });
+        if figure.tokens.is_none() && figure.cost.is_none() && !counted {
             return result;
         }
         result.include_absent(figure.tokens, figure.cost);
