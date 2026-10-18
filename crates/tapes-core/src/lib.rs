@@ -2239,7 +2239,7 @@ pub fn usage_window_with_backends(
     prices: Option<&pricing::PriceTable>,
 ) -> Result<UsageSummary> {
     let mut read = read_window(backends, selection, ask)?;
-    let apportioned = apportion_window(backends, selection, &mut read)?;
+    let apportioned = apportion_window(backends, &mut read)?;
     let overlap = overlap::Overlap::of(&read.figures, &mut |_| None);
     let (mut aggregate, partitions) =
         usage::partitioned_aggregate_related(&read.figures, by, &overlap, prices, &read.relations);
@@ -2307,7 +2307,6 @@ impl ApportionedWindow {
 /// each pool's observed rise and how it divides.
 pub fn apportion_window(
     backends: &[Box<dyn Backend>],
-    selection: &SessionSelection<'_>,
     read: &mut WindowRead,
 ) -> Result<ApportionedWindow> {
     let bounds = read.record.bounds;
@@ -2321,6 +2320,7 @@ pub fn apportion_window(
         .map(|share| share.id.clone())
         .collect::<HashSet<_>>();
     let mut timelines = Vec::new();
+    let mut members_truncated = false;
     for harness in ["codex"] {
         if !backends.iter().any(|backend| backend.harness() == harness) {
             continue;
@@ -2329,14 +2329,20 @@ pub fn apportion_window(
             since: bounds.from,
             ..ListFilters::default()
         };
+        // A pool's members are every session that spent from it, whatever
+        // the selection's limit: a member left out would hand its tokens'
+        // share of each rise to the members read.
         let listed = list_scoped(
             backends,
             Some(harness),
             None,
-            selection.limit.unwrap_or(DEFAULT_LIST_LIMIT),
+            POOL_MEMBER_LIMIT,
             &filters,
             ListSort::Newest,
         )?;
+        if listed.scan_truncated || listed.sessions.len() >= POOL_MEMBER_LIMIT {
+            members_truncated = true;
+        }
         for (index, session) in listed.sessions.iter().enumerate() {
             if !bounds.may_hold(session.started_at, session.last_activity_at) {
                 continue;
@@ -2395,7 +2401,11 @@ pub fn apportion_window(
     read.record.allowance = apportioned
         .pools
         .iter()
-        .map(allowance::Apportionment::pool)
+        .map(|pool| {
+            let mut pool = pool.pool();
+            pool.members_truncated = members_truncated;
+            pool
+        })
         .collect();
     if read
         .record
@@ -2409,6 +2419,9 @@ pub fn apportion_window(
     }
     Ok(apportioned)
 }
+
+/// The most sessions of one harness a pool lists as members.
+const POOL_MEMBER_LIMIT: usize = 10_000;
 
 /// How long after its last recorded activity a session counts as completed
 /// for allowance rates.
@@ -2427,7 +2440,7 @@ pub fn allowance_rates_with_backends(
     quota: window::QuotaKind,
 ) -> Result<allowance::AllowanceRates> {
     let mut read = read_window(backends, selection, WindowAsk::Bounds(lookback))?;
-    let apportioned = apportion_window(backends, selection, &mut read)?;
+    let apportioned = apportion_window(backends, &mut read)?;
     let completed_before = Utc::now() - chrono::Duration::minutes(COMPLETED_AFTER_MINUTES);
     let mut excluded_running = 0;
     let mut excluded_without_allowance = 0;

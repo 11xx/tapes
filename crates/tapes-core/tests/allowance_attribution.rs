@@ -399,3 +399,52 @@ fn rates_per_lane_give_quantiles_tokens_per_percent_and_dates() {
     assert_eq!(group["measured_over"]["from"], "2026-01-11T10:01:00Z");
     assert_eq!(group["measured_over"]["to"], "2026-01-11T14:11:00Z");
 }
+
+/// Claim: a pool's members are every session that spent from it whatever
+/// the selection's limit, so a selection limited to one session leaves the
+/// others' shares outside it rather than handing them to the one read.
+/// Rejects a pool listed under the selection's limit.
+#[test]
+fn a_pool_holds_members_beyond_the_selection_limit() {
+    let store = pool_store(true);
+    let backends: Vec<Box<dyn Backend>> = vec![Box::new(CodexBackend::new(&store.0))];
+    let window = WindowBounds {
+        from: Some(at("2026-01-10T09:00:00Z")),
+        to: Some(at("2026-01-10T12:00:00Z")),
+    };
+    let read = |limit| {
+        let selection = SessionSelection {
+            harness: Some("codex"),
+            limit: Some(limit),
+            ..Default::default()
+        };
+        serde_json::to_value(
+            usage_window_with_backends(
+                &backends,
+                &selection,
+                &[GroupBy::Session],
+                WindowAsk::Bounds(window),
+                None,
+            )
+            .unwrap(),
+        )
+        .unwrap()
+    };
+    let (one, all) = (read(1), read(50));
+    assert_eq!(one["window"]["sessions"].as_array().unwrap().len(), 1);
+    let only = one["window"]["sessions"][0]["id"].as_str().unwrap();
+    let share_in = |read: &Value| {
+        read["window"]["sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|share| share["id"] == only)
+            .unwrap()["allowance"][0]["estimate"]
+            .as_f64()
+            .unwrap()
+    };
+    assert!((share_in(&one) - share_in(&all)).abs() < 1e-9);
+    let pool = &one["window"]["allowance"][0];
+    assert!(close(&pool["observed"]["estimate"], 8.0));
+    assert!(close(&pool["attributed"]["estimate"], share_in(&one)));
+}

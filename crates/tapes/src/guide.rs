@@ -639,7 +639,10 @@ PROBE BEFORE EXPORTING
   `creator_account_id`, `rate_limits` `limit_id` and `plan_type`); where no
   record names an account, one harness's store on this machine is one pool and
   `window.allowance_assumption` says so. Every session of the pool's harness on
-  this machine with activity in the window is a member, selected or not.
+  this machine with activity in the window is a member, selected or not, up to
+  10,000 sessions whatever --limit says; a pool whose member listing reached
+  that bound says `members_truncated`, its members' shares then holding what
+  the sessions left out spent.
   Between two consecutive observations of a pool, ordered by observation time,
   the rise in `used_percent` is apportioned over each member's disjoint tokens
   (uncached input, cache read, cache write, output) inside that interval; a

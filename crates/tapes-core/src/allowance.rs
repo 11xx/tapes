@@ -156,6 +156,10 @@ pub struct PoolAllowance {
     /// machine, another client, or a session the listing did not reach.
     pub without_recorded_use: PercentBounds,
     pub coverage: AllowanceCoverage,
+    /// The member listing reached its bound, so sessions it left out may
+    /// have spent from the pool and their share sits with the members read.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub members_truncated: bool,
 }
 
 /// One session of a pool, with whether the selection holds it.
@@ -447,6 +451,7 @@ impl Apportionment {
                 self.weight_of(&outside, chain, interval, Weighting::DisjointTotal)
             }),
             without_recorded_use: self.bound(idle),
+            members_truncated: false,
             coverage: AllowanceCoverage {
                 observations: self.observations,
                 intervals: self.intervals(),
