@@ -1771,12 +1771,14 @@ enum Command {
         /// after it for the same length, which is `inferred`; an instant no
         /// observation's window or the one after it holds refuses, and the
         /// window is then read with --window. `window.quota` names the
-        /// observation and the session whose recording holds it.
+        /// observation and the session whose recording holds it. Like
+        /// --window it answers a selection: a session named by id,
+        /// --latest or --title refuses it.
         #[arg(
             long,
             value_name = "current|RFC3339",
             value_parser = parse_quota_at,
-            conflicts_with = "window",
+            conflicts_with_all = ["window", "session", "latest", "title", "occurrence", "full", "from", "to", "requests", "series", "reconcile", "event_keys"],
             requires = "harness"
         )]
         quota_window: Option<QuotaAt>,
