@@ -7056,7 +7056,12 @@ fn claude_usage_reports_cost_state_durations_and_the_per_model_split() {
     let session = located(&fixture, "session-claude");
     let view = usage(&fixture.transcript(&session, usize::MAX).unwrap());
     assert!(view.durations_ms.is_none(), "no cost-state, no durations");
-    assert!(view.by_model.is_none(), "no cost-state, no per-model split");
+    // Without a cost-state the split is the request sum's own: each share
+    // counts its requests and carries no harness-written cost.
+    let shares = view.by_model.as_ref().expect("the request sum's split");
+    assert!(shares
+        .iter()
+        .all(|share| share.request_count.is_some_and(|count| count > 0) && share.cost.is_none()));
 }
 
 /// A harness that records none of the optional usage facts omits each object

@@ -237,8 +237,12 @@ impl ClaudeBackend {
             observed_cost_state,
             requests.dimensions,
             requests.coverage,
-            requests.failures,
-            requests.unrecognized_usage,
+            RequestFacts {
+                by_model: requests.by_model,
+                failures: requests.failures,
+                unrecognized_usage: requests.unrecognized_usage,
+                placeholders: requests.placeholders,
+            },
             basis,
             tokens.as_ref(),
         );
@@ -1221,8 +1225,12 @@ impl ClaudeRecords {
             observed_cost_state,
             requests.dimensions,
             requests.coverage,
-            requests.failures,
-            requests.unrecognized_usage,
+            RequestFacts {
+                by_model: requests.by_model,
+                failures: requests.failures,
+                unrecognized_usage: requests.unrecognized_usage,
+                placeholders: requests.placeholders,
+            },
             basis,
             tokens.as_ref(),
         );
@@ -1467,15 +1475,28 @@ fn recorded_accounting(
 /// Selected accounting detail, with a set-aside cumulative state kept
 /// separately. Request dimensions describe the requests read; their TTL split
 /// describes the session counters only under request-sum accounting.
+/// What a request sum established beside its counters and dimensions.
+struct RequestFacts {
+    by_model: Option<Vec<ModelUsage>>,
+    failures: usize,
+    unrecognized_usage: usize,
+    placeholders: usize,
+}
+
 fn claude_usage_detail(
     cost_state: Option<&Value>,
     requests: Option<RequestDimensions>,
     request_coverage: BTreeMap<String, MeasurementCoverage>,
-    failures: usize,
-    unrecognized_usage: usize,
+    facts: RequestFacts,
     basis: AccountingBasis,
     selected_tokens: Option<&Tokens>,
 ) -> Option<UsageDetail> {
+    let RequestFacts {
+        by_model,
+        failures,
+        unrecognized_usage,
+        placeholders,
+    } = facts;
     let mut detail = if basis == AccountingBasis::RecordedTotal {
         cost_state.map(cost_state_detail).unwrap_or_default()
     } else {
@@ -1501,6 +1522,22 @@ fn claude_usage_detail(
             detail.recorded_total = Some(recorded);
         }
         detail.cache_write_by_ttl = requests.as_ref().map(|requests| requests.cache_write);
+        detail.by_model = by_model;
+    }
+    match placeholders {
+        0 => {}
+        count if selected_tokens.is_none() && failures == 0 => {
+            detail.accounting_notes.push(format!(
+                "{count} assistant records stand in for requests without being any (no request \
+                 id, every usage counter zero), as a delegated run's mirror rows are written; the \
+                 recording holds no consumption of its own, and its work's consumption is in that \
+                 work's own recording."
+            ));
+        }
+        count => detail.accounting_notes.push(format!(
+            "{count} assistant records stand in for requests without being any (no request id, \
+             every usage counter zero); they count as no requests."
+        )),
     }
     detail.requests = requests;
     detail.request_failures = failures;
@@ -1642,13 +1679,19 @@ fn claude_request_tokens(values: &[Value]) -> RequestUsage {
 struct RequestTokens {
     requests: BTreeMap<String, RequestWitness>,
     unkeyed: TokenTotals,
+    /// Requests without a request id, by the model each names.
+    unkeyed_by_model: BTreeMap<(String, Option<String>), (TokenTotals, usize)>,
     dimensions: RequestDimensions,
     failures: usize,
     unrecognized_usage: usize,
+    /// Assistant records that stand in for a request without being one.
+    placeholders: usize,
 }
 
 struct RequestWitness {
     tokens: Tokens,
+    /// The model the request's first record names.
+    model: Option<Model>,
     dimensions: RequestDimensions,
     ttl_witnesses: BTreeMap<u64, Option<CacheWrites>>,
     tool_envelope: [Option<u64>; 2],
@@ -1658,9 +1701,10 @@ const MAX_TTL_WITNESSES: usize = 16;
 const TOOL_DIMENSIONS: [&str; 2] = ["web_search_requests", "web_fetch_requests"];
 
 impl RequestWitness {
-    fn new(tokens: Tokens, dimensions: RequestDimensions) -> Self {
+    fn new(tokens: Tokens, model: Option<Model>, dimensions: RequestDimensions) -> Self {
         let mut witness = Self {
             tokens,
+            model,
             dimensions,
             ttl_witnesses: BTreeMap::new(),
             tool_envelope: [None; 2],
@@ -1829,15 +1873,20 @@ struct RequestUsage {
     tokens: Option<Tokens>,
     coverage: BTreeMap<String, MeasurementCoverage>,
     dimensions: Option<RequestDimensions>,
+    /// Each model's share of the sum, by the model each request names.
+    by_model: Option<Vec<ModelUsage>>,
     failures: usize,
     unrecognized_usage: usize,
+    placeholders: usize,
 }
 
 impl RequestTokens {
     fn finish(self) -> RequestUsage {
         let mut totals = self.unkeyed;
+        let mut by_model = self.unkeyed_by_model;
         let mut dimensions = self.dimensions;
         for witness in self.requests.into_values() {
+            let model = witness.model.clone();
             let (tokens, request_dimensions) = witness.finish();
             dimensions.add(request_dimensions);
             totals.add(
@@ -1847,13 +1896,44 @@ impl RequestTokens {
                 tokens.cache_read,
                 tokens.cache_write,
             );
+            if let Some(model) = model {
+                let (share, requests) = by_model.entry((model.id, model.variant)).or_default();
+                share.add(
+                    tokens.input,
+                    tokens.output,
+                    tokens.reasoning,
+                    tokens.cache_read,
+                    tokens.cache_write,
+                );
+                *requests += 1;
+            }
         }
         let (tokens, coverage) = totals.finish_covered();
+        let by_model = by_model
+            .into_iter()
+            .map(|((model, variant), (share, requests))| {
+                let (tokens, measurement_coverage) = share.finish_covered();
+                ModelUsage {
+                    list_price_estimate: None,
+                    measurement_completeness: Default::default(),
+                    model,
+                    variant,
+                    tokens,
+                    cost: None,
+                    cost_coverage: None,
+                    request_count: Some(requests),
+                    measurement_incomplete: known_subtotal_notes(&measurement_coverage),
+                    measurement_coverage,
+                }
+            })
+            .collect::<Vec<_>>();
         RequestUsage {
             tokens,
             coverage,
+            by_model: (!by_model.is_empty()).then_some(by_model),
             failures: self.failures,
             unrecognized_usage: self.unrecognized_usage,
+            placeholders: self.placeholders,
             dimensions: (dimensions.requests > 0).then_some(dimensions),
         }
     }
@@ -1874,6 +1954,10 @@ impl RequestTokens {
         }
         if message["model"] == "<synthetic>" {
             self.failures += usize::from(value["isApiErrorMessage"] == true);
+            return;
+        }
+        if placeholder_request(value) {
+            self.placeholders += 1;
             return;
         }
         let usage = message.get("usage").and_then(Value::as_object);
@@ -1907,18 +1991,34 @@ impl RequestTokens {
                 None => {
                     self.requests.insert(
                         request_id.to_owned(),
-                        RequestWitness::new(tokens, dimensions),
+                        RequestWitness::new(tokens, claude_model(value), dimensions),
                     );
                     return;
                 }
             },
-            None => self.unkeyed.add(
-                tokens.input,
-                tokens.output,
-                tokens.reasoning,
-                tokens.cache_read,
-                tokens.cache_write,
-            ),
+            None => {
+                self.unkeyed.add(
+                    tokens.input,
+                    tokens.output,
+                    tokens.reasoning,
+                    tokens.cache_read,
+                    tokens.cache_write,
+                );
+                if let Some(model) = claude_model(value) {
+                    let (share, requests) = self
+                        .unkeyed_by_model
+                        .entry((model.id, model.variant))
+                        .or_default();
+                    share.add(
+                        tokens.input,
+                        tokens.output,
+                        tokens.reasoning,
+                        tokens.cache_read,
+                        tokens.cache_write,
+                    );
+                    *requests += 1;
+                }
+            }
         }
         self.dimensions.add(dimensions);
     }
@@ -1956,6 +2056,28 @@ impl ClaudeRequests {
     }
 }
 
+/// Whether an assistant record stands in for a request without being one:
+/// it names no request id and every usage counter it writes is zero. A
+/// plugin that mirrors work done elsewhere into a session as a native row,
+/// such as a delegated run's progress, writes these; that work's consumption
+/// is in its own recording, and the row carries none.
+fn placeholder_request(value: &Value) -> bool {
+    let message = &value["message"];
+    value["type"] == "assistant"
+        && message["role"] == "assistant"
+        && value["requestId"].as_str().is_none()
+        && message["usage"].as_object().is_some_and(|usage| {
+            [
+                "input_tokens",
+                "output_tokens",
+                "cache_creation_input_tokens",
+                "cache_read_input_tokens",
+            ]
+            .iter()
+            .all(|counter| usage.get(*counter).and_then(Value::as_u64).unwrap_or(0) == 0)
+        })
+}
+
 /// What a record is to a span: a counted request, keyed by its request id
 /// where it has one, an attempt that failed, usage no counter reads, or
 /// none of these. The classification is the request sum's own.
@@ -1980,6 +2102,9 @@ fn span_item(value: &Value) -> SpanItem<'_> {
         } else {
             SpanItem::Other
         };
+    }
+    if placeholder_request(value) {
+        return SpanItem::Other;
     }
     if message.get("usage").and_then(Value::as_object).is_none()
         && value["answeredWithoutRequest"] == true
@@ -2126,7 +2251,7 @@ fn reconcile_source(
         } else if claude_unread_usage(value) {
             ledger.unrecognized_usage(source);
         } else if value["type"] == "assistant" && value["message"]["role"] == "assistant" {
-            if value["answeredWithoutRequest"] == true {
+            if value["answeredWithoutRequest"] == true || placeholder_request(value) {
                 ledger.unrequested(source);
             } else if value["isApiErrorMessage"] == true
                 || value["message"]["model"] == "<synthetic>"

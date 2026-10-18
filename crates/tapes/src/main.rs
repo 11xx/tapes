@@ -1863,8 +1863,11 @@ enum Command {
         /// A newest Claude cost-state below its request sum is set aside:
         /// accounting notes name the total and reason, while recorded_total
         /// retains its counters and dollar facts under its own accounting.
-        /// Synthetic assistant records do not count as requests; positive
-        /// failure evidence is counted separately with consumption unknown.
+        /// Synthetic assistant records do not count as requests, and neither
+        /// does a Claude record with no request id and every usage counter
+        /// zero (a mirror row of work done elsewhere); a recording of only
+        /// those notes it holds no consumption of its own. Positive failure
+        /// evidence is counted separately with consumption unknown.
         /// Incoming session reports and direct aggregation inputs classify
         /// costs against their tokens. Session JSON retains cost_coverage.
         /// A written zero beside nonzero tokens is unpriced: cost is absent,

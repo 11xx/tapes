@@ -507,8 +507,9 @@ PROBE BEFORE EXPORTING
 
   usage answers where a session's quota went as tapes-usage/15: its recorded
   launch mode when known, tokens, cost, accounting, turns, and any by-model attribution the source can
-  support — Claude's recorded cost-state, Codex's request observations, or
-  pi's per-message model each qualified by the thinking level in effect. Read
+  support — Claude's recorded cost-state or, for a request sum, the model
+  each request names; Codex's request observations; or pi's per-message
+  model each qualified by the thinking level in effect. Read
   accounting before adding anything up — basis says
   whether a figure is a recorded total or an observed request sum, and
   coverage says how much of the session it covers. An observed cumulative
@@ -857,7 +858,12 @@ PROBE BEFORE EXPORTING
   where request evidence exists, and zero-written cumulative observations
   otherwise. A mixed priced/unpriced sum is a known priced subtotal.
   Synthetic assistant records join no request tally; positively witnessed
-  failures are counted separately and their consumption is unknown. A Claude
+  failures are counted separately and their consumption is unknown. A
+  Claude assistant record with no request id and every usage counter zero,
+  as a plugin writes when it mirrors work done elsewhere (a delegated run's
+  `delegated-agents:run` rows), stands in for a request without being one:
+  it counts as no request, and a recording made only of such records notes
+  that it holds no consumption of its own, with no measured zeros. A Claude
   whole read that skips an undecodable record qualifies every counter
   unreadable-record.
 
