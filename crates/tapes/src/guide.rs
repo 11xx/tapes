@@ -661,7 +661,10 @@ PROBE BEFORE EXPORTING
   `creator_account_id`, `rate_limits` `limit_id` and `plan_type`); where no
   record names an account, one harness's store on this machine is one pool and
   `window.allowance_assumption` says so. Every session of the pool's harness on
-  this machine with activity in the window is a member, selected or not, up to
+  this machine with activity in the window that spends from the pool is a
+  member: its recording names the pool's account (or, like the pool, none),
+  and where its own observations name quota limits, the pool's is among
+  them. Members count selected or not, up to
   10,000 sessions whatever --limit says; a pool whose member listing reached
   that bound says `members_truncated`, its members' shares then holding what
   the sessions left out spent.
@@ -672,8 +675,12 @@ PROBE BEFORE EXPORTING
   percent does where no reset is recorded; inside one period a lower percent
   is a snapshot older than one already seen (concurrent sessions report the
   same account) and is skipped, counted as `stale_observations`. Requests before
-  a chain's first observation or after its last are `uncovered_requests`, not
-  counted. Observed percents are whole numbers, read as the true percent
+  a chain's first observation, after its last, or recorded without a time are
+  `uncovered_requests`, not counted; a Codex total recorded without a time
+  still advances the running total, so the next request's move is its own.
+  Each member keeps one weight per interval it spent in, so apportioning holds
+  memory in proportion to the requests read, never to members times
+  intervals. Observed percents are whole numbers, read as the true percent
   rounded to the nearest whole, so each figure gives `estimate`, the rises
   apportioned as observed, with `at_least` and `at_most` that hold for every
   true percent the observations allow: a run of equal observations hides at
@@ -698,12 +705,15 @@ PROBE BEFORE EXPORTING
   another length and a percent is of one window. Each group
   gives lanes, percent per lane (median, 90th percentile by nearest rank,
   maximum) over the lanes' estimates and their bounds, tokens per one percent
-  by disjoint category, the median minutes from a lane's first to its last
+  by disjoint category (the tokens of the lanes' requests an interval of their
+  pools holds, over the percent apportioned on them), `uncovered_requests`
+  (the lanes' requests no interval held, on neither side of the rate), the
+  median minutes from a lane's first to its last
   request, and `measured_over`, the first and last request measured: rates
   drift with models and pricing, so a rate is read with its dates. A plan
   whose window lacks the --quota kind (a plan with one weekly window, say)
   leaves its lanes `excluded_without_allowance`. The answer is
-  tapes-allowance-rates/1.
+  tapes-allowance-rates/2.
   A summary adds sessions only where no recording relates them. Two sessions
   are related when one declares the other as its fork origin or parent (Codex
   `forked_from_id`, Pi's parent header, OpenCode `fork_session_id` and

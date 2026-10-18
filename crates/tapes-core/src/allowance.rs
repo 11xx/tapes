@@ -21,7 +21,7 @@ use serde::Serialize;
 use crate::window::QuotaKind;
 
 pub const ALLOWANCE_KIND: &str = "apportioned-allowance";
-pub const RATES_SCHEMA: &str = "tapes-allowance-rates/1";
+pub const RATES_SCHEMA: &str = "tapes-allowance-rates/2";
 
 /// The allowance one observation reports on: one quota window of one plan
 /// of one account, as the recordings name them.
@@ -67,11 +67,65 @@ impl TimedUse {
 }
 
 /// What a recording holds for apportionment: its requests' disjoint tokens
-/// in time and the allowance observations it saw.
+/// in time, the requests it recorded no time for, the allowance observations
+/// it saw, and the account it names.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Timeline {
     pub requests: Vec<TimedUse>,
+    /// Requests whose record carries no usable timestamp, which no interval
+    /// can hold.
+    pub untimed: usize,
     pub observations: Vec<RateObservation>,
+    /// The account the recording names, where it names one.
+    pub account: Option<String>,
+}
+
+impl Timeline {
+    /// The quota limits the recording's own observations name.
+    pub fn limits(&self) -> Vec<Option<&str>> {
+        let mut limits = self
+            .observations
+            .iter()
+            .map(|observation| observation.pool.limit.as_deref())
+            .collect::<Vec<_>>();
+        limits.sort();
+        limits.dedup();
+        limits
+    }
+}
+
+/// Tokens by disjoint category, summed over requests.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Spent {
+    pub uncached_input: u64,
+    pub cache_read: u64,
+    pub cache_write: u64,
+    pub output: u64,
+    pub reasoning: u64,
+}
+
+impl Spent {
+    fn add(&mut self, request: &TimedUse) {
+        self.uncached_input += request.uncached_input;
+        self.cache_read += request.cache_read;
+        self.cache_write += request.cache_write;
+        self.output += request.output;
+        self.reasoning += request.reasoning;
+    }
+
+    pub fn total(&self) -> u64 {
+        self.uncached_input + self.cache_read + self.cache_write + self.output
+    }
+}
+
+impl std::ops::AddAssign for Spent {
+    fn add_assign(&mut self, other: Self) {
+        self.uncached_input += other.uncached_input;
+        self.cache_read += other.cache_read;
+        self.cache_write += other.cache_write;
+        self.output += other.output;
+        self.reasoning += other.reasoning;
+    }
 }
 
 /// How a pool's percent is weighted over the tokens spent in an interval.
@@ -135,8 +189,9 @@ pub struct AllowanceCoverage {
     #[serde(skip_serializing_if = "is_zero")]
     pub stale_observations: usize,
     /// Requests of the set that fell in no interval: before the first
-    /// observation, after the last, or across a reset. Their allowance is
-    /// not counted, so a set with any is a known subtotal.
+    /// observation, after the last, across a reset, or recorded without a
+    /// time. Their allowance is not counted, so a set with any is a known
+    /// subtotal.
     #[serde(skip_serializing_if = "is_zero")]
     pub uncovered_requests: usize,
 }
@@ -166,11 +221,27 @@ pub struct PoolAllowance {
     pub members_truncated: bool,
 }
 
-/// One session of a pool, with whether the selection holds it.
+/// One session that may spend from a pool, with whether the selection
+/// holds it, the account its recording names and the quota limits its own
+/// observations name.
 pub struct PoolMember<'a> {
     pub id: &'a str,
     pub selected: bool,
+    pub account: Option<&'a str>,
+    pub limits: Vec<Option<&'a str>>,
     pub requests: &'a [TimedUse],
+    /// Requests recorded without a time.
+    pub untimed: usize,
+}
+
+impl PoolMember<'_> {
+    /// Whether the session spends from `pool`: its recording names the
+    /// pool's account (or, like the pool, none), and when its own
+    /// observations name quota limits, the pool's is among them.
+    pub fn spends_from(&self, pool: &PoolKey) -> bool {
+        self.account == pool.account.as_deref()
+            && (self.limits.is_empty() || self.limits.contains(&pool.limit.as_deref()))
+    }
 }
 
 /// The intervals of a pool: chains of consecutive observations within one
@@ -188,9 +259,13 @@ pub struct Apportionment {
     rises: Vec<Vec<f64>>,
     /// Per chain, per interval: (start, end].
     bounds: Vec<Vec<(DateTime<Utc>, DateTime<Utc>)>>,
-    /// Per member id, per chain, per interval: (disjoint total, output).
-    weights: BTreeMap<String, Vec<Vec<(f64, f64)>>>,
+    /// Per member id, the intervals it spent in, each once, in order:
+    /// (chain, interval, disjoint total, output). A member keeps a cell per
+    /// interval it spent in, never one per interval of the pool.
+    weights: BTreeMap<String, Vec<(usize, usize, f64, f64)>>,
     totals: Vec<Vec<(f64, f64)>>,
+    /// Per member id, the tokens of its requests an interval holds.
+    covered: BTreeMap<String, Spent>,
     uncovered: BTreeMap<String, usize>,
     selected: BTreeMap<String, bool>,
 }
@@ -199,8 +274,9 @@ impl Apportionment {
     /// Split the pool's observations into chains, one per window period: a
     /// new chain at a new `resets_at` (beyond a minute's jitter), or at a
     /// falling percent where no reset is recorded. Inside a period a lower
-    /// percent is a stale snapshot and is skipped. Every member's requests
-    /// are placed in the interval that holds them.
+    /// percent is a stale snapshot and is skipped. Every member that spends
+    /// from the pool has its requests placed in the interval that holds
+    /// them; the others are no members of it.
     pub fn new(
         pool: PoolKey,
         observations: &[RateObservation],
@@ -273,38 +349,39 @@ impl Apportionment {
             })
             .collect();
         let mut weights = BTreeMap::new();
+        let mut covered = BTreeMap::new();
         let mut uncovered = BTreeMap::new();
         let mut selected = BTreeMap::new();
         let mut totals: Vec<Vec<(f64, f64)>> = bounds
             .iter()
             .map(|chain| vec![(0.0, 0.0); chain.len()])
             .collect();
-        for member in members {
-            let mut placed: Vec<Vec<(f64, f64)>> = bounds
-                .iter()
-                .map(|chain| vec![(0.0, 0.0); chain.len()])
-                .collect();
-            let mut missed = 0;
+        for member in members.iter().filter(|member| member.spends_from(&pool)) {
+            let mut placed = BTreeMap::<(usize, usize), (f64, f64)>::new();
+            let mut spent = Spent::default();
+            let mut missed = member.untimed;
             for request in member.requests {
-                let slot = bounds.iter().enumerate().find_map(|(chain, intervals)| {
-                    intervals
-                        .iter()
-                        .position(|(start, end)| *start < request.at && request.at <= *end)
-                        .map(|interval| (chain, interval))
-                });
-                match slot {
+                match slot(&bounds, request.at) {
                     Some((chain, interval)) => {
-                        let cell = &mut placed[chain][interval];
+                        let cell = placed.entry((chain, interval)).or_default();
                         cell.0 += request.total() as f64;
                         cell.1 += request.output as f64;
                         let total = &mut totals[chain][interval];
                         total.0 += request.total() as f64;
                         total.1 += request.output as f64;
+                        spent.add(request);
                     }
                     None => missed += 1,
                 }
             }
-            weights.insert(member.id.to_owned(), placed);
+            weights.insert(
+                member.id.to_owned(),
+                placed
+                    .into_iter()
+                    .map(|((chain, interval), (total, output))| (chain, interval, total, output))
+                    .collect(),
+            );
+            covered.insert(member.id.to_owned(), spent);
             uncovered.insert(member.id.to_owned(), missed);
             selected.insert(member.id.to_owned(), member.selected);
         }
@@ -318,9 +395,26 @@ impl Apportionment {
             bounds,
             weights,
             totals,
+            covered,
             uncovered,
             selected,
         }
+    }
+
+    /// How many weight cells the members keep: one per interval each spent
+    /// in, at most one per request placed.
+    pub fn weight_cells(&self) -> usize {
+        self.weights.values().map(Vec::len).sum()
+    }
+
+    /// The tokens of the sessions `ids` that an interval of the pool holds,
+    /// the tokens its allowance is apportioned over.
+    pub fn covered(&self, ids: &[&str]) -> Spent {
+        let mut spent = Spent::default();
+        for covered in ids.iter().filter_map(|id| self.covered.get(*id)) {
+            spent += *covered;
+        }
+        spent
     }
 
     fn intervals(&self) -> usize {
@@ -392,23 +486,33 @@ impl Apportionment {
         }
     }
 
-    fn weight_of(&self, ids: &[&str], chain: usize, interval: usize, weighting: Weighting) -> f64 {
-        let total = self.totals[chain][interval];
-        let total = match weighting {
-            Weighting::DisjointTotal => total.0,
-            Weighting::Output => total.1,
-        };
-        if total == 0.0 {
-            return 0.0;
+    /// The share of each interval's tokens the sessions `ids` spent, per
+    /// chain and interval, summed from their cells.
+    fn shares(&self, ids: &[&str], weighting: Weighting) -> Vec<Vec<f64>> {
+        let mut shares = self
+            .totals
+            .iter()
+            .map(|chain| vec![0.0; chain.len()])
+            .collect::<Vec<_>>();
+        for cells in ids.iter().filter_map(|id| self.weights.get(*id)) {
+            for (chain, interval, total, output) in cells {
+                shares[*chain][*interval] += match weighting {
+                    Weighting::DisjointTotal => total,
+                    Weighting::Output => output,
+                };
+            }
         }
-        ids.iter()
-            .filter_map(|id| self.weights.get(*id))
-            .map(|placed| match weighting {
-                Weighting::DisjointTotal => placed[chain][interval].0,
-                Weighting::Output => placed[chain][interval].1,
-            })
-            .sum::<f64>()
-            / total
+        for (chain, intervals) in shares.iter_mut().enumerate() {
+            for (interval, share) in intervals.iter_mut().enumerate() {
+                let (total, output) = self.totals[chain][interval];
+                let total = match weighting {
+                    Weighting::DisjointTotal => total,
+                    Weighting::Output => output,
+                };
+                *share = if total == 0.0 { 0.0 } else { *share / total };
+            }
+        }
+        shares
     }
 
     /// The allowance the sessions `ids` spent from this pool.
@@ -418,11 +522,14 @@ impl Apportionment {
             window: self.pool.window,
             window_minutes: self.pool.window_minutes,
             plan: self.pool.plan.clone(),
-            percent: self.bound(|chain, interval| {
-                self.weight_of(ids, chain, interval, Weighting::DisjointTotal)
-            }),
-            output_weighted: self
-                .bound(|chain, interval| self.weight_of(ids, chain, interval, Weighting::Output)),
+            percent: {
+                let shares = self.shares(ids, Weighting::DisjointTotal);
+                self.bound(|chain, interval| shares[chain][interval])
+            },
+            output_weighted: {
+                let shares = self.shares(ids, Weighting::Output);
+                self.bound(|chain, interval| shares[chain][interval])
+            },
             coverage: AllowanceCoverage {
                 observations: self.observations,
                 intervals: self.intervals(),
@@ -457,12 +564,14 @@ impl Apportionment {
         PoolAllowance {
             pool: self.pool.clone(),
             observed: self.bound(|_, _| 1.0),
-            attributed: self.bound(|chain, interval| {
-                self.weight_of(&selected, chain, interval, Weighting::DisjointTotal)
-            }),
-            outside_selection: self.bound(|chain, interval| {
-                self.weight_of(&outside, chain, interval, Weighting::DisjointTotal)
-            }),
+            attributed: {
+                let shares = self.shares(&selected, Weighting::DisjointTotal);
+                self.bound(|chain, interval| shares[chain][interval])
+            },
+            outside_selection: {
+                let shares = self.shares(&outside, Weighting::DisjointTotal);
+                self.bound(|chain, interval| shares[chain][interval])
+            },
             without_recorded_use: self.bound(idle),
             members_truncated: false,
             coverage: AllowanceCoverage {
@@ -476,6 +585,24 @@ impl Apportionment {
             },
         }
     }
+}
+
+/// The chain and interval `(start, end]` holding `at`. Chains follow one
+/// another in time and each chain's intervals are in order, so each is
+/// searched by halves.
+fn slot(
+    bounds: &[Vec<(DateTime<Utc>, DateTime<Utc>)>],
+    at: DateTime<Utc>,
+) -> Option<(usize, usize)> {
+    bounds.iter().enumerate().find_map(|(chain, intervals)| {
+        let first = intervals.first()?;
+        let last = intervals.last()?;
+        if at <= first.0 || at > last.1 {
+            return None;
+        }
+        let interval = intervals.partition_point(|(_, end)| *end < at);
+        (interval < intervals.len() && intervals[interval].0 < at).then_some((chain, interval))
+    })
 }
 
 /// Whether two observations' resets name one window period: the same reset,
@@ -590,8 +717,14 @@ pub struct RateGroup {
     pub window_minutes: Option<u64>,
     pub lanes: usize,
     pub percent_per_lane: LanePercent,
+    /// Tokens per one percent: the tokens of the lanes' requests that an
+    /// interval of their pools holds, over the percent apportioned on them.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tokens_per_percent: Option<TokensPerPercentSplit>,
+    /// The lanes' requests no interval held (before the first observation,
+    /// after the last, across a reset, or recorded without a time), which
+    /// neither side of the rate counts.
+    pub uncovered_requests: usize,
     /// Median minutes from a lane's first to its last request.
     pub median_duration_minutes: f64,
     pub measured_over: MeasuredOver,

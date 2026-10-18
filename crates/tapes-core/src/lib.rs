@@ -2376,8 +2376,10 @@ impl ApportionedWindow {
 
 /// Apportion the allowance observations inside `read`'s window. A pool's
 /// members are every session of its harness on this machine with activity
-/// inside the window, whether or not the selection holds it, so the shares
-/// of sessions it left out stay visible as `outside_selection`. Each share
+/// inside the window that spends from it (its recording names the pool's
+/// account, and the pool's quota limit where its own observations name
+/// limits), whether or not the selection holds it, so the shares of
+/// sessions it left out stay visible as `outside_selection`. Each share
 /// gains its allowance per pool, or the reason it has none; the window gains
 /// each pool's observed rise and how it divides.
 pub fn apportion_window(
@@ -2453,7 +2455,10 @@ pub fn apportion_window(
         .map(|(id, timeline)| allowance::PoolMember {
             id,
             selected: selected.contains(id),
+            account: timeline.account.as_deref(),
+            limits: timeline.limits(),
             requests: &timeline.requests,
+            untimed: timeline.untimed,
         })
         .collect::<Vec<_>>();
     let pools = keys
@@ -2467,8 +2472,10 @@ pub fn apportion_window(
             None => {
                 share.allowance = apportioned.allowance(&[share.id.as_str()]);
                 if share.allowance.is_empty() {
-                    share.allowance_absent =
-                        Some("no interval between two observations of its pool holds its requests");
+                    share.allowance_absent = Some(
+                        "no interval between two observations of a pool its account spends from \
+                         holds its requests",
+                    );
                 }
             }
         }
@@ -2493,6 +2500,16 @@ pub fn apportion_window(
         );
     }
     Ok(apportioned)
+}
+
+/// One lane's allowance from the pools of one window length: its percent,
+/// the tokens of its requests the pools' intervals hold, and its requests
+/// they do not.
+#[derive(Default)]
+struct LaneAllowance {
+    percent: allowance::PercentBounds,
+    covered: allowance::Spent,
+    uncovered_requests: usize,
 }
 
 /// The most sessions of one harness a pool lists as members.
@@ -2539,15 +2556,24 @@ pub fn allowance_rates_with_backends(
         }
         // A percent is of one window: a plan whose window of this kind has
         // another length is another window, so lanes group by length too.
-        let mut by_length: std::collections::BTreeMap<Option<u64>, allowance::PercentBounds> =
+        // Each lane's tokens are the ones its pools' intervals hold, the
+        // tokens its percent is apportioned over.
+        let mut by_length: std::collections::BTreeMap<Option<u64>, LaneAllowance> =
             std::collections::BTreeMap::new();
-        for allowance in apportioned
-            .allowance(&[share.id.as_str()])
-            .into_iter()
-            .filter(|allowance| allowance.window == quota)
+        for pool in apportioned
+            .pools
+            .iter()
+            .filter(|pool| pool.pool.window == quota)
         {
-            let sum = by_length.entry(allowance.window_minutes).or_default();
-            *sum = *sum + allowance.percent;
+            let ids = [share.id.as_str()];
+            let allowance = pool.allowance(&ids);
+            if allowance.percent.at_most <= 0.0 && allowance.percent.estimate <= 0.0 {
+                continue;
+            }
+            let lane = by_length.entry(allowance.window_minutes).or_default();
+            lane.percent = lane.percent + allowance.percent;
+            lane.covered += pool.covered(&ids);
+            lane.uncovered_requests += allowance.coverage.uncovered_requests;
         }
         if by_length.is_empty() {
             excluded_without_allowance += 1;
@@ -2571,27 +2597,28 @@ pub fn allowance_rates_with_backends(
             let pick = |part: fn(&allowance::PercentBounds) -> f64| {
                 members
                     .iter()
-                    .map(|member| part(&lanes[*member].1))
+                    .map(|member| part(&lanes[*member].1.percent))
                     .collect::<Vec<_>>()
             };
             let quantiles =
                 |values: Vec<f64>| allowance::Quantiles::of(&values).unwrap_or_default();
             let percent = members
                 .iter()
-                .map(|member| lanes[*member].1)
+                .map(|member| lanes[*member].1.percent)
                 .fold(allowance::PercentBounds::default(), |sum, lane| sum + lane);
-            let category = |part: fn(&model::DisjointTokens) -> Option<u64>| {
-                members
-                    .iter()
-                    .filter_map(|member| lanes[*member].0.disjoint.as_ref().and_then(part))
-                    .sum::<u64>()
-            };
-            let uncached_input = category(|disjoint| disjoint.uncached_input);
-            let cache_read = category(|disjoint| disjoint.cache_read);
-            let cache_write =
-                category(|disjoint| disjoint.cache_write.map(|writes| writes.total()));
-            let output = category(|disjoint| disjoint.output);
-            let reasoning = category(|disjoint| disjoint.reasoning);
+            let mut covered = allowance::Spent::default();
+            let mut uncovered_requests = 0;
+            for member in &members {
+                covered += lanes[*member].1.covered;
+                uncovered_requests += lanes[*member].1.uncovered_requests;
+            }
+            let allowance::Spent {
+                uncached_input,
+                cache_read,
+                cache_write,
+                output,
+                reasoning,
+            } = covered;
             let tokens_per_percent = (|| {
                 Some(allowance::TokensPerPercentSplit {
                     total: allowance::TokensPerPercent::of(
@@ -2627,6 +2654,7 @@ pub fn allowance_rates_with_backends(
                     at_most: quantiles(pick(|bounds| bounds.at_most)),
                 },
                 tokens_per_percent,
+                uncovered_requests,
                 median_duration_minutes: allowance::Quantiles::of(&durations)
                     .map_or(0.0, |quantiles| quantiles.median),
                 measured_over: allowance::MeasuredOver {

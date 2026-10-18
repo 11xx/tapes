@@ -1751,8 +1751,9 @@ enum Command {
         /// harness lists. Each share, group and total also carries
         /// `allowance`: the percent of each quota window it spent, apportioned
         /// over the disjoint tokens each session spent between consecutive
-        /// observations of the pool's used percent, an estimate with bounds
-        /// for the observations' whole-percent rounding; `window.allowance`
+        /// observations of the pool's used percent, among the sessions of the
+        /// pool's own account, an estimate with bounds for the observations'
+        /// whole-percent rounding; `window.allowance`
         /// shows each pool's observed rise and how it divides. Claude records
         /// no used percent, so its shares say so instead.
         #[arg(
@@ -1798,8 +1799,11 @@ enum Command {
         /// The lookback is --window, else --since..--until. Each group gives
         /// lanes, percent per lane (median, p90 by nearest rank, max) over the
         /// lanes' estimates and their bounds, tokens per one percent by
-        /// disjoint category (the estimate, and bounds from the percent's
-        /// bounds), the median minutes from a lane's first to its last
+        /// disjoint category (the tokens an interval of the lanes' pools
+        /// holds over the percent apportioned on them: the estimate, and
+        /// bounds from the percent's bounds), `uncovered_requests` (requests
+        /// no interval held, on neither side of the rate), the median minutes
+        /// from a lane's first to its last
         /// request, and `measured_over`, the first and last request measured,
         /// because rates drift with models and pricing. Claude lanes are left
         /// out with the reason: Claude records no used percent.

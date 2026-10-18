@@ -573,7 +573,8 @@ impl Backend for CodexBackend {
     /// is one spent at its own timestamp, as a span reads them. Each
     /// `rate_limits` window that reports a used percent is an observation of
     /// its pool: the account `session_meta` names, the limit, the plan, the
-    /// window and its length.
+    /// window and its length. A request recorded without a time is counted
+    /// untimed, never folded into the next timed one.
     fn allowance_timeline(&self, session: &Session) -> Result<Option<crate::allowance::Timeline>> {
         use crate::allowance::{PoolKey, RateObservation, TimedUse};
         use crate::window::QuotaKind;
@@ -586,9 +587,12 @@ impl Backend for CodexBackend {
         stream_jsonl(path, None, |value, _, revision| {
             super::validate_native_identity(value, "codex", &session.id)?;
             records.observe(value, None, revision);
-            timeline
-                .requests
-                .extend(records.take_outside().iter().filter_map(outside_use));
+            for request in records.take_outside() {
+                match outside_use(&request) {
+                    Some(spent) => timeline.requests.push(spent),
+                    None => timeline.untimed += 1,
+                }
+            }
             if value["type"] == "session_meta" && account.is_none() {
                 account = value["payload"]["creator_account_id"]
                     .as_str()
@@ -598,9 +602,9 @@ impl Backend for CodexBackend {
             if !is_token_count(value) {
                 return Ok(false);
             }
-            let Some(at) = timestamp(&value["timestamp"]) else {
-                return Ok(false);
-            };
+            // A total without a time still moves the running total, so the
+            // next request's move is its own; its own move is untimed.
+            let at = timestamp(&value["timestamp"]);
             if let Some(total) = codex_tokens(value) {
                 let change = previous
                     .as_ref()
@@ -615,16 +619,22 @@ impl Backend for CodexBackend {
                     let input = moved(|tokens| tokens.input);
                     let cache_read = moved(|tokens| tokens.cache_read);
                     let cache_write = moved(|tokens| tokens.cache_write);
-                    timeline.requests.push(TimedUse {
-                        at,
-                        uncached_input: input.saturating_sub(cache_read + cache_write),
-                        cache_read,
-                        cache_write,
-                        output: moved(|tokens| tokens.output),
-                        reasoning: moved(|tokens| tokens.reasoning),
-                    });
+                    match at {
+                        Some(at) => timeline.requests.push(TimedUse {
+                            at,
+                            uncached_input: input.saturating_sub(cache_read + cache_write),
+                            cache_read,
+                            cache_write,
+                            output: moved(|tokens| tokens.output),
+                            reasoning: moved(|tokens| tokens.reasoning),
+                        }),
+                        None => timeline.untimed += 1,
+                    }
                 }
             }
+            let Some(at) = at else {
+                return Ok(false);
+            };
             let limits = &value["payload"]["rate_limits"];
             for (quota, name) in [
                 (QuotaKind::Primary, "primary"),
@@ -651,9 +661,13 @@ impl Backend for CodexBackend {
             Ok(false)
         })?;
         records.settle_end();
-        timeline
-            .requests
-            .extend(records.take_outside().iter().filter_map(outside_use));
+        for request in records.take_outside() {
+            match outside_use(&request) {
+                Some(spent) => timeline.requests.push(spent),
+                None => timeline.untimed += 1,
+            }
+        }
+        timeline.account = account;
         Ok(Some(timeline))
     }
 

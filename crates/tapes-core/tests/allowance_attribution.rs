@@ -374,7 +374,7 @@ fn rates_per_lane_give_quantiles_tokens_per_percent_and_dates() {
         .unwrap(),
     )
     .unwrap();
-    assert_eq!(rates["schema"], "tapes-allowance-rates/1");
+    assert_eq!(rates["schema"], "tapes-allowance-rates/2");
     let group = &rates["groups"][0];
     assert_eq!(group["key"]["model"], "gpt-fixture");
     assert_eq!(group["lanes"], 5);
