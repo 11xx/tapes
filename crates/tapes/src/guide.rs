@@ -857,7 +857,9 @@ PROBE BEFORE EXPORTING
   where request evidence exists, and zero-written cumulative observations
   otherwise. A mixed priced/unpriced sum is a known priced subtotal.
   Synthetic assistant records join no request tally; positively witnessed
-  failures are counted separately and their consumption is unknown.
+  failures are counted separately and their consumption is unknown. A Claude
+  whole read that skips an undecodable record qualifies every counter
+  unreadable-record.
 
   A pi rewind appends a new branch and keeps the old one, and the abandoned
   requests were consumed all the same. pi usage therefore carries

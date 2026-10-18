@@ -13,8 +13,9 @@ use serde_json::{json, Value};
 
 use super::{
     accounting_for, bounded_launch, filter_listing_search, filter_listing_search_parallel,
-    merge_launch, recorded_total_coverage, search_turns, skipped_records_note, Backend, Listing,
-    Query, SearchCoverage, StreamCoordinates, StreamedTranscript, TokenTotals,
+    merge_launch, recorded_total_coverage, search_turns, skipped_records_note,
+    with_unreadable_records, Backend, Listing, Query, SearchCoverage, StreamCoordinates,
+    StreamedTranscript, TokenTotals,
 };
 use crate::content::{
     bounded_shape, text_part, tool_coverage, tool_part, ContentAvailability, ContentCarrier,
@@ -1802,19 +1803,6 @@ fn with_unrecognized_usage(mut session: Session, count: usize) -> Session {
             .usage_detail
             .get_or_insert_with(Default::default)
             .unrecognized_usage = count;
-    }
-    session
-}
-
-/// The session with `count` unreadable records noted: a record that did not
-/// decode may have carried consumption the figure does not show.
-fn with_unreadable_records(mut session: Session, count: usize) -> Session {
-    if count > 0 {
-        session
-            .usage_detail
-            .get_or_insert_with(Default::default)
-            .measurement_completeness
-            .qualify_all(MeasurementReason::UnreadableRecord);
     }
     session
 }

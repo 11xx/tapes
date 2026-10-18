@@ -1,4 +1,5 @@
 //! A Claude usage figure says what its records support:
+//! - a whole read that could not decode a record qualifies every counter;
 //! - a family's recorded total is ordered against its children by its place
 //!   in the parent's recording, since a cost-state writes no timestamp.
 
@@ -7,8 +8,8 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use agent_tapes_core::backend::{claude::ClaudeBackend, Backend};
-use agent_tapes_core::usage::UsageOptions;
-use agent_tapes_core::{usage_with_options_with_backends, Selection};
+use agent_tapes_core::usage::{UsageOptions, UsageView};
+use agent_tapes_core::{usage_full_with_backends, usage_with_options_with_backends, Selection};
 use serde_json::{json, Value};
 
 fn fixtures(name: &str) -> PathBuf {
@@ -49,6 +50,42 @@ impl Store {
 impl Drop for Store {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
+fn reasons(view: &UsageView, counter: &str) -> Vec<String> {
+    serde_json::to_value(&view.measurement_completeness).unwrap()[counter]
+        .as_array()
+        .map(|reasons| {
+            reasons
+                .iter()
+                .map(|reason| reason.as_str().unwrap().to_owned())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Claim: a whole read of a Claude recording that skips an undecodable line
+/// qualifies every counter `unreadable-record`, as pi and OpenCode do, since
+/// the line may have been a request the sum lacks. Rejects counters reported
+/// complete beside a skipped record.
+#[test]
+fn a_whole_read_qualifies_every_counter_with_an_unreadable_record() {
+    let view = usage_full_with_backends(
+        &[Box::new(ClaudeBackend::new(fixtures("claude-resumed")))],
+        Selection::Id("30000000-0000-4000-8000-000000000002"),
+    )
+    .unwrap();
+    assert!(view
+        .read
+        .as_ref()
+        .is_some_and(|read| read.source_length > 0));
+    for counter in ["input", "output", "reasoning", "cache_read", "cache_write"] {
+        assert!(
+            reasons(&view, counter).contains(&"unreadable-record".to_owned()),
+            "{counter}: {}",
+            serde_json::to_value(&view.measurement_completeness).unwrap()
+        );
     }
 }
 

@@ -720,6 +720,7 @@ impl Backend for ClaudeBackend {
         }
         let mut whole = session.clone();
         records.apply(&mut whole);
+        let whole = super::with_unreadable_records(whole, read.skipped);
         Ok(StreamedTranscript {
             terminal: None,
             coordinates: super::StreamCoordinates::FileBytes,
@@ -796,7 +797,7 @@ impl Backend for ClaudeBackend {
         }
         let mut whole = session.clone();
         records.apply(&mut whole);
-        Ok(whole)
+        Ok(super::with_unreadable_records(whole, read.skipped))
     }
 
     /// A Claude request is placed by the timestamp of its first record, and
@@ -982,6 +983,7 @@ impl Backend for ClaudeBackend {
             records.selections.interrupt();
         }
         records.apply(&mut session);
+        let session = super::with_unreadable_records(session, read.skipped);
         Ok(StreamedChild {
             session: session.with_derived_title(title_turn.as_slice()),
             read: StreamedTranscript {

@@ -1553,6 +1553,19 @@ pub struct StreamedTranscript {
     pub(crate) requests: Option<crate::span::RequestTimeline>,
 }
 
+/// The session with `count` unreadable records noted: a record that did not
+/// decode may have carried consumption the figure does not show.
+pub(crate) fn with_unreadable_records(mut session: Session, count: usize) -> Session {
+    if count > 0 {
+        session
+            .usage_detail
+            .get_or_insert_with(Default::default)
+            .measurement_completeness
+            .qualify_all(crate::measurement::MeasurementReason::UnreadableRecord);
+    }
+    session
+}
+
 /// `turn`, recording the stamp of each turn it hands over into `times`.
 pub(crate) fn timed<'a>(
     times: &'a mut Vec<DateTime<Utc>>,
