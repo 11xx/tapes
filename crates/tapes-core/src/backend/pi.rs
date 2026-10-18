@@ -28,7 +28,9 @@ use crate::model::{
 use crate::overlap::CopyEvidence;
 use crate::span::{Placer, SpanBounds, SpanSessions};
 use crate::usage::{Consumption, ConsumptionEvents, ConsumptionIdentity, ModelUsage, UsageDetail};
-use agent_tapes_discovery::{Harness as NativeHarness, IdentityBasis, NativeSession, NativeStore};
+use agent_tapes_discovery::{
+    Harness as NativeHarness, IdentityBasis, NativeSession, NativeStore, StoreCatalog,
+};
 
 mod consumption_keys;
 
@@ -36,6 +38,8 @@ mod consumption_keys;
 pub struct PiBackend {
     native_root: Option<PathBuf>,
     store: Option<NativeStore>,
+    /// The store's walk, shared by every lookup and listing of this backend.
+    catalog: StoreCatalog,
     /// How much of a recording's end a transcript read takes.
     read_bytes: u64,
 }
@@ -44,6 +48,7 @@ impl PiBackend {
     pub fn new(root: impl Into<PathBuf>) -> Self {
         Self {
             store: Some(NativeStore::pi(root)),
+            catalog: StoreCatalog::new(),
             read_bytes: super::DEFAULT_READ_BYTES,
             native_root: None,
         }
@@ -52,6 +57,7 @@ impl PiBackend {
     pub(crate) fn from_store(store: Option<NativeStore>) -> Self {
         Self {
             store,
+            catalog: StoreCatalog::new(),
             read_bytes: super::DEFAULT_READ_BYTES,
             native_root: None,
         }
@@ -237,7 +243,7 @@ impl Backend for PiBackend {
             return Ok(Listing::default());
         };
         let mut listing = list_discovered_files(
-            store,
+            (store, &self.catalog),
             query,
             |native, path| head_directory(path, native, pi_cwd),
             |native, path| self.parse(native, path).map(|(session, _, _, _)| session),
@@ -254,7 +260,7 @@ impl Backend for PiBackend {
             return Ok(Listing::default());
         };
         let mut listing = list_discovered_files_with_search(
-            store,
+            (store, &self.catalog),
             query,
             needle,
             tail,
@@ -281,7 +287,7 @@ impl Backend for PiBackend {
         let Some(store) = self.store.as_ref() else {
             return Ok(None);
         };
-        let Some(native) = store.locate_exact(id)? else {
+        let Some(native) = store.locate_exact_in(&self.catalog, id)? else {
             return Ok(None);
         };
         let path = native
@@ -689,7 +695,7 @@ impl PiBackend {
             .store
             .as_ref()
             .ok_or_else(|| anyhow!("pi store is unavailable"))?;
-        let native = store.locate_exact(&native_id)?;
+        let native = store.locate_exact_in(&self.catalog, &native_id)?;
         let resolved = native.is_some_and(|native| {
             if reference == native_id {
                 return true;

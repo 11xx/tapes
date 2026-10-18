@@ -8,7 +8,7 @@ mod file;
 mod opencode;
 
 pub use error::DiscoveryError;
-pub use file::{pi_recording_id, CandidatePage};
+pub use file::{pi_recording_id, CandidatePage, StoreCatalog};
 pub use opencode::{OpenCodeFlavor, OpenCodeStore};
 
 use std::collections::{HashMap, HashSet};
@@ -233,6 +233,28 @@ impl NativeStore {
         match self {
             Self::OpenCode(store) => store.candidates(limit),
             _ => file::candidates(self, limit),
+        }
+    }
+
+    /// As [`NativeStore::locate_exact`], walking a file-backed store at most
+    /// once per `catalog`.
+    pub fn locate_exact_in(
+        &self,
+        catalog: &StoreCatalog,
+        id: &str,
+    ) -> Result<Option<NativeSession>, DiscoveryError> {
+        match self {
+            Self::OpenCode(store) => store.locate_exact(id),
+            _ => file::locate_exact_in(self, catalog, id),
+        }
+    }
+
+    /// As [`NativeStore::candidates`], walking a file-backed store at most
+    /// once per `catalog`.
+    pub fn candidates_in(&self, catalog: &StoreCatalog, limit: usize) -> CandidatePage {
+        match self {
+            Self::OpenCode(store) => store.candidates(limit),
+            _ => file::candidates_in(self, catalog, limit),
         }
     }
 }

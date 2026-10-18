@@ -30,12 +30,16 @@ use crate::usage::{
     UsageAttribution, UsageDetail, UsageObservation, UsageObservationOmissions,
     UsageObservationOptions, UsageObservationResult, UsageObservationSeries,
 };
-use agent_tapes_discovery::{Harness as NativeHarness, IdentityBasis, NativeSession, NativeStore};
+use agent_tapes_discovery::{
+    Harness as NativeHarness, IdentityBasis, NativeSession, NativeStore, StoreCatalog,
+};
 
 #[derive(Clone, Debug)]
 pub struct CodexBackend {
     native_root: Option<PathBuf>,
     store: Option<NativeStore>,
+    /// The store's walk, shared by every lookup and listing of this backend.
+    catalog: StoreCatalog,
     /// How much of a recording's end a transcript read takes.
     read_bytes: u64,
 }
@@ -57,6 +61,7 @@ impl CodexBackend {
     pub fn new(root: impl Into<PathBuf>) -> Self {
         Self {
             store: Some(NativeStore::codex(root)),
+            catalog: StoreCatalog::new(),
             read_bytes: super::DEFAULT_READ_BYTES,
             native_root: None,
         }
@@ -65,6 +70,7 @@ impl CodexBackend {
     pub(crate) fn from_store(store: Option<NativeStore>) -> Self {
         Self {
             store,
+            catalog: StoreCatalog::new(),
             read_bytes: super::DEFAULT_READ_BYTES,
             native_root: None,
         }
@@ -317,7 +323,7 @@ impl Backend for CodexBackend {
             return Ok(Listing::default());
         };
         let mut listing = list_discovered_files(
-            store,
+            (store, &self.catalog),
             query,
             |native, path| head_directory(path, native, codex_cwd),
             |native, path| self.parse(native, path).map(|(session, _, _)| session),
@@ -334,7 +340,7 @@ impl Backend for CodexBackend {
             return Ok(Listing::default());
         };
         let mut listing = list_discovered_files_with_search(
-            store,
+            (store, &self.catalog),
             query,
             needle,
             tail,
@@ -362,7 +368,7 @@ impl Backend for CodexBackend {
         let Some(store) = self.store.as_ref() else {
             return Ok(None);
         };
-        let Some(native) = store.locate_exact(id)? else {
+        let Some(native) = store.locate_exact_in(&self.catalog, id)? else {
             return Ok(None);
         };
         let path = native
@@ -671,7 +677,7 @@ impl CodexBackend {
             .store
             .as_ref()
             .ok_or_else(|| anyhow!("codex store is unavailable"))?;
-        let page = store.candidates(100_000);
+        let page = store.candidates_in(&self.catalog, 100_000);
         let files = page
             .records
             .iter()
@@ -714,8 +720,11 @@ impl CodexBackend {
                 .store
                 .as_ref()
                 .ok_or_else(|| anyhow!("codex store is unavailable"))
-                .and_then(|store| store.locate_exact(native_id).map_err(Into::into))
-            {
+                .and_then(|store| {
+                    store
+                        .locate_exact_in(&self.catalog, native_id)
+                        .map_err(Into::into)
+                }) {
                 Ok(session) => session.is_some(),
                 Err(error) => {
                     notes.push(format!(

@@ -6,6 +6,8 @@ use std::io::{self, Read};
 use std::mem::size_of;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::time::SystemTime;
 
 const INITIAL_OPENING_BYTES: usize = 64 * 1024;
@@ -38,13 +40,13 @@ impl CandidatePage<NativeSession, DiscoveryError> {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct FileEntry {
     path: PathBuf,
     modified: SystemTime,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct Walk {
     entries: Vec<FileEntry>,
     scanned: usize,
@@ -89,22 +91,66 @@ impl Walk {
     }
 }
 
+/// One bounded walk of a file-backed store, shared by every exact lookup,
+/// listing and lineage join of one read context. The walk is the same one an
+/// uncatalogued lookup makes, taken once: within the context it answers
+/// which recordings the store held when the walk ran, so a recording written
+/// later belongs to the next context. Nothing is persisted. A catalog belongs
+/// to the store root it first walked; a store with another root walks for
+/// itself.
+#[derive(Clone, Debug, Default)]
+pub struct StoreCatalog {
+    walked: Arc<OnceLock<(PathBuf, Walk)>>,
+    walks: Arc<AtomicUsize>,
+}
+
+impl StoreCatalog {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// How many directory walks this catalog has made.
+    pub fn walks(&self) -> usize {
+        self.walks.load(Ordering::Relaxed)
+    }
+
+    fn walk(&self, store: &NativeStore, root: &Path) -> Walk {
+        let counted = || {
+            self.walks.fetch_add(1, Ordering::Relaxed);
+            walk(store, root)
+        };
+        let (walked_root, walked) = self.walked.get_or_init(|| (root.to_owned(), counted()));
+        if walked_root == root {
+            walked.clone()
+        } else {
+            counted()
+        }
+    }
+}
+
 pub(crate) fn candidates(store: &NativeStore, limit: usize) -> CandidatePage {
+    candidates_in(store, &StoreCatalog::new(), limit)
+}
+
+pub(crate) fn candidates_in(
+    store: &NativeStore,
+    catalog: &StoreCatalog,
+    limit: usize,
+) -> CandidatePage {
     match (store.file(), store.root()) {
         (Some(path), Some(root)) => merge_candidate_pages(
             store,
             explicit_file_candidates(store, path, limit),
-            candidates_from_root(store, root, limit),
+            candidates_from_root(store, catalog.walk(store, root), limit),
             limit,
         ),
         (Some(path), None) => explicit_file_candidates(store, path, limit),
-        (None, Some(root)) => candidates_from_root(store, root, limit),
+        (None, Some(root)) => candidates_from_root(store, catalog.walk(store, root), limit),
         (None, None) => CandidatePage::empty(),
     }
 }
 
-fn candidates_from_root(store: &NativeStore, root: &Path, limit: usize) -> CandidatePage {
-    let mut walk = walk(store, root);
+fn candidates_from_root(store: &NativeStore, mut walk: Walk, limit: usize) -> CandidatePage {
     if walk.entries.is_empty() && walk.failures.is_empty() {
         return CandidatePage {
             records: Vec::new(),
@@ -336,6 +382,14 @@ pub(crate) fn locate_exact(
     store: &NativeStore,
     id: &str,
 ) -> Result<Option<NativeSession>, DiscoveryError> {
+    locate_exact_in(store, &StoreCatalog::new(), id)
+}
+
+pub(crate) fn locate_exact_in(
+    store: &NativeStore,
+    catalog: &StoreCatalog,
+    id: &str,
+) -> Result<Option<NativeSession>, DiscoveryError> {
     let live = store.file().map(|path| {
         probe_runtime_file(store, path).and_then(|session| exact_identity(store, path, id, session))
     });
@@ -343,7 +397,7 @@ pub(crate) fn locate_exact(
         return Ok(Some(session.clone()));
     }
     let directory = match store.root() {
-        Some(root) => locate_exact_using(store, root, id, probe),
+        Some(root) => locate_exact_using(store, catalog.walk(store, root), id, probe),
         None => Ok(None),
     };
     match (live, directory) {
@@ -398,11 +452,10 @@ fn explicit_file_candidates(store: &NativeStore, path: &Path, limit: usize) -> C
 
 fn locate_exact_using(
     store: &NativeStore,
-    root: &Path,
+    walked: Walk,
     id: &str,
     mut inspect: impl FnMut(&NativeStore, &Path) -> Result<Option<NativeSession>, DiscoveryError>,
 ) -> Result<Option<NativeSession>, DiscoveryError> {
-    let walked = walk(store, root);
     let mut entries = walked.entries;
     entries.sort_by(|left, right| {
         right
@@ -1131,7 +1184,7 @@ mod tests {
         let path = write(&root, "project/id.jsonl", "{\"sessionId\":\"id\"}\n");
         let store = NativeStore::claude(root);
         let root = store.root().unwrap();
-        let error = locate_exact_using(&store, root, "id", |store, path| {
+        let error = locate_exact_using(&store, walk(&store, root), "id", |store, path| {
             probe_with_open(store, path, |_| {
                 Err(io::Error::from(io::ErrorKind::PermissionDenied))
             })
@@ -1171,7 +1224,7 @@ mod tests {
         }
         let store = NativeStore::pi(&root);
         let mut opened = 0;
-        let error = locate_exact_using(&store, &root, "id", |store, path| {
+        let error = locate_exact_using(&store, walk(&store, &root), "id", |store, path| {
             opened += 1;
             if opened == 1 {
                 probe(store, path)
@@ -1199,7 +1252,7 @@ mod tests {
         }
         let store = NativeStore::pi(&root);
         let mut inspected = 0;
-        let result = locate_exact_using(&store, &root, "id", |store, path| {
+        let result = locate_exact_using(&store, walk(&store, &root), "id", |store, path| {
             inspected += 1;
             match inspected {
                 1 => {
@@ -1391,18 +1444,20 @@ mod tests {
         let root = store.root().unwrap();
         let mut prefix_openings = 0;
         for query in ["00000000-0000", "000000000001"] {
-            assert!(locate_exact_using(&store, root, query, |_, _| {
-                prefix_openings += 1;
-                Ok(None)
-            })
-            .unwrap()
-            .is_none());
+            assert!(
+                locate_exact_using(&store, walk(&store, root), query, |_, _| {
+                    prefix_openings += 1;
+                    Ok(None)
+                })
+                .unwrap()
+                .is_none()
+            );
         }
         assert_eq!(prefix_openings, 0);
 
         let target = ids.last().unwrap();
         let mut exact_openings = 0;
-        let session = locate_exact_using(&store, root, target, |store, path| {
+        let session = locate_exact_using(&store, walk(&store, root), target, |store, path| {
             exact_openings += 1;
             probe(store, path)
         })
@@ -1411,9 +1466,34 @@ mod tests {
         assert_eq!(session.id(), target);
         assert_eq!(exact_openings, 1);
         assert_eq!(
-            Discovery::new([store]).resolve(target).unwrap().id(),
+            Discovery::new([store.clone()])
+                .resolve(target)
+                .unwrap()
+                .id(),
             target
         );
+
+        // Every exact lookup and listing of one read context shares one walk,
+        // and answers as an uncatalogued lookup does.
+        let catalog = StoreCatalog::new();
+        for id in ids.iter().step_by(97).chain([target]) {
+            let found = store.locate_exact_in(&catalog, id).unwrap().unwrap();
+            assert_eq!(found, store.locate_exact(id).unwrap().unwrap());
+        }
+        for query in ["00000000-0000", "absent-id"] {
+            assert!(store.locate_exact_in(&catalog, query).unwrap().is_none());
+        }
+        assert_eq!(
+            store.candidates_in(&catalog, 10).records,
+            store.candidates(10).records
+        );
+        assert_eq!(catalog.walks(), 1);
+        let shared = catalog.clone();
+        assert!(store.locate_exact_in(&shared, target).unwrap().is_some());
+        assert_eq!(catalog.walks(), 1);
+        let other = NativeStore::codex(temp.path().join("elsewhere"));
+        assert!(other.locate_exact_in(&catalog, target).unwrap().is_none());
+        assert_eq!(catalog.walks(), 2, "another root walks for itself");
     }
 
     #[test]

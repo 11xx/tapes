@@ -837,7 +837,7 @@ fn merge_discovery_coverage(
 }
 
 pub(crate) fn list_discovered_files(
-    store: &NativeStore,
+    (store, catalog): (&NativeStore, &agent_tapes_discovery::StoreCatalog),
     query: &Query,
     probe: impl Fn(&NativeSession, &Path) -> Option<PathBuf>,
     parse: impl Fn(&NativeSession, &Path) -> Result<Session>,
@@ -847,7 +847,7 @@ pub(crate) fn list_discovered_files(
     }
     let intentional_result_limit =
         query.scope.is_none() && !query.has_filters() && query.ceiling > query.limit;
-    let page = store.candidates(query.ceiling);
+    let page = store.candidates_in(catalog, query.ceiling);
     let mut by_path = HashMap::with_capacity(page.records.len());
     let mut files = Vec::with_capacity(page.records.len());
     let mut no_path = Vec::new();
@@ -908,7 +908,7 @@ pub(crate) fn list_discovered_files(
 }
 
 pub(crate) fn list_discovered_files_with_search(
-    store: &NativeStore,
+    (store, catalog): (&NativeStore, &agent_tapes_discovery::StoreCatalog),
     query: &Query,
     needle: &str,
     tail: usize,
@@ -919,7 +919,7 @@ pub(crate) fn list_discovered_files_with_search(
     if query.limit == 0 {
         return Listing::default();
     }
-    let page = store.candidates(query.ceiling);
+    let page = store.candidates_in(catalog, query.ceiling);
     let mut by_path = HashMap::with_capacity(page.records.len());
     let mut files = Vec::with_capacity(page.records.len());
     let mut no_path = Vec::new();

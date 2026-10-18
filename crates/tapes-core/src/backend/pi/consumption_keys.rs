@@ -454,7 +454,7 @@ fn verify_copies(
     let Some(store) = &backend.store else {
         return (Some(Unavailable), 0);
     };
-    let native = match store.locate_exact(&parent) {
+    let native = match store.locate_exact_in(&backend.catalog, &parent) {
         Ok(Some(native)) => native,
         Ok(None) => return (Some(Unavailable), 0),
         Err(_) => return (Some(Unreadable), 0),

@@ -34,12 +34,16 @@ use crate::span::{Placer, SpanBounds, SpanSessions};
 use crate::usage::{
     Durations, MeasurementCoverage, ModelUsage, RecordedUsage, RequestDimensions, UsageDetail,
 };
-use agent_tapes_discovery::{Harness as NativeHarness, IdentityBasis, NativeSession, NativeStore};
+use agent_tapes_discovery::{
+    Harness as NativeHarness, IdentityBasis, NativeSession, NativeStore, StoreCatalog,
+};
 
 #[derive(Clone, Debug)]
 pub struct ClaudeBackend {
     native_root: Option<PathBuf>,
     store: Option<NativeStore>,
+    /// The store's walk, shared by every lookup and listing of this backend.
+    catalog: StoreCatalog,
     /// How much of a recording's end a transcript read takes.
     read_bytes: u64,
 }
@@ -48,6 +52,7 @@ impl ClaudeBackend {
     pub fn new(root: impl Into<PathBuf>) -> Self {
         Self {
             store: Some(NativeStore::claude(root)),
+            catalog: StoreCatalog::new(),
             read_bytes: super::DEFAULT_READ_BYTES,
             native_root: None,
         }
@@ -56,6 +61,7 @@ impl ClaudeBackend {
     pub(crate) fn from_store(store: Option<NativeStore>) -> Self {
         Self {
             store,
+            catalog: StoreCatalog::new(),
             read_bytes: super::DEFAULT_READ_BYTES,
             native_root: None,
         }
@@ -373,7 +379,7 @@ impl Backend for ClaudeBackend {
         let Some(store) = self.store.as_ref() else {
             return Ok(Listing::default());
         };
-        let page = store.candidates(query.ceiling);
+        let page = store.candidates_in(&self.catalog, query.ceiling);
         let mut listing = Listing {
             scanned: page.scanned,
             scan_truncated: !page.complete,
@@ -440,7 +446,7 @@ impl Backend for ClaudeBackend {
             return Ok(Listing::default());
         };
         let mut listing = list_discovered_files(
-            store,
+            (store, &self.catalog),
             query,
             |native, path| head_directory(path, native, claude_cwd),
             |native, path| self.parse(native, path).map(|(session, _, _)| session),
@@ -457,7 +463,7 @@ impl Backend for ClaudeBackend {
             return Ok(Listing::default());
         };
         let mut listing = list_discovered_files_with_search(
-            store,
+            (store, &self.catalog),
             query,
             needle,
             tail,
@@ -484,7 +490,7 @@ impl Backend for ClaudeBackend {
         let Some(store) = self.store.as_ref() else {
             return Ok(None);
         };
-        let Some(native) = store.locate_exact(id)? else {
+        let Some(native) = store.locate_exact_in(&self.catalog, id)? else {
             return Ok(None);
         };
         let path = native
