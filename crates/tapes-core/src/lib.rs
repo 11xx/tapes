@@ -38,6 +38,7 @@ pub mod measurement;
 pub mod model;
 mod model_observation;
 pub mod overlap;
+pub mod pricing;
 pub mod projection;
 pub mod reader;
 pub mod reconcile;
@@ -55,7 +56,7 @@ pub mod workset;
 
 pub const LIST_SCHEMA: &str = "tapes-list/9";
 pub const EXPORT_MANIFEST_SCHEMA: &str = "tapes-export-manifest/7";
-pub const USAGE_SUMMARY_SCHEMA: &str = "tapes-usage-summary/6";
+pub const USAGE_SUMMARY_SCHEMA: &str = "tapes-usage-summary/7";
 /// Number of normalized turns a `list --search` query inspects per session.
 /// Keeping this fixed makes the listing's cost predictable for callers.
 pub const LIST_SEARCH_TAIL: usize = 32;
@@ -1950,6 +1951,17 @@ pub fn usage_summary_with_backends(
     selection: &SessionSelection<'_>,
     by: &[usage::GroupBy],
 ) -> Result<UsageSummary> {
+    usage_summary_priced(backends, selection, by, None)
+}
+
+/// As [`usage_summary_with_backends`], adding each session's list-price
+/// estimate under `prices` where a table is given.
+pub fn usage_summary_priced(
+    backends: &[Box<dyn Backend>],
+    selection: &SessionSelection<'_>,
+    by: &[usage::GroupBy],
+    prices: Option<&pricing::PriceTable>,
+) -> Result<UsageSummary> {
     let scope = selection.within.resolve()?;
     let limit = selection.limit.unwrap_or(DEFAULT_LIST_LIMIT);
     let listed = list_scoped(
@@ -1977,7 +1989,8 @@ pub fn usage_summary_with_backends(
             )
             .ok()
     });
-    let (aggregate, partitions) = usage::partitioned_aggregate_with(&sessions, by, &overlap);
+    let (aggregate, partitions) =
+        usage::partitioned_aggregate_priced(&sessions, by, &overlap, prices);
     Ok(UsageSummary {
         schema: USAGE_SUMMARY_SCHEMA,
         selection: selection_record(selection, limit),

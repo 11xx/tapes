@@ -68,6 +68,11 @@ pub enum MeasurementReason {
     /// The harness's convention does not determine the category from the
     /// counters it recorded.
     Undetermined,
+    /// The price table has no row for the model that served the usage.
+    UnlistedModel,
+    /// Cache writes recorded no TTL, so their price lies between the
+    /// 5-minute and the 1-hour price.
+    TtlUnrecorded,
 }
 
 impl MeasurementReason {
@@ -84,6 +89,8 @@ impl MeasurementReason {
             Self::UnestablishedScope => "unestablished-scope",
             Self::IncompleteAttribution => "incomplete-attribution",
             Self::Undetermined => "undetermined",
+            Self::UnlistedModel => "unlisted-model",
+            Self::TtlUnrecorded => "ttl-unrecorded",
         }
     }
 }

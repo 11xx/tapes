@@ -501,7 +501,7 @@ PROBE BEFORE EXPORTING
   Claude, Codex, or Pi recording twice, pairing past the read bound and
   writing each event as it pairs, with the same filters and counts.
 
-  usage answers where a session's quota went as tapes-usage/12: its recorded
+  usage answers where a session's quota went as tapes-usage/13: its recorded
   launch mode when known, tokens, cost, accounting, turns, and any by-model attribution the source can
   support — Claude's recorded cost-state, Codex's request observations, or
   pi's per-message model each qualified by the thinking level in effect. Read
@@ -544,7 +544,7 @@ PROBE BEFORE EXPORTING
   unrecognized usage the read cannot place for or against a span is counted
   under `unplaced` and qualifies it `unreadable-record`, `stopped-attempt` or
   `unrecognized-usage`, so a span the read could not cover is never complete.
-  The library answers several spans in one pass, as tapes-usage-spans/1: a
+  The library answers several spans in one pass, as tapes-usage-spans/2: a
   figure per span, the `remainder`, and the `whole` in the spans' basis.
   A summary adds sessions only where no recording relates them. Two sessions
   are related when one declares the other as its fork origin or parent (Codex
@@ -926,7 +926,7 @@ PROBE BEFORE EXPORTING
   its own first activity and not the parent's launch.
 
   Given a scope or a listing filter instead of a session, usage answers that
-  whole selection as tapes-usage-summary/6, using the flags list and export
+  whole selection as tapes-usage-summary/7, using the flags list and export
   take and grouping by --by (harness and model unless told otherwise). It sums
   the counters the listing already carries, so nothing is re-read. Read
   counted before a sum: it says how many of a group's sessions recorded that

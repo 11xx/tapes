@@ -1269,6 +1269,7 @@ impl PiUsage {
                         let requests = totals.assistant_requests;
                         let totals = totals.finish(AccountingCoverage::Session, 0, None).unwrap();
                         ModelUsage {
+                            list_price_estimate: None,
                             measurement_completeness: totals.measurement_completeness,
                             model: key.model,
                             variant: key.variant,
@@ -1496,6 +1497,7 @@ impl PiConsumption {
             ));
         }
         Some(Consumption {
+            list_price_estimate: None,
             accounting: Accounting {
                 basis: AccountingBasis::SummedRequests,
                 coverage,

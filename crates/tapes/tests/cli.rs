@@ -8314,13 +8314,13 @@ fn usage_help_names_the_schema_and_what_the_figures_mean() {
     let output = tapes().args(["usage", "--help"]).output().unwrap();
     assert!(output.status.success());
     let help = String::from_utf8_lossy(&output.stdout);
-    assert!(help.contains("tapes-usage/12"), "{help}");
+    assert!(help.contains("tapes-usage/13"), "{help}");
     assert!(
         help.contains("basis and coverage decide whether figures may be summed"),
         "{help}"
     );
     assert!(help.contains("quota is a separate fact"), "{help}");
-    assert!(help.contains("tapes-usage-summary/6"), "{help}");
+    assert!(help.contains("tapes-usage-summary/7"), "{help}");
     assert!(help.contains("--by"), "{help}");
 }
 
@@ -8347,7 +8347,7 @@ fn usage_json_reports_recorded_facts_and_turn_counts_show_agrees_with() {
     );
     let value: Value = serde_json::from_slice(&output.stdout).unwrap();
 
-    assert_eq!(value["schema"], "tapes-usage/12");
+    assert_eq!(value["schema"], "tapes-usage/13");
     assert_eq!(value["session"]["id"], id);
     assert_eq!(value["session"]["source"]["recorded_harness"], "codex");
     assert_eq!(
@@ -8409,7 +8409,7 @@ fn usage_series_is_opt_in_bounded_and_keeps_legacy_classifications() {
         String::from_utf8_lossy(&output.stderr)
     );
     let value: Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(value["schema"], "tapes-usage/12");
+    assert_eq!(value["schema"], "tapes-usage/13");
     assert_eq!(value["series"]["observed"], 3);
     assert_eq!(value["series"]["returned"], 2);
     assert_eq!(value["series"]["rows"][0]["classification"], "advance");
@@ -8497,7 +8497,7 @@ fn usage_full_counts_every_turn_and_folds_the_whole_recordings_counters() {
     assert_eq!(bounded["accounting"]["coverage"], "read-window");
 
     let full = json(&["usage", "usage-full", "--full", "--json"]);
-    assert_eq!(full["schema"], "tapes-usage/12");
+    assert_eq!(full["schema"], "tapes-usage/13");
     assert_eq!(full["turns"]["total"], 50, "{full}");
     assert_eq!(full["turns"]["user"], 2);
     assert_eq!(full["turns"]["assistant"], 48);
@@ -8715,7 +8715,7 @@ fn usage_summary_sums_the_listings_own_counters_and_counts_the_sessions_behind_t
     );
     let value: Value = serde_json::from_slice(&output.stdout).unwrap();
 
-    assert_eq!(value["schema"], "tapes-usage-summary/6");
+    assert_eq!(value["schema"], "tapes-usage-summary/7");
     assert_eq!(value["selection"]["scope"], "global");
     assert_eq!(value["selection"]["harness"], "codex");
     assert_eq!(value["scanned"], 4);
@@ -9368,7 +9368,7 @@ fn pi_usage_reports_active_branch_and_consumption_apart() {
             assert!(!rendered.contains(private), "{rendered}");
         }
         let value: Value = serde_json::from_str(&rendered).unwrap();
-        assert_eq!(value["schema"], "tapes-usage/12");
+        assert_eq!(value["schema"], "tapes-usage/13");
         assert_eq!(value["accounting"]["selection"], "active-branch", "{value}");
         assert_eq!(value["cost"]["usd"], 0.5625, "{value}");
         assert!(value.get("recorded_total").is_none(), "{value}");
@@ -11492,7 +11492,7 @@ fn usage_reconcile_sets_the_recorded_total_beside_the_family_requests() {
         "--json",
     ]);
     let value: Value = serde_json::from_slice(&json.stdout).unwrap();
-    assert_eq!(value["schema"], "tapes-usage/12");
+    assert_eq!(value["schema"], "tapes-usage/13");
     assert_eq!(
         value["reconciliation"]["counters"][0]["status"],
         "reconciled"

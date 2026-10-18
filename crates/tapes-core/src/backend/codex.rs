@@ -1039,6 +1039,7 @@ impl UsageCandidate {
             .map(|(key, value)| {
                 let (tokens, measurement_coverage) = value.tokens.finish_covered();
                 ModelUsage {
+                    list_price_estimate: None,
                     measurement_completeness: Default::default(),
                     model: key.model,
                     variant: key.variant,
@@ -1671,6 +1672,8 @@ struct CodexSpanFigure {
     tokens: TokenTotals,
     since_reset: bool,
     model: Option<Model>,
+    /// The model ids in effect at the span's requests.
+    models: BTreeSet<String>,
     context_window: Option<u64>,
     rate_limits: Option<RateLimits>,
     unrecognized_usage: usize,
@@ -1733,6 +1736,9 @@ impl CodexSpans {
                 );
                 figure.since_reset |= reset;
                 figure.model.clone_from(&self.model);
+                if let Some(model) = &self.model {
+                    figure.models.insert(model.id.clone());
+                }
                 if let Some(window) = codex_context_window(value) {
                     figure.context_window = Some(window);
                 }
@@ -1776,7 +1782,15 @@ impl CodexSpans {
                 }
                 .into_option();
                 span.model = figure.model;
-                span.model_observation = None;
+                // A span served by more than one model says so, and names no
+                // split between them.
+                span.model_observation =
+                    (figure.models.len() > 1).then_some(ModelObservationStatus {
+                        mixed: true,
+                        head_read: true,
+                        attribution_uncertain: true,
+                        distinct_observed: Some(figure.models.len()),
+                    });
                 span.model_selections = Vec::new();
                 crate::span::keep_identity(&mut span, whole);
                 span

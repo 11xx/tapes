@@ -1,0 +1,29 @@
+# A price table for the fixture sessions. The prices are round numbers chosen
+# so each estimate can be checked by hand; they are no vendor's prices.
+schema = "tapes-price-table/1"
+currency = "USD"
+
+[[models]]
+id = "claude-fixture"
+effective = 2026-01-01
+source = "fixture"
+per_million = { uncached_input = 3.0, cache_read = 0.3, cache_write_5m = 3.75, cache_write_1h = 6.0, output = 15.0 }
+
+[[models]]
+id = "gpt-fixture"
+aliases = ["gpt-fixture-alias"]
+effective = 2026-01-02
+source = "fixture"
+per_million = { uncached_input = 2.0, cache_read = 0.2, cache_write_5m = 2.5, output = 10.0 }
+
+[[models]]
+id = "kimi-k3"
+effective = 2026-01-03
+source = "fixture"
+per_million = { uncached_input = 1.0, cache_read = 0.1, cache_write_5m = 1.25, cache_write_1h = 1.25, output = 5.0 }
+
+[[models]]
+id = "pi-model-a"
+effective = 2026-01-04
+source = "fixture"
+per_million = { uncached_input = 1.0, cache_read = 0.1, cache_write_5m = 1.0, cache_write_1h = 2.0, output = 4.0 }

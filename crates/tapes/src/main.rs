@@ -1443,7 +1443,7 @@ enum Command {
         json: bool,
     },
     /// Where quota went. A session named by id or reached with --latest
-    /// answers that session as tapes-usage/12: its recorded tokens, cost, and
+    /// answers that session as tapes-usage/13: its recorded tokens, cost, and
     /// turn counts, plus whatever else its harness recorded — a context
     /// window, a provider quota window, wall-clock durations, a per-model
     /// split, the price-relevant dimensions its requests recorded. --from,
@@ -1451,7 +1451,7 @@ enum Command {
     /// with a `span` object; spans and the remainder no span holds add up to
     /// the whole session within one accounting basis. A scope or
     /// listing filter instead answers the whole selection as
-    /// tapes-usage-summary/6, grouped by --by and summing each counter over
+    /// tapes-usage-summary/7, grouped by --by and summing each counter over
     /// the sessions that recorded it. Native tokens follow each harness's own
     /// convention and add only within it; the disjoint categories (uncached
     /// input, cache read, cache write by TTL, output) add across harnesses.
@@ -1655,7 +1655,7 @@ enum Command {
             conflicts_with_all = ["by", "read_bytes", "series", "reconcile", "event_keys", "from", "to"]
         )]
         requests: Option<SpanBounds>,
-        /// Render the versioned tapes-usage/12 object, or tapes-usage-summary/6
+        /// Render the versioned tapes-usage/13 object, or tapes-usage-summary/7
         /// for a selection, as JSON. `session.model_observation` says
         /// whether more than one model and effort was observed (`mixed`) and
         /// whether a gap, partial read or budget kept the split incomplete

@@ -71,7 +71,7 @@ fn a_time_split_adds_up_to_the_full_answer() {
     let whole = store.json(&[SESSION, "--full"]);
     let before = store.json(&[SESSION, "--to", "2026-01-05T13:00:00Z"]);
     let after = store.json(&[SESSION, "--from", "2026-01-05T13:00:00Z"]);
-    assert_eq!(before["schema"], "tapes-usage/12");
+    assert_eq!(before["schema"], "tapes-usage/13");
     assert_eq!(before["span"]["bounds"]["kind"], "time");
     assert_eq!(before["span"]["bounds"]["to"], "2026-01-05T13:00:00Z");
     assert_eq!(before["span"]["requests"], 4);

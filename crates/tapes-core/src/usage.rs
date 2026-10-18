@@ -23,9 +23,10 @@ use crate::model::{
     TokenConvention, Tokens, Transcript, Truncation, Turn,
 };
 use crate::overlap::{CopyEvidence, Disjointness, Overlap, RelatedSessions, UsageOverlap};
+use crate::pricing::{EstimateSum, ListPriceEstimate, PriceTable, PricedFigure};
 use crate::span::{SpanPlacement, SpanSessions, SPANS_SCHEMA};
 
-pub const USAGE_SCHEMA: &str = "tapes-usage/12";
+pub const USAGE_SCHEMA: &str = "tapes-usage/13";
 
 /// Recorded usage facts and measurement notes kept beside the session's
 /// normalized counters. A source fact that was not recorded remains absent.
@@ -212,6 +213,9 @@ pub struct ModelUsage {
     /// its counters do not show; the usage view adds the rest.
     #[serde(skip_serializing_if = "MeasurementCompleteness::is_empty")]
     pub measurement_completeness: MeasurementCompleteness,
+    /// The model's share priced by its own row of a caller's price table.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub list_price_estimate: Option<ListPriceEstimate>,
 }
 
 impl ModelUsage {
@@ -428,6 +432,9 @@ pub struct Consumption {
     /// establish request counts; every zero-written event is an observation.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cost_coverage: Option<CostCoverage>,
+    /// The consumption priced by a caller's price table.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub list_price_estimate: Option<ListPriceEstimate>,
     /// Per-counter coverage among the counted events. Missing dimensions
     /// leave known subtotals, never complete measurements.
     pub measurement_coverage: BTreeMap<String, MeasurementCoverage>,
@@ -807,6 +814,10 @@ pub struct UsageView {
     pub cost: Option<Cost>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cost_coverage: Option<CostCoverage>,
+    /// The figure priced by a caller's price table, beside any cost the
+    /// harness wrote.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub list_price_estimate: Option<ListPriceEstimate>,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub measurement_coverage: BTreeMap<String, MeasurementCoverage>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -1003,6 +1014,7 @@ fn project(session: &Session, turns: TurnTally, facts: ReadFacts) -> UsageView {
         disjoint: session.disjoint_tokens(),
         cost: session.estimated_cost(),
         cost_coverage: session.cost_coverage(),
+        list_price_estimate: None,
         measurement_coverage: detail.measurement_coverage,
         measurement_incomplete: detail.measurement_incomplete,
         measurement_completeness: session.measurement_completeness(),
@@ -1060,6 +1072,39 @@ impl Session {
             completeness.qualify_all(MeasurementReason::UnrecognizedUsage);
         }
         completeness
+    }
+
+    /// The session priced under `table`, as its usage answer prices it.
+    /// Absent when no model is known to have served it.
+    pub fn list_price(&self, table: &PriceTable) -> Option<EstimateSum> {
+        let disjoint = self.disjoint_tokens();
+        let detail = self.usage_detail.as_ref();
+        let scope = match detail.and_then(|detail| detail.attribution.as_ref()) {
+            Some(attribution) => Some(attribution.coverage),
+            None => self
+                .accounting
+                .as_ref()
+                .map(|accounting| accounting.coverage),
+        };
+        let shared = self.shared_model_reasons();
+        let models = detail
+            .and_then(|detail| detail.by_model.clone())
+            .map(|mut models| {
+                for model in &mut models {
+                    model.qualify(scope, &shared);
+                }
+                models
+            });
+        PricedFigure {
+            disjoint: disjoint.as_ref(),
+            convention: None,
+            model: self.model.as_ref(),
+            selections: &self.model_selections,
+            observation: self.model_observation.as_ref(),
+            by_model: models.as_deref(),
+        }
+        .estimate(table)
+        .whole
     }
 
     /// The session's completeness as a member of a selection, where a
@@ -1265,6 +1310,14 @@ pub struct UsageTally {
     pub cost: Option<Cost>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cost_coverage: Option<CostCoverage>,
+    /// The sessions' list-price estimates added where their disjoint
+    /// categories add: within one accounting basis and coverage, and only
+    /// where no overlap group's exact totals are withheld.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub list_price_estimate: Option<ListPriceEstimate>,
+    /// Why a price table's estimate is not added here.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub list_price_withheld: Vec<EstimateWithheld>,
     pub coverage: CoverageCounts,
     pub counted: CountedSessions,
     /// The summed native counters some selected session measured
@@ -1289,6 +1342,20 @@ pub struct UsageTally {
     /// the recordings relate. Absent for a single session.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub overlap: Option<UsageOverlap>,
+}
+
+/// Why a summary withholds the list-price estimate of its sessions.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum EstimateWithheld {
+    /// The sessions' accounting bases or coverages differ, so their disjoint
+    /// categories, and the estimates priced from them, do not add.
+    MixedAccounting,
+    /// An overlap group's exact totals are withheld.
+    IdentityUnestablished,
+    /// Related sessions were added by the exact union of their events, which
+    /// names no model to price by.
+    ExactUnion,
 }
 
 /// One session's measurement, with no recording locator or raw diagnostic.
@@ -1563,9 +1630,29 @@ struct Tally {
     coverage: CoverageCounts,
     mixed_models: usize,
     attribution_uncertain: usize,
+    /// The sessions' list-price estimates, where a price table was given.
+    estimate: Option<EstimateSum>,
+    /// Some sessions were added by an exact union of their events, which
+    /// carries no model evidence to price by.
+    unioned: bool,
 }
 
 impl Tally {
+    /// Add the session's list-price estimate. A session with nothing priced
+    /// leaves the sum qualified: its categories' own reasons, or no model
+    /// known to have served it, or no counters at all.
+    fn price(&mut self, session: &Session, table: &PriceTable) {
+        let sum = self.estimate.get_or_insert_with(EstimateSum::default);
+        match session.list_price(table) {
+            Some(priced) => sum.merge(priced),
+            None if session.tokens.is_none() => sum.qualify_all(MeasurementReason::MissingCounter),
+            None if session.disjoint_tokens().is_none() => {
+                sum.qualify_all(MeasurementReason::Undetermined)
+            }
+            None => sum.qualify_all(MeasurementReason::IncompleteAttribution),
+        }
+    }
+
     fn add(&mut self, session: &Session) {
         self.add_facts(session);
         self.measurement_completeness
@@ -1611,6 +1698,7 @@ impl Tally {
     ) {
         let mut harness = None;
         let mut count = 0;
+        self.unioned = true;
         for session in sessions {
             self.add_facts(session);
             harness.get_or_insert(session.harness());
@@ -1721,6 +1809,15 @@ impl Tally {
             identity_bounds: None,
             session_figures: Vec::new(),
             overlap: None,
+            list_price_withheld: if self.unioned && self.estimate.is_some() {
+                vec![EstimateWithheld::ExactUnion]
+            } else {
+                Vec::new()
+            },
+            list_price_estimate: self
+                .estimate
+                .filter(|_| !self.unioned)
+                .and_then(EstimateSum::finish),
         }
     }
 }
@@ -1871,6 +1968,7 @@ mod tests {
                 total: Some(2_000),
             }),
             by_model: Some(vec![ModelUsage {
+                list_price_estimate: None,
                 measurement_completeness: Default::default(),
                 model: "fixture-model".to_owned(),
                 variant: None,
@@ -2250,6 +2348,17 @@ pub fn partitioned_aggregate_with(
     by: &[GroupBy],
     overlap: &Overlap,
 ) -> (UsageAggregate, Vec<AccountingPartition>) {
+    partitioned_aggregate_priced(sessions, by, overlap, None)
+}
+
+/// As [`partitioned_aggregate_with`], adding each session's list-price
+/// estimate under `prices` where one is given.
+pub fn partitioned_aggregate_priced(
+    sessions: &[Session],
+    by: &[GroupBy],
+    overlap: &Overlap,
+    prices: Option<&PriceTable>,
+) -> (UsageAggregate, Vec<AccountingPartition>) {
     let mut groups: BTreeMap<Vec<Option<String>>, Vec<usize>> = BTreeMap::new();
     let mut partitions: BTreeMap<(String, String), (Option<Accounting>, Vec<usize>)> =
         BTreeMap::new();
@@ -2270,10 +2379,10 @@ pub fn partitioned_aggregate_with(
             .into_iter()
             .map(|(values, members)| UsageGroup {
                 key: group_key(by, &values),
-                tally: summarize(sessions, &members, overlap),
+                tally: summarize(sessions, &members, overlap, prices),
             })
             .collect(),
-        totals: summarize(sessions, &everything, overlap),
+        totals: summarize(sessions, &everything, overlap, prices),
     };
     let partitions = partitions
         .into_iter()
@@ -2281,7 +2390,7 @@ pub fn partitioned_aggregate_with(
             |((harness, _), (accounting, members))| AccountingPartition {
                 harness,
                 accounting,
-                tally: summarize(sessions, &members, overlap),
+                tally: summarize(sessions, &members, overlap, prices),
             },
         )
         .collect();
@@ -2299,7 +2408,12 @@ fn accounting_key(session: &Session) -> (String, String) {
 /// within the set are added as one unit: by their exact union where their
 /// event keys establish it, and otherwise not at all, their exact totals
 /// withheld and bounded.
-fn summarize(sessions: &[Session], members: &[usize], overlap: &Overlap) -> UsageTally {
+fn summarize(
+    sessions: &[Session],
+    members: &[usize],
+    overlap: &Overlap,
+    prices: Option<&PriceTable>,
+) -> UsageTally {
     let buckets = overlap.buckets(members);
     let bucketed = buckets
         .iter()
@@ -2313,13 +2427,26 @@ fn summarize(sessions: &[Session], members: &[usize], overlap: &Overlap) -> Usag
         position.insert(*index, domains.add(session, &accounting_key(session)));
         if !bucketed.contains(index) {
             tally.add(session);
+            if let Some(table) = prices {
+                tally.price(session, table);
+            }
         }
     }
     for bucket in &buckets {
         let held = bucket.members.iter().map(|index| &sessions[*index]);
         match bucket.exact() {
-            Some(amounts) => tally.add_union(held, amounts),
-            None => held.for_each(|session| tally.add(session)),
+            Some(amounts) => {
+                tally.add_union(held, amounts);
+                if prices.is_some() {
+                    tally.estimate.get_or_insert_with(EstimateSum::default);
+                }
+            }
+            None => held.for_each(|session| {
+                tally.add(session);
+                if let Some(table) = prices {
+                    tally.price(session, table);
+                }
+            }),
         }
         domains.relate(
             bucket.members.iter().map(|index| position[index]).collect(),
@@ -2330,6 +2457,12 @@ fn summarize(sessions: &[Session], members: &[usize], overlap: &Overlap) -> Usag
     let mut tally = tally.finish();
     domains.apply(&mut tally);
     tally
+}
+
+fn withhold_estimate(tally: &mut UsageTally, reason: EstimateWithheld) {
+    if tally.list_price_estimate.take().is_some() && !tally.list_price_withheld.contains(&reason) {
+        tally.list_price_withheld.push(reason);
+    }
 }
 
 /// The accounting domains one group's counters span. Native counters add
@@ -2417,6 +2550,7 @@ impl Domains {
         }
         if self.accounting.len() > 1 {
             tally.disjoint = None;
+            withhold_estimate(tally, EstimateWithheld::MixedAccounting);
         }
         if self.unioned {
             // A union has only disjoint categories, so the native counters
@@ -2430,6 +2564,7 @@ impl Domains {
             tally.tokens = None;
             tally.cost = None;
             tally.disjoint = None;
+            withhold_estimate(tally, EstimateWithheld::IdentityUnestablished);
             tally.measurement_coverage.clear();
         }
         if self.figures.len() > 1 {

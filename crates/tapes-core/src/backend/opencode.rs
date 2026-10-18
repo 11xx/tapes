@@ -1845,6 +1845,8 @@ struct MessageSum {
     unrecognized_usage: usize,
     unreadable: bool,
     model: Option<Model>,
+    /// The model ids the summed messages name.
+    models: HashSet<String>,
 }
 
 impl MessageSum {
@@ -1870,6 +1872,7 @@ impl MessageSum {
             None => self.cost_measurement.missing += 1,
         }
         if let Some(id) = message["model"]["id"].as_str() {
+            self.models.insert(id.to_owned());
             self.model = Some(Model {
                 id: id.to_owned(),
                 variant: message["model"]["variant"].as_str().map(str::to_owned),
@@ -1902,6 +1905,14 @@ impl MessageSum {
         figure.tokens = tokens;
         figure.cost = cost;
         figure.model = self.model;
+        // Messages served by more than one model say so, and name no split.
+        figure.model_observation =
+            (self.models.len() > 1).then_some(crate::model::ModelObservationStatus {
+                mixed: true,
+                head_read: true,
+                attribution_uncertain: true,
+                distinct_observed: Some(self.models.len()),
+            });
         let mut detail = crate::usage::UsageDetail {
             cost_coverage,
             measurement_incomplete: known_subtotal_notes(&measurement_coverage),
