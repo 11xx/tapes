@@ -16,7 +16,7 @@ use crate::content::{parts_from_array, project_text, tool_coverage, tool_part};
 use crate::event::{Bounded, EventKind, ToolEvent};
 use crate::history::PageProjection;
 use crate::lineage::{ChildRef, Lineage, ParentRef, SourceRef};
-use crate::measurement::known_subtotal_notes;
+use crate::measurement::{known_subtotal_notes, MeasurementReason};
 use crate::model::{
     is_known_envelope, is_known_notice, AccountingBasis, AccountingCoverage, ByteSpan,
     DisjointTokens, KindDeclaration, Launch, Model, ModelObservationStatus, ReadGap, RecordRef,
@@ -24,6 +24,7 @@ use crate::model::{
     Transcript, Turn, TurnKind, TurnSelection, UserDefault,
 };
 use crate::overlap::CopyEvidence;
+use crate::span::{Placer, SpanBounds, SpanSessions};
 use crate::usage::{
     Credits, ModelUsage, ObservationBasis, ObservationClassification, RateLimits, RateWindow,
     UsageAttribution, UsageDetail, UsageObservation, UsageObservationOmissions,
@@ -480,6 +481,60 @@ impl Backend for CodexBackend {
         let mut whole = session.clone();
         records.apply(&mut whole);
         Ok(whole)
+    }
+
+    /// A Codex request is a token count that moves the cumulative total, and
+    /// its share is the move: a span's figure is the difference of the
+    /// totals at its boundaries. A total that fell restarts the count, so the
+    /// request after it contributes its own total and qualifies its span
+    /// `since-reset`.
+    fn stream_spans(
+        &self,
+        session: &Session,
+        read: &StreamedTranscript,
+        spans: &[SpanBounds],
+    ) -> Result<SpanSessions> {
+        let path = super::session_file_path(session)
+            .ok_or_else(|| anyhow!("codex session {} has no file locator", session.id))?;
+        let state = std::cell::RefCell::new((
+            CodexRecords::new(path, false),
+            Placer::new(spans),
+            CodexSpans::default(),
+        ));
+        let streamed = stream_jsonl_with_gaps(
+            path,
+            Some(read.pin()?),
+            |value, span, revision| {
+                super::validate_native_identity(value, "codex", &session.id)?;
+                let (records, placer, figures) = &mut *state.borrow_mut();
+                records.observe(value, Some(span), revision);
+                figures.observe(value, placer);
+                Ok(false)
+            },
+            |gap| {
+                let (records, placer, _) = &mut *state.borrow_mut();
+                records.observe_gap(gap);
+                placer.unreadable();
+            },
+        )?;
+        let (mut records, placer, figures) = state.into_inner();
+        for gap in &streamed.gaps {
+            records.observe_read_gap(gap);
+        }
+        let mut whole = session.clone();
+        records.apply(&mut whole);
+        let placed = placer.finish();
+        let figures = figures.finish(session, &whole, placed.figures());
+        Ok(SpanSessions::assemble(
+            placed,
+            figures,
+            whole,
+            vec![
+                "A Codex span is the difference of the cumulative totals at its boundaries; \
+                 its model split is not divided."
+                    .to_owned(),
+            ],
+        ))
     }
 
     fn usage_observations(
@@ -1598,6 +1653,135 @@ impl CodexUsageObserver {
             activity: self.activity,
             series,
         }
+    }
+}
+
+/// Codex span figures, each the moves of the cumulative total its requests
+/// made, with what the span's own token counts reported beside them.
+#[derive(Default)]
+struct CodexSpans {
+    previous: Option<Tokens>,
+    response: Option<(String, Option<Tokens>)>,
+    model: Option<Model>,
+    figures: BTreeMap<usize, CodexSpanFigure>,
+}
+
+#[derive(Default)]
+struct CodexSpanFigure {
+    tokens: TokenTotals,
+    since_reset: bool,
+    model: Option<Model>,
+    context_window: Option<u64>,
+    rate_limits: Option<RateLimits>,
+    unrecognized_usage: usize,
+}
+
+impl CodexSpans {
+    fn observe(&mut self, value: &Value, placer: &mut Placer) {
+        let at = timestamp(&value["timestamp"]);
+        if value["type"] == "turn_context" {
+            let payload = &value["payload"];
+            self.model = payload["model"].as_str().map(|id| Model {
+                id: id.to_owned(),
+                variant: turn_context_effort(payload)
+                    .filter(|effort| !effort.is_empty())
+                    .map(str::to_owned),
+            });
+        } else if value["type"] == "token_usage_record" {
+            let payload = &value["payload"];
+            self.response = payload["response_id"]
+                .as_str()
+                .filter(|id| !id.is_empty() && id.len() <= MAX_IDENTITY_BYTES)
+                .map(|id| (id.to_owned(), tokens_from_object(&payload["usage"])));
+        } else if let Some(total) = codex_tokens(value) {
+            let change = self
+                .previous
+                .as_ref()
+                .map(|previous| compare_totals(previous, &total));
+            let previous = self.previous.replace(total.clone());
+            if matches!(change, Some(TotalChange::Unchanged)) {
+                return;
+            }
+            let reset = matches!(change, Some(TotalChange::Reset));
+            let base = previous.filter(|_| !reset).unwrap_or(Tokens {
+                input: Some(0),
+                output: Some(0),
+                reasoning: Some(0),
+                cache_read: Some(0),
+                cache_write: Some(0),
+            });
+            // A cumulative counter never falls within an epoch, so one that
+            // stands at zero moved by zero even where the base did not write it.
+            let moved = |base: Option<u64>, total: Option<u64>| match (base, total?) {
+                (_, 0) => Some(0),
+                (base, total) => Some(total.saturating_sub(base?)),
+            };
+            let last = codex_last_tokens(value);
+            let response = self
+                .response
+                .take()
+                .filter(|(_, usage)| usage.is_some() && *usage == last)
+                .map(|(id, _)| id);
+            for index in placer.request(at, response.as_deref()) {
+                let figure = self.figures.entry(index).or_default();
+                figure.tokens.add(
+                    moved(base.input, total.input),
+                    moved(base.output, total.output),
+                    moved(base.reasoning, total.reasoning),
+                    moved(base.cache_read, total.cache_read),
+                    moved(base.cache_write, total.cache_write),
+                );
+                figure.since_reset |= reset;
+                figure.model.clone_from(&self.model);
+                if let Some(window) = codex_context_window(value) {
+                    figure.context_window = Some(window);
+                }
+                if let Some(limits) = codex_rate_limits(value) {
+                    figure.rate_limits = Some(limits);
+                }
+            }
+        } else if codex_unread_usage(value) {
+            for index in placer.record(at, MeasurementReason::UnrecognizedUsage) {
+                self.figures.entry(index).or_default().unrecognized_usage += 1;
+            }
+        }
+    }
+
+    fn finish(mut self, session: &Session, whole: &Session, count: usize) -> Vec<Session> {
+        (0..count)
+            .map(|index| {
+                let figure = self.figures.remove(&index).unwrap_or_default();
+                let (tokens, measurement_coverage) = figure.tokens.finish_covered();
+                let mut span = session.clone();
+                span.accounting = accounting_for(
+                    tokens.as_ref(),
+                    None,
+                    &measurement_coverage,
+                    AccountingBasis::RecordedTotal,
+                    if figure.since_reset {
+                        AccountingCoverage::SinceReset
+                    } else {
+                        AccountingCoverage::Session
+                    },
+                );
+                span.tokens = tokens;
+                span.cost = None;
+                span.usage_detail = UsageDetail {
+                    context_window: figure.context_window,
+                    rate_limits: figure.rate_limits,
+                    measurement_incomplete: known_subtotal_notes(&measurement_coverage),
+                    measurement_coverage,
+                    unrecognized_usage: figure.unrecognized_usage,
+                    ..UsageDetail::default()
+                }
+                .into_option();
+                span.model = figure.model;
+                span.model_observation = None;
+                span.model_selections = Vec::new();
+                crate::span::keep_identity(&mut span, whole);
+                span
+            })
+            .collect()
     }
 }
 

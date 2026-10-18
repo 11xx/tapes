@@ -372,6 +372,12 @@ case $path in
       *) /bin/cat "$fixture_dir/$list" ;;
     esac
     ;;
+  /api/session/ses_000000fixtureSpanSession/message|/api/session/ses_000000fixtureSpanSession/message\?*)
+    case $mode in
+      exit|malformed|absent) exit 7 ;;
+      *) /bin/cat "$fixture_dir/messages-spans.json" ;;
+    esac
+    ;;
   /api/session/*/message|/api/session/*/message\?*)
     case $mode in
       exit|malformed|absent) exit 7 ;;
@@ -395,6 +401,9 @@ case $path in
                 ;;
               /api/session/ses_api_only_fixture)
                 /bin/cat "$fixture_dir/session-api-only.json"
+                ;;
+              /api/session/ses_000000fixtureSpanSession)
+                /bin/cat "$fixture_dir/session-spans.json"
                 ;;
               *)
                 printf '%s\n' '{"data":null}'

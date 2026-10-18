@@ -26,6 +26,7 @@ use crate::model::{
     TrailingRecord, Transcript, Turn, TurnKind, TurnSelection, UserDefault,
 };
 use crate::overlap::CopyEvidence;
+use crate::span::{Placer, SpanBounds, SpanSessions};
 use crate::usage::{Consumption, ConsumptionEvents, ConsumptionIdentity, ModelUsage, UsageDetail};
 use agent_tapes_discovery::{Harness as NativeHarness, IdentityBasis, NativeSession, NativeStore};
 
@@ -519,6 +520,88 @@ impl Backend for PiBackend {
     /// entry's place in the tree and the facts it carries; the branch is
     /// walked once the last entry is known.
     fn stream_session(&self, session: &Session, read: &StreamedTranscript) -> Result<Session> {
+        let recording = self.stream_entries(session, read)?;
+        Ok(recording.figure(session, &|_| true, recording.skipped, read))
+    }
+
+    /// A pi consumption event is placed by its entry's timestamp; an entry
+    /// repeating an event already counted joins that event's spans. The
+    /// active-branch counters and the retained-branch consumption of a span
+    /// select from the same placed events, so each conserves on its own.
+    fn stream_spans(
+        &self,
+        session: &Session,
+        read: &StreamedTranscript,
+        spans: &[SpanBounds],
+    ) -> Result<SpanSessions> {
+        let recording = self.stream_entries(session, read)?;
+        let mut placer = Placer::new(spans);
+        let mut held = vec![Vec::new(); recording.entries.len()];
+        let mut by_entry = HashMap::<&str, Vec<usize>>::new();
+        let mut by_response = HashMap::<&(String, String), Vec<usize>>::new();
+        let mut gaps = recording.gaps.iter().peekable();
+        for (position, entry) in recording.entries.iter().enumerate() {
+            while gaps.next_if(|gap| gap.span.start < entry.start).is_some() {
+                placer.unreadable();
+            }
+            if let Some(consumed) = &entry.consumed {
+                let id = entry.id.as_deref().filter(|id| !id.is_empty());
+                let repeated = id
+                    .and_then(|id| by_entry.get(id))
+                    .or_else(|| {
+                        consumed
+                            .response
+                            .as_ref()
+                            .and_then(|response| by_response.get(response))
+                    })
+                    .cloned();
+                let figures = repeated.unwrap_or_else(|| {
+                    let named = consumed
+                        .response
+                        .as_ref()
+                        .map(|(_, response)| response.as_str())
+                        .or(id);
+                    placer.request(entry.timestamp, named)
+                });
+                if let Some(id) = id {
+                    by_entry.entry(id).or_insert_with(|| figures.clone());
+                }
+                if let Some(response) = &consumed.response {
+                    by_response
+                        .entry(response)
+                        .or_insert_with(|| figures.clone());
+                }
+                held[position] = figures;
+            } else if entry.unread_usage {
+                held[position] =
+                    placer.record(entry.timestamp, MeasurementReason::UnrecognizedUsage);
+            }
+        }
+        for _ in gaps {
+            placer.unreadable();
+        }
+        let whole = recording.figure(session, &|_| true, recording.skipped, read);
+        let placed = placer.finish();
+        let figures = (0..placed.figures())
+            .map(|index| {
+                let mut figure = recording.figure(
+                    session,
+                    &|position| held[position].contains(&index),
+                    0,
+                    read,
+                );
+                crate::span::keep_identity(&mut figure, &whole);
+                figure
+            })
+            .collect();
+        Ok(SpanSessions::assemble(placed, figures, whole, Vec::new()))
+    }
+}
+
+impl PiBackend {
+    /// Every entry of the recording `read` covered, with the active branch
+    /// walked from the last entry.
+    fn stream_entries(&self, session: &Session, read: &StreamedTranscript) -> Result<PiRecording> {
         let path = self.recording(session)?;
         let mut entries = Vec::<PiEntry>::new();
         let mut positions = HashMap::<String, usize>::new();
@@ -547,6 +630,7 @@ impl Backend for PiBackend {
                 model: pi_model(value).map(str::to_owned),
                 thinking: pi_thinking(value).map(str::to_owned),
                 timestamp: timestamp(&value["timestamp"]),
+                start: span.start,
                 end: span.end,
             });
             Ok(false)
@@ -560,7 +644,7 @@ impl Backend for PiBackend {
             let Some(id) = entry.id.as_deref() else {
                 break;
             };
-            if !seen.insert(id) {
+            if !seen.insert(id.to_owned()) {
                 break;
             }
             active.push(position);
@@ -576,81 +660,19 @@ impl Backend for PiBackend {
             entries.last().map(|entry| entry.end),
             &streamed.gaps,
         );
-        let mut consumption = PiConsumption::default();
-        for entry in &entries {
-            if let Some(consumed) = &entry.consumed {
-                let id = entry.id.as_deref();
-                consumption.observe(id, consumed, id.is_some_and(|id| seen.contains(id)));
-            }
-            consumption.unrecognized_usage += usize::from(entry.unread_usage);
-        }
-        let unrecognized_usage = active
-            .iter()
-            .filter(|position| entries[**position].unread_usage)
-            .count();
-        let copies = pi_copy_evidence(forked_from.clone());
-        let consumption =
-            consumption.finish(AccountingCoverage::Session, streamed.skipped, forked_from);
-
-        let mut usage = PiUsage::default();
-        let mut model = None;
-        let mut variant = None;
-        let mut selections = crate::model_observation::Selections::default();
-        for entry in active.iter().map(|position| &entries[*position]) {
-            if let Some(consumed) = &entry.consumed {
-                usage.add(entry.id.as_deref(), consumed, variant.as_deref());
-            }
-            if let Some(id) = &entry.model {
-                selections.observe(
-                    Model {
-                        id: id.clone(),
-                        variant: variant.clone(),
-                    },
-                    entry.timestamp,
-                    entry.id.as_deref(),
-                );
-                model.clone_from(&entry.model);
-            }
-            if entry.thinking.is_some() {
-                variant.clone_from(&entry.thinking);
-            }
-        }
-        let usage = usage.finish();
-        let tokens = usage.tokens;
-        let cost = usage.cost;
-        let mut whole = session.clone();
-        whole.accounting = branch_accounting(
-            tokens.as_ref(),
-            cost.as_ref(),
-            &usage.measurement_coverage,
+        Ok(PiRecording {
+            entries,
+            active,
+            seen,
             coverage,
-        );
-        whole.tokens = tokens;
-        whole.cost = cost;
-        whole.usage_detail = UsageDetail {
-            by_model: usage.by_model,
-            cost_coverage: usage.cost_coverage,
-            measurement_coverage: usage.measurement_coverage,
-            measurement_incomplete: usage.measurement_incomplete,
-            measurement_completeness: usage.measurement_completeness,
-            unrecognized_usage,
-            consumption,
-            copy_evidence: Some(copies).filter(|copies| !copies.is_empty()),
-            ..UsageDetail::default()
-        }
-        .into_option();
-        whole.model = model.map(|id| Model { id, variant });
-        if !read.gaps.is_empty() {
-            selections.interrupt();
-        }
-        (whole.model_observation, whole.model_selections) = selections.finish(true);
-        whole.launch = launch;
-        activity.apply(&mut whole);
-        Ok(whole)
+            activity,
+            launch,
+            forked_from,
+            skipped: streamed.skipped,
+            gaps: streamed.gaps,
+        })
     }
-}
 
-impl PiBackend {
     fn recording(&self, session: &Session) -> Result<PathBuf> {
         super::session_file_path(session)
             .map(Path::to_path_buf)
@@ -696,8 +718,129 @@ struct PiEntry {
     model: Option<String>,
     thinking: Option<String>,
     timestamp: Option<chrono::DateTime<chrono::Utc>>,
-    /// Where the entry's record ends in the file.
+    /// Where the entry's record starts and ends in the file.
+    start: u64,
     end: u64,
+}
+
+/// A whole pi recording's entries, its active branch, and what the read
+/// observed beside them.
+struct PiRecording {
+    entries: Vec<PiEntry>,
+    /// Positions of the active branch's entries, root first.
+    active: Vec<usize>,
+    /// Ids on the active branch.
+    seen: HashSet<String>,
+    coverage: AccountingCoverage,
+    activity: ActivityRange,
+    launch: Option<Launch>,
+    forked_from: Option<Option<String>>,
+    skipped: usize,
+    gaps: Vec<ReadGap>,
+}
+
+impl PiRecording {
+    /// The session figure over the entries `include` admits: active-branch
+    /// counters over the admitted entries on the branch, consumption over
+    /// every admitted entry. The thinking level in effect still follows the
+    /// whole branch. `unreadable` counts the undecoded records the figure's
+    /// consumption names.
+    fn figure(
+        &self,
+        session: &Session,
+        include: &dyn Fn(usize) -> bool,
+        unreadable: usize,
+        read: &StreamedTranscript,
+    ) -> Session {
+        let entries = &self.entries;
+        let mut consumption = PiConsumption::default();
+        for (position, entry) in entries.iter().enumerate() {
+            if !include(position) {
+                continue;
+            }
+            if let Some(consumed) = &entry.consumed {
+                let id = entry.id.as_deref();
+                consumption.observe(id, consumed, id.is_some_and(|id| self.seen.contains(id)));
+            }
+            consumption.unrecognized_usage += usize::from(entry.unread_usage);
+        }
+        let unrecognized_usage = self
+            .active
+            .iter()
+            .filter(|position| include(**position) && entries[**position].unread_usage)
+            .count();
+        let copies = pi_copy_evidence(self.forked_from.clone());
+        let consumption = consumption.finish(
+            AccountingCoverage::Session,
+            unreadable,
+            self.forked_from.clone(),
+        );
+
+        let mut usage = PiUsage::default();
+        let mut model = None;
+        let mut variant = None;
+        let mut model_variant = None;
+        let mut selections = crate::model_observation::Selections::default();
+        for position in &self.active {
+            let entry = &entries[*position];
+            let included = include(*position);
+            if let Some(consumed) = entry.consumed.as_ref().filter(|_| included) {
+                usage.add(entry.id.as_deref(), consumed, variant.as_deref());
+            }
+            if let Some(id) = entry.model.as_ref().filter(|_| included) {
+                selections.observe(
+                    Model {
+                        id: id.clone(),
+                        variant: variant.clone(),
+                    },
+                    entry.timestamp,
+                    entry.id.as_deref(),
+                );
+                model.clone_from(&entry.model);
+            }
+            if entry.thinking.is_some() {
+                variant.clone_from(&entry.thinking);
+            }
+            if included {
+                model_variant.clone_from(&variant);
+            }
+        }
+        let usage = usage.finish();
+        let tokens = usage.tokens;
+        let cost = usage.cost;
+        let mut whole = session.clone();
+        whole.accounting = branch_accounting(
+            tokens.as_ref(),
+            cost.as_ref(),
+            &usage.measurement_coverage,
+            self.coverage,
+        );
+        whole.tokens = tokens;
+        whole.cost = cost;
+        whole.usage_detail = UsageDetail {
+            by_model: usage.by_model,
+            cost_coverage: usage.cost_coverage,
+            measurement_coverage: usage.measurement_coverage,
+            measurement_incomplete: usage.measurement_incomplete,
+            measurement_completeness: usage.measurement_completeness,
+            unrecognized_usage,
+            consumption,
+            copy_evidence: Some(copies).filter(|copies| !copies.is_empty()),
+            ..UsageDetail::default()
+        }
+        .into_option();
+        whole.model = model.map(|id| Model {
+            id,
+            variant: model_variant,
+        });
+        if !read.gaps.is_empty() {
+            selections.interrupt();
+        }
+        (whole.model_observation, whole.model_selections) = selections.finish(true);
+        whole.launch = self.launch;
+        self.activity.apply(&mut whole);
+        whole
+    }
 }
 
 type PiTranscriptRead = (

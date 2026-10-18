@@ -23,8 +23,9 @@ use crate::model::{
     TokenConvention, Tokens, Transcript, Truncation, Turn,
 };
 use crate::overlap::{CopyEvidence, Disjointness, Overlap, RelatedSessions, UsageOverlap};
+use crate::span::{SpanPlacement, SpanSessions, SPANS_SCHEMA};
 
-pub const USAGE_SCHEMA: &str = "tapes-usage/11";
+pub const USAGE_SCHEMA: &str = "tapes-usage/12";
 
 /// Recorded usage facts and measurement notes kept beside the session's
 /// normalized counters. A source fact that was not recorded remains absent.
@@ -793,6 +794,9 @@ pub struct UsageSession {
 pub struct UsageView {
     pub schema: &'static str,
     pub session: UsageSession,
+    /// The span this figure answers, for a figure of part of the session.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub span: Option<SpanPlacement>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub accounting: Option<Accounting>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -901,6 +905,43 @@ pub fn streamed(session: &Session, mut turns: TurnTally, read: &StreamedTranscri
     )
 }
 
+/// Several spans of one session, answered in one read: a figure per span, the
+/// remainder for counted requests no span holds, and the whole session in
+/// the spans' accounting basis. Where no request is in two spans, the spans
+/// and the remainder add up to `whole` per counter. `overlapped` counts the
+/// requests more than one span holds, each counted in every span holding it.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct SpanUsage {
+    pub schema: &'static str,
+    pub spans: Vec<UsageView>,
+    pub remainder: UsageView,
+    pub whole: UsageView,
+    #[serde(skip_serializing_if = "is_zero")]
+    pub overlapped: usize,
+}
+
+/// Project a span read into its answer. `turns` and `read` describe the
+/// whole read, which every figure repeats: a span places requests, not turns.
+pub fn spans(figures: &SpanSessions, turns: &TurnTally, read: &StreamedTranscript) -> SpanUsage {
+    let figure = |session: &Session, placement: Option<&SpanPlacement>| {
+        let mut view = streamed(session, turns.clone(), read);
+        view.span = placement.cloned();
+        view.notes.extend(figures.notes.iter().cloned());
+        view
+    };
+    SpanUsage {
+        schema: SPANS_SCHEMA,
+        spans: figures
+            .spans
+            .iter()
+            .map(|(session, placement)| figure(session, Some(placement)))
+            .collect(),
+        remainder: figure(&figures.remainder.0, Some(&figures.remainder.1)),
+        whole: figure(&figures.whole, None),
+        overlapped: figures.overlapped,
+    }
+}
+
 /// What a read established beside its turns, as a usage answer repeats it.
 struct ReadFacts {
     read: Option<ReadEvidence>,
@@ -956,6 +997,7 @@ fn project(session: &Session, turns: TurnTally, facts: ReadFacts) -> UsageView {
             last_activity_at: session.last_activity_at,
             directory: session.directory.clone(),
         },
+        span: None,
         accounting: session.accounting.clone(),
         tokens: session.tokens.clone(),
         disjoint: session.disjoint_tokens(),

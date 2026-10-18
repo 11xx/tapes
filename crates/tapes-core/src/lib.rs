@@ -43,6 +43,7 @@ pub mod reader;
 pub mod reconcile;
 pub mod scope;
 pub mod search;
+pub mod span;
 pub mod stats;
 pub mod stats_summary;
 #[cfg(test)]
@@ -1169,6 +1170,27 @@ pub fn usage_full_with_backends(
         .extend(resolved.diagnostics.latest_warnings(&resolved.session));
     let session = backend.stream_session(&resolved.session, &read)?;
     Ok(usage::streamed(&session, turns, &read))
+}
+
+/// Several spans of one session's whole recording, answered in one pass: a
+/// figure per span, the remainder no span holds, and the whole session in the
+/// spans' basis. The read is the one `usage_full_with_backends` streams.
+pub fn usage_spans_with_backends(
+    backends: &[Box<dyn Backend>],
+    selection: Selection,
+    spans: &[span::SpanBounds],
+) -> Result<usage::SpanUsage> {
+    let resolved = selection.resolve(backends)?;
+    let backend = &backends[resolved.backend_index];
+    let mut turns = usage::TurnTally::default();
+    let mut read = backend.stream_transcript(&resolved.session, None, &mut |turn| {
+        turns.add(&turn);
+        Ok(())
+    })?;
+    read.notes
+        .extend(resolved.diagnostics.latest_warnings(&resolved.session));
+    let figures = backend.stream_spans(&resolved.session, &read, spans)?;
+    Ok(usage::spans(&figures, &turns, &read))
 }
 
 /// Every relative one session's whole recording names, read record by record.

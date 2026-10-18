@@ -30,6 +30,7 @@ use crate::model::{
     UserDefault,
 };
 use crate::overlap::DeclaredOrigin;
+use crate::span::{Placer, SpanBounds, SpanSessions};
 use agent_tapes_discovery::{
     DiscoveryError, Harness as NativeHarness, NativeSession, NativeStore, NativeStoreKind,
     OpenCodeFlavor,
@@ -876,6 +877,7 @@ impl OpenCodeBackend {
         &self,
         session: &Session,
         turn: &mut dyn FnMut(Turn) -> Result<()>,
+        item: &mut dyn FnMut(MessageItem<'_>) -> Result<()>,
     ) -> Result<StreamedTranscript> {
         let id = sql_literal(&session.id);
         let newest = self.database(&format!(
@@ -912,6 +914,9 @@ impl OpenCodeBackend {
                 unrecognized_usage += database_unread_usage(&rows);
                 unplaced += parts.unattributed;
                 let (messages, unreadable) = database_messages(&rows, parts);
+                for placed in ordered_items(&rows, &messages, &unreadable) {
+                    item(placed)?;
+                }
                 skipped += unreadable.records;
                 gaps.extend(unreadable.positions.into_iter().map(|row| ReadGap {
                     span: ByteSpan {
@@ -933,6 +938,9 @@ impl OpenCodeBackend {
             }
         }
         unplaced += self.database_unkeyed_messages(&id)?;
+        for _ in 0..unplaced {
+            item(MessageItem::Unreadable(None))?;
+        }
         gaps.extend((0..unplaced as u64).map(|row| ReadGap {
             span: ByteSpan {
                 start: read + row,
@@ -1037,6 +1045,7 @@ impl OpenCodeBackend {
         &self,
         session: &Session,
         turn: &mut dyn FnMut(Turn) -> Result<()>,
+        item: &mut dyn FnMut(MessageItem<'_>) -> Result<()>,
     ) -> Result<StreamedTranscript> {
         let request = |path: &str| self.request(path);
         let mut pager = MessagePager::new(&request, &session.id, "asc", MESSAGE_PAGE);
@@ -1061,6 +1070,7 @@ impl OpenCodeBackend {
                 for parsed in message_turns(message, session) {
                     turn(parsed)?;
                 }
+                item(MessageItem::Message(message))?;
             }
         }
         Ok(StreamedTranscript {
@@ -1075,7 +1085,8 @@ impl OpenCodeBackend {
             terminal: None,
             notes: Vec::new(),
             unmapped: None,
-            // The API projection carries no token counters on its messages.
+            // The API projects counters on assistant messages only, which
+            // the span reader counts.
             unrecognized_usage: 0,
             kinds: None,
         })
@@ -1335,9 +1346,9 @@ impl Backend for OpenCodeBackend {
             self.replayable(session)?;
         }
         if self.uses_database() {
-            return self.database_stream(session, turn);
+            return self.database_stream(session, turn, &mut |_| Ok(()));
         }
-        self.api_stream(session, turn)
+        self.api_stream(session, turn, &mut |_| Ok(()))
     }
 
     /// The session table names a fork's source in `fork_session_id` and a
@@ -1415,6 +1426,95 @@ impl Backend for OpenCodeBackend {
         Ok(with_unreadable_records(
             with_unrecognized_usage(session.clone(), read.unrecognized_usage),
             read.skipped,
+        ))
+    }
+
+    /// An OpenCode request is an assistant message, placed by its creation
+    /// time and measured by the counters and cost it records. The session
+    /// row's total covers requests no message records, so no span divides
+    /// it: every figure, the whole included, sums messages. Messages are
+    /// updated in place, so the span read is a read of its own.
+    fn stream_spans(
+        &self,
+        session: &Session,
+        read: &StreamedTranscript,
+        spans: &[SpanBounds],
+    ) -> Result<SpanSessions> {
+        let mut placer = Placer::new(spans);
+        let mut figures = (0..placer.figures())
+            .map(|_| MessageSum::default())
+            .collect::<Vec<_>>();
+        let mut whole = MessageSum::default();
+        let mut observe = |item: MessageItem<'_>| {
+            let held = match item {
+                MessageItem::Message(message) => {
+                    if message["type"] != "assistant" {
+                        return Ok(());
+                    }
+                    whole.add(message);
+                    let held = placer.request(
+                        epoch_millis(&message["time"]["created"]),
+                        message["id"].as_str(),
+                    );
+                    for index in &held {
+                        figures[*index].add(message);
+                    }
+                    return Ok(());
+                }
+                MessageItem::Unrecognized(at) => {
+                    whole.unrecognized_usage += 1;
+                    placer.record(at, MeasurementReason::UnrecognizedUsage)
+                }
+                MessageItem::Unreadable(at) => {
+                    whole.unreadable = true;
+                    match at {
+                        Some(at) => placer.record(Some(at), MeasurementReason::UnreadableRecord),
+                        None => {
+                            placer.unreadable();
+                            Vec::new()
+                        }
+                    }
+                }
+            };
+            for index in held {
+                match item {
+                    MessageItem::Unrecognized(_) => figures[index].unrecognized_usage += 1,
+                    _ => figures[index].unreadable = true,
+                }
+            }
+            Ok(())
+        };
+        let again = if self.uses_database() {
+            self.database_stream(session, &mut |_| Ok(()), &mut observe)?
+        } else {
+            self.api_stream(session, &mut |_| Ok(()), &mut observe)?
+        };
+        let whole = whole.finish(session);
+        let figures = figures
+            .into_iter()
+            .map(|figure| {
+                let mut figure = figure.finish(session);
+                crate::span::keep_identity(&mut figure, &whole);
+                figure
+            })
+            .collect();
+        let mut notes = vec![
+            "OpenCode span figures sum assistant messages; the session's recorded total is \
+             withheld, since it covers requests no message records."
+                .to_owned(),
+        ];
+        if again.source_length != read.source_length {
+            notes.push(format!(
+                "The span read found {} message rows where the session read found {}; \
+                 the session changed between them.",
+                again.source_length, read.source_length
+            ));
+        }
+        Ok(SpanSessions::assemble(
+            placer.finish(),
+            figures,
+            whole,
+            notes,
         ))
     }
 
@@ -1524,6 +1624,10 @@ const DATABASE_MESSAGE_ROW: &str = "json_object( \
      'id', id, 'time_created', time_created, 'data', \
      CASE WHEN json_valid(data) THEN json_object('role', json_extract(data, '$.role'), \
                  'time', json_extract(data, '$.time'), \
+                 'tokens', json_extract(data, '$.tokens'), \
+                 'cost', json_extract(data, '$.cost'), \
+                 'modelID', json_extract(data, '$.modelID'), \
+                 'variant', json_extract(data, '$.variant'), \
                  'usage_counters', \
                  json_type(data, '$.tokens.input') IN ('integer', 'real') \
                  OR json_type(data, '$.tokens.output') IN ('integer', 'real') \
@@ -1698,6 +1802,123 @@ fn with_unreadable_records(mut session: Session, count: usize) -> Session {
     session
 }
 
+/// One message row as a span read meets it, in row order: a projected
+/// message, a row whose counters no reading counts, or a record that could
+/// not be read, each with the row's creation time where it has one.
+#[derive(Clone, Copy)]
+enum MessageItem<'a> {
+    Message(&'a Value),
+    Unrecognized(Option<chrono::DateTime<Utc>>),
+    Unreadable(Option<chrono::DateTime<Utc>>),
+}
+
+/// The rows of one page as a span read meets them, in row order.
+fn ordered_items<'a>(
+    rows: &[Value],
+    messages: &'a [Value],
+    unreadable: &UnreadableRecords,
+) -> Vec<MessageItem<'a>> {
+    let mut messages = messages.iter().peekable();
+    let mut items = Vec::new();
+    for (position, row) in rows.iter().enumerate() {
+        let at = epoch_millis(&row["time_created"]);
+        if let Some(message) = messages.next_if(|message| message["id"] == row["id"]) {
+            items.push(MessageItem::Message(message));
+        } else if database_unread_usage(std::slice::from_ref(row)) > 0 {
+            items.push(MessageItem::Unrecognized(at));
+        }
+        if unreadable.positions.contains(&position) {
+            items.push(MessageItem::Unreadable(at));
+        }
+    }
+    items
+}
+
+/// Assistant messages summed: each one counted request, its counters and
+/// its written cost, a written zero beside usage unpriced.
+#[derive(Default)]
+struct MessageSum {
+    tokens: TokenTotals,
+    cost: f64,
+    cost_measurement: crate::usage::MeasurementCoverage,
+    zero_written: usize,
+    unrecognized_usage: usize,
+    unreadable: bool,
+    model: Option<Model>,
+}
+
+impl MessageSum {
+    fn add(&mut self, message: &Value) {
+        let tokens = api_tokens(message);
+        let counter = |read: fn(&Tokens) -> Option<u64>| tokens.as_ref().and_then(read);
+        self.tokens.add(
+            counter(|tokens| tokens.input),
+            counter(|tokens| tokens.output),
+            counter(|tokens| tokens.reasoning),
+            counter(|tokens| tokens.cache_read),
+            counter(|tokens| tokens.cache_write),
+        );
+        match message["cost"].as_f64() {
+            Some(usd) if Cost::from_written(usd, tokens.as_ref()).is_none() => {
+                self.cost_measurement.unpriced += 1;
+                self.zero_written += 1;
+            }
+            Some(usd) => {
+                self.cost_measurement.measured += 1;
+                self.cost += usd;
+            }
+            None => self.cost_measurement.missing += 1,
+        }
+        if let Some(id) = message["model"]["id"].as_str() {
+            self.model = Some(Model {
+                id: id.to_owned(),
+                variant: message["model"]["variant"].as_str().map(str::to_owned),
+            });
+        }
+    }
+
+    fn finish(self, session: &Session) -> Session {
+        let (tokens, mut measurement_coverage) = self.tokens.finish_covered();
+        let counted = crate::usage::MeasurementCoverage::counted_any(&measurement_coverage);
+        if counted {
+            measurement_coverage.insert("cost".to_owned(), self.cost_measurement);
+        }
+        let cost = (self.cost_measurement.measured > 0).then_some(Cost { usd: self.cost });
+        let cost_coverage = (self.cost_measurement.missing > 0
+            || self.cost_measurement.unpriced > 0)
+            .then_some(CostCoverage {
+                complete: false,
+                zero_written_requests: self.zero_written,
+                zero_written_observations: self.zero_written,
+            });
+        let mut figure = session.clone();
+        figure.accounting = accounting_for(
+            tokens.as_ref(),
+            cost.as_ref(),
+            &measurement_coverage,
+            AccountingBasis::SummedRequests,
+            AccountingCoverage::Session,
+        );
+        figure.tokens = tokens;
+        figure.cost = cost;
+        figure.model = self.model;
+        let mut detail = crate::usage::UsageDetail {
+            cost_coverage,
+            measurement_incomplete: known_subtotal_notes(&measurement_coverage),
+            measurement_coverage,
+            unrecognized_usage: self.unrecognized_usage,
+            ..crate::usage::UsageDetail::default()
+        };
+        if self.unreadable {
+            detail
+                .measurement_completeness
+                .qualify_all(MeasurementReason::UnreadableRecord);
+        }
+        figure.usage_detail = detail.into_option();
+        figure
+    }
+}
+
 /// The unreadable records of some message rows: how many there are, and the
 /// positions of the rows that hold them. A message whose data does not decode
 /// is one record; each of its parts whose data does not decode is another.
@@ -1849,12 +2070,21 @@ fn database_message(row: &Value, parts: Vec<Value>) -> Option<Result<Value>> {
             "text": user_text
         })
     } else {
-        json!({
+        let mut message = json!({
             "type": "assistant",
             "id": row["id"],
             "time": { "created": message_time },
             "content": parts
-        })
+        });
+        for field in ["tokens", "cost"] {
+            if !data[field].is_null() {
+                message[field] = data[field].clone();
+            }
+        }
+        if let Some(model) = data["modelID"].as_str() {
+            message["model"] = json!({ "id": model, "variant": data["variant"] });
+        }
+        message
     }))
 }
 

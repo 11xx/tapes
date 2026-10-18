@@ -1,0 +1,131 @@
+{
+  "data": [
+    {
+      "id": "msg_span_user_1",
+      "time": {
+        "created": 1784700000000
+      },
+      "text": "Start the span fixture.",
+      "files": [],
+      "type": "user"
+    },
+    {
+      "id": "msg_span_assistant_1",
+      "time": {
+        "created": 1784700001000,
+        "completed": 1784700001500
+      },
+      "type": "assistant",
+      "agent": "build",
+      "model": {
+        "id": "kimi-k3",
+        "providerID": "opencode-go",
+        "variant": "max"
+      },
+      "content": [
+        {
+          "type": "text",
+          "text": "First answer.",
+          "time": {
+            "created": 1784700001001,
+            "completed": 1784700001400
+          }
+        }
+      ],
+      "finish": "stop",
+      "cost": 0.01,
+      "tokens": {
+        "input": 100,
+        "output": 20,
+        "reasoning": 5,
+        "cache": {
+          "read": 0,
+          "write": 300
+        }
+      }
+    },
+    {
+      "id": "msg_span_assistant_2",
+      "time": {
+        "created": 1784700002000,
+        "completed": 1784700002500
+      },
+      "type": "assistant",
+      "agent": "build",
+      "model": {
+        "id": "kimi-k3",
+        "providerID": "opencode-go",
+        "variant": "max"
+      },
+      "content": [
+        {
+          "type": "text",
+          "text": "Second answer.",
+          "time": {
+            "created": 1784700002001,
+            "completed": 1784700002400
+          }
+        }
+      ],
+      "finish": "stop",
+      "cost": 0.02,
+      "tokens": {
+        "input": 30,
+        "output": 40,
+        "reasoning": 10,
+        "cache": {
+          "read": 400,
+          "write": 0
+        }
+      }
+    },
+    {
+      "id": "msg_span_user_2",
+      "time": {
+        "created": 1784700060000
+      },
+      "text": "Continue the span fixture.",
+      "files": [],
+      "type": "user"
+    },
+    {
+      "id": "msg_span_assistant_3",
+      "time": {
+        "created": 1784700061000,
+        "completed": 1784700061500
+      },
+      "type": "assistant",
+      "agent": "build",
+      "model": {
+        "id": "kimi-k3",
+        "providerID": "opencode-go",
+        "variant": "max"
+      },
+      "content": [
+        {
+          "type": "text",
+          "text": "Third answer.",
+          "time": {
+            "created": 1784700061001,
+            "completed": 1784700061400
+          }
+        }
+      ],
+      "finish": "stop",
+      "cost": 0.04,
+      "tokens": {
+        "input": 50,
+        "output": 60,
+        "reasoning": 0,
+        "cache": {
+          "read": 700,
+          "write": 50
+        }
+      }
+    }
+  ],
+  "cursor": {
+    "next": null,
+    "previous": null
+  }
+}

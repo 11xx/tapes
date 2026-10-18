@@ -1412,7 +1412,7 @@ enum Command {
         json: bool,
     },
     /// Where quota went. A session named by id or reached with --latest
-    /// answers that session as tapes-usage/11: its recorded tokens, cost, and
+    /// answers that session as tapes-usage/12: its recorded tokens, cost, and
     /// turn counts, plus whatever else its harness recorded — a context
     /// window, a provider quota window, wall-clock durations, a per-model
     /// split, the price-relevant dimensions its requests recorded. A scope or
@@ -1566,7 +1566,7 @@ enum Command {
         /// withheld and bounded. A partial price bounds only from below.
         #[arg(long, value_name = "N", num_args = 0..=1, default_missing_value = "200", conflicts_with_all = ["read_bytes", "series"])]
         event_keys: Option<Option<usize>>,
-        /// Render the versioned tapes-usage/11 object, or tapes-usage-summary/6
+        /// Render the versioned tapes-usage/12 object, or tapes-usage-summary/6
         /// for a selection, as JSON. `session.model_observation` says
         /// whether more than one model and effort was observed (`mixed`) and
         /// whether a gap, partial read or budget kept the split incomplete

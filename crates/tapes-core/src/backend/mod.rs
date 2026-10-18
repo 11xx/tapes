@@ -491,6 +491,22 @@ pub trait Backend {
             self.harness()
         )
     }
+    /// The figures of `spans` inside the recording `read` covered, in one
+    /// pass replayed as `stream_session` replays it: one session figure per
+    /// span, the remainder no span holds, and the whole session in the
+    /// spans' accounting basis. The default refuses.
+    fn stream_spans(
+        &self,
+        session: &Session,
+        read: &StreamedTranscript,
+        spans: &[crate::span::SpanBounds],
+    ) -> Result<crate::span::SpanSessions> {
+        let _ = (session, read, spans);
+        anyhow::bail!(
+            "{} sessions cannot be divided into spans; their reader places no requests",
+            self.harness()
+        )
+    }
     /// Read one backend's accounting observations against the same bounded or
     /// pinned source evidence a caller already used. Ordinary usage never
     /// calls this hook, so a backend does not retain a per-observation
@@ -1623,7 +1639,7 @@ pub fn skipped_records_note(skipped: usize) -> Option<String> {
 }
 
 /// The earliest and latest `timestamp` a stream of records carries.
-#[derive(Default)]
+#[derive(Clone, Copy, Default)]
 pub(crate) struct ActivityRange(Option<(DateTime<Utc>, DateTime<Utc>)>);
 
 impl ActivityRange {
@@ -2347,6 +2363,16 @@ fn list_files_inner(
         }
     }
     listing
+}
+
+/// The read gaps that begin in `[start, end)` of the source, in order.
+pub(crate) fn unreadable_between(
+    gaps: &[ReadGap],
+    start: u64,
+    end: u64,
+) -> impl Iterator<Item = &ReadGap> {
+    gaps.iter()
+        .filter(move |gap| gap.span.start >= start && gap.span.start < end)
 }
 
 pub(crate) fn timestamp(value: &Value) -> Option<DateTime<Utc>> {

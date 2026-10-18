@@ -500,7 +500,7 @@ PROBE BEFORE EXPORTING
   Claude, Codex, or Pi recording twice, pairing past the read bound and
   writing each event as it pairs, with the same filters and counts.
 
-  usage answers where a session's quota went as tapes-usage/11: its recorded
+  usage answers where a session's quota went as tapes-usage/12: its recorded
   launch mode when known, tokens, cost, accounting, turns, and any by-model attribution the source can
   support — Claude's recorded cost-state, Codex's request observations, or
   pi's per-message model each qualified by the thinking level in effect. Read

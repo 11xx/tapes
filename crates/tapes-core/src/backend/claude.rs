@@ -11,9 +11,9 @@ use super::{
     accounting_for, bounded_launch, default_native_store, enrich_native_session, head_directory,
     list_discovered_files, list_discovered_files_with_search, merge_launch, read_bounds,
     read_recording, replay_pin, skipped_records_note, stream_jsonl, streamed_trailing_record,
-    timestamp, trailing_record, transcript, transcript_from_recording, ActivityRange, Backend,
-    Jsonl, Listing, ParsedFile, Query, StreamedChild, StreamedTranscript, TokenTotals,
-    UnmappedTally,
+    timestamp, trailing_record, transcript, transcript_from_recording, unreadable_between,
+    ActivityRange, Backend, Jsonl, Listing, ParsedFile, Query, StreamedChild, StreamedTranscript,
+    TokenTotals, UnmappedTally,
 };
 use crate::content::{
     bounded_shape, bounded_text, text_part, tool_coverage, tool_part, ArtifactReference,
@@ -22,7 +22,7 @@ use crate::content::{
 use crate::event::{Bounded, EventKind, ReadLines, ToolEvent};
 use crate::history::PageProjection;
 use crate::lineage::{ChildRef, Lineage, SourceRef};
-use crate::measurement::known_subtotal_notes;
+use crate::measurement::{known_subtotal_notes, MeasurementReason};
 use crate::model::{
     derive_title, Accounting, AccountingBasis, AccountingCoverage, CacheWrites, Cost, CostCoverage,
     KindDeclaration, Launch, Model, Role, Session, SourceDescriptor, Tokens, TrailingRecord,
@@ -30,6 +30,7 @@ use crate::model::{
 };
 use crate::overlap::CopyEvidence;
 use crate::reconcile::{FailureReason, FamilyLedger, Reconciliation, SourceRole};
+use crate::span::{Placer, SpanBounds, SpanSessions};
 use crate::usage::{
     Durations, MeasurementCoverage, ModelUsage, RecordedUsage, RequestDimensions, UsageDetail,
 };
@@ -627,6 +628,88 @@ impl Backend for ClaudeBackend {
         let mut whole = session.clone();
         records.apply(&mut whole);
         Ok(whole)
+    }
+
+    /// A Claude request is placed by the timestamp of its first record, and
+    /// every later record of the same request id joins it. A cost-state is
+    /// the running total of one process, so no span can hold it: every
+    /// figure, the whole included, sums requests.
+    fn stream_spans(
+        &self,
+        session: &Session,
+        read: &StreamedTranscript,
+        spans: &[SpanBounds],
+    ) -> Result<SpanSessions> {
+        let path = self.recording(session)?;
+        let mut placer = Placer::new(spans);
+        let mut figures = (0..placer.figures())
+            .map(|_| ClaudeRecords::default())
+            .collect::<Vec<_>>();
+        let mut records = ClaudeRecords::default();
+        let mut placed = HashMap::<String, Vec<usize>>::new();
+        let mut cost_states = 0usize;
+        let mut last_end = 0;
+        stream_jsonl(&path, Some(read.pin()?), |value, span, _| {
+            super::validate_native_identity(value, "claude", &session.id)?;
+            if span.start != last_end {
+                records.selections.interrupt();
+                for _ in unreadable_between(&read.gaps, last_end, span.start) {
+                    placer.unreadable();
+                }
+            }
+            last_end = span.end;
+            if value["type"] == "cost-state" {
+                cost_states += 1;
+                return Ok(false);
+            }
+            records.observe(value);
+            let at = timestamp(&value["timestamp"]);
+            let held = match span_item(value) {
+                SpanItem::Request(Some(id)) => placed
+                    .entry(id.to_owned())
+                    .or_insert_with(|| placer.request(at, Some(id)))
+                    .clone(),
+                SpanItem::Request(None) => placer.request(at, None),
+                SpanItem::Failure => placer.record(at, MeasurementReason::StoppedAttempt),
+                SpanItem::Unrecognized => placer.record(at, MeasurementReason::UnrecognizedUsage),
+                SpanItem::Other => return Ok(false),
+            };
+            for index in held {
+                figures[index].observe(value);
+            }
+            Ok(false)
+        })?;
+        if !read.gaps.is_empty() {
+            records.selections.interrupt();
+        }
+        for _ in unreadable_between(&read.gaps, last_end, u64::MAX) {
+            placer.unreadable();
+        }
+        let mut whole = session.clone();
+        records.apply(&mut whole);
+        let figures = figures
+            .into_iter()
+            .map(|records| {
+                let mut figure = session.clone();
+                records.apply(&mut figure);
+                crate::span::keep_identity(&mut figure, &whole);
+                figure
+            })
+            .collect();
+        let notes = match cost_states {
+            0 => Vec::new(),
+            count => vec![format!(
+                "{count} recorded totals (cost-state) each cover one run up to where it was \
+                 written, not a span; they are withheld, and every figure here sums the \
+                 recording's requests."
+            )],
+        };
+        Ok(SpanSessions::assemble(
+            placer.finish(),
+            figures,
+            whole,
+            notes,
+        ))
     }
 
     fn usage_reconciliation(&self, session: &Session) -> Result<Reconciliation> {
@@ -1597,6 +1680,39 @@ impl RequestTokens {
         }
         self.dimensions.add(dimensions);
     }
+}
+
+/// What a record is to a span: a counted request, keyed by its request id
+/// where it has one, an attempt that failed, usage no counter reads, or
+/// none of these. The classification is the request sum's own.
+enum SpanItem<'a> {
+    Request(Option<&'a str>),
+    Failure,
+    Unrecognized,
+    Other,
+}
+
+fn span_item(value: &Value) -> SpanItem<'_> {
+    if claude_unread_usage(value) {
+        return SpanItem::Unrecognized;
+    }
+    let message = &value["message"];
+    if value["type"] != "assistant" || message["role"] != "assistant" {
+        return SpanItem::Other;
+    }
+    if message["model"] == "<synthetic>" {
+        return if value["isApiErrorMessage"] == true {
+            SpanItem::Failure
+        } else {
+            SpanItem::Other
+        };
+    }
+    if message.get("usage").and_then(Value::as_object).is_none()
+        && value["answeredWithoutRequest"] == true
+    {
+        return SpanItem::Other;
+    }
+    SpanItem::Request(value["requestId"].as_str())
 }
 
 /// Whether a record carries Claude's usage shape, a `message.usage` object

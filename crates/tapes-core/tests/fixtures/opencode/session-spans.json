@@ -1,0 +1,30 @@
+{
+  "data": {
+    "id": "ses_000000fixtureSpanSession",
+    "projectID": "fixture",
+    "agent": "build",
+    "model": {
+      "id": "kimi-k3",
+      "providerID": "opencode-go",
+      "variant": "max"
+    },
+    "cost": 0.08,
+    "tokens": {
+      "input": 200,
+      "output": 125,
+      "reasoning": 15,
+      "cache": {
+        "read": 1100,
+        "write": 350
+      }
+    },
+    "time": {
+      "created": 1784700000000,
+      "updated": 1784700061500
+    },
+    "title": "Span fixture session",
+    "location": {
+      "directory": "/fixtures/span-project"
+    }
+  }
+}
