@@ -359,6 +359,7 @@ PROBE BEFORE EXPORTING
   tapes capture <id> --json      The recording's store class and custody state.
   tapes usage <id> --json        Tokens, cost, quota observations, and turn counts.
   tapes usage <id> --from T --to T --json  The same answer for the requests in one span.
+  tapes usage <id> --prices FILE --json  The same answer with a list-price estimate.
   tapes stats <id> --json        The same recording, counted with its read evidence.
   tapes lineage <id> --json      The sessions this one names as relatives.
   tapes brief <id> --json        What a continuation of it needs.
@@ -546,6 +547,55 @@ PROBE BEFORE EXPORTING
   `unrecognized-usage`, so a span the read could not cover is never complete.
   The library answers several spans in one pass, as tapes-usage-spans/2: a
   figure per span, the `remainder`, and the `whole` in the spans' basis.
+  Money beyond what a harness wrote comes from a price table the caller
+  supplies; tapes holds no prices. `usage --prices FILE` reads one, else the
+  file `TAPES_PRICES` names, else `$XDG_CONFIG_HOME/tapes/prices.toml`
+  (`~/.config/tapes/prices.toml` when that is unset). A table named by the
+  flag or the variable that is missing or invalid refuses the command; an
+  invalid default table is reported once on stderr and the estimate is
+  absent, as it is with no table. Install a table by writing it to the
+  default path or pointing `TAPES_PRICES` at it. The format is TOML,
+  tapes-price-table/1:
+
+      schema = "tapes-price-table/1"
+      currency = "USD"
+      [[models]]
+      id = "model-id-as-recorded"     # the id a harness records
+      aliases = ["other-recorded-id"] # optional
+      effective = 2026-10-01          # the date the prices were read
+      source = "where they were read"
+      per_million = { uncached_input = 3.0, cache_read = 0.3,
+                      cache_write_5m = 3.75, cache_write_1h = 6.0, output = 15.0 }
+
+  Prices are per million tokens of each disjoint category; reasoning is a
+  share of output and priced as output. A category a row leaves out has no
+  price. Unknown keys, negative or non-finite prices, a non-date
+  `effective`, and an id or alias named twice refuse, naming the entry.
+  Each figure — a session, each model of `by_model`, a pi `consumption`, a
+  span, a summary group, total or partition — gains `list_price_estimate`
+  beside the harness's own `cost`, never in its place: `kind:
+  list-price-estimate`, `currency`, an `amount`, the table `schema`, each
+  row it used in `models` (`id`, `effective`, `source`), and
+  `measurement_completeness` over uncached_input, cache_read, cache_write and
+  output. A cache write that recorded no TTL is priced between the 5-minute
+  and 1-hour prices, as `at_least` and `at_most` in place of `amount`, and
+  its category says ttl-unrecorded. Each served model's share is priced by
+  its own row: a figure whose records name one model is that model's share
+  whole; one that names several is priced share by share from the split its
+  harness recorded, and what the shares leave uncovered is
+  incomplete-attribution; with neither, nothing is priced. A model the table
+  lacks qualifies its share unlisted-model and a missing category price
+  missing-price. Every reason a category's counters carry (missing-counter,
+  stopped-attempt, unrecognized-usage, read-window, ...) carries into the
+  estimate, whose amount is then a known subtotal; pi consumption on other
+  branches than the active one is incomplete-attribution. The estimate is
+  absent, never zero, when nothing could be priced. A summary adds estimates
+  where its disjoint categories add and otherwise withholds them, naming why
+  in `list_price_withheld`: mixed-accounting, identity-unestablished, or
+  exact-union for related sessions added by their events' union. Text output
+  prints `list-price estimate <amount> <currency> (from the price table:
+  ...)` with a completeness line, and a summary adds a LIST-PRICE ESTIMATE
+  column when a table is given.
   A summary adds sessions only where no recording relates them. Two sessions
   are related when one declares the other as its fork origin or parent (Codex
   `forked_from_id`, Pi's parent header, OpenCode `fork_session_id` and
@@ -616,8 +666,10 @@ PROBE BEFORE EXPORTING
   the reader has no reading for carries its harness's usage fields, so its
   consumption is in no counter), read-window, since-reset,
   unestablished-scope, incomplete-attribution (a model split whose read could
-  not attribute every request), and undetermined (the convention cannot
-  derive the category). A figure that counted events and measured nothing
+  not attribute every request), undetermined (the convention cannot
+  derive the category), and, for list-price estimates, unlisted-model (the
+  price table has no row for the model) and ttl-unrecorded (cache writes with
+  no TTL, priced between bounds). A figure that counted events and measured nothing
   qualifies every counter missing-counter and keeps every other reason that
   applies to it: its scope, pricing and coverage. A counter it does not name is complete; a present
   amount it names is a known subtotal. Usage, consumption, model splits,

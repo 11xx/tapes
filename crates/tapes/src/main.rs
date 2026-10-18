@@ -22,6 +22,7 @@ use agent_tapes_core::model::{
     TurnSelection, SUMMED_CATEGORIES,
 };
 use agent_tapes_core::overlap::Disjointness;
+use agent_tapes_core::pricing::{ListPriceEstimate, PriceLookup};
 use agent_tapes_core::reconcile::{CounterStatus, Reconciliation, SourceRole};
 use agent_tapes_core::span::{Instant, SpanBounds, SpanPlacement};
 use agent_tapes_core::stats::{
@@ -1449,7 +1450,9 @@ enum Command {
     /// split, the price-relevant dimensions its requests recorded. --from,
     /// --to and --requests answer one span of that session in the same shape
     /// with a `span` object; spans and the remainder no span holds add up to
-    /// the whole session within one accounting basis. A scope or
+    /// the whole session within one accounting basis. --prices, TAPES_PRICES
+    /// or the default price table add a `list_price_estimate` beside each
+    /// harness-written cost, priced from the caller's table. A scope or
     /// listing filter instead answers the whole selection as
     /// tapes-usage-summary/7, grouped by --by and summing each counter over
     /// the sessions that recorded it. Native tokens follow each harness's own
@@ -1655,6 +1658,31 @@ enum Command {
             conflicts_with_all = ["by", "read_bytes", "series", "reconcile", "event_keys", "from", "to"]
         )]
         requests: Option<SpanBounds>,
+        /// Price the answer with this tapes-price-table/1 file: each figure
+        /// gains `list_price_estimate` beside any cost its harness wrote,
+        /// never in its place. Without the flag the table is the file
+        /// TAPES_PRICES names, then $XDG_CONFIG_HOME/tapes/prices.toml (or
+        /// ~/.config/tapes/prices.toml). A table named here or by
+        /// TAPES_PRICES that is missing or invalid refuses; an invalid default
+        /// table is reported on stderr and leaves the estimate absent, as no
+        /// table does. tapes holds no prices of its own. Each served model's
+        /// share is priced by its own row; a figure that names one model is
+        /// that model's share whole, and one that names several is priced
+        /// share by share from its recorded split. The estimate carries
+        /// `kind: list-price-estimate`, the currency, an `amount` (or
+        /// `at_least` and `at_most` where cache writes recorded no TTL), the
+        /// table's schema, each row it used by `id`, `effective` date and
+        /// `source`, and `measurement_completeness` over the priced
+        /// categories (uncached_input, cache_read, cache_write, output): a
+        /// counter the figure measured incompletely keeps its reasons, and
+        /// unlisted-model, incomplete-attribution, missing-price and
+        /// ttl-unrecorded name what the table or the split could not price. It
+        /// is absent when nothing could be priced. A summary adds estimates
+        /// where its disjoint categories add and names why it withholds them
+        /// under `list_price_withheld` (mixed-accounting,
+        /// identity-unestablished, exact-union).
+        #[arg(long, value_name = "FILE")]
+        prices: Option<PathBuf>,
         /// Render the versioned tapes-usage/13 object, or tapes-usage-summary/7
         /// for a selection, as JSON. `session.model_observation` says
         /// whether more than one model and effort was observed (`mixed`) and
@@ -2862,9 +2890,18 @@ fn dispatch(cli: Cli) -> Result<()> {
             from,
             to,
             requests,
+            prices,
             json,
         } => {
             query.validate_input()?;
+            let prices = agent_tapes_core::pricing::lookup(prices.as_deref())?;
+            if let PriceLookup::DefaultInvalid { path, error } = &prices {
+                eprintln!(
+                    "warning: the default price table {} is not used, so no list-price estimate is given: {error}",
+                    path.display()
+                );
+            }
+            let prices = prices.table();
             read.refuse_supplied(&query.input)?;
             let span = requests
                 .or((from.is_some() || to.is_some()).then_some(SpanBounds::Time { from, to }));
@@ -2954,6 +2991,10 @@ fn dispatch(cli: Cli) -> Result<()> {
                 } else {
                     agent_tapes_core::usage_with_backends(&single_backends, one)?
                 };
+                let mut usage = usage;
+                if let Some(table) = prices {
+                    agent_tapes_core::pricing::price_view(&mut usage, table);
+                }
                 if json {
                     print_json_with_selection_warnings(&usage, &query.input, &latest_warnings)?;
                 } else {
@@ -2979,12 +3020,13 @@ fn dispatch(cli: Cli) -> Result<()> {
                 let by = grouping(&by);
                 let summary = if query.input.supplied() {
                     let backends = query.input.backends()?;
-                    agent_tapes_core::usage_summary_with_backends(&backends, &query.set(), &by)?
+                    agent_tapes_core::usage_summary_priced(&backends, &query.set(), &by, prices)?
                 } else {
-                    agent_tapes_core::usage_summary_with_backends(
+                    agent_tapes_core::usage_summary_priced(
                         &read.backends(&query.input)?,
                         &query.set(),
                         &by,
+                        prices,
                     )?
                 };
                 if json {
@@ -4245,6 +4287,9 @@ fn render_usage(usage: &UsageView) -> String {
     if let Some(cost) = &usage.cost {
         out.push_str(&format!("cost: {}\n", render_cost(cost)));
     }
+    if let Some(estimate) = &usage.list_price_estimate {
+        out.push_str(&render_estimate_lines("", estimate));
+    }
     if let Some(coverage) = &usage.cost_coverage {
         out.push_str(&format!(
             "cost coverage: {}\n",
@@ -4773,6 +4818,44 @@ fn render_cost_coverage(coverage: &CostCoverage) -> String {
         coverage.zero_written_requests, coverage.zero_written_observations)
 }
 
+/// A list-price estimate as one phrase: the amount or its bounds, marked
+/// as an estimate from the caller's table, with the rows it used.
+fn render_estimate(estimate: &ListPriceEstimate) -> String {
+    let amount = match (estimate.amount, estimate.at_least, estimate.at_most) {
+        (Some(amount), _, _) => format!("{amount:.4}"),
+        (None, Some(low), Some(high)) => format!("{low:.4} to {high:.4}"),
+        _ => "unpriced".to_owned(),
+    };
+    let models = estimate
+        .models
+        .iter()
+        .map(|model| format!("{} effective {}", model.id, model.effective))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "list-price estimate {amount} {} (from the price table: {models})",
+        estimate.currency
+    )
+}
+
+fn estimate_incomplete(estimate: &ListPriceEstimate) -> Option<String> {
+    render_incomplete_names(
+        &estimate.measurement_completeness,
+        &agent_tapes_core::pricing::PRICED_CATEGORIES,
+        "priced categories",
+    )
+}
+
+fn render_estimate_lines(prefix: &str, estimate: &ListPriceEstimate) -> String {
+    let mut out = format!("{prefix}{}\n", render_estimate(estimate));
+    if let Some(incomplete) = estimate_incomplete(estimate) {
+        out.push_str(&format!(
+            "{prefix}list-price estimate completeness: {incomplete}\n"
+        ));
+    }
+    out
+}
+
 fn render_cost(cost: &Cost) -> String {
     format!(
         "{:.4} USD (harness-calculated estimate, pricing basis not recorded)",
@@ -4815,6 +4898,9 @@ fn render_consumption(consumption: &Consumption) -> String {
     }
     if let Some(cost) = &consumption.cost {
         figures.push(format!("cost {}", render_cost(cost)));
+    }
+    if let Some(estimate) = &consumption.list_price_estimate {
+        figures.push(render_estimate(estimate));
     }
     let events = &consumption.events;
     let identity = &consumption.identity;
@@ -5122,7 +5208,18 @@ fn render_model_usage(model: &ModelUsage) -> String {
     if let Some(requests) = model.request_count {
         rendered.push_str(&format!("; {requests} observed requests"));
     }
+    if let Some(estimate) = &model.list_price_estimate {
+        rendered.push_str(&format!("; {}", render_estimate(estimate)));
+    }
     rendered.push('\n');
+    if let Some(estimate) = &model.list_price_estimate {
+        if let Some(incomplete) = estimate_incomplete(estimate) {
+            rendered.push_str(&format!(
+                "model {} list-price estimate completeness: {incomplete}\n",
+                model.model
+            ));
+        }
+    }
     render_measurement_coverage(
         &mut rendered,
         &format!("model {}", model.model),
@@ -5222,11 +5319,26 @@ fn render_usage_summary(summary: &UsageSummary, by: &[GroupBy]) -> String {
     } else {
         by.iter().map(key_column).collect()
     };
+    let priced = std::iter::once(&summary.totals)
+        .chain(summary.groups.iter().map(|group| &group.tally))
+        .any(|tally| tally.list_price_estimate.is_some() || !tally.list_price_withheld.is_empty());
+    let tally_cells = |tally: &UsageTally| {
+        let mut cells = tally_cells(tally);
+        if priced {
+            cells.push(estimate_cell(tally));
+        }
+        cells
+    };
     let mut out = key_columns.join("\t");
     out.push_str(
         "\tSESSIONS\tINPUT\tOUTPUT\tREASONING\tCACHE READ\tCACHE WRITE\tDISJOINT TOTAL\tCOST\t\
-         COVERAGE (RECORDED/SUMMED/WINDOW/SINCE-RESET/NONE)\n",
+         COVERAGE (RECORDED/SUMMED/WINDOW/SINCE-RESET/NONE)",
     );
+    out.push_str(if priced {
+        "\tLIST-PRICE ESTIMATE\n"
+    } else {
+        "\n"
+    });
     for group in &summary.groups {
         let mut cells: Vec<String> = by
             .iter()
@@ -5262,6 +5374,21 @@ fn render_usage_summary(summary: &UsageSummary, by: &[GroupBy]) -> String {
         out.push_str(&format!(
             "Cost coverage: {}\n",
             render_cost_coverage(coverage)
+        ));
+    }
+    if let Some(estimate) = &summary.totals.list_price_estimate {
+        out.push_str(&format!("Total {}", render_estimate_lines("", estimate)));
+    }
+    if !summary.totals.list_price_withheld.is_empty() {
+        out.push_str(&format!(
+            "List-price estimate withheld: {}\n",
+            summary
+                .totals
+                .list_price_withheld
+                .iter()
+                .map(serde_kebab)
+                .collect::<Vec<_>>()
+                .join(", ")
         ));
     }
     render_measurement_coverage(&mut out, "summed", &summary.totals.measurement_coverage);
@@ -5460,6 +5587,31 @@ fn key_cell(key: &GroupKey, dimension: GroupBy) -> Option<String> {
         GroupBy::Model => key.model.clone(),
         GroupBy::Variant => key.variant.clone(),
         GroupBy::Directory => key.directory.clone(),
+    }
+}
+
+/// A summary row's list-price estimate cell, its incomplete categories in
+/// brackets, or `withheld` with the reasons.
+fn estimate_cell(tally: &UsageTally) -> String {
+    if !tally.list_price_withheld.is_empty() {
+        let reasons = tally
+            .list_price_withheld
+            .iter()
+            .map(serde_kebab)
+            .collect::<Vec<_>>();
+        return format!("withheld [{}]", reasons.join(", "));
+    }
+    let Some(estimate) = &tally.list_price_estimate else {
+        return "-".to_owned();
+    };
+    let amount = match (estimate.amount, estimate.at_least, estimate.at_most) {
+        (Some(amount), _, _) => format!("{amount:.4} {}", estimate.currency),
+        (None, Some(low), Some(high)) => format!("{low:.4}-{high:.4} {}", estimate.currency),
+        _ => "-".to_owned(),
+    };
+    match estimate_incomplete(estimate) {
+        Some(incomplete) => format!("{amount} [{incomplete}]"),
+        None => amount,
     }
 }
 
