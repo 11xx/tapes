@@ -505,7 +505,7 @@ PROBE BEFORE EXPORTING
   Claude, Codex, or Pi recording twice, pairing past the read bound and
   writing each event as it pairs, with the same filters and counts.
 
-  usage answers where a session's quota went as tapes-usage/13: its recorded
+  usage answers where a session's quota went as tapes-usage/14: its recorded
   launch mode when known, tokens, cost, accounting, turns, and any by-model attribution the source can
   support — Claude's recorded cost-state, Codex's request observations, or
   pi's per-message model each qualified by the thinking level in effect. Read
@@ -513,8 +513,13 @@ PROBE BEFORE EXPORTING
   whether a figure is a recorded total or an observed request sum, and
   coverage says how much of the session it covers. An observed cumulative
   counter restart is `since-reset`; the newest recorded total remains visible
-  without being rebuilt from request rows. Codex quota observations preserve
-  credits balances and reached-limit flags exactly as recorded, including false
+  without being rebuilt from request rows. Codex attribution counts every
+  usage record, compactions included, and `attribution.outside_total` counts
+  the requests the cumulative total never moved for (a remote compaction, or
+  a request no token count followed), with `outside_total_tokens` their sum:
+  the model shares less those are the recorded total's movement, so a share
+  above the recorded total says what the total left out. Codex quota
+  observations preserve credits balances and reached-limit flags exactly as recorded, including false
   and string zero; absent fields remain unknown. `usage --full` streams the
   whole recording and folds its counters. Turns and complete request reads
   cover the session; recorded totals keep their epoch coverage. Pi's active
@@ -551,7 +556,7 @@ PROBE BEFORE EXPORTING
   unrecognized usage the read cannot place for or against a span is counted
   under `unplaced` and qualifies it `unreadable-record`, `stopped-attempt` or
   `unrecognized-usage`, so a span the read could not cover is never complete.
-  The library answers several spans in one pass, as tapes-usage-spans/2: a
+  The library answers several spans in one pass, as tapes-usage-spans/3: a
   figure per span, the `remainder`, and the `whole` in the spans' basis.
   Money beyond what a harness wrote comes from a price table the caller
   supplies; tapes holds no prices. `usage --prices FILE` reads one, else the

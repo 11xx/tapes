@@ -26,7 +26,7 @@ use crate::overlap::{CopyEvidence, Disjointness, Overlap, RelatedSessions, Usage
 use crate::pricing::{EstimateSum, ListPriceEstimate, PriceTable, PricedFigure};
 use crate::span::{SpanPlacement, SpanSessions, SPANS_SCHEMA};
 
-pub const USAGE_SCHEMA: &str = "tapes-usage/13";
+pub const USAGE_SCHEMA: &str = "tapes-usage/14";
 
 /// Recorded usage facts and measurement notes kept beside the session's
 /// normalized counters. A source fact that was not recorded remains absent.
@@ -401,6 +401,17 @@ pub struct UsageAttribution {
     pub unattributed: usize,
     pub leading_uncounted: usize,
     pub resets: usize,
+    /// Counted requests the cumulative recorded total never moved for: a
+    /// Codex remote compaction, whose token count leaves the total where it
+    /// was, or a request no token count followed before the next one's.
+    /// The attributed and unattributed shares less these tokens are the
+    /// recorded total's movement.
+    pub outside_total: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub outside_total_tokens: Option<Tokens>,
+    /// Per-counter coverage among the requests outside the total.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub outside_total_coverage: BTreeMap<String, MeasurementCoverage>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub unattributed_tokens: Option<Tokens>,
     /// Per-counter coverage among the unattributed requests, so their sum is

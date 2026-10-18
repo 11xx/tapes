@@ -1495,7 +1495,7 @@ enum Command {
         json: bool,
     },
     /// Where quota went. A session named by id or reached with --latest
-    /// answers that session as tapes-usage/13: its recorded tokens, cost, and
+    /// answers that session as tapes-usage/14: its recorded tokens, cost, and
     /// turn counts, plus whatever else its harness recorded — a context
     /// window, a provider quota window, wall-clock durations, a per-model
     /// split, the price-relevant dimensions its requests recorded. --from,
@@ -1597,7 +1597,11 @@ enum Command {
         /// request-observation read cover the session; recorded-total
         /// accounting keeps its own epoch coverage, including `since-reset`,
         /// and Codex attribution reports its observation coverage separately.
-        /// pi's active-branch coverage stays `read-window` when an unreadable
+        /// Codex attribution counts every usage record, and
+        /// `attribution.outside_total` counts the requests the recorded total
+        /// never moved for (a remote compaction, or a request no token count
+        /// followed), with `outside_total_tokens` their sum, so the shares
+        /// less those are the recorded total's movement. pi's active-branch coverage stays `read-window` when an unreadable
         /// record cuts the branch or follows its last entry, and its
         /// consumption covers the session with any unreadable record named
         /// under `incomplete`. Installed Claude, Codex, Pi, and OpenCode
@@ -1821,7 +1825,7 @@ enum Command {
         /// identity-unestablished, exact-union).
         #[arg(long, value_name = "FILE")]
         prices: Option<PathBuf>,
-        /// Render the versioned tapes-usage/13 object, or tapes-usage-summary/9
+        /// Render the versioned tapes-usage/14 object, or tapes-usage-summary/9
         /// for a selection, as JSON. `session.model_observation` says
         /// whether more than one model and effort was observed (`mixed`) and
         /// whether a gap, partial read or budget kept the split incomplete
@@ -5467,6 +5471,17 @@ fn render_attribution(attribution: &UsageAttribution) -> String {
         rendered.push_str(&format!(
             "attribution bounds: {}\n",
             attribution.bounds.join(", ")
+        ));
+    }
+    if attribution.outside_total > 0 {
+        rendered.push_str(&format!(
+            "outside the recorded total: {} requests{}\n",
+            attribution.outside_total,
+            attribution
+                .outside_total_tokens
+                .as_ref()
+                .map(|tokens| format!(", {}", render_tokens(tokens)))
+                .unwrap_or_default()
         ));
     }
     rendered

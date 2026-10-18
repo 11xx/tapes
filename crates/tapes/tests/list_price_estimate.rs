@@ -94,7 +94,7 @@ fn a_named_table_prices_the_answer() {
     let table = store.table();
     let table = table.to_str().unwrap();
     let (whole, _) = store.json(&[SESSION, "--full", "--prices", table], &[]);
-    assert_eq!(whole["schema"], "tapes-usage/13");
+    assert_eq!(whole["schema"], "tapes-usage/14");
     let estimate = &whole["list_price_estimate"];
     assert_eq!(estimate["kind"], "list-price-estimate");
     assert!((estimate["amount"].as_f64().unwrap() - 0.031854).abs() < 1e-12);

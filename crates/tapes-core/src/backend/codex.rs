@@ -1083,6 +1083,8 @@ struct UsageCandidate {
     unattributed: usize,
     leading_uncounted: usize,
     resets: usize,
+    outside_total: usize,
+    outside_total_tokens: TokenTotals,
     by_model: BTreeMap<ModelKey, CandidateModel>,
     unattributed_tokens: TokenTotals,
     incomplete: BoundedReasons,
@@ -1092,6 +1094,17 @@ struct UsageCandidate {
 impl UsageCandidate {
     fn observe(&mut self) {
         self.observed += 1;
+    }
+
+    fn leave_total(&mut self, tokens: &Tokens) {
+        self.outside_total += 1;
+        self.outside_total_tokens.add(
+            tokens.input,
+            tokens.output,
+            tokens.reasoning,
+            tokens.cache_read,
+            tokens.cache_write,
+        );
     }
 
     fn add_unattributed(&mut self, tokens: Option<&Tokens>) {
@@ -1165,6 +1178,8 @@ impl UsageCandidate {
         bounds.extend(global_bounds);
         let (unattributed_tokens, unattributed_coverage) =
             self.unattributed_tokens.clone().finish_covered();
+        let (outside_total_tokens, outside_total_coverage) =
+            self.outside_total_tokens.clone().finish_covered();
         UsageAttribution {
             basis,
             coverage,
@@ -1174,6 +1189,9 @@ impl UsageCandidate {
             unattributed: self.unattributed,
             leading_uncounted: self.leading_uncounted,
             resets: self.resets,
+            outside_total: self.outside_total,
+            outside_total_tokens,
+            outside_total_coverage,
             unattributed_tokens,
             unattributed_coverage,
             unattributed_completeness: Default::default(),
@@ -1328,6 +1346,9 @@ struct CodexUsageObserver {
     seen_response_id_bytes: usize,
     response_id_budget_exhausted: bool,
     previous_total: Option<Tokens>,
+    /// The usage of each request counted since the last token count that
+    /// carried a total, which settles whether the total moved for them.
+    unsettled: Vec<Tokens>,
     modern_seen: bool,
     legacy_seen: bool,
     legacy_preceded_modern: bool,
@@ -1363,6 +1384,7 @@ impl CodexUsageObserver {
             seen_response_id_bytes: 0,
             response_id_budget_exhausted: false,
             previous_total: None,
+            unsettled: Vec::new(),
             modern_seen: false,
             legacy_seen: false,
             legacy_preceded_modern: false,
@@ -1568,7 +1590,29 @@ impl CodexUsageObserver {
         } else {
             ObservationClassification::Incomplete
         };
+        if counted {
+            self.unsettled.push(usage);
+        }
         self.push_series(row, ObservationBasis::UsageRecord, counted);
+    }
+
+    /// A token count carrying a total settles the requests counted since
+    /// the previous one. A total that stood still moved for none of them; a
+    /// total whose last usage is the newest request's own moved for it
+    /// alone. Any other move is not attributed to particular requests.
+    fn settle(&mut self, change: Option<&TotalChange>, last: Option<&Tokens>) {
+        let mut unsettled = std::mem::take(&mut self.unsettled);
+        match change {
+            Some(TotalChange::Unchanged) => {}
+            Some(TotalChange::Incomparable) => return,
+            _ if unsettled.last() == last && last.is_some() => {
+                unsettled.pop();
+            }
+            _ => return,
+        }
+        for usage in &unsettled {
+            self.modern.leave_total(usage);
+        }
     }
 
     fn observe_legacy(&mut self, value: &Value, span: Option<ByteSpan>, revision: &str) {
@@ -1624,6 +1668,13 @@ impl CodexUsageObserver {
         self.legacy_seen = true;
         self.legacy.observe();
         let previous = self.previous_total.replace(total.clone());
+        self.settle(
+            previous
+                .as_ref()
+                .map(|previous| compare_totals(previous, &total))
+                .as_ref(),
+            last.as_ref(),
+        );
         let (classification, counted) = match previous {
             None if !self.read_window && supports_single_legacy_request(&total, last.as_ref()) => {
                 let counted = self.legacy.count_request(
@@ -1695,7 +1746,12 @@ impl CodexUsageObserver {
         }
     }
 
-    fn finish(self) -> CodexUsageFacts {
+    fn finish(mut self) -> CodexUsageFacts {
+        // No token count followed these requests, so the total never moved
+        // for them.
+        for usage in std::mem::take(&mut self.unsettled) {
+            self.modern.leave_total(&usage);
+        }
         let basis = if self.modern_seen {
             ObservationBasis::UsageRecord
         } else {

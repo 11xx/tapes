@@ -132,3 +132,28 @@ fn the_whole_session_answer_keeps_the_total_recorded_since_the_restart() {
         all.whole.notes
     );
 }
+
+/// Claim: Codex's request attribution counts every usage record, and names
+/// the ones its cumulative total never moved for (a remote compaction, and
+/// a request no token count followed) with their tokens, so the model's
+/// share less those is the recorded total. Rejects a share that exceeds the
+/// recorded total with nothing saying why.
+#[test]
+fn attribution_names_the_requests_the_recorded_total_omits() {
+    let id = "50000000-0000-7000-8000-000000000009";
+    let full = usage_full_with_backends(&[backend()], Selection::Id(id)).unwrap();
+    assert_eq!(counters(&full), [3400, 150, 35, 1600, 0]);
+    let value = serde_json::to_value(&full).unwrap();
+    let share = &value["by_model"][0]["tokens"];
+    let outside = &value["attribution"]["outside_total_tokens"];
+    let less = ["input", "output", "reasoning", "cache_read", "cache_write"].map(|counter| {
+        share[counter].as_u64().unwrap_or(0) - outside[counter].as_u64().unwrap_or(0)
+    });
+    assert_eq!(
+        less,
+        counters(&full),
+        "the model's share {share} less the requests outside the total {outside} \
+         against the recorded total"
+    );
+    assert_eq!(value["attribution"]["outside_total"], 2);
+}
