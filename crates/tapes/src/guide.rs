@@ -368,6 +368,7 @@ PROBE BEFORE EXPORTING
   tapes usage --here --json      The same counters summed over a project.
   tapes usage --global --window FROM..TO --by session,parent  What a window consumed, by session.
   tapes usage --global --quota-window current --harness codex  The same over the running quota window.
+  tapes usage --global --allowance-rates --harness codex --since DATE --by model,variant  Allowance per lane.
   tapes endings --here --json    What each session of a project ends on.
 
   show returns the last 100 turns unless --tail says otherwise, and marks the
@@ -631,6 +632,50 @@ PROBE BEFORE EXPORTING
   observation whose window holds it. Anything else refuses and the window is
   read with --window. `window.quota` names the observation and the session
   whose recording holds it.
+  A window read also apportions allowance: the percent of a quota window
+  sessions spent, an estimate from observations reported beside tokens and any
+  price, never in their place. A pool is one harness's quota window for one
+  account, limit and plan as the recordings name them (Codex `session_meta`
+  `creator_account_id`, `rate_limits` `limit_id` and `plan_type`); where no
+  record names an account, one harness's store on this machine is one pool and
+  `window.allowance_assumption` says so. Every session of the pool's harness on
+  this machine with activity in the window is a member, selected or not.
+  Between two consecutive observations of a pool, ordered by observation time,
+  the rise in `used_percent` is apportioned over each member's disjoint tokens
+  (uncached input, cache read, cache write, output) inside that interval; a
+  new `resets_at` or a falling percent starts a new chain, and requests before
+  a chain's first observation or after its last are `uncovered_requests`, not
+  counted. Observed percents are whole numbers, read as the true percent
+  rounded to the nearest whole, so each figure gives `estimate`, the rises
+  apportioned as observed, with `at_least` and `at_most` that hold for every
+  true percent the observations allow: a run of equal observations hides at
+  most one unit of rise. `output_weighted` repeats the apportionment weighted
+  by output alone, a sensitivity bound on the weighting. Each share, group
+  and total carries `allowance`, one `kind: apportioned-allowance` entry per
+  pool window (`primary` or `secondary`, its length, the plan) with its
+  `coverage` (observations, intervals, uncovered requests);
+  `window.allowance` gives each pool's `observed` rise and how it divides:
+  `attributed` to the selection, `outside_selection` for the pool's other
+  sessions, and `without_recorded_use` for rises in intervals where no member
+  spent a token. The estimates of the three add up to the observed rise.
+  Claude records no used percent (its quota observations exist only on
+  refused requests), so a Claude share carries `allowance_absent` with that
+  reason and no allowance.
+  `usage --allowance-rates` turns the same apportionment into rates per lane:
+  every completed session (last activity at least fifteen minutes before the
+  read) with requests in the lookback (--window, else --since..--until) is a
+  lane, its percent of the --quota window summed over that window's pools,
+  grouped by --by (`model,variant` for cost per model and effort) and by the
+  window's length, since a plan change can give a window of the same kind
+  another length and a percent is of one window. Each group
+  gives lanes, percent per lane (median, 90th percentile by nearest rank,
+  maximum) over the lanes' estimates and their bounds, tokens per one percent
+  by disjoint category, the median minutes from a lane's first to its last
+  request, and `measured_over`, the first and last request measured: rates
+  drift with models and pricing, so a rate is read with its dates. A plan
+  whose window lacks the --quota kind (a plan with one weekly window, say)
+  leaves its lanes `excluded_without_allowance`. The answer is
+  tapes-allowance-rates/1.
   A summary adds sessions only where no recording relates them. Two sessions
   are related when one declares the other as its fork origin or parent (Codex
   `forked_from_id`, Pi's parent header, OpenCode `fork_session_id` and
@@ -1013,7 +1058,7 @@ PROBE BEFORE EXPORTING
   its own first activity and not the parent's launch.
 
   Given a scope or a listing filter instead of a session, usage answers that
-  whole selection as tapes-usage-summary/8, using the flags list and export
+  whole selection as tapes-usage-summary/9, using the flags list and export
   take and grouping by --by (harness and model unless told otherwise). It sums
   the counters the listing already carries, so nothing is re-read. Read
   counted before a sum: it says how many of a group's sessions recorded that

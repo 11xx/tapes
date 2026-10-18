@@ -532,6 +532,84 @@ impl Backend for CodexBackend {
         Ok(whole)
     }
 
+    /// Each token count that moves the cumulative total is one request whose
+    /// tokens are the move, as a span reads it, and each `rate_limits` window
+    /// that reports a used percent is an observation of its pool: the account
+    /// `session_meta` names, the limit, the plan, the window and its length.
+    fn allowance_timeline(&self, session: &Session) -> Result<Option<crate::allowance::Timeline>> {
+        use crate::allowance::{PoolKey, RateObservation, TimedUse};
+        use crate::window::QuotaKind;
+        let path = super::session_file_path(session)
+            .ok_or_else(|| anyhow!("codex session {} has no file locator", session.id))?;
+        let mut timeline = crate::allowance::Timeline::default();
+        let mut account = None::<String>;
+        let mut previous = None::<Tokens>;
+        stream_jsonl(path, None, |value, _, _| {
+            super::validate_native_identity(value, "codex", &session.id)?;
+            if value["type"] == "session_meta" && account.is_none() {
+                account = value["payload"]["creator_account_id"]
+                    .as_str()
+                    .filter(|id| !id.is_empty())
+                    .map(str::to_owned);
+            }
+            if !is_token_count(value) {
+                return Ok(false);
+            }
+            let Some(at) = timestamp(&value["timestamp"]) else {
+                return Ok(false);
+            };
+            if let Some(total) = codex_tokens(value) {
+                let change = previous
+                    .as_ref()
+                    .map(|previous| compare_totals(previous, &total));
+                let base = previous.replace(total.clone());
+                if !matches!(change, Some(TotalChange::Unchanged)) {
+                    let base = base.filter(|_| !matches!(change, Some(TotalChange::Reset)));
+                    let moved = |pick: fn(&Tokens) -> Option<u64>| {
+                        let now = pick(&total).unwrap_or(0);
+                        now.saturating_sub(base.as_ref().and_then(pick).unwrap_or(0))
+                    };
+                    let input = moved(|tokens| tokens.input);
+                    let cache_read = moved(|tokens| tokens.cache_read);
+                    let cache_write = moved(|tokens| tokens.cache_write);
+                    timeline.requests.push(TimedUse {
+                        at,
+                        uncached_input: input.saturating_sub(cache_read + cache_write),
+                        cache_read,
+                        cache_write,
+                        output: moved(|tokens| tokens.output),
+                        reasoning: moved(|tokens| tokens.reasoning),
+                    });
+                }
+            }
+            let limits = &value["payload"]["rate_limits"];
+            for (quota, name) in [
+                (QuotaKind::Primary, "primary"),
+                (QuotaKind::Secondary, "secondary"),
+            ] {
+                let window = &limits[name];
+                let Some(used_percent) = window["used_percent"].as_f64() else {
+                    continue;
+                };
+                timeline.observations.push(RateObservation {
+                    at,
+                    pool: PoolKey {
+                        harness: "codex".to_owned(),
+                        account: account.clone(),
+                        limit: limits["limit_id"].as_str().map(str::to_owned),
+                        plan: limits["plan_type"].as_str().map(str::to_owned),
+                        window: quota,
+                        window_minutes: window["window_minutes"].as_u64(),
+                    },
+                    used_percent,
+                    resets_at: window["resets_at"].as_i64().and_then(epoch_seconds),
+                });
+            }
+            Ok(false)
+        })?;
+        Ok(Some(timeline))
+    }
+
     /// A Codex request is a token count that moves the cumulative total, and
     /// its share is the move: a span's figure is the difference of the
     /// totals at its boundaries. A total that fell restarts the count, so the

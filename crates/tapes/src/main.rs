@@ -1507,7 +1507,7 @@ enum Command {
     /// --quota-window answer a selection's consumption inside a window of
     /// time, each session contributing its own span inside it. A scope or
     /// listing filter instead answers the whole selection as
-    /// tapes-usage-summary/8, grouped by --by and summing each counter over
+    /// tapes-usage-summary/9, grouped by --by and summing each counter over
     /// the sessions that recorded it. Native tokens follow each harness's own
     /// convention and add only within it; the disjoint categories (uncached
     /// input, cache read, cache write by TTL, output) add across harnesses.
@@ -1735,7 +1735,13 @@ enum Command {
         /// largest first: its requests inside the window, its launch, its
         /// named `parent` and the `root` its chain of parents ends at, and its
         /// disjoint categories. --limit still bounds how many sessions each
-        /// harness lists.
+        /// harness lists. Each share, group and total also carries
+        /// `allowance`: the percent of each quota window it spent, apportioned
+        /// over the disjoint tokens each session spent between consecutive
+        /// observations of the pool's used percent, an estimate with bounds
+        /// for the observations' whole-percent rounding; `window.allowance`
+        /// shows each pool's observed rise and how it divides. Claude records
+        /// no used percent, so its shares say so instead.
         #[arg(
             long,
             value_name = "FROM..TO",
@@ -1769,6 +1775,24 @@ enum Command {
         /// window and Claude's seven-day limit.
         #[arg(long, value_enum, default_value = "primary", requires = "quota_window")]
         quota: QuotaArg,
+        /// Report allowance rates per lane instead of a summary: every
+        /// completed session (last activity at least fifteen minutes before
+        /// the read) with requests inside the lookback is a lane, its percent
+        /// of the --quota window apportioned as a window read apportions it,
+        /// grouped by --by (`model,variant` reads cost per model and effort).
+        /// The lookback is --window, else --since..--until. Each group gives
+        /// lanes, percent per lane (median, p90 by nearest rank, max) over the
+        /// lanes' estimates and their bounds, tokens per one percent by
+        /// disjoint category (the estimate, and bounds from the percent's
+        /// bounds), the median minutes from a lane's first to its last
+        /// request, and `measured_over`, the first and last request measured,
+        /// because rates drift with models and pricing. Claude lanes are left
+        /// out with the reason: Claude records no used percent.
+        #[arg(
+            long,
+            conflicts_with_all = ["session", "latest", "title", "occurrence", "full", "from", "to", "requests", "series", "reconcile", "event_keys", "quota_window", "prices"]
+        )]
+        allowance_rates: bool,
         /// Price the answer with this tapes-price-table/1 file: each figure
         /// gains `list_price_estimate` beside any cost its harness wrote,
         /// never in its place. Without the flag the table is the file
@@ -1794,7 +1818,7 @@ enum Command {
         /// identity-unestablished, exact-union).
         #[arg(long, value_name = "FILE")]
         prices: Option<PathBuf>,
-        /// Render the versioned tapes-usage/13 object, or tapes-usage-summary/8
+        /// Render the versioned tapes-usage/13 object, or tapes-usage-summary/9
         /// for a selection, as JSON. `session.model_observation` says
         /// whether more than one model and effort was observed (`mixed`) and
         /// whether a gap, partial read or budget kept the split incomplete
@@ -3005,6 +3029,7 @@ fn dispatch(cli: Cli) -> Result<()> {
             window,
             quota_window,
             quota,
+            allowance_rates,
             json,
         } => {
             query.validate_input()?;
@@ -3139,6 +3164,39 @@ fn dispatch(cli: Cli) -> Result<()> {
                             quota: quota.into(),
                             at,
                         }));
+                if allowance_rates {
+                    if query.input.supplied() {
+                        return Err(anyhow!(
+                            "--allowance-rates reads installed recordings whole; a supplied input refuses it"
+                        ));
+                    }
+                    let mut selection = query.set();
+                    let lookback = window.unwrap_or(WindowBounds {
+                        from: selection.filters.since,
+                        to: selection.filters.until,
+                    });
+                    if lookback.from.is_none() {
+                        return Err(anyhow!(
+                            "--allowance-rates needs a lookback: --window FROM..TO or --since"
+                        ));
+                    }
+                    // The lookback cuts consumption at its edges; a session
+                    // that ran past its end still has requests inside it.
+                    selection.filters.until = None;
+                    let rates = agent_tapes_core::allowance_rates_with_backends(
+                        &query.input.backends()?,
+                        &selection,
+                        &by,
+                        lookback,
+                        quota.into(),
+                    )?;
+                    if json {
+                        print_json(&rates, &query.input)?;
+                    } else {
+                        print!("{}", render_allowance_rates(&rates, &by));
+                    }
+                    return Ok(());
+                }
                 let summary = if let Some(ask) = ask {
                     if query.input.supplied() {
                         return Err(anyhow!(
@@ -5472,7 +5530,12 @@ fn render_window(window: &WindowRecord) -> String {
                 .map_or_else(String::new, |reason| format!("; inferred: {reason}"))
         ));
     }
-    out.push_str("SESSION\tHARNESS\tLAUNCH\tROOT\tREQUESTS\tDISJOINT TOKENS\n");
+    let allowance = window
+        .sessions
+        .iter()
+        .any(|share| !share.allowance.is_empty());
+    out.push_str("SESSION\tHARNESS\tLAUNCH\tROOT\tREQUESTS\tDISJOINT TOKENS");
+    out.push_str(if allowance { "\tALLOWANCE\n" } else { "\n" });
     for share in &window.sessions {
         let root = if share.root == share.id {
             "-".to_owned()
@@ -5496,6 +5559,40 @@ fn render_window(window: &WindowRecord) -> String {
             },
             share.consumed()
         ));
+        if allowance {
+            out.pop();
+            let cell = if share.allowance.is_empty() {
+                "-".to_owned()
+            } else {
+                share
+                    .allowance
+                    .iter()
+                    .map(render_allowance)
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            };
+            out.push_str(&format!("\t{cell}\n"));
+        }
+    }
+    for pool in &window.allowance {
+        out.push_str(&format!(
+            "allowance pool {} {} {}{} window: observed {}, attributed {}, outside the selection {}, without recorded use {} ({} observations, {} intervals)\n",
+            pool.pool.harness,
+            pool.pool.plan.as_deref().unwrap_or("-"),
+            serde_kebab(&pool.pool.window),
+            pool.pool
+                .window_minutes
+                .map_or_else(String::new, |minutes| format!(" {minutes}-minute")),
+            render_percent(&pool.observed),
+            render_percent(&pool.attributed),
+            render_percent(&pool.outside_selection),
+            render_percent(&pool.without_recorded_use),
+            pool.coverage.observations,
+            pool.coverage.intervals,
+        ));
+    }
+    if let Some(assumption) = window.allowance_assumption {
+        out.push_str(&format!("allowance pool assumption: {assumption}\n"));
     }
     if window.empty > 0 {
         out.push_str(&format!(
@@ -5504,6 +5601,104 @@ fn render_window(window: &WindowRecord) -> String {
         ));
     }
     out.push('\n');
+    out
+}
+
+fn render_percent(percent: &agent_tapes_core::allowance::PercentBounds) -> String {
+    format!(
+        "{:.1}% ({:.1}-{:.1})",
+        percent.estimate, percent.at_least, percent.at_most
+    )
+}
+
+fn render_allowance(allowance: &agent_tapes_core::allowance::Allowance) -> String {
+    format!(
+        "{} {}",
+        serde_kebab(&allowance.window),
+        render_percent(&allowance.percent)
+    )
+}
+
+fn render_allowance_rates(
+    rates: &agent_tapes_core::allowance::AllowanceRates,
+    by: &[GroupBy],
+) -> String {
+    let edge = |at: Option<Instant>| at.map_or_else(|| "open".to_owned(), |at| at.to_rfc3339());
+    let mut out = format!(
+        "allowance rates: {} window, lookback {} .. {}, weighted by {}\n",
+        serde_kebab(&rates.window),
+        edge(rates.lookback.from),
+        edge(rates.lookback.to),
+        serde_kebab(&rates.weighting)
+    );
+    let mut columns = by.iter().map(key_column).collect::<Vec<_>>();
+    columns.extend([
+        "WINDOW MIN",
+        "LANES",
+        "%/LANE MEDIAN",
+        "P90",
+        "MAX",
+        "TOKENS/% TOTAL",
+        "UNCACHED",
+        "CACHE READ",
+        "OUTPUT",
+        "REASONING",
+        "MEDIAN MIN",
+        "MEASURED",
+    ]);
+    out.push_str(&columns.join("\t"));
+    out.push('\n');
+    for group in &rates.groups {
+        let mut cells = by
+            .iter()
+            .map(|dimension| key_cell(&group.key, *dimension).unwrap_or_default())
+            .collect::<Vec<_>>();
+        let lane = &group.percent_per_lane;
+        let stat = |pick: fn(&agent_tapes_core::allowance::Quantiles) -> f64| {
+            format!(
+                "{:.2} ({:.2}-{:.2})",
+                pick(&lane.estimate),
+                pick(&lane.at_least),
+                pick(&lane.at_most)
+            )
+        };
+        let ratio = |ratio: &agent_tapes_core::allowance::TokensPerPercent| {
+            format!("{:.0}", ratio.estimate)
+        };
+        cells.push(
+            group
+                .window_minutes
+                .map_or_else(|| "-".to_owned(), |minutes| minutes.to_string()),
+        );
+        cells.push(group.lanes.to_string());
+        cells.push(stat(|quantiles| quantiles.median));
+        cells.push(stat(|quantiles| quantiles.p90));
+        cells.push(stat(|quantiles| quantiles.max));
+        match &group.tokens_per_percent {
+            Some(split) => cells.extend([
+                ratio(&split.total),
+                ratio(&split.uncached_input),
+                ratio(&split.cache_read),
+                ratio(&split.output),
+                ratio(&split.reasoning),
+            ]),
+            None => cells.extend(std::iter::repeat_n("-".to_owned(), 5)),
+        }
+        cells.push(format!("{:.1}", group.median_duration_minutes));
+        cells.push(format!(
+            "{} .. {}",
+            group.measured_over.from.to_rfc3339(),
+            group.measured_over.to.to_rfc3339()
+        ));
+        out.push_str(&cells.join("\t"));
+        out.push('\n');
+    }
+    out.push_str(&format!(
+        "left out: {} running, {} without allowance, {} from harnesses that record no used percent\n",
+        rates.excluded_running,
+        rates.excluded_without_allowance,
+        rates.excluded_absent.len()
+    ));
     out
 }
 

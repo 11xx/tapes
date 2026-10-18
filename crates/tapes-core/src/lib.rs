@@ -18,6 +18,7 @@ pub use event::{
     EVENTS_SCHEMA,
 };
 
+pub mod allowance;
 pub mod artifact;
 pub mod backend;
 pub mod brief;
@@ -58,7 +59,7 @@ pub mod workset;
 
 pub const LIST_SCHEMA: &str = "tapes-list/9";
 pub const EXPORT_MANIFEST_SCHEMA: &str = "tapes-export-manifest/7";
-pub const USAGE_SUMMARY_SCHEMA: &str = "tapes-usage-summary/8";
+pub const USAGE_SUMMARY_SCHEMA: &str = "tapes-usage-summary/9";
 /// Number of normalized turns a `list --search` query inspects per session.
 /// Keeping this fixed makes the listing's cost predictable for callers.
 pub const LIST_SEARCH_TAIL: usize = 32;
@@ -2183,6 +2184,8 @@ pub fn read_window(
                 first: placement.first,
                 last: placement.last,
                 disjoint: figure.disjoint_tokens(),
+                allowance: Vec::new(),
+                allowance_absent: None,
             });
             figures.push(figure);
         }
@@ -2208,6 +2211,8 @@ pub fn read_window(
             quota,
             sessions: shares_sorted,
             empty,
+            allowance: Vec::new(),
+            allowance_assumption: None,
         },
         figures,
         relations,
@@ -2233,10 +2238,32 @@ pub fn usage_window_with_backends(
     ask: WindowAsk,
     prices: Option<&pricing::PriceTable>,
 ) -> Result<UsageSummary> {
-    let read = read_window(backends, selection, ask)?;
+    let mut read = read_window(backends, selection, ask)?;
+    let apportioned = apportion_window(backends, selection, &mut read)?;
     let overlap = overlap::Overlap::of(&read.figures, &mut |_| None);
-    let (aggregate, partitions) =
+    let (mut aggregate, partitions) =
         usage::partitioned_aggregate_related(&read.figures, by, &overlap, prices, &read.relations);
+    for group in &mut aggregate.groups {
+        let ids = read
+            .figures
+            .iter()
+            .filter(|figure| {
+                let values = by
+                    .iter()
+                    .map(|dimension| dimension.of_in(figure, &read.relations))
+                    .collect::<Vec<_>>();
+                usage::group_key(by, &values) == group.key
+            })
+            .map(|figure| figure.id.as_str())
+            .collect::<Vec<_>>();
+        group.tally.allowance = apportioned.allowance(&ids);
+    }
+    let ids = read
+        .figures
+        .iter()
+        .map(|figure| figure.id.as_str())
+        .collect::<Vec<_>>();
+    aggregate.totals.allowance = apportioned.allowance(&ids);
     Ok(UsageSummary {
         schema: USAGE_SUMMARY_SCHEMA,
         selection: selection_record(selection, read.limit),
@@ -2251,6 +2278,292 @@ pub fn usage_window_with_backends(
         scan_truncated: read.scan_truncated,
         unplaced: Unplaced::from_directories(read.unplaced),
         window: Some(read.record),
+    })
+}
+
+/// The pools a window read's allowance observations report on, apportioned
+/// over the sessions that spent inside each interval.
+pub struct ApportionedWindow {
+    pub pools: Vec<allowance::Apportionment>,
+}
+
+impl ApportionedWindow {
+    /// The allowance the sessions `ids` spent, one entry per pool window
+    /// they spent from.
+    pub fn allowance(&self, ids: &[&str]) -> Vec<allowance::Allowance> {
+        self.pools
+            .iter()
+            .map(|pool| pool.allowance(ids))
+            .filter(|allowance| allowance.percent.at_most > 0.0 || allowance.percent.estimate > 0.0)
+            .collect()
+    }
+}
+
+/// Apportion the allowance observations inside `read`'s window. A pool's
+/// members are every session of its harness on this machine with activity
+/// inside the window, whether or not the selection holds it, so the shares
+/// of sessions it left out stay visible as `outside_selection`. Each share
+/// gains its allowance per pool, or the reason it has none; the window gains
+/// each pool's observed rise and how it divides.
+pub fn apportion_window(
+    backends: &[Box<dyn Backend>],
+    selection: &SessionSelection<'_>,
+    read: &mut WindowRead,
+) -> Result<ApportionedWindow> {
+    let bounds = read.record.bounds;
+    let inside = |at: DateTime<Utc>| {
+        bounds.from.is_none_or(|from| at >= from) && bounds.to.is_none_or(|to| at < to)
+    };
+    let selected = read
+        .record
+        .sessions
+        .iter()
+        .map(|share| share.id.clone())
+        .collect::<HashSet<_>>();
+    let mut timelines = Vec::new();
+    for harness in ["codex"] {
+        if !backends.iter().any(|backend| backend.harness() == harness) {
+            continue;
+        }
+        let filters = ListFilters {
+            since: bounds.from,
+            ..ListFilters::default()
+        };
+        let listed = list_scoped(
+            backends,
+            Some(harness),
+            None,
+            selection.limit.unwrap_or(DEFAULT_LIST_LIMIT),
+            &filters,
+            ListSort::Newest,
+        )?;
+        for (index, session) in listed.sessions.iter().enumerate() {
+            if !bounds.may_hold(session.started_at, session.last_activity_at) {
+                continue;
+            }
+            let backend = backends[listed.origins[index]].as_ref();
+            match backend.allowance_timeline(session) {
+                Ok(Some(mut timeline)) => {
+                    timeline.requests.retain(|request| inside(request.at));
+                    timeline
+                        .observations
+                        .retain(|observation| inside(observation.at));
+                    timelines.push((session.id.clone(), timeline));
+                }
+                Ok(None) => {}
+                Err(error) => read
+                    .unreadable
+                    .push(format!("{} ({harness}) allowance: {error:#}", session.id)),
+            }
+        }
+    }
+    let observations = timelines
+        .iter()
+        .flat_map(|(_, timeline)| timeline.observations.iter().cloned())
+        .collect::<Vec<_>>();
+    let mut keys = observations
+        .iter()
+        .map(|observation| observation.pool.clone())
+        .collect::<Vec<_>>();
+    keys.sort();
+    keys.dedup();
+    let members = timelines
+        .iter()
+        .map(|(id, timeline)| allowance::PoolMember {
+            id,
+            selected: selected.contains(id),
+            requests: &timeline.requests,
+        })
+        .collect::<Vec<_>>();
+    let pools = keys
+        .into_iter()
+        .map(|key| allowance::Apportionment::new(key, &observations, &members))
+        .collect::<Vec<_>>();
+    let apportioned = ApportionedWindow { pools };
+    for share in &mut read.record.sessions {
+        match allowance::absent_reason(&share.harness) {
+            Some(reason) => share.allowance_absent = Some(reason),
+            None => {
+                share.allowance = apportioned.allowance(&[share.id.as_str()]);
+                if share.allowance.is_empty() {
+                    share.allowance_absent =
+                        Some("no interval between two observations of its pool holds its requests");
+                }
+            }
+        }
+    }
+    read.record.allowance = apportioned
+        .pools
+        .iter()
+        .map(allowance::Apportionment::pool)
+        .collect();
+    if read
+        .record
+        .allowance
+        .iter()
+        .any(|pool| pool.pool.account.is_none())
+    {
+        read.record.allowance_assumption = Some(
+            "the recordings name no account, so one harness's store on this machine is one pool",
+        );
+    }
+    Ok(apportioned)
+}
+
+/// How long after its last recorded activity a session counts as completed
+/// for allowance rates.
+const COMPLETED_AFTER_MINUTES: i64 = 15;
+
+/// Allowance rates per lane over `lookback`: every completed session of the
+/// selection with activity in it is a lane, its allowance of the `quota`
+/// window apportioned as a window read apportions it, and lanes are grouped
+/// by `by`. A session whose last activity is within fifteen minutes of the
+/// read is still running and left out.
+pub fn allowance_rates_with_backends(
+    backends: &[Box<dyn Backend>],
+    selection: &SessionSelection<'_>,
+    by: &[usage::GroupBy],
+    lookback: window::WindowBounds,
+    quota: window::QuotaKind,
+) -> Result<allowance::AllowanceRates> {
+    let mut read = read_window(backends, selection, WindowAsk::Bounds(lookback))?;
+    let apportioned = apportion_window(backends, selection, &mut read)?;
+    let completed_before = Utc::now() - chrono::Duration::minutes(COMPLETED_AFTER_MINUTES);
+    let mut excluded_running = 0;
+    let mut excluded_without_allowance = 0;
+    let mut excluded_absent = Vec::new();
+    // Lanes by their group's key values and their window's length.
+    type LaneGroups = std::collections::BTreeMap<(Vec<Option<String>>, Option<u64>), Vec<usize>>;
+    let mut groups = LaneGroups::new();
+    let mut lanes = Vec::new();
+    for (index, share) in read.record.sessions.iter().enumerate() {
+        let figure = &read.figures[index];
+        if figure
+            .last_activity_at
+            .is_none_or(|last| last > completed_before)
+        {
+            excluded_running += 1;
+            continue;
+        }
+        if let Some(reason) = allowance::absent_reason(&share.harness) {
+            excluded_absent.push(format!("{} ({}): {reason}", share.id, share.harness));
+            continue;
+        }
+        // A percent is of one window: a plan whose window of this kind has
+        // another length is another window, so lanes group by length too.
+        let mut by_length: std::collections::BTreeMap<Option<u64>, allowance::PercentBounds> =
+            std::collections::BTreeMap::new();
+        for allowance in apportioned
+            .allowance(&[share.id.as_str()])
+            .into_iter()
+            .filter(|allowance| allowance.window == quota)
+        {
+            let sum = by_length.entry(allowance.window_minutes).or_default();
+            *sum = *sum + allowance.percent;
+        }
+        if by_length.is_empty() {
+            excluded_without_allowance += 1;
+            continue;
+        }
+        let values = by
+            .iter()
+            .map(|dimension| dimension.of_in(figure, &read.relations))
+            .collect::<Vec<_>>();
+        for (minutes, percent) in by_length {
+            groups
+                .entry((values.clone(), minutes))
+                .or_default()
+                .push(lanes.len());
+            lanes.push((share, percent));
+        }
+    }
+    let groups = groups
+        .into_iter()
+        .map(|((values, window_minutes), members)| {
+            let pick = |part: fn(&allowance::PercentBounds) -> f64| {
+                members
+                    .iter()
+                    .map(|member| part(&lanes[*member].1))
+                    .collect::<Vec<_>>()
+            };
+            let quantiles =
+                |values: Vec<f64>| allowance::Quantiles::of(&values).unwrap_or_default();
+            let percent = members
+                .iter()
+                .map(|member| lanes[*member].1)
+                .fold(allowance::PercentBounds::default(), |sum, lane| sum + lane);
+            let category = |part: fn(&model::DisjointTokens) -> Option<u64>| {
+                members
+                    .iter()
+                    .filter_map(|member| lanes[*member].0.disjoint.as_ref().and_then(part))
+                    .sum::<u64>()
+            };
+            let uncached_input = category(|disjoint| disjoint.uncached_input);
+            let cache_read = category(|disjoint| disjoint.cache_read);
+            let cache_write =
+                category(|disjoint| disjoint.cache_write.map(|writes| writes.total()));
+            let output = category(|disjoint| disjoint.output);
+            let reasoning = category(|disjoint| disjoint.reasoning);
+            let tokens_per_percent = (|| {
+                Some(allowance::TokensPerPercentSplit {
+                    total: allowance::TokensPerPercent::of(
+                        uncached_input + cache_read + cache_write + output,
+                        percent,
+                    )?,
+                    uncached_input: allowance::TokensPerPercent::of(uncached_input, percent)?,
+                    cache_read: allowance::TokensPerPercent::of(cache_read, percent)?,
+                    output: allowance::TokensPerPercent::of(output, percent)?,
+                    reasoning: allowance::TokensPerPercent::of(reasoning, percent)?,
+                })
+            })();
+            let mut durations = Vec::new();
+            let mut first = None::<DateTime<Utc>>;
+            let mut last = None::<DateTime<Utc>>;
+            for member in &members {
+                let share = lanes[*member].0;
+                let start = share.first.as_ref().and_then(|request| request.timestamp);
+                let end = share.last.as_ref().and_then(|request| request.timestamp);
+                if let (Some(start), Some(end)) = (start, end) {
+                    durations.push((end - start).num_seconds() as f64 / 60.0);
+                    first = Some(first.map_or(start, |first| first.min(start)));
+                    last = Some(last.map_or(end, |last| last.max(end)));
+                }
+            }
+            allowance::RateGroup {
+                key: usage::group_key(by, &values),
+                window_minutes,
+                lanes: members.len(),
+                percent_per_lane: allowance::LanePercent {
+                    estimate: quantiles(pick(|bounds| bounds.estimate)),
+                    at_least: quantiles(pick(|bounds| bounds.at_least)),
+                    at_most: quantiles(pick(|bounds| bounds.at_most)),
+                },
+                tokens_per_percent,
+                median_duration_minutes: allowance::Quantiles::of(&durations)
+                    .map_or(0.0, |quantiles| quantiles.median),
+                measured_over: allowance::MeasuredOver {
+                    from: first.unwrap_or_default(),
+                    to: last.unwrap_or_default(),
+                },
+            }
+        })
+        .collect();
+    Ok(allowance::AllowanceRates {
+        schema: allowance::RATES_SCHEMA,
+        lookback,
+        window: quota,
+        weighting: allowance::Weighting::DisjointTotal,
+        groups,
+        pools: apportioned
+            .pools
+            .iter()
+            .map(|pool| pool.pool.clone())
+            .filter(|pool| pool.window == quota)
+            .collect(),
+        excluded_running,
+        excluded_without_allowance,
+        excluded_absent,
+        unreadable: read.unreadable,
     })
 }
 

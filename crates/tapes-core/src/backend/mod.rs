@@ -536,6 +536,13 @@ pub trait Backend {
             self.harness()
         )
     }
+    /// The session's requests in time, as disjoint tokens, and the allowance
+    /// observations its recording holds, read whole; `None` for a harness
+    /// that records no used percent.
+    fn allowance_timeline(&self, session: &Session) -> Result<Option<crate::allowance::Timeline>> {
+        let _ = session;
+        Ok(None)
+    }
     /// Recordings of the session's own children that hold consumption no
     /// listing returns as a session, each as a session of its own whose id
     /// names the parent, with the children that could not be read. A harness

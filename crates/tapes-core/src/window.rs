@@ -54,7 +54,7 @@ pub enum WindowBoundary {
 
 /// Which of a provider's quota windows: the short one (Codex primary,
 /// Claude five-hour) or the long one (Codex secondary, Claude seven-day).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum QuotaKind {
     Primary,
@@ -281,6 +281,12 @@ pub struct WindowShare {
     /// The share's consumption in disjoint categories.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub disjoint: Option<crate::model::DisjointTokens>,
+    /// The allowance the share spent, one entry per pool window.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub allowance: Vec<crate::allowance::Allowance>,
+    /// Why the share carries no allowance.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub allowance_absent: Option<&'static str>,
 }
 
 impl WindowShare {
@@ -317,4 +323,11 @@ pub struct WindowRecord {
     pub sessions: Vec<WindowShare>,
     /// Selected sessions whose span inside the window placed no request.
     pub empty: usize,
+    /// Each allowance pool the window's observations report on, and how its
+    /// observed rise divides.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub allowance: Vec<crate::allowance::PoolAllowance>,
+    /// What a pool stands for where the recordings name no account.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub allowance_assumption: Option<&'static str>,
 }

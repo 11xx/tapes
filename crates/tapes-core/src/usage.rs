@@ -1272,7 +1272,7 @@ impl GroupBy {
         self.of_in(session, &SessionRelations::default())
     }
 
-    fn of_in(self, session: &Session, relations: &SessionRelations) -> Option<String> {
+    pub(crate) fn of_in(self, session: &Session, relations: &SessionRelations) -> Option<String> {
         match self {
             Self::Session => Some(session.id.clone()),
             Self::Launch => session.launch.map(|launch| launch.as_str().to_owned()),
@@ -1366,6 +1366,10 @@ pub struct UsageTally {
     /// Why a price table's estimate is not added here.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub list_price_withheld: Vec<EstimateWithheld>,
+    /// The allowance the summed sessions spent, one entry per pool window a
+    /// window read apportioned over them.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub allowance: Vec<crate::allowance::Allowance>,
     pub coverage: CoverageCounts,
     pub counted: CountedSessions,
     /// The summed native counters some selected session measured
@@ -1626,7 +1630,7 @@ fn unchecked_aggregate(sessions: &[Session], by: &[GroupBy]) -> UsageAggregate {
     }
 }
 
-fn group_key(by: &[GroupBy], values: &[Option<String>]) -> GroupKey {
+pub(crate) fn group_key(by: &[GroupBy], values: &[Option<String>]) -> GroupKey {
     let mut key = GroupKey::default();
     for (dimension, value) in by.iter().zip(values) {
         let slot = match dimension {
@@ -1860,6 +1864,7 @@ impl Tally {
             identity_bounds: None,
             session_figures: Vec::new(),
             overlap: None,
+            allowance: Vec::new(),
             list_price_withheld: if self.unioned && self.estimate.is_some() {
                 vec![EstimateWithheld::ExactUnion]
             } else {
