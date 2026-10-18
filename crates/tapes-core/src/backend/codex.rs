@@ -39,7 +39,10 @@ use agent_tapes_discovery::{
 pub struct CodexBackend {
     native_root: Option<PathBuf>,
     store: Option<NativeStore>,
-    /// The store's walk, shared by every lookup and listing of this backend.
+    /// The store's walk, shared by every lookup, listing and join of this
+    /// backend. Listing membership and join answers are the walk's; a
+    /// named lookup that misses in an older walk walks again and replaces
+    /// it.
     catalog: StoreCatalog,
     /// How much of a recording's end a transcript read takes.
     read_bytes: u64,
@@ -59,6 +62,10 @@ struct CandidateRecording {
 }
 
 impl CodexBackend {
+    /// A backend over the Codex store at `root`. Its listings answer from
+    /// one walk of the store taken at first use; a consumer that holds the
+    /// backend and needs a listing that sees later recordings builds a new
+    /// backend. A named lookup sees later recordings either way.
     pub fn new(root: impl Into<PathBuf>) -> Self {
         Self {
             store: Some(NativeStore::codex(root)),
@@ -80,6 +87,22 @@ impl CodexBackend {
     pub(crate) fn with_native_root(mut self, root: PathBuf) -> Self {
         self.native_root = Some(root);
         self
+    }
+
+    /// How many directory walks this backend's catalog has made.
+    pub fn catalog_walks(&self) -> usize {
+        self.catalog.walks()
+    }
+
+    fn located(&self, native: Option<NativeSession>) -> Result<Option<Session>> {
+        let Some(native) = native else {
+            return Ok(None);
+        };
+        let path = native
+            .locator()
+            .ok_or_else(|| anyhow!("Codex native session {} has no file locator", native.id()))?;
+        let (session, _, _) = self.parse(&native, path, ParsedTurns::TitleOnly)?;
+        Ok(Some(enrich_native_session(&native, session)?))
     }
 
     fn source(&self, path: &Path) -> SourceDescriptor {
@@ -389,14 +412,14 @@ impl Backend for CodexBackend {
         let Some(store) = self.store.as_ref() else {
             return Ok(None);
         };
-        let Some(native) = store.locate_exact_in(&self.catalog, id)? else {
+        self.located(store.locate_named_in(&self.catalog, id)?)
+    }
+
+    fn locate_relative(&self, id: &str) -> Result<Option<Session>> {
+        let Some(store) = self.store.as_ref() else {
             return Ok(None);
         };
-        let path = native
-            .locator()
-            .ok_or_else(|| anyhow!("Codex native session {} has no file locator", native.id()))?;
-        let (session, _, _) = self.parse(&native, path, ParsedTurns::TitleOnly)?;
-        Ok(Some(enrich_native_session(&native, session)?))
+        self.located(store.locate_exact_in(&self.catalog, id)?)
     }
 
     fn transcript(&self, session: &Session, tail: usize) -> Result<Transcript> {

@@ -872,6 +872,16 @@ pub fn resolve_session(
     resolve_session_from_indices(backends, query, &(0..backends.len()).collect::<Vec<_>>())
 }
 
+/// Resolve a session another session names, as a join over the backends'
+/// read context: a missing relative walks no store again.
+fn resolve_relative(
+    backends: &[Box<dyn Backend>],
+    query: &str,
+) -> std::result::Result<ResolvedSession, ResolveError> {
+    let indices = (0..backends.len()).collect::<Vec<_>>();
+    resolve_from_sources(backends, query, &indices, true)
+}
+
 fn resolve_session_scoped(
     backends: &[Box<dyn Backend>],
     query: &str,
@@ -896,9 +906,21 @@ fn resolve_session_from_indices(
     query: &str,
     indices: &[usize],
 ) -> std::result::Result<ResolvedSession, ResolveError> {
+    resolve_from_sources(backends, query, indices, false)
+}
+
+fn resolve_from_sources(
+    backends: &[Box<dyn Backend>],
+    query: &str,
+    indices: &[usize],
+    relative: bool,
+) -> std::result::Result<ResolvedSession, ResolveError> {
     let sources = indices
         .iter()
-        .map(|&index| BackendIdentitySource(backends[index].as_ref()))
+        .map(|&index| BackendIdentitySource {
+            backend: backends[index].as_ref(),
+            relative,
+        })
         .collect::<Vec<_>>();
     let sources = sources
         .iter()
@@ -2601,7 +2623,7 @@ fn session_relations(
         let mut seen = HashSet::from([current.clone()]);
         for _ in 0..MAX_DEPTH {
             if !parents.contains_key(&current) {
-                let looked_up = resolve_session(backends, &current)
+                let looked_up = resolve_relative(backends, &current)
                     .ok()
                     .map(|found| window::declared_parent(&found.session));
                 resolved.insert(current.clone(), looked_up.is_some());

@@ -408,7 +408,16 @@ pub trait Backend {
     /// Locate one session by its exact id without enumerating the store.
     /// `Ok(None)` means this backend does not hold it. Resolution calls this
     /// before it calls `list`, so an exact id never pays for a listing.
+    /// A file-backed backend answers a hit from its catalog's walk and walks
+    /// again once on a miss, so a named id is never reported absent from a
+    /// walk taken before the call.
     fn locate(&self, id: &str) -> Result<Option<Session>>;
+    /// Locate a session another session names, as a join over this backend's
+    /// read context: a file-backed backend answers from its catalog's walk
+    /// and never walks again for a missing relative.
+    fn locate_relative(&self, id: &str) -> Result<Option<Session>> {
+        self.locate(id)
+    }
     /// Locate one supplied-source occurrence without treating its native id
     /// as globally unique. Installed stores have no occurrence coordinate.
     fn locate_occurrence(&self, _occurrence: &str) -> Result<Option<Session>> {
@@ -705,26 +714,40 @@ impl IdentityRecord for Session {
 }
 
 /// The core's rich backend adapted to the discovery crate's shared selector.
-pub(crate) struct BackendIdentitySource<'a>(pub &'a dyn Backend);
+/// A relative source answers exact ids as a join, through
+/// [`Backend::locate_relative`].
+pub(crate) struct BackendIdentitySource<'a> {
+    pub backend: &'a dyn Backend,
+    pub relative: bool,
+}
+
+impl BackendIdentitySource<'_> {
+    fn locate(&self, query: &str) -> Result<Option<Session>> {
+        if self.relative {
+            self.backend.locate_relative(query)
+        } else {
+            self.backend.locate(query)
+        }
+    }
+}
 
 impl IdentitySource<Session> for BackendIdentitySource<'_> {
     fn store_label(&self) -> Option<&str> {
-        self.0.store_label()
+        self.backend.store_label()
     }
     fn harness(&self) -> &str {
-        self.0.harness()
+        self.backend.harness()
     }
 
     fn locate_exact(&self, query: &str) -> std::result::Result<Option<Session>, String> {
-        self.0.locate(query).map_err(|error| format!("{error:#}"))
+        self.locate(query).map_err(|error| format!("{error:#}"))
     }
 
     fn locate_for_resolution(
         &self,
         query: &str,
     ) -> std::result::Result<Option<Session>, agent_tapes_discovery::ExactLookupFailure> {
-        self.0
-            .locate(query)
+        self.locate(query)
             .map_err(|error| agent_tapes_discovery::ExactLookupFailure {
                 refuses_prefix: matches!(
                     error.downcast_ref::<agent_tapes_discovery::DiscoveryError>(),
@@ -737,7 +760,7 @@ impl IdentitySource<Session> for BackendIdentitySource<'_> {
     fn candidates(&self, limit: usize) -> NativeCandidatePage<Session, String> {
         let mut query = Query::unscoped(limit);
         query.ceiling = limit;
-        match self.0.list(&query) {
+        match self.backend.list(&query) {
             Ok(listing) => {
                 let failures = listing.unavailable;
                 let complete = !listing.scan_truncated
@@ -765,15 +788,15 @@ impl IdentitySource<Session> for BackendIdentitySource<'_> {
     }
 
     fn shares_session_ids(&self) -> bool {
-        self.0.shares_session_ids()
+        self.backend.shares_session_ids()
     }
 
     fn terminal_exact_failure(&self) -> bool {
-        self.0.terminal_exact_failure()
+        self.backend.terminal_exact_failure()
     }
 
     fn available(&self) -> bool {
-        self.0.available()
+        self.backend.available()
     }
 }
 
