@@ -26,6 +26,7 @@ pub mod byte_size;
 pub mod child;
 pub mod consumption_union;
 pub mod content;
+pub mod counters;
 pub mod endings;
 pub mod event;
 pub mod evidence;

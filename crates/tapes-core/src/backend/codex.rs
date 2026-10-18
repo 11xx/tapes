@@ -10,7 +10,7 @@ use super::{
     recorded_total_coverage, replay_pin, skipped_records_note, stream_jsonl,
     stream_jsonl_with_gaps, streamed_trailing_record, terminal_from_values, timestamp,
     trailing_record, transcript_from_recording, ActivityRange, Backend, Jsonl, Listing, ParsedFile,
-    Query, ReadPin, StreamedTranscript, TokenTotals, UnmappedTally,
+    ParsedTurns, Query, ReadPin, StreamedTranscript, TokenTotals, UnmappedTally,
 };
 use crate::content::{parts_from_array, project_text, tool_coverage, tool_part};
 use crate::event::{Bounded, EventKind, ToolEvent};
@@ -97,7 +97,12 @@ impl CodexBackend {
         Self { read_bytes, ..self }
     }
 
-    fn parse(&self, native: &NativeSession, path: &Path) -> Result<(Session, Vec<Turn>, Jsonl)> {
+    fn parse(
+        &self,
+        native: &NativeSession,
+        path: &Path,
+        wanted: ParsedTurns,
+    ) -> Result<(Session, Vec<Turn>, Jsonl)> {
         let recording = read_recording(path, self.read_bytes)?;
         let (started_at, last_activity_at) = recording
             .time_range()
@@ -144,11 +149,13 @@ impl CodexBackend {
                     .map(PathBuf::from)
             });
         let launch = opening.first().and_then(codex_launch);
+        let all = wanted == ParsedTurns::All;
         let mut reader = CodexTurns::default();
         let turns = read
             .values
             .iter()
-            .flat_map(|value| reader.parse(value))
+            .filter(|_| all)
+            .flat_map(|value| reader.counted(value))
             .collect::<Vec<_>>();
         let mut records = CodexRecords::new(path, read.truncated);
         records.observe_read(&read.values, &read.spans, &read.gaps, &read.source_revision);
@@ -192,13 +199,13 @@ impl CodexBackend {
         // session's first user turn even when the tail cannot see it.
         let session = if read.truncated {
             let mut reader = CodexTurns::default();
-            let opening_turns = opening
-                .iter()
-                .flat_map(|value| reader.parse(value))
-                .collect::<Vec<_>>();
-            session.with_derived_title(&opening_turns)
-        } else {
+            session.with_derived_title_from(opening.iter().flat_map(|value| reader.counted(value)))
+        } else if all {
             session.with_derived_title(&turns)
+        } else {
+            let mut reader = CodexTurns::default();
+            session
+                .with_derived_title_from(read.values.iter().flat_map(|value| reader.counted(value)))
         };
 
         Ok((session, turns, recording.tail))
@@ -326,7 +333,10 @@ impl Backend for CodexBackend {
             (store, &self.catalog),
             query,
             |native, path| head_directory(path, native, codex_cwd),
-            |native, path| self.parse(native, path).map(|(session, _, _)| session),
+            |native, path| {
+                self.parse(native, path, ParsedTurns::TitleOnly)
+                    .map(|(session, _, _)| session)
+            },
         );
         listing
             .sessions
@@ -347,7 +357,7 @@ impl Backend for CodexBackend {
             self.read_bytes,
             |native, path| head_directory(path, native, codex_cwd),
             |native, path| {
-                self.parse(native, path)
+                self.parse(native, path, ParsedTurns::All)
                     .map(|(session, turns, read)| ParsedFile {
                         session,
                         turns,
@@ -374,7 +384,7 @@ impl Backend for CodexBackend {
         let path = native
             .locator()
             .ok_or_else(|| anyhow!("Codex native session {} has no file locator", native.id()))?;
-        let (session, _, _) = self.parse(&native, path)?;
+        let (session, _, _) = self.parse(&native, path, ParsedTurns::TitleOnly)?;
         Ok(Some(enrich_native_session(&native, session)?))
     }
 
@@ -2205,6 +2215,13 @@ struct CodexTurns {
 }
 
 impl CodexTurns {
+    /// The record's turns, counted as built.
+    fn counted(&mut self, value: &Value) -> Vec<Turn> {
+        let turns = self.parse(value);
+        crate::counters::built_turns(turns.len());
+        turns
+    }
+
     fn parse(&mut self, value: &Value) -> Vec<Turn> {
         let turns = self.parse_unless_mirrored(value);
         if let Some(turns) = &turns {

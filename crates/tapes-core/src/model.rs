@@ -1544,6 +1544,22 @@ pub enum TurnKind {
 
 impl Session {
     /// Preserve recorded title absence while adding a bounded display hint.
+    /// As [`Session::with_derived_title`], taking turns only until the first
+    /// user turn that yields a title, and none when the session has a title.
+    pub fn with_derived_title_from(mut self, turns: impl IntoIterator<Item = Turn>) -> Self {
+        if self.title.is_none() {
+            if let Some((title, truncated)) = turns
+                .into_iter()
+                .filter(|turn| turn.role == Role::User)
+                .find_map(|turn| derive_title_info(&turn.text))
+            {
+                self.derived_title = Some(title);
+                self.derived_title_truncated = Some(truncated);
+            }
+        }
+        self
+    }
+
     pub fn with_derived_title(mut self, turns: &[Turn]) -> Self {
         if self.title.is_none() {
             if let Some((title, truncated)) = turns

@@ -12,8 +12,8 @@ use super::{
     list_discovered_files, list_discovered_files_with_search, merge_launch, read_bounds,
     read_recording, replay_pin, skipped_records_note, stream_jsonl, streamed_trailing_record,
     timestamp, trailing_record, transcript, transcript_from_recording, unreadable_between,
-    ActivityRange, Backend, Jsonl, Listing, ParsedFile, Query, StreamedChild, StreamedTranscript,
-    TokenTotals, UnmappedTally,
+    ActivityRange, Backend, Jsonl, Listing, ParsedFile, ParsedTurns, Query, StreamedChild,
+    StreamedTranscript, TokenTotals, UnmappedTally,
 };
 use crate::content::{
     bounded_shape, bounded_text, text_part, tool_coverage, tool_part, ArtifactReference,
@@ -88,12 +88,18 @@ impl ClaudeBackend {
         Self { read_bytes, ..self }
     }
 
-    fn parse(&self, native: &NativeSession, path: &Path) -> Result<(Session, Vec<Turn>, Jsonl)> {
+    fn parse(
+        &self,
+        native: &NativeSession,
+        path: &Path,
+        wanted: ParsedTurns,
+    ) -> Result<(Session, Vec<Turn>, Jsonl)> {
         self.parse_with_identity(
             path,
             native.id(),
             native.identity_basis() == Some(IdentityBasis::Header),
             None,
+            wanted,
         )
     }
 
@@ -103,7 +109,7 @@ impl ClaudeBackend {
         native_id: &str,
         child: &str,
     ) -> Result<(Session, Vec<Turn>, Jsonl)> {
-        self.parse_with_identity(path, native_id, true, Some(child))
+        self.parse_with_identity(path, native_id, true, Some(child), ParsedTurns::All)
     }
 
     fn parse_with_identity(
@@ -112,6 +118,7 @@ impl ClaudeBackend {
         native_id: &str,
         require_identity_record: bool,
         child: Option<&str>,
+        wanted: ParsedTurns,
     ) -> Result<(Session, Vec<Turn>, Jsonl)> {
         let recording = read_recording(path, self.read_bytes)?;
         let opening = recording.opening();
@@ -170,8 +177,9 @@ impl ClaudeBackend {
         );
         let (model_observation, model_selections) = claude_selections(read);
         let mut turns = Vec::new();
-        for (index, value) in read.values.iter().enumerate() {
-            let mut parsed = parse_turns(value);
+        let all = wanted == ParsedTurns::All;
+        for (index, value) in read.values.iter().enumerate().filter(|_| all) {
+            let mut parsed = counted_turns(value);
             super::attach_record_refs(
                 &mut parsed,
                 &format!("file:{}", path.display()),
@@ -242,10 +250,11 @@ impl ClaudeBackend {
         // The opening is the start of the file, so its first user turn is the
         // session's first user turn even when the tail cannot see it.
         let session = if read.truncated {
-            let opening_turns = opening.iter().flat_map(parse_turns).collect::<Vec<_>>();
-            session.with_derived_title(&opening_turns)
-        } else {
+            session.with_derived_title_from(opening.iter().flat_map(counted_turns))
+        } else if all {
             session.with_derived_title(&turns)
+        } else {
+            session.with_derived_title_from(read.values.iter().flat_map(counted_turns))
         };
 
         Ok((session, turns, recording.tail))
@@ -396,7 +405,7 @@ impl Backend for ClaudeBackend {
                 listing.unavailable_ids.push(native.id().to_owned());
                 continue;
             };
-            let (session, _, read) = match self.parse(&native, path) {
+            let (session, _, read) = match self.parse(&native, path, ParsedTurns::TitleOnly) {
                 Ok(parsed) => parsed,
                 Err(error) => {
                     listing
@@ -449,7 +458,10 @@ impl Backend for ClaudeBackend {
             (store, &self.catalog),
             query,
             |native, path| head_directory(path, native, claude_cwd),
-            |native, path| self.parse(native, path).map(|(session, _, _)| session),
+            |native, path| {
+                self.parse(native, path, ParsedTurns::TitleOnly)
+                    .map(|(session, _, _)| session)
+            },
         );
         listing
             .sessions
@@ -470,7 +482,7 @@ impl Backend for ClaudeBackend {
             self.read_bytes,
             |native, path| head_directory(path, native, claude_cwd),
             |native, path| {
-                self.parse(native, path)
+                self.parse(native, path, ParsedTurns::All)
                     .map(|(session, turns, read)| ParsedFile {
                         session,
                         turns,
@@ -496,7 +508,7 @@ impl Backend for ClaudeBackend {
         let path = native
             .locator()
             .ok_or_else(|| anyhow!("Claude native session {} has no file locator", native.id()))?;
-        let (session, _, _) = self.parse(&native, path)?;
+        let (session, _, _) = self.parse(&native, path, ParsedTurns::TitleOnly)?;
         Ok(Some(enrich_native_session(&native, session)?))
     }
 
@@ -1134,6 +1146,13 @@ fn read_transcript(
     }
     let trailing_record = trailing_record(read.values.iter(), last_turn, claude_trailing_kind);
     Ok((turns, recording, trailing_record, unmapped.finish()))
+}
+
+/// A record's turns, counted as built.
+fn counted_turns(value: &Value) -> Vec<Turn> {
+    let turns = parse_turns(value);
+    crate::counters::built_turns(turns.len());
+    turns
 }
 
 /// Count a record that produced no turn under its native type: `type`, and

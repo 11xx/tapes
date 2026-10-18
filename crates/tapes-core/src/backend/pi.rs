@@ -8,8 +8,8 @@ use super::{
     accounting_for, bounded_launch, default_native_store, enrich_native_session, head_directory,
     list_discovered_files, list_discovered_files_with_search, merge_launch, read_bounds,
     read_recording, replay_pin, skipped_records_note, stream_jsonl, timestamp, trailing_record,
-    transcript_from_recording, ActivityRange, Backend, Jsonl, Listing, ParsedFile, Query,
-    StreamedTranscript, TokenTotals, UnmappedTally,
+    transcript_from_recording, ActivityRange, Backend, Jsonl, Listing, ParsedFile, ParsedTurns,
+    Query, StreamedTranscript, TokenTotals, UnmappedTally,
 };
 use crate::content::{
     bounded_shape, text_part, tool_coverage, tool_part, ContentAvailability, ContentCarrier,
@@ -88,6 +88,7 @@ impl PiBackend {
         &self,
         native: &NativeSession,
         path: &Path,
+        wanted: ParsedTurns,
     ) -> Result<(Session, Vec<Turn>, Jsonl, usize)> {
         let recording = read_recording(path, self.read_bytes)?;
         let (started_at, last_activity_at) = recording
@@ -155,10 +156,12 @@ impl PiBackend {
                 id: id.to_owned(),
                 variant: variant.map(str::to_owned),
             });
+        let all = wanted == ParsedTurns::All;
         let mut thinking = None;
         let turns = active
             .iter()
-            .flat_map(|value| pi_turns(value, &mut thinking))
+            .filter(|_| all)
+            .flat_map(|value| counted_turns(value, &mut thinking))
             .collect::<Vec<_>>();
         let (model_observation, model_selections) = pi_selections(&active, read);
         let mut session = Session {
@@ -191,8 +194,15 @@ impl PiBackend {
         // prompt as the session's first.
         let session = if read.truncated {
             session
-        } else {
+        } else if all {
             session.with_derived_title(&turns)
+        } else {
+            let mut thinking = None;
+            session.with_derived_title_from(
+                active
+                    .iter()
+                    .flat_map(|value| counted_turns(value, &mut thinking)),
+            )
         };
 
         Ok((session, turns, recording.tail, abandoned))
@@ -246,7 +256,10 @@ impl Backend for PiBackend {
             (store, &self.catalog),
             query,
             |native, path| head_directory(path, native, pi_cwd),
-            |native, path| self.parse(native, path).map(|(session, _, _, _)| session),
+            |native, path| {
+                self.parse(native, path, ParsedTurns::TitleOnly)
+                    .map(|(session, _, _, _)| session)
+            },
         );
         listing
             .sessions
@@ -267,7 +280,7 @@ impl Backend for PiBackend {
             self.read_bytes,
             |native, path| head_directory(path, native, pi_cwd),
             |native, path| {
-                self.parse(native, path)
+                self.parse(native, path, ParsedTurns::All)
                     .map(|(session, turns, read, _)| ParsedFile {
                         session,
                         turns,
@@ -293,7 +306,7 @@ impl Backend for PiBackend {
         let path = native
             .locator()
             .ok_or_else(|| anyhow!("pi native session {} has no file locator", native.id()))?;
-        let (session, _, _, _) = self.parse(&native, path)?;
+        let (session, _, _, _) = self.parse(&native, path, ParsedTurns::TitleOnly)?;
         Ok(Some(enrich_native_session(&native, session)?))
     }
 
@@ -1596,6 +1609,13 @@ fn pi_origin(turn: &mut Turn, launch: Option<Launch>) {
         turn.origin = Some(crate::model::OperatorOrigin::Person);
     }
     turn.establish_origin(launch);
+}
+
+/// An entry's turns, counted as built.
+fn counted_turns(value: &Value, thinking: &mut Option<String>) -> Vec<Turn> {
+    let turns = pi_turns(value, thinking);
+    crate::counters::built_turns(turns.len());
+    turns
 }
 
 fn pi_turns(value: &Value, thinking: &mut Option<String>) -> Vec<Turn> {

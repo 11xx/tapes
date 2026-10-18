@@ -1415,6 +1415,14 @@ pub(crate) fn read_recording(path: &Path, read_bytes: u64) -> Result<Recording> 
     })
 }
 
+/// Whether a session parse builds the read's turns, or only the session and
+/// the turns its derived title needs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ParsedTurns {
+    All,
+    TitleOnly,
+}
+
 /// What a whole-recording read's `source_length` counts.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StreamCoordinates {
