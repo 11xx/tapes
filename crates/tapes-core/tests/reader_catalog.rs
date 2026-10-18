@@ -179,3 +179,64 @@ fn listing_builds_only_the_turns_a_derived_title_needs() {
     let transcript = backend.transcript(&session, usize::MAX).unwrap();
     assert_eq!(transcript.turns.len(), 1 + REPLIES);
 }
+
+/// Claim: a Codex usage read streams its recording once, folding the
+/// session's accounting into the same pass as its turns; a Claude parent
+/// streams twice (its launch evidence, then turns and accounting) and its
+/// reconciliation replays the validated prefix once more, three in all; and
+/// each figure equals the one a separate accounting pass produces. Rejects a
+/// read that streams the recording again for accounting.
+#[test]
+fn usage_reads_a_recording_once_per_figure_it_needs() {
+    let _counted = COUNTED
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let fixtures = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+    let full = |backend: Box<dyn Backend>, id: &str, reconcile: bool| {
+        let before = counters::recording_passes();
+        let view = agent_tapes_core::usage_with_options_with_backends(
+            &[backend],
+            agent_tapes_core::Selection::Id(id),
+            agent_tapes_core::usage::UsageOptions {
+                full: true,
+                series: None,
+                reconcile,
+                event_keys: None,
+            },
+        )
+        .unwrap();
+        (counters::recording_passes() - before, view)
+    };
+    let codex = || -> Box<dyn Backend> { Box::new(CodexBackend::new(fixtures.join("codex"))) };
+    let claude =
+        || -> Box<dyn Backend> { Box::new(ClaudeBackend::new(fixtures.join("claude-resumed"))) };
+    let codex_id = "00000000-0000-0000-0000-000000000001";
+    let claude_id = "30000000-0000-4000-8000-000000000001";
+
+    let (passes, view) = full(codex(), codex_id, false);
+    assert_eq!(passes, 1, "Codex usage streams once");
+    let (passes, _) = full(claude(), claude_id, false);
+    assert_eq!(
+        passes, 2,
+        "a Claude parent streams for launch, then turns and accounting"
+    );
+    let (passes, reconciled) = full(claude(), claude_id, true);
+    assert_eq!(
+        passes, 3,
+        "reconciliation replays the parent's validated prefix once"
+    );
+    assert!(reconciled.reconciliation.is_some());
+
+    // The folded figure is the one a separate accounting pass reads.
+    for (backend, id, folded) in [(codex(), codex_id, view), (claude(), claude_id, reconciled)] {
+        let session = backend.locate(id).unwrap().unwrap();
+        let read = backend
+            .stream_transcript(&session, None, &mut |_| Ok(()))
+            .unwrap();
+        let mut asked_elsewhere = session.clone();
+        asked_elsewhere.title = Some("asked about another session".to_owned());
+        let replayed = backend.stream_session(&asked_elsewhere, &read).unwrap();
+        assert_eq!(replayed.tokens, folded.tokens, "{id}");
+        assert_eq!(replayed.accounting, folded.accounting, "{id}");
+    }
+}

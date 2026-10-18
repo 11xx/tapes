@@ -1117,7 +1117,8 @@ pub fn usage_with_options_with_backends(
             .extend(resolved.diagnostics.latest_warnings(&resolved.session));
         view.series = observations.map(|observations| observations.series);
         if options.reconcile {
-            view.reconciliation = Some(backend.usage_reconciliation(&resolved.session)?);
+            view.reconciliation =
+                Some(backend.usage_reconciliation_after(&resolved.session, &read)?);
         }
         view.consumption_event_keys = options
             .event_keys

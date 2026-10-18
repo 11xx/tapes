@@ -472,6 +472,7 @@ impl Backend for PiBackend {
             unmapped: Some(unmapped.finish()),
             unrecognized_usage: 0,
             kinds: None,
+            folded: None,
         })
     }
 

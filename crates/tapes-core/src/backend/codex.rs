@@ -9,8 +9,9 @@ use super::{
     list_discovered_files, list_discovered_files_with_search, read_bounds, read_recording,
     recorded_total_coverage, replay_pin, skipped_records_note, stream_jsonl,
     stream_jsonl_with_gaps, streamed_trailing_record, terminal_from_values, timestamp,
-    trailing_record, transcript_from_recording, ActivityRange, Backend, Jsonl, Listing, ParsedFile,
-    ParsedTurns, Query, ReadPin, StreamedTranscript, TokenTotals, UnmappedTally,
+    trailing_record, transcript_from_recording, ActivityRange, Backend, FoldedSession, Jsonl,
+    Listing, ParsedFile, ParsedTurns, Query, ReadPin, StreamedTranscript, TokenTotals,
+    UnmappedTally,
 };
 use crate::content::{parts_from_array, project_text, tool_coverage, tool_part};
 use crate::event::{Bounded, EventKind, ToolEvent};
@@ -426,23 +427,38 @@ impl Backend for CodexBackend {
         let mut terminal = None;
         let mut launch = None;
         let mut reader = CodexTurns::default();
-        let read = stream_jsonl(path, replay_pin(replay)?, |value, span, revision| {
-            super::validate_native_identity(value, "codex", &session.id)?;
-            if value["type"] == "session_meta" {
-                launch = codex_launch(value);
-            }
-            if let Some(observed) = codex_terminal(value) {
-                terminal = Some(observed);
-            }
-            let mut parsed = reader.parse(value);
-            super::attach_record_refs(&mut parsed, &domain, Some(revision), Some(span));
-            let produced = !parsed.is_empty();
-            for mut parsed_turn in parsed {
-                parsed_turn.establish_origin(launch);
-                turn(parsed_turn)?;
-            }
-            Ok(produced)
-        })?;
+        // The session's accounting folds from the same records and gaps as
+        // the turns, as `stream_session` would replay them.
+        let records = std::cell::RefCell::new(CodexRecords::new(path, false));
+        let read = stream_jsonl_with_gaps(
+            path,
+            replay_pin(replay)?,
+            |value, span, revision| {
+                super::validate_native_identity(value, "codex", &session.id)?;
+                records.borrow_mut().observe(value, Some(span), revision);
+                if value["type"] == "session_meta" {
+                    launch = codex_launch(value);
+                }
+                if let Some(observed) = codex_terminal(value) {
+                    terminal = Some(observed);
+                }
+                let mut parsed = reader.parse(value);
+                super::attach_record_refs(&mut parsed, &domain, Some(revision), Some(span));
+                let produced = !parsed.is_empty();
+                for mut parsed_turn in parsed {
+                    parsed_turn.establish_origin(launch);
+                    turn(parsed_turn)?;
+                }
+                Ok(produced)
+            },
+            |gap| records.borrow_mut().observe_gap(gap),
+        )?;
+        let mut records = records.into_inner();
+        for gap in &read.gaps {
+            records.observe_read_gap(gap);
+        }
+        let mut whole = session.clone();
+        records.apply(&mut whole);
         Ok(StreamedTranscript {
             coordinates: super::StreamCoordinates::FileBytes,
             source_length: read.source_length,
@@ -457,6 +473,10 @@ impl Backend for CodexBackend {
             unmapped: Some(reader.unmapped()),
             unrecognized_usage: 0,
             kinds: None,
+            folded: Some(Box::new(FoldedSession {
+                asked: session.clone(),
+                whole,
+            })),
         })
     }
 
@@ -475,6 +495,9 @@ impl Backend for CodexBackend {
     }
 
     fn stream_session(&self, session: &Session, read: &StreamedTranscript) -> Result<Session> {
+        if let Some(whole) = read.folded_for(session) {
+            return Ok(whole);
+        }
         let path = super::session_file_path(session)
             .ok_or_else(|| anyhow!("codex session {} has no file locator", session.id))?;
         let records = std::cell::RefCell::new(CodexRecords::new(path, false));

@@ -12,8 +12,8 @@ use super::{
     list_discovered_files, list_discovered_files_with_search, merge_launch, read_bounds,
     read_recording, replay_pin, skipped_records_note, stream_jsonl, streamed_trailing_record,
     timestamp, trailing_record, transcript, transcript_from_recording, unreadable_between,
-    ActivityRange, Backend, Jsonl, Listing, ParsedFile, ParsedTurns, Query, StreamedChild,
-    StreamedTranscript, TokenTotals, UnmappedTally,
+    ActivityRange, Backend, FoldedSession, Jsonl, Listing, ParsedFile, ParsedTurns, Query, ReadPin,
+    StreamedChild, StreamedTranscript, TokenTotals, UnmappedTally,
 };
 use crate::content::{
     bounded_shape, bounded_text, text_part, tool_coverage, tool_part, ArtifactReference,
@@ -561,8 +561,17 @@ impl Backend for ClaudeBackend {
         })?;
         let domain = format!("file:{}", path.display());
         let mut unmapped = UnmappedTally::default();
+        // The session's accounting folds from the same records as the turns,
+        // as `stream_session` would replay them.
+        let mut records = ClaudeRecords::default();
+        let mut last_end = 0;
         let read = stream_jsonl(path, Some(opening.pin()), |value, span, revision| {
             super::validate_native_identity(value, "claude", &session.id)?;
+            if span.start != last_end {
+                records.selections.interrupt();
+            }
+            last_end = span.end;
+            records.observe(value);
             let mut parsed = parse_turns(value);
             if parsed.is_empty() {
                 count_unmapped(&mut unmapped, value);
@@ -578,6 +587,11 @@ impl Backend for ClaudeBackend {
             }
             Ok(produced)
         })?;
+        if !read.gaps.is_empty() {
+            records.selections.interrupt();
+        }
+        let mut whole = session.clone();
+        records.apply(&mut whole);
         Ok(StreamedTranscript {
             terminal: None,
             coordinates: super::StreamCoordinates::FileBytes,
@@ -592,6 +606,10 @@ impl Backend for ClaudeBackend {
             unmapped: Some(unmapped.finish()),
             unrecognized_usage: 0,
             kinds: None,
+            folded: Some(Box::new(FoldedSession {
+                asked: session.clone(),
+                whole,
+            })),
         })
     }
 
@@ -628,6 +646,9 @@ impl Backend for ClaudeBackend {
     }
 
     fn stream_session(&self, session: &Session, read: &StreamedTranscript) -> Result<Session> {
+        if let Some(whole) = read.folded_for(session) {
+            return Ok(whole);
+        }
         let path = self.recording(session)?;
         let mut records = ClaudeRecords::default();
         let mut last_end = 0;
@@ -731,44 +752,17 @@ impl Backend for ClaudeBackend {
     }
 
     fn usage_reconciliation(&self, session: &Session) -> Result<Reconciliation> {
-        let path = self.recording(session)?;
-        let mut ledger = FamilyLedger::default();
-        let parent = ledger.source(SourceRole::Parent, None, format!("file:{}", path.display()));
-        reconcile_source(&mut ledger, parent, &path, &session.id, None)?;
-        match subagent_files(&path) {
-            Ok(files) => {
-                for file in files {
-                    let child = ledger.source(
-                        SourceRole::Child,
-                        Some(file.agent_id.clone()),
-                        format!("file:{}", file.transcript.display()),
-                    );
-                    match reconcile_source(
-                        &mut ledger,
-                        child,
-                        &file.transcript,
-                        &session.id,
-                        Some(&file.agent_id),
-                    ) {
-                        Err(error) => {
-                            ledger.failed(child, &session.id, failure_reason(&error));
-                        }
-                        Ok(()) => {
-                            let directory = path.with_extension("").join("subagents");
-                            if let (Ok(directory), Ok(recording)) =
-                                (directory.canonicalize(), file.transcript.canonicalize())
-                            {
-                                if recording.parent() == Some(directory.as_path()) {
-                                    ledger.validated_child(child);
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            Err(_) => ledger.unenumerated(&session.id, FailureReason::SubagentsUnenumerated),
-        }
-        Ok(ledger.finish())
+        self.reconcile_family(session, None)
+    }
+
+    /// The parent's records were validated by `read`, which streamed every
+    /// one through the same identity check, so its prefix is replayed once.
+    fn usage_reconciliation_after(
+        &self,
+        session: &Session,
+        read: &StreamedTranscript,
+    ) -> Result<Reconciliation> {
+        self.reconcile_family(session, Some(read.pin()?))
     }
 
     fn stream_child_transcript(
@@ -882,12 +876,63 @@ impl Backend for ClaudeBackend {
                 unmapped: None,
                 unrecognized_usage: 0,
                 kinds: None,
+                folded: None,
             },
         })
     }
 }
 
 impl ClaudeBackend {
+    /// Reconcile the session's family: the parent replayed against `pinned`,
+    /// a prefix an earlier read validated, or read afresh, and every child
+    /// read afresh.
+    fn reconcile_family(
+        &self,
+        session: &Session,
+        pinned: Option<ReadPin<'_>>,
+    ) -> Result<Reconciliation> {
+        let path = self.recording(session)?;
+        let mut ledger = FamilyLedger::default();
+        let parent = ledger.source(SourceRole::Parent, None, format!("file:{}", path.display()));
+        reconcile_source(&mut ledger, parent, &path, &session.id, None, pinned)?;
+
+        match subagent_files(&path) {
+            Ok(files) => {
+                for file in files {
+                    let child = ledger.source(
+                        SourceRole::Child,
+                        Some(file.agent_id.clone()),
+                        format!("file:{}", file.transcript.display()),
+                    );
+                    match reconcile_source(
+                        &mut ledger,
+                        child,
+                        &file.transcript,
+                        &session.id,
+                        Some(&file.agent_id),
+                        None,
+                    ) {
+                        Err(error) => {
+                            ledger.failed(child, &session.id, failure_reason(&error));
+                        }
+                        Ok(()) => {
+                            let directory = path.with_extension("").join("subagents");
+                            if let (Ok(directory), Ok(recording)) =
+                                (directory.canonicalize(), file.transcript.canonicalize())
+                            {
+                                if recording.parent() == Some(directory.as_path()) {
+                                    ledger.validated_child(child);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            Err(_) => ledger.unenumerated(&session.id, FailureReason::SubagentsUnenumerated),
+        }
+        Ok(ledger.finish())
+    }
+
     fn recording(&self, session: &Session) -> Result<PathBuf> {
         super::session_file_path(session)
             .map(Path::to_path_buf)
@@ -1831,18 +1876,26 @@ fn reconcile_source(
     path: &Path,
     session_id: &str,
     child: Option<&str>,
+    validated: Option<ReadPin<'_>>,
 ) -> Result<()> {
     let parent = child.is_none();
-    let mut identity_seen = false;
-    let validated = stream_jsonl(path, None, |value, _, _| {
-        identity_seen |= source_identity(value, session_id, child)?;
-        Ok(false)
-    })?;
-    if !parent && !identity_seen {
-        return Err(IdentityFailure(FailureReason::NoIdentity).into());
-    }
+    let validation;
+    let pin = match validated {
+        Some(pin) => pin,
+        None => {
+            let mut identity_seen = false;
+            validation = stream_jsonl(path, None, |value, _, _| {
+                identity_seen |= source_identity(value, session_id, child)?;
+                Ok(false)
+            })?;
+            if !parent && !identity_seen {
+                return Err(IdentityFailure(FailureReason::NoIdentity).into());
+            }
+            validation.pin()
+        }
+    };
     let mut position = 0;
-    let read = stream_jsonl(path, Some(validated.pin()), |value, _, _| {
+    let read = stream_jsonl(path, Some(pin), |value, _, _| {
         source_identity(value, session_id, child)?;
         position += 1;
         if parent && value["type"] == "cost-state" {

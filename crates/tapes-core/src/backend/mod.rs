@@ -482,8 +482,10 @@ pub trait Backend {
     /// counters, accounting, recorded usage detail, model, and activity range
     /// folded from the whole recording rather than its bounded tail. The read
     /// is replayed as `stream_transcript` replays it, so the session and the
-    /// turns of `read` describe the same records. The default refuses, as
-    /// `stream_transcript` does.
+    /// turns of `read` describe the same records. A backend that folded the
+    /// session from those records while streaming `read` answers from them,
+    /// without another pass, for the session `read` was asked about. The
+    /// default refuses, as `stream_transcript` does.
     fn stream_session(&self, session: &Session, read: &StreamedTranscript) -> Result<Session> {
         let _ = (session, read);
         anyhow::bail!(
@@ -533,6 +535,17 @@ pub trait Backend {
             "{} sessions do not support usage reconciliation",
             self.harness()
         )
+    }
+    /// As [`Backend::usage_reconciliation`], for a session `read` streamed
+    /// whole: the session's own recording is replayed against the prefix that
+    /// read validated rather than validated again. The default reads afresh.
+    fn usage_reconciliation_after(
+        &self,
+        session: &Session,
+        read: &StreamedTranscript,
+    ) -> Result<crate::reconcile::Reconciliation> {
+        let _ = read;
+        self.usage_reconciliation(session)
     }
     /// Read bounded consumption identities against the caller's own source
     /// evidence, over every retained branch. Unsupported backends refuse only
@@ -1482,6 +1495,27 @@ pub struct StreamedTranscript {
     /// The kinds the harness's records can evidence, set by whoever knows
     /// which backend streamed the read.
     pub kinds: Option<crate::model::KindDeclaration>,
+    /// The session's accounting folded from the same records as the turns,
+    /// for a backend that folds it while it streams.
+    pub(crate) folded: Option<Box<FoldedSession>>,
+}
+
+/// The session a read's records state, and the session the read was asked
+/// about, which it answers for and no other.
+pub(crate) struct FoldedSession {
+    pub(crate) asked: Session,
+    pub(crate) whole: Session,
+}
+
+impl StreamedTranscript {
+    /// The session `stream_session` answers for `session`, when this read
+    /// folded it from its own records.
+    pub(crate) fn folded_for(&self, session: &Session) -> Option<Session> {
+        self.folded
+            .as_deref()
+            .filter(|folded| folded.asked == *session)
+            .map(|folded| folded.whole.clone())
+    }
 }
 
 /// A pinned read found its file replaced, shortened, or rewritten within the
@@ -1516,6 +1550,7 @@ impl StreamedTranscript {
             unmapped: None,
             unrecognized_usage: 0,
             kinds: None,
+            folded: None,
         }
     }
 
@@ -1785,6 +1820,7 @@ fn stream_jsonl_within(
         }
     }
     let revision = pin.map_or_else(|| stat_revision(&metadata), |pin| pin.revision.to_owned());
+    crate::counters::streamed_recording();
     let mut reader =
         BufReader::with_capacity(256 * 1024, DigestReader::new(file).take(source_length));
     let mut streamed = StreamedJsonl {

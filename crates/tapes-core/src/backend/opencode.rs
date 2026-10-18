@@ -964,6 +964,7 @@ impl OpenCodeBackend {
             unmapped: None,
             unrecognized_usage,
             kinds: None,
+            folded: None,
         })
     }
 
@@ -1089,6 +1090,7 @@ impl OpenCodeBackend {
             // the span reader counts.
             unrecognized_usage: 0,
             kinds: None,
+            folded: None,
         })
     }
 }
