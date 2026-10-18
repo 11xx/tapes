@@ -196,6 +196,16 @@ impl CodexBackend {
             copied_origins: forked_from,
             ..CopyEvidence::default()
         });
+        if let Some(parent) = opening
+            .iter()
+            .find(|value| value["type"] == "session_meta")
+            .and_then(|value| value["payload"]["parent_thread_id"].as_str())
+        {
+            session
+                .usage_detail
+                .get_or_insert_with(Default::default)
+                .declared_parent = Some(parent.to_owned());
+        }
         // The opening is the start of the file, so its first user turn is the
         // session's first user turn even when the tail cannot see it.
         let session = if read.truncated {

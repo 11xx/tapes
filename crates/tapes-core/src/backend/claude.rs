@@ -246,6 +246,13 @@ impl ClaudeBackend {
         for value in opening.iter().chain(&read.values) {
             observe_copies(&mut copies, value);
         }
+        let quota = claude_quota_observations(opening.iter().chain(&read.values));
+        if !quota.is_empty() {
+            session
+                .usage_detail
+                .get_or_insert_with(Default::default)
+                .quota_observations = quota;
+        }
         session.record_copy_evidence(copies);
         // The opening is the start of the file, so its first user turn is the
         // session's first user turn even when the tail cannot see it.
@@ -327,6 +334,51 @@ impl Backend for ClaudeBackend {
             recordable: TurnSelection::only(TurnKind::ALL),
             user_default: None,
         }
+    }
+
+    /// A Claude parent's subagents are recordings under its own directory
+    /// that no listing returns, named `<parent>::<agent>` as a child read
+    /// names them.
+    fn window_children(&self, session: &Session) -> (Vec<Session>, Vec<String>) {
+        let Ok(path) = self.recording(session) else {
+            return (Vec::new(), Vec::new());
+        };
+        let files = match subagent_files(&path) {
+            Ok(files) => files,
+            Err(error) => {
+                return (
+                    Vec::new(),
+                    vec![format!(
+                        "{} (claude): subagents unenumerated: {error:#}",
+                        session.id
+                    )],
+                )
+            }
+        };
+        let mut children = Vec::new();
+        let mut failures = Vec::new();
+        for file in files {
+            match self.parse_with_identity(
+                &file.transcript,
+                &session.id,
+                true,
+                Some(&file.agent_id),
+                ParsedTurns::TitleOnly,
+            ) {
+                Ok((mut child, _, _)) => {
+                    child.id = format!("{}::{}", session.id, file.agent_id);
+                    if let Some(location) = child.source.location.as_mut() {
+                        location.native_path = Some(file.transcript.clone());
+                    }
+                    children.push(child);
+                }
+                Err(error) => failures.push(format!(
+                    "{}::{} (claude): {error:#}",
+                    session.id, file.agent_id
+                )),
+            }
+        }
+        (children, failures)
     }
 
     fn child_transcript(&self, parent: &Session, reference: &str) -> Result<Transcript> {
@@ -1191,6 +1243,45 @@ fn read_transcript(
     }
     let trailing_record = trailing_record(read.values.iter(), last_turn, claude_trailing_kind);
     Ok((turns, recording, trailing_record, unmapped.finish()))
+}
+
+/// The newest quota observation of each limit the records hold. Claude
+/// records one only on a request the limit refused: `quotaLimits` names the
+/// limit (`five_hour`, `seven_day`) and when it resets, not its length, so
+/// the length is the one the name states.
+fn claude_quota_observations<'a>(
+    values: impl Iterator<Item = &'a Value>,
+) -> Vec<crate::window::QuotaObservation> {
+    use crate::window::{QuotaKind, QuotaLength, QuotaObservation};
+    let mut newest: BTreeMap<&'static str, QuotaObservation> = BTreeMap::new();
+    for value in values {
+        let limits = &value["quotaLimits"];
+        let (quota, minutes, name) = match limits["rateLimitType"].as_str() {
+            Some("five_hour") => (QuotaKind::Primary, 300, "five_hour"),
+            Some("seven_day") => (QuotaKind::Secondary, 7 * 24 * 60, "seven_day"),
+            _ => continue,
+        };
+        let Some(resets_at) = limits["resetsAt"]
+            .as_i64()
+            .and_then(|seconds| chrono::DateTime::from_timestamp(seconds, 0))
+        else {
+            continue;
+        };
+        let observation = QuotaObservation {
+            quota,
+            resets_at,
+            window_minutes: minutes,
+            length: QuotaLength::LimitName {
+                name: name.to_owned(),
+            },
+            observed_at: timestamp(&value["timestamp"]),
+        };
+        let held = newest.entry(name).or_insert_with(|| observation.clone());
+        if (observation.resets_at, observation.observed_at) > (held.resets_at, held.observed_at) {
+            *held = observation;
+        }
+    }
+    newest.into_values().collect()
 }
 
 /// A record's turns, counted as built.

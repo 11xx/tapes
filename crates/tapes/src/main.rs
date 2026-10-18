@@ -36,6 +36,8 @@ use agent_tapes_core::usage::{
     RateWindow, RecordedUsage, RequestDimensions, TurnCoverage, UsageAttribution, UsageObservation,
     UsageObservationOptions, UsageOptions, UsageTally, UsageView,
 };
+use agent_tapes_core::window::{QuotaAt, QuotaKind, WindowBounds, WindowRecord};
+use agent_tapes_core::WindowAsk;
 use agent_tapes_core::{BulkExport, Selection, UsageSummary, Where};
 use anyhow::{anyhow, Result};
 use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
@@ -91,6 +93,9 @@ enum ByArg {
     Model,
     Variant,
     Directory,
+    Session,
+    Launch,
+    Parent,
 }
 
 impl From<ByArg> for GroupBy {
@@ -100,6 +105,9 @@ impl From<ByArg> for GroupBy {
             ByArg::Model => Self::Model,
             ByArg::Variant => Self::Variant,
             ByArg::Directory => Self::Directory,
+            ByArg::Session => Self::Session,
+            ByArg::Launch => Self::Launch,
+            ByArg::Parent => Self::Parent,
         }
     }
 }
@@ -146,6 +154,49 @@ fn parse_event_keys(value: Option<Option<usize>>) -> Result<Option<ConsumptionKe
         ));
     }
     Ok(Some(ConsumptionKeyOptions { limit }))
+}
+
+fn parse_window(value: &str) -> std::result::Result<WindowBounds, String> {
+    let (from, to) = value
+        .split_once("..")
+        .ok_or_else(|| format!("`{value}` is not a window FROM..TO"))?;
+    let edge = |text: &str| -> std::result::Result<Option<Instant>, String> {
+        (!text.is_empty()).then(|| parse_instant(text)).transpose()
+    };
+    let bounds = WindowBounds {
+        from: edge(from)?,
+        to: edge(to)?,
+    };
+    if bounds
+        .from
+        .zip(bounds.to)
+        .is_some_and(|(from, to)| from >= to)
+    {
+        return Err(format!("window {value} ends before it starts"));
+    }
+    Ok(bounds)
+}
+
+fn parse_quota_at(value: &str) -> std::result::Result<QuotaAt, String> {
+    if value == "current" {
+        return Ok(QuotaAt::Current);
+    }
+    parse_instant(value).map(QuotaAt::At)
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum QuotaArg {
+    Primary,
+    Secondary,
+}
+
+impl From<QuotaArg> for QuotaKind {
+    fn from(quota: QuotaArg) -> Self {
+        match quota {
+            QuotaArg::Primary => Self::Primary,
+            QuotaArg::Secondary => Self::Secondary,
+        }
+    }
 }
 
 fn parse_instant(value: &str) -> std::result::Result<Instant, String> {
@@ -1452,9 +1503,11 @@ enum Command {
     /// with a `span` object; spans and the remainder no span holds add up to
     /// the whole session within one accounting basis. --prices, TAPES_PRICES
     /// or the default price table add a `list_price_estimate` beside each
-    /// harness-written cost, priced from the caller's table. A scope or
+    /// harness-written cost, priced from the caller's table. --window and
+    /// --quota-window answer a selection's consumption inside a window of
+    /// time, each session contributing its own span inside it. A scope or
     /// listing filter instead answers the whole selection as
-    /// tapes-usage-summary/7, grouped by --by and summing each counter over
+    /// tapes-usage-summary/8, grouped by --by and summing each counter over
     /// the sessions that recorded it. Native tokens follow each harness's own
     /// convention and add only within it; the disjoint categories (uncached
     /// input, cache read, cache write by TTL, output) add across harnesses.
@@ -1522,7 +1575,14 @@ enum Command {
         /// comma-separated; groups are keyed in the order given
         /// [default: harness,model]. `model` is the model id and `variant`
         /// the reasoning effort or tier qualifying it, so a session that
-        /// recorded no variant is grouped under that absence.
+        /// recorded no variant is grouped under that absence. `session`
+        /// groups each session alone, and `launch` by the interactive or
+        /// headless launch its recording states. `parent` groups a session
+        /// under the end of the chain of parents its recordings name: a Codex
+        /// spawn's `parent_thread_id`, a declared fork origin (Codex, pi,
+        /// OpenCode), a Claude subagent's parent. A session that names none is
+        /// its own group, and a parent the store does not hold is a group of
+        /// its own under that id, never joined to a guessed one.
         #[arg(
             long,
             value_enum,
@@ -1658,6 +1718,57 @@ enum Command {
             conflicts_with_all = ["by", "read_bytes", "series", "reconcile", "event_keys", "from", "to"]
         )]
         requests: Option<SpanBounds>,
+        /// Answer the consumption inside a window of time, FROM..TO in RFC
+        /// 3339 with either end open, over the sessions the scope and filters
+        /// select. --since and --until select sessions by their newest
+        /// activity; --window cuts consumption at its edges: every selected
+        /// session with activity inside the window contributes only the span
+        /// of its own requests inside it (the span `usage --from/--to` reads),
+        /// read whole, so a session that straddles an edge contributes what it
+        /// consumed inside and nothing else. A Claude parent's subagent
+        /// recordings contribute their own spans as `<parent>::<agent>`.
+        /// Shares sum to the window's figures under the summary's partitions
+        /// and withholding, and a request a span cannot place qualifies its
+        /// share as a span does. Related sessions are never added by an exact
+        /// union. `window` names the edges, how they were established
+        /// (`requested`, `recorded`, `inferred`), and each session's share,
+        /// largest first: its requests inside the window, its launch, its
+        /// named `parent` and the `root` its chain of parents ends at, and its
+        /// disjoint categories. --limit still bounds how many sessions each
+        /// harness lists.
+        #[arg(
+            long,
+            value_name = "FROM..TO",
+            value_parser = parse_window,
+            conflicts_with_all = ["session", "latest", "title", "occurrence", "full", "from", "to", "requests", "series", "reconcile", "event_keys"]
+        )]
+        window: Option<WindowBounds>,
+        /// Answer the quota window holding an instant (`current`, or an RFC
+        /// 3339 instant) as --window does, its edges taken from the
+        /// recordings' own quota observations; requires --harness codex or
+        /// --harness claude. Codex records each `rate_limits` window's reset
+        /// and length, so its window is `recorded`. Claude records a limit
+        /// only on a request it refused (`quotaLimits`), naming the limit and
+        /// its reset but not its length, so its window, five hours or seven
+        /// days by that name, is `inferred`. `current` takes the newest
+        /// observation's window, or, once that window has reset, the one
+        /// after it for the same length, which is `inferred`; an instant no
+        /// observation's window or the one after it holds refuses, and the
+        /// window is then read with --window. `window.quota` names the
+        /// observation and the session whose recording holds it.
+        #[arg(
+            long,
+            value_name = "current|RFC3339",
+            value_parser = parse_quota_at,
+            conflicts_with = "window",
+            requires = "harness"
+        )]
+        quota_window: Option<QuotaAt>,
+        /// Which quota window --quota-window reads: `primary`, Codex's short
+        /// window and Claude's five-hour limit, or `secondary`, Codex's long
+        /// window and Claude's seven-day limit.
+        #[arg(long, value_enum, default_value = "primary", requires = "quota_window")]
+        quota: QuotaArg,
         /// Price the answer with this tapes-price-table/1 file: each figure
         /// gains `list_price_estimate` beside any cost its harness wrote,
         /// never in its place. Without the flag the table is the file
@@ -1683,7 +1794,7 @@ enum Command {
         /// identity-unestablished, exact-union).
         #[arg(long, value_name = "FILE")]
         prices: Option<PathBuf>,
-        /// Render the versioned tapes-usage/13 object, or tapes-usage-summary/7
+        /// Render the versioned tapes-usage/13 object, or tapes-usage-summary/8
         /// for a selection, as JSON. `session.model_observation` says
         /// whether more than one model and effort was observed (`mixed`) and
         /// whether a gap, partial read or budget kept the split incomplete
@@ -2891,6 +3002,9 @@ fn dispatch(cli: Cli) -> Result<()> {
             to,
             requests,
             prices,
+            window,
+            quota_window,
+            quota,
             json,
         } => {
             query.validate_input()?;
@@ -3018,7 +3132,27 @@ fn dispatch(cli: Cli) -> Result<()> {
                 query.validate_window()?;
                 query.describe_search();
                 let by = grouping(&by);
-                let summary = if query.input.supplied() {
+                let ask =
+                    window
+                        .map(WindowAsk::Bounds)
+                        .or(quota_window.map(|at| WindowAsk::Quota {
+                            quota: quota.into(),
+                            at,
+                        }));
+                let summary = if let Some(ask) = ask {
+                    if query.input.supplied() {
+                        return Err(anyhow!(
+                            "--window and --quota-window read installed recordings whole; a supplied input refuses them"
+                        ));
+                    }
+                    agent_tapes_core::usage_window_with_backends(
+                        &query.input.backends()?,
+                        &query.set(),
+                        &by,
+                        ask,
+                        prices,
+                    )?
+                } else if query.input.supplied() {
                     let backends = query.input.backends()?;
                     agent_tapes_core::usage_summary_priced(&backends, &query.set(), &by, prices)?
                 } else {
@@ -3032,6 +3166,9 @@ fn dispatch(cli: Cli) -> Result<()> {
                 if json {
                     print_json(&summary, &query.input)?;
                 } else {
+                    if let Some(window) = &summary.window {
+                        print!("{}", render_window(window));
+                    }
                     print!("{}", render_usage_summary(&summary, &by));
                     print_diagnostics(
                         summary.scan_truncated,
@@ -5313,6 +5450,63 @@ fn render_observation(row: &UsageObservation) -> String {
 /// One row per group and a closing total, each counter cell naming how many
 /// of the row's sessions recorded it whenever that is fewer than all of
 /// them. A counter no session recorded has no figure to print.
+fn render_window(window: &WindowRecord) -> String {
+    let edge =
+        |at: Option<Instant>, open: &str| at.map_or_else(|| open.to_owned(), |at| at.to_rfc3339());
+    let mut out = format!(
+        "window: {} .. {} ({})\n",
+        edge(window.bounds.from, "start"),
+        edge(window.bounds.to, "now"),
+        serde_kebab(&window.boundary)
+    );
+    if let Some(quota) = &window.quota {
+        out.push_str(&format!(
+            "quota: {} {} window of {} minutes resetting {}, observed in {}{}\n",
+            quota.harness,
+            serde_kebab(&quota.observation.quota),
+            quota.observation.window_minutes,
+            quota.observation.resets_at.to_rfc3339(),
+            quota.session,
+            quota
+                .inferred
+                .map_or_else(String::new, |reason| format!("; inferred: {reason}"))
+        ));
+    }
+    out.push_str("SESSION\tHARNESS\tLAUNCH\tROOT\tREQUESTS\tDISJOINT TOKENS\n");
+    for share in &window.sessions {
+        let root = if share.root == share.id {
+            "-".to_owned()
+        } else if share.root_resolved {
+            share.root.clone()
+        } else {
+            format!("{} (unresolved)", share.root)
+        };
+        out.push_str(&format!(
+            "{}\t{}\t{}\t{}\t{} of {}{}\t{}\n",
+            share.id,
+            share.harness,
+            share.launch.map_or("-", |launch| launch.as_str()),
+            root,
+            share.requests,
+            share.session_requests,
+            if share.unplaced > 0 {
+                format!(" ({} unplaced)", share.unplaced)
+            } else {
+                String::new()
+            },
+            share.consumed()
+        ));
+    }
+    if window.empty > 0 {
+        out.push_str(&format!(
+            "{} selected sessions placed no request inside the window\n",
+            window.empty
+        ));
+    }
+    out.push('\n');
+    out
+}
+
 fn render_usage_summary(summary: &UsageSummary, by: &[GroupBy]) -> String {
     let key_columns: Vec<&str> = if by.is_empty() {
         vec!["GROUP"]
@@ -5578,6 +5772,9 @@ fn key_column(dimension: &GroupBy) -> &'static str {
         GroupBy::Model => "MODEL",
         GroupBy::Variant => "VARIANT",
         GroupBy::Directory => "DIRECTORY",
+        GroupBy::Session => "SESSION",
+        GroupBy::Launch => "LAUNCH",
+        GroupBy::Parent => "PARENT",
     }
 }
 
@@ -5587,6 +5784,9 @@ fn key_cell(key: &GroupKey, dimension: GroupBy) -> Option<String> {
         GroupBy::Model => key.model.clone(),
         GroupBy::Variant => key.variant.clone(),
         GroupBy::Directory => key.directory.clone(),
+        GroupBy::Session => key.session.clone(),
+        GroupBy::Launch => key.launch.clone(),
+        GroupBy::Parent => key.parent.clone(),
     }
 }
 

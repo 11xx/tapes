@@ -53,11 +53,12 @@ mod test_support;
 pub mod timeline;
 pub mod title;
 pub mod usage;
+pub mod window;
 pub mod workset;
 
 pub const LIST_SCHEMA: &str = "tapes-list/9";
 pub const EXPORT_MANIFEST_SCHEMA: &str = "tapes-export-manifest/7";
-pub const USAGE_SUMMARY_SCHEMA: &str = "tapes-usage-summary/7";
+pub const USAGE_SUMMARY_SCHEMA: &str = "tapes-usage-summary/8";
 /// Number of normalized turns a `list --search` query inspects per session.
 /// Keeping this fixed makes the listing's cost predictable for callers.
 pub const LIST_SEARCH_TAIL: usize = 32;
@@ -1934,6 +1935,9 @@ pub struct UsageSummary {
     pub scan_truncated: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub unplaced: Option<Unplaced>,
+    /// The window a window read answers, and each session's share of it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub window: Option<window::WindowRecord>,
 }
 
 pub fn usage_summary(
@@ -1991,8 +1995,19 @@ pub fn usage_summary_priced(
             )
             .ok()
     });
+    let relations = if by.contains(&usage::GroupBy::Parent) {
+        session_relations(
+            backends,
+            sessions
+                .iter()
+                .map(|session| (session.id.clone(), window::declared_parent(session))),
+        )
+        .0
+    } else {
+        usage::SessionRelations::default()
+    };
     let (aggregate, partitions) =
-        usage::partitioned_aggregate_priced(&sessions, by, &overlap, prices);
+        usage::partitioned_aggregate_related(&sessions, by, &overlap, prices, &relations);
     Ok(UsageSummary {
         schema: USAGE_SUMMARY_SCHEMA,
         selection: selection_record(selection, limit),
@@ -2006,7 +2021,276 @@ pub fn usage_summary_priced(
         scanned: listed.scanned,
         scan_truncated: listed.scan_truncated,
         unplaced: Unplaced::from_directories(listed.unplaced),
+        window: None,
     })
+}
+
+/// What a window read is asked for: edges the caller names, or the quota
+/// window of `selection.harness` holding an instant.
+#[derive(Clone, Copy, Debug)]
+pub enum WindowAsk {
+    Bounds(window::WindowBounds),
+    Quota {
+        quota: window::QuotaKind,
+        at: window::QuotaAt,
+    },
+}
+
+/// A window read before it is summed: each contributing session's figure
+/// inside the window, its share, and how sessions descend from one another.
+pub struct WindowRead {
+    pub record: window::WindowRecord,
+    /// One figure per share, in the same order.
+    pub figures: Vec<Session>,
+    pub relations: usage::SessionRelations,
+    pub limit: usize,
+    pub unavailable: Vec<String>,
+    pub unreadable: Vec<String>,
+    pub unsearched: Vec<String>,
+    pub partial_search: Vec<String>,
+    pub scanned: usize,
+    pub scan_truncated: bool,
+    pub unplaced: Vec<PathBuf>,
+}
+
+/// Read the window `ask` names over the sessions `selection` lists: every
+/// session with activity inside it, and each Claude parent's subagent
+/// recordings, contributes the span of its own requests inside the window,
+/// read whole. A session whose span places nothing is counted, not summed.
+pub fn read_window(
+    backends: &[Box<dyn Backend>],
+    selection: &SessionSelection<'_>,
+    ask: WindowAsk,
+) -> Result<WindowRead> {
+    let scope = selection.within.resolve()?;
+    let limit = selection.limit.unwrap_or(DEFAULT_LIST_LIMIT);
+    let mut observed_listing = None;
+    let (bounds, boundary, quota) = match ask {
+        WindowAsk::Bounds(bounds) => (bounds, window::WindowBoundary::Requested, None),
+        WindowAsk::Quota { quota, at } => {
+            let harness = selection
+                .harness
+                .filter(|harness| matches!(*harness, "codex" | "claude"))
+                .ok_or_else(|| {
+                    anyhow!("--quota-window reads the quota observations of --harness codex or --harness claude")
+                })?;
+            let observed = list_scoped(
+                backends,
+                Some(harness),
+                scope.as_ref(),
+                limit,
+                &selection.filters,
+                selection.sort,
+            )?;
+            let observations = observed
+                .sessions
+                .iter()
+                .flat_map(|session| {
+                    window::quota_observations(session)
+                        .into_iter()
+                        .map(|observation| (harness.to_owned(), session.id.clone(), observation))
+                })
+                .collect::<Vec<_>>();
+            let (bounds, boundary, source) =
+                window::resolve_quota_window(&observations, quota, at, Utc::now())?;
+            observed_listing = Some(observed);
+            (bounds, boundary, Some(source))
+        }
+    };
+    if bounds
+        .from
+        .zip(bounds.to)
+        .is_some_and(|(from, to)| from >= to)
+    {
+        anyhow::bail!("a window must start before it ends");
+    }
+    let mut filters = selection.filters;
+    if let Some(from) = bounds.from {
+        filters.since = Some(filters.since.map_or(from, |since| since.max(from)));
+    }
+    // Newest first, the listing the observations came from already holds
+    // every session the window's listing would: those of them active since
+    // the window opened.
+    let listed = match observed_listing.filter(|_| selection.sort == ListSort::Newest) {
+        Some(mut observed) => {
+            let keep = observed
+                .sessions
+                .iter()
+                .map(|session| {
+                    filters.since.is_none_or(|since| {
+                        session.last_activity_at.is_none_or(|last| last >= since)
+                    })
+                })
+                .collect::<Vec<_>>();
+            let mut kept = keep.iter();
+            observed.sessions.retain(|_| *kept.next().unwrap());
+            let mut kept = keep.iter();
+            observed.origins.retain(|_| *kept.next().unwrap());
+            observed
+        }
+        None => list_scoped(
+            backends,
+            selection.harness,
+            scope.as_ref(),
+            limit,
+            &filters,
+            selection.sort,
+        )?,
+    };
+    let mut sessions = listed.sessions;
+    declare_origins(backends, &listed.origins, &mut sessions);
+    let mut unreadable = listed.unreadable;
+    let mut figures = Vec::new();
+    let mut shares = Vec::new();
+    let mut parents = Vec::new();
+    let mut empty = 0;
+    for (index, session) in sessions.iter().enumerate() {
+        if !bounds.may_hold(session.started_at, session.last_activity_at) {
+            continue;
+        }
+        let backend = backends[listed.origins[index]].as_ref();
+        let (children, failures) = backend.window_children(session);
+        unreadable.extend(failures);
+        for member in std::iter::once(session.clone()).chain(children) {
+            let read = backend
+                .stream_transcript(&member, None, &mut |_| Ok(()))
+                .and_then(|read| backend.stream_spans(&member, &read, &[bounds.span()]));
+            let mut spans = match read {
+                Ok(spans) => spans,
+                Err(error) => {
+                    unreadable.push(format!("{} ({}): {error:#}", member.id, member.harness()));
+                    continue;
+                }
+            };
+            let (figure, placement) = spans.spans.remove(0);
+            if placement.requests == 0 && placement.unplaced == 0 {
+                empty += 1;
+                continue;
+            }
+            parents.push((member.id.clone(), window::declared_parent(&member)));
+            shares.push(window::WindowShare {
+                id: member.id.clone(),
+                harness: member.harness().to_owned(),
+                // The whole read's launch: a bounded listing withholds a
+                // headless launch its tail cannot confirm.
+                launch: figure.launch,
+                parent: window::declared_parent(&member),
+                root: String::new(),
+                root_resolved: true,
+                requests: placement.requests,
+                session_requests: placement.session_requests,
+                unplaced: placement.unplaced,
+                first: placement.first,
+                last: placement.last,
+                disjoint: figure.disjoint_tokens(),
+            });
+            figures.push(figure);
+        }
+    }
+    let (relations, resolved) = session_relations(backends, parents);
+    for share in &mut shares {
+        share.root = relations.root_of(&share.id).to_owned();
+        share.root_resolved = resolved.get(&share.root).copied().unwrap_or(true);
+    }
+    let mut order = (0..shares.len()).collect::<Vec<_>>();
+    order.sort_by(|left, right| {
+        shares[*right]
+            .consumed()
+            .cmp(&shares[*left].consumed())
+            .then_with(|| shares[*left].id.cmp(&shares[*right].id))
+    });
+    let shares_sorted = order.iter().map(|index| shares[*index].clone()).collect();
+    let figures = order.iter().map(|index| figures[*index].clone()).collect();
+    Ok(WindowRead {
+        record: window::WindowRecord {
+            bounds,
+            boundary,
+            quota,
+            sessions: shares_sorted,
+            empty,
+        },
+        figures,
+        relations,
+        limit,
+        unavailable: listed.unavailable,
+        unreadable,
+        unsearched: listed.unsearched,
+        partial_search: listed.partial_search,
+        scanned: listed.scanned,
+        scan_truncated: listed.scan_truncated,
+        unplaced: listed.unplaced,
+    })
+}
+
+/// The window `ask` names, summed: each session's share inside it grouped by
+/// `by` under the summary's own partitions and withholding, and the window
+/// with every share under `window`. Related sessions are never added by an
+/// exact union, whose event keys cover whole recordings rather than spans.
+pub fn usage_window_with_backends(
+    backends: &[Box<dyn Backend>],
+    selection: &SessionSelection<'_>,
+    by: &[usage::GroupBy],
+    ask: WindowAsk,
+    prices: Option<&pricing::PriceTable>,
+) -> Result<UsageSummary> {
+    let read = read_window(backends, selection, ask)?;
+    let overlap = overlap::Overlap::of(&read.figures, &mut |_| None);
+    let (aggregate, partitions) =
+        usage::partitioned_aggregate_related(&read.figures, by, &overlap, prices, &read.relations);
+    Ok(UsageSummary {
+        schema: USAGE_SUMMARY_SCHEMA,
+        selection: selection_record(selection, read.limit),
+        groups: aggregate.groups,
+        totals: aggregate.totals,
+        partitions,
+        unavailable: read.unavailable,
+        unreadable: read.unreadable,
+        unsearched: read.unsearched,
+        partial_search: read.partial_search,
+        scanned: read.scanned,
+        scan_truncated: read.scan_truncated,
+        unplaced: Unplaced::from_directories(read.unplaced),
+        window: Some(read.record),
+    })
+}
+
+/// Follow each session's named parent to the end of its chain: through the
+/// sessions given, then through the store. A parent the store does not hold
+/// ends the chain under its own id and is reported unresolved; a cycle ends
+/// it at the session that closes it.
+fn session_relations(
+    backends: &[Box<dyn Backend>],
+    named: impl IntoIterator<Item = (String, Option<String>)>,
+) -> (
+    usage::SessionRelations,
+    std::collections::BTreeMap<String, bool>,
+) {
+    const MAX_DEPTH: usize = 32;
+    let mut parents: HashMap<String, Option<String>> = named.into_iter().collect();
+    let ids = parents.keys().cloned().collect::<Vec<_>>();
+    let mut resolved = std::collections::BTreeMap::new();
+    let mut roots = std::collections::BTreeMap::new();
+    for id in ids {
+        let mut current = id.clone();
+        let mut seen = HashSet::from([current.clone()]);
+        for _ in 0..MAX_DEPTH {
+            if !parents.contains_key(&current) {
+                let looked_up = resolve_session(backends, &current)
+                    .ok()
+                    .map(|found| window::declared_parent(&found.session));
+                resolved.insert(current.clone(), looked_up.is_some());
+                parents.insert(current.clone(), looked_up.flatten());
+            }
+            match parents.get(&current).cloned().flatten() {
+                Some(parent) if seen.insert(parent.clone()) => current = parent,
+                _ => break,
+            }
+        }
+        if current != id {
+            roots.insert(id, current);
+        }
+    }
+    (usage::SessionRelations::new(roots), resolved)
 }
 
 /// Event keys read per session of a related pair when its exact union is

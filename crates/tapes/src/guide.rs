@@ -366,6 +366,8 @@ PROBE BEFORE EXPORTING
   tapes workset <id> --bundle DIR  The session and its relatives, read whole and cut into lanes.
   tapes locate --workset DIR --refs FILE --json  Whether a frozen workset still holds, and what its cited references are.
   tapes usage --here --json      The same counters summed over a project.
+  tapes usage --global --window FROM..TO --by session,parent  What a window consumed, by session.
+  tapes usage --global --quota-window current --harness codex  The same over the running quota window.
   tapes endings --here --json    What each session of a project ends on.
 
   show returns the last 100 turns unless --tail says otherwise, and marks the
@@ -596,6 +598,39 @@ PROBE BEFORE EXPORTING
   prints `list-price estimate <amount> <currency> (from the price table:
   ...)` with a completeness line, and a summary adds a LIST-PRICE ESTIMATE
   column when a table is given.
+  `usage --window FROM..TO` (RFC 3339, either end open) answers the
+  consumption inside a window over the sessions the scope and filters select.
+  --since and --until select sessions by their newest activity; --window cuts
+  consumption at its edges. Every selected session with activity inside the
+  window contributes the span of its own requests inside it, read whole as
+  `usage --from/--to` reads one session, so a session that straddles an edge
+  contributes what it consumed inside and nothing else; a Claude parent's
+  subagent recordings, which no listing returns, contribute their own spans as
+  `<parent>::<agent>`. The shares are summed under the summary's partitions,
+  withholding and overlap rules, so the window total is the sum of its shares
+  within one accounting basis, and a request a span cannot place qualifies its
+  share as it qualifies a span. Related sessions are never added by an exact
+  union, since event keys cover whole recordings. `window` names the edges,
+  how they were established (`requested`, `recorded`, `inferred`), the
+  selected sessions that placed nothing inside it, and each session's share,
+  largest first: its requests inside the window out of its own, its launch,
+  the `parent` its recording names, the `root` that chain of parents ends at
+  and whether the store holds it, and its disjoint categories. --limit still
+  bounds the sessions each harness lists. `--by session`, `launch` and
+  `parent` group any summary by session, by recorded launch, and under the
+  root of each session's named parents.
+  `usage --quota-window current|<instant> --harness codex|claude [--quota
+  primary|secondary]` answers as --window over the provider's quota window,
+  from the recordings' own quota observations. A Codex `rate_limits`
+  observation records its window's reset and length, so the window is
+  `recorded`. Claude records a limit only on a request it refused
+  (`quotaLimits`: `five_hour` or `seven_day` and the reset), so its length is
+  the one the limit's name states and the window is `inferred`. `current`
+  reads the newest observation alone, and once its window has reset takes the
+  window after it for the same length, `inferred`; an instant reads the newest
+  observation whose window holds it. Anything else refuses and the window is
+  read with --window. `window.quota` names the observation and the session
+  whose recording holds it.
   A summary adds sessions only where no recording relates them. Two sessions
   are related when one declares the other as its fork origin or parent (Codex
   `forked_from_id`, Pi's parent header, OpenCode `fork_session_id` and
@@ -978,7 +1013,7 @@ PROBE BEFORE EXPORTING
   its own first activity and not the parent's launch.
 
   Given a scope or a listing filter instead of a session, usage answers that
-  whole selection as tapes-usage-summary/7, using the flags list and export
+  whole selection as tapes-usage-summary/8, using the flags list and export
   take and grouping by --by (harness and model unless told otherwise). It sums
   the counters the listing already carries, so nothing is re-read. Read
   counted before a sum: it says how many of a group's sessions recorded that

@@ -536,6 +536,14 @@ pub trait Backend {
             self.harness()
         )
     }
+    /// Recordings of the session's own children that hold consumption no
+    /// listing returns as a session, each as a session of its own whose id
+    /// names the parent, with the children that could not be read. A harness
+    /// that lists every child as a session has none.
+    fn window_children(&self, session: &Session) -> (Vec<Session>, Vec<String>) {
+        let _ = session;
+        (Vec::new(), Vec::new())
+    }
     /// As [`Backend::usage_reconciliation`], for a session `read` streamed
     /// whole: the session's own recording is replayed against the prefix that
     /// read validated rather than validated again. The default reads afresh.

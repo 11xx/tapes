@@ -73,6 +73,11 @@ pub struct UsageDetail {
     /// What the recording says about history it may share with other
     /// sessions: a declared fork origin, and the ids its read visited.
     pub copy_evidence: Option<CopyEvidence>,
+    /// The session that launched this one, where the recording names it
+    /// beside any fork origin.
+    pub declared_parent: Option<String>,
+    /// Quota observations the read holds beside `rate_limits`.
+    pub quota_observations: Vec<crate::window::QuotaObservation>,
 }
 
 impl UsageDetail {
@@ -97,6 +102,8 @@ impl UsageDetail {
                 .copy_evidence
                 .as_ref()
                 .is_none_or(CopyEvidence::is_empty)
+            && self.declared_parent.is_none()
+            && self.quota_observations.is_empty()
     }
 
     /// The detail, or nothing when the harness recorded none of it.
@@ -1228,13 +1235,48 @@ pub enum GroupBy {
     /// one — a reasoning effort, a service tier.
     Variant,
     Directory,
+    /// The session itself, by id.
+    Session,
+    /// Whether a person or a program launched the session, as its recording
+    /// states it.
+    Launch,
+    /// The session that launched or forked this one, followed to the first
+    /// session that names no parent; a session that names none is its own.
+    Parent,
+}
+
+/// Which session each selected session descends from: the end of the chain
+/// of parents and fork origins its recordings name. A parent the store does
+/// not hold ends the chain under its own id.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SessionRelations {
+    roots: BTreeMap<String, String>,
+}
+
+impl SessionRelations {
+    pub fn new(roots: BTreeMap<String, String>) -> Self {
+        Self { roots }
+    }
+
+    /// The session `id` groups under, itself when no chain names a parent.
+    pub fn root_of<'a>(&'a self, id: &'a str) -> &'a str {
+        self.roots.get(id).map_or(id, String::as_str)
+    }
 }
 
 impl GroupBy {
     /// The session's value for this dimension, absent when the session
     /// carries no such fact.
+    #[cfg(test)]
     fn of(self, session: &Session) -> Option<String> {
+        self.of_in(session, &SessionRelations::default())
+    }
+
+    fn of_in(self, session: &Session, relations: &SessionRelations) -> Option<String> {
         match self {
+            Self::Session => Some(session.id.clone()),
+            Self::Launch => session.launch.map(|launch| launch.as_str().to_owned()),
+            Self::Parent => Some(relations.root_of(&session.id).to_owned()),
             Self::Harness => Some(session.harness().to_owned()),
             Self::Model => session.model.as_ref().map(|model| model.id.clone()),
             Self::Variant => session
@@ -1261,6 +1303,12 @@ pub struct GroupKey {
     pub variant: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub directory: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub launch: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent: Option<String>,
 }
 
 /// How many sessions carried each counter. A sum says how much; this says
@@ -1586,6 +1634,9 @@ fn group_key(by: &[GroupBy], values: &[Option<String>]) -> GroupKey {
             GroupBy::Model => &mut key.model,
             GroupBy::Variant => &mut key.variant,
             GroupBy::Directory => &mut key.directory,
+            GroupBy::Session => &mut key.session,
+            GroupBy::Launch => &mut key.launch,
+            GroupBy::Parent => &mut key.parent,
         };
         slot.clone_from(value);
     }
@@ -2359,12 +2410,27 @@ pub fn partitioned_aggregate_priced(
     overlap: &Overlap,
     prices: Option<&PriceTable>,
 ) -> (UsageAggregate, Vec<AccountingPartition>) {
+    partitioned_aggregate_related(sessions, by, overlap, prices, &SessionRelations::default())
+}
+
+/// As [`partitioned_aggregate_priced`], grouping `parent` by `relations`.
+pub fn partitioned_aggregate_related(
+    sessions: &[Session],
+    by: &[GroupBy],
+    overlap: &Overlap,
+    prices: Option<&PriceTable>,
+    relations: &SessionRelations,
+) -> (UsageAggregate, Vec<AccountingPartition>) {
     let mut groups: BTreeMap<Vec<Option<String>>, Vec<usize>> = BTreeMap::new();
     let mut partitions: BTreeMap<(String, String), (Option<Accounting>, Vec<usize>)> =
         BTreeMap::new();
     for (index, session) in sessions.iter().enumerate() {
         groups
-            .entry(by.iter().map(|dimension| dimension.of(session)).collect())
+            .entry(
+                by.iter()
+                    .map(|dimension| dimension.of_in(session, relations))
+                    .collect(),
+            )
             .or_default()
             .push(index);
         partitions

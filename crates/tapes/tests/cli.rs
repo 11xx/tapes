@@ -8320,7 +8320,7 @@ fn usage_help_names_the_schema_and_what_the_figures_mean() {
         "{help}"
     );
     assert!(help.contains("quota is a separate fact"), "{help}");
-    assert!(help.contains("tapes-usage-summary/7"), "{help}");
+    assert!(help.contains("tapes-usage-summary/8"), "{help}");
     assert!(help.contains("--by"), "{help}");
 }
 
@@ -8715,7 +8715,7 @@ fn usage_summary_sums_the_listings_own_counters_and_counts_the_sessions_behind_t
     );
     let value: Value = serde_json::from_slice(&output.stdout).unwrap();
 
-    assert_eq!(value["schema"], "tapes-usage-summary/7");
+    assert_eq!(value["schema"], "tapes-usage-summary/8");
     assert_eq!(value["selection"]["scope"], "global");
     assert_eq!(value["selection"]["harness"], "codex");
     assert_eq!(value["scanned"], 4);
