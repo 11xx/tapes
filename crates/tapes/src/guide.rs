@@ -864,8 +864,8 @@ PROBE BEFORE EXPORTING
   `delegated-agents:run` rows), stands in for a request without being one:
   it counts as no request, and a recording made only of such records notes
   that it holds no consumption of its own, with no measured zeros. A Claude
-  whole read that skips an undecodable record qualifies every counter
-  unreadable-record.
+  read, whole or bounded, that skips an undecodable record qualifies every
+  counter unreadable-record.
 
   A pi rewind appends a new branch and keeps the old one, and the abandoned
   requests were consumed all the same. pi usage therefore carries

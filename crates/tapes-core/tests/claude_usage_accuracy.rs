@@ -15,7 +15,8 @@ use agent_tapes_core::backend::{claude::ClaudeBackend, Backend};
 use agent_tapes_core::pricing::{self, PriceTable};
 use agent_tapes_core::usage::{UsageOptions, UsageView};
 use agent_tapes_core::{
-    child, usage_full_with_backends, usage_with_options_with_backends, Selection,
+    child, usage_full_with_backends, usage_with_backends, usage_with_options_with_backends,
+    Selection,
 };
 use serde_json::{json, Value};
 
@@ -72,17 +73,24 @@ fn reasons(view: &UsageView, counter: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// Claim: a whole read of a Claude recording that skips an undecodable line
-/// qualifies every counter `unreadable-record`, as pi and OpenCode do, since
-/// the line may have been a request the sum lacks. Rejects counters reported
-/// complete beside a skipped record.
+/// Claim: a read of a Claude recording that skips an undecodable line,
+/// whole or bounded, qualifies every counter `unreadable-record`, as pi and
+/// OpenCode do, since the line may have been a request the sum lacks.
+/// Rejects counters reported complete beside a skipped record.
 #[test]
 fn a_whole_read_qualifies_every_counter_with_an_unreadable_record() {
-    let view = usage_full_with_backends(
-        &[Box::new(ClaudeBackend::new(fixtures("claude-resumed")))],
-        Selection::Id("30000000-0000-4000-8000-000000000002"),
-    )
-    .unwrap();
+    let backend =
+        || -> Box<dyn Backend> { Box::new(ClaudeBackend::new(fixtures("claude-resumed"))) };
+    let id = "30000000-0000-4000-8000-000000000002";
+    let bounded = usage_with_backends(&[backend()], Selection::Id(id)).unwrap();
+    for counter in ["input", "output", "reasoning", "cache_read", "cache_write"] {
+        assert!(
+            reasons(&bounded, counter).contains(&"unreadable-record".to_owned()),
+            "bounded {counter}: {}",
+            serde_json::to_value(&bounded.measurement_completeness).unwrap()
+        );
+    }
+    let view = usage_full_with_backends(&[backend()], Selection::Id(id)).unwrap();
     assert!(view
         .read
         .as_ref()

@@ -281,6 +281,7 @@ impl ClaudeBackend {
                 .quota_observations = quota;
         }
         session.record_copy_evidence(copies);
+        let session = super::with_unreadable_records(session, read.skipped);
         // The opening is the start of the file, so its first user turn is the
         // session's first user turn even when the tail cannot see it.
         let session = if read.truncated {
