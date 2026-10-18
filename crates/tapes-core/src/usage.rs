@@ -26,7 +26,7 @@ use crate::overlap::{CopyEvidence, Disjointness, Overlap, RelatedSessions, Usage
 use crate::pricing::{EstimateSum, ListPriceEstimate, PriceTable, PricedFigure};
 use crate::span::{SpanPlacement, SpanSessions, SPANS_SCHEMA};
 
-pub const USAGE_SCHEMA: &str = "tapes-usage/14";
+pub const USAGE_SCHEMA: &str = "tapes-usage/15";
 
 /// Recorded usage facts and measurement notes kept beside the session's
 /// normalized counters. A source fact that was not recorded remains absent.

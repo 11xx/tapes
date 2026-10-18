@@ -1495,7 +1495,7 @@ enum Command {
         json: bool,
     },
     /// Where quota went. A session named by id or reached with --latest
-    /// answers that session as tapes-usage/14: its recorded tokens, cost, and
+    /// answers that session as tapes-usage/15: its recorded tokens, cost, and
     /// turn counts, plus whatever else its harness recorded — a context
     /// window, a provider quota window, wall-clock durations, a per-model
     /// split, the price-relevant dimensions its requests recorded. --from,
@@ -1507,7 +1507,7 @@ enum Command {
     /// --quota-window answer a selection's consumption inside a window of
     /// time, each session contributing its own span inside it. A scope or
     /// listing filter instead answers the whole selection as
-    /// tapes-usage-summary/9, grouped by --by and summing each counter over
+    /// tapes-usage-summary/10, grouped by --by and summing each counter over
     /// the sessions that recorded it. Native tokens follow each harness's own
     /// convention and add only within it; the disjoint categories (uncached
     /// input, cache read, cache write by TTL, output) add across harnesses.
@@ -1671,8 +1671,9 @@ enum Command {
         /// counted requests at or after it and before --to, either bound
         /// open. The whole recording is streamed and each request placed by
         /// its own timestamp: a Claude request by its first record, a Codex
-        /// request by its token count, a pi consumption event by its entry,
-        /// an OpenCode assistant message by its creation time. The answer has
+        /// request by its token count or, where the cumulative total never
+        /// moved for it, by its usage record, a pi consumption event by its
+        /// entry, an OpenCode assistant message by its creation time. The answer has
         /// the whole-session shape, its tokens, disjoint categories, cost,
         /// measurement coverage and completeness covering only the span, and
         /// adds `span`: the requested bounds, the `first` and `last` request
@@ -1681,11 +1682,12 @@ enum Command {
         /// `session_requests`. Spans conserve: the span before an instant
         /// and the span from it add up to the whole session per counter,
         /// within one accounting basis, and requests no span holds form the
-        /// remainder. A Codex span is the difference of the cumulative totals
-        /// at its boundaries, `since-reset` when a counter restarted inside
-        /// it; across a restart the whole its spans add up to sums every
-        /// request's move, while `usage --full` keeps the total recorded
-        /// since the last restart. A Claude cost-state or an OpenCode session
+        /// remainder. A Codex span sums its requests (`summed-requests`): each
+        /// token count's move of the cumulative total and the own usage of
+        /// each request the total never moved for (a remote compaction), so
+        /// its spans add up to the thread's total, `since-reset` where a
+        /// counter restarted, while `usage --full` keeps the recorded total.
+        /// A Claude cost-state or an OpenCode session
         /// total covers more than any span, so their spans sum requests and
         /// the recorded total is withheld with a note. A pi span keeps the
         /// active-branch counters and the retained-branch `consumption`
@@ -1716,7 +1718,8 @@ enum Command {
         /// 1-based and inclusive in recording order, either end open (`3..`,
         /// `..5`). Counted requests are the ones the whole-session figure
         /// sums: Claude request ids, Codex token counts that advance the
-        /// cumulative total, pi consumption events counted once, OpenCode
+        /// cumulative total and usage records it never moved for, pi
+        /// consumption events counted once, OpenCode
         /// assistant messages. The answer is the one --from describes.
         #[arg(
             long,
@@ -1825,7 +1828,7 @@ enum Command {
         /// identity-unestablished, exact-union).
         #[arg(long, value_name = "FILE")]
         prices: Option<PathBuf>,
-        /// Render the versioned tapes-usage/14 object, or tapes-usage-summary/9
+        /// Render the versioned tapes-usage/15 object, or tapes-usage-summary/10
         /// for a selection, as JSON. `session.model_observation` says
         /// whether more than one model and effort was observed (`mixed`) and
         /// whether a gap, partial read or budget kept the split incomplete

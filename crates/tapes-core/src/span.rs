@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use crate::measurement::{MeasurementCompleteness, MeasurementReason};
 use crate::model::Session;
 
-pub const SPANS_SCHEMA: &str = "tapes-usage-spans/3";
+pub const SPANS_SCHEMA: &str = "tapes-usage-spans/4";
 
 /// An instant a time span is bounded by.
 pub type Instant = DateTime<Utc>;

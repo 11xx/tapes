@@ -556,9 +556,11 @@ impl Backend for CodexBackend {
     }
 
     /// Each token count that moves the cumulative total is one request whose
-    /// tokens are the move, as a span reads it, and each `rate_limits` window
-    /// that reports a used percent is an observation of its pool: the account
-    /// `session_meta` names, the limit, the plan, the window and its length.
+    /// tokens are the move, and each usage record the total never moved for
+    /// is one spent at its own timestamp, as a span reads them. Each
+    /// `rate_limits` window that reports a used percent is an observation of
+    /// its pool: the account `session_meta` names, the limit, the plan, the
+    /// window and its length.
     fn allowance_timeline(&self, session: &Session) -> Result<Option<crate::allowance::Timeline>> {
         use crate::allowance::{PoolKey, RateObservation, TimedUse};
         use crate::window::QuotaKind;
@@ -567,8 +569,13 @@ impl Backend for CodexBackend {
         let mut timeline = crate::allowance::Timeline::default();
         let mut account = None::<String>;
         let mut previous = None::<Tokens>;
-        stream_jsonl(path, None, |value, _, _| {
+        let mut records = CodexRecords::placing_outside(path);
+        stream_jsonl(path, None, |value, _, revision| {
             super::validate_native_identity(value, "codex", &session.id)?;
+            records.observe(value, None, revision);
+            timeline
+                .requests
+                .extend(records.take_outside().iter().filter_map(outside_use));
             if value["type"] == "session_meta" && account.is_none() {
                 account = value["payload"]["creator_account_id"]
                     .as_str()
@@ -630,14 +637,19 @@ impl Backend for CodexBackend {
             }
             Ok(false)
         })?;
+        records.settle_end();
+        timeline
+            .requests
+            .extend(records.take_outside().iter().filter_map(outside_use));
         Ok(Some(timeline))
     }
 
-    /// A Codex request is a token count that moves the cumulative total, and
-    /// its share is the move: a span's figure is the difference of the
-    /// totals at its boundaries. A total that fell restarts the count, so the
-    /// request after it contributes its own total and qualifies its span
-    /// `since-reset`, and the whole is the sum of every request's move.
+    /// A Codex request is a token count that moves the cumulative total,
+    /// whose share is the move, or a usage record the total never moved for,
+    /// whose share is its own usage, placed by its own timestamp. A span sums
+    /// its requests' shares and the whole sums every request's. A total that
+    /// fell restarts the count, so the request after it contributes its own
+    /// total and qualifies its span `since-reset`.
     fn stream_spans(
         &self,
         session: &Session,
@@ -647,7 +659,7 @@ impl Backend for CodexBackend {
         let path = super::session_file_path(session)
             .ok_or_else(|| anyhow!("codex session {} has no file locator", session.id))?;
         let state = std::cell::RefCell::new((
-            CodexRecords::new(path, false),
+            CodexRecords::placing_outside(path),
             Placer::new(spans),
             CodexSpans::default(),
         ));
@@ -658,6 +670,9 @@ impl Backend for CodexBackend {
                 super::validate_native_identity(value, "codex", &session.id)?;
                 let (records, placer, figures) = &mut *state.borrow_mut();
                 records.observe(value, Some(span), revision);
+                for request in records.take_outside() {
+                    figures.place_outside(request, placer);
+                }
                 figures.observe(value, placer);
                 Ok(false)
             },
@@ -667,15 +682,21 @@ impl Backend for CodexBackend {
                 placer.unreadable();
             },
         )?;
-        let (mut records, placer, figures) = state.into_inner();
+        let (mut records, mut placer, mut figures) = state.into_inner();
+        records.settle_end();
+        for request in records.take_outside() {
+            figures.place_outside(request, &mut placer);
+        }
         for gap in &streamed.gaps {
             records.observe_read_gap(gap);
         }
         let mut whole = session.clone();
         records.apply(&mut whole);
         let mut notes = vec![
-            "A Codex span is the difference of the cumulative totals at its boundaries; \
-             its model split is not divided."
+            "A Codex span sums its requests: each token count's move of the cumulative \
+             total, and each usage record the total never moved for (a remote compaction, \
+             or a request no token count followed) by its own usage; its model split is \
+             not divided."
                 .to_owned(),
         ];
         notes.extend(figures.whole(&mut whole));
@@ -1346,9 +1367,12 @@ struct CodexUsageObserver {
     seen_response_id_bytes: usize,
     response_id_budget_exhausted: bool,
     previous_total: Option<Tokens>,
-    /// The usage of each request counted since the last token count that
-    /// carried a total, which settles whether the total moved for them.
-    unsettled: Vec<Tokens>,
+    /// Each request counted since the last token count that carried a
+    /// total, which settles whether the total moved for them.
+    unsettled: Vec<UsageRequest>,
+    /// Settled requests the total never moved for, held for a reader that
+    /// places them, until it takes them.
+    outside: Option<Vec<UsageRequest>>,
     modern_seen: bool,
     legacy_seen: bool,
     legacy_preceded_modern: bool,
@@ -1385,6 +1409,7 @@ impl CodexUsageObserver {
             response_id_budget_exhausted: false,
             previous_total: None,
             unsettled: Vec::new(),
+            outside: None,
             modern_seen: false,
             legacy_seen: false,
             legacy_preceded_modern: false,
@@ -1591,7 +1616,12 @@ impl CodexUsageObserver {
             ObservationClassification::Incomplete
         };
         if counted {
-            self.unsettled.push(usage);
+            self.unsettled.push(UsageRequest {
+                usage,
+                at: timestamp(&value["timestamp"]),
+                response_id: response_id.to_owned(),
+                model: self.current_model.clone(),
+            });
         }
         self.push_series(row, ObservationBasis::UsageRecord, counted);
     }
@@ -1605,14 +1635,28 @@ impl CodexUsageObserver {
         match change {
             Some(TotalChange::Unchanged) => {}
             Some(TotalChange::Incomparable) => return,
-            _ if unsettled.last() == last && last.is_some() => {
+            _ if last.is_some() && unsettled.last().map(|request| &request.usage) == last => {
                 unsettled.pop();
             }
             _ => return,
         }
-        for usage in &unsettled {
-            self.modern.leave_total(usage);
+        self.leave_total(unsettled);
+    }
+
+    fn leave_total(&mut self, requests: Vec<UsageRequest>) {
+        for request in &requests {
+            self.modern.leave_total(&request.usage);
         }
+        if let Some(outside) = &mut self.outside {
+            outside.extend(requests);
+        }
+    }
+
+    /// No token count followed the requests still unsettled at the end of a
+    /// read, so the total never moved for them.
+    fn settle_end(&mut self) {
+        let unsettled = std::mem::take(&mut self.unsettled);
+        self.leave_total(unsettled);
     }
 
     fn observe_legacy(&mut self, value: &Value, span: Option<ByteSpan>, revision: &str) {
@@ -1747,11 +1791,7 @@ impl CodexUsageObserver {
     }
 
     fn finish(mut self) -> CodexUsageFacts {
-        // No token count followed these requests, so the total never moved
-        // for them.
-        for usage in std::mem::take(&mut self.unsettled) {
-            self.modern.leave_total(&usage);
-        }
+        self.settle_end();
         let basis = if self.modern_seen {
             ObservationBasis::UsageRecord
         } else {
@@ -1863,17 +1903,18 @@ impl CodexUsageObserver {
     }
 }
 
-/// Codex span figures, each the moves of the cumulative total its requests
-/// made, with what the span's own token counts reported beside them.
-/// `moves` sums every request's move, the whole the figures add up to.
+/// Codex span figures, each the sum of its requests' shares, with what the
+/// span's own token counts reported beside them. `requests` sums every
+/// request's share, the whole the figures add up to.
 #[derive(Default)]
 struct CodexSpans {
     previous: Option<Tokens>,
     response: Option<(String, Option<Tokens>)>,
     model: Option<Model>,
     figures: BTreeMap<usize, CodexSpanFigure>,
-    moves: TokenTotals,
+    requests: TokenTotals,
     restarts: usize,
+    outside: usize,
 }
 
 #[derive(Default)]
@@ -1941,7 +1982,7 @@ impl CodexSpans {
                 moved(base.cache_read, total.cache_read),
                 moved(base.cache_write, total.cache_write),
             );
-            self.moves
+            self.requests
                 .add(request.0, request.1, request.2, request.3, request.4);
             self.restarts += usize::from(reset);
             for index in placer.request(at, response.as_deref()) {
@@ -1968,32 +2009,79 @@ impl CodexSpans {
         }
     }
 
-    /// A restarted total counts only the requests after the restart, so the
-    /// whole the figures add up to is every request's move, `since-reset`,
-    /// beside the total recorded since the restart that `usage --full`
-    /// keeps. Without a restart the two are the same total.
-    fn whole(&self, whole: &mut Session) -> Option<String> {
-        if self.restarts == 0 {
-            return None;
+    /// A usage record the cumulative total never moved for is a request of
+    /// its own, measured by its own usage.
+    fn place_outside(&mut self, request: UsageRequest, placer: &mut Placer) {
+        let usage = &request.usage;
+        self.requests.add(
+            usage.input,
+            usage.output,
+            usage.reasoning,
+            usage.cache_read,
+            usage.cache_write,
+        );
+        self.outside += 1;
+        for index in placer.request(request.at, Some(&request.response_id)) {
+            let figure = self.figures.entry(index).or_default();
+            figure.tokens.add(
+                usage.input,
+                usage.output,
+                usage.reasoning,
+                usage.cache_read,
+                usage.cache_write,
+            );
+            figure.model.clone_from(&request.model);
+            if let Some(model) = &request.model {
+                figure.models.insert(model.id.clone());
+            }
         }
-        let (tokens, measurement_coverage) = self.moves.clone().finish_covered();
+    }
+
+    /// The whole the figures add up to sums every request's share. It
+    /// differs from the total `usage --full` keeps where the total restarted
+    /// (that total covers the requests since the last restart) or never
+    /// moved for a request.
+    fn whole(&self, whole: &mut Session) -> Vec<String> {
+        let (tokens, measurement_coverage) = self.requests.clone().finish_covered();
+        let coverage = if self.restarts > 0 {
+            AccountingCoverage::SinceReset
+        } else {
+            whole
+                .accounting
+                .as_ref()
+                .map_or(AccountingCoverage::Session, |accounting| {
+                    accounting.coverage
+                })
+        };
         whole.accounting = accounting_for(
             tokens.as_ref(),
             None,
             &measurement_coverage,
-            AccountingBasis::RecordedTotal,
-            AccountingCoverage::SinceReset,
+            AccountingBasis::SummedRequests,
+            coverage,
         );
         whole.tokens = tokens;
         let detail = whole.usage_detail.get_or_insert_with(Default::default);
         detail.measurement_incomplete = known_subtotal_notes(&measurement_coverage);
         detail.measurement_coverage = measurement_coverage;
-        Some(format!(
-            "Codex's cumulative total restarted {} time(s); the whole here sums every \
-             request's move across the restarts, while `usage --full` keeps the total \
-             recorded since the last restart.",
-            self.restarts
-        ))
+        let mut notes = Vec::new();
+        if self.restarts > 0 {
+            notes.push(format!(
+                "Codex's cumulative total restarted {} time(s); the whole here sums every \
+                 request across the restarts, while `usage --full` keeps the total recorded \
+                 since the last restart.",
+                self.restarts
+            ));
+        }
+        if self.outside > 0 {
+            notes.push(format!(
+                "{} request(s) the cumulative total never moved for are counted by their own \
+                 usage; the recorded total `usage --full` keeps omits them, and its \
+                 `attribution.outside_total` names them.",
+                self.outside
+            ));
+        }
+        notes
     }
 
     fn finish(mut self, session: &Session, whole: &Session, count: usize) -> Vec<Session> {
@@ -2006,7 +2094,7 @@ impl CodexSpans {
                     tokens.as_ref(),
                     None,
                     &measurement_coverage,
-                    AccountingBasis::RecordedTotal,
+                    AccountingBasis::SummedRequests,
                     if figure.since_reset {
                         AccountingCoverage::SinceReset
                     } else {
@@ -2124,6 +2212,34 @@ fn compare_totals(previous: &Tokens, current: &Tokens) -> TotalChange {
     }
 }
 
+/// A request the cumulative total never moved for, spent when it was
+/// recorded.
+fn outside_use(request: &UsageRequest) -> Option<crate::allowance::TimedUse> {
+    let usage = &request.usage;
+    let cache_read = usage.cache_read.unwrap_or(0);
+    let cache_write = usage.cache_write.unwrap_or(0);
+    Some(crate::allowance::TimedUse {
+        at: request.at?,
+        uncached_input: usage
+            .input
+            .unwrap_or(0)
+            .saturating_sub(cache_read + cache_write),
+        cache_read,
+        cache_write,
+        output: usage.output.unwrap_or(0),
+        reasoning: usage.reasoning.unwrap_or(0),
+    })
+}
+
+/// A counted usage record: its own usage, when it was recorded, and the
+/// model in effect.
+struct UsageRequest {
+    usage: Tokens,
+    at: Option<chrono::DateTime<chrono::Utc>>,
+    response_id: String,
+    model: Option<Model>,
+}
+
 struct CodexRecords {
     observer: CodexUsageObserver,
 }
@@ -2133,6 +2249,28 @@ impl CodexRecords {
         Self {
             observer: CodexUsageObserver::new(path, read_window, None),
         }
+    }
+
+    /// Records whose reader places the requests the cumulative total never
+    /// moved for, taking them as each record settles them.
+    fn placing_outside(path: &Path) -> Self {
+        let mut records = Self::new(path, false);
+        records.observer.outside = Some(Vec::new());
+        records
+    }
+
+    /// The requests settled outside the total since the last call.
+    fn take_outside(&mut self) -> Vec<UsageRequest> {
+        self.observer
+            .outside
+            .as_mut()
+            .map(std::mem::take)
+            .unwrap_or_default()
+    }
+
+    /// Settle what the end of the read leaves unsettled.
+    fn settle_end(&mut self) {
+        self.observer.settle_end();
     }
 
     fn with_series(path: &Path, read_window: bool, options: UsageObservationOptions) -> Self {

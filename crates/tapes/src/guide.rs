@@ -505,7 +505,7 @@ PROBE BEFORE EXPORTING
   Claude, Codex, or Pi recording twice, pairing past the read bound and
   writing each event as it pairs, with the same filters and counts.
 
-  usage answers where a session's quota went as tapes-usage/14: its recorded
+  usage answers where a session's quota went as tapes-usage/15: its recorded
   launch mode when known, tokens, cost, accounting, turns, and any by-model attribution the source can
   support — Claude's recorded cost-state, Codex's request observations, or
   pi's per-message model each qualified by the thinking level in effect. Read
@@ -530,8 +530,9 @@ PROBE BEFORE EXPORTING
   `--requests FIRST..LAST` the session's counted requests 1-based and
   inclusive in recording order. Both stream the whole recording and place
   each counted request by its own timestamp: a Claude request id by its first
-  record, a Codex token count that moves the cumulative total, a pi
-  consumption event counted once, an OpenCode assistant message by its
+  record, a Codex token count that moves the cumulative total or a usage
+  record the total never moved for (a remote compaction, or a request no token
+  count followed), a pi consumption event counted once, an OpenCode assistant message by its
   creation time. The answer keeps the whole-session shape and vocabulary and
   adds `span`: the requested bounds, the `first` and `last` request placed
   (ordinal, timestamp, and the harness's own request id where it records
@@ -541,12 +542,14 @@ PROBE BEFORE EXPORTING
   remainder add up to the whole session per counter and disjoint category
   within one accounting basis, so the span before an instant and the span
   from it add up to `usage --full`. A request in two spans counts in each and
-  is `overlapped`. A Codex span is the difference of the cumulative totals at
-  its boundaries, `since-reset` when a counter restarted inside it; across a
-  restart, as a resumed `codex exec` process starts its total again, the
-  whole the spans add up to sums every request's move, `since-reset`, while
-  `usage --full` keeps the total recorded since the last restart. A Claude
-  cost-state is the running total of one run and an OpenCode session total
+  is `overlapped`. A Codex span sums its requests, `summed-requests`: a token
+  count's share is its move of the cumulative total and a usage record the
+  total never moved for counts its own usage, so the whole the spans add up
+  to is the thread's total, as `thread_token_usage` records it. A span is
+  `since-reset` when the counter restarted inside it, as a resumed `codex
+  exec` process starts its total again. `usage --full` keeps the recorded
+  total, which omits the requests `attribution.outside_total` names and,
+  after a restart, covers only the requests since it. A Claude cost-state is the running total of one run and an OpenCode session total
   counts requests no message records, so no span divides either: their
   spans, and the whole they add up to, sum requests, and the recorded total is
   withheld with a note. A pi span keeps the active-branch counters and the
@@ -556,7 +559,7 @@ PROBE BEFORE EXPORTING
   unrecognized usage the read cannot place for or against a span is counted
   under `unplaced` and qualifies it `unreadable-record`, `stopped-attempt` or
   `unrecognized-usage`, so a span the read could not cover is never complete.
-  The library answers several spans in one pass, as tapes-usage-spans/3: a
+  The library answers several spans in one pass, as tapes-usage-spans/4: a
   figure per span, the `remainder`, and the `whole` in the spans' basis.
   Money beyond what a harness wrote comes from a price table the caller
   supplies; tapes holds no prices. `usage --prices FILE` reads one, else the
@@ -803,7 +806,8 @@ PROBE BEFORE EXPORTING
   message order, or a part that names no message, takes a position after the
   last message.
   A harness can attach only some accounting bases: Claude summed-requests or
-  recorded-total, Codex and OpenCode recorded-total, Pi summed-requests.
+  recorded-total, Codex and OpenCode recorded-total, Pi summed-requests. Their
+  span figures, and the windows built from them, sum requests.
   The text output names the same reasons, one line per incomplete figure:
   `completeness: input: missing-counter; output, cost: stopped-attempt` lists
   each distinct reason set once with the counters that share it, and `all
@@ -1072,7 +1076,7 @@ PROBE BEFORE EXPORTING
   its own first activity and not the parent's launch.
 
   Given a scope or a listing filter instead of a session, usage answers that
-  whole selection as tapes-usage-summary/9, using the flags list and export
+  whole selection as tapes-usage-summary/10, using the flags list and export
   take and grouping by --by (harness and model unless told otherwise). It sums
   the counters the listing already carries, so nothing is re-read. Read
   counted before a sum: it says how many of a group's sessions recorded that
