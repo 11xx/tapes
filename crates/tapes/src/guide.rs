@@ -560,7 +560,12 @@ PROBE BEFORE EXPORTING
   under `unplaced` and qualifies it `unreadable-record`, `stopped-attempt` or
   `unrecognized-usage`, so a span the read could not cover is never complete.
   The library answers several spans in one pass, as tapes-usage-spans/4: a
-  figure per span, the `remainder`, and the `whole` in the spans' basis.
+  figure per span, the `remainder`, and the `whole` in the spans' basis. The
+  whole-recording read the spans replay also carries, without another pass,
+  the request timeline the spans count (every counted request with its
+  ordinal, timestamp or none, and id) and the working stretches `stats
+  --idle` cuts from the same turns, each holding the timed requests that
+  fall in it.
   Money beyond what a harness wrote comes from a price table the caller
   supplies; tapes holds no prices. `usage --prices FILE` reads one, else the
   file `TAPES_PRICES` names, else `$XDG_CONFIG_HOME/tapes/prices.toml`

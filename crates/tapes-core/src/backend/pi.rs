@@ -445,11 +445,25 @@ impl Backend for PiBackend {
         let mut trailing_record = None;
         let mut unmapped = UnmappedTally::default();
         let mut thinking = None;
+        // Its requests are counted over every entry, as a span read places
+        // them.
+        let mut requests = PiRequests::default();
+        let mut placer = Placer::new(&[]);
+        let mut turn_times = Vec::new();
+        let mut turn = super::timed(&mut turn_times, turn);
         let read = stream_jsonl(path, Some(first.pin()), |value, span, revision| {
             super::validate_native_identity(value, "pi", &session.id)?;
             if value["type"] == "session" {
                 count_unmapped(&mut unmapped, value);
                 return Ok(false);
+            }
+            if let Some(consumed) = pi_consumed(value) {
+                requests.place(
+                    value["id"].as_str(),
+                    &consumed,
+                    timestamp(&value["timestamp"]),
+                    &mut placer,
+                );
             }
             let entry = position;
             position += 1;
@@ -481,6 +495,7 @@ impl Backend for PiBackend {
             }
             Ok(produced)
         })?;
+        drop(turn);
         Ok(StreamedTranscript {
             coordinates: super::StreamCoordinates::FileBytes,
             source_length: read.source_length,
@@ -496,6 +511,8 @@ impl Backend for PiBackend {
             unrecognized_usage: 0,
             kinds: None,
             folded: None,
+            turn_times,
+            requests: Some(placer.finish().timeline()),
         })
     }
 
@@ -580,41 +597,15 @@ impl Backend for PiBackend {
         let recording = self.stream_entries(session, read)?;
         let mut placer = Placer::new(spans);
         let mut held = vec![Vec::new(); recording.entries.len()];
-        let mut by_entry = HashMap::<&str, Vec<usize>>::new();
-        let mut by_response = HashMap::<&(String, String), Vec<usize>>::new();
+        let mut requests = PiRequests::default();
         let mut gaps = recording.gaps.iter().peekable();
         for (position, entry) in recording.entries.iter().enumerate() {
             while gaps.next_if(|gap| gap.span.start < entry.start).is_some() {
                 placer.unreadable();
             }
             if let Some(consumed) = &entry.consumed {
-                let id = entry.id.as_deref().filter(|id| !id.is_empty());
-                let repeated = id
-                    .and_then(|id| by_entry.get(id))
-                    .or_else(|| {
-                        consumed
-                            .response
-                            .as_ref()
-                            .and_then(|response| by_response.get(response))
-                    })
-                    .cloned();
-                let figures = repeated.unwrap_or_else(|| {
-                    let named = consumed
-                        .response
-                        .as_ref()
-                        .map(|(_, response)| response.as_str())
-                        .or(id);
-                    placer.request(entry.timestamp, named)
-                });
-                if let Some(id) = id {
-                    by_entry.entry(id).or_insert_with(|| figures.clone());
-                }
-                if let Some(response) = &consumed.response {
-                    by_response
-                        .entry(response)
-                        .or_insert_with(|| figures.clone());
-                }
-                held[position] = figures;
+                held[position] =
+                    requests.place(entry.id.as_deref(), consumed, entry.timestamp, &mut placer);
             } else if entry.unread_usage {
                 held[position] =
                     placer.record(entry.timestamp, MeasurementReason::UnrecognizedUsage);
@@ -1336,6 +1327,57 @@ impl PiUsage {
             measurement_incomplete: totals.incomplete,
             measurement_completeness: totals.measurement_completeness,
         }
+    }
+}
+
+/// The consumption events of a pi recording, placed one entry at a time: an
+/// entry repeating an event already counted, by its entry id or by its
+/// provider's response identity, joins that event's figures instead of
+/// counting again. The span read and the transcript read count requests
+/// through here.
+#[derive(Default)]
+struct PiRequests {
+    by_entry: HashMap<String, Vec<usize>>,
+    by_response: HashMap<(String, String), Vec<usize>>,
+}
+
+impl PiRequests {
+    fn place(
+        &mut self,
+        id: Option<&str>,
+        consumed: &PiConsumed,
+        at: Option<chrono::DateTime<chrono::Utc>>,
+        placer: &mut Placer,
+    ) -> Vec<usize> {
+        let id = id.filter(|id| !id.is_empty());
+        let repeated = id
+            .and_then(|id| self.by_entry.get(id))
+            .or_else(|| {
+                consumed
+                    .response
+                    .as_ref()
+                    .and_then(|response| self.by_response.get(response))
+            })
+            .cloned();
+        let figures = repeated.unwrap_or_else(|| {
+            let named = consumed
+                .response
+                .as_ref()
+                .map(|(_, response)| response.as_str())
+                .or(id);
+            placer.request(at, named)
+        });
+        if let Some(id) = id {
+            self.by_entry
+                .entry(id.to_owned())
+                .or_insert_with(|| figures.clone());
+        }
+        if let Some(response) = &consumed.response {
+            self.by_response
+                .entry(response.clone())
+                .or_insert_with(|| figures.clone());
+        }
+        figures
     }
 }
 

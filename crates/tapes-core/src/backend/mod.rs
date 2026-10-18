@@ -1536,6 +1536,25 @@ pub struct StreamedTranscript {
     /// The session's accounting folded from the same records as the turns,
     /// for a backend that folds it while it streams.
     pub(crate) folded: Option<Box<FoldedSession>>,
+    /// The stamps of the turns the read handed over, in order, which
+    /// working stretches are cut from.
+    pub(crate) turn_times: Vec<DateTime<Utc>>,
+    /// Every request the read counted, as its backend's span read places
+    /// them, for a backend that counts while it streams.
+    pub(crate) requests: Option<crate::span::RequestTimeline>,
+}
+
+/// `turn`, recording the stamp of each turn it hands over into `times`.
+pub(crate) fn timed<'a>(
+    times: &'a mut Vec<DateTime<Utc>>,
+    turn: &'a mut dyn FnMut(Turn) -> Result<()>,
+) -> impl FnMut(Turn) -> Result<()> + 'a {
+    move |handed: Turn| {
+        if let Some(ts) = handed.ts {
+            times.push(ts);
+        }
+        turn(handed)
+    }
 }
 
 /// The session a read's records state, and the session the read was asked
@@ -1589,6 +1608,8 @@ impl StreamedTranscript {
             unrecognized_usage: 0,
             kinds: None,
             folded: None,
+            turn_times: Vec::new(),
+            requests: None,
         }
     }
 

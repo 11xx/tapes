@@ -49,6 +49,7 @@ pub mod search;
 pub mod span;
 pub mod stats;
 pub mod stats_summary;
+pub mod stretch;
 #[cfg(test)]
 mod test_support;
 pub mod timeline;

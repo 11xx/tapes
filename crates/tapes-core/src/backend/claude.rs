@@ -639,6 +639,11 @@ impl Backend for ClaudeBackend {
         // The session's accounting folds from the same records as the turns,
         // as `stream_session` would replay them.
         let mut records = ClaudeRecords::default();
+        // Its requests are counted as a span read places them.
+        let mut requests = ClaudeRequests::default();
+        let mut placer = Placer::new(&[]);
+        let mut turn_times = Vec::new();
+        let mut turn = super::timed(&mut turn_times, turn);
         let mut last_end = 0;
         let read = stream_jsonl(path, Some(opening.pin()), |value, span, revision| {
             super::validate_native_identity(value, "claude", &session.id)?;
@@ -647,6 +652,7 @@ impl Backend for ClaudeBackend {
             }
             last_end = span.end;
             records.observe(value);
+            requests.place(value, &mut placer);
             let mut parsed = parse_turns(value);
             if parsed.is_empty() {
                 count_unmapped(&mut unmapped, value);
@@ -662,6 +668,7 @@ impl Backend for ClaudeBackend {
             }
             Ok(produced)
         })?;
+        drop(turn);
         if !read.gaps.is_empty() {
             records.selections.interrupt();
         }
@@ -685,6 +692,8 @@ impl Backend for ClaudeBackend {
                 asked: session.clone(),
                 whole,
             })),
+            turn_times,
+            requests: Some(placer.finish().timeline()),
         })
     }
 
@@ -760,7 +769,7 @@ impl Backend for ClaudeBackend {
             .map(|_| ClaudeRecords::default())
             .collect::<Vec<_>>();
         let mut records = ClaudeRecords::default();
-        let mut placed = HashMap::<String, Vec<usize>>::new();
+        let mut requests = ClaudeRequests::default();
         let mut cost_states = 0usize;
         let mut last_end = 0;
         stream_jsonl(&path, Some(read.pin()?), |value, span, _| {
@@ -777,16 +786,8 @@ impl Backend for ClaudeBackend {
                 return Ok(false);
             }
             records.observe(value);
-            let at = timestamp(&value["timestamp"]);
-            let held = match span_item(value) {
-                SpanItem::Request(Some(id)) => placed
-                    .entry(id.to_owned())
-                    .or_insert_with(|| placer.request(at, Some(id)))
-                    .clone(),
-                SpanItem::Request(None) => placer.request(at, None),
-                SpanItem::Failure => placer.record(at, MeasurementReason::StoppedAttempt),
-                SpanItem::Unrecognized => placer.record(at, MeasurementReason::UnrecognizedUsage),
-                SpanItem::Other => return Ok(false),
+            let Some(held) = requests.place(value, &mut placer) else {
+                return Ok(false);
             };
             for index in held {
                 figures[index].observe(value);
@@ -952,6 +953,8 @@ impl Backend for ClaudeBackend {
                 unrecognized_usage: 0,
                 kinds: None,
                 folded: None,
+                turn_times: Vec::new(),
+                requests: None,
             },
         })
     }
@@ -1870,6 +1873,38 @@ impl RequestTokens {
             ),
         }
         self.dimensions.add(dimensions);
+    }
+}
+
+/// The requests of a Claude recording, placed one record at a time: a
+/// request id counts once, at its first record, and every later record of
+/// it joins the figures that hold it. The span read and the transcript read
+/// count requests through here.
+#[derive(Default)]
+struct ClaudeRequests {
+    placed: HashMap<String, Vec<usize>>,
+}
+
+impl ClaudeRequests {
+    /// The figures a record joins, or nothing when it is no request, failed
+    /// attempt or unread usage. A cost-state is a running total, not a
+    /// request.
+    fn place(&mut self, value: &Value, placer: &mut Placer) -> Option<Vec<usize>> {
+        if value["type"] == "cost-state" {
+            return None;
+        }
+        let at = timestamp(&value["timestamp"]);
+        Some(match span_item(value) {
+            SpanItem::Request(Some(id)) => self
+                .placed
+                .entry(id.to_owned())
+                .or_insert_with(|| placer.request(at, Some(id)))
+                .clone(),
+            SpanItem::Request(None) => placer.request(at, None),
+            SpanItem::Failure => placer.record(at, MeasurementReason::StoppedAttempt),
+            SpanItem::Unrecognized => placer.record(at, MeasurementReason::UnrecognizedUsage),
+            SpanItem::Other => return None,
+        })
     }
 }
 

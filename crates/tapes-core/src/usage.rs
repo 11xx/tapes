@@ -24,7 +24,8 @@ use crate::model::{
 };
 use crate::overlap::{CopyEvidence, Disjointness, Overlap, RelatedSessions, UsageOverlap};
 use crate::pricing::{EstimateSum, ListPriceEstimate, PriceTable, PricedFigure};
-use crate::span::{SpanPlacement, SpanSessions, SPANS_SCHEMA};
+use crate::span::{RequestTimeline, SpanPlacement, SpanSessions, SPANS_SCHEMA};
+use crate::stretch::{Stretch, StretchFold};
 
 pub const USAGE_SCHEMA: &str = "tapes-usage/15";
 
@@ -947,6 +948,28 @@ pub struct SpanUsage {
     pub whole: UsageView,
     #[serde(skip_serializing_if = "is_zero")]
     pub overlapped: usize,
+}
+
+/// Every request `read` counted, in recording order, as its backend's span
+/// read places them, so a span read that replays `read` counts the same
+/// requests under the same ordinals. Taken from the read itself, without
+/// another pass. Absent for a read that counted none while it streamed, such
+/// as a pin rebuilt with [`StreamedTranscript::frozen`].
+pub fn timeline(read: &StreamedTranscript) -> Option<&RequestTimeline> {
+    read.requests.as_ref()
+}
+
+/// The working stretches of `read` at an idle threshold of `idle_ms`: its
+/// timestamped turns, in the order the read handed them over, cut wherever a
+/// gap exceeds the threshold, exactly as `stats --idle` cuts them. Each holds
+/// the timed requests of [`timeline`] that fall in it; an untimed request
+/// belongs to none. Taken from the read itself, without another pass.
+pub fn stretches(read: &StreamedTranscript, idle_ms: i64) -> Vec<Stretch> {
+    let mut fold = StretchFold::new(idle_ms);
+    for ts in &read.turn_times {
+        fold.add(*ts);
+    }
+    fold.finish(timeline(read))
 }
 
 /// Project a span read into its answer. `turns` and `read` describe the

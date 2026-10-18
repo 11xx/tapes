@@ -965,6 +965,8 @@ impl OpenCodeBackend {
             unrecognized_usage,
             kinds: None,
             folded: None,
+            turn_times: Vec::new(),
+            requests: None,
         })
     }
 
@@ -1091,6 +1093,8 @@ impl OpenCodeBackend {
             unrecognized_usage: 0,
             kinds: None,
             folded: None,
+            turn_times: Vec::new(),
+            requests: None,
         })
     }
 }
@@ -1347,10 +1351,25 @@ impl Backend for OpenCodeBackend {
         if replay.is_some() {
             self.replayable(session)?;
         }
-        if self.uses_database() {
-            return self.database_stream(session, turn, &mut |_| Ok(()));
-        }
-        self.api_stream(session, turn, &mut |_| Ok(()))
+        let mut turn_times = Vec::new();
+        let mut turn = super::timed(&mut turn_times, turn);
+        // Its requests are counted as a span read places them.
+        let mut placer = Placer::new(&[]);
+        let mut count = |item: MessageItem<'_>| {
+            if let MessageItem::Message(message) = item {
+                place_message(message, &mut placer);
+            }
+            Ok(())
+        };
+        let mut read = if self.uses_database() {
+            self.database_stream(session, &mut turn, &mut count)?
+        } else {
+            self.api_stream(session, &mut turn, &mut count)?
+        };
+        drop(turn);
+        read.turn_times = turn_times;
+        read.requests = Some(placer.finish().timeline());
+        Ok(read)
     }
 
     /// The session table names a fork's source in `fork_session_id` and a
@@ -1450,14 +1469,10 @@ impl Backend for OpenCodeBackend {
         let mut observe = |item: MessageItem<'_>| {
             let held = match item {
                 MessageItem::Message(message) => {
-                    if message["type"] != "assistant" {
+                    let Some(held) = place_message(message, &mut placer) else {
                         return Ok(());
-                    }
+                    };
                     whole.add(message);
-                    let held = placer.request(
-                        epoch_millis(&message["time"]["created"]),
-                        message["id"].as_str(),
-                    );
                     for index in &held {
                         figures[*index].add(message);
                     }
@@ -2742,6 +2757,18 @@ fn required_string(value: &Value, field: &str) -> Result<String> {
         .as_str()
         .map(str::to_owned)
         .ok_or_else(|| anyhow!("opencode record has no {field}"))
+}
+
+/// An OpenCode request is an assistant message, placed by its creation
+/// time; the figures that hold it, or nothing for any other message. The
+/// span read and the transcript read count requests through here.
+fn place_message(message: &Value, placer: &mut Placer) -> Option<Vec<usize>> {
+    (message["type"] == "assistant").then(|| {
+        placer.request(
+            epoch_millis(&message["time"]["created"]),
+            message["id"].as_str(),
+        )
+    })
 }
 
 fn epoch_millis(value: &Value) -> Option<chrono::DateTime<Utc>> {

@@ -137,6 +137,24 @@ impl SpanPlacement {
     }
 }
 
+/// Every counted request of one read, in recording order, as the span
+/// placer counts them: its ordinal, its timestamp where it has one, and the
+/// harness's own id where it records one.
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+pub struct RequestTimeline {
+    pub requests: Vec<PlacedRequest>,
+}
+
+impl RequestTimeline {
+    /// The requests no usable timestamp places in time.
+    pub fn untimed(&self) -> usize {
+        self.requests
+            .iter()
+            .filter(|request| request.timestamp.is_none())
+            .count()
+    }
+}
+
 /// The most recent placed position a record follows.
 #[derive(Clone, Default)]
 struct Position {
@@ -159,6 +177,8 @@ pub(crate) struct Placer {
     position: Position,
     pending: Vec<Pending>,
     overlapped: usize,
+    /// Every request placed, in order.
+    requests: Vec<PlacedRequest>,
 }
 
 impl Placer {
@@ -178,6 +198,7 @@ impl Placer {
             position: Position::default(),
             pending: Vec::new(),
             overlapped: 0,
+            requests: Vec::new(),
         }
     }
 
@@ -230,6 +251,7 @@ impl Placer {
         for index in &held {
             self.placements[*index].add(&request);
         }
+        self.requests.push(request);
         if undecided {
             self.pending.push(Pending {
                 before: self.position.clone(),
@@ -313,6 +335,7 @@ impl Placer {
             placements: self.placements,
             qualified: self.qualified,
             overlapped: self.overlapped,
+            requests: self.requests,
         }
     }
 }
@@ -322,9 +345,17 @@ pub(crate) struct Placed {
     placements: Vec<SpanPlacement>,
     qualified: Vec<MeasurementCompleteness>,
     overlapped: usize,
+    requests: Vec<PlacedRequest>,
 }
 
 impl Placed {
+    /// Every request placed, in order.
+    pub(crate) fn timeline(self) -> RequestTimeline {
+        RequestTimeline {
+            requests: self.requests,
+        }
+    }
+
     /// How many figures were placed: one per span and the remainder.
     pub(crate) fn figures(&self) -> usize {
         self.placements.len()
@@ -341,6 +372,8 @@ pub struct SpanSessions {
     pub whole: Session,
     /// Requests more than one span holds.
     pub overlapped: usize,
+    /// Every request the figures place, in recording order.
+    pub timeline: RequestTimeline,
     pub notes: Vec<String>,
 }
 
@@ -374,6 +407,9 @@ impl SpanSessions {
             remainder,
             whole,
             overlapped: placed.overlapped,
+            timeline: RequestTimeline {
+                requests: placed.requests,
+            },
             notes,
         }
     }

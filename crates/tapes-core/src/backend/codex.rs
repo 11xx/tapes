@@ -460,15 +460,23 @@ impl Backend for CodexBackend {
         let mut terminal = None;
         let mut launch = None;
         let mut reader = CodexTurns::default();
+        let mut turn_times = Vec::new();
+        let mut turn = super::timed(&mut turn_times, turn);
         // The session's accounting folds from the same records and gaps as
-        // the turns, as `stream_session` would replay them.
-        let records = std::cell::RefCell::new(CodexRecords::new(path, false));
+        // the turns, as `stream_session` would replay them, and its requests
+        // are counted as a span read places them.
+        let records = std::cell::RefCell::new(CodexRecords::placing_outside(path));
+        let counted = std::cell::RefCell::new((Placer::new(&[]), CodexSpans::default()));
         let read = stream_jsonl_with_gaps(
             path,
             replay_pin(replay)?,
             |value, span, revision| {
                 super::validate_native_identity(value, "codex", &session.id)?;
-                records.borrow_mut().observe(value, Some(span), revision);
+                let mut records = records.borrow_mut();
+                records.observe(value, Some(span), revision);
+                let (placer, figures) = &mut *counted.borrow_mut();
+                figures.place_record(&mut records, value, placer);
+                drop(records);
                 if value["type"] == "session_meta" {
                     launch = codex_launch(value);
                 }
@@ -486,7 +494,10 @@ impl Backend for CodexBackend {
             },
             |gap| records.borrow_mut().observe_gap(gap),
         )?;
+        drop(turn);
         let mut records = records.into_inner();
+        let (mut placer, mut figures) = counted.into_inner();
+        figures.place_end(&mut records, &mut placer);
         for gap in &read.gaps {
             records.observe_read_gap(gap);
         }
@@ -510,6 +521,8 @@ impl Backend for CodexBackend {
                 asked: session.clone(),
                 whole,
             })),
+            turn_times,
+            requests: Some(placer.finish().timeline()),
         })
     }
 
@@ -670,10 +683,7 @@ impl Backend for CodexBackend {
                 super::validate_native_identity(value, "codex", &session.id)?;
                 let (records, placer, figures) = &mut *state.borrow_mut();
                 records.observe(value, Some(span), revision);
-                for request in records.take_outside() {
-                    figures.place_outside(request, placer);
-                }
-                figures.observe(value, placer);
+                figures.place_record(records, value, placer);
                 Ok(false)
             },
             |gap| {
@@ -683,10 +693,7 @@ impl Backend for CodexBackend {
             },
         )?;
         let (mut records, mut placer, mut figures) = state.into_inner();
-        records.settle_end();
-        for request in records.take_outside() {
-            figures.place_outside(request, &mut placer);
-        }
+        figures.place_end(&mut records, &mut placer);
         for gap in &streamed.gaps {
             records.observe_read_gap(gap);
         }
@@ -2006,6 +2013,24 @@ impl CodexSpans {
             for index in placer.record(at, MeasurementReason::UnrecognizedUsage) {
                 self.figures.entry(index).or_default().unrecognized_usage += 1;
             }
+        }
+    }
+
+    /// Place what one record establishes, once `records` has observed it:
+    /// the requests it settled outside the cumulative total, then its own.
+    /// The span read and the transcript read count requests through here.
+    fn place_record(&mut self, records: &mut CodexRecords, value: &Value, placer: &mut Placer) {
+        for request in records.take_outside() {
+            self.place_outside(request, placer);
+        }
+        self.observe(value, placer);
+    }
+
+    /// Place the requests the end of the read leaves outside the total.
+    fn place_end(&mut self, records: &mut CodexRecords, placer: &mut Placer) {
+        records.settle_end();
+        for request in records.take_outside() {
+            self.place_outside(request, placer);
         }
     }
 

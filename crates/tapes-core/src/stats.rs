@@ -19,6 +19,7 @@ use crate::model::{
     Accounting, Cost, KindDeclaration, ReadEvidence, RecordRef, Role, Session, TerminalObservation,
     TextTailEvidence, Tokens, Transcript, Truncation, Turn, TurnKind,
 };
+use crate::stretch::StretchFold;
 use crate::usage::{self, ModelUsage, TurnCoverage, UsageSession, UsageView};
 
 pub const DEFAULT_IDLE_MS: i64 = 45 * 60 * 1000;
@@ -325,7 +326,7 @@ impl Counted {
         let usage = usage::usage(&transcript);
         let kinds = transcript.kinds.clone();
         let mut turns = TurnFold::default();
-        turns.clock.idle_threshold = idle;
+        turns.clock.stretches = StretchFold::new(idle);
         for turn in &transcript.turns {
             turns.add(turn);
         }
@@ -354,7 +355,7 @@ impl Counted {
     ) -> Result<Self> {
         let mut tally = usage::TurnTally::default();
         let mut turns = TurnFold::default();
-        turns.clock.idle_threshold = idle;
+        turns.clock.stretches = StretchFold::new(idle);
         let mut index = PairIndex::default();
         backend.replayable(session)?;
         let read = crate::stream_numbered(backend, session, None, &mut |turn| {
@@ -584,12 +585,10 @@ impl AssistantClock {
 
 /// The recorded clock, accumulated over the turns that carry a timestamp.
 struct Clock {
-    idle_threshold: i64,
     active: i64,
-    stretches: usize,
+    stretches: StretchFold,
     first: Option<DateTime<Utc>>,
     last: Option<DateTime<Utc>>,
-    previous: Option<DateTime<Utc>>,
     between_turns_max: Option<i64>,
     counted: usize,
 }
@@ -597,12 +596,10 @@ struct Clock {
 impl Default for Clock {
     fn default() -> Self {
         Self {
-            idle_threshold: DEFAULT_IDLE_MS,
             active: 0,
-            stretches: 1,
+            stretches: StretchFold::new(DEFAULT_IDLE_MS),
             first: None,
             last: None,
-            previous: None,
             between_turns_max: None,
             counted: 0,
         }
@@ -614,26 +611,22 @@ impl Clock {
         self.counted += 1;
         self.first.get_or_insert(ts);
         self.last = Some(ts);
-        if let Some(previous) = self.previous {
-            let gap = ts.signed_duration_since(previous).num_milliseconds();
-            if gap > self.idle_threshold {
-                self.stretches += 1;
-            } else if gap >= 0 {
+        if let Some(gap) = self.stretches.add(ts) {
+            if (0..=self.stretches.idle_threshold()).contains(&gap) {
                 self.active = self.active.saturating_add(gap);
             }
             if gap >= 0 {
                 self.between_turns_max = Some(self.between_turns_max.unwrap_or(gap).max(gap));
             }
         }
-        self.previous = Some(ts);
     }
 
     /// The clock, or nothing when no turn the read reached carried a stamp.
     fn finish(self, in_tool: Option<i64>) -> Option<TimeStats> {
         (self.counted > 0).then(|| TimeStats {
             active: (self.counted > 1).then_some(self.active),
-            stretches: (self.counted > 1).then_some(self.stretches),
-            idle_threshold: (self.counted > 1).then_some(self.idle_threshold),
+            stretches: (self.counted > 1).then_some(self.stretches.count()),
+            idle_threshold: (self.counted > 1).then_some(self.stretches.idle_threshold()),
             // One stamp is a moment rather than a span, so a session with a
             // single timestamped turn records no span at all.
             recorded_span: (self.counted > 1)
@@ -884,7 +877,7 @@ mod tests {
     #[test]
     fn active_clock_splits_only_above_threshold_and_omits_insufficient_evidence() {
         let mut clock = Clock {
-            idle_threshold: 90_000,
+            stretches: StretchFold::new(90_000),
             ..Clock::default()
         };
         assert!(Clock::default().finish(None).is_none());
@@ -894,7 +887,7 @@ mod tests {
             assert!(one.get(key).is_none());
         }
         let mut fold = TurnFold::default();
-        fold.clock.idle_threshold = 90_000;
+        fold.clock.stretches = StretchFold::new(90_000);
         for (ordinal, ts) in [
             Some(0),
             None,
