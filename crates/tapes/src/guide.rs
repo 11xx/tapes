@@ -358,6 +358,7 @@ PROBE BEFORE EXPORTING
   tapes events <id> --json       Typed tool calls, results, pairs, and content parts.
   tapes capture <id> --json      The recording's store class and custody state.
   tapes usage <id> --json        Tokens, cost, quota observations, and turn counts.
+  tapes usage <id> --from T --to T --json  The same answer for the requests in one span.
   tapes stats <id> --json        The same recording, counted with its read evidence.
   tapes lineage <id> --json      The sessions this one names as relatives.
   tapes brief <id> --json        What a continuation of it needs.
@@ -515,6 +516,36 @@ PROBE BEFORE EXPORTING
   cover the session; recorded totals keep their epoch coverage. Pi's active
   accounting stays `read-window` when an unreadable record cuts its branch
   or follows its last entry.
+  `usage <id> --from <RFC3339> --to <RFC3339>` answers one span of one
+  session, the half-open `[from, to)` with either bound open, and
+  `--requests FIRST..LAST` the session's counted requests 1-based and
+  inclusive in recording order. Both stream the whole recording and place
+  each counted request by its own timestamp: a Claude request id by its first
+  record, a Codex token count that moves the cumulative total, a pi
+  consumption event counted once, an OpenCode assistant message by its
+  creation time. The answer keeps the whole-session shape and vocabulary and
+  adds `span`: the requested bounds, the `first` and `last` request placed
+  (ordinal, timestamp, and the harness's own request id where it records
+  one), how many `requests` it placed, and the session's `session_requests`.
+  Turn counts describe the whole read. Spans conserve: requests no span
+  holds form the remainder, and spans that share no request plus the
+  remainder add up to the whole session per counter and disjoint category
+  within one accounting basis, so the span before an instant and the span
+  from it add up to `usage --full`. A request in two spans counts in each and
+  is `overlapped`. A Codex span is the difference of the cumulative totals at
+  its boundaries, `since-reset` when a counter restarted inside it. A Claude
+  cost-state is the running total of one run and an OpenCode session total
+  counts requests no message records, so no span divides either: their
+  spans, and the whole they add up to, sum requests, and the recorded total is
+  withheld with a note. A pi span keeps the active-branch counters and the
+  retained-branch `consumption` apart, each conserving. A request with no
+  usable timestamp is held by the remainder and qualifies every span it may
+  belong to `unestablished-scope`; an unreadable record, a failed attempt or
+  unrecognized usage the read cannot place for or against a span is counted
+  under `unplaced` and qualifies it `unreadable-record`, `stopped-attempt` or
+  `unrecognized-usage`, so a span the read could not cover is never complete.
+  The library answers several spans in one pass, as tapes-usage-spans/1: a
+  figure per span, the `remainder`, and the `whole` in the spans' basis.
   A summary adds sessions only where no recording relates them. Two sessions
   are related when one declares the other as its fork origin or parent (Codex
   `forked_from_id`, Pi's parent header, OpenCode `fork_session_id` and

@@ -23,6 +23,7 @@ use agent_tapes_core::model::{
 };
 use agent_tapes_core::overlap::Disjointness;
 use agent_tapes_core::reconcile::{CounterStatus, Reconciliation, SourceRole};
+use agent_tapes_core::span::{Instant, SpanBounds, SpanPlacement};
 use agent_tapes_core::stats::{
     AssistantTurnDurations, Coverage, LineageStats, StatsView, TimeStats, ToolNameStats, ToolStats,
     TurnKindCounts, UsageStats, Warning,
@@ -144,6 +145,36 @@ fn parse_event_keys(value: Option<Option<usize>>) -> Result<Option<ConsumptionKe
         ));
     }
     Ok(Some(ConsumptionKeyOptions { limit }))
+}
+
+fn parse_instant(value: &str) -> std::result::Result<Instant, String> {
+    agent_tapes_core::span::parse_instant(value)
+        .ok_or_else(|| format!("`{value}` is not an RFC 3339 timestamp with an offset"))
+}
+
+/// `FIRST..LAST`, 1-based and inclusive, either end open.
+fn parse_request_range(value: &str) -> std::result::Result<SpanBounds, String> {
+    let (first, last) = value
+        .split_once("..")
+        .ok_or_else(|| format!("`{value}` is not a request range FIRST..LAST"))?;
+    let end = |text: &str| -> std::result::Result<Option<usize>, String> {
+        if text.is_empty() {
+            return Ok(None);
+        }
+        match text.parse::<usize>() {
+            Ok(0) | Err(_) => Err(format!(
+                "`{text}` is not a request ordinal; ordinals count from 1"
+            )),
+            Ok(ordinal) => Ok(Some(ordinal)),
+        }
+    };
+    let (first, last) = (end(first)?, end(last)?);
+    if let (Some(first), Some(last)) = (first, last) {
+        if first > last {
+            return Err(format!("request range {value} ends before it starts"));
+        }
+    }
+    Ok(SpanBounds::Requests { first, last })
 }
 
 #[derive(Parser)]
@@ -1415,7 +1446,10 @@ enum Command {
     /// answers that session as tapes-usage/12: its recorded tokens, cost, and
     /// turn counts, plus whatever else its harness recorded — a context
     /// window, a provider quota window, wall-clock durations, a per-model
-    /// split, the price-relevant dimensions its requests recorded. A scope or
+    /// split, the price-relevant dimensions its requests recorded. --from,
+    /// --to and --requests answer one span of that session in the same shape
+    /// with a `span` object; spans and the remainder no span holds add up to
+    /// the whole session within one accounting basis. A scope or
     /// listing filter instead answers the whole selection as
     /// tapes-usage-summary/6, grouped by --by and summing each counter over
     /// the sessions that recorded it. Native tokens follow each harness's own
@@ -1566,6 +1600,61 @@ enum Command {
         /// withheld and bounded. A partial price bounds only from below.
         #[arg(long, value_name = "N", num_args = 0..=1, default_missing_value = "200", conflicts_with_all = ["read_bytes", "series"])]
         event_keys: Option<Option<usize>>,
+        /// Answer the span of one session from this RFC 3339 instant: the
+        /// counted requests at or after it and before --to, either bound
+        /// open. The whole recording is streamed and each request placed by
+        /// its own timestamp: a Claude request by its first record, a Codex
+        /// request by its token count, a pi consumption event by its entry,
+        /// an OpenCode assistant message by its creation time. The answer has
+        /// the whole-session shape, its tokens, disjoint categories, cost,
+        /// measurement coverage and completeness covering only the span, and
+        /// adds `span`: the requested bounds, the `first` and `last` request
+        /// placed (ordinal, timestamp, and the harness's request id where it
+        /// records one), how many `requests` it placed, and the session's
+        /// `session_requests`. Spans conserve: the span before an instant
+        /// and the span from it add up to the whole session per counter,
+        /// within one accounting basis, and requests no span holds form the
+        /// remainder. A Codex span is the difference of the cumulative totals
+        /// at its boundaries, `since-reset` when a counter restarted inside
+        /// it. A Claude cost-state or an OpenCode session total covers more
+        /// than any span, so their spans sum requests and the recorded total
+        /// is withheld with a note. A pi span keeps the active-branch
+        /// counters and the retained-branch `consumption` apart. A request
+        /// without a usable timestamp is held by the remainder, and a record
+        /// that cannot be placed for or against the span (an unreadable
+        /// record, a failed attempt or unrecognized usage between requests)
+        /// is counted under `unplaced`; each qualifies the span's
+        /// completeness (unestablished-scope, unreadable-record,
+        /// stopped-attempt, unrecognized-usage). Turn counts describe the
+        /// whole read. A selection refuses span flags.
+        #[arg(
+            long,
+            value_name = "RFC3339",
+            value_parser = parse_instant,
+            conflicts_with_all = ["by", "read_bytes", "series", "reconcile", "event_keys"]
+        )]
+        from: Option<Instant>,
+        /// End the span before this RFC 3339 instant; see --from.
+        #[arg(
+            long,
+            value_name = "RFC3339",
+            value_parser = parse_instant,
+            conflicts_with_all = ["by", "read_bytes", "series", "reconcile", "event_keys"]
+        )]
+        to: Option<Instant>,
+        /// Answer the span of one session's counted requests FIRST..LAST,
+        /// 1-based and inclusive in recording order, either end open (`3..`,
+        /// `..5`). Counted requests are the ones the whole-session figure
+        /// sums: Claude request ids, Codex token counts that advance the
+        /// cumulative total, pi consumption events counted once, OpenCode
+        /// assistant messages. The answer is the one --from describes.
+        #[arg(
+            long,
+            value_name = "FIRST..LAST",
+            value_parser = parse_request_range,
+            conflicts_with_all = ["by", "read_bytes", "series", "reconcile", "event_keys", "from", "to"]
+        )]
+        requests: Option<SpanBounds>,
         /// Render the versioned tapes-usage/12 object, or tapes-usage-summary/6
         /// for a selection, as JSON. `session.model_observation` says
         /// whether more than one model and effort was observed (`mixed`) and
@@ -2770,10 +2859,24 @@ fn dispatch(cli: Cli) -> Result<()> {
             series,
             reconcile,
             event_keys,
+            from,
+            to,
+            requests,
             json,
         } => {
             query.validate_input()?;
             read.refuse_supplied(&query.input)?;
+            let span = requests
+                .or((from.is_some() || to.is_some()).then_some(SpanBounds::Time { from, to }));
+            if span.is_some() {
+                if query.single().is_none() {
+                    return Err(anyhow!(
+                        "--from, --to and --requests answer a span of one session; name a \
+                         session id, --latest, or --title"
+                    ));
+                }
+                refuse_full_supplied(&query.input)?;
+            }
             let series = parse_series(series)?;
             let event_keys = parse_event_keys(event_keys)?;
             if event_keys.is_some() && query.input.supplied() {
@@ -2811,7 +2914,15 @@ fn dispatch(cli: Cli) -> Result<()> {
             let latest_warnings = query.latest_warnings(&single_backends)?;
             print_selection_warnings(&latest_warnings);
             if let Some(one) = query.single() {
-                let usage = if full {
+                let usage = if let Some(span) = span {
+                    agent_tapes_core::usage_spans_with_backends(
+                        &query.input.backends()?,
+                        one,
+                        &[span],
+                    )?
+                    .spans
+                    .remove(0)
+                } else if full {
                     if series.is_some() || reconcile || event_keys.is_some() {
                         agent_tapes_core::usage_with_options_with_backends(
                             &query.input.backends()?,
@@ -4067,6 +4178,51 @@ fn warning_label(warning: Warning) -> &'static str {
 
 /// One line per fact, and a fact the harness did not record has no line.
 /// The closing notes are `show`'s, because the read behind them is the same.
+fn render_span(span: &SpanPlacement) -> String {
+    let bounds = match span.bounds {
+        Some(SpanBounds::Time { from, to }) => format!(
+            "{} .. {}",
+            from.map_or_else(|| "start".to_owned(), |from| from.to_rfc3339()),
+            to.map_or_else(|| "end".to_owned(), |to| to.to_rfc3339())
+        ),
+        Some(SpanBounds::Requests { first, last }) => format!(
+            "requests {}..{}",
+            first.map_or_else(String::new, |first| first.to_string()),
+            last.map_or_else(String::new, |last| last.to_string())
+        ),
+        None => "remainder".to_owned(),
+    };
+    let mut out = format!(
+        "span: {bounds}: {} of {} requests\n",
+        span.requests, span.session_requests
+    );
+    for (label, request) in [("first", &span.first), ("last", &span.last)] {
+        if let Some(request) = request {
+            out.push_str(&format!("span {label}: request {}", request.ordinal));
+            if let Some(at) = request.timestamp {
+                out.push_str(&format!(" at {}", at.to_rfc3339()));
+            }
+            if let Some(id) = &request.id {
+                out.push_str(&format!(" ({id})"));
+            }
+            out.push('\n');
+        }
+    }
+    if span.unplaced > 0 {
+        out.push_str(&format!(
+            "span unplaced: {} requests or records could not be placed for or against it\n",
+            span.unplaced
+        ));
+    }
+    if span.overlapped > 0 {
+        out.push_str(&format!(
+            "span overlapped: {} requests are in another span too\n",
+            span.overlapped
+        ));
+    }
+    out
+}
+
 fn render_usage(usage: &UsageView) -> String {
     let mut out = format!(
         "session: {} {}",
@@ -4077,6 +4233,9 @@ fn render_usage(usage: &UsageView) -> String {
         out.push_str(&format!(" {}", model.identity()));
     }
     out.push('\n');
+    if let Some(span) = &usage.span {
+        out.push_str(&render_span(span));
+    }
     if let Some(tokens) = &usage.tokens {
         out.push_str(&format!("tokens: {}\n", render_tokens(tokens)));
     }
@@ -4120,7 +4279,15 @@ fn render_usage(usage: &UsageView) -> String {
         out.push_str(&render_recorded_usage(recorded));
     }
     if let Some(accounting) = &usage.accounting {
-        out.push_str(&format!("accounting: {}\n", render_accounting(accounting)));
+        let within = if usage.span.is_some() {
+            ", within the span"
+        } else {
+            ""
+        };
+        out.push_str(&format!(
+            "accounting: {}{within}\n",
+            render_accounting(accounting)
+        ));
     }
     if let Some(status) = &usage.session.model_observation {
         out.push_str(&format!(
