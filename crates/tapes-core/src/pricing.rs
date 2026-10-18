@@ -161,8 +161,14 @@ impl PriceTable {
     }
 
     /// Read and validate the table at `path`, a regular file of bounded size.
+    /// The open never waits on a FIFO's writer; anything but a regular file
+    /// is refused before it is read.
     pub fn read(path: &Path) -> Result<Self> {
-        let file = std::fs::File::open(path)
+        use std::os::unix::fs::OpenOptionsExt;
+        let file = std::fs::File::options()
+            .read(true)
+            .custom_flags(libc::O_NONBLOCK)
+            .open(path)
             .with_context(|| format!("cannot open the price table {}", path.display()))?;
         let metadata = file.metadata()?;
         if !metadata.is_file() {

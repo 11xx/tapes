@@ -7,9 +7,11 @@
 
 use std::fs;
 use std::path::PathBuf;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::mpsc;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use agent_tapes_core::backend::{codex::CodexBackend, Backend};
+use agent_tapes_core::pricing::PriceTable;
 use agent_tapes_core::span::SpanBounds;
 use agent_tapes_core::{usage_full_with_backends, usage_spans_with_backends, Selection};
 use serde_json::{json, Value};
@@ -117,4 +119,25 @@ fn records_a_token_count_reports_together_are_inside_the_total() {
     .unwrap();
     let whole = spans.whole.tokens.as_ref().unwrap();
     assert_eq!(whole.input, Some(300), "the spans' whole");
+}
+
+/// Claim: a price table that names a FIFO is refused as not a regular file
+/// without waiting for a writer. Rejects opening it first, which blocks
+/// until something writes.
+#[test]
+fn a_price_table_that_is_a_fifo_is_refused_without_waiting() {
+    let store = Store::new("prices-fifo");
+    let path = store.0.join("prices.toml");
+    let name = std::ffi::CString::new(path.to_str().unwrap()).unwrap();
+    assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+    let (sender, receiver) = mpsc::channel();
+    let named = path.clone();
+    std::thread::spawn(move || {
+        let _ = sender.send(PriceTable::read(&named).map(|_| ()));
+    });
+    let read = receiver
+        .recv_timeout(Duration::from_secs(10))
+        .expect("reading the price table blocked on a FIFO with no writer");
+    let error = format!("{:#}", read.expect_err("a FIFO is no price table"));
+    assert!(error.contains("not a"), "{error}");
 }
