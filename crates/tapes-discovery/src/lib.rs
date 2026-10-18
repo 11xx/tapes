@@ -236,8 +236,9 @@ impl NativeStore {
         }
     }
 
-    /// As [`NativeStore::locate_exact`], walking a file-backed store at most
-    /// once per `catalog`.
+    /// As [`NativeStore::locate_exact`], answering from `catalog`'s walk of a
+    /// file-backed store: a recording the walk did not see is absent. Joins
+    /// that expect misses use this.
     pub fn locate_exact_in(
         &self,
         catalog: &StoreCatalog,
@@ -246,6 +247,21 @@ impl NativeStore {
         match self {
             Self::OpenCode(store) => store.locate_exact(id),
             _ => file::locate_exact_in(self, catalog, id),
+        }
+    }
+
+    /// As [`NativeStore::locate_exact`] for an id a caller named: a hit
+    /// answers from `catalog`'s walk, and a miss in a walk an earlier call
+    /// took walks again once and answers from the new walk, which replaces
+    /// the catalog's.
+    pub fn locate_named_in(
+        &self,
+        catalog: &StoreCatalog,
+        id: &str,
+    ) -> Result<Option<NativeSession>, DiscoveryError> {
+        match self {
+            Self::OpenCode(store) => store.locate_exact(id),
+            _ => file::locate_named_in(self, catalog, id),
         }
     }
 

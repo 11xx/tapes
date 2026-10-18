@@ -7,7 +7,7 @@ use std::mem::size_of;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
 const INITIAL_OPENING_BYTES: usize = 64 * 1024;
@@ -93,14 +93,17 @@ impl Walk {
 
 /// One bounded walk of a file-backed store, shared by every exact lookup,
 /// listing and lineage join of one read context. The walk is the same one an
-/// uncatalogued lookup makes, taken once: within the context it answers
-/// which recordings the store held when the walk ran, so a recording written
-/// later belongs to the next context. Nothing is persisted. A catalog belongs
+/// uncatalogued lookup makes, taken once: listing membership and a join's
+/// answer are the recordings the store held when the walk ran. A named
+/// lookup never reports absence from a walk older than itself: a miss in a
+/// walk an earlier call took walks again, and that walk replaces the shared
+/// one. A recording written later otherwise belongs to the next context,
+/// which starts with a new catalog. Nothing is persisted. A catalog belongs
 /// to the store root it first walked; a store with another root walks for
 /// itself.
 #[derive(Clone, Debug, Default)]
 pub struct StoreCatalog {
-    walked: Arc<OnceLock<(PathBuf, Walk)>>,
+    walked: Arc<Mutex<Option<(PathBuf, Walk)>>>,
     walks: Arc<AtomicUsize>,
 }
 
@@ -114,17 +117,42 @@ impl StoreCatalog {
         self.walks.load(Ordering::Relaxed)
     }
 
-    fn walk(&self, store: &NativeStore, root: &Path) -> Walk {
-        let counted = || {
-            self.walks.fetch_add(1, Ordering::Relaxed);
-            walk(store, root)
-        };
-        let (walked_root, walked) = self.walked.get_or_init(|| (root.to_owned(), counted()));
-        if walked_root == root {
-            walked.clone()
-        } else {
-            counted()
+    fn counted(&self, store: &NativeStore, root: &Path) -> Walk {
+        self.walks.fetch_add(1, Ordering::Relaxed);
+        walk(store, root)
+    }
+
+    /// The shared walk of `root`, and whether this call took it.
+    fn walk(&self, store: &NativeStore, root: &Path) -> (Walk, bool) {
+        let mut walked = self
+            .walked
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        match &*walked {
+            Some((walked_root, shared)) if walked_root == root => (shared.clone(), false),
+            Some(_) => (self.counted(store, root), true),
+            None => {
+                let taken = self.counted(store, root);
+                *walked = Some((root.to_owned(), taken.clone()));
+                (taken, true)
+            }
         }
+    }
+
+    /// Walk `root` again, replacing the shared walk when it is this root's.
+    fn rewalk(&self, store: &NativeStore, root: &Path) -> Walk {
+        let mut walked = self
+            .walked
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let taken = self.counted(store, root);
+        if walked
+            .as_ref()
+            .is_none_or(|(walked_root, _)| walked_root == root)
+        {
+            *walked = Some((root.to_owned(), taken.clone()));
+        }
+        taken
     }
 }
 
@@ -141,11 +169,11 @@ pub(crate) fn candidates_in(
         (Some(path), Some(root)) => merge_candidate_pages(
             store,
             explicit_file_candidates(store, path, limit),
-            candidates_from_root(store, catalog.walk(store, root), limit),
+            candidates_from_root(store, catalog.walk(store, root).0, limit),
             limit,
         ),
         (Some(path), None) => explicit_file_candidates(store, path, limit),
-        (None, Some(root)) => candidates_from_root(store, catalog.walk(store, root), limit),
+        (None, Some(root)) => candidates_from_root(store, catalog.walk(store, root).0, limit),
         (None, None) => CandidatePage::empty(),
     }
 }
@@ -390,6 +418,23 @@ pub(crate) fn locate_exact_in(
     catalog: &StoreCatalog,
     id: &str,
 ) -> Result<Option<NativeSession>, DiscoveryError> {
+    locate_in(store, catalog, id, false)
+}
+
+pub(crate) fn locate_named_in(
+    store: &NativeStore,
+    catalog: &StoreCatalog,
+    id: &str,
+) -> Result<Option<NativeSession>, DiscoveryError> {
+    locate_in(store, catalog, id, true)
+}
+
+fn locate_in(
+    store: &NativeStore,
+    catalog: &StoreCatalog,
+    id: &str,
+    named: bool,
+) -> Result<Option<NativeSession>, DiscoveryError> {
     let live = store.file().map(|path| {
         probe_runtime_file(store, path).and_then(|session| exact_identity(store, path, id, session))
     });
@@ -397,7 +442,16 @@ pub(crate) fn locate_exact_in(
         return Ok(Some(session.clone()));
     }
     let directory = match store.root() {
-        Some(root) => locate_exact_using(store, catalog.walk(store, root), id, probe),
+        Some(root) => {
+            let (walked, fresh) = catalog.walk(store, root);
+            match locate_exact_using(store, walked, id, probe) {
+                Ok(Some(session)) => Ok(Some(session)),
+                _ if named && !fresh => {
+                    locate_exact_using(store, catalog.rewalk(store, root), id, probe)
+                }
+                missed => missed,
+            }
+        }
         None => Ok(None),
     };
     match (live, directory) {
