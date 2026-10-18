@@ -448,3 +448,48 @@ fn a_pool_holds_members_beyond_the_selection_limit() {
     assert!(close(&pool["observed"]["estimate"], 8.0));
     assert!(close(&pool["attributed"]["estimate"], share_in(&one)));
 }
+
+/// Claim: within one window period a lower percent another session reports
+/// later is a stale snapshot and is skipped, and a reset reported a second
+/// apart is the same period, so neither restarts the period and counts its
+/// rise again. Rejects summing a pool's rise once per lagging snapshot.
+#[test]
+fn stale_snapshots_and_reset_jitter_do_not_restart_a_period() {
+    use Event::{Observed, Request};
+    let store = Store::new("stale");
+    let a = "40000000-0000-7000-8000-0000000000e1";
+    let b = "40000000-0000-7000-8000-0000000000e2";
+    store.write(
+        &format!("2026/01/10/rollout-2026-01-10T10-00-00-{a}.jsonl"),
+        &rollout(
+            a,
+            "gpt-fixture",
+            &[
+                Observed("2026-01-10T10:00:00Z", 10.0, RESETS),
+                Request("2026-01-10T10:05:00Z", 300, 0),
+                Observed("2026-01-10T10:10:00Z", 13.0, RESETS),
+                Request("2026-01-10T10:15:00Z", 200, 0),
+                Observed("2026-01-10T10:20:00Z", 15.0, RESETS + 1),
+            ],
+        ),
+    );
+    store.write(
+        &format!("2026/01/10/rollout-2026-01-10T10-01-00-{b}.jsonl"),
+        &rollout(
+            b,
+            "gpt-fixture",
+            &[
+                Request("2026-01-10T10:11:00Z", 100, 0),
+                Observed("2026-01-10T10:12:00Z", 12.0, RESETS),
+            ],
+        ),
+    );
+    let read = window_read(&store, ListFilters::default());
+    let pool = &read["window"]["allowance"][0];
+    assert!(close(&pool["observed"]["estimate"], 5.0), "{pool}");
+    assert_eq!(pool["coverage"]["stale_observations"], 1);
+    assert_eq!(pool["coverage"]["intervals"], 2);
+    // The second interval's rise of 2 splits 200 to 100.
+    let b_share = &share(&read, "e2")["allowance"][0];
+    assert!(close(&b_share["estimate"], 2.0 / 3.0), "{b_share}");
+}

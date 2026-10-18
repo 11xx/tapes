@@ -130,6 +130,10 @@ pub struct AllowanceCoverage {
     pub observations: usize,
     /// Intervals between consecutive observations of one window period.
     pub intervals: usize,
+    /// Observations below the percent already observed in their period,
+    /// snapshots older than an earlier one, which are skipped.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub stale_observations: usize,
     /// Requests of the set that fell in no interval: before the first
     /// observation, after the last, or across a reset. Their allowance is
     /// not counted, so a set with any is a known subtotal.
@@ -174,6 +178,8 @@ pub struct PoolMember<'a> {
 pub struct Apportionment {
     pub pool: PoolKey,
     observations: usize,
+    /// Observations below the running percent of their period.
+    stale: usize,
     /// Per chain, per observation: whether its percent is a rounded whole.
     rounded: Vec<Vec<bool>>,
     /// Per chain, per observation: the observed percent.
@@ -190,9 +196,11 @@ pub struct Apportionment {
 }
 
 impl Apportionment {
-    /// Split the pool's observations into chains, a new chain at each reset
-    /// (a new `resets_at` or a falling percent), and place every member's
-    /// requests in the interval that holds them.
+    /// Split the pool's observations into chains, one per window period: a
+    /// new chain at a new `resets_at` (beyond a minute's jitter), or at a
+    /// falling percent where no reset is recorded. Inside a period a lower
+    /// percent is a stale snapshot and is skipped. Every member's requests
+    /// are placed in the interval that holds them.
     pub fn new(
         pool: PoolKey,
         observations: &[RateObservation],
@@ -211,16 +219,19 @@ impl Apportionment {
             later.at == earlier.at && later.used_percent == earlier.used_percent
         });
         let mut chains: Vec<Vec<&RateObservation>> = Vec::new();
+        let mut stale = 0;
         for observation in &ordered {
-            let continues = chains
-                .last()
-                .and_then(|chain| chain.last())
-                .is_some_and(|last| {
-                    last.resets_at == observation.resets_at
-                        && observation.used_percent >= last.used_percent
-                });
-            if continues {
+            let Some(last) = chains.last().and_then(|chain| chain.last()) else {
+                chains.push(vec![observation]);
+                continue;
+            };
+            let period = same_period(last.resets_at, observation.resets_at);
+            if period && observation.used_percent >= last.used_percent {
                 chains.last_mut().unwrap().push(observation);
+            } else if period && last.resets_at.is_some() {
+                // A lower percent inside one period is a snapshot older than
+                // the one before it: another session's report lagging.
+                stale += 1;
             } else {
                 chains.push(vec![observation]);
             }
@@ -299,7 +310,8 @@ impl Apportionment {
         }
         Self {
             pool,
-            observations: ordered.len(),
+            stale,
+            observations: ordered.len() - stale,
             rounded,
             percents,
             rises,
@@ -414,6 +426,7 @@ impl Apportionment {
             coverage: AllowanceCoverage {
                 observations: self.observations,
                 intervals: self.intervals(),
+                stale_observations: self.stale,
                 uncovered_requests: ids.iter().filter_map(|id| self.uncovered.get(*id)).sum(),
             },
         }
@@ -455,12 +468,24 @@ impl Apportionment {
             coverage: AllowanceCoverage {
                 observations: self.observations,
                 intervals: self.intervals(),
+                stale_observations: self.stale,
                 uncovered_requests: selected
                     .iter()
                     .filter_map(|id| self.uncovered.get(*id))
                     .sum(),
             },
         }
+    }
+}
+
+/// Whether two observations' resets name one window period: the same reset,
+/// within the minute a provider's reported reset jitters by, or none
+/// recorded on either.
+fn same_period(left: Option<DateTime<Utc>>, right: Option<DateTime<Utc>>) -> bool {
+    match (left, right) {
+        (Some(left), Some(right)) => (left - right).num_seconds().abs() <= 60,
+        (None, None) => true,
+        _ => false,
     }
 }
 

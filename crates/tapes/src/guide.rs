@@ -645,8 +645,11 @@ PROBE BEFORE EXPORTING
   the sessions left out spent.
   Between two consecutive observations of a pool, ordered by observation time,
   the rise in `used_percent` is apportioned over each member's disjoint tokens
-  (uncached input, cache read, cache write, output) inside that interval; a
-  new `resets_at` or a falling percent starts a new chain, and requests before
+  (uncached input, cache read, cache write, output) inside that interval. A
+  new `resets_at`, beyond a minute's jitter, starts a new chain, as a falling
+  percent does where no reset is recorded; inside one period a lower percent
+  is a snapshot older than one already seen (concurrent sessions report the
+  same account) and is skipped, counted as `stale_observations`. Requests before
   a chain's first observation or after its last are `uncovered_requests`, not
   counted. Observed percents are whole numbers, read as the true percent
   rounded to the nearest whole, so each figure gives `estimate`, the rises
