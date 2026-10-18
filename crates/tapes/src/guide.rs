@@ -939,8 +939,11 @@ PROBE BEFORE EXPORTING
   consumption beyond the requests: recorded-total membership is missing.
   Resets, unresolved witnesses, absent counters or an unmatched comparison
   frontier withhold differences. Parent file positions order parent requests;
-  child frontiers require timestamps. A missing frontier or a child request
-  after the total cannot contradict that total. Each source names the exact
+  child requests are ordered by time against the total's own timestamp or,
+  for a cost-state, which writes none, the newest timestamp of the parent
+  records written before it. A child request without a timestamp, a total no
+  timestamp orders (named in a note), or a child request after the total
+  cannot contradict that total. Each source names the exact
   revision, length and SHA-256 read under the report's rules. A source that
   could not be used carries `error`, and an unenumerated family a note: the
   session id and one fixed reason (foreign-identity, no-identity,

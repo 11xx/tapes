@@ -143,7 +143,10 @@ pub struct ReconciledSource {
 /// as recorded. `resets` counts observations below their predecessor on some
 /// counter, each a new counter epoch. `after_last_request` says whether the
 /// newest observation reaches every source's request frontier. Parent file
-/// positions order parent requests; child frontiers require timestamps.
+/// positions order parent requests. A child request is ordered against the
+/// total by time: the total's own timestamp where it writes one, else the
+/// newest timestamp of the parent records written before it, since records
+/// are appended and the total was written no earlier than any of them.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct RecordedTotal {
     pub tokens: Tokens,
@@ -345,6 +348,10 @@ pub(crate) struct FamilyLedger {
     recorded_position: Option<usize>,
     last_parent_request: Option<usize>,
     recorded_at: Option<DateTime<Utc>>,
+    /// The newest timestamp of the parent records read so far, in file
+    /// order, and its value when the newest total was recorded.
+    newest_parent_stamp: Option<DateTime<Utc>>,
+    recorded_after: Option<DateTime<Utc>>,
     last_child_request: Option<DateTime<Utc>>,
     child_frontier_missing: bool,
     unenumerated: bool,
@@ -496,6 +503,12 @@ impl FamilyLedger {
         );
     }
 
+    /// A parent record's timestamp, in file order: a total recorded later
+    /// was written no earlier than it.
+    pub(crate) fn parent_stamp(&mut self, at: DateTime<Utc>) {
+        self.newest_parent_stamp = Some(self.newest_parent_stamp.map_or(at, |held| held.max(at)));
+    }
+
     /// One cumulative total the parent recorded, with its per-model split.
     pub(crate) fn recorded(
         &mut self,
@@ -519,6 +532,7 @@ impl FamilyLedger {
         self.recorded_by_model = by_model;
         self.recorded_position = Some(position);
         self.recorded_at = observed_at;
+        self.recorded_after = self.newest_parent_stamp;
     }
 
     pub(crate) fn finish(mut self) -> Reconciliation {
@@ -606,6 +620,15 @@ impl FamilyLedger {
             .map(|model| (model.model.clone(), model))
             .collect();
         let usage = self.recorded_usage.as_ref();
+        // When the total was written, as far as a positive fact says.
+        let written = self.recorded_at.or(self.recorded_after);
+        if self.recorded.is_some() && self.last_child_request.is_some() && written.is_none() {
+            self.notes.push(
+                "The recorded total writes no timestamp and no timestamped parent record precedes \
+                 it, so child requests cannot be ordered against it."
+                    .to_owned(),
+            );
+        }
         let recorded = self.recorded.clone().map(|tokens| RecordedTotal {
             accounting: usage.unwrap().accounting.clone(),
             cost: usage.and_then(|usage| usage.cost.clone()),
@@ -626,7 +649,7 @@ impl FamilyLedger {
                 })
                 && self
                     .last_child_request
-                    .is_none_or(|request| self.recorded_at.is_some_and(|total| total >= request)),
+                    .is_none_or(|request| written.is_some_and(|total| total >= request)),
         });
         let counters = COUNTERS
             .iter()

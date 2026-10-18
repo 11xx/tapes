@@ -1639,8 +1639,10 @@ enum Command {
         /// differences: zero reconciles, a negative value conflicts, and a
         /// surplus or incomplete measurement is a discrepancy. Resets,
         /// unresolved witnesses, missing counters or an unmatched frontier
-        /// withhold differences. Child frontiers require timestamps; missing
-        /// or later child observations cannot contradict an earlier total.
+        /// withhold differences. Child requests are ordered by time against
+        /// the total's timestamp or, for a cost-state, which writes none, the
+        /// newest parent record written before it; untimed or later child
+        /// observations cannot contradict an earlier total.
         /// Each source names the revision, length and SHA-256 of its bytes.
         /// A source that could not be used carries `error` and an
         /// unenumerated family a note, each a session id and a fixed reason

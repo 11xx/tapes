@@ -2099,6 +2099,9 @@ fn reconcile_source(
     let read = stream_jsonl(path, Some(pin), |value, _, _| {
         source_identity(value, session_id, child)?;
         position += 1;
+        if let Some(at) = timestamp(&value["timestamp"]).filter(|_| parent) {
+            ledger.parent_stamp(at);
+        }
         if parent && value["type"] == "cost-state" {
             let by_model = value["modelUsage"]
                 .as_object()
