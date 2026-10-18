@@ -1812,8 +1812,11 @@ enum Command {
         /// table is reported on stderr and leaves the estimate absent, as no
         /// table does. tapes holds no prices of its own. Each served model's
         /// share is priced by its own row; a figure that names one model is
-        /// that model's share whole, and one that names several is priced
-        /// share by share from its recorded split. The estimate carries
+        /// that model's share whole, and one that names several, or whose
+        /// uncertain attribution leaves part of it out of its model shares,
+        /// is priced share by share from its recorded split; pi consumption
+        /// on other branches is priced by the model each event names. The
+        /// estimate carries
         /// `kind: list-price-estimate`, the currency, an `amount` (or
         /// `at_least` and `at_most` where cache writes recorded no TTL), the
         /// table's schema, each row it used by `id`, `effective` date and

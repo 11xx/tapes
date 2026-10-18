@@ -702,8 +702,9 @@ impl Backend for CodexBackend {
         let mut notes = vec![
             "A Codex span sums its requests: each token count's move of the cumulative \
              total, and each usage record the total never moved for (a remote compaction, \
-             or a request no token count followed) by its own usage; its model split is \
-             not divided."
+             or a request no token count followed) by its own usage. A span served by more \
+             than one model, or holding a request no model was in effect for, splits its \
+             figure by the model in effect at each request."
                 .to_owned(),
         ];
         notes.extend(figures.whole(&mut whole));
@@ -1936,9 +1937,70 @@ struct CodexSpanFigure {
     model: Option<Model>,
     /// The model ids in effect at the span's requests.
     models: BTreeSet<String>,
+    /// Each model's share of the span, by model id and effort, and how many
+    /// requests made it.
+    split: BTreeMap<(String, Option<String>), (TokenTotals, usize)>,
+    /// Requests made before any model was in effect.
+    unattributed: usize,
     context_window: Option<u64>,
     rate_limits: Option<RateLimits>,
     unrecognized_usage: usize,
+}
+
+type Counters = (
+    Option<u64>,
+    Option<u64>,
+    Option<u64>,
+    Option<u64>,
+    Option<u64>,
+);
+
+impl CodexSpanFigure {
+    /// Count one request's share under the model in effect when it was made.
+    fn add(&mut self, model: Option<&Model>, share: Counters) {
+        let (input, output, reasoning, cache_read, cache_write) = share;
+        self.tokens
+            .add(input, output, reasoning, cache_read, cache_write);
+        self.model = model.cloned();
+        let Some(model) = model else {
+            self.unattributed += 1;
+            return;
+        };
+        self.models.insert(model.id.clone());
+        let (tokens, requests) = self
+            .split
+            .entry((model.id.clone(), model.variant.clone()))
+            .or_default();
+        tokens.add(input, output, reasoning, cache_read, cache_write);
+        *requests += 1;
+    }
+
+    /// The span's model shares, where it is not one model's whole: more
+    /// than one model served it, or a request no model was in effect for.
+    fn shares(&mut self) -> Option<Vec<ModelUsage>> {
+        if self.split.len() <= 1 && self.unattributed == 0 {
+            return None;
+        }
+        let shares = std::mem::take(&mut self.split)
+            .into_iter()
+            .map(|((model, variant), (tokens, requests))| {
+                let (tokens, measurement_coverage) = tokens.finish_covered();
+                ModelUsage {
+                    list_price_estimate: None,
+                    measurement_completeness: Default::default(),
+                    model,
+                    variant,
+                    tokens,
+                    cost: None,
+                    cost_coverage: None,
+                    request_count: Some(requests),
+                    measurement_incomplete: known_subtotal_notes(&measurement_coverage),
+                    measurement_coverage,
+                }
+            })
+            .collect::<Vec<_>>();
+        (!shares.is_empty()).then_some(shares)
+    }
 }
 
 impl CodexSpans {
@@ -1999,14 +2061,8 @@ impl CodexSpans {
             self.restarts += usize::from(reset);
             for index in placer.request(at, response.as_deref()) {
                 let figure = self.figures.entry(index).or_default();
-                figure
-                    .tokens
-                    .add(request.0, request.1, request.2, request.3, request.4);
+                figure.add(self.model.as_ref(), request);
                 figure.since_reset |= reset;
-                figure.model.clone_from(&self.model);
-                if let Some(model) = &self.model {
-                    figure.models.insert(model.id.clone());
-                }
                 if let Some(window) = codex_context_window(value) {
                     figure.context_window = Some(window);
                 }
@@ -2052,18 +2108,16 @@ impl CodexSpans {
         );
         self.outside += 1;
         for index in placer.request(request.at, Some(&request.response_id)) {
-            let figure = self.figures.entry(index).or_default();
-            figure.tokens.add(
-                usage.input,
-                usage.output,
-                usage.reasoning,
-                usage.cache_read,
-                usage.cache_write,
+            self.figures.entry(index).or_default().add(
+                request.model.as_ref(),
+                (
+                    usage.input,
+                    usage.output,
+                    usage.reasoning,
+                    usage.cache_read,
+                    usage.cache_write,
+                ),
             );
-            figure.model.clone_from(&request.model);
-            if let Some(model) = &request.model {
-                figure.models.insert(model.id.clone());
-            }
         }
     }
 
@@ -2117,7 +2171,8 @@ impl CodexSpans {
     fn finish(mut self, session: &Session, whole: &Session, count: usize) -> Vec<Session> {
         (0..count)
             .map(|index| {
-                let figure = self.figures.remove(&index).unwrap_or_default();
+                let mut figure = self.figures.remove(&index).unwrap_or_default();
+                let by_model = figure.shares();
                 let (tokens, measurement_coverage) = figure.tokens.finish_covered();
                 let mut span = session.clone();
                 span.accounting = accounting_for(
@@ -2139,15 +2194,17 @@ impl CodexSpans {
                     measurement_incomplete: known_subtotal_notes(&measurement_coverage),
                     measurement_coverage,
                     unrecognized_usage: figure.unrecognized_usage,
+                    by_model,
                     ..UsageDetail::default()
                 }
                 .into_option();
                 span.model = figure.model;
-                // A span served by more than one model says so, and names no
-                // split between them.
+                // A span served by more than one model, or holding a request
+                // no model was in effect for, says so beside its split.
+                let mixed = figure.models.len() > 1;
                 span.model_observation =
-                    (figure.models.len() > 1).then_some(ModelObservationStatus {
-                        mixed: true,
+                    (mixed || figure.unattributed > 0).then_some(ModelObservationStatus {
+                        mixed,
                         head_read: true,
                         attribution_uncertain: true,
                         distinct_observed: Some(figure.models.len()),
@@ -2204,6 +2261,36 @@ fn codex_last_tokens(value: &Value) -> Option<Tokens> {
 
 fn supports_single_legacy_request(total: &Tokens, last: Option<&Tokens>) -> bool {
     last.is_some_and(|last| total == last)
+}
+
+/// How far each counter of a cumulative total moved, where both totals
+/// recorded it.
+fn total_move(previous: &Tokens, total: &Tokens) -> Tokens {
+    let moved = |previous: Option<u64>, total: Option<u64>| total?.checked_sub(previous?);
+    Tokens {
+        input: moved(previous.input, total.input),
+        output: moved(previous.output, total.output),
+        reasoning: moved(previous.reasoning, total.reasoning),
+        cache_read: moved(previous.cache_read, total.cache_read),
+        cache_write: moved(previous.cache_write, total.cache_write),
+    }
+}
+
+/// Whether two figures agree on every counter both record, and both record
+/// at least one.
+fn same_counters(left: &Tokens, right: &Tokens) -> bool {
+    let pairs = [
+        (left.input, right.input),
+        (left.output, right.output),
+        (left.reasoning, right.reasoning),
+        (left.cache_read, right.cache_read),
+        (left.cache_write, right.cache_write),
+    ];
+    pairs.iter().any(|pair| matches!(pair, (Some(_), Some(_))))
+        && pairs.iter().all(|pair| match pair {
+            (Some(left), Some(right)) => left == right,
+            _ => true,
+        })
 }
 
 enum TotalChange {
@@ -2263,36 +2350,6 @@ fn outside_use(request: &UsageRequest) -> Option<crate::allowance::TimedUse> {
 
 /// A counted usage record: its own usage, when it was recorded, and the
 /// model in effect.
-/// How far each counter of a cumulative total moved, where both totals
-/// recorded it.
-fn total_move(previous: &Tokens, total: &Tokens) -> Tokens {
-    let moved = |previous: Option<u64>, total: Option<u64>| total?.checked_sub(previous?);
-    Tokens {
-        input: moved(previous.input, total.input),
-        output: moved(previous.output, total.output),
-        reasoning: moved(previous.reasoning, total.reasoning),
-        cache_read: moved(previous.cache_read, total.cache_read),
-        cache_write: moved(previous.cache_write, total.cache_write),
-    }
-}
-
-/// Whether two figures agree on every counter both record, and both record
-/// at least one.
-fn same_counters(left: &Tokens, right: &Tokens) -> bool {
-    let pairs = [
-        (left.input, right.input),
-        (left.output, right.output),
-        (left.reasoning, right.reasoning),
-        (left.cache_read, right.cache_read),
-        (left.cache_write, right.cache_write),
-    ];
-    pairs.iter().any(|pair| matches!(pair, (Some(_), Some(_))))
-        && pairs.iter().all(|pair| match pair {
-            (Some(left), Some(right)) => left == right,
-            _ => true,
-        })
-}
-
 struct UsageRequest {
     usage: Tokens,
     at: Option<chrono::DateTime<chrono::Utc>>,

@@ -511,9 +511,10 @@ impl PricedFigure<'_> {
     /// Price the figure under `table`. A figure whose evidence names one
     /// model is that model's share whole, and a split the harness recorded
     /// for the same model prices each part alike. A figure that names more
-    /// than one model is priced share by share from its split, and what the
-    /// shares leave of the whole is `incomplete-attribution`. A figure with
-    /// neither has no estimate.
+    /// than one model, or whose uncertain attribution leaves part of it out
+    /// of its model shares, is priced share by share from its split, and
+    /// what the shares leave of the whole is `incomplete-attribution`. A
+    /// figure with neither has no estimate.
     pub fn estimate(&self, table: &PriceTable) -> FigureEstimate {
         let convention = self
             .convention
@@ -544,9 +545,21 @@ impl PricedFigure<'_> {
                 by_model,
             };
         };
+        let parts = shares.iter().map(share_disjoint).collect::<Vec<_>>();
+        // Under uncertain attribution, shares that leave part of the figure
+        // unattributed say the one model in evidence did not serve all of it.
+        let unattributed = self
+            .observation
+            .is_some_and(|status| status.attribution_uncertain)
+            && !shares.is_empty()
+            && PRICED_CATEGORIES.iter().any(|category| {
+                category_amount(disjoint, category).is_some()
+                    && !shares_cover(disjoint, &parts, category)
+            });
         let sole = self
             .sole_model()
-            .filter(|sole| shares.iter().all(|model| model.model == *sole));
+            .filter(|sole| shares.iter().all(|model| model.model == *sole))
+            .filter(|_| !unattributed);
         let whole = if let Some(sole) = sole {
             let mut sum = price_share(disjoint, table.price(sole), table);
             if self
@@ -564,7 +577,6 @@ impl PricedFigure<'_> {
             for share in share_sums.into_iter().flatten() {
                 sum.merge(share);
             }
-            let parts = shares.iter().map(share_disjoint).collect::<Vec<_>>();
             for category in PRICED_CATEGORIES {
                 if !shares_cover(disjoint, &parts, category) {
                     sum.qualify(category, MeasurementReason::IncompleteAttribution);
@@ -578,14 +590,19 @@ impl PricedFigure<'_> {
     }
 }
 
-/// Whether the model shares account for all of the figure's `category`.
-fn shares_cover(whole: &DisjointTokens, parts: &[Option<DisjointTokens>], category: &str) -> bool {
-    let amount = |disjoint: &DisjointTokens| match category {
+/// A figure's amount of one priced category.
+fn category_amount(disjoint: &DisjointTokens, category: &str) -> Option<u64> {
+    match category {
         "uncached_input" => disjoint.uncached_input,
         "cache_read" => disjoint.cache_read,
         "cache_write" => disjoint.cache_write.map(|writes| writes.total()),
         _ => disjoint.output,
-    };
+    }
+}
+
+/// Whether the model shares account for all of the figure's `category`.
+fn shares_cover(whole: &DisjointTokens, parts: &[Option<DisjointTokens>], category: &str) -> bool {
+    let amount = |disjoint: &DisjointTokens| category_amount(disjoint, category);
     let Some(total) = amount(whole) else {
         return false;
     };
@@ -619,23 +636,41 @@ pub fn price_view(view: &mut crate::usage::UsageView, table: &PriceTable) {
             DisjointTokens::from_native(tokens, convention, None)
                 .with_completeness(&consumption.measurement_completeness)
         });
-        let estimate = PricedFigure {
-            disjoint: disjoint.as_ref(),
-            convention: Some(convention),
-            model: view.session.model.as_ref(),
-            selections: &view.session.model_selections,
-            observation: view.session.model_observation.as_ref(),
-            by_model: None,
-        }
-        .estimate(table);
-        // The model evidence is the active branch's, so events on other
-        // branches are attributed to no model.
-        consumption.list_price_estimate = estimate.whole.and_then(|mut sum| {
-            if consumption.events.other_branches > 0 {
-                sum.qualify_all(MeasurementReason::IncompleteAttribution);
+        // The session's model evidence is the active branch's. Events on
+        // other branches are priced by the model each names, share by share,
+        // and what no model names is left out as `incomplete-attribution`.
+        let other_branches = consumption.events.other_branches > 0;
+        let served = other_branches.then(|| {
+            let mut served = consumption.served.clone();
+            for share in &mut served {
+                share
+                    .measurement_completeness
+                    .merge(&consumption.measurement_completeness);
             }
-            sum.finish()
+            served
         });
+        let estimate = if let Some(served) = &served {
+            PricedFigure {
+                disjoint: disjoint.as_ref(),
+                convention: Some(convention),
+                model: None,
+                selections: &[],
+                observation: None,
+                by_model: Some(served),
+            }
+            .estimate(table)
+        } else {
+            PricedFigure {
+                disjoint: disjoint.as_ref(),
+                convention: Some(convention),
+                model: view.session.model.as_ref(),
+                selections: &view.session.model_selections,
+                observation: view.session.model_observation.as_ref(),
+                by_model: None,
+            }
+            .estimate(table)
+        };
+        consumption.list_price_estimate = estimate.whole.and_then(EstimateSum::finish);
     }
 }
 

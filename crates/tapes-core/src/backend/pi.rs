@@ -1478,6 +1478,8 @@ struct PiConsumption {
     cost_measurement: crate::usage::MeasurementCoverage,
     entries: HashSet<String>,
     responses: HashSet<(String, String)>,
+    /// Each model's assistant events, by the model each message names.
+    models: BTreeMap<String, (TokenTotals, usize)>,
 }
 
 impl PiConsumption {
@@ -1504,6 +1506,17 @@ impl PiConsumption {
             coverage.measured += 1;
         }
         self.totals.add(usage);
+        if let Some(model) = &consumed.model {
+            let (tokens, events) = self.models.entry(model.clone()).or_default();
+            tokens.add(
+                usage.input,
+                usage.output,
+                usage.reasoning,
+                usage.cache_read,
+                usage.cache_write,
+            );
+            *events += 1;
+        }
         self.events.counted += 1;
         self.assistant_requests += usize::from(consumed.assistant_request);
         if on_branch {
@@ -1581,7 +1594,27 @@ impl PiConsumption {
                 self.unrecognized_usage
             ));
         }
+        let served = self
+            .models
+            .into_iter()
+            .map(|(model, (tokens, events))| {
+                let (tokens, measurement_coverage) = tokens.finish_covered();
+                ModelUsage {
+                    list_price_estimate: None,
+                    measurement_completeness: Default::default(),
+                    model,
+                    variant: None,
+                    tokens,
+                    cost: None,
+                    cost_coverage: None,
+                    request_count: Some(events),
+                    measurement_incomplete: known_subtotal_notes(&measurement_coverage),
+                    measurement_coverage,
+                }
+            })
+            .collect();
         Some(Consumption {
+            served,
             list_price_estimate: None,
             accounting: Accounting {
                 basis: AccountingBasis::SummedRequests,

@@ -600,14 +600,17 @@ PROBE BEFORE EXPORTING
   and 1-hour prices, as `at_least` and `at_most` in place of `amount`, and
   its category says ttl-unrecorded. Each served model's share is priced by
   its own row: a figure whose records name one model is that model's share
-  whole; one that names several is priced share by share from the split its
-  harness recorded, and what the shares leave uncovered is
-  incomplete-attribution; with neither, nothing is priced. A model the table
+  whole; one that names several, or whose uncertain attribution leaves part
+  of it out of its model shares (a Codex request made before any model was
+  in effect), is priced share by share from the split its harness recorded,
+  and what the shares leave uncovered is incomplete-attribution; with
+  neither, nothing is priced. A model the table
   lacks qualifies its share unlisted-model and a missing category price
   missing-price. Every reason a category's counters carry (missing-counter,
   stopped-attempt, unrecognized-usage, read-window, ...) carries into the
-  estimate, whose amount is then a known subtotal; pi consumption on other
-  branches than the active one is incomplete-attribution. The estimate is
+  estimate, whose amount is then a known subtotal. Pi consumption on other
+  branches than the active one is priced by the model each event names, and
+  usage no model names is incomplete-attribution. The estimate is
   absent, never zero, when nothing could be priced. A summary adds estimates
   where its disjoint categories add and otherwise withholds them, naming why
   in `list_price_withheld`: mixed-accounting, identity-unestablished, or

@@ -11,8 +11,9 @@ use std::sync::mpsc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use agent_tapes_core::backend::{codex::CodexBackend, pi::PiBackend, Backend};
-use agent_tapes_core::pricing::PriceTable;
+use agent_tapes_core::pricing::{self, PriceTable};
 use agent_tapes_core::span::SpanBounds;
+use agent_tapes_core::usage::UsageView;
 use agent_tapes_core::{usage_full_with_backends, usage_spans_with_backends, Selection};
 use serde_json::{json, Value};
 
@@ -97,6 +98,64 @@ fn a_pi_span_qualifies_its_consumption_with_an_unreadable_record() {
     );
 }
 
+fn table(rows: &str) -> PriceTable {
+    PriceTable::parse(&format!(
+        "schema = \"tapes-price-table/1\"\ncurrency = \"USD\"\n{rows}"
+    ))
+    .unwrap()
+}
+
+fn amount(estimate: &Value) -> f64 {
+    estimate["amount"]
+        .as_f64()
+        .unwrap_or_else(|| panic!("an amount: {estimate}"))
+}
+
+/// Claim: pi consumption over two branches served by different models is
+/// priced share by share, each model's events by its own row: model A's 100
+/// output tokens at 10 per million and the abandoned branch's model B's 100
+/// at 1 per million come to 0.0011. Rejects pricing every retained branch
+/// under the active branch's model, which gives 0.002.
+#[test]
+fn pi_consumption_on_another_branch_is_priced_by_its_own_model() {
+    let store = Store::new("pi-branches");
+    let id = "60000000-0000-4000-8000-0000000000c1";
+    let assistant = |entry: &str, stamp: &str, model: &str| {
+        json!({"type": "message", "id": entry, "parentId": "user-1", "timestamp": stamp,
+            "message": {"role": "assistant", "timestamp": 0, "provider": "openai-codex", "model": model,
+                "usage": {"input": 0, "output": 100, "reasoning": 0, "cacheRead": 0, "cacheWrite": 0,
+                          "totalTokens": 100},
+                "content": [{"type": "text", "text": "Done."}]}})
+    };
+    store.write(
+        &format!("--fixtures-project--/2026-01-03T10-00-00-000Z_{id}.jsonl"),
+        &[
+            json!({"type": "session", "version": 3, "id": id, "timestamp": "2026-01-03T10:00:00Z",
+                   "cwd": "/fixtures/project"}),
+            json!({"type": "message", "id": "user-1", "parentId": null, "timestamp": "2026-01-03T10:00:01Z",
+                   "message": {"role": "user", "timestamp": 0, "content": [{"type": "text", "text": "Go."}]}}),
+            assistant("abandoned-1", "2026-01-03T10:00:02Z", "model-b"),
+            assistant("assistant-1", "2026-01-03T10:00:03Z", "model-a"),
+        ],
+    );
+    let mut view =
+        usage_full_with_backends(&[Box::new(PiBackend::new(&store.0))], Selection::Id(id)).unwrap();
+    let prices = table(
+        "[[models]]\nid = \"model-a\"\neffective = 2026-01-01\nsource = \"fixture\"\n\
+         per_million = { uncached_input = 1.0, cache_read = 0.1, output = 10.0 }\n\
+         [[models]]\nid = \"model-b\"\neffective = 2026-01-01\nsource = \"fixture\"\n\
+         per_million = { uncached_input = 1.0, cache_read = 0.1, output = 1.0 }\n",
+    );
+    pricing::price_view(&mut view, &prices);
+    let consumption = serde_json::to_value(view.consumption.as_ref().unwrap()).unwrap();
+    assert_eq!(consumption["events"]["other_branches"], 1);
+    let estimate = &consumption["list_price_estimate"];
+    assert!(
+        (amount(estimate) - 0.0011).abs() < 1e-12,
+        "consumption priced share by share: {estimate}"
+    );
+}
+
 fn codex_usage(input: u64, output: u64) -> Value {
     json!({"input_tokens": input, "cached_input_tokens": 0, "cache_write_input_tokens": 0,
            "output_tokens": output, "reasoning_output_tokens": 0, "total_tokens": input + output})
@@ -168,6 +227,57 @@ fn records_a_token_count_reports_together_are_inside_the_total() {
     .unwrap();
     let whole = spans.whole.tokens.as_ref().unwrap();
     assert_eq!(whole.input, Some(300), "the spans' whole");
+}
+
+fn estimate_of(view: &UsageView) -> Value {
+    serde_json::to_value(view).unwrap()["list_price_estimate"].clone()
+}
+
+/// Claim: a Codex span holding a request made before any model context
+/// and a request under model A prices only A's share, and names the rest
+/// `incomplete-attribution`, so its amount is a known subtotal: 100 output
+/// tokens at 10 per million. Rejects pricing all 200 tokens as A.
+#[test]
+fn a_codex_span_with_an_unattributed_request_prices_only_what_it_attributes() {
+    let store = Store::new("codex-unattributed");
+    let id = "70000000-0000-7000-8000-0000000000d2";
+    store.write(
+        &format!("2026/01/11/rollout-2026-01-11T11-00-00-{id}.jsonl"),
+        &[
+            codex_meta(id),
+            codex_record(id, "2026-01-11T11:00:01Z", "resp_unknown_1", 0, 100),
+            codex_count("2026-01-11T11:00:01.100Z", (0, 100), (0, 100)),
+            codex_context("2026-01-11T11:00:02Z", "model-a"),
+            codex_record(id, "2026-01-11T11:00:03Z", "resp_model_a_1", 0, 100),
+            codex_count("2026-01-11T11:00:03.100Z", (0, 200), (0, 100)),
+        ],
+    );
+    let mut spans = usage_spans_with_backends(
+        &[Box::new(CodexBackend::new(&store.0))],
+        Selection::Id(id),
+        &[SpanBounds::Requests {
+            first: None,
+            last: None,
+        }],
+    )
+    .unwrap();
+    let prices = table(
+        "[[models]]\nid = \"model-a\"\neffective = 2026-01-01\nsource = \"fixture\"\n\
+         per_million = { uncached_input = 1.0, cache_read = 0.1, output = 10.0 }\n",
+    );
+    pricing::price_spans(&mut spans, &prices);
+    let span = &spans.spans[0];
+    assert_eq!(span.tokens.as_ref().unwrap().output, Some(200));
+    let estimate = estimate_of(span);
+    assert!(
+        (amount(&estimate) - 0.001).abs() < 1e-12,
+        "only model A's 100 output tokens are priced: {estimate}"
+    );
+    assert!(
+        reasons(&estimate["measurement_completeness"], "output")
+            .contains(&"incomplete-attribution".to_owned()),
+        "{estimate}"
+    );
 }
 
 /// Claim: a price table that names a FIFO is refused as not a regular file

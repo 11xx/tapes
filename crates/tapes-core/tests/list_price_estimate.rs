@@ -220,8 +220,9 @@ fn a_cache_write_without_a_ttl_is_bounded() {
 
 /// Claim: a counter the figure measured incompletely keeps the estimate
 /// qualified with the same reason, a known subtotal; and consumption on
-/// branches the model evidence does not cover is `incomplete-attribution`.
-/// Rejects a complete estimate over incompletely measured counters.
+/// another branch, whose every event names its model, is priced by those
+/// models rather than left unattributed. Rejects a complete estimate over
+/// incompletely measured counters.
 #[test]
 fn a_qualified_counter_keeps_the_estimate_qualified() {
     let claude = priced(
@@ -242,8 +243,13 @@ fn a_qualified_counter_keeps_the_estimate_qualified() {
         "a known subtotal keeps its amount"
     );
     let pi = priced(Box::new(PiBackend::new(fixtures("pi"))), "session-pi");
+    assert!(pi["consumption"]["events"]["other_branches"].as_u64() > Some(0));
     let consumption = &pi["consumption"]["list_price_estimate"];
-    assert!(reasons(consumption, "output").contains(&"incomplete-attribution".to_owned()));
+    assert_eq!(
+        consumption["models"][0]["id"], "gpt-fixture",
+        "{consumption}"
+    );
+    assert!(!reasons(consumption, "output").contains(&"incomplete-attribution".to_owned()));
 }
 
 /// Claim: usage a harness attributed to no model leaves the estimate a known

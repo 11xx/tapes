@@ -454,6 +454,11 @@ pub struct Consumption {
     /// The consumption priced by a caller's price table.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub list_price_estimate: Option<ListPriceEstimate>,
+    /// Each model's share of the counted events, by the model each assistant
+    /// event names, which prices events on other branches than the active
+    /// one by their own model.
+    #[serde(skip)]
+    pub served: Vec<ModelUsage>,
     /// Per-counter coverage among the counted events. Missing dimensions
     /// leave known subtotals, never complete measurements.
     pub measurement_coverage: BTreeMap<String, MeasurementCoverage>,
