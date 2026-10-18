@@ -637,7 +637,7 @@ impl Backend for CodexBackend {
     /// its share is the move: a span's figure is the difference of the
     /// totals at its boundaries. A total that fell restarts the count, so the
     /// request after it contributes its own total and qualifies its span
-    /// `since-reset`.
+    /// `since-reset`, and the whole is the sum of every request's move.
     fn stream_spans(
         &self,
         session: &Session,
@@ -673,18 +673,15 @@ impl Backend for CodexBackend {
         }
         let mut whole = session.clone();
         records.apply(&mut whole);
+        let mut notes = vec![
+            "A Codex span is the difference of the cumulative totals at its boundaries; \
+             its model split is not divided."
+                .to_owned(),
+        ];
+        notes.extend(figures.whole(&mut whole));
         let placed = placer.finish();
         let figures = figures.finish(session, &whole, placed.figures());
-        Ok(SpanSessions::assemble(
-            placed,
-            figures,
-            whole,
-            vec![
-                "A Codex span is the difference of the cumulative totals at its boundaries; \
-                 its model split is not divided."
-                    .to_owned(),
-            ],
-        ))
+        Ok(SpanSessions::assemble(placed, figures, whole, notes))
     }
 
     fn usage_observations(
@@ -1812,12 +1809,15 @@ impl CodexUsageObserver {
 
 /// Codex span figures, each the moves of the cumulative total its requests
 /// made, with what the span's own token counts reported beside them.
+/// `moves` sums every request's move, the whole the figures add up to.
 #[derive(Default)]
 struct CodexSpans {
     previous: Option<Tokens>,
     response: Option<(String, Option<Tokens>)>,
     model: Option<Model>,
     figures: BTreeMap<usize, CodexSpanFigure>,
+    moves: TokenTotals,
+    restarts: usize,
 }
 
 #[derive(Default)]
@@ -1878,15 +1878,21 @@ impl CodexSpans {
                 .take()
                 .filter(|(_, usage)| usage.is_some() && *usage == last)
                 .map(|(id, _)| id);
+            let request = (
+                moved(base.input, total.input),
+                moved(base.output, total.output),
+                moved(base.reasoning, total.reasoning),
+                moved(base.cache_read, total.cache_read),
+                moved(base.cache_write, total.cache_write),
+            );
+            self.moves
+                .add(request.0, request.1, request.2, request.3, request.4);
+            self.restarts += usize::from(reset);
             for index in placer.request(at, response.as_deref()) {
                 let figure = self.figures.entry(index).or_default();
-                figure.tokens.add(
-                    moved(base.input, total.input),
-                    moved(base.output, total.output),
-                    moved(base.reasoning, total.reasoning),
-                    moved(base.cache_read, total.cache_read),
-                    moved(base.cache_write, total.cache_write),
-                );
+                figure
+                    .tokens
+                    .add(request.0, request.1, request.2, request.3, request.4);
                 figure.since_reset |= reset;
                 figure.model.clone_from(&self.model);
                 if let Some(model) = &self.model {
@@ -1904,6 +1910,34 @@ impl CodexSpans {
                 self.figures.entry(index).or_default().unrecognized_usage += 1;
             }
         }
+    }
+
+    /// A restarted total counts only the requests after the restart, so the
+    /// whole the figures add up to is every request's move, `since-reset`,
+    /// beside the total recorded since the restart that `usage --full`
+    /// keeps. Without a restart the two are the same total.
+    fn whole(&self, whole: &mut Session) -> Option<String> {
+        if self.restarts == 0 {
+            return None;
+        }
+        let (tokens, measurement_coverage) = self.moves.clone().finish_covered();
+        whole.accounting = accounting_for(
+            tokens.as_ref(),
+            None,
+            &measurement_coverage,
+            AccountingBasis::RecordedTotal,
+            AccountingCoverage::SinceReset,
+        );
+        whole.tokens = tokens;
+        let detail = whole.usage_detail.get_or_insert_with(Default::default);
+        detail.measurement_incomplete = known_subtotal_notes(&measurement_coverage);
+        detail.measurement_coverage = measurement_coverage;
+        Some(format!(
+            "Codex's cumulative total restarted {} time(s); the whole here sums every \
+             request's move across the restarts, while `usage --full` keeps the total \
+             recorded since the last restart.",
+            self.restarts
+        ))
     }
 
     fn finish(mut self, session: &Session, whole: &Session, count: usize) -> Vec<Session> {

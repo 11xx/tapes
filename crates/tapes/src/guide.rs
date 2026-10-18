@@ -537,7 +537,10 @@ PROBE BEFORE EXPORTING
   within one accounting basis, so the span before an instant and the span
   from it add up to `usage --full`. A request in two spans counts in each and
   is `overlapped`. A Codex span is the difference of the cumulative totals at
-  its boundaries, `since-reset` when a counter restarted inside it. A Claude
+  its boundaries, `since-reset` when a counter restarted inside it; across a
+  restart, as a resumed `codex exec` process starts its total again, the
+  whole the spans add up to sums every request's move, `since-reset`, while
+  `usage --full` keeps the total recorded since the last restart. A Claude
   cost-state is the running total of one run and an OpenCode session total
   counts requests no message records, so no span divides either: their
   spans, and the whole they add up to, sum requests, and the recorded total is

@@ -1679,10 +1679,13 @@ enum Command {
         /// within one accounting basis, and requests no span holds form the
         /// remainder. A Codex span is the difference of the cumulative totals
         /// at its boundaries, `since-reset` when a counter restarted inside
-        /// it. A Claude cost-state or an OpenCode session total covers more
-        /// than any span, so their spans sum requests and the recorded total
-        /// is withheld with a note. A pi span keeps the active-branch
-        /// counters and the retained-branch `consumption` apart. A request
+        /// it; across a restart the whole its spans add up to sums every
+        /// request's move, while `usage --full` keeps the total recorded
+        /// since the last restart. A Claude cost-state or an OpenCode session
+        /// total covers more than any span, so their spans sum requests and
+        /// the recorded total is withheld with a note. A pi span keeps the
+        /// active-branch counters and the retained-branch `consumption`
+        /// apart. A request
         /// without a usable timestamp is held by the remainder, and a record
         /// that cannot be placed for or against the span (an unreadable
         /// record, a failed attempt or unrecognized usage between requests)
