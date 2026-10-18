@@ -560,6 +560,15 @@ pub trait Backend {
         let _ = session;
         (Vec::new(), Vec::new())
     }
+    /// Sessions whose window children may have spent at or after `since`
+    /// though the session's own records may end before it, so a window read
+    /// reaches children a listing by the session's own activity leaves out,
+    /// with the candidates that could not be read. A candidate is not proof
+    /// of activity: the window read places the children's requests itself.
+    fn window_parents(&self, since: DateTime<Utc>) -> (Vec<Session>, Vec<String>) {
+        let _ = since;
+        (Vec::new(), Vec::new())
+    }
     /// As [`Backend::usage_reconciliation`], for a session `read` streamed
     /// whole: the session's own recording is replayed against the prefix that
     /// read validated rather than validated again. The default reads afresh.

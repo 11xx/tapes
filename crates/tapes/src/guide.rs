@@ -626,11 +626,14 @@ PROBE BEFORE EXPORTING
   `usage --from/--to` reads one session, so a session that straddles an edge
   contributes what it consumed inside and nothing else; a Claude parent's
   subagent recordings, which no listing returns, contribute their own spans as
-  `<parent>::<agent>`. The shares are summed under the summary's partitions,
-  withholding and overlap rules, so the window total is the sum of its shares
-  within one accounting basis, and a request a span cannot place qualifies its
-  share as it qualifies a span. Related sessions are never added by an exact
-  union, since event keys cover whole recordings. `window` names the edges,
+  `<parent>::<agent>`, and a parent whose own records end before the window is
+  reached through subagent recordings written since it opened, under the same
+  scope and filters but beyond --limit (except under --search). The shares are
+  summed under the summary's partitions, withholding and overlap rules, so the
+  window total is the sum of its shares within one accounting basis, and a
+  request a span cannot place qualifies its share as it qualifies a span.
+  Related sessions are never added by an exact union, since event keys cover
+  whole recordings. `window` names the edges,
   how they were established (`requested`, `recorded`, `inferred`), the
   selected sessions that placed nothing inside it, and each session's share,
   largest first: its requests inside the window out of its own, its launch,

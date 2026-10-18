@@ -2162,17 +2162,64 @@ pub fn read_window(
         )?,
     };
     let mut sessions = listed.sessions;
-    declare_origins(backends, &listed.origins, &mut sessions);
+    let mut origins = listed.origins;
     let mut unreadable = listed.unreadable;
+    // A parent whose own records end before the window can have children
+    // that spend inside it; the listing, which reads each session's own
+    // activity, leaves such a parent out, so it is reached through them.
+    let mut through_children = HashSet::new();
+    if let Some(from) = bounds.from.filter(|_| selection.filters.search.is_none()) {
+        let admits = backend::Query::scoped_with_filters(
+            scope.as_ref(),
+            1,
+            1,
+            backend::QueryFilters {
+                model: selection.filters.model,
+                launch: selection.filters.launch,
+                directory: selection.filters.directory,
+                since: None,
+                until: selection.filters.until,
+            },
+        );
+        for (origin, backend) in backends.iter().enumerate().filter(|(_, backend)| {
+            selection
+                .harness
+                .is_none_or(|harness| backend.harness() == harness)
+        }) {
+            let (parents, failures) = backend.window_parents(from);
+            unreadable.extend(failures);
+            for parent in parents {
+                let placed = scope.as_ref().is_none_or(|scope| {
+                    parent
+                        .directory
+                        .as_deref()
+                        .is_some_and(|directory| scope.contains(directory))
+                });
+                if !placed
+                    || !admits.matches(&parent)
+                    || sessions.iter().any(|session| session.id == parent.id)
+                {
+                    continue;
+                }
+                through_children.insert(parent.id.clone());
+                sessions.push(parent);
+                origins.push(origin);
+            }
+        }
+    }
+    declare_origins(backends, &origins, &mut sessions);
     let mut figures = Vec::new();
     let mut shares = Vec::new();
     let mut parents = Vec::new();
     let mut empty = 0;
     for (index, session) in sessions.iter().enumerate() {
-        if !bounds.may_hold(session.started_at, session.last_activity_at) {
+        if !through_children.contains(&session.id)
+            && !bounds.may_hold(session.started_at, session.last_activity_at)
+        {
             continue;
         }
-        let backend = backends[listed.origins[index]].as_ref();
+        let backend = backends[origins[index]].as_ref();
+        let reached = through_children.contains(&session.id);
         let (children, failures) = backend.window_children(session);
         unreadable.extend(failures);
         for member in std::iter::once(session.clone()).chain(children) {
@@ -2188,7 +2235,12 @@ pub fn read_window(
             };
             let (figure, placement) = spans.spans.remove(0);
             if placement.requests == 0 && placement.unplaced == 0 {
-                empty += 1;
+                // A parent reached only through its children was not listed,
+                // so neither it nor a child of it that places nothing is an
+                // empty session of the window.
+                if !reached {
+                    empty += 1;
+                }
                 continue;
             }
             parents.push((member.id.clone(), window::declared_parent(&member)));

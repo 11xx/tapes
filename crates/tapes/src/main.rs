@@ -1736,11 +1736,14 @@ enum Command {
         /// of its own requests inside it (the span `usage --from/--to` reads),
         /// read whole, so a session that straddles an edge contributes what it
         /// consumed inside and nothing else. A Claude parent's subagent
-        /// recordings contribute their own spans as `<parent>::<agent>`.
-        /// Shares sum to the window's figures under the summary's partitions
-        /// and withholding, and a request a span cannot place qualifies its
-        /// share as a span does. Related sessions are never added by an exact
-        /// union. `window` names the edges, how they were established
+        /// recordings contribute their own spans as `<parent>::<agent>`, a
+        /// parent whose own records end before the window reached through
+        /// subagent recordings written since it opened (beyond --limit,
+        /// except under --search). Shares sum to the window's figures under
+        /// the summary's partitions and withholding, and a request a span
+        /// cannot place qualifies its share as a span does. Related sessions
+        /// are never added by an exact union. `window` names the edges, how
+        /// they were established
         /// (`requested`, `recorded`, `inferred`), and each session's share,
         /// largest first: its requests inside the window, its launch, its
         /// named `parent` and the `root` its chain of parents ends at, and its

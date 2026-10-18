@@ -404,6 +404,52 @@ impl Backend for ClaudeBackend {
         (children, failures)
     }
 
+    /// A parent whose subagent recordings were written at or after `since`.
+    /// A recording's modification time is no earlier than the newest record
+    /// written to it, so a child that spent since then is never missed; the
+    /// window read decides from the records whether it did.
+    fn window_parents(&self, since: chrono::DateTime<chrono::Utc>) -> (Vec<Session>, Vec<String>) {
+        let Some(store) = self.store.as_ref() else {
+            return (Vec::new(), Vec::new());
+        };
+        let page = store.candidates_in(&self.catalog, usize::MAX);
+        let mut parents = Vec::new();
+        let mut failures = page
+            .failures
+            .iter()
+            .map(|failure| format!("claude window parents: {failure}"))
+            .collect::<Vec<_>>();
+        for native in &page.records {
+            let Some(path) = native.locator() else {
+                continue;
+            };
+            let mut written = false;
+            let visited = visit_subagent_transcripts(path, |_, transcript| {
+                written |= fs::metadata(&transcript)
+                    .and_then(|metadata| metadata.modified())
+                    .is_ok_and(|modified| chrono::DateTime::<chrono::Utc>::from(modified) >= since);
+            });
+            if let Err(error) = visited {
+                failures.push(format!(
+                    "{} (claude): subagents unenumerated: {error:#}",
+                    native.id()
+                ));
+                continue;
+            }
+            if !written {
+                continue;
+            }
+            match self
+                .parse(native, path, ParsedTurns::TitleOnly)
+                .and_then(|(session, _, _)| super::enrich_native_session(native, session))
+            {
+                Ok(session) => parents.push(session),
+                Err(error) => failures.push(format!("{} (claude): {error:#}", native.id())),
+            }
+        }
+        (parents, failures)
+    }
+
     fn child_transcript(&self, parent: &Session, reference: &str) -> Result<Transcript> {
         let path = child_recording(parent, reference)?;
         let (mut session, turns, read) = self.parse_with_parent(&path, &parent.id, reference)?;
