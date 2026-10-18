@@ -6,15 +6,21 @@
 //! a regular file is refused without waiting on it.
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use agent_tapes_core::backend::{codex::CodexBackend, Backend};
+use agent_tapes_core::backend::{codex::CodexBackend, pi::PiBackend, Backend};
 use agent_tapes_core::pricing::PriceTable;
 use agent_tapes_core::span::SpanBounds;
 use agent_tapes_core::{usage_full_with_backends, usage_spans_with_backends, Selection};
 use serde_json::{json, Value};
+
+fn fixtures(name: &str) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures")
+        .join(name)
+}
 
 /// A store laid out as its harness lays it out, removed when dropped.
 struct Store(PathBuf);
@@ -46,6 +52,49 @@ impl Drop for Store {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.0);
     }
+}
+
+fn reasons(completeness: &Value, counter: &str) -> Vec<String> {
+    completeness[counter]
+        .as_array()
+        .map(|reasons| {
+            reasons
+                .iter()
+                .map(|reason| reason.as_str().unwrap().to_owned())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Claim: a pi span the read could not cover, because a malformed record
+/// lies among its requests, qualifies its retained-branch consumption
+/// `unreadable-record` as it qualifies its active-branch counters. Rejects
+/// a consumption figure that reads as complete beside a span that counts
+/// the record as unplaced.
+#[test]
+fn a_pi_span_qualifies_its_consumption_with_an_unreadable_record() {
+    let answer = usage_spans_with_backends(
+        &[Box::new(PiBackend::new(fixtures("pi")))],
+        Selection::Id("malformed"),
+        &[SpanBounds::Requests {
+            first: None,
+            last: None,
+        }],
+    )
+    .unwrap();
+    let span = serde_json::to_value(&answer.spans[0]).unwrap();
+    assert!(span["span"]["unplaced"].as_u64().unwrap() > 0, "{span}");
+    assert!(
+        reasons(&span["measurement_completeness"], "output")
+            .contains(&"unreadable-record".to_owned()),
+        "{span}"
+    );
+    assert!(
+        reasons(&span["consumption"]["measurement_completeness"], "output")
+            .contains(&"unreadable-record".to_owned()),
+        "the consumption beside an unplaced record: {}",
+        span["consumption"]
+    );
 }
 
 fn codex_usage(input: u64, output: u64) -> Value {

@@ -391,12 +391,14 @@ impl SpanSessions {
             .zip(placed.placements)
             .zip(placed.qualified)
             .map(|((mut session, placement), qualified)| {
+                // What the placer could not place qualifies every figure the
+                // span holds, a retained-branch consumption included.
                 if !qualified.is_empty() {
-                    session
-                        .usage_detail
-                        .get_or_insert_with(Default::default)
-                        .measurement_completeness
-                        .merge(&qualified);
+                    let detail = session.usage_detail.get_or_insert_with(Default::default);
+                    detail.measurement_completeness.merge(&qualified);
+                    if let Some(consumption) = &mut detail.consumption {
+                        consumption.measurement_completeness.merge(&qualified);
+                    }
                 }
                 (session, placement)
             })
