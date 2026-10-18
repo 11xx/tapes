@@ -492,6 +492,58 @@ fn all_known_housekeeping_records_preserve_the_final_conversation_ending() {
 }
 
 #[test]
+fn the_prompt_snapshot_written_after_the_ending_does_not_hide_it() {
+    let snapshot = json!({"type": "attachment", "sessionId": PARENT, "uuid": "snapshot",
+        "timestamp": "2026-10-09T18:39:13.000Z", "isSidechain": true, "agentId": FINISHED,
+        "attachment": {"type": "prompt_snapshot", "systemPrompt": ["Synthetic context."],
+            "tools": [], "systemTurns": true}});
+    let (_store, child) = single_child(
+        "prompt-snapshot",
+        &plugin_meta(),
+        &lines(&[brief(FINISHED), ended(FINISHED), snapshot]),
+    );
+
+    assert_eq!(
+        child.completed_at,
+        Some(instant("2026-10-09T18:39:12.500Z")),
+        "{child:#?}"
+    );
+    assert!(has_record(&child, &format!("{FINISHED}-ending")));
+}
+
+#[test]
+fn a_child_its_meta_calls_finished_completed_at_its_final_record_whatever_it_is() {
+    let stopped = json!({"type": "user", "sessionId": PARENT, "uuid": "stopped",
+        "parentUuid": "running-call", "timestamp": "2026-10-09T18:41:00.000Z",
+        "isSidechain": true, "agentId": FINISHED,
+        "message": {"role": "user", "content": [{"type": "tool_result",
+            "tool_use_id": "call", "content": "Interrupted."}]}});
+    let recording = lines(&[
+        brief(FINISHED),
+        assistant(
+            FINISHED,
+            "running-call",
+            "2026-10-09T18:40:00.000Z",
+            json!("tool_use"),
+        ),
+        stopped,
+    ]);
+    let mut finished = plugin_meta();
+    finished["finished"] = json!(true);
+
+    let (_store, child) = single_child("meta-finished", &finished, &recording);
+    assert_eq!(
+        child.completed_at,
+        Some(instant("2026-10-09T18:41:00.000Z")),
+        "{child:#?}"
+    );
+    assert!(has_record(&child, "stopped"));
+
+    let (_store, child) = single_child("meta-silent", &plugin_meta(), &recording);
+    assert!(child.completed_at.is_none(), "{child:#?}");
+}
+
+#[test]
 fn unknown_trailing_records_and_gaps_before_housekeeping_leave_the_child_open() {
     for record in [
         json!({"type": "future-metadata", "sessionId": PARENT}),

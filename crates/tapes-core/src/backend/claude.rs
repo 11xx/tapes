@@ -1023,7 +1023,13 @@ impl ClaudeBackend {
             ];
             source.extend(call.sources());
             let ending = if file.plugin_steered && call.completed_at.is_none() {
-                child_ending(&file.transcript, parent_id, &file.agent_id, self.read_bytes)?
+                child_ending(
+                    &file.transcript,
+                    parent_id,
+                    &file.agent_id,
+                    file.finished,
+                    self.read_bytes,
+                )?
             } else {
                 None
             };
@@ -3225,6 +3231,9 @@ struct SubagentFile {
     /// the parent records no `Agent` call for it and its own recording is the
     /// only statement of where it ended.
     plugin_steered: bool,
+    /// The meta record says the subagent finished, which holds even where its
+    /// recording stops mid-turn.
+    finished: bool,
 }
 
 /// The agent calls a Claude recording holds, keyed by tool-use id and folded
@@ -3320,7 +3329,8 @@ struct ChildEnding {
 }
 
 /// The ending a subagent's recording states: its final conversation record is
-/// an assistant record that stopped on `end_turn`. Housekeeping records
+/// an assistant record that stopped on `end_turn`, or, when its meta record says
+/// it finished, whatever its final conversation record is. Housekeeping records
 /// Claude appends after the conversation do not reopen it. A recording whose
 /// final line cannot be parsed, whose final record lies outside the read bound,
 /// or whose ending carries no timestamp states no ending. The opening and tail
@@ -3330,6 +3340,7 @@ fn child_ending(
     path: &Path,
     parent_id: &str,
     reference: &str,
+    finished: bool,
     read_bytes: u64,
 ) -> Result<Option<ChildEnding>> {
     let recording = child_ending_recording(path, read_bytes)
@@ -3353,7 +3364,7 @@ fn child_ending(
         .iter()
         .enumerate()
         .rev()
-        .find(|(_, value)| claude_trailing_kind(value).is_none())
+        .find(|(_, value)| !child_housekeeping(value))
     else {
         return Ok(None);
     };
@@ -3364,13 +3375,20 @@ fn child_ending(
     {
         return Ok(None);
     }
-    if last["type"] != "assistant" || last["message"]["stop_reason"] != "end_turn" {
+    if !finished && (last["type"] != "assistant" || last["message"]["stop_reason"] != "end_turn") {
         return Ok(None);
     }
     Ok(timestamp(&last["timestamp"]).map(|at| ChildEnding {
         at,
         record: last["uuid"].as_str().map(str::to_owned),
     }))
+}
+
+/// A record Claude appends to a subagent's recording after its turn: the
+/// session's housekeeping, and the snapshot of the prompt the turn ran with.
+fn child_housekeeping(value: &Value) -> bool {
+    claude_trailing_kind(value).is_some()
+        || value["type"] == "attachment" && value["attachment"]["type"] == "prompt_snapshot"
 }
 
 fn child_ending_recording(path: &Path, read_bytes: u64) -> Result<super::Recording> {
@@ -3382,7 +3400,7 @@ fn child_ending_recording(path: &Path, read_bytes: u64) -> Result<super::Recordi
             .tail
             .values
             .iter()
-            .any(|value| claude_trailing_kind(value).is_none())
+            .any(|value| !child_housekeeping(value))
     {
         return read_recording(path, read_bytes);
     }
@@ -3442,6 +3460,7 @@ fn subagent_files(path: &Path) -> Result<Vec<SubagentFile>> {
             model: recorded["model"].as_str().map(str::to_owned),
             plugin_steered: recorded["pluginSteered"] == true
                 && recorded["requestNonInteractive"] != false,
+            finished: recorded["finished"] == true,
         });
     })?;
     files.sort_by(|left, right| left.agent_id.cmp(&right.agent_id));
@@ -3758,20 +3777,28 @@ mod child_ending_cost_tests {
         let read = child_ending_recording(&path, super::super::DEFAULT_READ_BYTES).unwrap();
         assert_eq!(read.tail.configured_bound, 64 * 1024);
         assert!(read.tail.truncated);
-        assert!(
-            child_ending(&path, "parent", "fixture", super::super::DEFAULT_READ_BYTES)
-                .unwrap()
-                .is_some()
-        );
+        assert!(child_ending(
+            &path,
+            "parent",
+            "fixture",
+            false,
+            super::super::DEFAULT_READ_BYTES
+        )
+        .unwrap()
+        .is_some());
         ending["message"]["content"] = serde_json::json!("x".repeat(128 * 1024));
         fs::write(&path, format!("{opening}\n{ending}\n{housekeeping}\n")).unwrap();
         let read = child_ending_recording(&path, super::super::DEFAULT_READ_BYTES).unwrap();
         assert_eq!(read.tail.configured_bound, super::super::DEFAULT_READ_BYTES);
-        assert!(
-            child_ending(&path, "parent", "fixture", super::super::DEFAULT_READ_BYTES)
-                .unwrap()
-                .is_some()
-        );
+        assert!(child_ending(
+            &path,
+            "parent",
+            "fixture",
+            false,
+            super::super::DEFAULT_READ_BYTES
+        )
+        .unwrap()
+        .is_some());
         fs::remove_dir_all(root).unwrap();
     }
 }
