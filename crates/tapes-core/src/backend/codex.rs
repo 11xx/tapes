@@ -1634,20 +1634,31 @@ impl CodexUsageObserver {
     }
 
     /// A token count carrying a total settles the requests counted since
-    /// the previous one. A total that stood still moved for none of them; a
-    /// total whose last usage is the newest request's own moved for it
-    /// alone. Any other move is not attributed to particular requests.
-    fn settle(&mut self, change: Option<&TotalChange>, last: Option<&Tokens>) {
+    /// the previous one, by how far the total moved: a total that stood
+    /// still moved for none of them, and one that moved by exactly the
+    /// newest request's usage moved for it alone. Any other move, such as
+    /// one that covers several requests at once, leaves none of them outside
+    /// the total.
+    fn settle(&mut self, previous: Option<&Tokens>, total: &Tokens) {
         let mut unsettled = std::mem::take(&mut self.unsettled);
-        match change {
-            Some(TotalChange::Unchanged) => {}
-            Some(TotalChange::Incomparable) => return,
-            _ if last.is_some() && unsettled.last().map(|request| &request.usage) == last => {
-                unsettled.pop();
+        let change = previous.map(|previous| compare_totals(previous, total));
+        let moved = match change {
+            Some(TotalChange::Unchanged) => {
+                self.leave_total(unsettled);
+                return;
             }
-            _ => return,
+            Some(TotalChange::Incomparable) => return,
+            // A restarted total, like the first, counts from zero.
+            Some(TotalChange::Reset) | None => total.clone(),
+            Some(TotalChange::Advance) => total_move(previous.expect("an advance"), total),
+        };
+        if unsettled
+            .last()
+            .is_some_and(|request| same_counters(&moved, &request.usage))
+        {
+            unsettled.pop();
+            self.leave_total(unsettled);
         }
-        self.leave_total(unsettled);
     }
 
     fn leave_total(&mut self, requests: Vec<UsageRequest>) {
@@ -1719,13 +1730,7 @@ impl CodexUsageObserver {
         self.legacy_seen = true;
         self.legacy.observe();
         let previous = self.previous_total.replace(total.clone());
-        self.settle(
-            previous
-                .as_ref()
-                .map(|previous| compare_totals(previous, &total))
-                .as_ref(),
-            last.as_ref(),
-        );
+        self.settle(previous.as_ref(), &total);
         let (classification, counted) = match previous {
             None if !self.read_window && supports_single_legacy_request(&total, last.as_ref()) => {
                 let counted = self.legacy.count_request(
@@ -2258,6 +2263,36 @@ fn outside_use(request: &UsageRequest) -> Option<crate::allowance::TimedUse> {
 
 /// A counted usage record: its own usage, when it was recorded, and the
 /// model in effect.
+/// How far each counter of a cumulative total moved, where both totals
+/// recorded it.
+fn total_move(previous: &Tokens, total: &Tokens) -> Tokens {
+    let moved = |previous: Option<u64>, total: Option<u64>| total?.checked_sub(previous?);
+    Tokens {
+        input: moved(previous.input, total.input),
+        output: moved(previous.output, total.output),
+        reasoning: moved(previous.reasoning, total.reasoning),
+        cache_read: moved(previous.cache_read, total.cache_read),
+        cache_write: moved(previous.cache_write, total.cache_write),
+    }
+}
+
+/// Whether two figures agree on every counter both record, and both record
+/// at least one.
+fn same_counters(left: &Tokens, right: &Tokens) -> bool {
+    let pairs = [
+        (left.input, right.input),
+        (left.output, right.output),
+        (left.reasoning, right.reasoning),
+        (left.cache_read, right.cache_read),
+        (left.cache_write, right.cache_write),
+    ];
+    pairs.iter().any(|pair| matches!(pair, (Some(_), Some(_))))
+        && pairs.iter().all(|pair| match pair {
+            (Some(left), Some(right)) => left == right,
+            _ => true,
+        })
+}
+
 struct UsageRequest {
     usage: Tokens,
     at: Option<chrono::DateTime<chrono::Utc>>,
