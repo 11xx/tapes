@@ -2165,11 +2165,20 @@ pub fn read_window(
     let mut sessions = listed.sessions;
     let mut origins = listed.origins;
     let mut unreadable = listed.unreadable;
+    let mut unsearched = listed.unsearched;
+    let mut partial_search = listed.partial_search;
     // A parent whose own records end before the window can have children
     // that spend inside it; the listing, which reads each session's own
-    // activity, leaves such a parent out, so it is reached through them.
+    // activity, leaves such a parent out, so it is reached through them:
+    // through children written since the window opened, and since the
+    // caller's --since where that is later. Every other filter, --search
+    // included, still applies to the parent itself.
     let mut through_children = HashSet::new();
-    if let Some(from) = bounds.from.filter(|_| selection.filters.search.is_none()) {
+    if let Some(from) = bounds.from {
+        let written_since = selection
+            .filters
+            .since
+            .map_or(from, |since| since.max(from));
         let admits = backend::Query::scoped_with_filters(
             scope.as_ref(),
             1,
@@ -2187,7 +2196,7 @@ pub fn read_window(
                 .harness
                 .is_none_or(|harness| backend.harness() == harness)
         }) {
-            let (parents, failures) = backend.window_parents(from);
+            let (parents, failures) = backend.window_parents(written_since);
             unreadable.extend(failures);
             for parent in parents {
                 let placed = scope.as_ref().is_none_or(|scope| {
@@ -2201,6 +2210,27 @@ pub fn read_window(
                     || sessions.iter().any(|session| session.id == parent.id)
                 {
                     continue;
+                }
+                if let Some(needle) = selection.filters.search {
+                    let tail = selection.filters.search_turns.unwrap_or(LIST_SEARCH_TAIL);
+                    match backend.search_coverage(&parent, needle, tail) {
+                        Ok(coverage) => {
+                            if coverage.partial && !coverage.matched {
+                                partial_search.push(coverage.diagnostic(&parent));
+                            }
+                            if !coverage.matched {
+                                continue;
+                            }
+                        }
+                        Err(error) => {
+                            unsearched.push(format!(
+                                "{} session {}: {error:#}",
+                                backend.harness(),
+                                parent.id
+                            ));
+                            continue;
+                        }
+                    }
                 }
                 through_children.insert(parent.id.clone());
                 sessions.push(parent);
@@ -2296,8 +2326,8 @@ pub fn read_window(
         limit,
         unavailable: listed.unavailable,
         unreadable,
-        unsearched: listed.unsearched,
-        partial_search: listed.partial_search,
+        unsearched,
+        partial_search,
         scanned: listed.scanned,
         scan_truncated: listed.scan_truncated,
         unplaced: listed.unplaced,

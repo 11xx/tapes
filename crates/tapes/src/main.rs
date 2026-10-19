@@ -1744,8 +1744,9 @@ enum Command {
         /// consumed inside and nothing else. A Claude parent's subagent
         /// recordings contribute their own spans as `<parent>::<agent>`, a
         /// parent whose own records end before the window reached through
-        /// subagent recordings written since it opened (beyond --limit,
-        /// except under --search). Shares sum to the window's figures under
+        /// subagent recordings written since it opened and since --since,
+        /// under the other filters, --search over its own turns included,
+        /// and beyond --limit. Shares sum to the window's figures under
         /// the summary's partitions and withholding, and a request a span
         /// cannot place qualifies its share as a span does. Related sessions
         /// are never added by an exact union. `window` names the edges, how

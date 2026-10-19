@@ -1063,7 +1063,7 @@ pub struct SearchCoverage {
 }
 
 impl SearchCoverage {
-    fn diagnostic(&self, session: &Session) -> String {
+    pub(crate) fn diagnostic(&self, session: &Session) -> String {
         format!(
             "{} session {}: partial coverage of the requested turn window",
             session.harness(),
