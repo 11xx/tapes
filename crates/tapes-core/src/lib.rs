@@ -2255,8 +2255,8 @@ fn read_window_keeping(
     // through children written since the window opened, and since the
     // caller's --since where that is later. Every other filter, --search
     // included, still applies to the parent itself.
-    // The children of each parent reached through them, by the parent's
-    // place in `sessions`.
+    // Each parent reached through its children, by its place in
+    // `sessions`, with the children --since already read.
     let mut reached_children = HashMap::new();
     if let Some(from) = bounds.from {
         let written_since = selection
@@ -2323,12 +2323,15 @@ fn read_window_keeping(
                 // recordings has activity since it, as it keeps a listed
                 // session by its own, and a family it rejects takes no
                 // place under a keep bound.
-                let (children, failures) = backend.window_children(&parent);
-                unreadable.extend(failures);
-                if selection.filters.since.is_some_and(|since| {
+                let children = selection.filters.since.map(|since| {
+                    let (children, failures) = backend.window_children(&parent);
+                    unreadable.extend(failures);
+                    (since, children)
+                });
+                if children.as_ref().is_some_and(|(since, children)| {
                     !std::iter::once(&parent)
-                        .chain(&children)
-                        .any(|member| member.last_activity_at.is_some_and(|last| last >= since))
+                        .chain(children)
+                        .any(|member| member.last_activity_at.is_some_and(|last| last >= *since))
                 }) {
                     continue;
                 }
@@ -2342,7 +2345,7 @@ fn read_window_keeping(
                     }
                     *count += 1;
                 }
-                reached_children.insert(sessions.len(), children);
+                reached_children.insert(sessions.len(), children.map(|(_, children)| children));
                 sessions.push(parent);
                 origins.push(origin);
             }
@@ -2360,7 +2363,7 @@ fn read_window_keeping(
         }
         let backend = backends[origins[index]].as_ref();
         let reached = nominated.is_some();
-        let children = nominated.unwrap_or_else(|| {
+        let children = nominated.flatten().unwrap_or_else(|| {
             let (children, failures) = backend.window_children(session);
             unreadable.extend(failures);
             children
