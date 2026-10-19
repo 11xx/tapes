@@ -215,7 +215,12 @@ FIND IT
   An identity mismatch remains a failure
   when candidate enumeration finds only prefix matches. A prefix is accepted only when
   bounded candidate coverage proves it unique; an ambiguous prefix lists its
-  candidates. --harness <h> restricts ID and prefix lookup to that harness's
+  candidates. A file-backed harness matches an id or prefix against the
+  identities its walk reads from filenames and recording headers and reads
+  only the matching recordings whole, so a recording another session is
+  still writing never decides a miss; a candidate whose header it could not
+  read keeps the miss from reading as absence. A whole read whose recording
+  changes under it starts again, up to three reads. --harness <h> restricts ID and prefix lookup to that harness's
   stores. Lookup diagnostics retain the failure causes alongside incomplete
   and completely searched harness stores, distinguishing store generations
   when a harness has several. Incomplete coverage asks for the full id or

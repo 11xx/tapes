@@ -217,6 +217,10 @@ pub struct Query<'a> {
     /// The order the caller presents. A backend holding its whole candidate
     /// set applies it before `limit` and continuation.
     pub sort: crate::ListSort,
+    /// The start of the native identity a session must have, when resolving
+    /// an id. A file backend applies it to the identities a walk reads from
+    /// filenames and headers, so a candidate it rules out is never parsed.
+    pub id_prefix: Option<String>,
 }
 
 /// Metadata predicates applied before a listing's result limit.
@@ -241,6 +245,7 @@ impl<'a> Query<'a> {
             since: None,
             until: None,
             sort: crate::ListSort::Newest,
+            id_prefix: None,
         }
     }
 
@@ -271,11 +276,13 @@ impl<'a> Query<'a> {
             since: filters.since,
             until: filters.until,
             sort: crate::ListSort::Newest,
+            id_prefix: None,
         }
     }
 
     pub(crate) fn has_filters(&self) -> bool {
-        self.model.is_some()
+        self.id_prefix.is_some()
+            || self.model.is_some()
             || self.launch.is_some()
             || self.directory.is_some()
             || self.since.is_some()
@@ -283,6 +290,10 @@ impl<'a> Query<'a> {
     }
 
     pub(crate) fn matches(&self, session: &Session) -> bool {
+        let id_matches = self
+            .id_prefix
+            .as_deref()
+            .is_none_or(|prefix| session.id.starts_with(prefix));
         let model_matches = self.model.as_ref().is_none_or(|needle| {
             session
                 .model
@@ -307,7 +318,12 @@ impl<'a> Query<'a> {
                 .last_activity_at
                 .is_some_and(|activity| activity < until)
         });
-        model_matches && launch_matches && directory_matches && since_matches && until_matches
+        id_matches
+            && model_matches
+            && launch_matches
+            && directory_matches
+            && since_matches
+            && until_matches
     }
 }
 
@@ -791,8 +807,39 @@ impl IdentitySource<Session> for BackendIdentitySource<'_> {
     }
 
     fn candidates(&self, limit: usize) -> NativeCandidatePage<Session, String> {
+        self.candidates_with_prefix(None, limit)
+    }
+
+    fn candidates_matching(
+        &self,
+        prefix: &str,
+        limit: usize,
+    ) -> NativeCandidatePage<Session, String> {
+        self.candidates_with_prefix(Some(prefix), limit)
+    }
+
+    fn shares_session_ids(&self) -> bool {
+        self.backend.shares_session_ids()
+    }
+
+    fn terminal_exact_failure(&self) -> bool {
+        self.backend.terminal_exact_failure()
+    }
+
+    fn available(&self) -> bool {
+        self.backend.available()
+    }
+}
+
+impl BackendIdentitySource<'_> {
+    fn candidates_with_prefix(
+        &self,
+        prefix: Option<&str>,
+        limit: usize,
+    ) -> NativeCandidatePage<Session, String> {
         let mut query = Query::unscoped(limit);
         query.ceiling = limit;
+        query.id_prefix = prefix.map(str::to_owned);
         match self.backend.list(&query) {
             Ok(listing) => {
                 let failures = listing.unavailable;
@@ -818,18 +865,6 @@ impl IdentitySource<Session> for BackendIdentitySource<'_> {
                 unreadable_ids: Vec::new(),
             },
         }
-    }
-
-    fn shares_session_ids(&self) -> bool {
-        self.backend.shares_session_ids()
-    }
-
-    fn terminal_exact_failure(&self) -> bool {
-        self.backend.terminal_exact_failure()
-    }
-
-    fn available(&self) -> bool {
-        self.backend.available()
     }
 }
 
@@ -936,6 +971,13 @@ pub(crate) fn list_discovered_files(
     let mut files = Vec::with_capacity(page.records.len());
     let mut no_path = Vec::new();
     for native in page.records {
+        if !query
+            .id_prefix
+            .as_deref()
+            .is_none_or(|prefix| native.id().starts_with(prefix))
+        {
+            continue;
+        }
         let Some(path) = native.locator().map(Path::to_path_buf) else {
             no_path.push(native.id().to_owned());
             continue;
@@ -1008,6 +1050,13 @@ pub(crate) fn list_discovered_files_with_search(
     let mut files = Vec::with_capacity(page.records.len());
     let mut no_path = Vec::new();
     for native in page.records {
+        if !query
+            .id_prefix
+            .as_deref()
+            .is_none_or(|prefix| native.id().starts_with(prefix))
+        {
+            continue;
+        }
         let Some(path) = native.locator().map(Path::to_path_buf) else {
             no_path.push(native.id().to_owned());
             continue;
@@ -1476,7 +1525,35 @@ pub(crate) fn validate_recording_identity(
     Ok(())
 }
 
+/// How many whole reads a recording that keeps changing under them gets.
+const RECORDING_READ_ATTEMPTS: usize = 3;
+
+/// A whole read saw its recording change between its first and last look.
+#[derive(Debug)]
+struct ChangedDuringRead;
+
+impl std::fmt::Display for ChangedDuringRead {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("recording source changed during the read; restart without a cursor")
+    }
+}
+
+impl std::error::Error for ChangedDuringRead {}
+
+/// Read `path`'s bounded tail, and its head when the tail is truncated, as
+/// one snapshot. A recording a live session appends to mid-read is read
+/// again from the start, up to [`RECORDING_READ_ATTEMPTS`] times.
 pub(crate) fn read_recording(path: &Path, read_bytes: u64) -> Result<Recording> {
+    for _ in 1..RECORDING_READ_ATTEMPTS {
+        match read_recording_once(path, read_bytes) {
+            Err(error) if error.is::<ChangedDuringRead>() => {}
+            result => return result,
+        }
+    }
+    read_recording_once(path, read_bytes)
+}
+
+fn read_recording_once(path: &Path, read_bytes: u64) -> Result<Recording> {
     let mut file =
         open_regular_file(path).with_context(|| format!("failed to open {}", path.display()))?;
     let metadata = file.metadata()?;
@@ -1488,7 +1565,7 @@ pub(crate) fn read_recording(path: &Path, read_bytes: u64) -> Result<Recording> 
     };
     let after = file.metadata()?;
     if !same_source(&metadata, &after) {
-        anyhow::bail!("recording source changed during the read; restart without a cursor");
+        return Err(ChangedDuringRead.into());
     }
     Ok(Recording {
         head: head.values,

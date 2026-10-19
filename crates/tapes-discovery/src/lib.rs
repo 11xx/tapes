@@ -629,6 +629,14 @@ pub trait IdentitySource<R: IdentityRecord> {
             })
     }
     fn candidates(&self, limit: usize) -> CandidatePage<R, String>;
+    /// The candidates whose identity starts with `prefix`. The page's
+    /// coverage still answers for every candidate the walk met, so a record
+    /// it could not inspect keeps a miss from reading as absence. The default
+    /// returns every candidate and leaves the prefix to the caller.
+    fn candidates_matching(&self, prefix: &str, limit: usize) -> CandidatePage<R, String> {
+        let _ = prefix;
+        self.candidates(limit)
+    }
     fn shares_session_ids(&self) -> bool {
         false
     }
@@ -909,7 +917,7 @@ pub fn resolve_with_sources<R: IdentityRecord + Clone>(
             });
             continue;
         }
-        let page = source.candidates(1_000);
+        let page = source.candidates_matching(query, 1_000);
         truncated |= !page.complete;
         diagnostics.extend(page.failures.iter().cloned());
         pages.push(page);
