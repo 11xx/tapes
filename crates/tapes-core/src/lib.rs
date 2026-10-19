@@ -3079,9 +3079,10 @@ pub fn allowance_forecast_with_backends(
 }
 
 /// Follow each session's named parent to the end of its chain: through the
-/// sessions given, then through the store. A parent the store does not hold
-/// ends the chain under its own id and is reported unresolved; a cycle ends
-/// it at the session that closes it.
+/// sessions given, then through the store, a level of the chains at a time
+/// so each level's launch markers are one batched question per backend. A
+/// parent the store does not hold ends the chain under its own id and is
+/// reported unresolved; a cycle ends it at the session that closes it.
 fn session_relations(
     backends: &[Box<dyn Backend>],
     named: impl IntoIterator<Item = (String, Option<String>)>,
@@ -3093,21 +3094,43 @@ fn session_relations(
     let mut parents: HashMap<String, Option<String>> = named.into_iter().collect();
     let ids = parents.keys().cloned().collect::<Vec<_>>();
     let mut resolved = std::collections::BTreeMap::new();
+    for _ in 0..MAX_DEPTH {
+        let level: std::collections::BTreeSet<String> = parents
+            .values()
+            .flatten()
+            .filter(|parent| !parents.contains_key(*parent))
+            .cloned()
+            .collect();
+        if level.is_empty() {
+            break;
+        }
+        let mut found = Vec::new();
+        for id in level {
+            match resolve_relative(backends, &id) {
+                Ok(session) => found.push((id, session)),
+                Err(_) => {
+                    resolved.insert(id.clone(), false);
+                    parents.insert(id, None);
+                }
+            }
+        }
+        declare_launch_markers(
+            backends,
+            found
+                .iter_mut()
+                .map(|(_, found)| found)
+                .filter(|found| window::declared_parent(&found.session).is_none()),
+        );
+        for (id, found) in found {
+            resolved.insert(id.clone(), true);
+            parents.insert(id, window::declared_parent(&found.session));
+        }
+    }
     let mut roots = std::collections::BTreeMap::new();
     for id in ids {
         let mut current = id.clone();
         let mut seen = HashSet::from([current.clone()]);
         for _ in 0..MAX_DEPTH {
-            if !parents.contains_key(&current) {
-                let looked_up = resolve_relative(backends, &current).ok().map(|mut found| {
-                    if window::declared_parent(&found.session).is_none() {
-                        declare_launch_markers(backends, [&mut found]);
-                    }
-                    window::declared_parent(&found.session)
-                });
-                resolved.insert(current.clone(), looked_up.is_some());
-                parents.insert(current.clone(), looked_up.flatten());
-            }
             match parents.get(&current).cloned().flatten() {
                 Some(parent) if seen.insert(parent.clone()) => current = parent,
                 _ => break,
