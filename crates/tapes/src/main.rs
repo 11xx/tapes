@@ -1901,7 +1901,9 @@ enum Command {
         /// steadier lane cost where whole-percent steps land on whichever
         /// lanes spent in them. `tokens_per_lane` gives the lanes' tokens.
         /// Claude lanes are left out with the reason: Claude records no used
-        /// percent.
+        /// percent. Lanes are read from up to 10000 sessions per harness, or
+        /// --limit's, taken in --sort order; `lanes_read` names that limit,
+        /// the sessions it left out, and whether the listing reached it.
         #[arg(
             long,
             conflicts_with_all = ["session", "latest", "title", "occurrence", "full", "from", "to", "requests", "series", "reconcile", "event_keys", "quota_window", "prices"],
@@ -1909,7 +1911,7 @@ enum Command {
         )]
         allowance_rates: bool,
         /// Forecast a planned lane mix against the --quota window of
-        /// --harness, as tapes-allowance-forecast/1: MODEL[#VARIANT]=LANES,
+        /// --harness, as tapes-allowance-forecast/2: MODEL[#VARIANT]=LANES,
         /// comma-separated (`gpt-6.1-sol#xhigh=2,gpt-6.1-sol#low=4`). The
         /// rates of --allowance-rates grouped by model and variant, over
         /// --window, else --since..--until, else the last 14 days, size each
@@ -1927,7 +1929,8 @@ enum Command {
         /// spent at that pace, and whether that falls before the reset. A
         /// bound the measurements leave open is null. A model and variant
         /// with no measured lanes refuses, naming it; a Claude forecast
-        /// refuses, since Claude records no used percent.
+        /// refuses, since Claude records no used percent. `lanes_read` names
+        /// the sessions the rates were read from, as --allowance-rates does.
         #[arg(
             long,
             value_name = "MODEL[#VARIANT]=LANES,...",
@@ -5946,6 +5949,30 @@ fn render_allowance_rates(
         rates.excluded_without_allowance,
         rates.excluded_absent.len()
     ));
+    out.push_str(&render_lanes_read(&rates.lanes_read));
+    out
+}
+
+fn render_lanes_read(lanes: &agent_tapes_core::allowance::LanesRead) -> String {
+    let mut out = format!(
+        "lanes read: up to {} sessions per harness ({})",
+        lanes.limit,
+        if lanes.explicit_limit {
+            "--limit"
+        } else {
+            "the lane bound"
+        }
+    );
+    if lanes.left_out_by_limit > 0 {
+        out.push_str(&format!(
+            "; {} sessions beyond it left out",
+            lanes.left_out_by_limit
+        ));
+    }
+    if lanes.lane_bound_reached {
+        out.push_str("; the listing reached its bound, so sessions beyond it were not read");
+    }
+    out.push('\n');
     out
 }
 
@@ -6005,6 +6032,7 @@ fn render_forecast(forecast: &agent_tapes_core::allowance::AllowanceForecast) ->
             bounds(&lanes.percent, 2),
         ));
     }
+    out.push_str(&render_lanes_read(&forecast.lanes_read));
     out.push_str(&format!(
         "mix: {}% of the window, fits: {}\n",
         bounds(&forecast.percent, 2),

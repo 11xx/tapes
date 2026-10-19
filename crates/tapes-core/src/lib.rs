@@ -2111,6 +2111,13 @@ pub struct WindowRead {
     pub scanned: usize,
     pub scan_truncated: bool,
     pub unplaced: Vec<PathBuf>,
+    /// Listed sessions the window may hold that a caller's keep bound left
+    /// out, those first in the listing's order kept.
+    pub left_out_by_limit: usize,
+    /// The listing returned as many sessions of a harness as its limit
+    /// allows, or stopped at its scan ceiling, so it may have left sessions
+    /// out.
+    pub listing_bound_reached: bool,
 }
 
 /// Read the window `ask` names over the sessions `selection` lists: every
@@ -2121,6 +2128,18 @@ pub fn read_window(
     backends: &[Box<dyn Backend>],
     selection: &SessionSelection<'_>,
     ask: WindowAsk,
+) -> Result<WindowRead> {
+    read_window_keeping(backends, selection, ask, None)
+}
+
+/// As [`read_window`], keeping, when `keep` names a bound, only the first
+/// `keep` listed sessions of each harness the window may hold, in the
+/// listing's order, and counting the rest.
+fn read_window_keeping(
+    backends: &[Box<dyn Backend>],
+    selection: &SessionSelection<'_>,
+    ask: WindowAsk,
+    keep: Option<usize>,
 ) -> Result<WindowRead> {
     let scope = selection.within.resolve()?;
     let limit = selection.limit.unwrap_or(DEFAULT_LIST_LIMIT);
@@ -2199,6 +2218,34 @@ pub fn read_window(
     };
     let mut sessions = listed.sessions;
     let mut origins = listed.origins;
+    let mut per_harness = HashMap::<&str, usize>::new();
+    for origin in &origins {
+        *per_harness.entry(backends[*origin].harness()).or_default() += 1;
+    }
+    let listing_bound_reached =
+        listed.scan_truncated || per_harness.values().any(|count| *count >= limit);
+    let mut left_out_by_limit = 0;
+    if let Some(keep) = keep {
+        let mut kept = HashMap::<&str, usize>::new();
+        let mut kept_sessions = Vec::new();
+        let mut kept_origins = Vec::new();
+        for (session, origin) in sessions.into_iter().zip(origins) {
+            // A session outside the window holds nothing of it, so it takes
+            // no place under the bound.
+            if bounds.may_hold(session.started_at, session.last_activity_at) {
+                let count = kept.entry(backends[origin].harness()).or_default();
+                if *count >= keep {
+                    left_out_by_limit += 1;
+                    continue;
+                }
+                *count += 1;
+            }
+            kept_sessions.push(session);
+            kept_origins.push(origin);
+        }
+        sessions = kept_sessions;
+        origins = kept_origins;
+    }
     let mut unreadable = listed.unreadable;
     let mut unsearched = listed.unsearched;
     let mut partial_search = listed.partial_search;
@@ -2366,6 +2413,8 @@ pub fn read_window(
         scanned: listed.scanned,
         scan_truncated: listed.scan_truncated,
         unplaced: listed.unplaced,
+        left_out_by_limit,
+        listing_bound_reached,
     })
 }
 
@@ -2590,6 +2639,10 @@ struct LaneAllowance {
 /// The most sessions of one harness a pool lists as members.
 const POOL_MEMBER_LIMIT: usize = 10_000;
 
+/// The most sessions of one harness allowance rates and forecasts read as
+/// lanes when the caller names no --limit.
+pub const LANE_LIMIT: usize = 10_000;
+
 /// How long after its last recorded activity a session counts as completed
 /// for allowance rates.
 const COMPLETED_AFTER_MINUTES: i64 = 15;
@@ -2617,7 +2670,21 @@ fn allowance_rates_read(
     lookback: window::WindowBounds,
     quota: window::QuotaKind,
 ) -> Result<(allowance::AllowanceRates, ApportionedWindow)> {
-    let mut read = read_window(backends, selection, WindowAsk::Bounds(lookback))?;
+    // Every completed session of the lookback is a lane, up to the lane
+    // bound; a caller's --limit keeps the first of them in --sort order and
+    // counts the rest.
+    let explicit = selection.limit;
+    let wide = SessionSelection {
+        limit: Some(LANE_LIMIT),
+        ..*selection
+    };
+    let mut read = read_window_keeping(backends, &wide, WindowAsk::Bounds(lookback), explicit)?;
+    let lanes_read = allowance::LanesRead {
+        limit: explicit.unwrap_or(LANE_LIMIT),
+        explicit_limit: explicit.is_some(),
+        left_out_by_limit: read.left_out_by_limit,
+        lane_bound_reached: read.listing_bound_reached,
+    };
     let apportioned = apportion_window(backends, &mut read)?;
     let completed_before = Utc::now() - chrono::Duration::minutes(COMPLETED_AFTER_MINUTES);
     let mut excluded_running = 0;
@@ -2785,6 +2852,7 @@ fn allowance_rates_read(
         excluded_without_allowance,
         excluded_absent,
         unreadable: read.unreadable,
+        lanes_read,
     };
     Ok((rates, apportioned))
 }
@@ -2984,6 +3052,7 @@ pub fn allowance_forecast_with_backends(
             remaining_percent: remaining,
             reset_since_observed,
         },
+        lanes_read: rates.lanes_read,
         plan: sized,
         concurrency,
         percent,

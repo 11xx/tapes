@@ -182,7 +182,7 @@ fn the_smoothed_lane_estimate_spreads_each_periods_rise() {
         "--by",
         "session",
     ]);
-    assert_eq!(rates["schema"], "tapes-allowance-rates/3");
+    assert_eq!(rates["schema"], "tapes-allowance-rates/4");
     for (id, smoothed, low, high, interval) in
         [(A, 3.25, 2.25, 4.25, 4.25), (B, 3.75, 2.75, 4.75, 2.75)]
     {
@@ -235,7 +235,7 @@ fn a_forecast_sizes_the_mix_and_the_time_left() {
         "--window",
         LOOKBACK,
     ]);
-    assert_eq!(forecast["schema"], "tapes-allowance-forecast/1");
+    assert_eq!(forecast["schema"], "tapes-allowance-forecast/2");
     let state = &forecast["window_state"];
     assert_eq!(state["window_minutes"], 300);
     assert_eq!(state["resets_at"], "2030-01-01T00:00:00Z");

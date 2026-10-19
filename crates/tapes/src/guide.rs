@@ -767,13 +767,19 @@ PROBE BEFORE EXPORTING
   bound it. At whole-percent resolution most intervals rise by nothing and a
   step lands on whichever lanes spent in it, so the smoothed figure is the
   steadier lane cost; both sum to the same group total. `tokens_per_lane`
-  gives the lanes' tokens. The answer is tapes-allowance-rates/3.
+  gives the lanes' tokens. Lanes come from up to 10000 sessions per harness,
+  not --limit's default of 20; an explicit --limit keeps that many in --sort
+  order. `lanes_read` names the limit, whether it is the caller's, the
+  sessions the lookback may hold that it left out (`left_out_by_limit`), and
+  `lane_bound_reached` when a listing stopped at its bound, so sessions past
+  it went unread. The answer is tapes-allowance-rates/4.
   `usage --forecast MODEL[#VARIANT]=LANES,... --harness H [--concurrency N]
   [--quota primary|secondary]` sizes a planned mix against that window, as
-  tapes-allowance-forecast/1. It reads the rates grouped by model and
+  tapes-allowance-forecast/2. It reads the rates grouped by model and
   variant over --window, else --since..--until, else the last 14 days, and
   sizes each lane as its group's median lane tokens over the group's tokens
-  per one percent, with the ratio's bounds. The window is the one the pools'
+  per one percent, with the ratio's bounds, and carries the rates'
+  `lanes_read`. The window is the one the pools'
   newest observation is of; its length is named, never assumed, and only
   lanes measured against a window of that length size the plan, since a
   plan's windows differ by kind and length. That observation gives what is

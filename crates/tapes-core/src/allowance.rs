@@ -21,8 +21,8 @@ use serde::Serialize;
 use crate::window::QuotaKind;
 
 pub const ALLOWANCE_KIND: &str = "apportioned-allowance";
-pub const RATES_SCHEMA: &str = "tapes-allowance-rates/3";
-pub const FORECAST_SCHEMA: &str = "tapes-allowance-forecast/1";
+pub const RATES_SCHEMA: &str = "tapes-allowance-rates/4";
+pub const FORECAST_SCHEMA: &str = "tapes-allowance-forecast/2";
 
 /// The allowance one observation reports on: one quota window of one plan
 /// of one account, as the recordings name them.
@@ -811,6 +811,27 @@ pub struct AllowanceRates {
     pub excluded_absent: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub unreadable: Vec<String>,
+    pub lanes_read: LanesRead,
+}
+
+/// Which sessions rates were measured over: every completed session of the
+/// lookback, up to `limit` per harness.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub struct LanesRead {
+    /// The most sessions of a harness read: the caller's --limit, else the
+    /// lane bound.
+    pub limit: usize,
+    /// The limit is the caller's.
+    pub explicit_limit: bool,
+    /// Sessions the lookback may hold that the limit left out, those first
+    /// in --sort order kept.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub left_out_by_limit: usize,
+    /// The listing returned as many sessions of a harness as the lane bound
+    /// allows, or stopped at its scan ceiling, so sessions beyond it were
+    /// not read and are not counted in `left_out_by_limit`.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub lane_bound_reached: bool,
 }
 
 /// One model and variant of a planned mix, and how many lanes of it.
@@ -872,6 +893,8 @@ pub struct AllowanceForecast {
     pub lookback: crate::window::WindowBounds,
     pub window: QuotaKind,
     pub window_state: ForecastWindow,
+    /// Which sessions the rates sizing the plan were measured over.
+    pub lanes_read: LanesRead,
     pub plan: Vec<ForecastLanes>,
     /// Lanes running at once.
     pub concurrency: usize,
