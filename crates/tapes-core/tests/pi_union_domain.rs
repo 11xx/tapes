@@ -4,6 +4,7 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use agent_tapes_core::backend::{pi::PiBackend, Backend};
@@ -15,6 +16,8 @@ use agent_tapes_core::{
     usage_summary_with_backends, usage_with_options_with_backends, Selection, SessionSelection,
 };
 use serde_json::Value;
+
+static TEMP_ROOTS: AtomicU64 = AtomicU64::new(0);
 
 const PARENT: &str = "2026-01-15T10-00-00-000Z_keys-parent.jsonl";
 const FORK: &str = "2026-01-15T11-00-00-000Z_keys-fork.jsonl";
@@ -33,8 +36,9 @@ impl Store {
             .unwrap()
             .as_nanos();
         let root = std::env::temp_dir().join(format!(
-            "tapes-pi-union-{label}-{}-{nonce}",
-            std::process::id()
+            "tapes-pi-union-{label}-{}-{}-{nonce}",
+            std::process::id(),
+            TEMP_ROOTS.fetch_add(1, Ordering::Relaxed)
         ));
         fs::create_dir_all(&root).unwrap();
         for file in [PARENT, FORK] {

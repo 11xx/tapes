@@ -6,9 +6,12 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::Value;
+
+static TEMP_ROOTS: AtomicU64 = AtomicU64::new(0);
 
 const SESSION: &str = "30000000-0000-4000-8000-000000000001";
 
@@ -21,8 +24,11 @@ impl Store {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let root =
-            std::env::temp_dir().join(format!("tapes-cli-span-{}-{nonce}", std::process::id()));
+        let root = std::env::temp_dir().join(format!(
+            "tapes-cli-span-{}-{}-{nonce}",
+            std::process::id(),
+            TEMP_ROOTS.fetch_add(1, Ordering::Relaxed)
+        ));
         let project = root.join("projects/-fixtures-resumed-project");
         fs::create_dir_all(&project).unwrap();
         let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))

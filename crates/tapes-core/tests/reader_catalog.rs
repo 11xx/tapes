@@ -4,6 +4,7 @@
 
 use std::fs;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -12,6 +13,8 @@ use agent_tapes_core::backend::{
 };
 use agent_tapes_core::counters;
 use serde_json::{json, Value};
+
+static TEMP_ROOTS: AtomicU64 = AtomicU64::new(0);
 
 /// The counters are process-wide, so the tests that read them run one at a
 /// time.
@@ -26,8 +29,9 @@ impl Store {
             .unwrap()
             .as_nanos();
         let root = std::env::temp_dir().join(format!(
-            "tapes-reader-{label}-{}-{nonce}",
-            std::process::id()
+            "tapes-reader-{label}-{}-{}-{nonce}",
+            std::process::id(),
+            TEMP_ROOTS.fetch_add(1, Ordering::Relaxed)
         ));
         fs::create_dir_all(&root).unwrap();
         Self(root)

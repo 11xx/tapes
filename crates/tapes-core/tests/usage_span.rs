@@ -7,6 +7,7 @@
 use std::collections::BTreeMap;
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::OnceLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -18,6 +19,8 @@ use agent_tapes_core::usage::{SpanUsage, UsageView};
 use agent_tapes_core::{usage_full_with_backends, usage_spans_with_backends, Selection};
 use chrono::{DateTime, Duration, Utc};
 use serde_json::{json, Value};
+
+static TEMP_ROOTS: AtomicU64 = AtomicU64::new(0);
 
 fn fixtures(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -524,7 +527,11 @@ fn a_request_without_a_timestamp_is_held_by_the_remainder() {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    let root = std::env::temp_dir().join(format!("tapes-span-{}-{nonce}", std::process::id()));
+    let root = std::env::temp_dir().join(format!(
+        "tapes-span-{}-{}-{nonce}",
+        std::process::id(),
+        TEMP_ROOTS.fetch_add(1, Ordering::Relaxed)
+    ));
     let project = root.join("project");
     fs::create_dir_all(&project).unwrap();
     let id = "30000000-0000-4000-8000-000000000003";

@@ -4,11 +4,14 @@ use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use agent_tapes_core::ResolveError;
 use serde_json::Value;
+
+static TEMP_ROOTS: AtomicU64 = AtomicU64::new(0);
 
 const CODEX_SESSION_ONE: &str = include_str!(
     "fixtures/codex/rollout-2026-01-01T10-00-00-00000000-0000-0000-0000-000000000001.jsonl"
@@ -66,7 +69,11 @@ fn tapes() -> Command {
 }
 
 fn fixture_store(name: &str) -> (PathBuf, PathBuf) {
-    let root = std::env::temp_dir().join(format!("tapes-cli-live-{name}-{}", std::process::id()));
+    let root = std::env::temp_dir().join(format!(
+        "tapes-cli-live-{name}-{}-{}",
+        std::process::id(),
+        TEMP_ROOTS.fetch_add(1, Ordering::Relaxed)
+    ));
     let _ = fs::remove_dir_all(&root);
     let sessions = root.join("sessions/2026/01/01");
     fs::create_dir_all(&sessions).unwrap();
@@ -1283,8 +1290,9 @@ fn read_bytes_sets_the_file_tail_a_transcript_read_takes() {
 
 fn terminal_only_fixture_store(name: &str) -> (PathBuf, PathBuf) {
     let root = std::env::temp_dir().join(format!(
-        "tapes-cli-terminal-only-{name}-{}",
-        std::process::id()
+        "tapes-cli-terminal-only-{name}-{}-{}",
+        std::process::id(),
+        TEMP_ROOTS.fetch_add(1, Ordering::Relaxed)
     ));
     let sessions = root.join("sessions/2026/01/01");
     fs::create_dir_all(&sessions).unwrap();
@@ -1298,8 +1306,9 @@ fn terminal_only_fixture_store(name: &str) -> (PathBuf, PathBuf) {
 
 fn completed_only_runtime_fixture_store(name: &str) -> (PathBuf, PathBuf) {
     let root = std::env::temp_dir().join(format!(
-        "tapes-cli-codex-completed-only-{name}-{}",
-        std::process::id()
+        "tapes-cli-codex-completed-only-{name}-{}-{}",
+        std::process::id(),
+        TEMP_ROOTS.fetch_add(1, Ordering::Relaxed)
     ));
     let _ = fs::remove_dir_all(&root);
     let sessions = root.join("sessions/2026/01/01");
@@ -1314,8 +1323,9 @@ fn completed_only_runtime_fixture_store(name: &str) -> (PathBuf, PathBuf) {
 
 fn invocation_fixture_store(name: &str) -> (PathBuf, PathBuf) {
     let root = std::env::temp_dir().join(format!(
-        "tapes-cli-invocations-{name}-{}",
-        std::process::id()
+        "tapes-cli-invocations-{name}-{}-{}",
+        std::process::id(),
+        TEMP_ROOTS.fetch_add(1, Ordering::Relaxed)
     ));
     let sessions = root.join("sessions/2026/01/01");
     fs::create_dir_all(&sessions).unwrap();
@@ -1329,8 +1339,9 @@ fn invocation_fixture_store(name: &str) -> (PathBuf, PathBuf) {
 
 fn parser_context_fixture_store(name: &str) -> (PathBuf, PathBuf) {
     let root = std::env::temp_dir().join(format!(
-        "tapes-cli-parser-context-{name}-{}",
-        std::process::id()
+        "tapes-cli-parser-context-{name}-{}-{}",
+        std::process::id(),
+        TEMP_ROOTS.fetch_add(1, Ordering::Relaxed)
     ));
     let _ = fs::remove_dir_all(&root);
     let sessions = root.join("sessions/2026/01/01");
@@ -1398,8 +1409,9 @@ fn parser_context_fixture_store(name: &str) -> (PathBuf, PathBuf) {
 
 fn invocation_bound_fixture_store(name: &str) -> (PathBuf, PathBuf) {
     let root = std::env::temp_dir().join(format!(
-        "tapes-cli-invocation-bound-{name}-{}",
-        std::process::id()
+        "tapes-cli-invocation-bound-{name}-{}-{}",
+        std::process::id(),
+        TEMP_ROOTS.fetch_add(1, Ordering::Relaxed)
     ));
     let _ = fs::remove_dir_all(&root);
     let sessions = root.join("sessions/2026/01/01");
@@ -1483,7 +1495,11 @@ fn invocation_bound_fixture_store(name: &str) -> (PathBuf, PathBuf) {
 }
 
 fn filter_fixture_store(name: &str) -> (PathBuf, PathBuf) {
-    let root = std::env::temp_dir().join(format!("tapes-cli-filter-{name}-{}", std::process::id()));
+    let root = std::env::temp_dir().join(format!(
+        "tapes-cli-filter-{name}-{}-{}",
+        std::process::id(),
+        TEMP_ROOTS.fetch_add(1, Ordering::Relaxed)
+    ));
     let _ = fs::remove_dir_all(&root);
     let sessions = root.join("sessions/2026/01/01");
     fs::create_dir_all(&sessions).unwrap();
@@ -1523,7 +1539,11 @@ fn filter_fixture_store(name: &str) -> (PathBuf, PathBuf) {
 }
 
 fn launch_fixture_store(name: &str) -> (PathBuf, PathBuf) {
-    let root = std::env::temp_dir().join(format!("tapes-cli-launch-{name}-{}", std::process::id()));
+    let root = std::env::temp_dir().join(format!(
+        "tapes-cli-launch-{name}-{}-{}",
+        std::process::id(),
+        TEMP_ROOTS.fetch_add(1, Ordering::Relaxed)
+    ));
     let _ = fs::remove_dir_all(&root);
     let sessions = root.join("sessions/2026/01/02");
     fs::create_dir_all(&sessions).unwrap();
@@ -5654,9 +5674,11 @@ fn a_listing_names_the_opencode_store_it_could_not_read() {
             ],
         ),
     ] {
-        let root = TemporaryDirectory::new(
-            std::env::temp_dir().join(format!("tapes-cli-{fixture}-{}", std::process::id())),
-        );
+        let root = TemporaryDirectory::new(std::env::temp_dir().join(format!(
+            "tapes-cli-{fixture}-{}-{}",
+            std::process::id(),
+            TEMP_ROOTS.fetch_add(1, Ordering::Relaxed)
+        )));
         let stable = root.path().join("opencode");
         std::os::unix::fs::symlink(
             Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -6700,8 +6722,9 @@ fn assert_row_gaps_are_local(
         return;
     }
     let root = TemporaryDirectory::new(std::env::temp_dir().join(format!(
-        "tapes-cli-opencode-row-gaps-{name}-{}",
-        std::process::id()
+        "tapes-cli-opencode-row-gaps-{name}-{}-{}",
+        std::process::id(),
+        TEMP_ROOTS.fetch_add(1, Ordering::Relaxed)
     )));
     let _program = opencode_program(root.path(), "opencode");
     for sqlite3 in binaries {
@@ -9231,9 +9254,11 @@ const STATS_CHILD: &str = concat!(
 );
 
 fn stats_store(name: &str) -> TemporaryDirectory {
-    let root = TemporaryDirectory::new(
-        std::env::temp_dir().join(format!("tapes-cli-stats-{name}-{}", std::process::id())),
-    );
+    let root = TemporaryDirectory::new(std::env::temp_dir().join(format!(
+        "tapes-cli-stats-{name}-{}-{}",
+        std::process::id(),
+        TEMP_ROOTS.fetch_add(1, Ordering::Relaxed)
+    )));
     let sessions = root.path().join("codex/sessions/2026/02/02");
     fs::create_dir_all(&sessions).unwrap();
     fs::create_dir_all(root.path().join("home")).unwrap();
@@ -9557,9 +9582,11 @@ fn pi_disjoint_output_qualifies_a_missing_compaction_input() {
 /// A store holding the active-consumption fixture with each entry passed
 /// through `edit`.
 fn pi_active_consumption_store(label: &str, edit: impl Fn(&mut Value)) -> TemporaryDirectory {
-    let root = TemporaryDirectory::new(
-        std::env::temp_dir().join(format!("tapes-cli-{label}-{}", std::process::id())),
-    );
+    let root = TemporaryDirectory::new(std::env::temp_dir().join(format!(
+        "tapes-cli-{label}-{}-{}",
+        std::process::id(),
+        TEMP_ROOTS.fetch_add(1, Ordering::Relaxed)
+    )));
     let sessions = root.path().join("sessions");
     fs::create_dir_all(&sessions).unwrap();
     let file = "2026-01-14T10-00-00-000Z_active-consumption.jsonl";
@@ -11938,7 +11965,11 @@ struct RemoteReplica {
 
 impl RemoteReplica {
     fn new(name: &str) -> Self {
-        let root = std::env::temp_dir().join(format!("tapes-remote-{name}-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!(
+            "tapes-remote-{name}-{}-{}",
+            std::process::id(),
+            TEMP_ROOTS.fetch_add(1, Ordering::Relaxed)
+        ));
         let _ = fs::remove_dir_all(&root);
         let bin = root.join("bin");
         let home = root.join("home");
@@ -12069,8 +12100,11 @@ fn run_against_replica(
 /// A transport that fails without the replica ever running, for the failure
 /// a real ssh, a missing remote binary, or a wrong answer produces.
 fn failing_transport(name: &str, body: &str) -> PathBuf {
-    let path =
-        std::env::temp_dir().join(format!("tapes-transport-{name}-{}.sh", std::process::id()));
+    let path = std::env::temp_dir().join(format!(
+        "tapes-transport-{name}-{}-{}.sh",
+        std::process::id(),
+        TEMP_ROOTS.fetch_add(1, Ordering::Relaxed)
+    ));
     fs::write(&path, body).unwrap();
     fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
     path

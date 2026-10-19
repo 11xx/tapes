@@ -781,12 +781,18 @@ impl Drop for PartialDirectory {
 #[cfg(all(test, feature = "zip"))]
 mod tests {
     use std::io::Write;
+    use std::sync::atomic::{AtomicU64, Ordering};
 
     use super::*;
 
+    static TEMP_ROOTS: AtomicU64 = AtomicU64::new(0);
+
     fn temporary(name: &str) -> PathBuf {
-        let path =
-            std::env::temp_dir().join(format!("tapes-evidence-{name}-{}", std::process::id()));
+        let path = std::env::temp_dir().join(format!(
+            "tapes-evidence-{name}-{}-{}",
+            std::process::id(),
+            TEMP_ROOTS.fetch_add(1, Ordering::Relaxed)
+        ));
         let _ = fs::remove_dir_all(&path);
         fs::create_dir_all(&path).unwrap();
         path

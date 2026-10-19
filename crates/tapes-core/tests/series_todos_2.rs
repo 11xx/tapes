@@ -7,7 +7,7 @@ use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -17,6 +17,8 @@ use agent_tapes_core::pricing::{self, PriceTable};
 use agent_tapes_core::{resolve_session, usage_full_with_backends, usage_with_backends, Selection};
 use agent_tapes_discovery::ResolveError;
 use serde_json::{json, Value};
+
+static TEMP_ROOTS: AtomicU64 = AtomicU64::new(0);
 
 const LIVE: &str = "6f1d2c3b-4a59-4e68-9b7a-1c2d3e4f5a6b";
 const TARGET: &str = "0a9b8c7d-6e5f-4a3b-8c2d-1e0f9a8b7c6d";
@@ -31,8 +33,9 @@ impl Store {
             .unwrap()
             .as_nanos();
         let root = std::env::temp_dir().join(format!(
-            "tapes-series-todos-2-{name}-{}-{nonce}",
-            std::process::id()
+            "tapes-series-todos-2-{name}-{}-{}-{nonce}",
+            std::process::id(),
+            TEMP_ROOTS.fetch_add(1, Ordering::Relaxed)
         ));
         fs::create_dir_all(root.join("-fixtures-project")).unwrap();
         Self(root)

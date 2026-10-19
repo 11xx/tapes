@@ -3,6 +3,7 @@
 use std::fs::{self, File};
 use std::os::unix::fs::symlink;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use agent_tapes_core::backend::{Backend, Query};
@@ -10,6 +11,8 @@ use agent_tapes_core::evidence;
 use agent_tapes_core::input::{InputBackend, InputFormat, InputOptions};
 use agent_tapes_core::model::Transcript;
 use serde_json::{json, Value};
+
+static TEMP_ROOTS: AtomicU64 = AtomicU64::new(0);
 
 const MAX_MEMBER_BYTES: u64 = 512 * 1024 * 1024;
 
@@ -137,8 +140,9 @@ impl Fixture {
             .unwrap()
             .as_nanos();
         let root = std::env::temp_dir().join(format!(
-            "tapes-evidence-directory-{name}-{}-{stamp}",
-            std::process::id()
+            "tapes-evidence-directory-{name}-{}-{}-{stamp}",
+            std::process::id(),
+            TEMP_ROOTS.fetch_add(1, Ordering::Relaxed)
         ));
         fs::create_dir(&root).unwrap();
         fs::write(root.join("conversations.json"), conversation_bytes()).unwrap();

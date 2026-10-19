@@ -5,6 +5,7 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use agent_tapes_core::backend::{opencode::OpenCodeBackend, Backend};
@@ -14,6 +15,8 @@ use agent_tapes_core::{
     Selection, TurnSink,
 };
 use serde_json::{json, Value};
+
+static TEMP_ROOTS: AtomicU64 = AtomicU64::new(0);
 
 const SESSION: &str = "ses_database_only_fixture";
 const NATIVE: [&str; 6] = [
@@ -41,8 +44,9 @@ impl Fixtures {
             .unwrap()
             .as_nanos();
         let root = std::env::temp_dir().join(format!(
-            "tapes-opencode-unreadable-message-{}-{nonce}",
-            std::process::id()
+            "tapes-opencode-unreadable-message-{}-{}-{nonce}",
+            std::process::id(),
+            TEMP_ROOTS.fetch_add(1, Ordering::Relaxed)
         ));
         let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/opencode");
         fs::create_dir_all(root.join("bin")).unwrap();

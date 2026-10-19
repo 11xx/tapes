@@ -2,9 +2,12 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::Value;
+
+static TEMP_ROOTS: AtomicU64 = AtomicU64::new(0);
 
 const PARENT: &str = "2026-01-15T10-00-00-000Z_keys-parent.jsonl";
 const FORK: &str = "2026-01-15T11-00-00-000Z_keys-fork.jsonl";
@@ -17,8 +20,11 @@ impl Store {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let root =
-            std::env::temp_dir().join(format!("tapes-event-keys-{}-{nonce}", std::process::id()));
+        let root = std::env::temp_dir().join(format!(
+            "tapes-event-keys-{}-{}-{nonce}",
+            std::process::id(),
+            TEMP_ROOTS.fetch_add(1, Ordering::Relaxed)
+        ));
         let sessions = root.join("sessions");
         fs::create_dir_all(&sessions).unwrap();
         let fixtures = Path::new(env!("CARGO_MANIFEST_DIR"))

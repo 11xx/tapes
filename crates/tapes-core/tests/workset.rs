@@ -2,6 +2,7 @@
 //! harness recorded the source, and are cut at the projected-byte bound.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use agent_tapes_core::backend::claude::ClaudeBackend;
 use agent_tapes_core::backend::codex::CodexBackend;
@@ -15,6 +16,8 @@ use agent_tapes_core::workset::{
     build_with_backends, Lane, LaneCutter, SourceRole, Workset, MIN_LANE_BYTES,
 };
 use agent_tapes_core::{show_full_with_backends, Selection, TurnSink};
+
+static TEMP_ROOTS: AtomicU64 = AtomicU64::new(0);
 
 fn fixtures(harness: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -383,7 +386,11 @@ fn omitted_bytes_add_up_from_turns_to_lanes_to_coverage() {
 }
 
 fn scratch(tag: &str) -> PathBuf {
-    let path = std::env::temp_dir().join(format!("tapes-workset-{tag}-{}", std::process::id()));
+    let path = std::env::temp_dir().join(format!(
+        "tapes-workset-{tag}-{}-{}",
+        std::process::id(),
+        TEMP_ROOTS.fetch_add(1, Ordering::Relaxed)
+    ));
     let _ = std::fs::remove_dir_all(&path);
     path
 }

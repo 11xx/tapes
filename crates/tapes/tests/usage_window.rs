@@ -4,9 +4,12 @@
 use std::fs;
 use std::path::PathBuf;
 use std::process::{Command, Output};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{json, Value};
+
+static TEMP_ROOTS: AtomicU64 = AtomicU64::new(0);
 
 struct Store(PathBuf);
 
@@ -16,8 +19,11 @@ impl Store {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let root =
-            std::env::temp_dir().join(format!("tapes-cli-window-{}-{nonce}", std::process::id()));
+        let root = std::env::temp_dir().join(format!(
+            "tapes-cli-window-{}-{}-{nonce}",
+            std::process::id(),
+            TEMP_ROOTS.fetch_add(1, Ordering::Relaxed)
+        ));
         let project = root.join("projects/-fixtures-project");
         fs::create_dir_all(&project).unwrap();
         for (id, minutes) in [

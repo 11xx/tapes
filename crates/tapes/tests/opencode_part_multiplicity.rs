@@ -9,8 +9,11 @@ use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde_json::Value;
+
+static TEMP_ROOTS: AtomicU64 = AtomicU64::new(0);
 
 const SESSION: &str = "ses_part_multiplicity_fixture";
 
@@ -19,8 +22,9 @@ struct Root(PathBuf);
 impl Root {
     fn new(name: &str) -> Self {
         let path = std::env::temp_dir().join(format!(
-            "tapes-opencode-part-multiplicity-{name}-{}",
-            std::process::id()
+            "tapes-opencode-part-multiplicity-{name}-{}-{}",
+            std::process::id(),
+            TEMP_ROOTS.fetch_add(1, Ordering::Relaxed)
         ));
         let _ = fs::remove_dir_all(&path);
         fs::create_dir_all(path.join("home/.local/share/opencode")).unwrap();

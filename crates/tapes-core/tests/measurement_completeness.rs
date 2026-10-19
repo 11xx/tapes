@@ -7,6 +7,7 @@
 
 use std::fs;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use agent_tapes_core::backend::{pi::PiBackend, Backend};
@@ -15,6 +16,8 @@ use agent_tapes_core::model::{
 };
 use agent_tapes_core::usage::{self, GroupBy, ModelUsage, RecordedUsage};
 use serde_json::{json, Value};
+
+static TEMP_ROOTS: AtomicU64 = AtomicU64::new(0);
 
 const ID: &str = "completeness-fixture";
 const NATIVE: [&str; 6] = [
@@ -47,8 +50,9 @@ impl Store {
             .unwrap()
             .as_nanos();
         let root = std::env::temp_dir().join(format!(
-            "tapes-completeness-{label}-{}-{nonce}",
-            std::process::id()
+            "tapes-completeness-{label}-{}-{}-{nonce}",
+            std::process::id(),
+            TEMP_ROOTS.fetch_add(1, Ordering::Relaxed)
         ));
         fs::create_dir_all(&root).unwrap();
         Self(root)

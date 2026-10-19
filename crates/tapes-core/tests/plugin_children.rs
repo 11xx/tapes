@@ -6,12 +6,15 @@
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use agent_tapes_core::backend::claude::ClaudeBackend;
 use agent_tapes_core::backend::{Backend, MIN_READ_BYTES};
 use agent_tapes_core::lineage::{ChildRef, Lineage, SourceRef};
 use chrono::{DateTime, Utc};
 use serde_json::{json, Value};
+
+static TEMP_ROOTS: AtomicU64 = AtomicU64::new(0);
 
 const PARENT: &str = "5c1f0a2e-0000-4000-8000-000000000001";
 const FINISHED: &str = "a5f3c01d7e2b49a60";
@@ -22,8 +25,9 @@ struct Store(PathBuf);
 impl Store {
     fn new(label: &str) -> Self {
         let path = std::env::temp_dir().join(format!(
-            "tapes-plugin-children-{label}-{}",
-            std::process::id()
+            "tapes-plugin-children-{label}-{}-{}",
+            std::process::id(),
+            TEMP_ROOTS.fetch_add(1, Ordering::Relaxed)
         ));
         let _ = fs::remove_dir_all(&path);
         fs::create_dir_all(&path).unwrap();

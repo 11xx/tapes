@@ -4,10 +4,13 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use agent_tapes_core::backend::codex::CodexBackend;
 use agent_tapes_core::backend::Backend;
 use serde_json::json;
+
+static TEMP_ROOTS: AtomicU64 = AtomicU64::new(0);
 
 const PARENT: &str = "00000000-0000-0000-0000-000000000001";
 const CHILD: &str = "00000000-0000-0000-0000-000000000002";
@@ -26,8 +29,11 @@ impl Drop for Store {
 /// A store holding the parent fixture and a child whose recording is a single
 /// `session_meta` record of `bytes` bytes, with a final newline when `newline`.
 fn store(label: &str, bytes: usize, newline: bool) -> Store {
-    let root =
-        std::env::temp_dir().join(format!("tapes-child-header-{label}-{}", std::process::id()));
+    let root = std::env::temp_dir().join(format!(
+        "tapes-child-header-{label}-{}-{}",
+        std::process::id(),
+        TEMP_ROOTS.fetch_add(1, Ordering::Relaxed)
+    ));
     let _ = fs::remove_dir_all(&root);
     fs::create_dir_all(&root).unwrap();
     fs::copy(

@@ -4,8 +4,11 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde_json::{json, Value};
+
+static TEMP_ROOTS: AtomicU64 = AtomicU64::new(0);
 
 fn tapes() -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_tapes"));
@@ -144,8 +147,9 @@ struct TempRoot {
 impl TempRoot {
     fn new(name: &str) -> Self {
         let path = std::env::temp_dir().join(format!(
-            "tapes-supplied-audit-{name}-{}",
-            std::process::id()
+            "tapes-supplied-audit-{name}-{}-{}",
+            std::process::id(),
+            TEMP_ROOTS.fetch_add(1, Ordering::Relaxed)
         ));
         let _ = fs::remove_dir_all(&path);
         fs::create_dir_all(&path).unwrap();

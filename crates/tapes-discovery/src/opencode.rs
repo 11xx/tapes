@@ -1120,8 +1120,11 @@ mod tests {
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
     use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Mutex;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    static TEMP_ROOTS: AtomicU64 = AtomicU64::new(0);
 
     struct Temp(PathBuf);
 
@@ -1134,8 +1137,9 @@ mod tests {
                 .unwrap()
                 .as_nanos();
             let path = std::env::temp_dir().join(format!(
-                "tapes-opencode-discovery-{}-{nonce}",
-                std::process::id()
+                "tapes-opencode-discovery-{}-{}-{nonce}",
+                std::process::id(),
+                TEMP_ROOTS.fetch_add(1, Ordering::Relaxed)
             ));
             fs::create_dir_all(&path).unwrap();
             Self(path)

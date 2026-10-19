@@ -4,6 +4,7 @@
 
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::OnceLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -16,11 +17,14 @@ use serde_json::{json, Value};
 const FIRST_MESSAGE: &str = "/message?limit=1&order=asc";
 const OPENCODE_PARENT: &str = "30000000-0000-4000-8000-0000000000c1";
 
-fn nonce() -> u128 {
-    SystemTime::now()
+static TEMP_ROOTS: AtomicU64 = AtomicU64::new(0);
+
+fn nonce() -> String {
+    let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
-        .as_nanos()
+        .as_nanos();
+    format!("{}-{nanos}", TEMP_ROOTS.fetch_add(1, Ordering::Relaxed))
 }
 
 /// The OpenCode fixture program under a name that answers with a session

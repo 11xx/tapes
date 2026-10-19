@@ -4,9 +4,12 @@
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::json;
+
+static TEMP_ROOTS: AtomicU64 = AtomicU64::new(0);
 
 /// A Claude session id a marker also names in pi.
 const SHARED: &str = "30000000-0000-4000-8000-0000000000f1";
@@ -22,8 +25,9 @@ impl Store {
             .unwrap()
             .as_nanos();
         let root = std::env::temp_dir().join(format!(
-            "tapes-cli-final-wave-lineage-{}-{nonce}",
-            std::process::id()
+            "tapes-cli-final-wave-lineage-{}-{}-{nonce}",
+            std::process::id(),
+            TEMP_ROOTS.fetch_add(1, Ordering::Relaxed)
         ));
         let project = root.join("projects/-fixtures-project");
         fs::create_dir_all(&project).unwrap();

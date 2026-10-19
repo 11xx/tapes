@@ -8,6 +8,7 @@
 
 use std::fs;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use agent_tapes_core::allowance::{Apportionment, PoolKey, PoolMember, RateObservation, TimedUse};
@@ -20,6 +21,8 @@ use agent_tapes_core::{
 use chrono::{DateTime, Duration, Utc};
 use serde_json::{json, Value};
 
+static TEMP_ROOTS: AtomicU64 = AtomicU64::new(0);
+
 /// A store laid out as its harness lays it out, removed when dropped.
 struct Store(PathBuf);
 
@@ -30,8 +33,9 @@ impl Store {
             .unwrap()
             .as_nanos();
         let root = std::env::temp_dir().join(format!(
-            "tapes-review-window-{label}-{}-{nonce}",
-            std::process::id()
+            "tapes-review-window-{label}-{}-{}-{nonce}",
+            std::process::id(),
+            TEMP_ROOTS.fetch_add(1, Ordering::Relaxed)
         ));
         fs::create_dir_all(&root).unwrap();
         Self(root)

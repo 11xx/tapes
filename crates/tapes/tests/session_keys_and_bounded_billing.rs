@@ -4,9 +4,12 @@
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{json, Value};
+
+static TEMP_ROOTS: AtomicU64 = AtomicU64::new(0);
 
 /// One id a Claude session and a Codex session both carry.
 const SHARED: &str = "01a10000-0000-7000-8000-0000000000c1";
@@ -22,8 +25,9 @@ impl Store {
             .unwrap()
             .as_nanos();
         let root = std::env::temp_dir().join(format!(
-            "tapes-cli-session-keys-{}-{nonce}",
-            std::process::id()
+            "tapes-cli-session-keys-{}-{}-{nonce}",
+            std::process::id(),
+            TEMP_ROOTS.fetch_add(1, Ordering::Relaxed)
         ));
         let store = Self(root);
         for id in [SHARED, ALONE] {

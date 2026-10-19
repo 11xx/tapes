@@ -1,8 +1,11 @@
 use std::fs;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use agent_tapes_core::backend;
+
+static TEMP_ROOTS: AtomicU64 = AtomicU64::new(0);
 
 struct Temp(PathBuf);
 
@@ -13,8 +16,9 @@ impl Temp {
             .unwrap()
             .as_nanos();
         let path = std::env::temp_dir().join(format!(
-            "tapes-pi-live-session-{}-{nonce}",
-            std::process::id()
+            "tapes-pi-live-session-{}-{}-{nonce}",
+            std::process::id(),
+            TEMP_ROOTS.fetch_add(1, Ordering::Relaxed)
         ));
         fs::create_dir_all(&path).unwrap();
         Self(path)

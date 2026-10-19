@@ -12,6 +12,7 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use agent_tapes_core::backend::claude::ClaudeBackend;
@@ -21,6 +22,8 @@ use agent_tapes_core::model::{Session, Turn};
 use agent_tapes_core::{search, usage, ListFilters, ListSort, Selection};
 use chrono::{DateTime, Utc};
 use serde_json::Value;
+
+static TEMP_ROOTS: AtomicU64 = AtomicU64::new(0);
 
 const SESSION: &str = "21000000-0000-4000-8000-000000000001";
 const CHILD: &str = "a21000000000000b1";
@@ -55,8 +58,9 @@ impl Store {
             .unwrap()
             .as_nanos();
         let root = std::env::temp_dir().join(format!(
-            "tapes-claude-request-blob-{label}-{}-{nonce}",
-            std::process::id()
+            "tapes-claude-request-blob-{label}-{}-{}-{nonce}",
+            std::process::id(),
+            TEMP_ROOTS.fetch_add(1, Ordering::Relaxed)
         ));
         copy_tree(&fixture(), &root, keep);
         Self(root)

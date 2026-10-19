@@ -7,7 +7,7 @@ use std::os::unix::ffi::OsStringExt;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::OnceLock;
 
 use agent_tapes_core::backend::claude::ClaudeBackend;
@@ -34,6 +34,8 @@ use agent_tapes_core::{
     SessionSelection, Where, EXPORT_MANIFEST_SCHEMA, LIST_SEARCH_TAIL,
 };
 use chrono::{DateTime, TimeZone, Utc};
+
+static TEMP_ROOTS: AtomicU64 = AtomicU64::new(0);
 
 fn fixtures(harness: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -1921,8 +1923,11 @@ const CLAUDE_FAMILY_CHILD: &str = "agent-a0123456789abcdef";
 /// may rewrite, so each case varies one fact of the same family.
 fn claude_family(tag: &str, edit: impl FnOnce(&mut String, &mut String)) -> PathBuf {
     let source = fixtures("claude-family").join("project");
-    let root =
-        std::env::temp_dir().join(format!("tapes-claude-family-{tag}-{}", std::process::id()));
+    let root = std::env::temp_dir().join(format!(
+        "tapes-claude-family-{tag}-{}-{}",
+        std::process::id(),
+        TEMP_ROOTS.fetch_add(1, Ordering::Relaxed)
+    ));
     let _ = fs::remove_dir_all(&root);
     let project = root.join("project");
     let subagents = project.join(CLAUDE_FAMILY_SESSION).join("subagents");
@@ -2243,8 +2248,9 @@ fn claude_dimension_witnesses(
     edit: impl Fn(&mut serde_json::Value, bool),
 ) -> (PathBuf, serde_json::Value, serde_json::Value) {
     let root = std::env::temp_dir().join(format!(
-        "tapes-dimension-witness-{tag}-{}",
-        std::process::id()
+        "tapes-dimension-witness-{tag}-{}-{}",
+        std::process::id(),
+        TEMP_ROOTS.fetch_add(1, Ordering::Relaxed)
     ));
     let project = root.join("project");
     fs::create_dir_all(&project).unwrap();
@@ -3294,7 +3300,11 @@ fn opencode_is_unavailable_when_its_binary_is_absent() {
 /// exist on disk: a recorded path that is gone cannot be attributed to any
 /// project.
 fn scoped_store(name: &str, directories: &[&Path]) -> PathBuf {
-    let root = std::env::temp_dir().join(format!("tapes-scoped-{name}-{}", std::process::id()));
+    let root = std::env::temp_dir().join(format!(
+        "tapes-scoped-{name}-{}-{}",
+        std::process::id(),
+        TEMP_ROOTS.fetch_add(1, Ordering::Relaxed)
+    ));
     let _ = fs::remove_dir_all(&root);
     let day = root.join("2026/08/09");
     fs::create_dir_all(&day).unwrap();
@@ -3332,7 +3342,11 @@ fn scoped_store(name: &str, directories: &[&Path]) -> PathBuf {
 }
 
 fn filtered_store(name: &str) -> PathBuf {
-    let root = std::env::temp_dir().join(format!("tapes-filtered-{name}-{}", std::process::id()));
+    let root = std::env::temp_dir().join(format!(
+        "tapes-filtered-{name}-{}-{}",
+        std::process::id(),
+        TEMP_ROOTS.fetch_add(1, Ordering::Relaxed)
+    ));
     let _ = fs::remove_dir_all(&root);
     let day = root.join("2026/08/09");
     fs::create_dir_all(&day).unwrap();
@@ -4220,8 +4234,9 @@ fn unmatched_results_distinguish_missing_calls_from_calls_before_the_file_tail()
         ("bounded", true, Incomplete::CallBeforeReadBound),
     ] {
         let root = std::env::temp_dir().join(format!(
-            "tapes-unmatched-result-{tag}-{}",
-            std::process::id()
+            "tapes-unmatched-result-{tag}-{}-{}",
+            std::process::id(),
+            TEMP_ROOTS.fetch_add(1, Ordering::Relaxed)
         ));
         let day = root.join("2026/01/01");
         fs::create_dir_all(&day).unwrap();
@@ -5985,7 +6000,11 @@ fn codex_legacy_counter_resets_keep_the_newest_total_and_since_reset_coverage() 
 /// One synthetic Codex rollout, written under a per-test store root so a
 /// usage read can be driven end to end through the ordinary resolver.
 fn codex_rollout(tag: &str, id: &str, records: &[serde_json::Value]) -> PathBuf {
-    let root = std::env::temp_dir().join(format!("tapes-codex-{tag}-{}", std::process::id()));
+    let root = std::env::temp_dir().join(format!(
+        "tapes-codex-{tag}-{}-{}",
+        std::process::id(),
+        TEMP_ROOTS.fetch_add(1, Ordering::Relaxed)
+    ));
     let sessions = root.join("sessions/2026/01/01");
     let _ = fs::remove_dir_all(&root);
     fs::create_dir_all(&sessions).unwrap();
@@ -6047,7 +6066,11 @@ fn codex_token_count(ordinal: u64, total: u64, last: u64) -> serde_json::Value {
 }
 
 fn non_utf8_test_roots(tag: &str) -> (PathBuf, PathBuf) {
-    let mut name = OsString::from(format!("tapes-{tag}-{}", std::process::id()));
+    let mut name = OsString::from(format!(
+        "tapes-{tag}-{}-{}",
+        std::process::id(),
+        TEMP_ROOTS.fetch_add(1, Ordering::Relaxed)
+    ));
     name.push(OsString::from_vec(vec![b'-', 0xff]));
     let native = std::env::temp_dir().join(name);
     let display_shadow = PathBuf::from(native.to_string_lossy().into_owned());
@@ -6379,7 +6402,11 @@ fn codex_usage_with_options(
 }
 
 fn codex_rollout_text(tag: &str, id: &str, contents: &str) -> PathBuf {
-    let root = std::env::temp_dir().join(format!("tapes-codex-{tag}-{}", std::process::id()));
+    let root = std::env::temp_dir().join(format!(
+        "tapes-codex-{tag}-{}-{}",
+        std::process::id(),
+        TEMP_ROOTS.fetch_add(1, Ordering::Relaxed)
+    ));
     let sessions = root.join("sessions/2026/01/01");
     let _ = fs::remove_dir_all(&root);
     fs::create_dir_all(&sessions).unwrap();
@@ -7207,8 +7234,11 @@ impl Backend for BulkExportFixture {
 }
 
 fn export_directory(name: &str) -> PathBuf {
-    let directory =
-        std::env::temp_dir().join(format!("tapes-selection-{name}-{}", std::process::id()));
+    let directory = std::env::temp_dir().join(format!(
+        "tapes-selection-{name}-{}-{}",
+        std::process::id(),
+        TEMP_ROOTS.fetch_add(1, Ordering::Relaxed)
+    ));
     let _ = fs::remove_dir_all(&directory);
     directory
 }
@@ -7893,9 +7923,10 @@ fn selected_identity_is_checked_on_every_recording_read() {
         let location = session.source.location.as_ref().unwrap();
         let path = Path::new(&location.locator);
         let root = std::env::temp_dir().join(format!(
-            "tapes-identity-{}-{}",
+            "tapes-identity-{}-{}-{}",
             backend.harness(),
-            std::process::id()
+            std::process::id(),
+            TEMP_ROOTS.fetch_add(1, Ordering::Relaxed)
         ));
         fs::create_dir_all(&root).unwrap();
         let copied = root.join(path.file_name().unwrap());
@@ -7938,9 +7969,10 @@ fn history_and_metadata_pages_validate_selected_identity() {
     {
         let mut session = backend.locate(id).unwrap().unwrap();
         let root = std::env::temp_dir().join(format!(
-            "tapes-page-identity-{}-{}",
+            "tapes-page-identity-{}-{}-{}",
             backend.harness(),
-            std::process::id()
+            std::process::id(),
+            TEMP_ROOTS.fetch_add(1, Ordering::Relaxed)
         ));
         fs::create_dir_all(&root).unwrap();
         let path = Path::new(&session.source.location.as_ref().unwrap().locator);

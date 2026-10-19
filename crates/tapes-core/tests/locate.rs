@@ -4,6 +4,7 @@
 use std::fs;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use agent_tapes_core::backend::claude::ClaudeBackend;
 use agent_tapes_core::backend::codex::CodexBackend;
@@ -17,6 +18,8 @@ use agent_tapes_core::model::TurnKind;
 use agent_tapes_core::workset::{build_with_backends, write_manifest, MIN_LANE_BYTES};
 use agent_tapes_core::Selection;
 
+static TEMP_ROOTS: AtomicU64 = AtomicU64::new(0);
+
 const CODEX_FIXTURE: &str =
     "rollout-2026-01-01T10-00-00-00000000-0000-0000-0000-000000000001.jsonl";
 const CODEX_ID: &str = "00000000-0000-0000-0000-000000000001";
@@ -29,7 +32,11 @@ fn fixtures(harness: &str) -> PathBuf {
 }
 
 fn scratch(tag: &str) -> PathBuf {
-    let path = std::env::temp_dir().join(format!("tapes-locate-{tag}-{}", std::process::id()));
+    let path = std::env::temp_dir().join(format!(
+        "tapes-locate-{tag}-{}-{}",
+        std::process::id(),
+        TEMP_ROOTS.fetch_add(1, Ordering::Relaxed)
+    ));
     let _ = fs::remove_dir_all(&path);
     fs::create_dir_all(&path).unwrap();
     path

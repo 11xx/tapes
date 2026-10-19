@@ -1,16 +1,20 @@
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use agent_tapes_core::backend::{backends_from_stores, MIN_READ_BYTES};
 use agent_tapes_core::{resolve_session, NativeStore, ResolveError};
+
+static TEMP_ROOTS: AtomicU64 = AtomicU64::new(0);
 
 struct Temp(PathBuf);
 
 impl Temp {
     fn new(label: &str) -> Self {
         let path = std::env::temp_dir().join(format!(
-            "tapes-exact-mismatch-{label}-{}",
-            std::process::id()
+            "tapes-exact-mismatch-{label}-{}-{}",
+            std::process::id(),
+            TEMP_ROOTS.fetch_add(1, Ordering::Relaxed)
         ));
         let _ = fs::remove_dir_all(&path);
         fs::create_dir_all(&path).unwrap();

@@ -5,6 +5,7 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use agent_tapes_core::backend::{claude::ClaudeBackend, codex::CodexBackend, Backend};
@@ -21,6 +22,8 @@ use agent_tapes_core::{
 use chrono::{DateTime, Utc};
 use serde_json::{json, Value};
 
+static TEMP_ROOTS: AtomicU64 = AtomicU64::new(0);
+
 struct Store(PathBuf);
 
 impl Store {
@@ -30,8 +33,9 @@ impl Store {
             .unwrap()
             .as_nanos();
         let root = std::env::temp_dir().join(format!(
-            "tapes-window-{label}-{}-{nonce}",
-            std::process::id()
+            "tapes-window-{label}-{}-{}-{nonce}",
+            std::process::id(),
+            TEMP_ROOTS.fetch_add(1, Ordering::Relaxed)
         ));
         fs::create_dir_all(&root).unwrap();
         Self(root)

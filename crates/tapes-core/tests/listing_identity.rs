@@ -5,11 +5,14 @@
 
 use std::fs;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use agent_tapes_core::backend::codex::CodexBackend;
 use agent_tapes_core::backend::pi::PiBackend;
 use agent_tapes_core::backend::{Backend, Listing, Query, MIN_READ_BYTES};
 use serde_json::{json, Value};
+
+static TEMP_ROOTS: AtomicU64 = AtomicU64::new(0);
 
 const SESSION: &str = "70000000-0000-0000-0000-0000000000c1";
 const OTHER: &str = "70000000-0000-0000-0000-0000000000c2";
@@ -19,8 +22,9 @@ struct Store(PathBuf);
 impl Store {
     fn new(label: &str) -> Self {
         let path = std::env::temp_dir().join(format!(
-            "tapes-listing-identity-{label}-{}",
-            std::process::id()
+            "tapes-listing-identity-{label}-{}-{}",
+            std::process::id(),
+            TEMP_ROOTS.fetch_add(1, Ordering::Relaxed)
         ));
         let _ = fs::remove_dir_all(&path);
         fs::create_dir_all(&path).unwrap();

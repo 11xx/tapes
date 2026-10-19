@@ -5,9 +5,12 @@
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{json, Value};
+
+static TEMP_ROOTS: AtomicU64 = AtomicU64::new(0);
 
 const LOOKBACK: &str = "2026-01-10T09:00:00Z..2026-01-10T16:00:00Z";
 const LANES: usize = 25;
@@ -23,8 +26,11 @@ impl Store {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let root =
-            std::env::temp_dir().join(format!("tapes-series-lanes-{}-{nonce}", std::process::id()));
+        let root = std::env::temp_dir().join(format!(
+            "tapes-series-lanes-{}-{}-{nonce}",
+            std::process::id(),
+            TEMP_ROOTS.fetch_add(1, Ordering::Relaxed)
+        ));
         fs::create_dir_all(root.join("home")).unwrap();
         let store = Self(root);
         for lane in 0..LANES {

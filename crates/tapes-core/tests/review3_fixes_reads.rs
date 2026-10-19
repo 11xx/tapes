@@ -10,6 +10,7 @@ use std::cell::Cell;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use agent_tapes_core::backend::{
@@ -27,6 +28,8 @@ use agent_tapes_core::{
 };
 use serde_json::{json, Value};
 
+static TEMP_ROOTS: AtomicU64 = AtomicU64::new(0);
+
 /// A temporary store root, removed when dropped.
 struct Store(PathBuf);
 
@@ -37,8 +40,9 @@ impl Store {
             .unwrap()
             .as_nanos();
         let root = std::env::temp_dir().join(format!(
-            "tapes-review3-reads-{label}-{}-{nonce}",
-            std::process::id()
+            "tapes-review3-reads-{label}-{}-{}-{nonce}",
+            std::process::id(),
+            TEMP_ROOTS.fetch_add(1, Ordering::Relaxed)
         ));
         fs::create_dir_all(&root).unwrap();
         Self(root)

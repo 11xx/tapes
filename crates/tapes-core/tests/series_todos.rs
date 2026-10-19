@@ -5,6 +5,7 @@
 
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::OnceLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -12,6 +13,8 @@ use agent_tapes_core::backend::{codex::CodexBackend, opencode::OpenCodeBackend, 
 use agent_tapes_core::usage::GroupBy;
 use agent_tapes_core::{usage_summary_with_backends, SessionSelection};
 use serde_json::{json, Value};
+
+static TEMP_ROOTS: AtomicU64 = AtomicU64::new(0);
 
 fn fixtures() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/opencode")
@@ -38,14 +41,19 @@ impl Alias {
             .as_nanos();
         let (path, directory) = if in_directory {
             let directory = std::env::temp_dir().join(format!(
-                "tapes-series-opencode-{}-{nonce}",
-                std::process::id()
+                "tapes-series-opencode-{}-{}-{nonce}",
+                std::process::id(),
+                TEMP_ROOTS.fetch_add(1, Ordering::Relaxed)
             ));
             fs::create_dir_all(&directory).unwrap();
             (directory.join(name), Some(directory))
         } else {
             (
-                std::env::temp_dir().join(format!("{name}-{}-{nonce}", std::process::id())),
+                std::env::temp_dir().join(format!(
+                    "{name}-{}-{}-{nonce}",
+                    std::process::id(),
+                    TEMP_ROOTS.fetch_add(1, Ordering::Relaxed)
+                )),
                 None,
             )
         };
@@ -134,8 +142,11 @@ fn a_large_codex_rollout_is_titled_by_its_first_prompt() {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    let root =
-        std::env::temp_dir().join(format!("tapes-series-codex-{}-{nonce}", std::process::id()));
+    let root = std::env::temp_dir().join(format!(
+        "tapes-series-codex-{}-{}-{nonce}",
+        std::process::id(),
+        TEMP_ROOTS.fetch_add(1, Ordering::Relaxed)
+    ));
     let path = root.join(format!(
         "2026/01/10/rollout-2026-01-10T10-00-00-{CODEX_ID}.jsonl"
     ));

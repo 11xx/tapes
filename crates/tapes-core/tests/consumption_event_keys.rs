@@ -1,8 +1,11 @@
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use agent_tapes_core::backend::{pi::PiBackend, Backend};
 use agent_tapes_core::usage::{ConsumptionKeyOptions, UsageOptions};
 use agent_tapes_core::{usage_with_options_with_backends, Selection};
+
+static TEMP_ROOTS: AtomicU64 = AtomicU64::new(0);
 
 #[test]
 fn public_usage_options_bound_keys_without_shortening_measurements() {
@@ -59,8 +62,11 @@ fn bounded_measurements_and_keys_share_the_transcript_frontier() {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    let root =
-        std::env::temp_dir().join(format!("tapes-key-frontier-{}-{nonce}", std::process::id()));
+    let root = std::env::temp_dir().join(format!(
+        "tapes-key-frontier-{}-{}-{nonce}",
+        std::process::id(),
+        TEMP_ROOTS.fetch_add(1, Ordering::Relaxed)
+    ));
     fs::create_dir_all(&root).unwrap();
     let file = "2026-01-15T10-00-00-000Z_keys-parent.jsonl";
     let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -92,6 +98,7 @@ fn bounded_measurements_and_keys_share_the_transcript_frontier() {
 mod amounts {
     use std::fs;
     use std::path::{Path, PathBuf};
+    use std::sync::atomic::Ordering;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use agent_tapes_core::backend::{pi::PiBackend, Backend};
@@ -99,6 +106,8 @@ mod amounts {
     use agent_tapes_core::usage::{ConsumptionEventKeys, ConsumptionKeyOptions, UsageOptions};
     use agent_tapes_core::{usage_with_options_with_backends, Selection};
     use serde_json::json;
+
+    use super::TEMP_ROOTS;
 
     const PARENT: &str = "2026-01-15T10-00-00-000Z_keys-parent.jsonl";
     const FORK: &str = "2026-01-15T11-00-00-000Z_keys-fork.jsonl";
@@ -140,8 +149,11 @@ mod amounts {
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
                 .as_nanos();
-            let root = std::env::temp_dir()
-                .join(format!("tapes-key-amounts-{}-{nonce}", std::process::id()));
+            let root = std::env::temp_dir().join(format!(
+                "tapes-key-amounts-{}-{}-{nonce}",
+                std::process::id(),
+                TEMP_ROOTS.fetch_add(1, Ordering::Relaxed)
+            ));
             fs::create_dir_all(&root).unwrap();
             for file in [PARENT, FORK] {
                 fs::copy(fixtures().join(file), root.join(file)).unwrap();

@@ -4,9 +4,12 @@
 
 use std::fs;
 use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::json;
+
+static TEMP_ROOTS: AtomicU64 = AtomicU64::new(0);
 
 /// Claim: `usage <id> --harness codex --quota-window current` refuses,
 /// naming the conflict between a single session and a quota window.
@@ -19,8 +22,9 @@ fn a_single_session_refuses_a_quota_window() {
         .unwrap()
         .as_nanos();
     let root = std::env::temp_dir().join(format!(
-        "tapes-cli-quota-single-{}-{nonce}",
-        std::process::id()
+        "tapes-cli-quota-single-{}-{}-{nonce}",
+        std::process::id(),
+        TEMP_ROOTS.fetch_add(1, Ordering::Relaxed)
     ));
     let id = "40000000-0000-7000-8000-0000000000f6";
     let path = root.join(format!(

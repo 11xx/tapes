@@ -772,6 +772,8 @@ mod tests {
         fs::remove_dir_all(directory).unwrap();
     }
 
+    use std::sync::atomic::{AtomicU64, Ordering};
+
     use chrono::TimeZone;
 
     use super::*;
@@ -779,6 +781,8 @@ mod tests {
         Accounting, AccountingBasis, AccountingCoverage, LiveState, Model, SourceDescriptor,
         Tokens, TrailingRecord, Truncation, Turn, TurnKind, SESSION_SCHEMA,
     };
+
+    static TEMP_ROOTS: AtomicU64 = AtomicU64::new(0);
 
     fn transcript() -> Transcript {
         let ts = Utc.timestamp_opt(1_700_000_000, 0).unwrap();
@@ -912,8 +916,11 @@ mod tests {
     /// Each test gets its own directory: they run in parallel and every one of
     /// them counts and then removes the directory's contents.
     fn export_into_temporary_directory(test: &str) -> (PathBuf, Bundle) {
-        let directory =
-            std::env::temp_dir().join(format!("tapes-bundle-{}-{test}", std::process::id()));
+        let directory = std::env::temp_dir().join(format!(
+            "tapes-bundle-{}-{}-{test}",
+            std::process::id(),
+            TEMP_ROOTS.fetch_add(1, Ordering::Relaxed)
+        ));
         let _ = fs::remove_dir_all(&directory);
         let bundle = export(&transcript(), &directory).unwrap();
         (directory, bundle)
@@ -1114,8 +1121,11 @@ mod tests {
     }
 
     fn scratch(test: &str) -> PathBuf {
-        let directory =
-            std::env::temp_dir().join(format!("tapes-bundle-{}-{test}", std::process::id()));
+        let directory = std::env::temp_dir().join(format!(
+            "tapes-bundle-{}-{}-{test}",
+            std::process::id(),
+            TEMP_ROOTS.fetch_add(1, Ordering::Relaxed)
+        ));
         let _ = fs::remove_dir_all(&directory);
         directory
     }

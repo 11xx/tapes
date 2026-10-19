@@ -1,5 +1,6 @@
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use agent_tapes_core::backend::claude::ClaudeBackend;
 use agent_tapes_core::backend::codex::CodexBackend;
@@ -9,6 +10,8 @@ use agent_tapes_core::event::{project, EventKind};
 use agent_tapes_core::{capture_with_backends, export_with_backends, ExportRead, Selection};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+
+static TEMP_ROOTS: AtomicU64 = AtomicU64::new(0);
 
 fn fixture_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/read-records")
@@ -161,8 +164,9 @@ fn read_locators_survive_export_and_capture_is_unpinned() {
         }
 
         let directory = std::env::temp_dir().join(format!(
-            "tapes-read-export-{harness}-{}",
-            std::process::id()
+            "tapes-read-export-{harness}-{}-{}",
+            std::process::id(),
+            TEMP_ROOTS.fetch_add(1, Ordering::Relaxed)
         ));
         fs::create_dir_all(&directory).unwrap();
         let bundle = export_with_backends(
@@ -208,8 +212,9 @@ fn event_identity_survives_distinct_file_windows() {
         let content = fs::read_to_string(source).unwrap();
         let (first, rest) = content.split_once('\n').unwrap();
         let root = std::env::temp_dir().join(format!(
-            "tapes-read-window-{harness}-{}",
-            std::process::id()
+            "tapes-read-window-{harness}-{}-{}",
+            std::process::id(),
+            TEMP_ROOTS.fetch_add(1, Ordering::Relaxed)
         ));
         let target = root.join(relative);
         fs::create_dir_all(target.parent().unwrap()).unwrap();

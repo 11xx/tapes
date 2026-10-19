@@ -7,9 +7,12 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{json, Value};
+
+static TEMP_ROOTS: AtomicU64 = AtomicU64::new(0);
 
 const PARENT: &str = "2026-01-15T10-00-00-000Z_0b1e6f3a-0000-4000-8000-00000000a001.jsonl";
 const FORK: &str = "2026-01-15T11-00-00-000Z_0b1e6f3a-0000-4000-8000-00000000b002.jsonl";
@@ -24,8 +27,9 @@ impl Root {
             .unwrap()
             .as_nanos();
         let root = std::env::temp_dir().join(format!(
-            "tapes-union-completeness-{label}-{}-{nonce}",
-            std::process::id()
+            "tapes-union-completeness-{label}-{}-{}-{nonce}",
+            std::process::id(),
+            TEMP_ROOTS.fetch_add(1, Ordering::Relaxed)
         ));
         fs::create_dir_all(&root).unwrap();
         Self(root)

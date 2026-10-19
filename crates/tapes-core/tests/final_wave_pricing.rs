@@ -6,6 +6,7 @@
 
 use std::fs;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use agent_tapes_core::allowance_rates_with_backends;
@@ -19,6 +20,8 @@ use agent_tapes_core::{
 use chrono::{DateTime, Utc};
 use serde_json::{json, Value};
 
+static TEMP_ROOTS: AtomicU64 = AtomicU64::new(0);
+
 struct Store(PathBuf);
 
 impl Store {
@@ -28,8 +31,9 @@ impl Store {
             .unwrap()
             .as_nanos();
         let root = std::env::temp_dir().join(format!(
-            "tapes-final-wave-pricing-{label}-{}-{nonce}",
-            std::process::id()
+            "tapes-final-wave-pricing-{label}-{}-{}-{nonce}",
+            std::process::id(),
+            TEMP_ROOTS.fetch_add(1, Ordering::Relaxed)
         ));
         fs::create_dir_all(&root).unwrap();
         Self(root)

@@ -4,9 +4,12 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::json;
+
+static TEMP_ROOTS: AtomicU64 = AtomicU64::new(0);
 
 struct Home(PathBuf);
 
@@ -17,8 +20,9 @@ impl Home {
             .unwrap()
             .as_nanos();
         let root = std::env::temp_dir().join(format!(
-            "tapes-overlap-human-{label}-{}-{nonce}",
-            std::process::id()
+            "tapes-overlap-human-{label}-{}-{}-{nonce}",
+            std::process::id(),
+            TEMP_ROOTS.fetch_add(1, Ordering::Relaxed)
         ));
         fs::create_dir_all(root.join("projects/fixture-project")).unwrap();
         Self(root)

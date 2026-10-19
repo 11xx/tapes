@@ -6,9 +6,12 @@
 use std::fs;
 use std::path::PathBuf;
 use std::process::{Command, Output};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{json, Value};
+
+static TEMP_ROOTS: AtomicU64 = AtomicU64::new(0);
 
 const A: &str = "40000000-0000-7000-8000-0000000000a1";
 const B: &str = "40000000-0000-7000-8000-0000000000a2";
@@ -29,8 +32,9 @@ impl Store {
             .unwrap()
             .as_nanos();
         let root = std::env::temp_dir().join(format!(
-            "tapes-forecast-{label}-{}-{nonce}",
-            std::process::id()
+            "tapes-forecast-{label}-{}-{}-{nonce}",
+            std::process::id(),
+            TEMP_ROOTS.fetch_add(1, Ordering::Relaxed)
         ));
         fs::create_dir_all(root.join("home")).unwrap();
         Self(root)
