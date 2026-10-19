@@ -281,6 +281,15 @@ impl ClaudeBackend {
                 .quota_observations = quota;
         }
         session.record_copy_evidence(copies);
+        if child.is_none() {
+            session.declare_launch_parent_read(super::first_prompt_marker(
+                &recording,
+                path,
+                "claude",
+                native_id,
+                claude_prompt_text,
+            ));
+        }
         let session = super::with_unreadable_records(session, read.skipped);
         // The opening is the start of the file, so its first user turn is the
         // session's first user turn even when the tail cannot see it.
@@ -3729,6 +3738,24 @@ fn subagent_metadata(path: &Path) -> (Value, Option<String>) {
                 path.display()
             )),
         ),
+    }
+}
+
+/// The text of a Claude user message as its sender wrote it: the content
+/// string, or its first block when that is text. A message the harness marks
+/// as its own (`isMeta`) and a tool result carry no prompt.
+fn claude_prompt_text(value: &Value) -> Option<String> {
+    if value["type"] != "user" || value["isMeta"] == true {
+        return None;
+    }
+    match &value["message"]["content"] {
+        Value::String(text) => Some(text.clone()),
+        Value::Array(blocks) => blocks
+            .first()
+            .filter(|block| block["type"] == "text")
+            .and_then(|block| block["text"].as_str())
+            .map(str::to_owned),
+        _ => None,
     }
 }
 

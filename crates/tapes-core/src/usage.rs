@@ -77,6 +77,9 @@ pub struct UsageDetail {
     /// The session that launched this one, where the recording names it
     /// beside any fork origin.
     pub declared_parent: Option<String>,
+    /// The session a `tapes-parent` marker opening the first prompt names
+    /// as the one that launched this one.
+    pub launch_parent: Option<String>,
     /// Quota observations the read holds beside `rate_limits`.
     pub quota_observations: Vec<crate::window::QuotaObservation>,
 }
@@ -104,6 +107,7 @@ impl UsageDetail {
                 .as_ref()
                 .is_none_or(CopyEvidence::is_empty)
             && self.declared_parent.is_none()
+            && self.launch_parent.is_none()
             && self.quota_observations.is_empty()
     }
 

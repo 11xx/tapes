@@ -239,20 +239,56 @@ pub fn resolve_quota_window(
     }
 }
 
-/// The session a recording names as its parent or fork origin, as its own
-/// records state it: a Claude subagent's parent, a Codex spawn's
-/// `parent_thread_id`, or a declared fork origin.
-pub fn declared_parent(session: &Session) -> Option<String> {
+/// How a recording names the session it descends from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ParentEvidence {
+    /// A Claude subagent's recording, kept under its parent's.
+    Subagent,
+    /// A Codex spawn's `parent_thread_id`.
+    Spawn,
+    /// A declared fork origin, whose history the session copies.
+    ForkOrigin,
+    /// A `tapes-parent` marker opening the first prompt, written by the tool
+    /// that launched the session. The session holds no copy of its parent.
+    DeclaredLaunchParent,
+}
+
+/// The session a recording names as its parent, as its own records state it,
+/// and how: a Claude subagent's parent, a Codex spawn's `parent_thread_id`, a
+/// declared fork origin, or the launcher a `tapes-parent` marker names. A fork
+/// copies its origin's first prompt, marker included, so its origin outranks
+/// the marker.
+pub fn named_parent(session: &Session) -> Option<(String, ParentEvidence)> {
     if let Some((parent, _)) = session.id.split_once("::") {
-        return Some(parent.to_owned());
+        return Some((parent.to_owned(), ParentEvidence::Subagent));
     }
     let detail = session.usage_detail.as_ref()?;
-    detail.declared_parent.clone().or_else(|| {
+    let spawn = || {
+        detail
+            .declared_parent
+            .clone()
+            .map(|parent| (parent, ParentEvidence::Spawn))
+    };
+    let origin = || {
         detail
             .copy_evidence
             .as_ref()
             .and_then(|copies| copies.origins.first().cloned())
-    })
+            .map(|origin| (origin, ParentEvidence::ForkOrigin))
+    };
+    let launcher = || {
+        detail
+            .launch_parent
+            .clone()
+            .map(|parent| (parent, ParentEvidence::DeclaredLaunchParent))
+    };
+    spawn().or_else(origin).or_else(launcher)
+}
+
+/// The session a recording names as its parent; see [`named_parent`].
+pub fn declared_parent(session: &Session) -> Option<String> {
+    named_parent(session).map(|(parent, _)| parent)
 }
 
 /// One session's share of a window: the requests its span placed inside it,
@@ -263,9 +299,12 @@ pub struct WindowShare {
     pub harness: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub launch: Option<crate::model::Launch>,
-    /// The parent or fork origin the session's recording names.
+    /// The parent the session's recording names.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parent: Option<String>,
+    /// How the recording names `parent`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_evidence: Option<ParentEvidence>,
     /// The session the chain of named parents ends at.
     pub root: String,
     /// Whether the store holds the session the chain ends at.

@@ -1576,14 +1576,15 @@ impl Session {
 }
 
 /// Turn the first user message into a compact, human-readable listing hint.
-/// Harness envelopes that are known to surround the user message are removed
-/// before whitespace is collapsed; unknown content remains untouched.
+/// Harness envelopes that are known to surround the user message, and a
+/// `tapes-parent` marker line naming a parent, are removed before whitespace
+/// is collapsed; unknown content remains untouched.
 pub fn derive_title(text: &str) -> Option<String> {
     derive_title_info(text).map(|(title, _)| title)
 }
 
 fn derive_title_info(text: &str) -> Option<(String, bool)> {
-    let cleaned = without_known_envelopes(text);
+    let cleaned = without_known_envelopes(crate::launch_parent::without_marker(text));
 
     let collapsed = cleaned.split_whitespace().collect::<Vec<_>>().join(" ");
     if collapsed.is_empty() {

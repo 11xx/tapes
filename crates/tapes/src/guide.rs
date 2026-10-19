@@ -638,11 +638,36 @@ PROBE BEFORE EXPORTING
   how they were established (`requested`, `recorded`, `inferred`), the
   selected sessions that placed nothing inside it, and each session's share,
   largest first: its requests inside the window out of its own, its launch,
-  the `parent` its recording names, the `root` that chain of parents ends at
+  the `parent` its recording names and how (`parent_evidence`), the `root`
+  that chain of parents ends at
   and whether the store holds it, and its disjoint categories. --limit still
   bounds the sessions each harness lists. `--by session`, `launch` and
   `parent` group any summary by session, by recorded launch, and under the
   root of each session's named parents.
+  A recording names its parent in one of four ways, and a share's
+  `parent_evidence` says which: `subagent` (a Claude subagent's recording,
+  kept under its parent's), `spawn` (a Codex child's `parent_thread_id`),
+  `fork-origin` (a declared fork origin), or `declared-launch-parent` (a
+  marker the tool that launched the session wrote into it). A fork copies its
+  origin's first prompt, so a fork origin outranks a marker the copy carries.
+  The launch marker is the contract a launcher writes to. The first line of
+  the prompt a launched session starts with is exactly
+      tapes-parent: <harness>:<session-id>
+  with nothing before it: `tapes-parent:`, one space, the launching session's
+  harness (`claude`, `codex`, `pi` or `opencode`), a colon, and that
+  session's native id, 1 to 128 ASCII letters, digits, `-`, `_` or `.`. The
+  line ends at a line feed, or at the end of the prompt; the rest of the
+  prompt follows it. tapes reads the marker from the session's first user
+  message that is not wholly context the harness attached (Codex records its
+  AGENTS.md and environment blocks first), within the recording's first MiB,
+  in Claude, Codex and pi recordings; OpenCode sessions are not read for it.
+  The parent is looked up by its id in every store tapes reads; one the stores
+  do not hold stays the named, unresolved root, as a missing fork origin
+  does. A first prompt opening with `tapes-parent:` in any other form, or
+  naming the session itself, names no parent, and the session's usage notes
+  say so. A launched session holds no copy of its parent, so the marker never
+  makes the two an overlap group: their consumption adds. A derived title
+  leaves the marker line out.
   `usage --quota-window current|<instant> --harness codex|claude [--quota
   primary|secondary]` answers as --window over the provider's quota window,
   from the recordings' own quota observations. A Codex `rate_limits`
@@ -1108,7 +1133,7 @@ PROBE BEFORE EXPORTING
   its own first activity and not the parent's launch.
 
   Given a scope or a listing filter instead of a session, usage answers that
-  whole selection as tapes-usage-summary/10, using the flags list and export
+  whole selection as tapes-usage-summary/11, using the flags list and export
   take and grouping by --by (harness and model unless told otherwise). It sums
   the counters the listing already carries, so nothing is re-read. Read
   counted before a sum: it says how many of a group's sessions recorded that

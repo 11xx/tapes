@@ -236,6 +236,13 @@ impl CodexBackend {
                 .get_or_insert_with(Default::default)
                 .declared_parent = Some(parent.to_owned());
         }
+        session.declare_launch_parent_read(super::first_prompt_marker(
+            &recording,
+            path,
+            "codex",
+            native.id(),
+            codex_prompt_text,
+        ));
         // The opening is the start of the file, so its first user turn is the
         // session's first user turn even when the tail cannot see it.
         let session = if read.truncated {
@@ -3197,6 +3204,22 @@ fn reasoning_text(payload: &Value) -> String {
     } else {
         String::new()
     }
+}
+
+/// The text of a Codex user message, its input texts joined by line feeds.
+fn codex_prompt_text(value: &Value) -> Option<String> {
+    let payload = &value["payload"];
+    if value["type"] != "response_item" || payload["type"] != "message" || payload["role"] != "user"
+    {
+        return None;
+    }
+    let texts = payload["content"]
+        .as_array()?
+        .iter()
+        .filter(|item| item["type"] == "input_text")
+        .filter_map(|item| item["text"].as_str())
+        .collect::<Vec<_>>();
+    (!texts.is_empty()).then(|| texts.join("\n"))
 }
 
 /// Recordings whose headers the lineage read will open while looking for

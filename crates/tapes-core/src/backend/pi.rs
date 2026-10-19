@@ -210,6 +210,15 @@ impl PiBackend {
             usage_detail: None,
         };
         apply_recording_usage(&mut session, &recording, &active, rooted);
+        // The marker opens the prompt the session was launched with, the
+        // file's first, whichever branch is active.
+        session.declare_launch_parent_read(super::first_prompt_marker(
+            &recording,
+            path,
+            "pi",
+            native.id(),
+            pi_prompt_text,
+        ));
         // pi rewinds by appending a new branch, so the first user message in
         // the file may sit on a root the active path never reaches. The
         // active path is known only when the whole file is in the tail; past
@@ -1001,6 +1010,27 @@ fn count_unmapped(tally: &mut UnmappedTally, value: &Value) {
 /// process opens a session. Its `data.mode` is pi's run mode and its
 /// `data.session` the session it was written for.
 pub const LAUNCH_ENTRY_TYPE: &str = "tapes.launch";
+
+/// The text of a pi user message: its content string, or its text blocks
+/// joined by line feeds.
+fn pi_prompt_text(value: &Value) -> Option<String> {
+    let message = &value["message"];
+    if value["type"] != "message" || message["role"] != "user" {
+        return None;
+    }
+    match &message["content"] {
+        Value::String(text) => Some(text.clone()),
+        Value::Array(blocks) => {
+            let texts = blocks
+                .iter()
+                .filter(|block| block["type"] == "text")
+                .filter_map(|block| block["text"].as_str())
+                .collect::<Vec<_>>();
+            (!texts.is_empty()).then(|| texts.join("\n"))
+        }
+        _ => None,
+    }
+}
 
 fn is_launch_entry(value: &Value) -> bool {
     value["type"] == "custom" && value["customType"] == LAUNCH_ENTRY_TYPE

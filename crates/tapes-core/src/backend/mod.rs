@@ -1475,6 +1475,50 @@ pub(crate) fn read_recording(path: &Path, read_bytes: u64) -> Result<Recording> 
     })
 }
 
+/// How much of a recording's start a first-prompt read takes.
+const FIRST_PROMPT_BYTES: u64 = HEAD_PROBE_MAX_BYTES;
+
+/// The launch marker of a recording's first prompt. `prompt` is the text of a
+/// record that is a user message. The opening answers when it holds the first
+/// prompt, or holds the whole recording; otherwise the recording's first MiB
+/// is read record by record until the first prompt, with each record's
+/// identity checked as the opening's are. No prompt within that bound is no
+/// marker.
+pub(crate) fn first_prompt_marker(
+    recording: &Recording,
+    path: &Path,
+    harness: &str,
+    expected: &str,
+    prompt: impl Fn(&Value) -> Option<String>,
+) -> Result<crate::launch_parent::LaunchMarker> {
+    use crate::launch_parent::{is_prompt, LaunchMarker};
+    if let Some(marker) =
+        LaunchMarker::of_first_prompt(recording.opening().iter().filter_map(&prompt))
+    {
+        return Ok(marker);
+    }
+    if !recording.tail.truncated {
+        return Ok(LaunchMarker::Absent);
+    }
+    let file =
+        open_regular_file(path).with_context(|| format!("failed to open {}", path.display()))?;
+    let mut reader = BufReader::new(file.take(FIRST_PROMPT_BYTES));
+    let mut line = Vec::new();
+    loop {
+        line.clear();
+        if reader.read_until(b'\n', &mut line)? == 0 || line.last() != Some(&b'\n') {
+            return Ok(LaunchMarker::Absent);
+        }
+        let Ok(value) = serde_json::from_slice::<Value>(&line) else {
+            continue;
+        };
+        validate_native_identity(&value, harness, expected)?;
+        if let Some(text) = prompt(&value).filter(|text| is_prompt(text)) {
+            return Ok(LaunchMarker::read(&text));
+        }
+    }
+}
+
 /// Whether a session parse builds the read's turns, or only the session and
 /// the turns its derived title needs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

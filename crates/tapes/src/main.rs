@@ -1507,7 +1507,7 @@ enum Command {
     /// --quota-window answer a selection's consumption inside a window of
     /// time, each session contributing its own span inside it. A scope or
     /// listing filter instead answers the whole selection as
-    /// tapes-usage-summary/10, grouped by --by and summing each counter over
+    /// tapes-usage-summary/11, grouped by --by and summing each counter over
     /// the sessions that recorded it. Native tokens follow each harness's own
     /// convention and add only within it; the disjoint categories (uncached
     /// input, cache read, cache write by TTL, output) add across harnesses.
@@ -1580,9 +1580,13 @@ enum Command {
         /// headless launch its recording states. `parent` groups a session
         /// under the end of the chain of parents its recordings name: a Codex
         /// spawn's `parent_thread_id`, a declared fork origin (Codex, pi,
-        /// OpenCode), a Claude subagent's parent. A session that names none is
-        /// its own group, and a parent the store does not hold is a group of
-        /// its own under that id, never joined to a guessed one.
+        /// OpenCode), a Claude subagent's parent, or the launcher a first
+        /// prompt names on its first line as `tapes-parent:
+        /// <harness>:<session-id>` (Claude, Codex, pi; the guide gives the
+        /// exact form). A session that names none is its own group, and a
+        /// parent the store does not hold is a group of its own under that
+        /// id, never joined to a guessed one. A launched session is never an
+        /// overlap group with its launcher.
         #[arg(
             long,
             value_enum,
@@ -1748,7 +1752,9 @@ enum Command {
         /// they were established
         /// (`requested`, `recorded`, `inferred`), and each session's share,
         /// largest first: its requests inside the window, its launch, its
-        /// named `parent` and the `root` its chain of parents ends at, and its
+        /// named `parent`, how its recording names it (`parent_evidence`:
+        /// `subagent`, `spawn`, `fork-origin` or `declared-launch-parent`),
+        /// the `root` its chain of parents ends at, and its
         /// disjoint categories. --limit still bounds how many sessions each
         /// harness lists. Each share, group and total also carries
         /// `allowance`: the percent of each quota window it spent, apportioned
@@ -1842,7 +1848,7 @@ enum Command {
         /// identity-unestablished, exact-union).
         #[arg(long, value_name = "FILE")]
         prices: Option<PathBuf>,
-        /// Render the versioned tapes-usage/15 object, or tapes-usage-summary/10
+        /// Render the versioned tapes-usage/15 object, or tapes-usage-summary/11
         /// for a selection, as JSON. `session.model_observation` says
         /// whether more than one model and effort was observed (`mixed`) and
         /// whether a gap, partial read or budget kept the split incomplete

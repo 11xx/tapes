@@ -34,6 +34,7 @@ pub mod evidence;
 pub mod history;
 pub mod input;
 pub mod lane_file;
+pub mod launch_parent;
 pub mod lineage;
 pub mod locate;
 pub mod measurement;
@@ -60,7 +61,7 @@ pub mod workset;
 
 pub const LIST_SCHEMA: &str = "tapes-list/9";
 pub const EXPORT_MANIFEST_SCHEMA: &str = "tapes-export-manifest/7";
-pub const USAGE_SUMMARY_SCHEMA: &str = "tapes-usage-summary/10";
+pub const USAGE_SUMMARY_SCHEMA: &str = "tapes-usage-summary/11";
 /// Number of normalized turns a `list --search` query inspects per session.
 /// Keeping this fixed makes the listing's cost predictable for callers.
 pub const LIST_SEARCH_TAIL: usize = 32;
@@ -2251,6 +2252,7 @@ pub fn read_window(
                 // headless launch its tail cannot confirm.
                 launch: figure.launch,
                 parent: window::declared_parent(&member),
+                parent_evidence: window::named_parent(&member).map(|(_, evidence)| evidence),
                 root: String::new(),
                 root_resolved: true,
                 requests: placement.requests,
