@@ -968,7 +968,7 @@ fn opencode_v2_search_reports_a_failed_local_server_fallback() {
 #[test]
 fn opencode_search_uses_the_first_projection_before_deduplicating() {
     let stable = OpenCodeAlias::database();
-    let api = OpenCodeAlias::new("counting");
+    let api = OpenCodeAlias::counting();
     let backends: Vec<Box<dyn Backend>> = vec![
         Box::new(OpenCodeBackend::new(stable.path())),
         Box::new(OpenCodeBackend::new(api.path())),
