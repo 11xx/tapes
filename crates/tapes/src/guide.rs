@@ -673,7 +673,8 @@ PROBE BEFORE EXPORTING
   API, which takes only a ChatGPT account's sign-in, is a subscription; any
   other pi recording, a compaction or tool result naming no API included,
   and every OpenCode recording name no billing. A span or window share is
-  billed as its whole recording is, whatever records it holds. A
+  billed as its whole recording is, whatever records it holds, and names
+  no billing where the whole recording names none. A
   subscription pays no long-context surcharge; billing the recording
   establishes neither way is
   priced between base and surcharged rates, its categories

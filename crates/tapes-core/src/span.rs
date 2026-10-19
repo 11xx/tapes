@@ -416,19 +416,16 @@ pub struct SpanSessions {
 }
 
 impl SpanSessions {
-    /// Give every figure the billing the whole recording establishes: each
-    /// is part of the one recording, whatever records a span holds. The
-    /// whole read's billing comes first, since it reads every record a
-    /// bounded lookup of `session` may not; `session`'s stands where the
-    /// whole read establishes none.
-    pub(crate) fn billed_as(mut self, session: &Session) -> Self {
-        let of = |figure: &Session| {
-            figure
-                .usage_detail
-                .as_ref()
-                .and_then(|detail| detail.billing.clone())
-        };
-        let billing = of(&self.whole).or_else(|| of(session));
+    /// Give every figure the billing the whole recording establishes, and
+    /// none where it establishes none: each is part of the one recording,
+    /// whatever records a span holds, and no bounded read of it knows more
+    /// than the whole read.
+    pub(crate) fn billed_as_whole(mut self) -> Self {
+        let billing = self
+            .whole
+            .usage_detail
+            .as_ref()
+            .and_then(|detail| detail.billing.clone());
         for figure in self
             .spans
             .iter_mut()

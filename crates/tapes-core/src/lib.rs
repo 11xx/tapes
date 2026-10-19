@@ -1218,7 +1218,7 @@ pub fn usage_spans_with_backends(
         .extend(resolved.diagnostics.latest_warnings(&resolved.session));
     let figures = backend
         .stream_spans(&resolved.session, &read, spans)?
-        .billed_as(&resolved.session);
+        .billed_as_whole();
     Ok(usage::spans(&figures, &turns, &read))
 }
 
@@ -2362,7 +2362,7 @@ fn read_window_keeping(
             let read = backend
                 .stream_transcript(&member, None, &mut |_| Ok(()))
                 .and_then(|read| backend.stream_spans(&member, &read, &[bounds.span()]))
-                .map(|spans| spans.billed_as(&member));
+                .map(span::SpanSessions::billed_as_whole);
             let mut spans = match read {
                 Ok(spans) => spans,
                 Err(error) => {
