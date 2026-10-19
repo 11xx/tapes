@@ -1981,7 +1981,8 @@ enum Command {
         /// or window share billed as its whole recording, unestablished
         /// where the whole recording establishes none, and a bounded read
         /// that leaves part of its recording unread unestablished, its
-        /// evidence naming what the read window shows: a subscription
+        /// evidence naming what the read window shows, or that it shows
+        /// none: a subscription
         /// pays no surcharge, and unestablished billing is priced between
         /// base and surcharged rates with billing-unestablished. A request no
         /// row is in effect for, or usage of no known time a row may not

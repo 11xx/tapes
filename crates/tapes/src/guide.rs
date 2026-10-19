@@ -678,12 +678,11 @@ PROBE BEFORE EXPORTING
   leaves part of its recording unread — the default `usage` view, a
   listing or a summary of a recording past --read-bytes — establishes no
   billing: its billing is unestablished, its evidence naming what the read
-  window shows, since a record the read skipped can contradict that, and
-  `--full` reads the recording's billing whole. A
+  window shows, or that it shows none, since a record the read skipped can
+  contradict that, and `--full` reads the recording's billing whole. A
   subscription pays no long-context surcharge; billing the recording
-  establishes neither way is
-  priced between base and surcharged rates, its categories
-  billing-unestablished.
+  establishes neither way is priced between base and surcharged rates, its
+  categories billing-unestablished.
   Each figure — a session, each model of `by_model`, a pi `consumption`, a
   span, a summary group, total or partition — gains `list_price_estimate`
   beside the harness's own `cost`, never in its place: `kind:

@@ -164,7 +164,7 @@ pub(crate) fn bounded_billing(
     truncated: bool,
 ) -> Option<crate::pricing::Billing> {
     if truncated {
-        billing.map(crate::pricing::Billing::of_read_window)
+        Some(crate::pricing::Billing::of_read_window(billing))
     } else {
         billing
     }
