@@ -1493,6 +1493,8 @@ impl CodexUsageObserver {
         }
         if value["type"] == "token_usage_record" {
             self.observe_modern(value, span, revision);
+        } else if value["type"] == "compacted" {
+            self.settle_compaction(&value["payload"]["compaction_response_id"]);
         } else if is_token_count(value) {
             self.observe_legacy(value, span, revision);
         } else if codex_unread_usage(value) {
@@ -1672,7 +1674,8 @@ impl CodexUsageObserver {
     /// still moved for none of them, and one that moved by exactly the
     /// newest request's usage moved for it alone. Any other move, such as
     /// one that covers several requests at once, leaves none of them outside
-    /// the total.
+    /// the total. A compaction a `compacted` record named has already
+    /// settled outside it.
     fn settle(&mut self, previous: Option<&Tokens>, total: &Tokens) {
         let mut unsettled = std::mem::take(&mut self.unsettled);
         let change = previous.map(|previous| compare_totals(previous, total));
@@ -1692,6 +1695,24 @@ impl CodexUsageObserver {
         {
             unsettled.pop();
             self.leave_total(unsettled);
+        }
+    }
+
+    /// A `compacted` record names the usage record of the compaction it
+    /// closes. Codex's cumulative total never moves for a compaction, so
+    /// that request settles outside the total as soon as it is named,
+    /// whatever later moves of the total cover.
+    fn settle_compaction(&mut self, response_id: &Value) {
+        let Some(response_id) = response_id.as_str() else {
+            return;
+        };
+        if let Some(position) = self
+            .unsettled
+            .iter()
+            .position(|request| request.response_id == response_id)
+        {
+            let compaction = self.unsettled.remove(position);
+            self.leave_total(vec![compaction]);
         }
     }
 

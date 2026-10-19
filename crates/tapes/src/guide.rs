@@ -517,7 +517,10 @@ PROBE BEFORE EXPORTING
   without being rebuilt from request rows. Codex attribution counts every
   usage record, compactions included, and `attribution.outside_total` counts
   the requests the cumulative total never moved for (a remote compaction, or
-  a request no token count followed), with `outside_total_tokens` their sum:
+  a request no token count followed), with `outside_total_tokens` their sum.
+  A compaction is the usage record a `compacted` record names by its
+  `compaction_response_id`, and it is outside the total however the next
+  total moves:
   the model shares less those are the recorded total's movement, so a share
   above the recorded total says what the total left out. Codex quota
   observations preserve credits balances and reached-limit flags exactly as recorded, including false
