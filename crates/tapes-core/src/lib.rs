@@ -1090,11 +1090,14 @@ pub fn usage_with_backends(
     backends: &[Box<dyn Backend>],
     selection: Selection,
 ) -> Result<usage::UsageView> {
-    Ok(usage::usage(&show_with_backends(
-        backends,
-        selection,
-        EXPORT_TAIL,
-    )?))
+    let resolved = selection.resolve(backends)?;
+    let backend = backends[resolved.backend_index].as_ref();
+    let mut transcript = declared_transcript(backend, &resolved.session, EXPORT_TAIL)?;
+    transcript
+        .notes
+        .extend(resolved.diagnostics.latest_warnings(&resolved.session));
+    declare_session_launch_marker(backend, &mut transcript.session);
+    Ok(usage::usage(&transcript))
 }
 
 /// Read one session's usage with optional bounded observation rows or event
@@ -1134,10 +1137,11 @@ pub fn usage_with_options_with_backends(
                 backend.usage_observations(&resolved.session, Some(&read_evidence), series)
             })
             .transpose()?;
-        let session = observations
+        let mut session = observations
             .as_ref()
             .map(|observations| observations.session.clone())
             .map_or_else(|| backend.stream_session(&resolved.session, &read), Ok)?;
+        declare_session_launch_marker(backend.as_ref(), &mut session);
         let mut view = usage::streamed(&session, turns, &read);
         view.notes
             .extend(resolved.diagnostics.latest_warnings(&resolved.session));
@@ -1165,6 +1169,7 @@ pub fn usage_with_options_with_backends(
         if let Some(observations) = &observations {
             transcript.session = observations.session.clone();
         }
+        declare_session_launch_marker(backend.as_ref(), &mut transcript.session);
         let mut view = usage::usage(&transcript);
         view.series = observations.map(|observations| observations.series);
         if options.reconcile {
@@ -1197,7 +1202,8 @@ pub fn usage_full_with_backends(
     })?;
     read.notes
         .extend(resolved.diagnostics.latest_warnings(&resolved.session));
-    let session = backend.stream_session(&resolved.session, &read)?;
+    let mut session = backend.stream_session(&resolved.session, &read)?;
+    declare_session_launch_marker(backend.as_ref(), &mut session);
     Ok(usage::streamed(&session, turns, &read))
 }
 
@@ -2039,7 +2045,8 @@ pub fn usage_summary_priced(
         selection.sort,
     )?;
     let mut sessions = listed.sessions;
-    declare_origins(backends, &listed.origins, &mut sessions);
+    let parents = by.contains(&usage::GroupBy::Parent);
+    declare_origins(backends, &listed.origins, &mut sessions, parents);
     let overlap = overlap::Overlap::of(&sessions, &mut |index| {
         let backend = backends[listed.origins[index]].as_ref();
         let transcript = declared_transcript(backend, &sessions[index], EXPORT_TAIL).ok()?;
@@ -2055,7 +2062,7 @@ pub fn usage_summary_priced(
             )
             .ok()
     });
-    let relations = if by.contains(&usage::GroupBy::Parent) {
+    let relations = if parents {
         session_relations(
             backends,
             sessions
@@ -2129,17 +2136,19 @@ pub fn read_window(
     selection: &SessionSelection<'_>,
     ask: WindowAsk,
 ) -> Result<WindowRead> {
-    read_window_keeping(backends, selection, ask, None)
+    read_window_keeping(backends, selection, ask, None, true)
 }
 
 /// As [`read_window`], keeping, when `keep` names a bound, only the first
 /// `keep` listed sessions of each harness the window may hold, in the
-/// listing's order, and counting the rest.
+/// listing's order, and counting the rest, and reading launch markers only
+/// when the answer uses `parents`.
 fn read_window_keeping(
     backends: &[Box<dyn Backend>],
     selection: &SessionSelection<'_>,
     ask: WindowAsk,
     keep: Option<usize>,
+    parents: bool,
 ) -> Result<WindowRead> {
     let scope = selection.within.resolve()?;
     let limit = selection.limit.unwrap_or(DEFAULT_LIST_LIMIT);
@@ -2320,7 +2329,7 @@ fn read_window_keeping(
             }
         }
     }
-    declare_origins(backends, &origins, &mut sessions);
+    declare_origins(backends, &origins, &mut sessions, parents);
     let mut figures = Vec::new();
     let mut shares = Vec::new();
     let mut parents = Vec::new();
@@ -2678,7 +2687,13 @@ fn allowance_rates_read(
         limit: Some(LANE_LIMIT),
         ..*selection
     };
-    let mut read = read_window_keeping(backends, &wide, WindowAsk::Bounds(lookback), explicit)?;
+    let mut read = read_window_keeping(
+        backends,
+        &wide,
+        WindowAsk::Bounds(lookback),
+        explicit,
+        by.contains(&usage::GroupBy::Parent),
+    )?;
     let lanes_read = allowance::LanesRead {
         limit: explicit.unwrap_or(LANE_LIMIT),
         explicit_limit: explicit.is_some(),
@@ -3084,9 +3099,12 @@ fn session_relations(
         let mut seen = HashSet::from([current.clone()]);
         for _ in 0..MAX_DEPTH {
             if !parents.contains_key(&current) {
-                let looked_up = resolve_relative(backends, &current)
-                    .ok()
-                    .map(|found| window::declared_parent(&found.session));
+                let looked_up = resolve_relative(backends, &current).ok().map(|mut found| {
+                    if window::declared_parent(&found.session).is_none() {
+                        declare_launch_markers(backends, [&mut found]);
+                    }
+                    window::declared_parent(&found.session)
+                });
                 resolved.insert(current.clone(), looked_up.is_some());
                 parents.insert(current.clone(), looked_up.flatten());
             }
@@ -3107,10 +3125,15 @@ fn session_relations(
 const OVERLAP_KEY_LIMIT: usize = 10_000;
 
 /// Add to each session the fork origins its harness's store declares outside
-/// the recording a listing reads, and, for a session the store relates to no
-/// other, the launch marker its first prompt opens with: one batched question
-/// per backend each.
-fn declare_origins(backends: &[Box<dyn Backend>], origins: &[usize], sessions: &mut [Session]) {
+/// the recording a listing reads, and, when the answer uses `parents`, the
+/// launch marker the first prompt of each session the store relates to no
+/// other opens with: one batched question per backend each.
+fn declare_origins(
+    backends: &[Box<dyn Backend>],
+    origins: &[usize],
+    sessions: &mut [Session],
+    parents: bool,
+) {
     for (index, backend) in backends.iter().enumerate() {
         let positions: Vec<usize> = (0..sessions.len())
             .filter(|position| origins[*position] == index)
@@ -3123,6 +3146,9 @@ fn declare_origins(backends: &[Box<dyn Backend>], origins: &[usize], sessions: &
             for (position, declared) in positions.iter().zip(declared) {
                 sessions[*position].declare_origins(declared);
             }
+        }
+        if !parents {
+            continue;
         }
         let unrelated: Vec<usize> = positions
             .into_iter()
@@ -3137,6 +3163,39 @@ fn declare_origins(backends: &[Box<dyn Backend>], origins: &[usize], sessions: &
                 sessions[*position].declare_launch_parent_read(marker);
             }
         }
+    }
+}
+
+/// Read the launch marker of each resolved session's first prompt, one
+/// batched question per backend.
+fn declare_launch_markers<'a>(
+    backends: &[Box<dyn Backend>],
+    resolved: impl IntoIterator<Item = &'a mut ResolvedSession>,
+) {
+    let mut by_backend: Vec<Vec<&mut ResolvedSession>> =
+        backends.iter().map(|_| Vec::new()).collect();
+    for found in resolved {
+        by_backend[found.backend_index].push(found);
+    }
+    for (backend, found) in backends.iter().zip(by_backend) {
+        if found.is_empty() {
+            continue;
+        }
+        let held: Vec<&Session> = found.iter().map(|found| &found.session).collect();
+        let markers = backend.first_prompt_markers(&held);
+        for (found, marker) in found.into_iter().zip(markers) {
+            if let Some(marker) = marker {
+                found.session.declare_launch_parent_read(marker);
+            }
+        }
+    }
+}
+
+/// Read the launch marker of one session's first prompt, for an answer about
+/// that session alone: its usage notes say what a marker it opens with names.
+fn declare_session_launch_marker(backend: &dyn Backend, session: &mut Session) {
+    if let Some(Some(marker)) = backend.first_prompt_markers(&[session]).into_iter().next() {
+        session.declare_launch_parent_read(marker);
     }
 }
 

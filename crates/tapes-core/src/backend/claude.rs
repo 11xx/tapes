@@ -282,15 +282,6 @@ impl ClaudeBackend {
                 .quota_observations = quota;
         }
         session.record_copy_evidence(copies);
-        if child.is_none() {
-            session.declare_launch_parent_read(super::first_prompt_marker(
-                &recording,
-                path,
-                "claude",
-                native_id,
-                claude_prompt_text,
-            ));
-        }
         let session = super::with_unreadable_records(session, read.skipped);
         // The opening is the start of the file, so its first user turn is the
         // session's first user turn even when the tail cannot see it.
@@ -767,6 +758,25 @@ impl Backend for ClaudeBackend {
     /// directory and the `Agent` calls its records hold. The parent names
     /// them; a plugin-steered child's bounded ending can establish completion.
     /// Enumeration and child-ending I/O failures leave lineage unreadable.
+    /// A subagent's recording names its parent by where it is kept, so only
+    /// a top-level session's first prompt is read.
+    fn first_prompt_markers(
+        &self,
+        sessions: &[&Session],
+    ) -> Vec<Option<Result<crate::launch_parent::LaunchMarker>>> {
+        let mut markers =
+            super::file_first_prompt_markers(sessions, "claude", claude_prompt_text).into_iter();
+        sessions
+            .iter()
+            .map(|session| {
+                markers
+                    .next()
+                    .flatten()
+                    .filter(|_| !session.id.contains("::"))
+            })
+            .collect()
+    }
+
     fn lineage(&self, session: &Session) -> Result<Lineage> {
         let path = self.recording(session)?;
         let recording = read_recording(&path, self.read_bytes)?;

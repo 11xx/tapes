@@ -27,6 +27,7 @@ case $invoked in
   *opencode-oversized*) name=opencode2-oversized ;;
   *opencode-many*) name=opencode2-many ;;
   *opencode-launched*) name=opencode2-launched ;;
+  *opencode-launch-counted*) name=opencode2-launch-counted ;;
 esac
 path=${4:-}
 query=${4:-}
@@ -49,6 +50,12 @@ case $name in
     messages=messages-launched.json
     session=session.json
     mode=normal
+    ;;
+  opencode2-launch-counted*)
+    list=list.json
+    messages=messages-launched.json
+    session=session.json
+    mode=counting
     ;;
   opencode2-counting*)
     list=list.json

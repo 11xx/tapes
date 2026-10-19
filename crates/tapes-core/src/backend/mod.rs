@@ -633,10 +633,10 @@ pub trait Backend {
     fn declared_origins(&self, sessions: &[&Session]) -> Result<Vec<Vec<DeclaredOrigin>>> {
         Ok(vec![Vec::new(); sessions.len()])
     }
-    /// The `tapes-parent` marker each session's first prompt opens with, for
-    /// a harness whose listing reads no prompt, or the failure of its read:
-    /// `None` where nothing was asked. The default asks nothing, since a
-    /// listing that reads the first prompt has read its marker already.
+    /// The `tapes-parent` marker each session's first prompt opens with, or
+    /// the failure of its read: `None` where nothing was asked. A listing
+    /// reads no marker; an answer that uses a session's parent asks for it
+    /// here, once per backend. The default asks nothing.
     fn first_prompt_markers(
         &self,
         sessions: &[&Session],
@@ -1502,23 +1502,24 @@ pub(crate) fn read_recording(path: &Path, read_bytes: u64) -> Result<Recording> 
 /// How much of a recording's start a first-prompt read takes.
 const FIRST_PROMPT_BYTES: u64 = HEAD_PROBE_MAX_BYTES;
 
-/// The launch marker of a recording's first prompt. `prompt` is the text of a
-/// record that is a user message. The opening answers when it holds the first
-/// prompt, or holds the whole recording; otherwise the recording's first MiB
-/// is read record by record until the first prompt, with each record's
-/// identity checked as the opening's are. No prompt within that bound is no
-/// marker.
-pub(crate) fn first_prompt_marker(
-    recording: &Recording,
-    path: &Path,
+/// The launch marker each session's first prompt opens with, read from its
+/// recording file as [`first_prompt_in_file`] reads it. `None` for a session
+/// with no recording file.
+pub(crate) fn file_first_prompt_markers(
+    sessions: &[&Session],
     harness: &str,
-    expected: &str,
     prompt: impl Fn(&Value) -> Option<String>,
-) -> Result<crate::launch_parent::LaunchMarker> {
-    Ok(marker_of(
-        first_prompt(recording, path, harness, expected, &prompt)?.as_ref(),
-        prompt,
-    ))
+) -> Vec<Option<Result<crate::launch_parent::LaunchMarker>>> {
+    sessions
+        .iter()
+        .map(|session| {
+            let path = session_file_path(session)?;
+            Some(
+                first_prompt_in_file(path, harness, &session.id, &prompt)
+                    .map(|record| marker_of(record.as_ref(), &prompt)),
+            )
+        })
+        .collect()
 }
 
 /// The launch marker of a first prompt record `first_prompt` found.
@@ -1533,10 +1534,9 @@ pub(crate) fn marker_of(
         })
 }
 
-/// A recording's first prompt record, read as [`first_prompt_marker`]
-/// describes: from the opening when it holds it or the whole recording,
-/// else from the recording's first MiB. `None` when no prompt lies within
-/// that bound.
+/// A recording's first prompt record. `prompt` is the text of a record that
+/// is a user message. The opening answers when it holds the first prompt, or
+/// holds the whole recording; otherwise [`first_prompt_in_file`] reads on.
 pub(crate) fn first_prompt(
     recording: &Recording,
     path: &Path,
@@ -1545,13 +1545,29 @@ pub(crate) fn first_prompt(
     prompt: impl Fn(&Value) -> Option<String>,
 ) -> Result<Option<Value>> {
     use crate::launch_parent::is_prompt;
-    let is_first = |value: &Value| prompt(value).is_some_and(|text| is_prompt(&text));
-    if let Some(record) = recording.opening().iter().find(|value| is_first(value)) {
+    if let Some(record) = recording
+        .opening()
+        .iter()
+        .find(|value| prompt(value).is_some_and(|text| is_prompt(&text)))
+    {
         return Ok(Some(record.clone()));
     }
     if !recording.tail.truncated {
         return Ok(None);
     }
+    first_prompt_in_file(path, harness, expected, prompt)
+}
+
+/// A recording file's first prompt record, read record by record from the
+/// start through its first MiB, with each record's identity checked as an
+/// opening's are. `None` when no prompt lies within that bound.
+pub(crate) fn first_prompt_in_file(
+    path: &Path,
+    harness: &str,
+    expected: &str,
+    prompt: impl Fn(&Value) -> Option<String>,
+) -> Result<Option<Value>> {
+    use crate::launch_parent::is_prompt;
     let file =
         open_regular_file(path).with_context(|| format!("failed to open {}", path.display()))?;
     let mut reader = BufReader::new(file.take(FIRST_PROMPT_BYTES));
@@ -1565,7 +1581,7 @@ pub(crate) fn first_prompt(
             continue;
         };
         validate_native_identity(&value, harness, expected)?;
-        if is_first(&value) {
+        if prompt(&value).is_some_and(|text| is_prompt(&text)) {
             return Ok(Some(value));
         }
     }

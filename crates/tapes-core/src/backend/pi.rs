@@ -211,15 +211,6 @@ impl PiBackend {
             list_price_estimate: None,
         };
         apply_recording_usage(&mut session, &recording, &active, rooted);
-        // The marker opens the prompt the session was launched with, the
-        // file's first, whichever branch is active.
-        session.declare_launch_parent_read(super::first_prompt_marker(
-            &recording,
-            path,
-            "pi",
-            native.id(),
-            pi_prompt_text,
-        ));
         // pi rewinds by appending a new branch, so the first user message in
         // the file may sit on a root the active path never reaches. The
         // active path is known only when the whole file is in the tail; past
@@ -544,6 +535,15 @@ impl Backend for PiBackend {
     /// pi records a relationship on the session that has one: its header
     /// names the session it came from. A recording names no children of its
     /// own, so a parent's list of them stays empty.
+    /// The marker opens the prompt the session was launched with, the file's
+    /// first, whichever branch is active.
+    fn first_prompt_markers(
+        &self,
+        sessions: &[&Session],
+    ) -> Vec<Option<Result<crate::launch_parent::LaunchMarker>>> {
+        super::file_first_prompt_markers(sessions, "pi", pi_prompt_text)
+    }
+
     fn lineage(&self, session: &Session) -> Result<Lineage> {
         let path = self.recording(session)?;
         let recording = read_recording(&path, self.read_bytes)?;
