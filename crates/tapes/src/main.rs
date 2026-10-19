@@ -1848,8 +1848,10 @@ enum Command {
         /// `allowance`: the percent of each quota window it spent, apportioned
         /// over the disjoint tokens each session spent between consecutive
         /// observations of the pool's used percent, among the sessions of the
-        /// pool's own account, an estimate with bounds for the observations'
-        /// whole-percent rounding; `window.allowance`
+        /// pool's own account and harness, an estimate with bounds for the
+        /// observations' whole-percent rounding. A group or total holds each
+        /// session once, by its harness and id, so each rise is apportioned
+        /// once whatever the grouping; `window.allowance`
         /// shows each pool's observed rise and how it divides. Claude records
         /// no used percent, so its shares say so instead.
         #[arg(

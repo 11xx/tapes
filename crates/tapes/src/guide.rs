@@ -833,7 +833,10 @@ PROBE BEFORE EXPORTING
   `window.allowance` gives each pool's `observed` rise and how it divides:
   `attributed` to the selection, `outside_selection` for the pool's other
   sessions, and `without_recorded_use` for rises in intervals where no member
-  spent a token. The estimates of the three add up to the observed rise.
+  spent a token. The estimates of the three add up to the observed rise. A
+  group or total holds each session once, by its harness and id together,
+  and a session spends only from its own harness's pools, so each rise is
+  apportioned once whatever the grouping.
   Claude records no used percent (its quota observations exist only on
   refused requests), so a Claude share carries `allowance_absent` with that
   reason and no allowance.

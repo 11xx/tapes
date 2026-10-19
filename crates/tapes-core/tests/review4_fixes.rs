@@ -1,20 +1,24 @@
 //! A span bills as its whole recording even where a bounded read of it
-//! would establish a billing, and a recorded-activity --since rejects a
-//! parent reached through its children before the parent takes a place
-//! under --limit.
+//! would establish a billing; a recorded-activity --since rejects a parent
+//! reached through its children before the parent takes a place under
+//! --limit; and a window's allowance groups name a session by its harness
+//! and id together, so each pool rise is apportioned once.
 
 use std::fs::{self, File};
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use agent_tapes_core::backend::{claude::ClaudeBackend, pi::PiBackend, Backend};
+use agent_tapes_core::backend::{
+    claude::ClaudeBackend, codex::CodexBackend, pi::PiBackend, Backend,
+};
 use agent_tapes_core::pricing::{self, PriceTable};
 use agent_tapes_core::span::SpanBounds;
 use agent_tapes_core::usage::GroupBy;
 use agent_tapes_core::window::{QuotaKind, WindowBounds};
 use agent_tapes_core::{
     allowance_rates_with_backends, usage_full_with_backends, usage_spans_with_backends,
-    usage_with_backends, ListFilters, Selection, SessionSelection,
+    usage_window_with_backends, usage_with_backends, ListFilters, Selection, SessionSelection,
+    WindowAsk,
 };
 use chrono::{DateTime, Utc};
 use serde_json::{json, Value};
@@ -52,6 +56,11 @@ impl Drop for Store {
 
 fn at(stamp: &str) -> DateTime<Utc> {
     stamp.parse().unwrap()
+}
+
+fn close(left: &Value, right: f64) -> bool {
+    left.as_f64()
+        .is_some_and(|left| (left - right).abs() < 1e-9)
 }
 
 // --- Span billing past the bounded read -------------------------------------
@@ -272,4 +281,101 @@ fn a_parent_since_rejects_takes_no_place_under_the_limit() {
         absent[0].starts_with(&format!("{q}::{q_agent} (claude)")),
         "{rates:#}"
     );
+}
+
+// --- Allowance groups keyed by harness and id --------------------------------
+
+/// One id two harnesses both name: a Codex session and a Claude session.
+const SHARED_ID: &str = "40000000-0000-4000-8000-0000000000e3";
+
+fn codex_usage(input: u64) -> Value {
+    json!({"input_tokens": input, "cached_input_tokens": 0, "cache_write_input_tokens": 0,
+           "output_tokens": 0, "reasoning_output_tokens": 0, "total_tokens": input})
+}
+
+fn codex_observed(stamp: &str, used: f64) -> Value {
+    json!({"timestamp": stamp, "type": "event_msg",
+           "payload": {"type": "token_count", "info": null, "rate_limits": {
+               "limit_id": "codex", "plan_type": "plus",
+               "primary": {"used_percent": used, "window_minutes": 300, "resets_at": 1_768_053_600},
+               "secondary": null}}})
+}
+
+/// Claim: a window of a Codex session that spent the pool's whole 5% rise
+/// and a Claude session with the same id, grouped by parent, gives the
+/// Codex family 5%, the Claude family no allowance, and the totals 5%.
+/// Rejects matching allowance by bare id, which hands the Codex session's
+/// 5% to the Claude family too and reports 10% in total for a 5% rise.
+#[test]
+fn allowance_groups_name_a_session_by_harness_and_id() {
+    let store = Store::new("qualified");
+    let start = "2026-01-10T09:00:00Z";
+    store.write(
+        &format!("codex/2026/01/10/rollout-2026-01-10T09-00-00-{SHARED_ID}.jsonl"),
+        &[
+            json!({"timestamp": start, "type": "session_meta", "payload": {"id": SHARED_ID,
+                   "timestamp": start, "cwd": "/fixtures/project", "source": "exec",
+                   "creator_account_id": "account-a"}}),
+            json!({"timestamp": start, "type": "turn_context",
+                   "payload": {"cwd": "/fixtures/project", "model": "gpt-fixture", "effort": "high"}}),
+            codex_observed("2026-01-10T10:00:00Z", 10.0),
+            json!({"timestamp": "2026-01-10T10:05:00Z", "type": "event_msg",
+                   "payload": {"type": "token_count", "info": {"total_token_usage": codex_usage(300),
+                       "last_token_usage": codex_usage(300), "model_context_window": 272000},
+                       "rate_limits": null}}),
+            codex_observed("2026-01-10T10:10:00Z", 15.0),
+        ],
+    );
+    store.write(
+        &format!("claude/project/{SHARED_ID}.jsonl"),
+        &[subagent_record(
+            SHARED_ID,
+            None,
+            "claude-1",
+            "2026-01-10T10:05:00Z",
+        )],
+    );
+    let backends: Vec<Box<dyn Backend>> = vec![
+        Box::new(CodexBackend::new(store.0.join("codex"))),
+        Box::new(ClaudeBackend::new(store.0.join("claude"))),
+    ];
+    let summary = serde_json::to_value(
+        usage_window_with_backends(
+            &backends,
+            &SessionSelection {
+                limit: Some(50),
+                ..Default::default()
+            },
+            &[GroupBy::Parent],
+            WindowAsk::Bounds(WindowBounds {
+                from: Some(at("2026-01-10T09:30:00Z")),
+                to: Some(at("2026-01-10T11:00:00Z")),
+            }),
+            None,
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let allowance = |group: &Value| -> Vec<Value> {
+        group["allowance"]
+            .as_array()
+            .map(|pools| pools.iter().map(|pool| pool["estimate"].clone()).collect())
+            .unwrap_or_default()
+    };
+    let group = |harness: &str| {
+        summary["groups"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|group| group["key"] == json!({"parent": SHARED_ID, "parent_harness": harness}))
+            .unwrap_or_else(|| panic!("the {harness} family: {summary:#}"))
+            .clone()
+    };
+    let codex = allowance(&group("codex"));
+    assert_eq!(codex.len(), 1, "{summary:#}");
+    assert!(close(&codex[0], 5.0), "{summary:#}");
+    assert!(allowance(&group("claude")).is_empty(), "{summary:#}");
+    let totals = allowance(&summary["totals"]);
+    assert_eq!(totals.len(), 1, "{summary:#}");
+    assert!(close(&totals[0], 5.0), "{summary:#}");
 }

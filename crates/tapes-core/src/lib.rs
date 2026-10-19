@@ -2475,7 +2475,7 @@ pub fn usage_window_with_backends(
     let (mut aggregate, partitions) =
         usage::partitioned_aggregate_related(&read.figures, by, &overlap, prices, &read.relations);
     for group in &mut aggregate.groups {
-        let ids = read
+        let sessions = read
             .figures
             .iter()
             .filter(|figure| {
@@ -2485,16 +2485,16 @@ pub fn usage_window_with_backends(
                     .collect::<Vec<_>>();
                 usage::group_key(by, &values) == group.key
             })
-            .map(|figure| figure.id.as_str())
+            .map(|figure| (figure.harness(), figure.id.as_str()))
             .collect::<Vec<_>>();
-        group.tally.allowance = apportioned.allowance(&ids);
+        group.tally.allowance = apportioned.allowance(&sessions);
     }
-    let ids = read
+    let sessions = read
         .figures
         .iter()
-        .map(|figure| figure.id.as_str())
+        .map(|figure| (figure.harness(), figure.id.as_str()))
         .collect::<Vec<_>>();
-    aggregate.totals.allowance = apportioned.allowance(&ids);
+    aggregate.totals.allowance = apportioned.allowance(&sessions);
     Ok(UsageSummary {
         schema: USAGE_SUMMARY_SCHEMA,
         selection: selection_record(selection, read.limit),
@@ -2519,12 +2519,25 @@ pub struct ApportionedWindow {
 }
 
 impl ApportionedWindow {
-    /// The allowance the sessions `ids` spent, one entry per pool window
-    /// they spent from.
-    pub fn allowance(&self, ids: &[&str]) -> Vec<allowance::Allowance> {
+    /// The allowance the sessions `sessions` spent, one entry per pool
+    /// window they spent from. A session is named by its harness and id
+    /// together, spends only from its own harness's pools, and counts once
+    /// however often it is named.
+    pub fn allowance(&self, sessions: &[(&str, &str)]) -> Vec<allowance::Allowance> {
+        let sessions = sessions
+            .iter()
+            .copied()
+            .collect::<std::collections::BTreeSet<_>>();
         self.pools
             .iter()
-            .map(|pool| pool.allowance(ids))
+            .map(|pool| {
+                let ids = sessions
+                    .iter()
+                    .filter(|(harness, _)| *harness == pool.pool.harness)
+                    .map(|(_, id)| *id)
+                    .collect::<Vec<_>>();
+                pool.allowance(&ids)
+            })
             .filter(|allowance| allowance.percent.at_most > 0.0 || allowance.percent.estimate > 0.0)
             .collect()
     }
@@ -2550,7 +2563,7 @@ pub fn apportion_window(
         .record
         .sessions
         .iter()
-        .map(|share| share.id.clone())
+        .map(|share| (share.harness.as_str(), share.id.as_str()))
         .collect::<HashSet<_>>();
     let mut timelines = Vec::new();
     let mut members_truncated = false;
@@ -2594,7 +2607,7 @@ pub fn apportion_window(
                     timeline
                         .observations
                         .retain(|observation| inside(observation.at));
-                    timelines.push((session.id.clone(), timeline, limits));
+                    timelines.push((harness, session.id.clone(), timeline, limits));
                 }
                 Ok(None) => {}
                 Err(error) => read
@@ -2605,7 +2618,7 @@ pub fn apportion_window(
     }
     let observations = timelines
         .iter()
-        .flat_map(|(_, timeline, _)| timeline.observations.iter().cloned())
+        .flat_map(|(_, _, timeline, _)| timeline.observations.iter().cloned())
         .collect::<Vec<_>>();
     let mut keys = observations
         .iter()
@@ -2613,27 +2626,35 @@ pub fn apportion_window(
         .collect::<Vec<_>>();
     keys.sort();
     keys.dedup();
-    let members = timelines
-        .iter()
-        .map(|(id, timeline, limits)| allowance::PoolMember {
-            id,
-            selected: selected.contains(id),
-            account: timeline.account.as_deref(),
-            limits: limits.iter().map(Option::as_deref).collect(),
-            requests: &timeline.requests,
-            untimed: timeline.untimed,
-        })
-        .collect::<Vec<_>>();
+    // A pool's members are sessions of its own harness.
+    let members = |harness: &str| {
+        timelines
+            .iter()
+            .filter(|(of, ..)| *of == harness)
+            .map(|(of, id, timeline, limits)| allowance::PoolMember {
+                id,
+                selected: selected.contains(&(*of, id.as_str())),
+                account: timeline.account.as_deref(),
+                limits: limits.iter().map(Option::as_deref).collect(),
+                requests: &timeline.requests,
+                untimed: timeline.untimed,
+            })
+            .collect::<Vec<_>>()
+    };
     let pools = keys
         .into_iter()
-        .map(|key| allowance::Apportionment::new(key, &observations, &members))
+        .map(|key| {
+            let members = members(&key.harness);
+            allowance::Apportionment::new(key, &observations, &members)
+        })
         .collect::<Vec<_>>();
     let apportioned = ApportionedWindow { pools };
     for share in &mut read.record.sessions {
         match allowance::absent_reason(&share.harness) {
             Some(reason) => share.allowance_absent = Some(reason),
             None => {
-                share.allowance = apportioned.allowance(&[share.id.as_str()]);
+                share.allowance =
+                    apportioned.allowance(&[(share.harness.as_str(), share.id.as_str())]);
                 if share.allowance.is_empty() {
                     share.allowance_absent = Some(
                         "no interval between two observations of a pool its account spends from \
@@ -2796,11 +2817,9 @@ fn rates_of(
         // intervals hold, the tokens its percent is apportioned over.
         let mut by_capacity: std::collections::BTreeMap<Capacity, LaneAllowance> =
             std::collections::BTreeMap::new();
-        for pool in apportioned
-            .pools
-            .iter()
-            .filter(|pool| pool.pool.window == quota && measured(&pool.pool))
-        {
+        for pool in apportioned.pools.iter().filter(|pool| {
+            pool.pool.harness == share.harness && pool.pool.window == quota && measured(&pool.pool)
+        }) {
             let ids = [share.id.as_str()];
             let allowance = pool.allowance(&ids);
             let smoothed = pool.smoothed(&ids);
