@@ -756,7 +756,35 @@
         null,
         null
       ],
-      "consumption": null,
+      "consumption": {
+        "at_least": 0.0000954,
+        "at_most": 0.0001004,
+        "currency": "USD",
+        "kind": "list-price-estimate",
+        "measurement_completeness": {
+          "cache_read": [
+            "unlisted-model"
+          ],
+          "cache_write": [
+            "unlisted-model",
+            "ttl-unrecorded"
+          ],
+          "output": [
+            "unlisted-model"
+          ],
+          "uncached_input": [
+            "unlisted-model"
+          ]
+        },
+        "models": [
+          {
+            "effective": "2026-01-04",
+            "id": "pi-model-a",
+            "source": "fixture"
+          }
+        ],
+        "schema": "tapes-price-table/1"
+      },
       "whole": {
         "at_least": 0.0000954,
         "at_most": 0.0001004,
@@ -840,7 +868,35 @@
         null,
         null
       ],
-      "consumption": null,
+      "consumption": {
+        "at_least": 0.0000954,
+        "at_most": 0.0001004,
+        "currency": "USD",
+        "kind": "list-price-estimate",
+        "measurement_completeness": {
+          "cache_read": [
+            "unlisted-model"
+          ],
+          "cache_write": [
+            "unlisted-model",
+            "ttl-unrecorded"
+          ],
+          "output": [
+            "unlisted-model"
+          ],
+          "uncached_input": [
+            "unlisted-model"
+          ]
+        },
+        "models": [
+          {
+            "effective": "2026-01-04",
+            "id": "pi-model-a",
+            "source": "fixture"
+          }
+        ],
+        "schema": "tapes-price-table/1"
+      },
       "whole": {
         "at_least": 0.0000954,
         "at_most": 0.0001004,

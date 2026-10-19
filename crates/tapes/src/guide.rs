@@ -702,9 +702,11 @@ PROBE BEFORE EXPORTING
   model's events (unreadable-record, unrecognized-usage, read-window,
   since-reset, unestablished-scope, incomplete-attribution), so a
   share-by-share estimate carries it too, and a share prices its cache
-  writes at the TTLs its own requests recorded. Pi consumption on other
-  branches than the active one is priced by the model each event names, and
-  usage no model names is incomplete-attribution. The estimate is
+  writes at the TTLs its own requests recorded. Pi consumption is split by
+  the model each event names. On the active branch alone it is priced as
+  the session figure is, share by share where every event names a model;
+  with events on other branches it is priced by that split, and usage no
+  model names is incomplete-attribution. The estimate is
   absent, never zero, when nothing could be priced. A summary adds estimates
   where its disjoint categories add and otherwise withholds them, naming why
   in `list_price_withheld`: mixed-accounting, identity-unestablished, or

@@ -1698,9 +1698,12 @@ pub fn price_view(view: &mut crate::usage::UsageView, table: &PriceTable) {
             DisjointTokens::from_native(tokens, convention, None)
                 .with_completeness(&consumption.measurement_completeness)
         });
-        // The session's model evidence is the active branch's. Events on
-        // other branches are priced by the model each names, share by share,
-        // and what no model names is left out as `incomplete-attribution`.
+        // Consumption on the active branch alone is priced as the session
+        // figure is: by the session's model evidence, split by the model each
+        // event names where every event names one. The session's evidence is
+        // the active branch's, so events on other branches are priced by the
+        // model each names, share by share, and what no model names is left
+        // out as `incomplete-attribution`.
         let other_branches = consumption.events.other_branches > 0;
         // Consumption holds its own events, those on other branches too, so
         // it reads its own requests rather than the active branch's.
@@ -1708,38 +1711,28 @@ pub fn price_view(view: &mut crate::usage::UsageView, table: &PriceTable) {
             requests: consumption.request_uses.as_ref(),
             ..terms
         };
-        let served = other_branches.then(|| {
-            let mut served = consumption.served.clone();
-            for share in &mut served {
-                share
-                    .measurement_completeness
-                    .merge(&consumption.measurement_completeness);
-            }
-            served
-        });
-        let estimate = if let Some(served) = &served {
-            PricedFigure {
-                disjoint: disjoint.as_ref(),
-                convention: Some(convention),
-                model: None,
-                selections: &[],
-                observation: None,
-                by_model: Some(served),
-                terms: consumption_terms,
-            }
-            .estimate(table)
-        } else {
-            PricedFigure {
-                disjoint: disjoint.as_ref(),
-                convention: Some(convention),
-                model: view.session.model.as_ref(),
-                selections: &view.session.model_selections,
-                observation: view.session.model_observation.as_ref(),
-                by_model: None,
-                terms: consumption_terms,
-            }
-            .estimate(table)
-        };
+        let mut served = consumption.served.clone();
+        for share in &mut served {
+            share
+                .measurement_completeness
+                .merge(&consumption.measurement_completeness);
+        }
+        let attributed = served
+            .iter()
+            .filter_map(|share| share.request_count)
+            .sum::<usize>()
+            == consumption.events.counted;
+        let session = (!other_branches).then_some(&view.session);
+        let estimate = PricedFigure {
+            disjoint: disjoint.as_ref(),
+            convention: Some(convention),
+            model: session.and_then(|session| session.model.as_ref()),
+            selections: session.map_or(&[], |session| &session.model_selections),
+            observation: session.and_then(|session| session.model_observation.as_ref()),
+            by_model: (other_branches || attributed).then_some(&served),
+            terms: consumption_terms,
+        }
+        .estimate(table);
         consumption.list_price_estimate = estimate.whole.and_then(EstimateSum::finish);
     }
 }
