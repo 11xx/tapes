@@ -2968,7 +2968,10 @@ pub fn allowance_forecast_with_backends(
         .pools
         .iter()
         .filter(|pool| pool.pool.window == quota && pool.pool.harness == harness)
-        .filter_map(|pool| pool.latest().map(|latest| (pool.pool.clone(), latest.clone())))
+        .filter_map(|pool| {
+            pool.latest()
+                .map(|latest| (pool.pool.clone(), latest.clone()))
+        })
         .max_by_key(|(_, latest)| latest.at)
         .ok_or_else(|| {
             anyhow!(

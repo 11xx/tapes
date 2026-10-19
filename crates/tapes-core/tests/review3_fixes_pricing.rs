@@ -664,9 +664,7 @@ fn weekend_session(store: &Store) {
                          "totalTokens": 102_000, "cost": {"total": 0.0251}},
                "content": [{"type": "text", "text": "Done."}]})
     };
-    let user = |millis: u64, text: &str| {
-        json!({"role": "user", "timestamp": millis, "content": [{"type": "text", "text": text}]})
-    };
+    let user = |millis: u64, text: &str| json!({"role": "user", "timestamp": millis, "content": [{"type": "text", "text": text}]});
     let friday = at("2026-10-16T02:00:00Z").timestamp_millis() as u64;
     let saturday = at("2026-10-17T02:00:00Z").timestamp_millis() as u64;
     store.write(
@@ -709,9 +707,8 @@ fn weekend_amounts(days: &str) -> Vec<Value> {
     let store = Store::new("weekdays");
     weekend_session(&store);
     let table = PriceTable::parse(&deepseek_table(days)).unwrap();
-    let backend = || {
-        Box::new(agent_tapes_core::backend::pi::PiBackend::new(&store.0)) as Box<dyn Backend>
-    };
+    let backend =
+        || Box::new(agent_tapes_core::backend::pi::PiBackend::new(&store.0)) as Box<dyn Backend>;
     let mut view = usage_with_backends(&[backend()], Selection::Id(DEEPSEEK_ID)).unwrap();
     pricing::price_view(&mut view, &table);
     let mut whole = usage_full_with_backends(&[backend()], Selection::Id(DEEPSEEK_ID)).unwrap();
@@ -745,10 +742,7 @@ fn a_weekday_window_leaves_a_saturday_request_off_peak() {
         );
     }
     for estimate in weekend_amounts("") {
-        assert!(
-            close(&estimate["amount"], 4.0 * OFF_PEAK),
-            "{estimate:#}"
-        );
+        assert!(close(&estimate["amount"], 4.0 * OFF_PEAK), "{estimate:#}");
     }
 }
 
