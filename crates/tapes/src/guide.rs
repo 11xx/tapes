@@ -709,9 +709,10 @@ PROBE BEFORE EXPORTING
   subagent recordings, which no listing returns, contribute their own spans as
   `<parent>::<agent>`, and a parent whose own records end before the window is
   reached through subagent recordings written since it opened, and since
-  --since where that is later. Every other filter applies to the parent as to
-  a listed session, --search over the parent's own turns included, but the
-  parent is reached beyond --limit. The shares are
+  --since where that is later; under --since it is kept only when it or one of
+  its subagents has recorded activity since it. Every other filter applies to
+  the parent as to a listed session, --search over the parent's own turns
+  included, but the parent is reached beyond --limit. The shares are
   summed under the summary's partitions, withholding and overlap rules, so the
   window total is the sum of its shares within one accounting basis, and a
   request a span cannot place qualifies its share as it qualifies a span.

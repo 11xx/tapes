@@ -1821,7 +1821,8 @@ enum Command {
         /// recordings contribute their own spans as `<parent>::<agent>`, a
         /// parent whose own records end before the window reached through
         /// subagent recordings written since it opened and since --since,
-        /// under the other filters, --search over its own turns included,
+        /// kept under --since only when it or a subagent has recorded
+        /// activity since it, under the other filters, --search over its own turns included,
         /// and beyond --limit. Shares sum to the window's figures under
         /// the summary's partitions and withholding, and a request a span
         /// cannot place qualifies its share as a span does. Related sessions

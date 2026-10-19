@@ -2345,6 +2345,19 @@ fn read_window_keeping(
         let reached = through_children.contains(&session.id);
         let (children, failures) = backend.window_children(session);
         unreadable.extend(failures);
+        // A recording's modification time only nominates a parent reached
+        // through its children; the caller's --since keeps the family when
+        // one of its recordings has activity since it, as it keeps a listed
+        // session by its own.
+        if reached
+            && selection.filters.since.is_some_and(|since| {
+                !std::iter::once(session)
+                    .chain(&children)
+                    .any(|member| member.last_activity_at.is_some_and(|last| last >= since))
+            })
+        {
+            continue;
+        }
         for member in std::iter::once(session.clone()).chain(children) {
             let read = backend
                 .stream_transcript(&member, None, &mut |_| Ok(()))
