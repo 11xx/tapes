@@ -753,9 +753,8 @@ fn git(directory: &Path, args: &[&str]) -> Option<String> {
 mod tests {
     #[test]
     fn a_bundle_file_that_cannot_be_placed_takes_the_placed_ones_with_it() {
-        let directory =
-            std::env::temp_dir().join(format!("tapes-bundle-place-all-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&directory);
+        let temporary = TempDir::with_prefix("tapes-bundle-place-all-").unwrap();
+        let directory = temporary.path();
         let prefix = directory.join("bundle");
         let files = ["context.md", "json", "trace.md"]
             .map(|extension| super::PartialFile::create(&prefix, extension).unwrap());
@@ -763,26 +762,22 @@ mod tests {
         fs::create_dir_all(directory.join("bundle.trace.md/occupied")).unwrap();
 
         assert!(super::place_all(files).is_err());
-        let mut left = fs::read_dir(&directory)
+        let mut left = fs::read_dir(directory)
             .unwrap()
             .map(|entry| entry.unwrap().file_name().into_string().unwrap())
             .collect::<Vec<_>>();
         left.sort();
         assert_eq!(left, ["bundle.trace.md"]);
-        fs::remove_dir_all(directory).unwrap();
     }
 
-    use std::sync::atomic::{AtomicU64, Ordering};
-
     use chrono::TimeZone;
+    use tempfile::TempDir;
 
     use super::*;
     use crate::model::{
         Accounting, AccountingBasis, AccountingCoverage, LiveState, Model, SourceDescriptor,
         Tokens, TrailingRecord, Truncation, Turn, TurnKind, SESSION_SCHEMA,
     };
-
-    static TEMP_ROOTS: AtomicU64 = AtomicU64::new(0);
 
     fn transcript() -> Transcript {
         let ts = Utc.timestamp_opt(1_700_000_000, 0).unwrap();
@@ -913,22 +908,18 @@ mod tests {
         }
     }
 
-    /// Each test gets its own directory: they run in parallel and every one of
-    /// them counts and then removes the directory's contents.
-    fn export_into_temporary_directory(test: &str) -> (PathBuf, Bundle) {
-        let directory = std::env::temp_dir().join(format!(
-            "tapes-bundle-{}-{}-{test}",
-            std::process::id(),
-            TEMP_ROOTS.fetch_add(1, Ordering::Relaxed)
-        ));
-        let _ = fs::remove_dir_all(&directory);
-        let bundle = export(&transcript(), &directory).unwrap();
+    /// Each test gets its own directory, removed when the test ends: they run
+    /// in parallel and some count the directory's contents.
+    fn export_into_temporary_directory(test: &str) -> (TempDir, Bundle) {
+        let directory = scratch(test);
+        let bundle = export(&transcript(), directory.path()).unwrap();
         (directory, bundle)
     }
 
     #[test]
     fn export_writes_three_files_sharing_one_prefix() {
-        let (directory, bundle) = export_into_temporary_directory("three-files");
+        let (temporary, bundle) = export_into_temporary_directory("three-files");
+        let directory = temporary.path();
 
         let names = bundle
             .files()
@@ -942,35 +933,29 @@ mod tests {
         for file in bundle.files() {
             assert!(file.path.is_file(), "{} is missing", file.path.display());
         }
-        assert_eq!(fs::read_dir(&directory).unwrap().count(), 3);
-
-        fs::remove_dir_all(directory).unwrap();
+        assert_eq!(fs::read_dir(directory).unwrap().count(), 3);
     }
 
     #[test]
     fn context_holds_operator_turns_and_excludes_reasoning_and_tools() {
-        let (directory, bundle) = export_into_temporary_directory("context");
+        let (_directory, bundle) = export_into_temporary_directory("context");
         let context = fs::read_to_string(&bundle.context.path).unwrap();
 
         assert!(context.contains("fix the parser"));
         assert!(context.contains("fixed it"));
         assert!(!context.contains("the parser drops empty lines"));
         assert!(!context.contains("cargo test"));
-
-        fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
     fn trace_holds_the_whole_chronology_and_names_its_tools() {
-        let (directory, bundle) = export_into_temporary_directory("trace");
+        let (_directory, bundle) = export_into_temporary_directory("trace");
         let trace = fs::read_to_string(&bundle.trace.path).unwrap();
 
         assert!(trace.contains("## reasoning"));
         assert!(trace.contains("the parser drops empty lines"));
         assert!(trace.contains("## tool: shell"));
         assert!(trace.contains("cargo test"));
-
-        fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
@@ -989,7 +974,7 @@ mod tests {
 
     #[test]
     fn json_carries_the_schema_and_the_transcript_notes() {
-        let (directory, bundle) = export_into_temporary_directory("json");
+        let (_directory, bundle) = export_into_temporary_directory("json");
         let value: Value =
             serde_json::from_str(&fs::read_to_string(&bundle.json.path).unwrap()).unwrap();
 
@@ -998,23 +983,18 @@ mod tests {
         assert_eq!(value["turns"].as_array().unwrap().len(), 4);
         assert_eq!(value["notes"][0], "1 entry belongs to an abandoned branch.");
         assert!(value.get("git").is_none());
-
-        fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
     fn json_carries_a_trailing_record() {
-        let directory = std::env::temp_dir().join(format!(
-            "tapes-bundle-{}-trailing-record",
-            std::process::id()
-        ));
-        let _ = fs::remove_dir_all(&directory);
+        let temporary = TempDir::with_prefix("tapes-bundle-trailing-record-").unwrap();
+        let directory = temporary.path();
         let mut transcript = transcript();
         transcript.trailing_record = Some(TrailingRecord {
             kind: "event_msg".into(),
             timestamp: Some(Utc.timestamp_opt(1_700_000_001, 0).unwrap()),
         });
-        let bundle = export(&transcript, &directory).unwrap();
+        let bundle = export(&transcript, directory).unwrap();
         let value: Value =
             serde_json::from_str(&fs::read_to_string(&bundle.json.path).unwrap()).unwrap();
 
@@ -1025,23 +1005,19 @@ mod tests {
                 "timestamp": "2023-11-14T22:13:21Z"
             })
         );
-
-        fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
     fn json_omits_volatile_live_state() {
-        let directory =
-            std::env::temp_dir().join(format!("tapes-bundle-{}-live-state", std::process::id()));
-        let _ = fs::remove_dir_all(&directory);
+        let temporary = TempDir::with_prefix("tapes-bundle-live-state-").unwrap();
+        let directory = temporary.path();
         let mut transcript = transcript();
         transcript.session.live = Some(LiveState::Working);
-        let bundle = export(&transcript, &directory).unwrap();
+        let bundle = export(&transcript, directory).unwrap();
         let value: Value =
             serde_json::from_str(&fs::read_to_string(&bundle.json.path).unwrap()).unwrap();
 
         assert!(value["session"].get("live").is_none());
-        fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
@@ -1055,10 +1031,9 @@ mod tests {
             turn.ts = Some(ts);
         }
 
-        let directory =
-            std::env::temp_dir().join(format!("tapes-bundle-{}-derived-title", std::process::id()));
-        let _ = fs::remove_dir_all(&directory);
-        let bundle = export(&transcript, &directory).unwrap();
+        let temporary = TempDir::with_prefix("tapes-bundle-derived-title-").unwrap();
+        let directory = temporary.path();
+        let bundle = export(&transcript, directory).unwrap();
         let context = fs::read_to_string(&bundle.context.path).unwrap();
         let trace = fs::read_to_string(&bundle.trace.path).unwrap();
 
@@ -1067,8 +1042,6 @@ mod tests {
         assert!(trace.contains("## user #0 — 2023-11-14T22:13:20Z"));
         assert!(!context.contains(".123456789Z"));
         assert!(!trace.contains(".123456789Z"));
-
-        fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
@@ -1087,24 +1060,22 @@ mod tests {
             selection: None,
         });
 
-        let directory =
-            std::env::temp_dir().join(format!("tapes-bundle-{}-token-header", std::process::id()));
-        let _ = fs::remove_dir_all(&directory);
-        let bundle = export(&transcript, &directory).unwrap();
+        let temporary = TempDir::with_prefix("tapes-bundle-token-header-").unwrap();
+        let directory = temporary.path();
+        let bundle = export(&transcript, directory).unwrap();
         let context = fs::read_to_string(&bundle.context.path).unwrap();
         let trace = fs::read_to_string(&bundle.trace.path).unwrap();
         let line = "- tokens: input 100, output 50, reasoning 25, cache read 10, cache write 5 (recorded total, whole session)";
         assert!(context.contains(line), "{context}");
         assert!(trace.contains(line), "{trace}");
-
-        fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
     fn no_partial_files_survive_a_completed_export() {
-        let (directory, _) = export_into_temporary_directory("atomic");
+        let (temporary, _) = export_into_temporary_directory("atomic");
+        let directory = temporary.path();
 
-        for entry in fs::read_dir(&directory).unwrap() {
+        for entry in fs::read_dir(directory).unwrap() {
             let path = entry.unwrap().path();
             assert!(
                 !path.to_string_lossy().ends_with(".partial"),
@@ -1112,22 +1083,14 @@ mod tests {
                 path.display()
             );
         }
-
-        fs::remove_dir_all(directory).unwrap();
     }
 
     fn fixture_root() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures")
     }
 
-    fn scratch(test: &str) -> PathBuf {
-        let directory = std::env::temp_dir().join(format!(
-            "tapes-bundle-{}-{}-{test}",
-            std::process::id(),
-            TEMP_ROOTS.fetch_add(1, Ordering::Relaxed)
-        ));
-        let _ = fs::remove_dir_all(&directory);
-        directory
+    fn scratch(test: &str) -> TempDir {
+        TempDir::with_prefix(format!("tapes-bundle-{test}-")).unwrap()
     }
 
     fn json_of(file: &BundleFile) -> Value {
@@ -1165,7 +1128,8 @@ mod tests {
             Box::new(CodexBackend::new(root.join("codex"))),
             Box::new(PiBackend::new(root.join("pi"))),
         ];
-        let directory = scratch("whole-matches-bounded");
+        let temporary = scratch("whole-matches-bounded");
+        let directory = temporary.path();
         let (mut sessions, mut events) = (0, 0);
         for backend in &backends {
             for session in backend.list(&Query::unscoped(usize::MAX)).unwrap().sessions {
@@ -1214,7 +1178,6 @@ mod tests {
                     .ends_with(".partial")
             })
             .count();
-        fs::remove_dir_all(&directory).unwrap();
         assert_eq!(leftovers, 0);
         assert!(
             sessions >= 5 && events > 0,
@@ -1289,7 +1252,8 @@ mod tests {
             }
         }
 
-        let directory = scratch("appended-between-reads");
+        let temporary = scratch("appended-between-reads");
+        let directory = temporary.path();
         let store = directory.join("store");
         let project = store.join("-fixtures-project");
         fs::create_dir_all(&project).unwrap();
@@ -1356,7 +1320,6 @@ mod tests {
         let (_, diverged) = export(false, "unreplayed");
         let error = format!("{:#}", diverged.err().expect("an unreplayed second read"));
         let placed = fs::read_dir(directory.join("unreplayed")).unwrap().count();
-        fs::remove_dir_all(&directory).unwrap();
         assert!(
             error.contains("differed between the two pairing passes"),
             "{error}"

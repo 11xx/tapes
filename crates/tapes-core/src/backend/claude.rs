@@ -4269,9 +4269,8 @@ mod child_ending_cost_tests {
 
     #[test]
     fn ending_reads_use_a_small_tail_and_expand_for_an_oversized_final_record() {
-        let root =
-            std::env::temp_dir().join(format!("tapes-child-ending-cost-{}", std::process::id()));
-        fs::create_dir_all(&root).unwrap();
+        let temporary = tempfile::TempDir::with_prefix("tapes-child-ending-cost-").unwrap();
+        let root = temporary.path();
         let path = root.join("agent-fixture.jsonl");
         let opening =
             serde_json::json!({"type": "user", "sessionId": "parent", "agentId": "fixture"});
@@ -4309,6 +4308,5 @@ mod child_ending_cost_tests {
         )
         .unwrap()
         .is_some());
-        fs::remove_dir_all(root).unwrap();
     }
 }

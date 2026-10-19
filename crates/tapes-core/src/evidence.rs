@@ -781,26 +781,19 @@ impl Drop for PartialDirectory {
 #[cfg(all(test, feature = "zip"))]
 mod tests {
     use std::io::Write;
-    use std::sync::atomic::{AtomicU64, Ordering};
+
+    use tempfile::TempDir;
 
     use super::*;
 
-    static TEMP_ROOTS: AtomicU64 = AtomicU64::new(0);
-
-    fn temporary(name: &str) -> PathBuf {
-        let path = std::env::temp_dir().join(format!(
-            "tapes-evidence-{name}-{}-{}",
-            std::process::id(),
-            TEMP_ROOTS.fetch_add(1, Ordering::Relaxed)
-        ));
-        let _ = fs::remove_dir_all(&path);
-        fs::create_dir_all(&path).unwrap();
-        path
+    fn scratch(name: &str) -> TempDir {
+        TempDir::with_prefix(format!("tapes-evidence-{name}-")).unwrap()
     }
 
     #[test]
     fn a_member_that_fails_its_checksum_is_not_copied() {
-        let root = temporary("checksum");
+        let temporary = scratch("checksum");
+        let root = temporary.path();
         let archive = root.join("export.zip");
         let body = b"report body that will be altered in the archive";
         let mut writer = zip::ZipWriter::new(File::create(&archive).unwrap());
@@ -821,19 +814,19 @@ mod tests {
         bytes[at] ^= 0xff;
         fs::write(&archive, bytes).unwrap();
 
-        let error = copy_member(&archive, "file_00aa.dat", &root).unwrap_err();
+        let error = copy_member(&archive, "file_00aa.dat", root).unwrap_err();
         assert!(error.contains("failed verification"), "{error}");
         assert_eq!(
-            fs::read_dir(&root).unwrap().count(),
+            fs::read_dir(root).unwrap().count(),
             1,
             "only the archive remains"
         );
-        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
     fn a_report_write_failure_leaves_no_partial_member() {
-        let root = temporary("report-write-failure");
+        let temporary = scratch("report-write-failure");
+        let root = temporary.path();
         let archive = root.join("export.zip");
         let body = b"report body";
         let mut writer = zip::ZipWriter::new(File::create(&archive).unwrap());
@@ -852,16 +845,16 @@ mod tests {
         fs::create_dir(&occupied).unwrap();
         fs::write(occupied.join("keep"), b"another export").unwrap();
 
-        let error = copy_member(&archive, "report.dat", &root).unwrap_err();
+        let error = copy_member(&archive, "report.dat", root).unwrap_err();
         assert!(!error.is_empty());
         assert!(occupied.join("keep").is_file());
         assert!(!root.join(format!("{name}.partial")).exists());
-        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
     fn conflicting_or_symlinked_evidence_is_never_replaced() {
-        let root = temporary("report-conflict");
+        let temporary = scratch("report-conflict");
+        let root = temporary.path();
         let archive = root.join("export.zip");
         let body = b"report body";
         let mut writer = zip::ZipWriter::new(File::create(&archive).unwrap());
@@ -878,7 +871,7 @@ mod tests {
         let target = root.join(&name);
 
         fs::write(&target, b"conflicting bytes").unwrap();
-        assert!(copy_member(&archive, "report.dat", &root).is_err());
+        assert!(copy_member(&archive, "report.dat", root).is_err());
         assert_eq!(fs::read(&target).unwrap(), b"conflicting bytes");
         assert!(!root.join(format!("{name}.partial")).exists());
         fs::remove_file(&target).unwrap();
@@ -886,25 +879,24 @@ mod tests {
         let destination = root.join("elsewhere");
         fs::write(&destination, b"symlink target").unwrap();
         std::os::unix::fs::symlink(&destination, &target).unwrap();
-        assert!(copy_member(&archive, "report.dat", &root).is_err());
+        assert!(copy_member(&archive, "report.dat", root).is_err());
         assert_eq!(fs::read_link(&target).unwrap(), destination);
         assert!(!root.join(format!("{name}.partial")).exists());
-        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
     fn a_record_whose_bytes_changed_since_the_read_is_refused() {
-        let root = temporary("changed");
+        let temporary = scratch("changed");
+        let root = temporary.path();
         let source = root.join("export.json");
         fs::write(&source, b"[{\"id\":\"a\"}]").unwrap();
         let span = ByteSpan { start: 1, end: 11 };
         let recorded = hex(&Sha256::digest(b"{\"id\":\"a\"}"));
-        let copied = copy_record(&Source::File(source.clone()), span, &recorded, &root).unwrap();
+        let copied = copy_record(&Source::File(source.clone()), span, &recorded, root).unwrap();
         assert_eq!(copied.sha256, recorded);
 
         fs::write(&source, b"[{\"id\":\"b\"}]").unwrap();
-        let error = copy_record(&Source::File(source), span, &recorded, &root).unwrap_err();
+        let error = copy_record(&Source::File(source), span, &recorded, root).unwrap_err();
         assert!(error.contains("the input changed"), "{error}");
-        fs::remove_dir_all(root).unwrap();
     }
 }

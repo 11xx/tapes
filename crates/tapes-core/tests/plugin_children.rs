@@ -807,9 +807,13 @@ fn fifo_child_reads_are_bounded() {
         return;
     }
     for component in ["jsonl", "meta.json"] {
+        // A child killed at the deadline removes nothing, so it writes inside
+        // a temp directory this process removes.
+        let child_temp = tempfile::TempDir::with_prefix("tapes-plugin-children-fifo-").unwrap();
         let mut child = std::process::Command::new(std::env::current_exe().unwrap())
             .args(["--exact", "fifo_child_reads_are_bounded", "--nocapture"])
             .env(PROBE, component)
+            .env("TMPDIR", child_temp.path())
             .spawn()
             .unwrap();
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
@@ -821,11 +825,6 @@ fn fifo_child_reads_are_bounded() {
             if std::time::Instant::now() >= deadline {
                 child.kill().unwrap();
                 child.wait().unwrap();
-                let scratch = std::env::temp_dir().join(format!(
-                    "tapes-plugin-children-fifo-{component}-{}",
-                    child.id()
-                ));
-                fs::remove_dir_all(scratch).unwrap();
                 panic!("FIFO {component} read exceeded two seconds without a writer");
             }
             std::thread::sleep(std::time::Duration::from_millis(10));

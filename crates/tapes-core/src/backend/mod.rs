@@ -3279,8 +3279,8 @@ mod tests {
 
     #[test]
     fn prefilters_do_not_exclude_a_foreign_recording_before_validation() {
-        let root =
-            std::env::temp_dir().join(format!("tapes-prefilter-identity-{}", std::process::id()));
+        let temporary = tempfile::TempDir::with_prefix("tapes-prefilter-identity-").unwrap();
+        let root = temporary.path();
         fs::create_dir_all(root.join("project")).unwrap();
         let path = root.join("project/fixture-parent.jsonl");
         fs::write(
@@ -3288,7 +3288,7 @@ mod tests {
             br#"{"sessionId":"fixture-parent","cwd":"/fixtures/inside"}"#,
         )
         .unwrap();
-        let native = NativeStore::claude(&root)
+        let native = NativeStore::claude(root)
             .locate_exact("fixture-parent")
             .unwrap()
             .unwrap();
@@ -3313,13 +3313,12 @@ mod tests {
                 raw_tail_may_contain(&path, "needle", DEFAULT_READ_BYTES, Some(&native));
             assert_eq!((directory, candidate), (None, true));
         }
-        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
     fn raw_prefilter_skips_a_definite_miss_but_not_a_hit() {
-        let path = std::env::temp_dir().join(format!("tapes-raw-prefilter-{}", std::process::id()));
-        let _ = fs::remove_file(&path);
+        let temporary = tempfile::TempDir::with_prefix("tapes-raw-prefilter-").unwrap();
+        let path = temporary.path().join("recording.jsonl");
         fs::write(&path, br#"{"text":"other"}"#).unwrap();
         assert!(!raw_tail_may_contain(
             &path,
@@ -3343,15 +3342,12 @@ mod tests {
             DEFAULT_READ_BYTES,
             None
         ));
-
-        fs::remove_file(path).unwrap();
     }
 
     #[test]
     fn list_search_does_not_parse_a_raw_definite_miss() {
-        let path =
-            std::env::temp_dir().join(format!("tapes-raw-prefilter-list-{}", std::process::id()));
-        let _ = fs::remove_file(&path);
+        let temporary = tempfile::TempDir::with_prefix("tapes-raw-prefilter-list-").unwrap();
+        let path = temporary.path().join("recording.jsonl");
         fs::write(&path, br#"{"text":"other"}"#).unwrap();
         let parsed = AtomicBool::new(false);
         let listing = list_files_with_search(
@@ -3373,6 +3369,5 @@ mod tests {
         assert_eq!(listing.scanned, 1);
         assert!(listing.sessions.is_empty());
         assert!(!parsed.load(Ordering::Relaxed));
-        fs::remove_file(path).unwrap();
     }
 }
