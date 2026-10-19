@@ -70,15 +70,15 @@ fn instant(text: &str) -> DateTime<Utc> {
 
 const PARENT: &str = "6b0e2d14-0000-4000-8000-0000000000b1";
 /// Ended, and said so by two task notifications on attachment records.
-const NOTIFIED: &str = "a0cbe2de6b06527b1";
+const NOTIFIED: &str = "a20000000000000a1";
 /// Ended, and said so by a task notification on a user record.
-const KILLED: &str = "a1e372fed4092a1d9";
+const KILLED: &str = "a20000000000000b2";
 /// Ended, with its spawn and notification outside the parent's recording and
 /// only its meta record saying it finished.
-const FINISHED: &str = "a50d88701944893df";
+const FINISHED: &str = "a20000000000000c3";
 /// Still running: launched, no notification, and a meta record that does not
 /// say it finished.
-const RUNNING: &str = "acd0f1e27e510deb4";
+const RUNNING: &str = "a20000000000000d4";
 
 fn call_id(agent_id: &str) -> String {
     format!("toolu_01{agent_id}")
@@ -187,7 +187,7 @@ fn child_recording(agent_id: &str, last: &str, stop_reason: Value) -> Vec<Value>
         record(
             "user",
             format!("{agent_id}-brief"),
-            "2026-10-12T06:49:00.000Z",
+            "2026-10-12T09:49:00.000Z",
             json!({"role": "user", "content": "Scout."}),
         ),
         record(
@@ -205,11 +205,11 @@ fn background_store() -> Store {
     let mut parent = vec![parent_record(
         "user",
         "parent-prompt",
-        "2026-10-12T06:48:00.000Z",
+        "2026-10-12T09:48:00.000Z",
         json!({"role": "user", "content": "Scout the fixture in the background."}),
     )];
     for agent_id in [NOTIFIED, KILLED, RUNNING] {
-        parent.extend(background_launch(agent_id, "2026-10-12T06:48:59.130Z"));
+        parent.extend(background_launch(agent_id, "2026-10-12T09:48:59.600Z"));
     }
     // A background shell command notifies the same way; its call is no
     // `Agent` call, so it names no child.
@@ -218,21 +218,21 @@ fn background_store() -> Store {
         "toolu_01shellcommand",
         "completed",
         "shell-notified",
-        "2026-10-12T06:50:00.000Z",
+        "2026-10-12T09:50:00.000Z",
     ));
     parent.extend(attached_notification(
         NOTIFIED,
         &call_id(NOTIFIED),
         "completed",
         "notified-first",
-        "2026-10-12T06:52:53.033Z",
+        "2026-10-12T09:52:53.600Z",
     ));
     parent.push(user_notification(
         KILLED,
         &call_id(KILLED),
         "killed",
         "killed-notified",
-        "2026-10-12T06:53:09.292Z",
+        "2026-10-12T09:53:09.600Z",
     ));
     // The same child, resumed and stopped again, notifies again.
     parent.extend(attached_notification(
@@ -240,15 +240,15 @@ fn background_store() -> Store {
         &call_id(NOTIFIED),
         "completed",
         "notified-again",
-        "2026-10-12T07:01:00.500Z",
+        "2026-10-12T10:01:00.500Z",
     ));
     let project = "claude/projects/-fixtures-project";
     store.write(&format!("{project}/{PARENT}.jsonl"), &parent);
     let children = [
-        (NOTIFIED, false, "2026-10-12T07:01:00.000Z"),
-        (KILLED, false, "2026-10-12T06:53:09.000Z"),
-        (FINISHED, true, "2026-10-12T06:55:30.250Z"),
-        (RUNNING, false, "2026-10-12T06:54:00.000Z"),
+        (NOTIFIED, false, "2026-10-12T10:01:00.000Z"),
+        (KILLED, false, "2026-10-12T09:53:09.000Z"),
+        (FINISHED, true, "2026-10-12T09:55:30.250Z"),
+        (RUNNING, false, "2026-10-12T09:54:00.000Z"),
     ];
     for (agent_id, finished, last) in children {
         let stop = if agent_id == RUNNING {
@@ -312,20 +312,20 @@ fn a_notified_background_child_reads_as_completed() {
     let notified = child(&lineage, NOTIFIED);
     assert_eq!(
         notified.completed_at,
-        Some(instant("2026-10-12T07:01:00.500Z")),
+        Some(instant("2026-10-12T10:01:00.500Z")),
         "{notified:#?}"
     );
     assert_eq!(notified.disposition.as_deref(), Some("completed"));
     assert_eq!(
         notified.spawned_at,
-        Some(instant("2026-10-12T06:48:59.130Z"))
+        Some(instant("2026-10-12T09:48:59.600Z"))
     );
     assert!(cites(notified, "notified-again"), "{notified:#?}");
 
     let killed = child(&lineage, KILLED);
     assert_eq!(
         killed.completed_at,
-        Some(instant("2026-10-12T06:53:09.292Z")),
+        Some(instant("2026-10-12T09:53:09.600Z")),
         "{killed:#?}"
     );
     assert_eq!(killed.disposition.as_deref(), Some("killed"));
@@ -347,7 +347,7 @@ fn a_finished_meta_completes_a_child_the_parent_never_notified() {
     let finished = child(&lineage, FINISHED);
     assert_eq!(
         finished.completed_at,
-        Some(instant("2026-10-12T06:55:30.250Z")),
+        Some(instant("2026-10-12T09:55:30.250Z")),
         "{finished:#?}"
     );
     assert!(
