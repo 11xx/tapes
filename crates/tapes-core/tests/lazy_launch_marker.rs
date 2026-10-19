@@ -2,10 +2,11 @@
 //! session's parent: a summary grouped by parent reads it, and one grouped
 //! otherwise asks for no first prompt.
 
-use std::fs::{self, File};
+mod support;
+
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::OnceLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use agent_tapes_core::backend::{opencode::OpenCodeBackend, pi::PiBackend, Backend};
@@ -34,14 +35,7 @@ struct CountedOpenCode(PathBuf);
 
 impl CountedOpenCode {
     fn new() -> Self {
-        static XDG: OnceLock<PathBuf> = OnceLock::new();
-        let root = XDG.get_or_init(|| {
-            let root = std::env::temp_dir().join(format!("tapes-lazy-xdg-{}", std::process::id()));
-            fs::create_dir_all(root.join("opencode")).unwrap();
-            File::create(root.join("opencode/opencode.db")).unwrap();
-            root
-        });
-        std::env::set_var("XDG_DATA_HOME", root);
+        std::env::set_var("XDG_DATA_HOME", support::empty_opencode_data_home());
         let path = std::env::temp_dir().join(format!(
             "opencode-launch-counted-{}-{}",
             std::process::id(),
@@ -154,22 +148,20 @@ fn pi_session(root: &Path, id: &str, stamp: &str, prompt: &str) {
 /// for its first prompt once the listing stops reading it.
 #[test]
 fn a_pi_summary_by_parent_groups_under_the_marker() {
-    let root =
-        std::env::temp_dir().join(format!("tapes-lazy-pi-{}-{}", std::process::id(), nonce()));
+    let root = tempfile::TempDir::with_prefix("tapes-lazy-pi-").unwrap();
     pi_session(
-        &root,
+        root.path(),
         PI_PARENT,
         "2026-01-01T10:00:00.000Z",
         "Lead the fixture work.",
     );
     pi_session(
-        &root,
+        root.path(),
         PI_CHILD,
         "2026-01-01T10:05:00.000Z",
         &format!("tapes-parent: pi:{PI_PARENT}\nInspect the fixture."),
     );
-    let grouped = summary(Box::new(PiBackend::new(&root)), &[GroupBy::Parent]);
-    let _ = fs::remove_dir_all(&root);
+    let grouped = summary(Box::new(PiBackend::new(root.path())), &[GroupBy::Parent]);
     assert_eq!(
         group_keys(&grouped, "parent"),
         vec![PI_PARENT.to_owned()],

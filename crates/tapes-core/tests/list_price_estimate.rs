@@ -3,7 +3,9 @@
 //! table or the figure cannot price leaves the estimate a known subtotal, or
 //! bounds, with a reason; nothing priced leaves it absent.
 
-use std::fs::{self, File};
+mod support;
+
+use std::fs::{self};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
@@ -40,10 +42,7 @@ fn environment() -> std::sync::MutexGuard<'static, ()> {
 }
 
 fn opencode_program() -> PathBuf {
-    let root = std::env::temp_dir().join(format!("tapes-price-xdg-{}", std::process::id()));
-    fs::create_dir_all(root.join("opencode")).unwrap();
-    File::create(root.join("opencode/opencode.db")).unwrap();
-    std::env::set_var("XDG_DATA_HOME", &root);
+    std::env::set_var("XDG_DATA_HOME", support::empty_opencode_data_home());
     fixtures("opencode").join("opencode2")
 }
 

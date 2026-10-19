@@ -3,10 +3,11 @@
 //! Codex rollout whose first prompt lies past a truncated read's opening is
 //! still titled by it.
 
-use std::fs::{self, File};
+mod support;
+
+use std::fs::{self};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::OnceLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use agent_tapes_core::backend::{codex::CodexBackend, opencode::OpenCodeBackend, Backend, Query};
@@ -26,15 +27,7 @@ struct Alias(PathBuf, Option<PathBuf>);
 
 impl Alias {
     fn new(name: &str, in_directory: bool) -> Self {
-        static XDG: OnceLock<PathBuf> = OnceLock::new();
-        let root = XDG.get_or_init(|| {
-            let root =
-                std::env::temp_dir().join(format!("tapes-series-xdg-{}", std::process::id()));
-            fs::create_dir_all(root.join("opencode")).unwrap();
-            File::create(root.join("opencode/opencode.db")).unwrap();
-            root
-        });
-        std::env::set_var("XDG_DATA_HOME", root);
+        std::env::set_var("XDG_DATA_HOME", support::empty_opencode_data_home());
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()

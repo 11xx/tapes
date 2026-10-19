@@ -1,6 +1,8 @@
 //! A workset's lanes partition every source's turns exactly, whichever
 //! harness recorded the source, and are cut at the projected-byte bound.
 
+mod support;
+
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -26,10 +28,7 @@ fn fixtures(harness: &str) -> PathBuf {
 }
 
 fn opencode_backend() -> Box<dyn Backend> {
-    let root = std::env::temp_dir().join(format!("tapes-workset-xdg-{}", std::process::id()));
-    std::fs::create_dir_all(root.join("opencode")).unwrap();
-    std::fs::File::create(root.join("opencode/opencode.db")).unwrap();
-    std::env::set_var("XDG_DATA_HOME", &root);
+    std::env::set_var("XDG_DATA_HOME", support::empty_opencode_data_home());
     Box::new(OpenCodeBackend::new(fixtures("opencode").join("opencode2")))
 }
 

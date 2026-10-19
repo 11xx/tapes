@@ -4,11 +4,12 @@
 //! boundary requests, and a request or record it can neither place nor rule
 //! out qualifies it instead of silently leaving it complete.
 
+mod support;
+
 use std::collections::BTreeMap;
-use std::fs::{self, File};
+use std::fs::{self};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::OnceLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use agent_tapes_core::backend::{
@@ -29,15 +30,7 @@ fn fixtures(name: &str) -> PathBuf {
 }
 
 fn opencode_program() -> PathBuf {
-    static XDG: OnceLock<PathBuf> = OnceLock::new();
-    let root = XDG.get_or_init(|| {
-        let root = std::env::temp_dir().join(format!("tapes-span-xdg-{}", std::process::id()));
-        let opencode = root.join("opencode");
-        fs::create_dir_all(&opencode).unwrap();
-        File::create(opencode.join("opencode.db")).unwrap();
-        root
-    });
-    std::env::set_var("XDG_DATA_HOME", root);
+    std::env::set_var("XDG_DATA_HOME", support::empty_opencode_data_home());
     fixtures("opencode").join("opencode2")
 }
 

@@ -1,3 +1,5 @@
+mod support;
+
 use std::cell::Cell;
 use std::collections::HashSet;
 use std::ffi::OsString;
@@ -8,7 +10,6 @@ use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::OnceLock;
 
 use agent_tapes_core::backend::claude::ClaudeBackend;
 use agent_tapes_core::backend::codex::CodexBackend;
@@ -44,16 +45,7 @@ fn fixtures(harness: &str) -> PathBuf {
 }
 
 fn configure_opencode_fixture_store() {
-    static XDG: OnceLock<PathBuf> = OnceLock::new();
-    let root = XDG.get_or_init(|| {
-        let root = std::env::temp_dir().join(format!("tapes-opencode-xdg-{}", std::process::id()));
-        let opencode = root.join("opencode");
-        fs::create_dir_all(&opencode).unwrap();
-        File::create(opencode.join("opencode.db")).unwrap();
-        std::env::set_var("XDG_DATA_HOME", &root);
-        root
-    });
-    std::env::set_var("XDG_DATA_HOME", root);
+    std::env::set_var("XDG_DATA_HOME", support::empty_opencode_data_home());
 }
 
 fn file_fixture_backends() -> Vec<(Box<dyn Backend>, &'static str)> {
