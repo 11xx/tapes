@@ -243,7 +243,7 @@ impl ClaudeBackend {
                 unrecognized_usage: requests.unrecognized_usage,
                 placeholders: requests.placeholders,
                 uses: requests.uses,
-                billing: requests.billing,
+                billing: super::bounded_billing(requests.billing, read.truncated),
             },
             basis,
             tokens.as_ref(),

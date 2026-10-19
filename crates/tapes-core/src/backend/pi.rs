@@ -1229,7 +1229,7 @@ fn apply_recording_usage(
         consumption,
         copy_evidence: Some(copies).filter(|copies| !copies.is_empty()),
         request_uses: usage.uses,
-        billing: billing.finish(),
+        billing: super::bounded_billing(billing.finish(), read.truncated),
         ..UsageDetail::default()
     }
     .into_option();

@@ -674,7 +674,12 @@ PROBE BEFORE EXPORTING
   other pi recording, a compaction or tool result naming no API included,
   and every OpenCode recording name no billing. A span or window share is
   billed as its whole recording is, whatever records it holds, and names
-  no billing where the whole recording names none. A
+  no billing where the whole recording names none. A bounded read that
+  leaves part of its recording unread — the default `usage` view, a
+  listing or a summary of a recording past --read-bytes — establishes no
+  billing: its billing is unestablished, its evidence naming what the read
+  window shows, since a record the read skipped can contradict that, and
+  `--full` reads the recording's billing whole. A
   subscription pays no long-context surcharge; billing the recording
   establishes neither way is
   priced between base and surcharged rates, its categories

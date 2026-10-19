@@ -157,6 +157,19 @@ pub(crate) fn bounded_launch(
     }
 }
 
+/// The billing a bounded read's records establish, unestablished where the
+/// read left part of its recording unread.
+pub(crate) fn bounded_billing(
+    billing: Option<crate::pricing::Billing>,
+    truncated: bool,
+) -> Option<crate::pricing::Billing> {
+    if truncated {
+        billing.map(crate::pricing::Billing::of_read_window)
+    } else {
+        billing
+    }
+}
+
 /// Fold one record's launch evidence into a session's: any interactive
 /// evidence makes the session interactive, and headless evidence counts only
 /// while nothing else is known.

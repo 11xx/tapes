@@ -903,6 +903,24 @@ impl Billing {
         }
     }
 
+    /// The billing of a read that left part of its recording unread: what
+    /// the read's own records establish is named, but none is established,
+    /// since a record the read skipped can contradict it.
+    pub fn of_read_window(shown: Self) -> Self {
+        let terms = match shown.terms {
+            BillingTerms::Subscription => "a subscription",
+            BillingTerms::Api => "per-token billing",
+            BillingTerms::Unestablished => return shown,
+        };
+        Self {
+            terms: BillingTerms::Unestablished,
+            evidence: format!(
+                "the read window shows {terms} ({}), but records outside it went unread",
+                shown.evidence
+            ),
+        }
+    }
+
     /// Whether a term for `billing` applies: known, or unknown when the
     /// recording establishes no billing and the term does not cover both.
     fn applies(&self, billing: &[BillingKind]) -> Option<bool> {

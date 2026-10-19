@@ -147,12 +147,15 @@ fn a_span_is_no_more_certain_of_billing_than_its_whole_recording() {
     pi_compacted_session(&store);
     let table = PriceTable::parse(GPT_TABLE).unwrap();
     let backend = || -> Box<dyn Backend> { Box::new(PiBackend::new(&store.0)) };
-    // The bounded read's tail holds the ChatGPT request alone.
+    // The bounded read's tail holds the ChatGPT request alone, a
+    // subscription's evidence there.
     let mut bounded = usage_with_backends(&[backend()], Selection::Id(PI_ID)).unwrap();
     pricing::price_view(&mut bounded, &table);
     let bounded = serde_json::to_value(bounded).unwrap()["list_price_estimate"].clone();
-    assert_eq!(
-        bounded["billing"][0]["terms"], "subscription",
+    assert!(
+        bounded["billing"][0]["evidence"]
+            .as_str()
+            .is_some_and(|evidence| evidence.contains("the read window shows a subscription")),
         "{bounded:#}"
     );
     let mut whole = usage_full_with_backends(&[backend()], Selection::Id(PI_ID)).unwrap();
@@ -249,8 +252,10 @@ fn a_claude_span_is_no_more_certain_of_billing_than_its_whole_recording() {
     let mut bounded = usage_with_backends(&[backend()], Selection::Id(CLAUDE_ID)).unwrap();
     pricing::price_view(&mut bounded, &table);
     let bounded = serde_json::to_value(bounded).unwrap()["list_price_estimate"].clone();
-    assert_eq!(
-        bounded["billing"][0]["terms"], "subscription",
+    assert!(
+        bounded["billing"][0]["evidence"]
+            .as_str()
+            .is_some_and(|evidence| evidence.contains("the read window shows a subscription")),
         "{bounded:#}"
     );
     let mut whole = usage_full_with_backends(&[backend()], Selection::Id(CLAUDE_ID)).unwrap();

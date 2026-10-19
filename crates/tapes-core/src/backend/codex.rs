@@ -2029,9 +2029,12 @@ impl CodexUsageObserver {
             measurement_coverage,
             unrecognized_usage: self.unrecognized_usage,
             request_uses: Some(request_uses).filter(|uses| !uses.is_empty()),
-            billing: codex_billing(
-                self.provider.as_deref(),
-                self.plan_quota.as_ref().map(Option::as_deref),
+            billing: super::bounded_billing(
+                codex_billing(
+                    self.provider.as_deref(),
+                    self.plan_quota.as_ref().map(Option::as_deref),
+                ),
+                self.read_window,
             ),
             ..UsageDetail::default()
         }

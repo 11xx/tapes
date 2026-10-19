@@ -1979,7 +1979,9 @@ enum Command {
         /// requests are not known one by one. The estimate's `billing` names
         /// the billing each recording establishes and its evidence, a span
         /// or window share billed as its whole recording, unestablished
-        /// where the whole recording establishes none: a subscription
+        /// where the whole recording establishes none, and a bounded read
+        /// that leaves part of its recording unread unestablished, its
+        /// evidence naming what the read window shows: a subscription
         /// pays no surcharge, and unestablished billing is priced between
         /// base and surcharged rates with billing-unestablished. A request no
         /// row is in effect for, or usage of no known time a row may not
