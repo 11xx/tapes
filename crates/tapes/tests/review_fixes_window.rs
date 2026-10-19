@@ -4,12 +4,8 @@
 
 use std::fs;
 use std::process::Command;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::json;
-
-static TEMP_ROOTS: AtomicU64 = AtomicU64::new(0);
 
 /// Claim: `usage <id> --harness codex --quota-window current` refuses,
 /// naming the conflict between a single session and a quota window.
@@ -17,15 +13,8 @@ static TEMP_ROOTS: AtomicU64 = AtomicU64::new(0);
 /// as though `--quota-window` had not been given.
 #[test]
 fn a_single_session_refuses_a_quota_window() {
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let root = std::env::temp_dir().join(format!(
-        "tapes-cli-quota-single-{}-{}-{nonce}",
-        std::process::id(),
-        TEMP_ROOTS.fetch_add(1, Ordering::Relaxed)
-    ));
+    let temporary = tempfile::TempDir::with_prefix("tapes-cli-quota-single-").unwrap();
+    let root = temporary.path();
     let id = "40000000-0000-7000-8000-0000000000f6";
     let path = root.join(format!(
         "sessions/2026/01/10/rollout-2026-01-10T09-00-00-{id}.jsonl"
@@ -59,10 +48,9 @@ fn a_single_session_refuses_a_quota_window() {
             "--json",
         ])
         .args(["--native-store", "codex", "--native-root"])
-        .arg(&root)
+        .arg(root)
         .output()
         .unwrap();
-    let _ = fs::remove_dir_all(&root);
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(

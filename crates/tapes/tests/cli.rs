@@ -68,14 +68,13 @@ fn tapes() -> Command {
     command
 }
 
-fn fixture_store(name: &str) -> (PathBuf, PathBuf) {
-    let root = std::env::temp_dir().join(format!(
+fn fixture_store(name: &str) -> (TemporaryDirectory, PathBuf) {
+    let root = TemporaryDirectory::new(std::env::temp_dir().join(format!(
         "tapes-cli-live-{name}-{}-{}",
         std::process::id(),
         TEMP_ROOTS.fetch_add(1, Ordering::Relaxed)
-    ));
-    let _ = fs::remove_dir_all(&root);
-    let sessions = root.join("sessions/2026/01/01");
+    )));
+    let sessions = root.path().join("sessions/2026/01/01");
     fs::create_dir_all(&sessions).unwrap();
     fs::write(
         sessions.join("rollout-2026-01-01T10-00-00-00000000-0000-0000-0000-000000000001.jsonl"),
@@ -87,15 +86,17 @@ fn fixture_store(name: &str) -> (PathBuf, PathBuf) {
         CODEX_SESSION_TWO,
     )
     .unwrap();
-    (root.clone(), root.join("home"))
+    let home = root.path().join("home");
+    (root, home)
 }
 
 #[test]
 fn capture_reports_the_selected_store_without_claiming_a_pin() {
-    let (codex_home, home) = fixture_store("capture");
+    let (temporary, home) = fixture_store("capture");
+    let codex_home = temporary.path();
     let mut command = tapes();
     command.args(["capture", "00000000-0000-0000-0000-000000000001", "--json"]);
-    with_fixture_env(&mut command, &codex_home, &home, &codex_home);
+    with_fixture_env(&mut command, codex_home, &home, codex_home);
     let output = command.output().unwrap();
     assert!(
         output.status.success(),
@@ -107,7 +108,6 @@ fn capture_reports_the_selected_store_without_claiming_a_pin() {
     assert_eq!(report["harness"], "codex");
     assert_eq!(report["store_path_class"], "codex-session-jsonl");
     assert_eq!(report["state"], "unpinned");
-    fs::remove_dir_all(codex_home).unwrap();
 }
 
 /// `self` is the caller's own session, named by the variable its harness
@@ -116,13 +116,14 @@ fn capture_reports_the_selected_store_without_claiming_a_pin() {
 /// id is one no store holds, or when the store holds it under another harness.
 #[test]
 fn self_names_the_session_its_harness_exports() {
-    let (codex_home, home) = fixture_store("self-token");
+    let (temporary, home) = fixture_store("self-token");
+    let codex_home = temporary.path();
     let newest = "10000000-0000-0000-0000-000000000002";
     let older = "00000000-0000-0000-0000-000000000001";
     let run = |args: &[&str], variables: &[(&str, &str)]| {
         let mut command = tapes();
         command.args(args);
-        with_fixture_env(&mut command, &codex_home, &home, &codex_home);
+        with_fixture_env(&mut command, codex_home, &home, codex_home);
         for variable in [
             "CLAUDE_SESSION_ID",
             "CLAUDE_CODE_SESSION_ID",
@@ -190,7 +191,6 @@ fn self_names_the_session_its_harness_exports() {
         let error = String::from_utf8_lossy(&refused.stderr);
         assert!(error.contains(expected), "{variables:?}: {error}");
     }
-    let _ = fs::remove_dir_all(&codex_home);
 }
 
 /// `show --json` on the bounded reader reports the effort a Claude assistant
@@ -545,8 +545,10 @@ fn exports_preserve_existing_outputs_across_concurrent_and_evidence_runs() {
 /// reach them.
 #[test]
 fn scoped_listing_reports_directories_it_cannot_place() {
-    let root = std::env::temp_dir().join(format!("tapes-cli-unplaced-{}", std::process::id()));
-    let _ = fs::remove_dir_all(&root);
+    let temporary = TemporaryDirectory::new(
+        std::env::temp_dir().join(format!("tapes-cli-unplaced-{}", std::process::id())),
+    );
+    let root = temporary.path();
     let project = root.join("project");
     fs::create_dir_all(&project).unwrap();
     let initialized = Command::new("git")
@@ -686,7 +688,6 @@ fn scoped_listing_reports_directories_it_cannot_place() {
         "00000000-0000-0000-0000-00000000000b"
     );
     assert!(global.get("unplaced").is_none(), "{global}");
-    fs::remove_dir_all(root).unwrap();
 }
 
 /// The turns of a whole show that a kind predicate keeps, and the count of
@@ -729,12 +730,13 @@ fn turn_identities(turns: &Value) -> Vec<(u64, String, String)> {
 /// selection; a bounded read, a whole read, and `--tail` agree on them.
 #[test]
 fn only_and_omit_keep_turn_kinds_and_count_the_rest() {
-    let (codex_home, home) = fixture_store("turn-kinds");
+    let (temporary, home) = fixture_store("turn-kinds");
+    let codex_home = temporary.path();
     let id = "00000000-0000-0000-0000-000000000001";
     let invoke = |args: &[&str]| {
         tapes()
             .args(args)
-            .env("CODEX_HOME", &codex_home)
+            .env("CODEX_HOME", codex_home)
             .env("HOME", &home)
             .env("PATH", "/definitely/missing")
             .output()
@@ -893,7 +895,6 @@ fn only_and_omit_keep_turn_kinds_and_count_the_rest() {
     }
     assert!(!invoke(&["export", id, "--exchange"]).status.success());
     assert!(!invoke(&["show", id, "--only", "prompt"]).status.success());
-    let _ = fs::remove_dir_all(&codex_home);
 }
 
 /// `--omit` narrows every file of a bundle: the JSON and the trace hold every
@@ -901,12 +902,13 @@ fn only_and_omit_keep_turn_kinds_and_count_the_rest() {
 /// the selection keeps. A bulk export applies it to each bundle.
 #[test]
 fn export_omit_narrows_every_bundle_file_and_counts_the_omitted_turns() {
-    let (codex_home, home) = fixture_store("export-omit");
+    let (temporary, home) = fixture_store("export-omit");
+    let codex_home = temporary.path();
     let id = "00000000-0000-0000-0000-000000000001";
     let run = |args: &[&str]| {
         let output = tapes()
             .args(args)
-            .env("CODEX_HOME", &codex_home)
+            .env("CODEX_HOME", codex_home)
             .env("HOME", &home)
             .env("PATH", "/definitely/missing")
             .output()
@@ -1025,7 +1027,6 @@ fn export_omit_narrows_every_bundle_file_and_counts_the_omitted_turns() {
             "{bundle}"
         );
     }
-    let _ = fs::remove_dir_all(&codex_home);
 }
 
 /// A bundle's context file is the exchange `show --exchange` returns, turn for
@@ -1210,8 +1211,10 @@ fn exchange_keeps_the_operator_turns_of_an_interactive_codex_rollout() {
 /// evidence and the truncation report name the bound that was in force.
 #[test]
 fn read_bytes_sets_the_file_tail_a_transcript_read_takes() {
-    let root = std::env::temp_dir().join(format!("tapes-cli-read-bytes-{}", std::process::id()));
-    let _ = fs::remove_dir_all(&root);
+    let temporary = TemporaryDirectory::new(
+        std::env::temp_dir().join(format!("tapes-cli-read-bytes-{}", std::process::id())),
+    );
+    let root = temporary.path();
     let sessions = root.join("sessions/2026/01/01");
     fs::create_dir_all(&sessions).unwrap();
     let id = "00000000-0000-0000-0000-00000000dddd";
@@ -1236,7 +1239,7 @@ fn read_bytes_sets_the_file_tail_a_transcript_read_takes() {
         tapes()
             .args(args)
             .env("HOME", root.join("home"))
-            .env("CODEX_HOME", &root)
+            .env("CODEX_HOME", root)
             .env("PATH", "/definitely/missing")
             .output()
             .unwrap()
@@ -1284,67 +1287,66 @@ fn read_bytes_sets_the_file_tail_a_transcript_read_takes() {
     assert!(!unparsed.status.success());
     let stderr = String::from_utf8_lossy(&unparsed.stderr);
     assert!(stderr.contains("unknown size unit"), "{stderr}");
-
-    let _ = fs::remove_dir_all(&root);
 }
 
-fn terminal_only_fixture_store(name: &str) -> (PathBuf, PathBuf) {
-    let root = std::env::temp_dir().join(format!(
+fn terminal_only_fixture_store(name: &str) -> (TemporaryDirectory, PathBuf) {
+    let root = TemporaryDirectory::new(std::env::temp_dir().join(format!(
         "tapes-cli-terminal-only-{name}-{}-{}",
         std::process::id(),
         TEMP_ROOTS.fetch_add(1, Ordering::Relaxed)
-    ));
-    let sessions = root.join("sessions/2026/01/01");
+    )));
+    let sessions = root.path().join("sessions/2026/01/01");
     fs::create_dir_all(&sessions).unwrap();
     fs::write(
         sessions.join("rollout-2026-01-01T15-00-00-00000000-0000-0000-0000-000000000006.jsonl"),
         CODEX_SESSION_TERMINAL_ONLY,
     )
     .unwrap();
-    (root.clone(), root.join("home"))
+    let home = root.path().join("home");
+    (root, home)
 }
 
-fn completed_only_runtime_fixture_store(name: &str) -> (PathBuf, PathBuf) {
-    let root = std::env::temp_dir().join(format!(
+fn completed_only_runtime_fixture_store(name: &str) -> (TemporaryDirectory, PathBuf) {
+    let root = TemporaryDirectory::new(std::env::temp_dir().join(format!(
         "tapes-cli-codex-completed-only-{name}-{}-{}",
         std::process::id(),
         TEMP_ROOTS.fetch_add(1, Ordering::Relaxed)
-    ));
-    let _ = fs::remove_dir_all(&root);
-    let sessions = root.join("sessions/2026/01/01");
+    )));
+    let sessions = root.path().join("sessions/2026/01/01");
     fs::create_dir_all(&sessions).unwrap();
     fs::write(
         sessions.join("rollout-2026-01-01T16-00-00-00000000-0000-0000-0000-00000000000a.jsonl"),
         CODEX_SESSION_COMPLETED_ONLY_RUNTIME,
     )
     .unwrap();
-    (root.clone(), root.join("home"))
+    let home = root.path().join("home");
+    (root, home)
 }
 
-fn invocation_fixture_store(name: &str) -> (PathBuf, PathBuf) {
-    let root = std::env::temp_dir().join(format!(
+fn invocation_fixture_store(name: &str) -> (TemporaryDirectory, PathBuf) {
+    let root = TemporaryDirectory::new(std::env::temp_dir().join(format!(
         "tapes-cli-invocations-{name}-{}-{}",
         std::process::id(),
         TEMP_ROOTS.fetch_add(1, Ordering::Relaxed)
-    ));
-    let sessions = root.join("sessions/2026/01/01");
+    )));
+    let sessions = root.path().join("sessions/2026/01/01");
     fs::create_dir_all(&sessions).unwrap();
     fs::write(
         sessions.join("rollout-2026-01-01T16-00-00-00000000-0000-0000-0000-000000000007.jsonl"),
         CODEX_SESSION_INVOCATIONS,
     )
     .unwrap();
-    (root.clone(), root.join("home"))
+    let home = root.path().join("home");
+    (root, home)
 }
 
-fn parser_context_fixture_store(name: &str) -> (PathBuf, PathBuf) {
-    let root = std::env::temp_dir().join(format!(
+fn parser_context_fixture_store(name: &str) -> (TemporaryDirectory, PathBuf) {
+    let root = TemporaryDirectory::new(std::env::temp_dir().join(format!(
         "tapes-cli-parser-context-{name}-{}-{}",
         std::process::id(),
         TEMP_ROOTS.fetch_add(1, Ordering::Relaxed)
-    ));
-    let _ = fs::remove_dir_all(&root);
-    let sessions = root.join("sessions/2026/01/01");
+    )));
+    let sessions = root.path().join("sessions/2026/01/01");
     fs::create_dir_all(&sessions).unwrap();
     let id = "00000000-0000-0000-0000-000000000008";
     let scripts = [
@@ -1404,17 +1406,17 @@ fn parser_context_fixture_store(name: &str) -> (PathBuf, PathBuf) {
         body,
     )
     .unwrap();
-    (root.clone(), root.join("home"))
+    let home = root.path().join("home");
+    (root, home)
 }
 
-fn invocation_bound_fixture_store(name: &str) -> (PathBuf, PathBuf) {
-    let root = std::env::temp_dir().join(format!(
+fn invocation_bound_fixture_store(name: &str) -> (TemporaryDirectory, PathBuf) {
+    let root = TemporaryDirectory::new(std::env::temp_dir().join(format!(
         "tapes-cli-invocation-bound-{name}-{}-{}",
         std::process::id(),
         TEMP_ROOTS.fetch_add(1, Ordering::Relaxed)
-    ));
-    let _ = fs::remove_dir_all(&root);
-    let sessions = root.join("sessions/2026/01/01");
+    )));
+    let sessions = root.path().join("sessions/2026/01/01");
     fs::create_dir_all(&sessions).unwrap();
     let id = "00000000-0000-0000-0000-000000000009";
     let long_program = "p".repeat(3_000);
@@ -1491,17 +1493,17 @@ fn invocation_bound_fixture_store(name: &str) -> (PathBuf, PathBuf) {
         body,
     )
     .unwrap();
-    (root.clone(), root.join("home"))
+    let home = root.path().join("home");
+    (root, home)
 }
 
-fn filter_fixture_store(name: &str) -> (PathBuf, PathBuf) {
-    let root = std::env::temp_dir().join(format!(
+fn filter_fixture_store(name: &str) -> (TemporaryDirectory, PathBuf) {
+    let root = TemporaryDirectory::new(std::env::temp_dir().join(format!(
         "tapes-cli-filter-{name}-{}-{}",
         std::process::id(),
         TEMP_ROOTS.fetch_add(1, Ordering::Relaxed)
-    ));
-    let _ = fs::remove_dir_all(&root);
-    let sessions = root.join("sessions/2026/01/01");
+    )));
+    let sessions = root.path().join("sessions/2026/01/01");
     fs::create_dir_all(&sessions).unwrap();
     let files = [
         (
@@ -1535,17 +1537,17 @@ fn filter_fixture_store(name: &str) -> (PathBuf, PathBuf) {
             .set_modified(std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(modified))
             .unwrap();
     }
-    (root.clone(), root.join("home"))
+    let home = root.path().join("home");
+    (root, home)
 }
 
-fn launch_fixture_store(name: &str) -> (PathBuf, PathBuf) {
-    let root = std::env::temp_dir().join(format!(
+fn launch_fixture_store(name: &str) -> (TemporaryDirectory, PathBuf) {
+    let root = TemporaryDirectory::new(std::env::temp_dir().join(format!(
         "tapes-cli-launch-{name}-{}-{}",
         std::process::id(),
         TEMP_ROOTS.fetch_add(1, Ordering::Relaxed)
-    ));
-    let _ = fs::remove_dir_all(&root);
-    let sessions = root.join("sessions/2026/01/02");
+    )));
+    let sessions = root.path().join("sessions/2026/01/02");
     fs::create_dir_all(&sessions).unwrap();
     let fixtures =
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../tapes-core/tests/fixtures/launch/codex");
@@ -1567,7 +1569,8 @@ fn launch_fixture_store(name: &str) -> (PathBuf, PathBuf) {
             )
             .unwrap();
     }
-    (root.clone(), root.join("home"))
+    let home = root.path().join("home");
+    (root, home)
 }
 
 fn fake_status(root: &Path, body: &str, exit: i32) -> (PathBuf, PathBuf) {
@@ -1763,12 +1766,13 @@ fn session<'a>(value: &'a Value, id: &str) -> &'a Value {
 }
 
 fn fixture_command(name: &str, args: &[&str]) -> std::process::Output {
-    let (codex_home, home) = fixture_store(name);
+    let (temporary, home) = fixture_store(name);
+    let codex_home = temporary.path();
     let mut command = tapes();
     command.args(args);
     with_fixture_env(
         &mut command,
-        &codex_home,
+        codex_home,
         &home,
         Path::new("/definitely/missing"),
     );
@@ -3283,7 +3287,8 @@ fn events_json_answers_call_counts_and_incomplete_calls_without_raw_text() {
 /// that record, retaining the recorded arguments and source coordinate.
 #[test]
 fn completed_only_codex_runtime_items_are_complete_operations_everywhere() {
-    let (codex_home, home) = completed_only_runtime_fixture_store("projection");
+    let (temporary, home) = completed_only_runtime_fixture_store("projection");
+    let codex_home = temporary.path();
     let id = "00000000-0000-0000-0000-00000000000a";
     let bundle = codex_home.join("bundle");
     let run = |arguments: &[&str]| {
@@ -3291,7 +3296,7 @@ fn completed_only_codex_runtime_items_are_complete_operations_everywhere() {
         command.args(arguments);
         with_fixture_env(
             &mut command,
-            &codex_home,
+            codex_home,
             &home,
             Path::new("/definitely/missing"),
         );
@@ -3343,7 +3348,7 @@ fn completed_only_codex_runtime_items_are_complete_operations_everywhere() {
         command.args(["export", id, "--bundle", bundle.to_str().unwrap()]);
         with_fixture_env(
             &mut command,
-            &codex_home,
+            codex_home,
             &home,
             Path::new("/definitely/missing"),
         );
@@ -3364,17 +3369,17 @@ fn completed_only_codex_runtime_items_are_complete_operations_everywhere() {
         serde_json::from_slice::<Value>(&fs::read(json_path).unwrap()).unwrap()
     };
     assert_complete(&exported);
-    let _ = fs::remove_dir_all(&codex_home);
 }
 
 #[test]
 fn terminal_only_recording_exposes_a_structured_stop_observation() {
-    let (codex_home, home) = terminal_only_fixture_store("observation");
+    let (temporary, home) = terminal_only_fixture_store("observation");
+    let codex_home = temporary.path();
     let mut command = tapes();
     command.args(["show", "00000000-0000-0000-0000-000000000006", "--json"]);
     with_fixture_env(
         &mut command,
-        &codex_home,
+        codex_home,
         &home,
         Path::new("/definitely/missing"),
     );
@@ -3428,7 +3433,7 @@ fn terminal_only_recording_exposes_a_structured_stop_observation() {
     ]);
     with_fixture_env(
         &mut zero_tail,
-        &codex_home,
+        codex_home,
         &home,
         Path::new("/definitely/missing"),
     );
@@ -3439,7 +3444,6 @@ fn terminal_only_recording_exposes_a_structured_stop_observation() {
         zero_tail["text_tail"]["empty_reason"],
         "zero-requested-tail"
     );
-    fs::remove_dir_all(codex_home).unwrap();
 }
 
 #[test]
@@ -3740,13 +3744,14 @@ fn events_filters_after_pairing_and_tail_uses_show_ordinals() {
 
 #[test]
 fn events_expose_nested_declarations_and_qualified_artifact_consumption() {
-    let (codex_home, home) = invocation_fixture_store("projection");
+    let (temporary, home) = invocation_fixture_store("projection");
+    let codex_home = temporary.path();
     let id = "00000000-0000-0000-0000-000000000007";
     let mut command = tapes();
     command.args(["events", id, "--json"]);
     with_fixture_env(
         &mut command,
-        &codex_home,
+        codex_home,
         &home,
         Path::new("/definitely/missing"),
     );
@@ -3884,7 +3889,7 @@ fn events_expose_nested_declarations_and_qualified_artifact_consumption() {
     stats.args(["stats", id, "--json"]);
     with_fixture_env(
         &mut stats,
-        &codex_home,
+        codex_home,
         &home,
         Path::new("/definitely/missing"),
     );
@@ -3899,7 +3904,7 @@ fn events_expose_nested_declarations_and_qualified_artifact_consumption() {
     filtered.args(["events", id, "--program", "cargo", "--json"]);
     with_fixture_env(
         &mut filtered,
-        &codex_home,
+        codex_home,
         &home,
         Path::new("/definitely/missing"),
     );
@@ -3929,7 +3934,7 @@ fn events_expose_nested_declarations_and_qualified_artifact_consumption() {
         }
         with_fixture_env(
             &mut paired,
-            &codex_home,
+            codex_home,
             &home,
             Path::new("/definitely/missing"),
         );
@@ -3953,7 +3958,7 @@ fn events_expose_nested_declarations_and_qualified_artifact_consumption() {
     wrong_name.args(["events", id, "--name", "git", "--json"]);
     with_fixture_env(
         &mut wrong_name,
-        &codex_home,
+        codex_home,
         &home,
         Path::new("/definitely/missing"),
     );
@@ -3971,7 +3976,7 @@ fn events_expose_nested_declarations_and_qualified_artifact_consumption() {
         .arg(bundle_root.path());
     with_fixture_env(
         &mut export,
-        &codex_home,
+        codex_home,
         &home,
         Path::new("/definitely/missing"),
     );
@@ -4002,18 +4007,18 @@ fn events_expose_nested_declarations_and_qualified_artifact_consumption() {
         })
         .unwrap();
     assert!(String::from_utf8_lossy(&fs::read(trace).unwrap()).contains("invocation:"));
-    fs::remove_dir_all(codex_home).unwrap();
 }
 
 #[test]
 fn events_and_stats_qualify_ambiguous_invocation_contexts() {
-    let (codex_home, home) = parser_context_fixture_store("context");
+    let (temporary, home) = parser_context_fixture_store("context");
+    let codex_home = temporary.path();
     let id = "00000000-0000-0000-0000-000000000008";
     let mut events = tapes();
     events.args(["events", id, "--json"]);
     with_fixture_env(
         &mut events,
-        &codex_home,
+        codex_home,
         &home,
         Path::new("/definitely/missing"),
     );
@@ -4064,7 +4069,7 @@ fn events_and_stats_qualify_ambiguous_invocation_contexts() {
     stats.args(["stats", id, "--json"]);
     with_fixture_env(
         &mut stats,
-        &codex_home,
+        codex_home,
         &home,
         Path::new("/definitely/missing"),
     );
@@ -4074,18 +4079,18 @@ fn events_and_stats_qualify_ambiguous_invocation_contexts() {
     assert_eq!(stats["tools"]["calls"], 5);
     assert_eq!(stats["tools"]["results"], 0);
     assert_eq!(stats["tools"]["paired"], 0);
-    fs::remove_dir_all(codex_home).unwrap();
 }
 
 #[test]
 fn events_qualify_shortened_invocation_names_and_bound_arguments() {
-    let (codex_home, home) = invocation_bound_fixture_store("names");
+    let (temporary, home) = invocation_bound_fixture_store("names");
+    let codex_home = temporary.path();
     let id = "00000000-0000-0000-0000-000000000009";
     let mut command = tapes();
     command.args(["events", id, "--json"]);
     with_fixture_env(
         &mut command,
-        &codex_home,
+        codex_home,
         &home,
         Path::new("/definitely/missing"),
     );
@@ -4150,7 +4155,6 @@ fn events_qualify_shortened_invocation_names_and_bound_arguments() {
         2_048
     );
     assert_eq!(bounded["invocations"][0]["arguments"][0]["truncated"], true);
-    fs::remove_dir_all(codex_home).unwrap();
 }
 
 #[test]
@@ -4172,15 +4176,16 @@ fn list_without_stores_is_empty_and_successful() {
 
 #[test]
 fn list_joins_one_bounded_status_snapshot_and_maps_states() {
-    let (codex_home, home) = fixture_store("list");
+    let (temporary, home) = fixture_store("list");
+    let codex_home = temporary.path();
     let snapshot = r#"{"threads":[
       {"id":"00000000-0000-0000-0000-000000000001","harness":"codex","state":"working"},
       {"id":"10000000-0000-0000-0000-000000000002","harness":"codex","state":"attention"}
     ]}"#;
-    let (bin, calls) = fake_status(&codex_home, snapshot, 0);
+    let (bin, calls) = fake_status(codex_home, snapshot, 0);
     let mut command = tapes();
     command.args(["list", "--global", "--json"]);
-    with_fixture_env(&mut command, &codex_home, &home, &bin);
+    with_fixture_env(&mut command, codex_home, &home, &bin);
     let output = command.output().unwrap();
 
     assert!(
@@ -4198,20 +4203,20 @@ fn list_joins_one_bounded_status_snapshot_and_maps_states() {
         "idle"
     );
     assert_eq!(fs::read_to_string(calls).unwrap().lines().count(), 1);
-    let _ = fs::remove_dir_all(codex_home);
 }
 
 #[test]
 fn human_list_keeps_id_column_exact() {
-    let (codex_home, home) = fixture_store("human-list");
+    let (temporary, home) = fixture_store("human-list");
+    let codex_home = temporary.path();
     let snapshot = r#"{"threads":[
       {"id":"00000000-0000-0000-0000-000000000001","harness":"codex","state":"working"},
       {"id":"10000000-0000-0000-0000-000000000002","harness":"codex","state":"idle"}
     ]}"#;
-    let (bin, _) = fake_status(&codex_home, snapshot, 0);
+    let (bin, _) = fake_status(codex_home, snapshot, 0);
     let mut command = tapes();
     command.args(["list", "--global"]);
-    with_fixture_env(&mut command, &codex_home, &home, &bin);
+    with_fixture_env(&mut command, codex_home, &home, &bin);
     let output = command.output().unwrap();
 
     assert!(
@@ -4238,18 +4243,18 @@ fn human_list_keeps_id_column_exact() {
     assert_eq!(first[1], "idle");
     assert_eq!(second[0], "00000000-0000-0000-0000-000000000001");
     assert_eq!(second[1], "working");
-    let _ = fs::remove_dir_all(codex_home);
 }
 
 #[test]
 fn list_filters_metadata_case_insensitively_and_before_limit() {
-    let (codex_home, home) = filter_fixture_store("metadata");
+    let (temporary, home) = filter_fixture_store("metadata");
+    let codex_home = temporary.path();
     let command = |arguments: &[&str]| {
         let mut command = tapes();
         command.args(arguments);
         with_fixture_env(
             &mut command,
-            &codex_home,
+            codex_home,
             &home,
             Path::new("/definitely/missing"),
         );
@@ -4328,13 +4333,12 @@ fn list_filters_metadata_case_insensitively_and_before_limit() {
         "10000000-0000-0000-0000-000000000002"
     );
     assert_eq!(limited_value["scanned"], 3);
-
-    fs::remove_dir_all(codex_home).unwrap();
 }
 
 #[test]
 fn list_filters_activity_before_limit_and_serializes_the_window() {
-    let (codex_home, home) = filter_fixture_store("activity");
+    let (temporary, home) = filter_fixture_store("activity");
+    let codex_home = temporary.path();
     let mut command = tapes();
     command.args([
         "list",
@@ -4351,7 +4355,7 @@ fn list_filters_activity_before_limit_and_serializes_the_window() {
     ]);
     with_fixture_env(
         &mut command,
-        &codex_home,
+        codex_home,
         &home,
         Path::new("/definitely/missing"),
     );
@@ -4378,19 +4382,18 @@ fn list_filters_activity_before_limit_and_serializes_the_window() {
     assert_eq!(value["sessions"].as_array().unwrap().len(), 1);
     assert_eq!(value["scanned"], 4);
     assert_eq!(value["scan_truncated"], false);
-
-    fs::remove_dir_all(codex_home).unwrap();
 }
 
 #[test]
 fn launch_filter_selects_sessions_before_limit_and_reaches_endings() {
-    let (codex_home, home) = launch_fixture_store("selection");
+    let (temporary, home) = launch_fixture_store("selection");
+    let codex_home = temporary.path();
     let command = |arguments: &[&str]| {
         let mut command = tapes();
         command.args(arguments);
         with_fixture_env(
             &mut command,
-            &codex_home,
+            codex_home,
             &home,
             Path::new("/definitely/missing"),
         );
@@ -4491,19 +4494,18 @@ fn launch_filter_selects_sessions_before_limit_and_reaches_endings() {
         serde_json::from_slice(&fs::read(bundle_dir.join("manifest.json")).unwrap()).unwrap();
     assert_eq!(manifest["schema"], "tapes-export-manifest/7");
     assert_eq!(manifest["selection"]["launch"], "headless");
-
-    fs::remove_dir_all(codex_home).unwrap();
 }
 
 #[test]
 fn list_sort_oldest_orders_recorded_activity_and_keeps_activity_absent() {
-    let (codex_home, home) = filter_fixture_store("sort");
+    let (temporary, home) = filter_fixture_store("sort");
+    let codex_home = temporary.path();
     let command = |arguments: &[&str]| {
         let mut command = tapes();
         command.args(arguments);
         with_fixture_env(
             &mut command,
-            &codex_home,
+            codex_home,
             &home,
             Path::new("/definitely/missing"),
         );
@@ -4559,13 +4561,12 @@ fn list_sort_oldest_orders_recorded_activity_and_keeps_activity_absent() {
     );
     assert_eq!(oldest_value["sort"], "oldest");
     assert!(oldest_value.get("activity").is_none());
-
-    fs::remove_dir_all(codex_home).unwrap();
 }
 
 #[test]
 fn list_accepts_date_only_activity_bounds_and_omits_absent_bound() {
-    let (codex_home, home) = filter_fixture_store("date-only");
+    let (temporary, home) = filter_fixture_store("date-only");
+    let codex_home = temporary.path();
     let mut command = tapes();
     command.args([
         "list",
@@ -4580,7 +4581,7 @@ fn list_accepts_date_only_activity_bounds_and_omits_absent_bound() {
     ]);
     with_fixture_env(
         &mut command,
-        &codex_home,
+        codex_home,
         &home,
         Path::new("/definitely/missing"),
     );
@@ -4598,8 +4599,6 @@ fn list_accepts_date_only_activity_bounds_and_omits_absent_bound() {
         value["sessions"][0]["id"],
         "30000000-0000-0000-0000-000000000005"
     );
-
-    fs::remove_dir_all(codex_home).unwrap();
 }
 
 #[test]
@@ -4704,7 +4703,8 @@ fn list_rejects_a_non_half_open_activity_window() {
         ("2026-01-01T11:00:00Z", "2026-01-01T10:00:00Z"),
     ];
     for (since, until) in cases {
-        let (codex_home, home) = filter_fixture_store("invalid-window");
+        let (temporary, home) = filter_fixture_store("invalid-window");
+        let codex_home = temporary.path();
         let mut command = tapes();
         command.args([
             "list",
@@ -4718,7 +4718,7 @@ fn list_rejects_a_non_half_open_activity_window() {
         ]);
         with_fixture_env(
             &mut command,
-            &codex_home,
+            codex_home,
             &home,
             Path::new("/definitely/missing"),
         );
@@ -4731,13 +4731,13 @@ fn list_rejects_a_non_half_open_activity_window() {
             "{}",
             String::from_utf8_lossy(&output.stderr)
         );
-        fs::remove_dir_all(codex_home).unwrap();
     }
 }
 
 #[test]
 fn list_searches_recent_fixture_turns_before_the_limit_and_survives_a_bad_line() {
-    let (codex_home, home) = filter_fixture_store("search");
+    let (temporary, home) = filter_fixture_store("search");
+    let codex_home = temporary.path();
     let mut command = tapes();
     command.args([
         "list",
@@ -4752,7 +4752,7 @@ fn list_searches_recent_fixture_turns_before_the_limit_and_survives_a_bad_line()
     ]);
     with_fixture_env(
         &mut command,
-        &codex_home,
+        codex_home,
         &home,
         Path::new("/definitely/missing"),
     );
@@ -4777,21 +4777,20 @@ fn list_searches_recent_fixture_turns_before_the_limit_and_survives_a_bad_line()
     assert_eq!(value["scanned"], 4);
     assert_eq!(value["scan_truncated"], false);
     assert!(value["unsearched"].as_array().unwrap().is_empty());
-
-    fs::remove_dir_all(codex_home).unwrap();
 }
 
 #[test]
 fn liveness_tolerates_unknown_states() {
-    let (codex_home, home) = fixture_store("unknown-state");
+    let (temporary, home) = fixture_store("unknown-state");
+    let codex_home = temporary.path();
     let snapshot = r#"{"threads":[
       {"id":"00000000-0000-0000-0000-000000000001","harness":"codex","state":"working"},
       {"id":"10000000-0000-0000-0000-000000000002","harness":"codex","state":"waiting-for-future"}
     ]}"#;
-    let (bin, _) = fake_status(&codex_home, snapshot, 0);
+    let (bin, _) = fake_status(codex_home, snapshot, 0);
     let mut command = tapes();
     command.args(["list", "--global", "--json"]);
-    with_fixture_env(&mut command, &codex_home, &home, &bin);
+    with_fixture_env(&mut command, codex_home, &home, &bin);
     let output = command.output().unwrap();
 
     assert!(
@@ -4805,16 +4804,16 @@ fn liveness_tolerates_unknown_states() {
         "working"
     );
     assert!(session(&value, "10000000-0000-0000-0000-000000000002")["live"].is_null());
-    let _ = fs::remove_dir_all(codex_home);
 }
 
 #[test]
 fn liveness_times_out_stalled_authority() {
-    let (codex_home, home) = fixture_store("timeout");
-    let (bin, calls, parent_pid, child_pid) = fake_stalled_status(&codex_home);
+    let (temporary, home) = fixture_store("timeout");
+    let codex_home = temporary.path();
+    let (bin, calls, parent_pid, child_pid) = fake_stalled_status(codex_home);
     let mut command = tapes();
     command.args(["list", "--global", "--json"]);
-    with_fixture_env(&mut command, &codex_home, &home, &bin);
+    with_fixture_env(&mut command, codex_home, &home, &bin);
     let started = Instant::now();
     let output = command.output().unwrap();
     let elapsed = started.elapsed();
@@ -4833,16 +4832,16 @@ fn liveness_times_out_stalled_authority() {
     assert_eq!(fs::read_to_string(calls).unwrap().lines().count(), 1);
     assert_process_gone(&parent_pid);
     assert_process_gone(&child_pid);
-    let _ = fs::remove_dir_all(codex_home);
 }
 
 #[test]
 fn liveness_reaps_exited_authority_with_inherited_pipe() {
-    let (codex_home, home) = fixture_store("exited-timeout");
-    let (bin, calls, parent_pid, child_pid) = fake_exited_stalled_status(&codex_home);
+    let (temporary, home) = fixture_store("exited-timeout");
+    let codex_home = temporary.path();
+    let (bin, calls, parent_pid, child_pid) = fake_exited_stalled_status(codex_home);
     let mut command = tapes();
     command.args(["list", "--global", "--json"]);
-    with_fixture_env(&mut command, &codex_home, &home, &bin);
+    with_fixture_env(&mut command, codex_home, &home, &bin);
     let started = Instant::now();
     let output = command.output().unwrap();
     let elapsed = started.elapsed();
@@ -4861,17 +4860,17 @@ fn liveness_reaps_exited_authority_with_inherited_pipe() {
     assert_eq!(fs::read_to_string(calls).unwrap().lines().count(), 1);
     assert_process_gone(&parent_pid);
     assert_process_gone(&child_pid);
-    let _ = fs::remove_dir_all(codex_home);
 }
 
 #[test]
 fn oversized_status_is_optional() {
-    let (codex_home, home) = fixture_store("oversized");
+    let (temporary, home) = fixture_store("oversized");
+    let codex_home = temporary.path();
     let oversized = format!("{{\"threads\":[]}}{}", "x".repeat(64 * 1024));
-    let (bin, calls) = fake_status(&codex_home, &oversized, 0);
+    let (bin, calls) = fake_status(codex_home, &oversized, 0);
     let mut command = tapes();
     command.args(["list", "--global", "--json"]);
-    with_fixture_env(&mut command, &codex_home, &home, &bin);
+    with_fixture_env(&mut command, codex_home, &home, &bin);
     let started = Instant::now();
     let output = command.output().unwrap();
     let elapsed = started.elapsed();
@@ -4888,14 +4887,14 @@ fn oversized_status_is_optional() {
     let value: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert!(session(&value, "00000000-0000-0000-0000-000000000001")["live"].is_null());
     assert_eq!(fs::read_to_string(calls).unwrap().lines().count(), 1);
-    let _ = fs::remove_dir_all(codex_home);
 }
 
 #[test]
 fn show_human_header_marks_matching_live_state() {
-    let (codex_home, home) = fixture_store("show");
+    let (temporary, home) = fixture_store("show");
+    let codex_home = temporary.path();
     let snapshot = r#"{"threads":[{"id":"00000000-0000-0000-0000-000000000001","harness":"codex","state":"working"}]}"#;
-    let (bin, calls) = fake_status(&codex_home, snapshot, 0);
+    let (bin, calls) = fake_status(codex_home, snapshot, 0);
     let mut command = tapes();
     command.args([
         "show",
@@ -4903,7 +4902,7 @@ fn show_human_header_marks_matching_live_state() {
         "--tail",
         "1",
     ]);
-    with_fixture_env(&mut command, &codex_home, &home, &bin);
+    with_fixture_env(&mut command, codex_home, &home, &bin);
     let output = command.output().unwrap();
 
     assert!(
@@ -4914,14 +4913,14 @@ fn show_human_header_marks_matching_live_state() {
     let text = String::from_utf8_lossy(&output.stdout);
     assert!(text.starts_with("# codex 00000000-0000-0000-0000-000000000001 [working]\n"));
     assert_eq!(fs::read_to_string(calls).unwrap().lines().count(), 1);
-    let _ = fs::remove_dir_all(codex_home);
 }
 
 #[test]
 fn show_json_carries_matching_live_state() {
-    let (codex_home, home) = fixture_store("show-json");
+    let (temporary, home) = fixture_store("show-json");
+    let codex_home = temporary.path();
     let snapshot = r#"{"threads":[{"id":"10000000-0000-0000-0000-000000000002","harness":"codex","state":"idle"}]}"#;
-    let (bin, calls) = fake_status(&codex_home, snapshot, 0);
+    let (bin, calls) = fake_status(codex_home, snapshot, 0);
     let mut command = tapes();
     command.args([
         "show",
@@ -4930,7 +4929,7 @@ fn show_json_carries_matching_live_state() {
         "1",
         "--json",
     ]);
-    with_fixture_env(&mut command, &codex_home, &home, &bin);
+    with_fixture_env(&mut command, codex_home, &home, &bin);
     let output = command.output().unwrap();
 
     assert!(
@@ -4941,12 +4940,12 @@ fn show_json_carries_matching_live_state() {
     let value: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(value["session"]["live"], "idle");
     assert_eq!(fs::read_to_string(calls).unwrap().lines().count(), 1);
-    let _ = fs::remove_dir_all(codex_home);
 }
 
 #[test]
 fn show_names_a_trailing_record_in_human_and_json_output() {
-    let (codex_home, home) = fixture_store("trailing-record");
+    let (temporary, home) = fixture_store("trailing-record");
+    let codex_home = temporary.path();
 
     let mut human_command = tapes();
     human_command.args([
@@ -4955,7 +4954,7 @@ fn show_names_a_trailing_record_in_human_and_json_output() {
         "--tail",
         "1",
     ]);
-    with_fixture_env(&mut human_command, &codex_home, &home, &codex_home);
+    with_fixture_env(&mut human_command, codex_home, &home, codex_home);
     let human = human_command.output().unwrap();
     assert!(
         human.status.success(),
@@ -4976,7 +4975,7 @@ fn show_names_a_trailing_record_in_human_and_json_output() {
         "1",
         "--json",
     ]);
-    with_fixture_env(&mut json_command, &codex_home, &home, &codex_home);
+    with_fixture_env(&mut json_command, codex_home, &home, codex_home);
     let json_output = json_command.output().unwrap();
     assert!(json_output.status.success());
     let value: Value = serde_json::from_slice(&json_output.stdout).unwrap();
@@ -4987,13 +4986,12 @@ fn show_names_a_trailing_record_in_human_and_json_output() {
             "timestamp": "2026-01-01T10:00:07Z"
         })
     );
-
-    let _ = fs::remove_dir_all(codex_home);
 }
 
 #[test]
 fn show_omits_an_absent_trailing_record_in_human_and_json_output() {
-    let (codex_home, home) = fixture_store("no-trailing-record");
+    let (temporary, home) = fixture_store("no-trailing-record");
+    let codex_home = temporary.path();
 
     let mut human_command = tapes();
     human_command.args([
@@ -5002,7 +5000,7 @@ fn show_omits_an_absent_trailing_record_in_human_and_json_output() {
         "--tail",
         "1",
     ]);
-    with_fixture_env(&mut human_command, &codex_home, &home, &codex_home);
+    with_fixture_env(&mut human_command, codex_home, &home, codex_home);
     let human = human_command.output().unwrap();
     assert!(human.status.success());
     let text = String::from_utf8_lossy(&human.stdout);
@@ -5016,22 +5014,21 @@ fn show_omits_an_absent_trailing_record_in_human_and_json_output() {
         "1",
         "--json",
     ]);
-    with_fixture_env(&mut json_command, &codex_home, &home, &codex_home);
+    with_fixture_env(&mut json_command, codex_home, &home, codex_home);
     let json_output = json_command.output().unwrap();
     assert!(json_output.status.success());
     let value: Value = serde_json::from_slice(&json_output.stdout).unwrap();
     assert!(value.get("trailing_record").is_none());
-
-    let _ = fs::remove_dir_all(codex_home);
 }
 
 #[test]
 fn unusable_status_is_optional_and_export_omits_volatile_state() {
-    let (codex_home, home) = fixture_store("optional");
-    let (bin, calls) = fake_status(&codex_home, "{not-json", 17);
+    let (temporary, home) = fixture_store("optional");
+    let codex_home = temporary.path();
+    let (bin, calls) = fake_status(codex_home, "{not-json", 17);
     let mut list_command = tapes();
     list_command.args(["list", "--global", "--json"]);
-    with_fixture_env(&mut list_command, &codex_home, &home, &bin);
+    with_fixture_env(&mut list_command, codex_home, &home, &bin);
     let list_output = list_command.output().unwrap();
 
     assert!(list_output.status.success());
@@ -5044,7 +5041,7 @@ fn unusable_status_is_optional_and_export_omits_volatile_state() {
     export_command
         .args(["export", "00000000-0000-0000-0000-000000000001", "--bundle"])
         .arg(&bundle);
-    with_fixture_env(&mut export_command, &codex_home, &home, &bin);
+    with_fixture_env(&mut export_command, codex_home, &home, &bin);
     let export_output = export_command.output().unwrap();
     assert!(
         export_output.status.success(),
@@ -5062,7 +5059,6 @@ fn unusable_status_is_optional_and_export_omits_volatile_state() {
         })
         .unwrap();
     assert!(!fs::read_to_string(json_path).unwrap().contains("\"live\""));
-    let _ = fs::remove_dir_all(codex_home);
 }
 
 #[test]
@@ -5081,16 +5077,15 @@ fn piped_help_does_not_panic() {
 
 #[test]
 fn exporting_an_unknown_session_writes_no_bundle_and_fails() {
-    let directory = std::env::temp_dir().join(format!("tapes-cli-export-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&directory);
+    let root = TemporaryDirectory::new(
+        std::env::temp_dir().join(format!("tapes-cli-export-{}", std::process::id())),
+    );
+    let directory = root.path().join("bundle");
     let output = tapes()
         .args(["export", "definitely-not-a-session"])
         .arg("--bundle")
         .arg(&directory)
-        .env(
-            "HOME",
-            std::env::temp_dir().join(format!("tapes-cli-empty-home-{}", std::process::id())),
-        )
+        .env("HOME", root.path().join("home"))
         .output()
         .unwrap();
 
@@ -5101,8 +5096,10 @@ fn exporting_an_unknown_session_writes_no_bundle_and_fails() {
 
 #[test]
 fn human_renderers_show_derived_titles_and_whole_second_timestamps() {
-    let root = std::env::temp_dir().join(format!("tapes-cli-human-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&root);
+    let temporary = TemporaryDirectory::new(
+        std::env::temp_dir().join(format!("tapes-cli-human-{}", std::process::id())),
+    );
+    let root = temporary.path();
     let id = "00000000-0000-0000-0000-0000000000aa";
     let path = root
         .join("sessions/2026/01/01")
@@ -5129,7 +5126,7 @@ fn human_renderers_show_derived_titles_and_whole_second_timestamps() {
         tapes()
             .args(arguments)
             .env("HOME", root.join("home"))
-            .env("CODEX_HOME", &root)
+            .env("CODEX_HOME", root)
             .env("PATH", "/definitely/missing")
             .output()
             .unwrap()
@@ -5191,17 +5188,15 @@ fn human_renderers_show_derived_titles_and_whole_second_timestamps() {
         "Inspect the fixture."
     );
     assert_eq!(show_value["session"]["derived_title_truncated"], false);
-
-    std::fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
 fn list_json_marks_derived_title_truncation_without_changing_the_title_text() {
-    let root = std::env::temp_dir().join(format!(
+    let temporary = TemporaryDirectory::new(std::env::temp_dir().join(format!(
         "tapes-cli-derived-title-marker-{}",
         std::process::id()
-    ));
-    let _ = fs::remove_dir_all(&root);
+    )));
+    let root = temporary.path();
     let sessions = root.join("sessions/2026/01/01");
     fs::create_dir_all(&sessions).unwrap();
     fs::write(
@@ -5234,7 +5229,7 @@ fn list_json_marks_derived_title_truncation_without_changing_the_title_text() {
     command.args(["list", "--global", "--harness", "codex", "--json"]);
     command
         .env("HOME", root.join("home"))
-        .env("CODEX_HOME", &root)
+        .env("CODEX_HOME", root)
         .env("PATH", "/definitely/missing");
     let output = command.output().unwrap();
 
@@ -5255,8 +5250,6 @@ fn list_json_marks_derived_title_truncation_without_changing_the_title_text() {
         96
     );
     assert!(shortened["derived_title"].as_str().unwrap().ends_with('…'));
-
-    fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
@@ -5825,9 +5818,10 @@ fn opencode_database_transcripts_preserve_normalized_turn_roles_and_text() {
 /// reports the header's recorded start and still marks the window truncated.
 #[test]
 fn show_reports_the_recorded_start_of_an_oversized_session() {
-    let root =
-        std::env::temp_dir().join(format!("tapes-cli-oversized-start-{}", std::process::id()));
-    let _ = fs::remove_dir_all(&root);
+    let temporary = TemporaryDirectory::new(
+        std::env::temp_dir().join(format!("tapes-cli-oversized-start-{}", std::process::id())),
+    );
+    let root = temporary.path();
     let sessions = root.join("sessions/2026/01/01");
     fs::create_dir_all(&sessions).unwrap();
     let id = "00000000-0000-0000-0000-00000000bbbb";
@@ -5854,7 +5848,7 @@ fn show_reports_the_recorded_start_of_an_oversized_session() {
     command.args(["show", id, "--tail", "1", "--json"]);
     command
         .env("HOME", root.join("home"))
-        .env("CODEX_HOME", &root)
+        .env("CODEX_HOME", root)
         .env("PATH", "/definitely/missing");
     let output = command.output().unwrap();
 
@@ -5876,8 +5870,6 @@ fn show_reports_the_recorded_start_of_an_oversized_session() {
     );
     assert_eq!(value["truncation"]["window"]["returned"], 1);
     assert_eq!(value["truncation"]["window"]["bound"], 1);
-
-    fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
@@ -6012,11 +6004,11 @@ fn show_preserves_aligned_tail_records_and_reports_only_real_partial_prefixes() 
 /// source bound; a wide enough window clears it; export reads every turn.
 #[test]
 fn show_distinguishes_the_turn_window_from_source_truncation() {
-    let root = std::env::temp_dir().join(format!(
+    let temporary = TemporaryDirectory::new(std::env::temp_dir().join(format!(
         "tapes-cli-window-provenance-{}",
         std::process::id()
-    ));
-    let _ = fs::remove_dir_all(&root);
+    )));
+    let root = temporary.path();
     let sessions = root.join("sessions/2026/01/01");
     fs::create_dir_all(&sessions).unwrap();
     let id = "00000000-0000-0000-0000-00000000cccc";
@@ -6043,7 +6035,7 @@ fn show_distinguishes_the_turn_window_from_source_truncation() {
         command.args(args);
         command
             .env("HOME", root.join("home"))
-            .env("CODEX_HOME", &root)
+            .env("CODEX_HOME", root)
             .env("PATH", "/definitely/missing");
         let output = command.output().unwrap();
         assert!(
@@ -6091,8 +6083,6 @@ fn show_distinguishes_the_turn_window_from_source_truncation() {
     assert_eq!(exported["turns"].as_array().unwrap().len(), 147);
     assert_eq!(exported["truncated"], false);
     assert!(exported.get("truncation").is_none(), "{exported}");
-
-    fs::remove_dir_all(root).unwrap();
 }
 
 /// The database projection cuts long part text; the transcript names that
@@ -6146,14 +6136,15 @@ fn opencode_database_reads_name_cut_turn_text_as_a_source_bound() {
 /// read from.
 #[test]
 fn show_gives_every_turn_a_coordinate_a_consumer_can_write_down() {
-    let (codex_home, home) = fixture_store("source-reference");
+    let (temporary, home) = fixture_store("source-reference");
+    let codex_home = temporary.path();
     let id = "00000000-0000-0000-0000-000000000001";
     let run = |args: &[&str]| {
         let mut command = tapes();
         command.args(args);
         with_fixture_env(
             &mut command,
-            &codex_home,
+            codex_home,
             &home,
             Path::new("/definitely/missing"),
         );
@@ -6208,8 +6199,6 @@ fn show_gives_every_turn_a_coordinate_a_consumer_can_write_down() {
         session(&listed, id)["source"]["location"]["locator"],
         whole["session"]["source"]["location"]["locator"]
     );
-
-    fs::remove_dir_all(codex_home).unwrap();
 }
 
 /// `show --tail 1` on a session whose whole message projection exceeds the
@@ -6862,14 +6851,15 @@ fn an_opencode_part_row_without_an_id_is_one_unreadable_record() {
 /// export bundle carry the same counters, with absent ones omitted.
 #[test]
 fn codex_token_totals_agree_across_list_show_and_export() {
-    let (codex_home, home) = fixture_store("codex-tokens");
+    let (temporary, home) = fixture_store("codex-tokens");
+    let codex_home = temporary.path();
     let id = "00000000-0000-0000-0000-000000000001";
     let run = |args: &[&str]| {
         let mut command = tapes();
         command.args(args);
         with_fixture_env(
             &mut command,
-            &codex_home,
+            codex_home,
             &home,
             Path::new("/definitely/missing"),
         );
@@ -6914,13 +6904,12 @@ fn codex_token_totals_agree_across_list_show_and_export() {
     let exported: Value = serde_json::from_str(&fs::read_to_string(json_path).unwrap()).unwrap();
     assert_eq!(exported["session"]["tokens"], expected);
     assert_eq!(exported["session"]["accounting"], expected_accounting);
-
-    fs::remove_dir_all(codex_home).unwrap();
 }
 
 #[test]
 fn list_sort_oldest_keeps_the_oldest_sessions_under_the_limit() {
-    let (codex_home, home) = filter_fixture_store("sort-oldest-limit");
+    let (temporary, home) = filter_fixture_store("sort-oldest-limit");
+    let codex_home = temporary.path();
     let mut command = tapes();
     command.args([
         "list",
@@ -6935,7 +6924,7 @@ fn list_sort_oldest_keeps_the_oldest_sessions_under_the_limit() {
     ]);
     with_fixture_env(
         &mut command,
-        &codex_home,
+        codex_home,
         &home,
         Path::new("/definitely/missing"),
     );
@@ -6948,8 +6937,6 @@ fn list_sort_oldest_keeps_the_oldest_sessions_under_the_limit() {
         value["sessions"][0]["id"],
         "00000000-0000-0000-0000-000000000001"
     );
-
-    fs::remove_dir_all(codex_home).unwrap();
 }
 
 const CLAUDE_SESSION: &str = include_str!("fixtures/claude/project/session-claude.jsonl");
@@ -8700,13 +8687,14 @@ fn usage_human_output_names_the_recorded_facts_only() {
 /// `counted` says how many sessions were behind each sum.
 #[test]
 fn usage_summary_sums_the_listings_own_counters_and_counts_the_sessions_behind_them() {
-    let (codex_home, home) = filter_fixture_store("usage-summary");
+    let (temporary, home) = filter_fixture_store("usage-summary");
+    let codex_home = temporary.path();
     let command = |arguments: &[&str]| {
         let mut command = tapes();
         command.args(arguments);
         with_fixture_env(
             &mut command,
-            &codex_home,
+            codex_home,
             &home,
             Path::new("/definitely/missing"),
         );
@@ -8785,8 +8773,6 @@ fn usage_summary_sums_the_listings_own_counters_and_counts_the_sessions_behind_t
     assert_eq!(value["totals"]["tokens"], counted_session["tokens"]);
     assert_eq!(value["totals"]["counted"]["input"], 1);
     assert_eq!(value["totals"]["coverage"]["no_accounting"], 3);
-
-    fs::remove_dir_all(codex_home).unwrap();
 }
 
 /// The activity window narrows the summed set the same way it narrows a
@@ -8794,7 +8780,8 @@ fn usage_summary_sums_the_listings_own_counters_and_counts_the_sessions_behind_t
 /// such rather than as zeroes.
 #[test]
 fn usage_summary_narrows_by_activity_and_reports_sessions_with_no_accounting() {
-    let (codex_home, home) = filter_fixture_store("usage-window");
+    let (temporary, home) = filter_fixture_store("usage-window");
+    let codex_home = temporary.path();
     let mut command = tapes();
     command.args([
         "usage",
@@ -8809,7 +8796,7 @@ fn usage_summary_narrows_by_activity_and_reports_sessions_with_no_accounting() {
     ]);
     with_fixture_env(
         &mut command,
-        &codex_home,
+        codex_home,
         &home,
         Path::new("/definitely/missing"),
     );
@@ -8840,20 +8827,19 @@ fn usage_summary_narrows_by_activity_and_reports_sessions_with_no_accounting() {
     assert_eq!(value["totals"]["sessions"], 2);
     assert_eq!(value["totals"]["coverage"]["no_accounting"], 2);
     assert!(value["totals"].get("tokens").is_none(), "{value}");
-
-    fs::remove_dir_all(codex_home).unwrap();
 }
 
 /// The table prints one row per group and a closing total, and a sum drawn
 /// from fewer sessions than the row holds says so.
 #[test]
 fn usage_summary_human_output_says_how_many_sessions_are_behind_each_sum() {
-    let (codex_home, home) = filter_fixture_store("usage-table");
+    let (temporary, home) = filter_fixture_store("usage-table");
+    let codex_home = temporary.path();
     let mut command = tapes();
     command.args(["usage", "--global", "--harness", "codex"]);
     with_fixture_env(
         &mut command,
-        &codex_home,
+        codex_home,
         &home,
         Path::new("/definitely/missing"),
     );
@@ -8891,15 +8877,14 @@ fn usage_summary_human_output_says_how_many_sessions_are_behind_each_sum() {
         lines[7],
         "Disjoint missing, sessions per category: cache_read 3, cache_write 3, output 3, reasoning 4, uncached_input 3"
     );
-
-    fs::remove_dir_all(codex_home).unwrap();
 }
 
 /// The selection is exactly what `list` returns for the same flags, in the
 /// same order, and each session keeps its own bounded bundle.
 #[test]
 fn export_over_an_activity_window_writes_one_bundle_per_session_and_a_manifest() {
-    let (codex_home, home) = filter_fixture_store("export-window");
+    let (temporary, home) = filter_fixture_store("export-window");
+    let codex_home = temporary.path();
     let bundle = codex_home.join("bundle");
     let mut command = tapes();
     command.args([
@@ -8918,7 +8903,7 @@ fn export_over_an_activity_window_writes_one_bundle_per_session_and_a_manifest()
     command.arg(&bundle);
     with_fixture_env(
         &mut command,
-        &codex_home,
+        codex_home,
         &home,
         Path::new("/definitely/missing"),
     );
@@ -8978,21 +8963,20 @@ fn export_over_an_activity_window_writes_one_bundle_per_session_and_a_manifest()
         .collect::<Vec<_>>();
     stdout_paths.push(bundle.join("manifest.json"));
     assert_eq!(printed, stdout_paths);
-
-    fs::remove_dir_all(codex_home).unwrap();
 }
 
 /// A limit bounds the selection the way it bounds a listing, and a selection
 /// that holds nothing is a fact rather than a failure.
 #[test]
 fn export_honours_the_limit_and_writes_a_manifest_for_an_empty_selection() {
-    let (codex_home, home) = filter_fixture_store("export-limit");
+    let (temporary, home) = filter_fixture_store("export-limit");
+    let codex_home = temporary.path();
     let run = |arguments: &[&str], bundle: &Path| {
         let mut command = tapes();
         command.args(arguments).arg("--bundle").arg(bundle);
         with_fixture_env(
             &mut command,
-            &codex_home,
+            codex_home,
             &home,
             Path::new("/definitely/missing"),
         );
@@ -9047,8 +9031,6 @@ fn export_honours_the_limit_and_writes_a_manifest_for_an_empty_selection() {
     assert_eq!(fs::read_dir(&empty_bundle).unwrap().count(), 1);
     let stdout = String::from_utf8(empty.stdout).unwrap();
     assert_eq!(stdout.lines().count(), 1, "{stdout}");
-
-    fs::remove_dir_all(codex_home).unwrap();
 }
 
 #[test]
@@ -9069,7 +9051,8 @@ fn endings_help_names_the_schema_and_what_it_does_not_do() {
 /// report holds exactly the sessions `list` would return for the same flags.
 #[test]
 fn endings_applies_the_activity_window_before_reading_any_transcript() {
-    let (codex_home, home) = filter_fixture_store("endings-window");
+    let (temporary, home) = filter_fixture_store("endings-window");
+    let codex_home = temporary.path();
     let mut command = tapes();
     command.args([
         "endings",
@@ -9082,7 +9065,7 @@ fn endings_applies_the_activity_window_before_reading_any_transcript() {
     ]);
     with_fixture_env(
         &mut command,
-        &codex_home,
+        codex_home,
         &home,
         Path::new("/definitely/missing"),
     );
@@ -9119,8 +9102,6 @@ fn endings_applies_the_activity_window_before_reading_any_transcript() {
     }
     assert!(value["unread"].as_array().unwrap().is_empty());
     assert_eq!(value["scan_truncated"], false);
-
-    fs::remove_dir_all(codex_home).unwrap();
 }
 
 /// The text tail is a glimpse of the exchange: an entry longer than the bound
@@ -10295,14 +10276,15 @@ fn brief_help_names_the_schema_and_the_half_it_reads() {
 /// said.
 #[test]
 fn brief_renders_the_continuation_in_reading_order() {
-    let (codex_home, home) = fixture_store("brief-order");
+    let (temporary, home) = fixture_store("brief-order");
+    let codex_home = temporary.path();
     let id = "00000000-0000-0000-0000-000000000001";
     let run = |arguments: &[&str]| {
         let mut command = tapes();
         command.args(arguments);
         with_fixture_env(
             &mut command,
-            &codex_home,
+            codex_home,
             &home,
             Path::new("/definitely/missing"),
         );
@@ -10357,14 +10339,11 @@ fn brief_renders_the_continuation_in_reading_order() {
     );
     assert_eq!(value["usage"]["tokens"]["input"], 1200);
     assert_eq!(value["tail"].as_array().unwrap().len(), 2);
-
-    fs::remove_dir_all(codex_home).unwrap();
 }
 
 #[test]
 fn selection_stats_agree_with_individual_reads() {
-    let (path, home) = fixture_store("stats-summary");
-    let root = TemporaryDirectory { path };
+    let (root, home) = fixture_store("stats-summary");
     let run = |args: &[&str]| {
         let mut command = tapes();
         command.args(args);
@@ -11963,6 +11942,12 @@ struct RemoteReplica {
     argv: PathBuf,
 }
 
+impl Drop for RemoteReplica {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.root);
+    }
+}
+
 impl RemoteReplica {
     fn new(name: &str) -> Self {
         let root = std::env::temp_dir().join(format!(
@@ -12098,16 +12083,18 @@ fn run_against_replica(
 }
 
 /// A transport that fails without the replica ever running, for the failure
-/// a real ssh, a missing remote binary, or a wrong answer produces.
-fn failing_transport(name: &str, body: &str) -> PathBuf {
-    let path = std::env::temp_dir().join(format!(
-        "tapes-transport-{name}-{}-{}.sh",
+/// a real ssh, a missing remote binary, or a wrong answer produces, in a
+/// directory of its own.
+fn failing_transport(name: &str, body: &str) -> (TemporaryDirectory, PathBuf) {
+    let directory = TemporaryDirectory::new(std::env::temp_dir().join(format!(
+        "tapes-transport-{name}-{}-{}",
         std::process::id(),
         TEMP_ROOTS.fetch_add(1, Ordering::Relaxed)
-    ));
+    )));
+    let path = directory.path().join("transport.sh");
     fs::write(&path, body).unwrap();
     fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
-    path
+    (directory, path)
 }
 
 const CODEX_ONE_FILE: &str =
@@ -12126,19 +12113,20 @@ fn list_remote_answers_from_the_replica_and_names_it() {
     replica.record(CODEX_ONE_FILE, CODEX_SESSION_ONE);
     let remote_calls = replica
         .status(r#"{"threads":[{"id":"00000000-0000-0000-0000-000000000001","state":"working"}]}"#);
-    let (local_codex, local_home) = fixture_store("remote-list-local");
+    let (temporary, local_home) = fixture_store("remote-list-local");
+    let local_codex = temporary.path();
     // This machine holds only the other fixture: the replica's session is
     // nowhere in the local store.
     fs::remove_file(local_codex.join("sessions/2026/01/01").join(CODEX_ONE_FILE)).unwrap();
     let (local_bin, local_calls) = fake_status(
-        &local_codex,
+        local_codex,
         r#"{"threads":[{"id":"00000000-0000-0000-0000-000000000001","state":"working"},{"id":"10000000-0000-0000-0000-000000000002","state":"working"}]}"#,
         0,
     );
 
     let output = run_against_replica(
         &replica,
-        &local_codex,
+        local_codex,
         &local_home,
         &local_bin,
         &["list", "--global", "--remote", "replica-host", "--json"],
@@ -12184,7 +12172,7 @@ fn list_remote_answers_from_the_replica_and_names_it() {
     // carries no replica.
     let mut local = tapes();
     local.args(["list", "--global", "--json"]);
-    with_fixture_env(&mut local, &local_codex, &local_home, &local_bin);
+    with_fixture_env(&mut local, local_codex, &local_home, &local_bin);
     let local: Value = serde_json::from_slice(&local.output().unwrap().stdout).unwrap();
     let sessions = local["sessions"].as_array().unwrap();
     assert_eq!(sessions.len(), 1, "{local}");
@@ -12193,7 +12181,7 @@ fn list_remote_answers_from_the_replica_and_names_it() {
 
     let human = run_against_replica(
         &replica,
-        &local_codex,
+        local_codex,
         &local_home,
         &local_bin,
         &["list", "--global", "--remote", "replica-host"],
@@ -12201,9 +12189,6 @@ fn list_remote_answers_from_the_replica_and_names_it() {
     let text = String::from_utf8_lossy(&human.stdout);
     assert!(text.starts_with("Replica: replica-host\n"), "{text}");
     assert!(text.contains(CODEX_ONE_ID), "{text}");
-
-    let _ = fs::remove_dir_all(&replica.root);
-    let _ = fs::remove_dir_all(local_codex);
 }
 
 /// A replica that reports no liveness answers `unknown`, whatever this
@@ -12213,16 +12198,17 @@ fn list_remote_answers_from_the_replica_and_names_it() {
 fn show_remote_never_joins_the_local_liveness_registry() {
     let replica = RemoteReplica::new("show");
     replica.record(CODEX_ONE_FILE, CODEX_SESSION_ONE);
-    let (local_codex, local_home) = fixture_store("remote-show-local");
+    let (temporary, local_home) = fixture_store("remote-show-local");
+    let local_codex = temporary.path();
     let (local_bin, local_calls) = fake_status(
-        &local_codex,
+        local_codex,
         r#"{"threads":[{"id":"00000000-0000-0000-0000-000000000001","state":"working"}]}"#,
         0,
     );
 
     let output = run_against_replica(
         &replica,
-        &local_codex,
+        local_codex,
         &local_home,
         &local_bin,
         &[
@@ -12259,7 +12245,7 @@ fn show_remote_never_joins_the_local_liveness_registry() {
 
     let human = run_against_replica(
         &replica,
-        &local_codex,
+        local_codex,
         &local_home,
         &local_bin,
         &[
@@ -12277,9 +12263,6 @@ fn show_remote_never_joins_the_local_liveness_registry() {
         "{text}"
     );
     assert!(!text.contains("[working]"), "{text}");
-
-    let _ = fs::remove_dir_all(&replica.root);
-    let _ = fs::remove_dir_all(local_codex);
 }
 
 #[test]
@@ -12353,14 +12336,15 @@ fn remote_older_reports_keep_written_zero_as_unpriced_evidence() {
 fn the_default_ssh_is_invoked_non_interactively() {
     let replica = RemoteReplica::new("default-ssh");
     replica.record(CODEX_ONE_FILE, CODEX_SESSION_ONE);
-    let (local_codex, local_home) = fixture_store("remote-default-ssh-local");
+    let (temporary, local_home) = fixture_store("remote-default-ssh-local");
+    let local_codex = temporary.path();
     let local_bin = local_codex.join("bin");
     fs::create_dir_all(&local_bin).unwrap();
     replica.default_program(&local_bin);
 
     let mut command = tapes();
     command.args(["list", "--global", "--remote", "replica-host", "--json"]);
-    with_fixture_env(&mut command, &local_codex, &local_home, &local_bin);
+    with_fixture_env(&mut command, local_codex, &local_home, &local_bin);
     command.env_remove("TAPES_SSH");
     let output = command.output().unwrap();
     assert!(
@@ -12385,7 +12369,7 @@ fn the_default_ssh_is_invoked_non_interactively() {
     named.record(CODEX_ONE_FILE, CODEX_SESSION_ONE);
     let output = run_against_replica(
         &named,
-        &local_codex,
+        local_codex,
         &local_home,
         &local_bin,
         &["list", "--global", "--remote", "replica-host", "--json"],
@@ -12400,10 +12384,6 @@ fn the_default_ssh_is_invoked_non_interactively() {
         Some("replica-host"),
         "a program named through TAPES_SSH received an option it did not ask for"
     );
-
-    let _ = fs::remove_dir_all(&replica.root);
-    let _ = fs::remove_dir_all(&named.root);
-    let _ = fs::remove_dir_all(local_codex);
 }
 
 /// Every way a replica can fail to answer is its own cause, named beside the
@@ -12412,7 +12392,8 @@ fn the_default_ssh_is_invoked_non_interactively() {
 /// nothing in it.
 #[test]
 fn a_replica_that_cannot_answer_names_the_cause_and_the_destination() {
-    let (local_codex, local_home) = fixture_store("remote-unavailable");
+    let (temporary, local_home) = fixture_store("remote-unavailable");
+    let local_codex = temporary.path();
     let local_bin = local_codex.join("bin");
     fs::create_dir_all(&local_bin).unwrap();
     let cases = [
@@ -12448,10 +12429,10 @@ fn a_replica_that_cannot_answer_names_the_cause_and_the_destination() {
         ),
     ];
     for (name, body, listed, shown) in cases {
-        let transport = failing_transport(name, body);
+        let (_transport_directory, transport) = failing_transport(name, body);
         let mut command = tapes();
         command.args(["list", "--remote", "replica-host", "--json"]);
-        with_fixture_env(&mut command, &local_codex, &local_home, &local_bin);
+        with_fixture_env(&mut command, local_codex, &local_home, &local_bin);
         command.env("TAPES_SSH", &transport);
         let output = command.output().unwrap();
         assert!(
@@ -12475,7 +12456,7 @@ fn a_replica_that_cannot_answer_names_the_cause_and_the_destination() {
         // nothing and refuses.
         let mut command = tapes();
         command.args(["show", CODEX_ONE_ID, "--remote", "replica-host", "--json"]);
-        with_fixture_env(&mut command, &local_codex, &local_home, &local_bin);
+        with_fixture_env(&mut command, local_codex, &local_home, &local_bin);
         command.env("TAPES_SSH", &transport);
         let output = command.output().unwrap();
         assert!(!output.status.success(), "{name}");
@@ -12485,9 +12466,7 @@ fn a_replica_that_cannot_answer_names_the_cause_and_the_destination() {
             error.contains("remote replica replica-host unavailable") && error.contains(shown),
             "{name}: {error}"
         );
-        let _ = fs::remove_file(&transport);
     }
-    let _ = fs::remove_dir_all(local_codex);
 }
 
 /// The local side caps what it accepts and how long it waits, so a replica
@@ -12495,17 +12474,18 @@ fn a_replica_that_cannot_answer_names_the_cause_and_the_destination() {
 /// variable that raises them.
 #[test]
 fn a_remote_answer_is_bounded_in_bytes_and_wall_clock() {
-    let (local_codex, local_home) = fixture_store("remote-bounds");
+    let (temporary, local_home) = fixture_store("remote-bounds");
+    let local_codex = temporary.path();
     let local_bin = local_codex.join("bin");
     fs::create_dir_all(&local_bin).unwrap();
 
-    let big = failing_transport(
+    let (_big_directory, big) = failing_transport(
         "big",
         "#!/bin/sh\nhead -c 200000 /dev/zero | tr '\\0' 'x'\nexit 0\n",
     );
     let mut command = tapes();
     command.args(["list", "--remote", "replica-host", "--json"]);
-    with_fixture_env(&mut command, &local_codex, &local_home, &local_bin);
+    with_fixture_env(&mut command, local_codex, &local_home, &local_bin);
     command.env("TAPES_SSH", &big);
     command.env("TAPES_REMOTE_MAX_BYTES", "512");
     let output = command.output().unwrap();
@@ -12516,11 +12496,12 @@ fn a_remote_answer_is_bounded_in_bytes_and_wall_clock() {
         "{error}"
     );
     assert!(error.contains("TAPES_REMOTE_MAX_BYTES"), "{error}");
-    let _ = fs::remove_file(&big);
 
-    let pid_file = std::env::temp_dir().join(format!("tapes-remote-hang-{}", std::process::id()));
-    let _ = fs::remove_file(&pid_file);
-    let hang = failing_transport(
+    let pid_root = TemporaryDirectory::new(
+        std::env::temp_dir().join(format!("tapes-remote-hang-{}", std::process::id())),
+    );
+    let pid_file = pid_root.path().join("pid");
+    let (_hang_directory, hang) = failing_transport(
         "hang",
         &format!(
             "#!/bin/sh\nprintf '%s\\n' \"$$\" > '{}'\nsleep 30\n",
@@ -12529,7 +12510,7 @@ fn a_remote_answer_is_bounded_in_bytes_and_wall_clock() {
     );
     let mut command = tapes();
     command.args(["list", "--remote", "replica-host", "--json"]);
-    with_fixture_env(&mut command, &local_codex, &local_home, &local_bin);
+    with_fixture_env(&mut command, local_codex, &local_home, &local_bin);
     command.env("TAPES_SSH", &hang);
     command.env("TAPES_REMOTE_DEADLINE_MS", "200");
     let started = Instant::now();
@@ -12543,9 +12524,6 @@ fn a_remote_answer_is_bounded_in_bytes_and_wall_clock() {
     assert!(error.contains("no answer within 200ms"), "{error}");
     assert!(error.contains("TAPES_REMOTE_DEADLINE_MS"), "{error}");
     assert_process_gone(&pid_file);
-    let _ = fs::remove_file(&hang);
-    let _ = fs::remove_file(&pid_file);
-    let _ = fs::remove_dir_all(local_codex);
 }
 
 /// The transport hands the remote shell one quoted command, so an argument
@@ -12555,14 +12533,15 @@ fn a_remote_answer_is_bounded_in_bytes_and_wall_clock() {
 fn a_remote_query_carries_the_callers_arguments_intact() {
     let replica = RemoteReplica::new("quoting");
     replica.record(CODEX_ONE_FILE, CODEX_SESSION_ONE);
-    let (local_codex, local_home) = fixture_store("remote-quoting-local");
+    let (temporary, local_home) = fixture_store("remote-quoting-local");
+    let local_codex = temporary.path();
     let local_bin = local_codex.join("bin");
     fs::create_dir_all(&local_bin).unwrap();
     let title = "Title with 'quotes', $HOME, `ticks`, and \"double\"";
 
     let output = run_against_replica(
         &replica,
-        &local_codex,
+        local_codex,
         &local_home,
         &local_bin,
         &[
@@ -12599,9 +12578,6 @@ fn a_remote_query_carries_the_callers_arguments_intact() {
         "the remote shell expanded a caller's argument: {error}"
     );
     assert!(!error.contains("/home/"), "{error}");
-
-    let _ = fs::remove_dir_all(&replica.root);
-    let _ = fs::remove_dir_all(local_codex);
 }
 
 /// An export is run by the replica, which writes the bundles on its own
@@ -12612,7 +12588,8 @@ fn export_remote_runs_the_replica_export_and_tags_every_path() {
     let replica = RemoteReplica::new("export");
     replica.record(CODEX_ONE_FILE, CODEX_SESSION_ONE);
     replica.record(CODEX_TWO_FILE, CODEX_SESSION_TWO);
-    let (local_codex, local_home) = fixture_store("remote-export-local");
+    let (temporary, local_home) = fixture_store("remote-export-local");
+    let local_codex = temporary.path();
     let local_bin = local_codex.join("bin");
     fs::create_dir_all(&local_bin).unwrap();
     let bundles = replica.root.join("bundles");
@@ -12620,7 +12597,7 @@ fn export_remote_runs_the_replica_export_and_tags_every_path() {
 
     let output = run_against_replica(
         &replica,
-        &local_codex,
+        local_codex,
         &local_home,
         &local_bin,
         &[
@@ -12681,7 +12658,7 @@ fn export_remote_runs_the_replica_export_and_tags_every_path() {
     // manifest that spans them.
     let output = run_against_replica(
         &replica,
-        &local_codex,
+        local_codex,
         &local_home,
         &local_bin,
         &[
@@ -12719,7 +12696,7 @@ fn export_remote_runs_the_replica_export_and_tags_every_path() {
     );
 
     // A replica that cannot answer refuses and prints no path.
-    let unreachable = failing_transport(
+    let (_unreachable_directory, unreachable) = failing_transport(
         "export-unreachable",
         "#!/bin/sh\necho 'ssh: connect to host replica-host port 22: Connection refused' >&2\nexit 255\n",
     );
@@ -12732,7 +12709,7 @@ fn export_remote_runs_the_replica_export_and_tags_every_path() {
         "--bundle",
         bundles.to_str().unwrap(),
     ]);
-    with_fixture_env(&mut command, &local_codex, &local_home, &local_bin);
+    with_fixture_env(&mut command, local_codex, &local_home, &local_bin);
     command.env("TAPES_SSH", &unreachable);
     let output = command.output().unwrap();
     assert!(!output.status.success());
@@ -12743,9 +12720,6 @@ fn export_remote_runs_the_replica_export_and_tags_every_path() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let _ = fs::remove_file(&unreachable);
-    let _ = fs::remove_dir_all(&replica.root);
-    let _ = fs::remove_dir_all(local_codex);
 }
 
 /// A replica answers for another machine's stores, so the flags that name
@@ -12753,7 +12727,8 @@ fn export_remote_runs_the_replica_export_and_tags_every_path() {
 /// refused by name rather than forwarded.
 #[test]
 fn remote_refuses_the_selectors_that_name_this_machine() {
-    let (local_codex, local_home) = fixture_store("remote-conflicts");
+    let (temporary, local_home) = fixture_store("remote-conflicts");
+    let local_codex = temporary.path();
     let local_bin = local_codex.join("bin");
     fs::create_dir_all(&local_bin).unwrap();
 
@@ -12785,7 +12760,7 @@ fn remote_refuses_the_selectors_that_name_this_machine() {
     ] {
         let mut command = tapes();
         command.args(&args);
-        with_fixture_env(&mut command, &local_codex, &local_home, &local_bin);
+        with_fixture_env(&mut command, local_codex, &local_home, &local_bin);
         let output = command.output().unwrap();
         assert!(!output.status.success(), "{args:?}");
         let error = String::from_utf8_lossy(&output.stderr);
@@ -12797,7 +12772,7 @@ fn remote_refuses_the_selectors_that_name_this_machine() {
 
     let mut command = tapes();
     command.args(["show", "self", "--remote", "replica-host"]);
-    with_fixture_env(&mut command, &local_codex, &local_home, &local_bin);
+    with_fixture_env(&mut command, local_codex, &local_home, &local_bin);
     command.env("CODEX_THREAD_ID", CODEX_ONE_ID);
     let output = command.output().unwrap();
     assert!(!output.status.success());
@@ -12813,7 +12788,7 @@ fn remote_refuses_the_selectors_that_name_this_machine() {
     // different contract.
     let mut command = tapes();
     command.args(["export", CODEX_ONE_ID, "--remote", "replica-host", "--json"]);
-    with_fixture_env(&mut command, &local_codex, &local_home, &local_bin);
+    with_fixture_env(&mut command, local_codex, &local_home, &local_bin);
     let output = command.output().unwrap();
     assert!(!output.status.success());
     assert!(
@@ -12821,19 +12796,18 @@ fn remote_refuses_the_selectors_that_name_this_machine() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-
-    let _ = fs::remove_dir_all(local_codex);
 }
 
 #[test]
 fn session_commands_accept_harness_scoped_prefixes() {
-    let (codex_home, home) = fixture_store("harness-prefix");
+    let (temporary, home) = fixture_store("harness-prefix");
+    let codex_home = temporary.path();
     for view in [
         "show", "brief", "usage", "stats", "lineage", "events", "capture",
     ] {
         let mut command = tapes();
         command.args([view, "00000000-0000", "--harness", "codex", "--json"]);
-        with_fixture_env(&mut command, &codex_home, &home, &codex_home);
+        with_fixture_env(&mut command, codex_home, &home, codex_home);
         let output = command.output().unwrap();
         assert!(
             output.status.success(),
@@ -12845,20 +12819,20 @@ fn session_commands_accept_harness_scoped_prefixes() {
     }
     let mut command = tapes();
     command.args(["capture", "00000000-0000", "--harness", "claude", "--json"]);
-    with_fixture_env(&mut command, &codex_home, &home, &codex_home);
+    with_fixture_env(&mut command, codex_home, &home, codex_home);
     let output = command.output().unwrap();
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("was not found"));
-    fs::remove_dir_all(codex_home).unwrap();
 }
 
 #[test]
 fn id_lookup_refuses_an_unknown_harness() {
-    let (codex_home, home) = fixture_store("unknown-harness");
+    let (temporary, home) = fixture_store("unknown-harness");
+    let codex_home = temporary.path();
     for view in ["show", "stats", "capture"] {
         let mut command = tapes();
         command.args([view, "synthetic-prefix", "--harness", "foo", "--json"]);
-        with_fixture_env(&mut command, &codex_home, &home, &codex_home);
+        with_fixture_env(&mut command, codex_home, &home, codex_home);
         let output = command.output().unwrap();
         assert!(!output.status.success(), "{view}");
         assert!(
@@ -12871,7 +12845,6 @@ fn id_lookup_refuses_an_unknown_harness() {
             "{view}"
         );
     }
-    fs::remove_dir_all(codex_home).unwrap();
 }
 
 #[test]
@@ -13030,8 +13003,10 @@ fn claude_content_digests_survive_bounded_and_streamed_events_and_exports() {
 
 #[test]
 fn install_pi_writes_a_managed_extension_once_and_uninstall_removes_only_it() {
-    let root = std::env::temp_dir().join(format!("tapes-cli-install-pi-{}", std::process::id()));
-    let _ = fs::remove_dir_all(&root);
+    let temporary = TemporaryDirectory::new(
+        std::env::temp_dir().join(format!("tapes-cli-install-pi-{}", std::process::id())),
+    );
+    let root = temporary.path();
     let home = root.join("home");
     let run = |agent_dir: &str, args: &[&str]| {
         tapes()
@@ -13119,12 +13094,12 @@ fn install_pi_writes_a_managed_extension_once_and_uninstall_removes_only_it() {
             .file_name()
             .to_string_lossy()
             .starts_with('.')));
-    let _ = fs::remove_dir_all(&root);
 }
 
 #[test]
 fn show_turn_chars_caps_unicode_text_for_bounded_full_and_supplied_reads() {
-    let (codex_home, home) = fixture_store("turn-chars");
+    let (temporary, home) = fixture_store("turn-chars");
+    let codex_home = temporary.path();
     let id = "00000000-0000-0000-0000-000000000001";
     let path = codex_home
         .join("sessions/2026/01/01")
@@ -13173,7 +13148,7 @@ fn show_turn_chars_caps_unicode_text_for_bounded_full_and_supplied_reads() {
                 }
                 _ => {}
             }
-            with_fixture_env(&mut command, &codex_home, &home, &codex_home);
+            with_fixture_env(&mut command, codex_home, &home, codex_home);
             let output = command.output().unwrap();
             assert!(
                 output.status.success(),
@@ -13194,30 +13169,30 @@ fn show_turn_chars_caps_unicode_text_for_bounded_full_and_supplied_reads() {
     }
     let mut command = tapes();
     command.args(["show", id, "--turn-chars", "2"]);
-    with_fixture_env(&mut command, &codex_home, &home, &codex_home);
+    with_fixture_env(&mut command, codex_home, &home, codex_home);
     let output = command.output().unwrap();
     assert!(output.status.success());
     assert!(String::from_utf8_lossy(&output.stdout).contains("aé\n[2 characters omitted]"));
     let mut command = tapes();
     command.args(["show", id, "--json"]);
-    with_fixture_env(&mut command, &codex_home, &home, &codex_home);
+    with_fixture_env(&mut command, codex_home, &home, codex_home);
     let output = command.output().unwrap();
     let value: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(value["turns"][0]["text"], text);
     assert!(value["turns"][0].get("text_truncated").is_none());
-    fs::remove_dir_all(codex_home).unwrap();
 }
 
 #[test]
 fn show_turn_chars_travels_to_the_replica_and_retains_cap_evidence() {
     let replica = RemoteReplica::new("turn-chars");
     replica.record(CODEX_ONE_FILE, CODEX_SESSION_ONE);
-    let (local_codex, local_home) = fixture_store("remote-turn-chars");
+    let (temporary, local_home) = fixture_store("remote-turn-chars");
+    let local_codex = temporary.path();
     let output = run_against_replica(
         &replica,
-        &local_codex,
+        local_codex,
         &local_home,
-        &local_codex,
+        local_codex,
         &[
             "show",
             CODEX_ONE_ID,
@@ -13243,8 +13218,6 @@ fn show_turn_chars_travels_to_the_replica_and_retains_cap_evidence() {
     assert_eq!(value["turns"][0]["text_truncated"], true);
     assert!(value["turns"][0]["text_chars"].as_u64().unwrap() > 2);
     assert!(replica.queried()[0].contains("'--turn-chars' '2'"));
-    fs::remove_dir_all(replica.root).unwrap();
-    fs::remove_dir_all(local_codex).unwrap();
 }
 
 #[test]
@@ -13294,7 +13267,8 @@ fn timeline_projects_fixture_turns_without_payloads() {
 #[test]
 fn timeline_omits_unrecorded_timestamps() {
     let id = "00000000-0000-0000-0000-000000000001";
-    let (codex_home, home) = fixture_store("timeline-no-timestamp");
+    let (temporary, home) = fixture_store("timeline-no-timestamp");
+    let codex_home = temporary.path();
     let recording = CODEX_SESSION_ONE
         .lines()
         .map(|line| {
@@ -13314,7 +13288,7 @@ fn timeline_omits_unrecorded_timestamps() {
         }
         with_fixture_env(
             &mut command,
-            &codex_home,
+            codex_home,
             &home,
             Path::new("/definitely/missing"),
         );
@@ -13332,7 +13306,6 @@ fn timeline_omits_unrecorded_timestamps() {
             .iter()
             .all(|record| record.as_object().unwrap().len() == 2));
     }
-    fs::remove_dir_all(codex_home).unwrap();
 }
 
 #[test]
@@ -13559,11 +13532,12 @@ fn list_search_turn_depth_reaches_older_supplied_turns() {
 fn remote_list_preserves_search_turn_depth() {
     let replica = RemoteReplica::new("search-depth");
     replica.record(CODEX_ONE_FILE, CODEX_SESSION_ONE);
-    let (codex, home) = fixture_store("remote-search-depth-local");
+    let (temporary, home) = fixture_store("remote-search-depth-local");
+    let codex = temporary.path();
     for (depth, expected) in [("1", 0), ("all", 1)] {
         let output = run_against_replica(
             &replica,
-            &codex,
+            codex,
             &home,
             Path::new("/definitely/missing"),
             &[
@@ -13599,7 +13573,7 @@ fn remote_list_preserves_search_turn_depth() {
 
 #[test]
 fn human_search_diagnostics_group_sessions_by_harness_and_reason() {
-    let transport = failing_transport(
+    let (_transport_directory, transport) = failing_transport(
         "fold-search",
         r#"#!/bin/sh
 cat <<'JSON'
@@ -13650,7 +13624,8 @@ JSON
 
 #[test]
 fn origin_selection_agrees_in_show_and_export() {
-    let (codex_home, home) = fixture_store("operator-origin");
+    let (temporary, home) = fixture_store("operator-origin");
+    let codex_home = temporary.path();
     let pi_root = home.join(".pi/agent/sessions/project");
     fs::create_dir_all(&pi_root).unwrap();
     let fixtures =
@@ -13672,7 +13647,7 @@ fn origin_selection_agrees_in_show_and_export() {
     let invoke = |args: &[&str]| {
         let output = tapes()
             .args(args)
-            .env("CODEX_HOME", &codex_home)
+            .env("CODEX_HOME", codex_home)
             .env("HOME", &home)
             .env("PI_CODING_AGENT_SESSION_DIR", &pi_root)
             .env_remove("PI_CODING_AGENT_DIR")
@@ -13788,7 +13763,6 @@ fn origin_selection_agrees_in_show_and_export() {
     let view: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(view["turns"].as_array().unwrap().len(), 1);
     assert_eq!(view["turns"][0]["ordinal"], 1);
-    let _ = fs::remove_dir_all(codex_home);
 }
 
 #[test]
@@ -13990,8 +13964,10 @@ fn artifact_reads_only_confined_persisted_results() {
 
 #[test]
 fn opencode_integration_preserves_foreign_files_and_uses_config_directory() {
-    let root = std::env::temp_dir().join(format!("tapes-opencode-install-{}", std::process::id()));
-    let _ = fs::remove_dir_all(&root);
+    let temporary = TemporaryDirectory::new(
+        std::env::temp_dir().join(format!("tapes-opencode-install-{}", std::process::id())),
+    );
+    let root = temporary.path();
     let config = root.join("config");
     let plugin = config.join("plugins/tapes-launch.ts");
     let run = |action: &str| {
@@ -14027,7 +14003,6 @@ fn opencode_integration_preserves_foreign_files_and_uses_config_directory() {
     fs::create_dir(&plugin).unwrap();
     assert!(!run("install").status.success());
     assert!(!run("uninstall").status.success());
-    fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
@@ -14359,13 +14334,14 @@ fn locate_reports_outcomes_and_refuses_only_an_unreadable_input() {
     let bundle_arg = bundle.to_str().unwrap();
     let id = "00000000-0000-0000-0000-000000000001";
     // One store for every run: rebuilding it would replace the frozen file.
-    let (codex_home, home) = fixture_store("locate");
+    let (temporary, home) = fixture_store("locate");
+    let codex_home = temporary.path();
     let fixture_command = |_: &str, args: &[&str]| {
         let mut command = tapes();
         command.args(args);
         with_fixture_env(
             &mut command,
-            &codex_home,
+            codex_home,
             &home,
             Path::new("/definitely/missing"),
         );
@@ -14434,5 +14410,4 @@ fn locate_reports_outcomes_and_refuses_only_an_unreadable_input() {
         ],
     );
     assert_eq!(output.status.code(), Some(1), "{output:?}");
-    fs::remove_dir_all(codex_home).unwrap();
 }

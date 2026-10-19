@@ -289,14 +289,12 @@ mod tests {
 
     #[test]
     fn staging_never_reuses_an_existing_name() {
-        let root = std::env::temp_dir().join(format!("tapes-stage-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&root);
-        fs::create_dir_all(&root).unwrap();
-        let first = stage(&root, "one").unwrap();
-        let second = stage(&root, "two").unwrap();
+        let temporary = tempfile::TempDir::with_prefix("tapes-stage-").unwrap();
+        let root = temporary.path();
+        let first = stage(root, "one").unwrap();
+        let second = stage(root, "two").unwrap();
         assert_ne!(first, second);
         assert_eq!(fs::read_to_string(&first).unwrap(), "one");
         assert_eq!(fs::read_to_string(&second).unwrap(), "two");
-        let _ = fs::remove_dir_all(&root);
     }
 }
