@@ -655,10 +655,13 @@ PROBE BEFORE EXPORTING
   a subscription; a Codex `model_provider` other than `openai` bills per
   token; a Claude `api-request` record carrying the `oauth-2025-04-20`
   beta, or a `quotaLimits` refusal naming a plan quota, is a subscription,
-  and one sent without that beta bills per token; a pi or OpenCode
-  recording names no billing. A span or window share is billed as its
-  session is. A subscription pays no
-  long-context surcharge; billing the recording establishes neither way is
+  and one sent without that beta bills per token; a pi recording whose
+  every token-carrying event is a request on the `openai-codex-responses`
+  API, which takes only a ChatGPT account's sign-in, is a subscription; any
+  other pi recording, a compaction or tool result naming no API included,
+  and every OpenCode recording name no billing. A span or window share is
+  billed as its session is. A subscription pays no long-context surcharge;
+  billing the recording establishes neither way is
   priced between base and surcharged rates, its categories
   billing-unestablished.
   Each figure — a session, each model of `by_model`, a pi `consumption`, a

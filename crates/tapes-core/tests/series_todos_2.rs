@@ -1,6 +1,7 @@
 //! A Claude id lookup answers from identities a walk reads in filenames and
 //! headers, so a miss does not depend on unrelated live recordings, and a
-//! recording that changes under a read is read again.
+//! recording that changes under a read is read again. A pi recording whose
+//! requests all went through a ChatGPT sign-in is billed by subscription.
 
 use std::fs::{self, OpenOptions};
 use std::io::Write;
@@ -11,9 +12,11 @@ use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use agent_tapes_core::backend::{claude::ClaudeBackend, Backend};
-use agent_tapes_core::resolve_session;
+use agent_tapes_core::backend::{claude::ClaudeBackend, pi::PiBackend, Backend, Query};
+use agent_tapes_core::pricing::{self, PriceTable};
+use agent_tapes_core::{resolve_session, usage_full_with_backends, usage_with_backends, Selection};
 use agent_tapes_discovery::ResolveError;
+use serde_json::{json, Value};
 
 const LIVE: &str = "6f1d2c3b-4a59-4e68-9b7a-1c2d3e4f5a6b";
 const TARGET: &str = "0a9b8c7d-6e5f-4a3b-8c2d-1e0f9a8b7c6d";
@@ -234,5 +237,166 @@ fn an_uninspectable_candidate_keeps_a_miss_from_reading_as_absence() {
             panic!("expected incomplete coverage, got {outcome:?}")
         }
         Err(_) => {}
+    }
+}
+
+// --- pi billing --------------------------------------------------------------
+
+const GPT_TABLE: &str = r#"
+schema = "tapes-price-table/2"
+currency = "USD"
+
+[[models]]
+id = "gpt-6-fixture"
+effective = 2026-10-19
+source = "fixture"
+per_million = { uncached_input = 2.0, cache_read = 0.2, cache_write_5m = 2.5, output = 10.0 }
+
+[models.long_context]
+above_prompt_tokens = 272000
+prompt_tokens = ["uncached_input", "cache_read", "cache_write"]
+multipliers = { uncached_input = 2.0, cache_read = 2.0, cache_write_5m = 2.0, output = 1.5 }
+"#;
+
+const PI_ID: &str = "019f0000-0000-7000-8000-0000000000f1";
+
+// A 300K-prompt request (100K uncached, 200K read, 1K output) at base and
+// surcharged rates, and a 50K one (10K uncached, 40K read, 500 output)
+// below the threshold.
+const LARGE_BASE: f64 = (200_000.0 + 40_000.0 + 10_000.0) / 1e6;
+const LARGE_SURCHARGED: f64 = (400_000.0 + 80_000.0 + 15_000.0) / 1e6;
+const SMALL: f64 = (20_000.0 + 8_000.0 + 5_000.0) / 1e6;
+
+fn pi_usage(input: u64, read: u64, output: u64) -> Value {
+    json!({"input": input, "output": output, "cacheRead": read, "cacheWrite": 0, "reasoning": 0,
+           "totalTokens": input + read + output,
+           "cost": {"input": 0.0, "output": 0.0, "cacheRead": 0.0, "cacheWrite": 0.0, "total": 0.0}})
+}
+
+/// A pi session, as pi writes one, of a large and a small request through
+/// `provider`'s `api`, with `extra` entries after them.
+fn pi_session(store: &Store, provider: &str, api: &str, extra: &[Value]) {
+    let assistant = |id: &str, parent: &str, usage: Value| {
+        json!({"type": "message", "id": id, "parentId": parent,
+               "timestamp": "2026-10-19T10:00:30.000Z",
+               "message": {"role": "assistant", "content": [{"type": "text", "text": "Done."}],
+                           "api": api, "provider": provider, "model": "gpt-6-fixture",
+                           "usage": usage, "stopReason": "stop", "timestamp": 1_791_000_000_000_u64,
+                           "responseId": format!("resp_{id}")}})
+    };
+    let user = |id: &str, parent: &str| {
+        json!({"type": "message", "id": id, "parentId": parent,
+               "timestamp": "2026-10-19T10:00:01.000Z",
+               "message": {"role": "user", "content": [{"type": "text", "text": "Survey."}],
+                           "timestamp": 1_791_000_000_000_u64}})
+    };
+    let mut lines = vec![
+        json!({"type": "session", "version": 3, "id": PI_ID,
+               "timestamp": "2026-10-19T10:00:00.000Z", "cwd": "/fixtures/project"}),
+        json!({"type": "model_change", "id": "model-1", "parentId": null,
+               "timestamp": "2026-10-19T10:00:00.000Z", "provider": provider,
+               "modelId": "gpt-6-fixture"}),
+        user("user-1", "model-1"),
+        assistant("assistant-1", "user-1", pi_usage(100_000, 200_000, 1_000)),
+        user("user-2", "assistant-1"),
+        assistant("assistant-2", "user-2", pi_usage(10_000, 40_000, 500)),
+    ];
+    lines.extend_from_slice(extra);
+    let body: String = lines.iter().map(|line| format!("{line}\n")).collect();
+    let directory = store.0.join("--fixtures-project--");
+    fs::create_dir_all(&directory).unwrap();
+    fs::write(
+        directory.join(format!("2026-10-19T10-00-00-000Z_{PI_ID}.jsonl")),
+        body,
+    )
+    .unwrap();
+}
+
+/// The session's estimate from the bounded and the whole usage view, and
+/// as a listing prices it.
+fn pi_estimates(store: &Store) -> [Value; 3] {
+    let table = PriceTable::parse(GPT_TABLE).unwrap();
+    let backend = || -> Box<dyn Backend> { Box::new(PiBackend::new(&store.0)) };
+    let mut view = usage_with_backends(&[backend()], Selection::Id(PI_ID)).unwrap();
+    pricing::price_view(&mut view, &table);
+    let mut whole = usage_full_with_backends(&[backend()], Selection::Id(PI_ID)).unwrap();
+    pricing::price_view(&mut whole, &table);
+    let mut listed = backend()
+        .list(&Query::unscoped(5))
+        .unwrap()
+        .sessions
+        .into_iter()
+        .find(|session| session.id == PI_ID)
+        .unwrap();
+    listed.price(&table);
+    [
+        serde_json::to_value(view).unwrap()["list_price_estimate"].clone(),
+        serde_json::to_value(whole).unwrap()["list_price_estimate"].clone(),
+        serde_json::to_value(&listed.list_price_estimate).unwrap(),
+    ]
+}
+
+fn close(left: &Value, right: f64) -> bool {
+    left.as_f64()
+        .is_some_and(|left| (left - right).abs() < 1e-9)
+}
+
+/// Claim: a pi session whose requests all went through the
+/// `openai-codex-responses` API, a ChatGPT sign-in, is billed by
+/// subscription, so its request above 272K pays base rates; the estimate is
+/// complete and names that billing and its evidence. Rejects a pi session
+/// priced between base and surcharged rates as billing-unestablished.
+#[test]
+fn a_pi_chatgpt_session_above_the_threshold_pays_base_rates() {
+    let store = Store::new("pi-chatgpt");
+    pi_session(&store, "openai-codex", "openai-codex-responses", &[]);
+    for estimate in pi_estimates(&store) {
+        assert!(
+            close(&estimate["amount"], LARGE_BASE + SMALL),
+            "{estimate:#}"
+        );
+        assert_eq!(
+            estimate["billing"],
+            json!([{"terms": "subscription",
+                    "evidence": "pi `openai-codex-responses` requests, a ChatGPT sign-in"}])
+        );
+        assert!(
+            estimate.get("measurement_completeness").is_none(),
+            "{estimate:#}"
+        );
+    }
+}
+
+/// Claim: a pi session establishes no billing when a token-carrying event
+/// is not a ChatGPT sign-in's request: an `anthropic` request, which may be
+/// an OAuth sign-in or an API key, or a compaction, which names no API. Its
+/// request above 272K is bounded billing-unestablished. Rejects a
+/// subscription read from some of a session's requests.
+#[test]
+fn a_pi_session_with_any_other_token_event_establishes_no_billing() {
+    let compaction = json!({"type": "compaction", "id": "compaction-1", "parentId": "assistant-2",
+        "timestamp": "2026-10-19T10:05:00.000Z", "summary": "Summary.",
+        "firstKeptEntryId": "user-2", "tokensBefore": 300_000, "details": {},
+        "usage": pi_usage(5_000, 0, 500), "fromHook": false});
+    for (label, provider, api, extra) in [
+        ("pi-anthropic", "anthropic", "anthropic-messages", vec![]),
+        (
+            "pi-compaction",
+            "openai-codex",
+            "openai-codex-responses",
+            vec![compaction],
+        ),
+    ] {
+        let store = Store::new(label);
+        pi_session(&store, provider, api, &extra);
+        for estimate in pi_estimates(&store) {
+            assert!(estimate.get("amount").is_none(), "{label}: {estimate:#}");
+            assert!(
+                estimate["at_most"].as_f64().unwrap() - estimate["at_least"].as_f64().unwrap()
+                    > (LARGE_SURCHARGED - LARGE_BASE) / 2.0,
+                "{label}: {estimate:#}"
+            );
+            assert_eq!(estimate["billing"][0]["terms"], "unestablished", "{label}");
+        }
     }
 }

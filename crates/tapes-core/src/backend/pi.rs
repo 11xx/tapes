@@ -838,6 +838,7 @@ impl PiRecording {
     ) -> Session {
         let entries = &self.entries;
         let mut consumption = PiConsumption::default();
+        let mut billing = PiBilling::default();
         for (position, entry) in entries.iter().enumerate() {
             if !include(position) {
                 continue;
@@ -845,6 +846,7 @@ impl PiRecording {
             if let Some(consumed) = &entry.consumed {
                 let id = entry.id.as_deref();
                 consumption.observe(id, consumed, id.is_some_and(|id| self.seen.contains(id)));
+                billing.observe(consumed);
             }
             consumption.unrecognized_usage += usize::from(entry.unread_usage);
         }
@@ -916,6 +918,7 @@ impl PiRecording {
             consumption,
             copy_evidence: Some(copies).filter(|copies| !copies.is_empty()),
             request_uses: usage.uses,
+            billing: billing.finish(),
             ..UsageDetail::default()
         }
         .into_option();
@@ -1177,10 +1180,12 @@ fn apply_recording_usage(
         .rfind(|(value, _)| value["type"] != "session")
         .map(|(_, span)| span.end);
     let mut consumption = PiConsumption::default();
+    let mut billing = PiBilling::default();
     for entry in &read.values {
         if let Some(consumed) = pi_consumed(entry) {
             let id = entry["id"].as_str();
             consumption.observe(id, &consumed, id.is_some_and(|id| active_ids.contains(id)));
+            billing.observe(&consumed);
         }
         consumption.unrecognized_usage += usize::from(pi_unread_usage(entry));
     }
@@ -1214,6 +1219,7 @@ fn apply_recording_usage(
         consumption,
         copy_evidence: Some(copies).filter(|copies| !copies.is_empty()),
         request_uses: usage.uses,
+        billing: billing.finish(),
         ..UsageDetail::default()
     }
     .into_option();
@@ -1508,6 +1514,58 @@ struct PiConsumed {
     response: Option<(String, String)>,
     /// The request ended on an error or an abort, so its usage stopped with it.
     stopped: bool,
+    /// The wire API an assistant message names, which decides how its
+    /// request authenticated. Kept out of the event's digest, so an event's
+    /// key depends only on what it consumed.
+    #[serde(skip)]
+    api: Option<String>,
+}
+
+/// The API pi's `openai-codex` provider speaks. It posts to the ChatGPT
+/// backend and refuses a bearer token that is not a ChatGPT account's.
+const PI_CHATGPT_API: &str = "openai-codex-responses";
+
+/// What a pi recording says about its billing, over the events that carry
+/// tokens: whether each was a request through a ChatGPT sign-in.
+#[derive(Default)]
+struct PiBilling {
+    chatgpt: bool,
+    other: bool,
+}
+
+impl PiBilling {
+    fn observe(&mut self, consumed: &PiConsumed) {
+        let usage = &consumed.usage;
+        let carries_tokens = [
+            usage.input,
+            usage.output,
+            usage.reasoning,
+            usage.cache_read,
+            usage.cache_write,
+            usage.total_tokens,
+        ]
+        .into_iter()
+        .any(|count| count.unwrap_or(0) > 0);
+        if !carries_tokens {
+            return;
+        }
+        if consumed.api.as_deref() == Some(PI_CHATGPT_API) {
+            self.chatgpt = true;
+        } else {
+            self.other = true;
+        }
+    }
+
+    /// A recording whose every token-carrying event is a ChatGPT sign-in's
+    /// request draws on a ChatGPT plan's quota. Any other event, including
+    /// a compaction or tool result that names no API, establishes nothing.
+    fn finish(self) -> Option<crate::pricing::Billing> {
+        (self.chatgpt && !self.other).then(|| {
+            crate::pricing::Billing::subscription(format!(
+                "pi `{PI_CHATGPT_API}` requests, a ChatGPT sign-in"
+            ))
+        })
+    }
 }
 
 fn pi_consumed(entry: &Value) -> Option<PiConsumed> {
@@ -1549,6 +1607,9 @@ fn pi_consumed(entry: &Value) -> Option<PiConsumed> {
         .map(str::to_owned),
         response,
         stopped: assistant && matches!(message["stopReason"].as_str(), Some("error" | "aborted")),
+        api: assistant
+            .then(|| message["api"].as_str().map(str::to_owned))
+            .flatten(),
     })
 }
 
