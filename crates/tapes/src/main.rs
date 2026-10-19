@@ -1961,7 +1961,8 @@ enum Command {
         /// or window share billed as its whole recording: a subscription
         /// pays no surcharge, and unestablished billing is priced between
         /// base and surcharged rates with billing-unestablished. A request no
-        /// row is in effect for is outside-validity. Without the flag the table is the file
+        /// row is in effect for, or usage of no known time a row may not
+        /// cover, is outside-validity. Without the flag the table is the file
         /// TAPES_PRICES names, then $XDG_CONFIG_HOME/tapes/prices.toml (or
         /// ~/.config/tapes/prices.toml). A table named here or by
         /// TAPES_PRICES that is missing or invalid refuses; an invalid default

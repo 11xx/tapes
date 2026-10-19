@@ -648,7 +648,10 @@ PROBE BEFORE EXPORTING
   row), is priced between every rate it could pay, as `at_least` and
   `at_most`, its categories qualified request-terms-unknown, and never
   reads complete. A request no row of its model is in effect for is
-  unpriced, its categories outside-validity. Each recording's billing comes
+  unpriced, its categories outside-validity; usage of no known time that
+  the rows in effect leave part of the figure's span uncovered for is
+  priced by the rows that cover it, its categories outside-validity too.
+  Each recording's billing comes
   from what it records, named with its evidence in the estimate's
   `billing` wherever a used row has a long-context term: a Codex
   `rate_limits` window reporting a used percent is a ChatGPT plan's quota,

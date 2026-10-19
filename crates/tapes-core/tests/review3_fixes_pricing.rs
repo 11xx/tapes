@@ -477,3 +477,148 @@ fn a_span_takes_billing_from_the_whole_recording() {
         );
     }
 }
+
+/// A recorded total of one million output tokens over a recording that
+/// spans 10:00 to 10:02, priced by a single row of $10 per million output
+/// that is in effect until `until`.
+fn untimed_estimates(until: &str) -> [Value; 3] {
+    let store = Store::new("untimed");
+    store.write(
+        &claude_path(),
+        &[
+            user("user-1", "2026-10-19T10:00:00Z", "Survey the fixture."),
+            json!({"type": "cost-state", "sessionId": CLAUDE_ID, "timestamp": "2026-10-19T10:01:00Z",
+                   "totalCostUSD": 10.0, "modelUsage": {"claude-haiku-5-5": {
+                       "inputTokens": 0, "outputTokens": 1_000_000, "cacheReadInputTokens": 0,
+                       "cacheCreationInputTokens": 0, "webSearchRequests": 0, "costUSD": 10.0}}}),
+            user("user-2", "2026-10-19T10:02:00Z", "Again."),
+        ],
+    );
+    let table = PriceTable::parse(&format!(
+        r#"
+schema = "tapes-price-table/2"
+currency = "USD"
+
+[[models]]
+id = "claude-haiku-5-5"
+effective = 2026-10-18
+source = "fixture"
+effective_until = {until}
+per_million = {{ uncached_input = 1.0, cache_read = 0.1, cache_write_5m = 1.25, cache_write_1h = 2.0, output = 10.0 }}
+"#
+    ))
+    .unwrap();
+    estimates(&store, &table)
+}
+
+/// Claim: usage whose requests are unknown, over a recording from 10:00 to
+/// 10:02, priced by a row that stops being in effect at 10:01, says its
+/// output may fall outside the row's validity; under a row in effect
+/// throughout, the same usage is a complete $10. Rejects a complete price
+/// whenever a row overlaps the recording at all.
+#[test]
+fn untimed_usage_a_row_may_not_cover_is_outside_validity() {
+    for estimate in untimed_estimates("2026-10-19T10:01:00Z") {
+        assert!(
+            reasons(&estimate, "output").contains(&"outside-validity".to_owned()),
+            "{estimate:#}"
+        );
+    }
+    for estimate in untimed_estimates("2026-10-19T10:05:00Z") {
+        assert!(close(&estimate["amount"], 10.0), "{estimate:#}");
+        assert!(
+            estimate.get("measurement_completeness").is_none(),
+            "{estimate:#}"
+        );
+    }
+}
+
+/// Claim: a request above the threshold with one million cache writes of
+/// unrecorded TTL, under base 5m/1h prices of $1/$2 and surcharged ones of
+/// $1/$4 and no established billing, is priced $1 to $4 and says both
+/// ttl-unrecorded and billing-unestablished. Rejects deciding whether
+/// billing matters by the candidates' lower costs alone, which are equal
+/// here, dropping billing-unestablished.
+#[test]
+fn billing_that_changes_only_the_upper_price_is_unestablished() {
+    let store = Store::new("upper");
+    store.write(
+        &claude_path(),
+        &[
+            user("user-1", "2026-10-19T10:00:00Z", "Survey the fixture."),
+            assistant(
+                "req-writes",
+                "2026-10-19T10:00:10Z",
+                json!({"input_tokens": 0, "cache_read_input_tokens": 0,
+                       "cache_creation_input_tokens": 1_000_000, "output_tokens": 0}),
+            ),
+        ],
+    );
+    let table = PriceTable::parse(
+        r#"
+schema = "tapes-price-table/2"
+currency = "USD"
+
+[[models]]
+id = "claude-haiku-5-5"
+effective = 2026-10-18
+source = "fixture"
+per_million = { uncached_input = 0.10, cache_read = 0.01, cache_write_5m = 1.0, cache_write_1h = 2.0, output = 0.50 }
+
+[models.long_context]
+above_prompt_tokens = 100000
+prompt_tokens = ["uncached_input", "cache_read", "cache_write"]
+multipliers = { cache_write_1h = 2.0 }
+"#,
+    )
+    .unwrap();
+    for estimate in estimates(&store, &table) {
+        assert!(close(&estimate["at_least"], 1.0), "{estimate:#}");
+        assert!(close(&estimate["at_most"], 4.0), "{estimate:#}");
+        let writes = reasons(&estimate, "cache_write");
+        assert!(
+            writes.contains(&"ttl-unrecorded".to_owned()),
+            "{estimate:#}"
+        );
+        assert!(
+            writes.contains(&"billing-unestablished".to_owned()),
+            "{estimate:#}"
+        );
+    }
+}
+
+/// Claim: a dated row that prices no category leaves a request with tokens
+/// in every category without an estimate, as a plain row pricing nothing
+/// does. Rejects reporting an amount of 0 for consumption nothing priced.
+#[test]
+fn a_dated_row_pricing_nothing_gives_no_estimate() {
+    let store = Store::new("unpriced");
+    store.write(
+        &claude_path(),
+        &[
+            user("user-1", "2026-10-19T10:00:00Z", "Survey the fixture."),
+            assistant(
+                "req-all",
+                "2026-10-19T10:00:10Z",
+                haiku_usage(1_000, 2_000, 3_000, 4_000),
+            ),
+        ],
+    );
+    let table = PriceTable::parse(
+        r#"
+schema = "tapes-price-table/2"
+currency = "USD"
+
+[[models]]
+id = "claude-haiku-5-5"
+effective = 2026-10-18
+source = "fixture"
+effective_from = 2026-10-01T00:00:00Z
+per_million = {}
+"#,
+    )
+    .unwrap();
+    for estimate in estimates(&store, &table) {
+        assert!(estimate.is_null(), "{estimate:#}");
+    }
+}

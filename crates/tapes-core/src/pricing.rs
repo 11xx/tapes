@@ -1183,6 +1183,9 @@ fn price_tokens(
         present(sum, MeasurementReason::OutsideValidity);
         return;
     }
+    if at.is_none() && !in_force_throughout(&in_force, terms.from, terms.to) {
+        present(sum, MeasurementReason::OutsideValidity);
+    }
     let mut reasons = BTreeSet::new();
     if at.is_none() && in_force.len() > 1 {
         reasons.insert(MeasurementReason::RequestTermsUnknown);
@@ -1239,7 +1242,7 @@ fn price_tokens(
     let high = costs.iter().map(|cost| cost.high).fold(0.0, f64::max);
     sum.low += low;
     sum.high += high;
-    sum.priced = true;
+    sum.priced |= costs.iter().any(|cost| cost.priced);
     for cost in &costs {
         for category in &cost.missing {
             sum.qualify(category, MeasurementReason::MissingPrice);
@@ -1248,8 +1251,12 @@ fn price_tokens(
             sum.qualify("cache_write", MeasurementReason::TtlUnrecorded);
         }
     }
+    let same = |left: f64, right: f64| {
+        (left - right).abs() <= f64::EPSILON * left.abs().max(right.abs()).max(1.0)
+    };
     let differ = costs.iter().any(|cost| {
-        (cost.low - low).abs() > f64::EPSILON * low.abs().max(1.0)
+        !same(cost.low, costs[0].low)
+            || !same(cost.high, costs[0].high)
             || cost.missing != costs[0].missing
     });
     if differ {
@@ -1259,13 +1266,44 @@ fn price_tokens(
     }
 }
 
+/// Whether `rows` hold, between them, a row in effect at every instant of
+/// `from..=to`, either end open.
+fn in_force_throughout(
+    rows: &[&ModelPrice],
+    from: Option<DateTime<Utc>>,
+    to: Option<DateTime<Utc>>,
+) -> bool {
+    let mut rows = rows.to_vec();
+    rows.sort_by_key(|row| row.effective_from);
+    // Every instant before `reached` is held; `None` is the open past.
+    let mut reached = from;
+    for row in rows {
+        let gap = row
+            .effective_from
+            .is_some_and(|start| reached.is_none_or(|reached| start > reached));
+        if gap {
+            return false;
+        }
+        let Some(until) = row.effective_until else {
+            return true;
+        };
+        if to.is_some_and(|to| until > to) {
+            return true;
+        }
+        reached = Some(reached.map_or(until, |reached| reached.max(until)));
+    }
+    false
+}
+
 /// What tokens cost under one set of rates: an amount, or bounds where cache
-/// writes recorded no TTL, and the categories the rates leave unpriced.
+/// writes recorded no TTL, the categories the rates leave unpriced, and
+/// whether they price any of the tokens, as rates do for tokens of none.
 struct Cost {
     low: f64,
     high: f64,
     missing: Vec<&'static str>,
     ttl_bounded: bool,
+    priced: bool,
 }
 
 fn cost(tokens: &RequestTokens, prices: &CategoryPrices) -> Cost {
@@ -1274,6 +1312,7 @@ fn cost(tokens: &RequestTokens, prices: &CategoryPrices) -> Cost {
         high: 0.0,
         missing: Vec::new(),
         ttl_bounded: false,
+        priced: tokens.is_empty(),
     };
     for (category, amount, price) in [
         (
@@ -1294,6 +1333,7 @@ fn cost(tokens: &RequestTokens, prices: &CategoryPrices) -> Cost {
                 let amount = amount as f64 * price / 1_000_000.0;
                 cost.low += amount;
                 cost.high += amount;
+                cost.priced = true;
             }
             None if !cost.missing.contains(&category) => cost.missing.push(category),
             None => {}
@@ -1306,6 +1346,7 @@ fn cost(tokens: &RequestTokens, prices: &CategoryPrices) -> Cost {
                 cost.low += amount * short.min(long);
                 cost.high += amount * short.max(long);
                 cost.ttl_bounded = true;
+                cost.priced = true;
             }
             _ if !cost.missing.contains(&"cache_write") => cost.missing.push("cache_write"),
             _ => {}
