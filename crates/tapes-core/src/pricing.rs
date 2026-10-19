@@ -19,7 +19,7 @@ use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Context, Result};
-use chrono::{DateTime, NaiveDate, NaiveTime, Utc};
+use chrono::{DateTime, Datelike, NaiveDate, NaiveTime, Utc, Weekday};
 use serde::{Deserialize, Serialize};
 
 use crate::measurement::{MeasurementCompleteness, MeasurementReason};
@@ -114,7 +114,7 @@ impl ModelPrice {
     fn rates_at(&self, at: DateTime<Utc>) -> &CategoryPrices {
         self.time_of_day
             .iter()
-            .find(|window| window.holds(at.time()))
+            .find(|window| window.holds(at))
             .map_or(&self.per_million, |window| &window.per_million)
     }
 }
@@ -198,23 +198,84 @@ impl LongContext {
 }
 
 /// Rates a request pays when its time of day, in UTC, falls in
-/// `from..until`; a window whose `until` is not after `from` runs past
-/// midnight.
+/// `from..until` on a day the window opens on; a window whose `until` is
+/// not after `from` runs past midnight into the next day.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct TimeOfDayRates {
     pub from: NaiveTime,
     pub until: NaiveTime,
     pub per_million: CategoryPrices,
+    /// The UTC days of the week the window opens on; every day when absent.
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "serialize_days"
+    )]
+    pub days: Option<Vec<Weekday>>,
 }
 
 impl TimeOfDayRates {
-    fn holds(&self, time: NaiveTime) -> bool {
-        if self.from < self.until {
-            self.from <= time && time < self.until
+    fn holds(&self, at: DateTime<Utc>) -> bool {
+        let time = at.time();
+        let opened = if self.from < self.until {
+            (self.from <= time && time < self.until).then_some(at.weekday())
+        } else if self.from <= time {
+            Some(at.weekday())
         } else {
-            self.from <= time || time < self.until
-        }
+            (time < self.until).then_some(at.weekday().pred())
+        };
+        opened.is_some_and(|day| self.days.as_ref().is_none_or(|days| days.contains(&day)))
     }
+}
+
+/// The days of the week a price table names, as it names them.
+const DAY_NAMES: [(&str, Weekday); 7] = [
+    ("mon", Weekday::Mon),
+    ("tue", Weekday::Tue),
+    ("wed", Weekday::Wed),
+    ("thu", Weekday::Thu),
+    ("fri", Weekday::Fri),
+    ("sat", Weekday::Sat),
+    ("sun", Weekday::Sun),
+];
+
+fn serialize_days<S: serde::Serializer>(
+    days: &Option<Vec<Weekday>>,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    let names = days.iter().flatten().filter_map(|day| {
+        DAY_NAMES
+            .iter()
+            .find(|(_, named)| named == day)
+            .map(|(name, _)| *name)
+    });
+    serializer.collect_seq(names)
+}
+
+/// A window's days of the week, each named once.
+fn days_of_week(entry: &str, names: &[String]) -> Result<Vec<Weekday>> {
+    if names.is_empty() {
+        return Err(anyhow!(
+            "{entry}: time_of_day days must name at least one day"
+        ));
+    }
+    let mut days = Vec::new();
+    for name in names {
+        let day = DAY_NAMES
+            .iter()
+            .find(|(named, _)| named == name)
+            .map(|(_, day)| *day)
+            .ok_or_else(|| {
+                anyhow!(
+                    "{entry}: time_of_day days are written mon, tue, wed, thu, fri, sat or sun, \
+                     not `{name}`"
+                )
+            })?;
+        if days.contains(&day) {
+            return Err(anyhow!("{entry}: time_of_day days name `{name}` twice"));
+        }
+        days.push(day);
+    }
+    Ok(days)
 }
 
 /// A validated price table.
@@ -270,6 +331,7 @@ struct RawTimeOfDay {
     from: String,
     until: String,
     per_million: CategoryPrices,
+    days: Option<Vec<String>>,
 }
 
 /// Refuse a negative or non-finite price, naming the entry and category.
@@ -406,15 +468,27 @@ impl PriceTable {
                     ));
                 }
                 check_prices(&entry, &window.per_million, "time_of_day price")?;
+                let days = window
+                    .days
+                    .as_deref()
+                    .map(|names| days_of_week(&entry, names))
+                    .transpose()?;
                 let window = TimeOfDayRates {
                     from,
                     until,
                     per_million: window.per_million,
+                    days,
                 };
-                let overlapping = (0..24 * 60).any(|minute| {
-                    let time = NaiveTime::from_hms_opt(minute / 60, minute % 60, 0)
-                        .expect("a minute of the day");
-                    window.holds(time) && windows.iter().any(|held| held.holds(time))
+                // Every minute of a week, from a Monday.
+                let monday = DateTime::<Utc>::from_naive_utc_and_offset(
+                    NaiveDate::from_isoywd_opt(2024, 1, Weekday::Mon)
+                        .and_then(|day| day.and_hms_opt(0, 0, 0))
+                        .expect("a Monday"),
+                    Utc,
+                );
+                let overlapping = (0..7 * 24 * 60).any(|minute| {
+                    let at = monday + chrono::Duration::minutes(minute);
+                    window.holds(at) && windows.iter().any(|held| held.holds(at))
                 });
                 if overlapping {
                     return Err(anyhow!("{entry}: time_of_day windows overlap"));

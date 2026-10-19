@@ -1952,7 +1952,8 @@ enum Command {
         /// beside any cost its harness wrote, never in its place. A /2 row may
         /// carry a long-context rate for the whole request above a prompt
         /// size, for the billing it names (per-token API billing unless it
-        /// says otherwise), UTC time-of-day rates, and an
+        /// says otherwise), UTC time-of-day rates, limited to days of the
+        /// week where a window names them, and an
         /// effective_from..effective_until window; those terms are priced
         /// request by request from the requests the read kept, and between
         /// their rates, with request-terms-unknown, where the figure's

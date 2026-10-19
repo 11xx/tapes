@@ -628,6 +628,9 @@ PROBE BEFORE EXPORTING
       from = "16:30"                   # UTC, inclusive
       until = "00:30"                  # UTC, exclusive; past midnight when
       per_million = { ... }            # not after `from`
+      days = ["mon", "tue", "wed", "thu", "fri"]
+                                       # optional: the UTC days it opens on,
+                                       # mon..sun; every day when left out
 
   A long-context term charges the whole request, every category, once the
   request's prompt — the sum of the categories `prompt_tokens` names —
@@ -636,7 +639,11 @@ PROBE BEFORE EXPORTING
   rates, or its `multipliers` scale them, a category it leaves out keeping
   its rate. It applies to the billing it names, per-token API billing
   unless it says otherwise. A time-of-day window's rates replace the row's
-  for a request made inside it. A row is in effect from `effective_from`
+  for a request made inside it on a UTC day of the week its `days` names,
+  or on any day when it names none; a window past midnight belongs to the
+  day it opens on, so Friday's 22:00 to 02:00 holds early Saturday. Public
+  holidays are not expressed: a window holds on a holiday as on any other
+  day of its weekday. A row is in effect from `effective_from`
   until `effective_until`; one id may name several rows whose windows do
   not meet, so a dated price change is two rows. A /1 table refuses these
   keys, and prices exactly as it always has. A figure is priced by these

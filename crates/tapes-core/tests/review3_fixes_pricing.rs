@@ -622,3 +622,174 @@ per_million = {}
         assert!(estimate.is_null(), "{estimate:#}");
     }
 }
+
+// --- Weekday time-of-day windows ------------------------------------------
+
+const DEEPSEEK_ID: &str = "019f0000-0000-7000-8000-0000000000f9";
+
+/// Off-peak base rates and a peak window from 01:00 to 04:00 UTC that opens
+/// on `days`, where it names any.
+fn deepseek_table(days: &str) -> String {
+    format!(
+        r#"
+schema = "tapes-price-table/2"
+currency = "USD"
+
+[[models]]
+id = "deepseek-v4-pro"
+effective = 2026-10-19
+source = "fixture"
+per_million = {{ uncached_input = 0.66, cache_read = 0.022, output = 1.98 }}
+
+[[models.time_of_day]]
+from = "01:00"
+until = "04:00"
+per_million = {{ uncached_input = 1.32, cache_read = 0.044, output = 3.96 }}
+{days}
+"#
+    )
+}
+
+/// A pi DeepSeek session with one request on Friday 2026-10-16 at 02:00 UTC
+/// and one on Saturday 2026-10-17 at 02:00 UTC.
+fn weekend_session(store: &Store) {
+    let message = |id: &str, parent: &str, stamp: &str, body: Value| {
+        json!({"type": "message", "id": id, "parentId": parent, "timestamp": stamp,
+               "message": body})
+    };
+    let assistant = |millis: u64| {
+        json!({"role": "assistant", "timestamp": millis, "provider": "deepseek",
+               "model": "deepseek-v4-pro", "stopReason": "stop",
+               "usage": {"input": 10_000, "output": 2_000, "cacheRead": 90_000, "cacheWrite": 0,
+                         "totalTokens": 102_000, "cost": {"total": 0.0251}},
+               "content": [{"type": "text", "text": "Done."}]})
+    };
+    let user = |millis: u64, text: &str| {
+        json!({"role": "user", "timestamp": millis, "content": [{"type": "text", "text": text}]})
+    };
+    let friday = at("2026-10-16T02:00:00Z").timestamp_millis() as u64;
+    let saturday = at("2026-10-17T02:00:00Z").timestamp_millis() as u64;
+    store.write(
+        &format!("--fixtures-project--/2026-10-16T02-00-00-000Z_{DEEPSEEK_ID}.jsonl"),
+        &[
+            json!({"type": "session", "version": 3, "id": DEEPSEEK_ID,
+                   "timestamp": "2026-10-16T02:00:00.000Z", "cwd": "/fixtures/project"}),
+            json!({"type": "model_change", "id": "model-1", "parentId": null,
+                   "timestamp": "2026-10-16T02:00:00.000Z", "provider": "deepseek",
+                   "modelId": "deepseek-v4-pro"}),
+            message(
+                "user-1",
+                "model-1",
+                "2026-10-16T02:00:01.000Z",
+                user(friday, "Survey the fixture."),
+            ),
+            message(
+                "assistant-1",
+                "user-1",
+                "2026-10-16T02:00:30.000Z",
+                assistant(friday + 30_000),
+            ),
+            message(
+                "user-2",
+                "assistant-1",
+                "2026-10-17T02:00:01.000Z",
+                user(saturday, "Again."),
+            ),
+            message(
+                "assistant-2",
+                "user-2",
+                "2026-10-17T02:00:30.000Z",
+                assistant(saturday + 30_000),
+            ),
+        ],
+    );
+}
+
+fn weekend_amounts(days: &str) -> Vec<Value> {
+    let store = Store::new("weekdays");
+    weekend_session(&store);
+    let table = PriceTable::parse(&deepseek_table(days)).unwrap();
+    let backend = || {
+        Box::new(agent_tapes_core::backend::pi::PiBackend::new(&store.0)) as Box<dyn Backend>
+    };
+    let mut view = usage_with_backends(&[backend()], Selection::Id(DEEPSEEK_ID)).unwrap();
+    pricing::price_view(&mut view, &table);
+    let mut whole = usage_full_with_backends(&[backend()], Selection::Id(DEEPSEEK_ID)).unwrap();
+    pricing::price_view(&mut whole, &table);
+    [view, whole]
+        .into_iter()
+        .map(|view| serde_json::to_value(view).unwrap()["list_price_estimate"].clone())
+        .collect()
+}
+
+// 10k uncached x 0.66 + 90k read x 0.022 + 2k output x 1.98 off-peak, and
+// twice each at peak.
+const OFF_PEAK: f64 = (6_600.0 + 1_980.0 + 3_960.0) / 1e6;
+
+/// Claim: under a peak window that opens Monday to Friday, a Saturday 02:00
+/// request pays the off-peak base rates while the Friday 02:00 one pays
+/// peak; a window that names no days holds both. Rejects a time-of-day
+/// window that holds every day whatever days it names, which prices the
+/// Saturday request at peak.
+#[test]
+fn a_weekday_window_leaves_a_saturday_request_off_peak() {
+    let weekdays = r#"days = ["mon", "tue", "wed", "thu", "fri"]"#;
+    for estimate in weekend_amounts(weekdays) {
+        assert!(
+            close(&estimate["amount"], 2.0 * OFF_PEAK + OFF_PEAK),
+            "{estimate:#}"
+        );
+        assert!(
+            estimate.get("measurement_completeness").is_none(),
+            "{estimate:#}"
+        );
+    }
+    for estimate in weekend_amounts("") {
+        assert!(
+            close(&estimate["amount"], 4.0 * OFF_PEAK),
+            "{estimate:#}"
+        );
+    }
+}
+
+/// Claim: a window past midnight belongs to the day it opens on, so
+/// Thursday's 22:00 to 02:30 window holds Friday 02:00 and leaves Saturday
+/// 02:00 off-peak. Rejects judging a window's day by the request's own day,
+/// which leaves both off-peak.
+#[test]
+fn a_window_past_midnight_belongs_to_the_day_it_opens_on() {
+    let store = Store::new("past-midnight");
+    weekend_session(&store);
+    let table = PriceTable::parse(
+        &deepseek_table(r#"days = ["thu"]"#)
+            .replace(r#"from = "01:00""#, r#"from = "22:00""#)
+            .replace(r#"until = "04:00""#, r#"until = "02:30""#),
+    )
+    .unwrap();
+    let backend = Box::new(agent_tapes_core::backend::pi::PiBackend::new(&store.0));
+    let mut whole = usage_full_with_backends(&[backend], Selection::Id(DEEPSEEK_ID)).unwrap();
+    pricing::price_view(&mut whole, &table);
+    let estimate = serde_json::to_value(whole).unwrap()["list_price_estimate"].clone();
+    assert!(
+        close(&estimate["amount"], OFF_PEAK + 2.0 * OFF_PEAK),
+        "{estimate:#}"
+    );
+}
+
+/// Claim: a window's days refuse a name that is not a day of the week, a
+/// day named twice, and an empty list, naming the entry. Rejects a table
+/// whose misspelt day silently leaves the window holding no day.
+#[test]
+fn a_windows_days_refuse_what_is_not_a_day() {
+    for (days, refusal) in [
+        (r#"days = ["saturday"]"#, "not `saturday`"),
+        (r#"days = ["mon", "mon"]"#, "`mon` twice"),
+        ("days = []", "at least one day"),
+    ] {
+        let error = PriceTable::parse(&deepseek_table(days))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains(refusal), "{days}: {error}");
+        assert!(error.contains("deepseek-v4-pro"), "{days}: {error}");
+    }
+}
