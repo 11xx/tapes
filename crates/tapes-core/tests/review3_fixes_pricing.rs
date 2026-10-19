@@ -160,3 +160,185 @@ fn a_parent_reached_through_children_needs_recorded_activity_since() {
         vec![format!("{PARENT}::{AGENT}")]
     );
 }
+
+// --- Codex allowance pools ------------------------------------------------
+
+fn codex_usage(input: u64) -> Value {
+    json!({"input_tokens": input, "cached_input_tokens": 0, "cache_write_input_tokens": 0,
+           "output_tokens": 0, "reasoning_output_tokens": 0, "total_tokens": input})
+}
+
+enum Event {
+    /// The primary used percent the provider reported under a plan.
+    Observed(&'static str, &'static str, f64),
+    /// One request's uncached input.
+    Request(&'static str, u64),
+}
+
+fn rollout(store: &Store, id: &str, day: &str, events: &[Event]) {
+    let start = format!("{day}T09:00:00Z");
+    let mut lines = vec![
+        json!({"timestamp": start, "type": "session_meta", "payload": {"id": id,
+               "timestamp": start, "cwd": "/fixtures/project", "source": "exec",
+               "creator_account_id": "account-a"}}),
+        json!({"timestamp": start, "type": "turn_context",
+               "payload": {"cwd": "/fixtures/project", "model": "gpt-fixture", "effort": "high"}}),
+    ];
+    let mut total = 0;
+    for event in events {
+        match event {
+            Event::Observed(stamp, plan, used) => lines.push(json!({
+                "timestamp": stamp, "type": "event_msg",
+                "payload": {"type": "token_count", "info": null, "rate_limits": {
+                    "limit_id": "codex", "plan_type": plan,
+                    "primary": {"used_percent": used, "window_minutes": 300, "resets_at": 1_768_053_600},
+                    "secondary": null}}
+            })),
+            Event::Request(stamp, input) => {
+                total += input;
+                lines.push(json!({
+                    "timestamp": stamp, "type": "event_msg",
+                    "payload": {"type": "token_count", "info": {"total_token_usage": codex_usage(total),
+                        "last_token_usage": codex_usage(*input), "model_context_window": 272000},
+                        "rate_limits": null}
+                }));
+            }
+        }
+    }
+    let folder = day.replace('-', "/");
+    store.write(
+        &format!("{folder}/rollout-{day}T09-00-00-{id}.jsonl"),
+        &lines,
+    );
+}
+
+fn codex_selection() -> SessionSelection<'static> {
+    SessionSelection {
+        harness: Some("codex"),
+        limit: Some(50),
+        ..Default::default()
+    }
+}
+
+/// Claim: in one period observed at 10.25, 10.25 and 13.25, B spending 100
+/// tokens in the first interval and A 300 in the second, B is a lane whose
+/// period-smoothed percent is 0.75 beside A's 2.25, so the smoothed lanes
+/// add up to the 3% rise as the interval-apportioned ones do. Rejects
+/// keeping only lanes with an interval-apportioned percent, which drops B
+/// and leaves the smoothed lanes 0.75 short of the rise.
+#[test]
+fn a_lane_with_only_a_smoothed_percent_stays_a_lane() {
+    use Event::{Observed, Request};
+    let store = Store::new("smoothed");
+    let a = "40000000-0000-7000-8000-0000000000f9";
+    let b = "40000000-0000-7000-8000-0000000000fa";
+    rollout(
+        &store,
+        b,
+        "2026-01-10",
+        &[
+            Observed("2026-01-10T10:00:00Z", "plus", 10.25),
+            Request("2026-01-10T10:05:00Z", 100),
+            Observed("2026-01-10T10:10:00Z", "plus", 10.25),
+        ],
+    );
+    rollout(
+        &store,
+        a,
+        "2026-01-10",
+        &[
+            Observed("2026-01-10T10:10:00Z", "plus", 10.25),
+            Request("2026-01-10T10:15:00Z", 300),
+            Observed("2026-01-10T10:20:00Z", "plus", 13.25),
+        ],
+    );
+    let rates = serde_json::to_value(
+        allowance_rates_with_backends(
+            &[Box::new(CodexBackend::new(&store.0)) as Box<dyn Backend>],
+            &codex_selection(),
+            &[GroupBy::Session],
+            WindowBounds {
+                from: Some(at("2026-01-10T09:00:00Z")),
+                to: Some(at("2026-01-10T12:00:00Z")),
+            },
+            QuotaKind::Primary,
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let group = |id: &str| {
+        rates["groups"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|group| group["key"]["session"] == id)
+            .unwrap_or_else(|| panic!("{id}'s lane: {rates:#}"))
+            .clone()
+    };
+    let (a, b) = (group(a), group(b));
+    let smoothed = |group: &Value| group["smoothed_percent_per_lane"]["estimate"]["median"].clone();
+    let interval = |group: &Value| group["percent_per_lane"]["estimate"]["median"].clone();
+    assert!(close(&smoothed(&b), 0.75), "{b:#}");
+    assert!(close(&smoothed(&a), 2.25), "{a:#}");
+    assert!(close(&interval(&b), 0.0), "{b:#}");
+    assert!(close(&interval(&a), 3.0), "{a:#}");
+}
+
+/// Claim: a forecast of one lane under plan X sizes it by X's measured lanes
+/// alone, 1%, when a pool of another plan with windows of the same length
+/// measured an identical lane at 10%. Rejects matching window length alone,
+/// which merges the two plans' rates into 5.5%.
+#[test]
+fn a_forecast_sizes_lanes_by_the_newest_pools_plan() {
+    use Event::{Observed, Request};
+    let store = Store::new("plans");
+    rollout(
+        &store,
+        "40000000-0000-7000-8000-0000000000fb",
+        "2026-01-10",
+        &[
+            Observed("2026-01-10T10:00:00Z", "pro", 20.0),
+            Request("2026-01-10T10:05:00Z", 1_000),
+            Observed("2026-01-10T10:10:00Z", "pro", 30.0),
+        ],
+    );
+    rollout(
+        &store,
+        "40000000-0000-7000-8000-0000000000fc",
+        "2026-01-11",
+        &[
+            Observed("2026-01-11T10:00:00Z", "plus", 20.0),
+            Request("2026-01-11T10:05:00Z", 1_000),
+            Observed("2026-01-11T10:10:00Z", "plus", 21.0),
+        ],
+    );
+    let forecast = serde_json::to_value(
+        allowance_forecast_with_backends(
+            &[Box::new(CodexBackend::new(&store.0)) as Box<dyn Backend>],
+            &codex_selection(),
+            WindowBounds {
+                from: Some(at("2026-01-10T00:00:00Z")),
+                to: Some(at("2026-01-12T00:00:00Z")),
+            },
+            QuotaKind::Primary,
+            &[PlannedLanes {
+                model: "gpt-fixture".to_owned(),
+                variant: Some("high".to_owned()),
+                lanes: 1,
+            }],
+            None,
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        forecast["window_state"]["pool"]["plan"], "plus",
+        "{forecast:#}"
+    );
+    let sized = &forecast["plan"][0];
+    assert_eq!(sized["measured_lanes"], 1, "{sized:#}");
+    assert!(
+        close(&sized["percent_per_lane"]["estimate"], 1.0),
+        "{sized:#}"
+    );
+}

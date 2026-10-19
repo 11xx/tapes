@@ -1900,8 +1900,9 @@ enum Command {
         /// of each window period's tokens times the period's rise, with
         /// bounds from the rounding of the observations that bound it, a
         /// steadier lane cost where whole-percent steps land on whichever
-        /// lanes spent in them. `tokens_per_lane` gives the lanes' tokens.
-        /// Claude lanes are left out with the reason: Claude records no used
+        /// lanes spent in them. A session either estimator gives a percent is
+        /// a lane of both, so both sum to the same group total.
+        /// `tokens_per_lane` gives the lanes' tokens. Claude lanes are left out with the reason: Claude records no used
         /// percent. Lanes are read from up to 10000 sessions per harness, or
         /// --limit's, taken in --sort order and then from the parents reached
         /// only through their subagents; `lanes_read` names that limit, the
@@ -1920,8 +1921,8 @@ enum Command {
         /// lane as its group's median lane tokens over the group's tokens
         /// per one percent, carrying the ratio's bounds. The window is the
         /// one the pools' newest observation is of, and its length is named
-        /// and never assumed: only lanes measured against a window of that
-        /// length size the plan. The newest observation gives the remaining
+        /// and never assumed: only lanes measured in pools of its plan, its
+        /// limit and its length size the plan. The newest observation gives the remaining
         /// percent (100 less its used percent, bounded by its rounding, or
         /// the whole window once its reported reset has passed) and the
         /// newest period's reset. The answer gives the mix's percent, whether

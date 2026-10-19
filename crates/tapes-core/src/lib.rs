@@ -2687,17 +2687,24 @@ pub fn allowance_rates_with_backends(
     lookback: window::WindowBounds,
     quota: window::QuotaKind,
 ) -> Result<allowance::AllowanceRates> {
-    Ok(allowance_rates_read(backends, selection, by, lookback, quota)?.0)
+    let lanes = read_lanes(backends, selection, by, lookback)?;
+    Ok(rates_of(lanes, by, lookback, quota, |_| true))
 }
 
-/// The rates and the apportioned pools they were measured from.
-fn allowance_rates_read(
+/// The lanes of a lookback: the window read that holds them, the pools it
+/// was apportioned over, and how far the listing reached.
+struct Lanes {
+    read: WindowRead,
+    apportioned: ApportionedWindow,
+    lanes_read: allowance::LanesRead,
+}
+
+fn read_lanes(
     backends: &[Box<dyn Backend>],
     selection: &SessionSelection<'_>,
     by: &[usage::GroupBy],
     lookback: window::WindowBounds,
-    quota: window::QuotaKind,
-) -> Result<(allowance::AllowanceRates, ApportionedWindow)> {
+) -> Result<Lanes> {
     // Every completed session of the lookback is a lane, up to the lane
     // bound; a caller's --limit keeps the first of them in --sort order and
     // counts the rest.
@@ -2720,6 +2727,27 @@ fn allowance_rates_read(
         lane_bound_reached: read.listing_bound_reached,
     };
     let apportioned = apportion_window(backends, &mut read)?;
+    Ok(Lanes {
+        read,
+        apportioned,
+        lanes_read,
+    })
+}
+
+/// The rates of `lanes` measured against the pools of the `quota` window
+/// that `measured` admits.
+fn rates_of(
+    lanes: Lanes,
+    by: &[usage::GroupBy],
+    lookback: window::WindowBounds,
+    quota: window::QuotaKind,
+    measured: impl Fn(&allowance::PoolKey) -> bool,
+) -> allowance::AllowanceRates {
+    let Lanes {
+        read,
+        apportioned,
+        lanes_read,
+    } = lanes;
     let completed_before = Utc::now() - chrono::Duration::minutes(COMPLETED_AFTER_MINUTES);
     let mut excluded_running = 0;
     let mut excluded_without_allowance = 0;
@@ -2750,16 +2778,22 @@ fn allowance_rates_read(
         for pool in apportioned
             .pools
             .iter()
-            .filter(|pool| pool.pool.window == quota)
+            .filter(|pool| pool.pool.window == quota && measured(&pool.pool))
         {
             let ids = [share.id.as_str()];
             let allowance = pool.allowance(&ids);
-            if allowance.percent.at_most <= 0.0 && allowance.percent.estimate <= 0.0 {
+            let smoothed = pool.smoothed(&ids);
+            // A lane either estimator gives a percent is a lane of both, so
+            // each estimator's lanes sum to the pools' rise.
+            let spent = |percent: &allowance::PercentBounds| {
+                percent.at_most > 0.0 || percent.estimate > 0.0
+            };
+            if !spent(&allowance.percent) && !spent(&smoothed) {
                 continue;
             }
             let lane = by_length.entry(allowance.window_minutes).or_default();
             lane.percent = lane.percent + allowance.percent;
-            lane.smoothed = lane.smoothed + pool.smoothed(&ids);
+            lane.smoothed = lane.smoothed + smoothed;
             lane.covered += pool.covered(&ids);
             lane.uncovered_requests += allowance.coverage.uncovered_requests;
         }
@@ -2870,7 +2904,7 @@ fn allowance_rates_read(
             }
         })
         .collect();
-    let rates = allowance::AllowanceRates {
+    allowance::AllowanceRates {
         schema: allowance::RATES_SCHEMA,
         lookback,
         window: quota,
@@ -2880,15 +2914,14 @@ fn allowance_rates_read(
             .pools
             .iter()
             .map(|pool| pool.pool.clone())
-            .filter(|pool| pool.window == quota)
+            .filter(|pool| pool.window == quota && measured(pool))
             .collect(),
         excluded_running,
         excluded_without_allowance,
         excluded_absent,
         unreadable: read.unreadable,
         lanes_read,
-    };
-    Ok((rates, apportioned))
+    }
 }
 
 /// The days a forecast measures its rates over when the caller names no
@@ -2902,8 +2935,8 @@ pub const FORECAST_LOOKBACK_DAYS: i64 = 14;
 /// size each lane as its group's median lane tokens over the group's tokens
 /// per percent, and the window's newest observation gives what is left and
 /// when it resets. The window is the one the pools' newest observation is
-/// of, and only lanes measured against a window of its length size the
-/// plan. A model and variant no lane was measured for refuses, naming it,
+/// of, and only lanes measured in pools of its plan, limit and length size
+/// the plan. A model and variant no lane was measured for refuses, naming it,
 /// and a harness that records no used percent refuses with that reason.
 pub fn allowance_forecast_with_backends(
     backends: &[Box<dyn Backend>],
@@ -2929,12 +2962,13 @@ pub fn allowance_forecast_with_backends(
         ..lookback
     };
     let by = [usage::GroupBy::Model, usage::GroupBy::Variant];
-    let (rates, apportioned) = allowance_rates_read(backends, selection, &by, lookback, quota)?;
-    let (pool, latest) = apportioned
+    let lanes = read_lanes(backends, selection, &by, lookback)?;
+    let (pool, latest) = lanes
+        .apportioned
         .pools
         .iter()
         .filter(|pool| pool.pool.window == quota && pool.pool.harness == harness)
-        .filter_map(|pool| pool.latest().map(|latest| (pool, latest)))
+        .filter_map(|pool| pool.latest().map(|latest| (pool.pool.clone(), latest.clone())))
         .max_by_key(|(_, latest)| latest.at)
         .ok_or_else(|| {
             anyhow!(
@@ -2945,7 +2979,16 @@ pub fn allowance_forecast_with_backends(
                     .unwrap_or("quota")
             )
         })?;
-    let window_minutes = pool.pool.window_minutes;
+    // A percent is of one capacity: lanes measured under another plan or
+    // limit, or against a window of another length, spent another
+    // allowance, whichever account they ran under.
+    let rates = rates_of(lanes, &by, lookback, quota, |measured| {
+        measured.harness == pool.harness
+            && measured.plan == pool.plan
+            && measured.limit == pool.limit
+            && measured.window_minutes == pool.window_minutes
+    });
+    let window_minutes = pool.window_minutes;
     let length = window_minutes.map_or_else(
         || "unrecorded-length".to_owned(),
         |minutes| format!("{minutes}-minute"),
@@ -3078,7 +3121,7 @@ pub fn allowance_forecast_with_backends(
         lookback,
         window: quota,
         window_state: allowance::ForecastWindow {
-            pool: pool.pool.clone(),
+            pool,
             window_minutes,
             observed_at: latest.at,
             used_percent: latest.used_percent,

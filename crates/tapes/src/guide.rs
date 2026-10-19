@@ -840,7 +840,8 @@ PROBE BEFORE EXPORTING
   times the period's rise, bounded by the rounding of the observations that
   bound it. At whole-percent resolution most intervals rise by nothing and a
   step lands on whichever lanes spent in it, so the smoothed figure is the
-  steadier lane cost; both sum to the same group total. `tokens_per_lane`
+  steadier lane cost. A session either estimator gives a percent is a lane
+  of both, so both sum to the same group total. `tokens_per_lane`
   gives the lanes' tokens. Lanes come from up to 10000 sessions per harness,
   not --limit's default of 20; an explicit --limit keeps that many in --sort
   order, a parent reached only through its subagents taking a place after the
@@ -856,8 +857,9 @@ PROBE BEFORE EXPORTING
   per one percent, with the ratio's bounds, and carries the rates'
   `lanes_read`. The window is the one the pools'
   newest observation is of; its length is named, never assumed, and only
-  lanes measured against a window of that length size the plan, since a
-  plan's windows differ by kind and length. That observation gives what is
+  lanes measured in pools of its plan, its limit and its length size the
+  plan, since a percent is of one capacity and plans and limits differ in
+  theirs as a plan's windows differ by kind and length. That observation gives what is
   left (100 less its used percent, bounded by its rounding, or the whole
   window once its reported reset has passed) and the newest period's reset,
   which moves, so it is read rather than assumed. The answer gives the mix's
