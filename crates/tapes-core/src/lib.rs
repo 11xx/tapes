@@ -2459,11 +2459,18 @@ pub fn apportion_window(
             let backend = backends[listed.origins[index]].as_ref();
             match backend.allowance_timeline(session) {
                 Ok(Some(mut timeline)) => {
+                    // The limits a session spends under are the ones its
+                    // recording observed, inside the window or not.
+                    let limits = timeline
+                        .limits()
+                        .into_iter()
+                        .map(|limit| limit.map(str::to_owned))
+                        .collect::<Vec<_>>();
                     timeline.requests.retain(|request| inside(request.at));
                     timeline
                         .observations
                         .retain(|observation| inside(observation.at));
-                    timelines.push((session.id.clone(), timeline));
+                    timelines.push((session.id.clone(), timeline, limits));
                 }
                 Ok(None) => {}
                 Err(error) => read
@@ -2474,7 +2481,7 @@ pub fn apportion_window(
     }
     let observations = timelines
         .iter()
-        .flat_map(|(_, timeline)| timeline.observations.iter().cloned())
+        .flat_map(|(_, timeline, _)| timeline.observations.iter().cloned())
         .collect::<Vec<_>>();
     let mut keys = observations
         .iter()
@@ -2484,11 +2491,11 @@ pub fn apportion_window(
     keys.dedup();
     let members = timelines
         .iter()
-        .map(|(id, timeline)| allowance::PoolMember {
+        .map(|(id, timeline, limits)| allowance::PoolMember {
             id,
             selected: selected.contains(id),
             account: timeline.account.as_deref(),
-            limits: timeline.limits(),
+            limits: limits.iter().map(Option::as_deref).collect(),
             requests: &timeline.requests,
             untimed: timeline.untimed,
         })

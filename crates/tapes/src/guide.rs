@@ -699,8 +699,8 @@ PROBE BEFORE EXPORTING
   `window.allowance_assumption` says so. Every session of the pool's harness on
   this machine with activity in the window that spends from the pool is a
   member: its recording names the pool's account (or, like the pool, none),
-  and where its own observations name quota limits, the pool's is among
-  them. Members count selected or not, up to
+  and where its recording's observations name quota limits, inside the
+  window or before it, the pool's is among them. Members count selected or not, up to
   10,000 sessions whatever --limit says; a pool whose member listing reached
   that bound says `members_truncated`, its members' shares then holding what
   the sessions left out spent.
