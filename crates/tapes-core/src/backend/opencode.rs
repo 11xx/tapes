@@ -62,6 +62,10 @@ const MAX_DB_TOOL_CHARS: usize = 2_000;
 const MAX_DB_PART_PAGE: usize = 128;
 /// Keep each SQL prefilter query small without limiting the union of matches.
 const MAX_DB_SEARCH_IDS: usize = 256;
+
+/// The leading characters of an OpenCode first prompt read for its launch
+/// marker, whose line is shorter.
+const FIRST_PROMPT_CHARS: usize = 256;
 /// A v2 message this large may still make the API confirmation ambiguous if its
 /// output is truncated by a client, so keep its session as a candidate.
 const MAX_V2_PREFILTER_MESSAGE_BYTES: usize = 64 * 1024;
@@ -1427,6 +1431,103 @@ impl Backend for OpenCodeBackend {
             .iter()
             .map(|session| declared.remove(&session.id).unwrap_or_default())
             .collect())
+    }
+
+    /// OpenCode lists sessions without their messages, so the first prompt
+    /// is asked for: the leading characters of the first user message's
+    /// first text part, one database query per page of ids, or the API's
+    /// first message in ascending order, one bounded request per session
+    /// through one API server, the command where no server starts.
+    fn first_prompt_markers(
+        &self,
+        sessions: &[&Session],
+    ) -> Vec<Option<Result<crate::launch_parent::LaunchMarker>>> {
+        use crate::launch_parent::LaunchMarker;
+        let marker = |text: Option<&str>| {
+            text.and_then(|text| LaunchMarker::of_first_prompt([text]))
+                .unwrap_or(LaunchMarker::Absent)
+        };
+        if !self.uses_database() {
+            if sessions.is_empty() {
+                return Vec::new();
+            }
+            let first_message = |session: &Session| {
+                let page = self.request(&format!(
+                    "/api/session/{}/message?limit=1&order=asc",
+                    session.id
+                ));
+                Some(page.map(|page| {
+                    let first = &page["data"][0];
+                    marker(
+                        (first["type"] == "user")
+                            .then(|| first["text"].as_str())
+                            .flatten(),
+                    )
+                }))
+            };
+            let workers = thread::available_parallelism()
+                .map_or(1, std::num::NonZeroUsize::get)
+                .min(MAX_API_SEARCH_WORKERS)
+                .min(sessions.len());
+            return thread::scope(|scope| {
+                sessions
+                    .chunks(sessions.len().div_ceil(workers))
+                    .map(|chunk| {
+                        scope.spawn(|| {
+                            chunk
+                                .iter()
+                                .map(|session| first_message(session))
+                                .collect::<Vec<_>>()
+                        })
+                    })
+                    .collect::<Vec<_>>()
+                    .into_iter()
+                    .flat_map(|handle| handle.join().expect("first prompt worker panicked"))
+                    .collect()
+            });
+        }
+        let mut prompts: HashMap<String, String> = HashMap::new();
+        let mut failed: HashMap<String, String> = HashMap::new();
+        for page in sessions.chunks(MAX_DB_SEARCH_IDS) {
+            let ids = page
+                .iter()
+                .map(|session| session.id.clone())
+                .collect::<Vec<_>>();
+            let rows = self.database(&format!(
+                "SELECT json_object('session_id', m.session_id, 'first_prompt', \
+                 substr(json_extract(p.data, '$.text'), 1, {FIRST_PROMPT_CHARS})) AS row \
+                 FROM message m JOIN part p ON p.message_id = m.id \
+                 WHERE m.session_id IN ({}) AND m.id = (SELECT first.id FROM message first \
+                 WHERE first.session_id = m.session_id \
+                 AND json_extract(first.data, '$.role') = 'user' \
+                 ORDER BY first.time_created, first.id LIMIT 1) \
+                 AND json_extract(p.data, '$.type') = 'text' ORDER BY m.session_id, p.id",
+                sql_id_list(&ids)
+            ));
+            match rows {
+                Ok(rows) => {
+                    for row in rows {
+                        if let (Some(id), Some(text)) =
+                            (row["session_id"].as_str(), row["first_prompt"].as_str())
+                        {
+                            prompts
+                                .entry(id.to_owned())
+                                .or_insert_with(|| text.to_owned());
+                        }
+                    }
+                }
+                Err(error) => failed.extend(ids.into_iter().map(|id| (id, format!("{error:#}")))),
+            }
+        }
+        sessions
+            .iter()
+            .map(|session| {
+                Some(match failed.get(&session.id) {
+                    Some(error) => Err(anyhow!("{error}")),
+                    None => Ok(marker(prompts.get(&session.id).map(String::as_str))),
+                })
+            })
+            .collect()
     }
 
     fn lineage(&self, session: &Session) -> Result<Lineage> {

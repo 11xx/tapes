@@ -633,6 +633,16 @@ pub trait Backend {
     fn declared_origins(&self, sessions: &[&Session]) -> Result<Vec<Vec<DeclaredOrigin>>> {
         Ok(vec![Vec::new(); sessions.len()])
     }
+    /// The `tapes-parent` marker each session's first prompt opens with, for
+    /// a harness whose listing reads no prompt, or the failure of its read:
+    /// `None` where nothing was asked. The default asks nothing, since a
+    /// listing that reads the first prompt has read its marker already.
+    fn first_prompt_markers(
+        &self,
+        sessions: &[&Session],
+    ) -> Vec<Option<Result<crate::launch_parent::LaunchMarker>>> {
+        sessions.iter().map(|_| None).collect()
+    }
     /// Every relationship the whole recording names, read record by record so
     /// memory follows the references kept rather than the file. The default
     /// refuses: a bounded lineage read is not an answer to a whole one.

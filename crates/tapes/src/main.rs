@@ -1658,8 +1658,8 @@ enum Command {
         /// spawn's `parent_thread_id`, a declared fork origin (Codex, pi,
         /// OpenCode), a Claude subagent's parent, or the launcher a first
         /// prompt names on its first line as `tapes-parent:
-        /// <harness>:<session-id>` (Claude, Codex, pi; the guide gives the
-        /// exact form). A session that names none is its own group, and a
+        /// <harness>:<session-id>` (Claude, Codex, pi, OpenCode; the guide
+        /// gives the exact form). A session that names none is its own group, and a
         /// parent the store does not hold is a group of its own under that
         /// id, never joined to a guessed one. A launched session is never an
         /// overlap group with its launcher.

@@ -680,7 +680,11 @@ PROBE BEFORE EXPORTING
   prompt follows it. tapes reads the marker from the session's first user
   message that is not wholly context the harness attached (Codex records its
   AGENTS.md and environment blocks first), within the recording's first MiB,
-  in Claude, Codex and pi recordings; OpenCode sessions are not read for it.
+  in Claude, Codex and pi recordings. An OpenCode listing reads no messages,
+  so a summary or window read asks for the first 256 characters of the first
+  user message's first text part, one query per page of sessions (one
+  request per session through the API), of every session its store names no
+  parent or fork origin for.
   The parent is looked up by its id in every store tapes reads; one the stores
   do not hold stays the named, unresolved root, as a missing fork origin
   does. A first prompt opening with `tapes-parent:` in any other form, or

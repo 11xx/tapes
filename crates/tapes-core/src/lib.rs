@@ -3107,7 +3107,9 @@ fn session_relations(
 const OVERLAP_KEY_LIMIT: usize = 10_000;
 
 /// Add to each session the fork origins its harness's store declares outside
-/// the recording a listing reads, one batched question per backend.
+/// the recording a listing reads, and, for a session the store relates to no
+/// other, the launch marker its first prompt opens with: one batched question
+/// per backend each.
 fn declare_origins(backends: &[Box<dyn Backend>], origins: &[usize], sessions: &mut [Session]) {
     for (index, backend) in backends.iter().enumerate() {
         let positions: Vec<usize> = (0..sessions.len())
@@ -3117,11 +3119,23 @@ fn declare_origins(backends: &[Box<dyn Backend>], origins: &[usize], sessions: &
             .iter()
             .map(|position| &sessions[*position])
             .collect();
-        let Ok(declared) = backend.declared_origins(&held) else {
-            continue;
-        };
-        for (position, declared) in positions.into_iter().zip(declared) {
-            sessions[position].declare_origins(declared);
+        if let Ok(declared) = backend.declared_origins(&held) {
+            for (position, declared) in positions.iter().zip(declared) {
+                sessions[*position].declare_origins(declared);
+            }
+        }
+        let unrelated: Vec<usize> = positions
+            .into_iter()
+            .filter(|position| window::declared_parent(&sessions[*position]).is_none())
+            .collect();
+        let held: Vec<&Session> = unrelated
+            .iter()
+            .map(|position| &sessions[*position])
+            .collect();
+        for (position, marker) in unrelated.iter().zip(backend.first_prompt_markers(&held)) {
+            if let Some(marker) = marker {
+                sessions[*position].declare_launch_parent_read(marker);
+            }
         }
     }
 }
