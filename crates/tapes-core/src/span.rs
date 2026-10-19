@@ -416,25 +416,37 @@ pub struct SpanSessions {
 }
 
 impl SpanSessions {
-    /// Give every figure the billing `session`'s recording establishes:
-    /// each is part of the one recording.
+    /// Give every figure the billing the whole recording establishes: each
+    /// is part of the one recording, whatever records a span holds. The
+    /// whole read's billing comes first, since it reads every record a
+    /// bounded lookup of `session` may not; `session`'s stands where the
+    /// whole read establishes none.
     pub(crate) fn billed_as(mut self, session: &Session) -> Self {
-        let billing = session
-            .usage_detail
-            .as_ref()
-            .and_then(|detail| detail.billing.clone());
-        if let Some(billing) = billing {
-            for figure in self
-                .spans
-                .iter_mut()
-                .map(|(figure, _)| figure)
-                .chain([&mut self.remainder.0, &mut self.whole])
-            {
-                figure
-                    .usage_detail
-                    .get_or_insert_with(Default::default)
-                    .billing
-                    .get_or_insert_with(|| billing.clone());
+        let of = |figure: &Session| {
+            figure
+                .usage_detail
+                .as_ref()
+                .and_then(|detail| detail.billing.clone())
+        };
+        let billing = of(&self.whole).or_else(|| of(session));
+        for figure in self
+            .spans
+            .iter_mut()
+            .map(|(figure, _)| figure)
+            .chain([&mut self.remainder.0, &mut self.whole])
+        {
+            match &billing {
+                Some(billing) => {
+                    figure
+                        .usage_detail
+                        .get_or_insert_with(Default::default)
+                        .billing = Some(billing.clone());
+                }
+                None => {
+                    if let Some(detail) = figure.usage_detail.as_mut() {
+                        detail.billing = None;
+                    }
+                }
             }
         }
         self

@@ -342,3 +342,138 @@ fn a_forecast_sizes_lanes_by_the_newest_pools_plan() {
         "{sized:#}"
     );
 }
+
+// --- Request-term pricing of Claude recordings ----------------------------
+
+const CLAUDE_ID: &str = "30000000-0000-4000-8000-0000000000fa";
+
+fn claude_path() -> String {
+    format!("-fixtures-project/{CLAUDE_ID}.jsonl")
+}
+
+fn user(entry: &str, stamp: &str, text: &str) -> Value {
+    json!({"type": "user", "sessionId": CLAUDE_ID, "uuid": entry, "parentUuid": null,
+           "timestamp": stamp, "cwd": "/fixtures/project",
+           "message": {"role": "user", "content": text}})
+}
+
+fn assistant(request: &str, stamp: &str, usage: Value) -> Value {
+    json!({"type": "assistant", "sessionId": CLAUDE_ID, "uuid": format!("assistant-{request}"),
+           "parentUuid": "user-1", "timestamp": stamp, "cwd": "/fixtures/project",
+           "requestId": request,
+           "message": {"id": format!("msg-{request}"), "role": "assistant", "model": "claude-haiku-5-5",
+                       "content": [{"type": "text", "text": "Done."}], "usage": usage}})
+}
+
+fn api_request(stamp: &str, betas: &[&str]) -> Value {
+    json!({"type": "api-request", "sessionId": CLAUDE_ID, "timestamp": stamp,
+           "params": {"model": "claude-haiku-5-5", "betas": betas}})
+}
+
+/// Every pricing path of one session: the bounded and the whole usage
+/// view, and the session as a listing prices it.
+fn estimates(store: &Store, table: &PriceTable) -> [Value; 3] {
+    let backend = || Box::new(ClaudeBackend::new(&store.0)) as Box<dyn Backend>;
+    let mut view = usage_with_backends(&[backend()], Selection::Id(CLAUDE_ID)).unwrap();
+    pricing::price_view(&mut view, table);
+    let mut whole = usage_full_with_backends(&[backend()], Selection::Id(CLAUDE_ID)).unwrap();
+    pricing::price_view(&mut whole, table);
+    let mut listed = backend()
+        .list(&Query::unscoped(5))
+        .unwrap()
+        .sessions
+        .into_iter()
+        .find(|session| session.id == CLAUDE_ID)
+        .unwrap();
+    listed.price(table);
+    [
+        serde_json::to_value(view).unwrap()["list_price_estimate"].clone(),
+        serde_json::to_value(whole).unwrap()["list_price_estimate"].clone(),
+        serde_json::to_value(&listed.list_price_estimate).unwrap(),
+    ]
+}
+
+const HAIKU_TABLE: &str = r#"
+schema = "tapes-price-table/2"
+currency = "USD"
+
+[[models]]
+id = "claude-haiku-5-5"
+effective = 2026-10-18
+source = "fixture"
+per_million = { uncached_input = 0.10, cache_read = 0.01, cache_write_5m = 0.125, cache_write_1h = 0.20, output = 0.50 }
+
+[models.long_context]
+above_prompt_tokens = 100000
+prompt_tokens = ["uncached_input", "cache_read", "cache_write"]
+multipliers = { uncached_input = 5.0, cache_read = 5.0, cache_write_5m = 5.0, cache_write_1h = 5.0, output = 5.0 }
+"#;
+
+fn haiku_usage(input: u64, read: u64, write_5m: u64, output: u64) -> Value {
+    json!({"input_tokens": input, "cache_read_input_tokens": read,
+           "cache_creation_input_tokens": write_5m, "output_tokens": output,
+           "cache_creation": {"ephemeral_5m_input_tokens": write_5m, "ephemeral_1h_input_tokens": 0}})
+}
+
+/// Claim: a Claude recording past the bounded read, whose only OAuth
+/// evidence comes before the bounded read's tail, prices its 110k-prompt
+/// Haiku request at base rates as a subscription's under --from as under
+/// --full, both naming the subscription billing. Rejects a span that takes
+/// its billing from the bounded lookup, which establishes none and prices
+/// the request between base and surcharged rates, billing-unestablished.
+#[test]
+fn a_span_takes_billing_from_the_whole_recording() {
+    let store = Store::new("span-billing");
+    let filler = "x".repeat(64 * 1024);
+    let mut lines = vec![
+        user("user-1", "2026-10-19T10:00:00Z", "Survey the fixture."),
+        api_request(
+            "2026-10-19T10:00:01Z",
+            &["claude-code-20250219", "oauth-2025-04-20"],
+        ),
+    ];
+    // Six MiB of turns between the evidence and the request, past the
+    // four-MiB bounded read and any opening it keeps.
+    for index in 0..96 {
+        lines.push(user(
+            &format!("filler-{index}"),
+            "2026-10-19T10:10:00Z",
+            &filler,
+        ));
+    }
+    lines.push(assistant(
+        "req-large",
+        "2026-10-19T10:30:00Z",
+        haiku_usage(20_000, 80_000, 10_000, 2_000),
+    ));
+    store.write(&claude_path(), &lines);
+    let table = PriceTable::parse(HAIKU_TABLE).unwrap();
+    // 20k x 0.10 + 80k x 0.01 + 10k x 0.125 + 2k x 0.50, at base rates.
+    let base = (2_000.0 + 800.0 + 1_250.0 + 1_000.0) / 1e6;
+    let backend = || Box::new(ClaudeBackend::new(&store.0)) as Box<dyn Backend>;
+    let mut whole = usage_full_with_backends(&[backend()], Selection::Id(CLAUDE_ID)).unwrap();
+    pricing::price_view(&mut whole, &table);
+    let whole = serde_json::to_value(whole).unwrap()["list_price_estimate"].clone();
+    let mut spans = usage_spans_with_backends(
+        &[backend()],
+        Selection::Id(CLAUDE_ID),
+        &[SpanBounds::Time {
+            from: Some(at("2026-10-19T10:20:00Z")),
+            to: None,
+        }],
+    )
+    .unwrap();
+    pricing::price_spans(&mut spans, &table);
+    let span = serde_json::to_value(&spans.spans[0]).unwrap()["list_price_estimate"].clone();
+    for estimate in [whole, span] {
+        assert!(close(&estimate["amount"], base), "{estimate:#}");
+        assert_eq!(
+            estimate["billing"][0]["terms"], "subscription",
+            "{estimate:#}"
+        );
+        assert!(
+            estimate.get("measurement_completeness").is_none(),
+            "{estimate:#}"
+        );
+    }
+}

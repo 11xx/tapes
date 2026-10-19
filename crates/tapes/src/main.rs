@@ -1957,10 +1957,11 @@ enum Command {
         /// request by request from the requests the read kept, and between
         /// their rates, with request-terms-unknown, where the figure's
         /// requests are not known one by one. The estimate's `billing` names
-        /// the billing each recording establishes and its evidence: a
-        /// subscription pays no surcharge, and unestablished billing is priced
-        /// between base and surcharged rates with billing-unestablished. A
-        /// request no row is in effect for is outside-validity. Without the flag the table is the file
+        /// the billing each recording establishes and its evidence, a span
+        /// or window share billed as its whole recording: a subscription
+        /// pays no surcharge, and unestablished billing is priced between
+        /// base and surcharged rates with billing-unestablished. A request no
+        /// row is in effect for is outside-validity. Without the flag the table is the file
         /// TAPES_PRICES names, then $XDG_CONFIG_HOME/tapes/prices.toml (or
         /// ~/.config/tapes/prices.toml). A table named here or by
         /// TAPES_PRICES that is missing or invalid refuses; an invalid default
