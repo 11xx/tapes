@@ -9,11 +9,15 @@ use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use agent_tapes_core::backend::{
-    claude::ClaudeBackend, codex::CodexBackend, pi::PiBackend, Backend, StreamedTranscript,
+    claude::ClaudeBackend, codex::CodexBackend, pi::PiBackend, Backend, StreamOptions,
+    StreamedTranscript,
 };
 use agent_tapes_core::model::Session;
 use agent_tapes_core::span::{PlacedRequest, SpanBounds};
 use agent_tapes_core::{counters, stats_full_with_backends_and_idle, usage, Selection};
+
+/// Every read here asks for its timeline.
+const TIMELINE: StreamOptions = StreamOptions { timeline: true };
 
 /// Tests that count recording passes hold this, since every read in the
 /// process moves the counter.
@@ -68,7 +72,7 @@ fn cases() -> Vec<Case> {
 fn read(backend: &dyn Backend, id: &str) -> (Session, StreamedTranscript) {
     let session = backend.locate(id).unwrap().unwrap();
     let read = backend
-        .stream_transcript(&session, None, &mut |_| Ok(()))
+        .stream_transcript_with(&session, None, TIMELINE, &mut |_| Ok(()))
         .unwrap();
     (session, read)
 }
@@ -86,7 +90,7 @@ fn the_timeline_counts_requests_as_the_span_placer_does() {
         let (session, read) = read(backend.as_ref(), id);
         let timeline = usage::timeline(&read).unwrap_or_else(|| panic!("{label}: a timeline"));
         let spans = backend.stream_spans(&session, &read, &[]).unwrap();
-        assert_eq!(timeline, &spans.timeline, "{label}");
+        assert_eq!(Some(timeline), spans.timeline.as_ref(), "{label}");
         let ordinals = timeline
             .requests
             .iter()
@@ -121,7 +125,7 @@ fn stretches_are_the_ones_stats_counts() {
                 .durations_ms
                 .as_ref()
                 .and_then(|durations| durations.stretches);
-            let stretches = usage::stretches(&read, idle);
+            let stretches = usage::stretches(&read, idle).unwrap();
             // stats states no stretch count for a single stamp.
             if let Some(counted) = counted {
                 assert_eq!(stretches.len(), counted, "{label} at {idle} ms");
@@ -134,7 +138,7 @@ fn stretches_are_the_ones_stats_counts() {
     // minutes, holding the runs' requests.
     let backend = ClaudeBackend::new(fixtures("claude-resumed"));
     let (_, read) = read(&backend, "30000000-0000-4000-8000-000000000001");
-    let stretches = usage::stretches(&read, 45 * 60_000);
+    let stretches = usage::stretches(&read, 45 * 60_000).unwrap();
     let held = stretches
         .iter()
         .map(|stretch| stretch.requests)
@@ -209,8 +213,8 @@ fn an_untimed_request_is_counted_and_held_by_no_stretch() {
         }
     );
     let spans = backend.stream_spans(&session, &read, &[]).unwrap();
-    assert_eq!(timeline, &spans.timeline);
-    let stretches = usage::stretches(&read, 45 * 60_000);
+    assert_eq!(Some(timeline), spans.timeline.as_ref());
+    let stretches = usage::stretches(&read, 45 * 60_000).unwrap();
     assert_eq!(
         stretches
             .iter()
@@ -238,12 +242,12 @@ fn one_read_serves_the_timeline_the_stretches_and_the_spans() {
         let session = backend.locate(id).unwrap().unwrap();
         let before = counters::recording_passes();
         let read = backend
-            .stream_transcript(&session, None, &mut |_| Ok(()))
+            .stream_transcript_with(&session, None, TIMELINE, &mut |_| Ok(()))
             .unwrap();
         let read_passes = counters::recording_passes() - before;
         let before = counters::recording_passes();
         let timeline = usage::timeline(&read).unwrap().clone();
-        let stretches = usage::stretches(&read, 45 * 60_000);
+        let stretches = usage::stretches(&read, 45 * 60_000).unwrap();
         assert_eq!(
             counters::recording_passes() - before,
             0,
@@ -271,6 +275,6 @@ fn one_read_serves_the_timeline_the_stretches_and_the_spans() {
             "{label}: the spans replay the read once"
         );
         assert!(read_passes >= 1, "{label}");
-        assert_eq!(spans.timeline, timeline, "{label}");
+        assert_eq!(spans.timeline, Some(timeline), "{label}");
     }
 }

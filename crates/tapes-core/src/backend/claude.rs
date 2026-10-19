@@ -680,10 +680,11 @@ impl Backend for ClaudeBackend {
         true
     }
 
-    fn stream_transcript(
+    fn stream_transcript_with(
         &self,
         session: &Session,
         replay: Option<&StreamedTranscript>,
+        options: super::StreamOptions,
         turn: &mut dyn FnMut(Turn) -> Result<()>,
     ) -> Result<StreamedTranscript> {
         let path = super::session_file_path(session)
@@ -701,8 +702,8 @@ impl Backend for ClaudeBackend {
         let mut records = ClaudeRecords::default();
         // Its requests are counted as a span read places them.
         let mut requests = ClaudeRequests::default();
-        let mut placer = Placer::new(&[]);
-        let mut turn_times = Vec::new();
+        let mut placer = Placer::new(&[]).keeping(options.timeline);
+        let mut turn_times = super::TurnStamps::new(options);
         let mut turn = super::timed(&mut turn_times, turn);
         let mut last_end = 0;
         let read = stream_jsonl(path, Some(opening.pin()), |value, span, revision| {
@@ -735,6 +736,8 @@ impl Backend for ClaudeBackend {
         let mut whole = session.clone();
         records.apply(&mut whole);
         let whole = super::with_unreadable_records(whole, read.skipped);
+        let (turn_times, requests, timeline_withheld) =
+            turn_times.finish(placer.finish().timeline());
         Ok(StreamedTranscript {
             terminal: None,
             coordinates: super::StreamCoordinates::FileBytes,
@@ -754,7 +757,8 @@ impl Backend for ClaudeBackend {
                 whole,
             })),
             turn_times,
-            requests: Some(placer.finish().timeline()),
+            requests,
+            timeline_withheld,
         })
     }
 
@@ -1016,6 +1020,7 @@ impl Backend for ClaudeBackend {
                 kinds: None,
                 folded: None,
                 turn_times: Vec::new(),
+                timeline_withheld: None,
                 requests: None,
             },
         })

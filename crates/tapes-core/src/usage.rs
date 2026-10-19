@@ -967,23 +967,35 @@ pub struct SpanUsage {
 /// Every request `read` counted, in recording order, as its backend's span
 /// read places them, so a span read that replays `read` counts the same
 /// requests under the same ordinals. Taken from the read itself, without
-/// another pass. Absent for a read that counted none while it streamed, such
-/// as a pin rebuilt with [`StreamedTranscript::frozen`].
+/// another pass. Present only for a read streamed with
+/// [`StreamOptions::timeline`](crate::backend::StreamOptions), and absent
+/// for one that counted none while it streamed, such as a pin rebuilt with
+/// [`StreamedTranscript::frozen`], or that outgrew a bound, which
+/// [`timeline_withheld`] names.
 pub fn timeline(read: &StreamedTranscript) -> Option<&RequestTimeline> {
     read.requests.as_ref()
+}
+
+/// Why a read streamed for its timeline holds none: it counted more
+/// requests, or handed over more timed turns, than a timeline keeps. A
+/// timeline is withheld whole, never cut short.
+pub fn timeline_withheld(read: &StreamedTranscript) -> Option<&'static str> {
+    read.timeline_withheld
 }
 
 /// The working stretches of `read` at an idle threshold of `idle_ms`: its
 /// timestamped turns, in the order the read handed them over, cut wherever a
 /// gap exceeds the threshold, exactly as `stats --idle` cuts them. Each holds
 /// the timed requests of [`timeline`] that fall in it; an untimed request
-/// belongs to none. Taken from the read itself, without another pass.
-pub fn stretches(read: &StreamedTranscript, idle_ms: i64) -> Vec<Stretch> {
+/// belongs to none. Taken from the read itself, without another pass, and
+/// absent wherever [`timeline`] is.
+pub fn stretches(read: &StreamedTranscript, idle_ms: i64) -> Option<Vec<Stretch>> {
+    let timeline = timeline(read)?;
     let mut fold = StretchFold::new(idle_ms);
     for ts in &read.turn_times {
         fold.add(*ts);
     }
-    fold.finish(timeline(read))
+    Some(fold.finish(Some(timeline)))
 }
 
 /// Project a span read into its answer. `turns` and `read` describe the

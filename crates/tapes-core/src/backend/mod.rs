@@ -455,7 +455,21 @@ pub trait Backend {
         replay: Option<&StreamedTranscript>,
         turn: &mut dyn FnMut(Turn) -> Result<()>,
     ) -> Result<StreamedTranscript> {
-        let _ = (session, replay, turn);
+        self.stream_transcript_with(session, replay, StreamOptions::default(), turn)
+    }
+
+    /// As [`Backend::stream_transcript`], keeping what `options` asks for
+    /// beside the turns: with `timeline`, the read's request timeline and
+    /// its turns' stamps, within [`crate::span::MAX_TIMELINE_REQUESTS`]
+    /// requests and [`MAX_TIMELINE_TURNS`] stamps.
+    fn stream_transcript_with(
+        &self,
+        session: &Session,
+        replay: Option<&StreamedTranscript>,
+        options: StreamOptions,
+        turn: &mut dyn FnMut(Turn) -> Result<()>,
+    ) -> Result<StreamedTranscript> {
+        let _ = (session, replay, options, turn);
         anyhow::bail!(
             "{} sessions cannot be read whole; their reader keeps a bounded tail",
             self.harness()
@@ -1590,11 +1604,81 @@ pub struct StreamedTranscript {
     /// for a backend that folds it while it streams.
     pub(crate) folded: Option<Box<FoldedSession>>,
     /// The stamps of the turns the read handed over, in order, which
-    /// working stretches are cut from.
+    /// working stretches are cut from. Kept only for a read asked for its
+    /// timeline.
     pub(crate) turn_times: Vec<DateTime<Utc>>,
     /// Every request the read counted, as its backend's span read places
-    /// them, for a backend that counts while it streams.
+    /// them, for a read asked for its timeline by a backend that counts
+    /// while it streams.
     pub(crate) requests: Option<crate::span::RequestTimeline>,
+    /// Why a read asked for its timeline holds none: it outgrew a bound.
+    pub(crate) timeline_withheld: Option<&'static str>,
+}
+
+/// What a whole read keeps beside the turns it hands over.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct StreamOptions {
+    /// Keep the request timeline and the turns' stamps, which
+    /// [`crate::usage::timeline`] and [`crate::usage::stretches`] answer
+    /// from. A read without it keeps neither.
+    pub timeline: bool,
+}
+
+/// The most turn stamps a read keeps for its working stretches. A read that
+/// hands over more timed turns withholds its timeline.
+pub const MAX_TIMELINE_TURNS: usize = 1_000_000;
+
+/// Why a read asked for its timeline holds none: it handed over more timed
+/// turns than it keeps stamps for.
+pub const TIMELINE_TURNS_WITHHELD: &str =
+    "the read handed over more timed turns than a timeline keeps stamps for (1000000)";
+
+/// The stamps of the turns a read hands over, kept within
+/// [`MAX_TIMELINE_TURNS`] when the read was asked for its timeline.
+pub(crate) struct TurnStamps {
+    stamps: Vec<DateTime<Utc>>,
+    keep: bool,
+    withheld: bool,
+}
+
+impl TurnStamps {
+    pub(crate) fn new(options: StreamOptions) -> Self {
+        Self {
+            stamps: Vec::new(),
+            keep: options.timeline,
+            withheld: false,
+        }
+    }
+
+    fn push(&mut self, ts: DateTime<Utc>) {
+        if !self.keep {
+            return;
+        }
+        if self.stamps.len() < MAX_TIMELINE_TURNS {
+            self.stamps.push(ts);
+        } else {
+            self.keep = false;
+            self.withheld = true;
+            self.stamps = Vec::new();
+        }
+    }
+
+    /// The stamps, the timeline and the reason either was withheld, from
+    /// these stamps and what the read's placer kept.
+    pub(crate) fn finish(
+        self,
+        placed: std::result::Result<Option<crate::span::RequestTimeline>, &'static str>,
+    ) -> (
+        Vec<DateTime<Utc>>,
+        Option<crate::span::RequestTimeline>,
+        Option<&'static str>,
+    ) {
+        match placed {
+            Err(reason) => (Vec::new(), None, Some(reason)),
+            Ok(_) if self.withheld => (Vec::new(), None, Some(TIMELINE_TURNS_WITHHELD)),
+            Ok(timeline) => (self.stamps, timeline, None),
+        }
+    }
 }
 
 /// The session with `count` unreadable records noted: a record that did not
@@ -1612,7 +1696,7 @@ pub(crate) fn with_unreadable_records(mut session: Session, count: usize) -> Ses
 
 /// `turn`, recording the stamp of each turn it hands over into `times`.
 pub(crate) fn timed<'a>(
-    times: &'a mut Vec<DateTime<Utc>>,
+    times: &'a mut TurnStamps,
     turn: &'a mut dyn FnMut(Turn) -> Result<()>,
 ) -> impl FnMut(Turn) -> Result<()> + 'a {
     move |handed: Turn| {
@@ -1675,6 +1759,7 @@ impl StreamedTranscript {
             kinds: None,
             folded: None,
             turn_times: Vec::new(),
+            timeline_withheld: None,
             requests: None,
         }
     }

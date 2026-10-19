@@ -403,10 +403,11 @@ impl Backend for PiBackend {
         consumption_keys::read_keys(self, session, read, options, selection)
     }
 
-    fn stream_transcript(
+    fn stream_transcript_with(
         &self,
         session: &Session,
         replay: Option<&StreamedTranscript>,
+        options: super::StreamOptions,
         turn: &mut dyn FnMut(Turn) -> Result<()>,
     ) -> Result<StreamedTranscript> {
         let path = super::session_file_path(session)
@@ -457,8 +458,8 @@ impl Backend for PiBackend {
         // Its requests are counted over every entry, as a span read places
         // them.
         let mut requests = PiRequests::default();
-        let mut placer = Placer::new(&[]);
-        let mut turn_times = Vec::new();
+        let mut placer = Placer::new(&[]).keeping(options.timeline);
+        let mut turn_times = super::TurnStamps::new(options);
         let mut turn = super::timed(&mut turn_times, turn);
         // The session's accounting folds from the same entries, as
         // `stream_session` would replay them.
@@ -510,6 +511,8 @@ impl Backend for PiBackend {
         })?;
         drop(turn);
         let recording = recorded.finish(read.skipped, read.gaps.clone());
+        let (turn_times, requests, timeline_withheld) =
+            turn_times.finish(placer.finish().timeline());
         let mut streamed = StreamedTranscript {
             coordinates: super::StreamCoordinates::FileBytes,
             source_length: read.source_length,
@@ -526,7 +529,8 @@ impl Backend for PiBackend {
             kinds: None,
             folded: None,
             turn_times,
-            requests: Some(placer.finish().timeline()),
+            requests,
+            timeline_withheld,
         };
         let whole = recording.figure(session, &|_| true, recording.skipped, &streamed);
         streamed.folded = Some(Box::new(FoldedSession {

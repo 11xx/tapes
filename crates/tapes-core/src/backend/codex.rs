@@ -462,10 +462,11 @@ impl Backend for CodexBackend {
         true
     }
 
-    fn stream_transcript(
+    fn stream_transcript_with(
         &self,
         session: &Session,
         replay: Option<&StreamedTranscript>,
+        options: super::StreamOptions,
         turn: &mut dyn FnMut(Turn) -> Result<()>,
     ) -> Result<StreamedTranscript> {
         let path = super::session_file_path(session)
@@ -474,13 +475,16 @@ impl Backend for CodexBackend {
         let mut terminal = None;
         let mut launch = None;
         let mut reader = CodexTurns::default();
-        let mut turn_times = Vec::new();
+        let mut turn_times = super::TurnStamps::new(options);
         let mut turn = super::timed(&mut turn_times, turn);
         // The session's accounting folds from the same records and gaps as
         // the turns, as `stream_session` would replay them, and its requests
         // are counted as a span read places them.
         let records = std::cell::RefCell::new(CodexRecords::placing_outside(path));
-        let counted = std::cell::RefCell::new((Placer::new(&[]), CodexSpans::default()));
+        let counted = std::cell::RefCell::new((
+            Placer::new(&[]).keeping(options.timeline),
+            CodexSpans::default(),
+        ));
         let read = stream_jsonl_with_gaps(
             path,
             replay_pin(replay)?,
@@ -517,6 +521,8 @@ impl Backend for CodexBackend {
         }
         let mut whole = session.clone();
         records.apply(&mut whole);
+        let (turn_times, requests, timeline_withheld) =
+            turn_times.finish(placer.finish().timeline());
         Ok(StreamedTranscript {
             coordinates: super::StreamCoordinates::FileBytes,
             source_length: read.source_length,
@@ -536,7 +542,8 @@ impl Backend for CodexBackend {
                 whole,
             })),
             turn_times,
-            requests: Some(placer.finish().timeline()),
+            requests,
+            timeline_withheld,
         })
     }
 

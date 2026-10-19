@@ -967,6 +967,7 @@ impl OpenCodeBackend {
             kinds: None,
             folded: None,
             turn_times: Vec::new(),
+            timeline_withheld: None,
             requests: None,
         })
     }
@@ -1095,6 +1096,7 @@ impl OpenCodeBackend {
             kinds: None,
             folded: None,
             turn_times: Vec::new(),
+            timeline_withheld: None,
             requests: None,
         })
     }
@@ -1343,19 +1345,20 @@ impl Backend for OpenCodeBackend {
         true
     }
 
-    fn stream_transcript(
+    fn stream_transcript_with(
         &self,
         session: &Session,
         replay: Option<&StreamedTranscript>,
+        options: super::StreamOptions,
         turn: &mut dyn FnMut(Turn) -> Result<()>,
     ) -> Result<StreamedTranscript> {
         if replay.is_some() {
             self.replayable(session)?;
         }
-        let mut turn_times = Vec::new();
+        let mut turn_times = super::TurnStamps::new(options);
         let mut turn = super::timed(&mut turn_times, turn);
         // Its requests are counted as a span read places them.
-        let mut placer = Placer::new(&[]);
+        let mut placer = Placer::new(&[]).keeping(options.timeline);
         let mut count = |item: MessageItem<'_>| {
             if let MessageItem::Message(message) = item {
                 place_message(message, &mut placer);
@@ -1368,8 +1371,8 @@ impl Backend for OpenCodeBackend {
             self.api_stream(session, &mut turn, &mut count)?
         };
         drop(turn);
-        read.turn_times = turn_times;
-        read.requests = Some(placer.finish().timeline());
+        (read.turn_times, read.requests, read.timeline_withheld) =
+            turn_times.finish(placer.finish().timeline());
         Ok(read)
     }
 

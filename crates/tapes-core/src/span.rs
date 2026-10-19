@@ -155,6 +155,25 @@ impl RequestTimeline {
     }
 }
 
+/// The most requests a read keeps in its timeline. A read that counts more
+/// withholds the timeline rather than keep part of it.
+pub const MAX_TIMELINE_REQUESTS: usize = 100_000;
+
+/// Why a read asked for its timeline holds none: it counted more requests
+/// than a timeline keeps.
+pub const TIMELINE_REQUESTS_WITHHELD: &str =
+    "the read counted more requests than a timeline keeps (100000)";
+
+/// What a placer keeps of the requests it places.
+enum Kept {
+    /// Nothing: no caller asked for the timeline.
+    Off,
+    /// Every request placed so far, within the bound.
+    Requests(Vec<PlacedRequest>),
+    /// More requests than the bound; none are kept.
+    Withheld,
+}
+
 /// The most recent placed position a record follows.
 #[derive(Clone, Default)]
 struct Position {
@@ -177,8 +196,8 @@ pub(crate) struct Placer {
     position: Position,
     pending: Vec<Pending>,
     overlapped: usize,
-    /// Every request placed, in order.
-    requests: Vec<PlacedRequest>,
+    /// The requests placed, in order, as far as the placer keeps them.
+    kept: Kept,
 }
 
 impl Placer {
@@ -198,8 +217,17 @@ impl Placer {
             position: Position::default(),
             pending: Vec::new(),
             overlapped: 0,
-            requests: Vec::new(),
+            kept: Kept::Requests(Vec::new()),
         }
+    }
+
+    /// A placer that keeps its requests' timeline only when `timeline` asks
+    /// for it.
+    pub(crate) fn keeping(mut self, timeline: bool) -> Self {
+        if !timeline {
+            self.kept = Kept::Off;
+        }
+        self
     }
 
     /// How many figures the placer fills: one per span and the remainder.
@@ -251,7 +279,13 @@ impl Placer {
         for index in &held {
             self.placements[*index].add(&request);
         }
-        self.requests.push(request);
+        if let Kept::Requests(requests) = &mut self.kept {
+            if requests.len() < MAX_TIMELINE_REQUESTS {
+                requests.push(request);
+            } else {
+                self.kept = Kept::Withheld;
+            }
+        }
         if undecided {
             self.pending.push(Pending {
                 before: self.position.clone(),
@@ -335,7 +369,7 @@ impl Placer {
             placements: self.placements,
             qualified: self.qualified,
             overlapped: self.overlapped,
-            requests: self.requests,
+            kept: self.kept,
         }
     }
 }
@@ -345,14 +379,17 @@ pub(crate) struct Placed {
     placements: Vec<SpanPlacement>,
     qualified: Vec<MeasurementCompleteness>,
     overlapped: usize,
-    requests: Vec<PlacedRequest>,
+    kept: Kept,
 }
 
 impl Placed {
-    /// Every request placed, in order.
-    pub(crate) fn timeline(self) -> RequestTimeline {
-        RequestTimeline {
-            requests: self.requests,
+    /// Every request placed, in order: none when the placer kept no
+    /// timeline, and the reason when it outgrew its bound.
+    pub(crate) fn timeline(self) -> Result<Option<RequestTimeline>, &'static str> {
+        match self.kept {
+            Kept::Off => Ok(None),
+            Kept::Requests(requests) => Ok(Some(RequestTimeline { requests })),
+            Kept::Withheld => Err(TIMELINE_REQUESTS_WITHHELD),
         }
     }
 
@@ -372,8 +409,9 @@ pub struct SpanSessions {
     pub whole: Session,
     /// Requests more than one span holds.
     pub overlapped: usize,
-    /// Every request the figures place, in recording order.
-    pub timeline: RequestTimeline,
+    /// Every request the figures place, in recording order, unless the
+    /// read counted more than [`MAX_TIMELINE_REQUESTS`].
+    pub timeline: Option<RequestTimeline>,
     pub notes: Vec<String>,
 }
 
@@ -386,10 +424,20 @@ impl SpanSessions {
         whole: Session,
         notes: Vec<String>,
     ) -> Self {
+        let Placed {
+            placements,
+            qualified,
+            overlapped,
+            kept,
+        } = placed;
+        let timeline = match kept {
+            Kept::Requests(requests) => Some(RequestTimeline { requests }),
+            Kept::Off | Kept::Withheld => None,
+        };
         let mut joined = figures
             .into_iter()
-            .zip(placed.placements)
-            .zip(placed.qualified)
+            .zip(placements)
+            .zip(qualified)
             .map(|((mut session, placement), qualified)| {
                 // What the placer could not place qualifies every figure the
                 // span holds, a retained-branch consumption included.
@@ -408,10 +456,8 @@ impl SpanSessions {
             spans: joined,
             remainder,
             whole,
-            overlapped: placed.overlapped,
-            timeline: RequestTimeline {
-                requests: placed.requests,
-            },
+            overlapped,
+            timeline,
             notes,
         }
     }
