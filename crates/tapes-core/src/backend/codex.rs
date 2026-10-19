@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use anyhow::{anyhow, Result};
 use serde_json::Value;
@@ -44,6 +45,8 @@ pub struct CodexBackend {
     /// named lookup that misses in an older walk walks again and replaces
     /// it.
     catalog: StoreCatalog,
+    /// The child headers of the catalog's walk, shared like the catalog.
+    lineage: LineageIndex,
     /// How much of a recording's end a transcript read takes.
     read_bytes: u64,
 }
@@ -65,11 +68,14 @@ impl CodexBackend {
     /// A backend over the Codex store at `root`. Its listings answer from
     /// one walk of the store taken at first use; a consumer that holds the
     /// backend and needs a listing that sees later recordings builds a new
-    /// backend. A named lookup sees later recordings either way.
+    /// backend. A named lookup sees later recordings either way. Lineage
+    /// joins against the child headers of the walk the backend holds, each
+    /// read once per walk.
     pub fn new(root: impl Into<PathBuf>) -> Self {
         Self {
             store: Some(NativeStore::codex(root)),
             catalog: StoreCatalog::new(),
+            lineage: LineageIndex::default(),
             read_bytes: super::DEFAULT_READ_BYTES,
             native_root: None,
         }
@@ -79,6 +85,7 @@ impl CodexBackend {
         Self {
             store,
             catalog: StoreCatalog::new(),
+            lineage: LineageIndex::default(),
             read_bytes: super::DEFAULT_READ_BYTES,
             native_root: None,
         }
@@ -531,13 +538,13 @@ impl Backend for CodexBackend {
     /// parent, keyed by the agent path they name, and the headers of the
     /// store's own recordings. Only headers are read; no child's turns are.
     fn lineage(&self, session: &Session) -> Result<Lineage> {
-        let (files, path, discovery_notes) = self.lineage_inputs(session)?;
-        self.lineage_from_inputs(session, files, path, discovery_notes)
+        let (index, path) = self.lineage_inputs(session)?;
+        self.lineage_from_inputs(session, &index, path)
     }
 
     fn stream_lineage(&self, session: &Session) -> Result<Lineage> {
-        let (files, path, discovery_notes) = self.lineage_inputs(session)?;
-        self.stream_lineage_from_inputs(session, files, path, discovery_notes)
+        let (index, path) = self.lineage_inputs(session)?;
+        self.stream_lineage_from_inputs(session, &index, path)
     }
 
     fn stream_session(&self, session: &Session, read: &StreamedTranscript) -> Result<Session> {
@@ -803,9 +810,8 @@ impl CodexBackend {
     fn lineage_from_inputs(
         &self,
         session: &Session,
-        files: Vec<CandidateRecording>,
+        index: &ChildIndex,
         path: PathBuf,
-        discovery_notes: Vec<String>,
     ) -> Result<Lineage> {
         let recording = read_recording(&path, self.read_bytes)?;
         super::validate_recording_identity(&recording, "codex", &session.id)?;
@@ -821,7 +827,7 @@ impl CodexBackend {
         }
         let lineage = Lineage {
             truncation: read_bounds(&recording.tail),
-            ..self.relatives(&files, &path, session, &header, agents, discovery_notes)
+            ..self.relatives(index, &path, session, &header, agents)
         };
         Ok(lineage)
     }
@@ -829,9 +835,8 @@ impl CodexBackend {
     fn stream_lineage_from_inputs(
         &self,
         session: &Session,
-        files: Vec<CandidateRecording>,
+        index: &ChildIndex,
         path: PathBuf,
-        discovery_notes: Vec<String>,
     ) -> Result<Lineage> {
         let mut header = None;
         let mut agents = SpawnedAgents::default();
@@ -844,19 +849,26 @@ impl CodexBackend {
             Ok(false)
         })?;
         let header = header.unwrap_or(Value::Null);
-        let mut lineage = self.relatives(&files, &path, session, &header, agents, discovery_notes);
+        let mut lineage = self.relatives(index, &path, session, &header, agents);
         lineage.notes.extend(skipped_records_note(read.skipped));
         Ok(lineage)
     }
 
-    /// Use discovery-owned native locators for sibling and parent joins.
-    fn lineage_inputs(
-        &self,
-        session: &Session,
-    ) -> Result<(Vec<CandidateRecording>, PathBuf, Vec<String>)> {
+    /// The session's recording and the child index of the catalog's walk.
+    fn lineage_inputs(&self, session: &Session) -> Result<(Arc<ChildIndex>, PathBuf)> {
         let path = super::session_file_path(session)
             .map(Path::to_path_buf)
             .ok_or_else(|| anyhow!("codex session {} has no file locator", session.id))?;
+        let index = self.lineage.current(&self.catalog, || {
+            let (files, notes) = self.candidates()?;
+            Ok(ChildIndex::read(&files, notes))
+        })?;
+        Ok((index, path))
+    }
+
+    /// The store's candidate recordings, as discovery-owned native locators,
+    /// and the notes on what the listing could not cover.
+    fn candidates(&self) -> Result<(Vec<CandidateRecording>, Vec<String>)> {
         let store = self
             .store
             .as_ref()
@@ -885,20 +897,20 @@ impl CodexBackend {
         if !page.complete && notes.is_empty() {
             notes.push("Codex lineage candidate coverage is incomplete".to_owned());
         }
-        Ok((files, path, notes))
+        Ok((files, notes))
     }
 
     /// The relatives a rollout's header and spawned agents name, joined to the
     /// store's child rollout headers.
     fn relatives(
         &self,
-        files: &[CandidateRecording],
+        index: &ChildIndex,
         path: &Path,
         session: &Session,
         header: &Value,
         agents: SpawnedAgents,
-        mut notes: Vec<String>,
     ) -> Lineage {
+        let mut notes = index.notes.clone();
         let parent = header["parent_thread_id"].as_str().map(|native_id| {
             let resolved = match self
                 .store
@@ -925,7 +937,7 @@ impl CodexBackend {
         });
 
         let mut agents = agents.agents;
-        let (probed, probe_bound) = child_headers(files, path, &session.id, &mut notes);
+        let (probed, probe_bound) = index.children(path, &session.id, &mut notes);
         for child in probed {
             let entry = agents.entry(child.agent_path.clone()).or_default();
             entry.session_id = Some(child.thread_id);
@@ -3211,6 +3223,7 @@ struct SpawnedAgent {
 }
 
 /// A child recording found by its header.
+#[derive(Clone, Debug)]
 struct ChildHeader {
     thread_id: String,
     agent_path: String,
@@ -3297,57 +3310,132 @@ fn payload_json(value: &Value) -> Value {
     }
 }
 
-/// The store's recordings whose headers name this session as their parent,
-/// and the probe bound when the store held more than the read inspected.
-/// Failed probes retain their source and I/O cause in the coverage notes.
-fn child_headers(
-    files: &[CandidateRecording],
-    own: &Path,
-    id: &str,
-    notes: &mut Vec<String>,
-) -> (Vec<ChildHeader>, Option<usize>) {
-    let inspected = files.len().min(MAX_LINEAGE_PROBES);
-    let bound = (files.len() > inspected).then_some(inspected);
-    let children = files
-        .iter()
-        .take(inspected)
-        .filter(|candidate| candidate.path.as_path() != own)
-        .filter_map(|candidate| {
-            let path = &candidate.path;
-            let expected = &candidate.id;
-            let values = match head_jsonl(path) {
-                Ok(values) => values,
-                Err(error) => {
-                    notes.push(format!(
+/// The child index of a backend's store walk, shared by the backend and its
+/// clones. It is read once per walk: a lineage read joins against the walk
+/// the catalog holds, and a walk taken again, after a named lookup missed,
+/// replaces the index with one read from it.
+#[derive(Clone, Debug, Default)]
+struct LineageIndex(Arc<Mutex<Option<Arc<ChildIndex>>>>);
+
+impl LineageIndex {
+    fn current(
+        &self,
+        catalog: &StoreCatalog,
+        read: impl FnOnce() -> Result<ChildIndex>,
+    ) -> Result<Arc<ChildIndex>> {
+        let mut held = self
+            .0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(index) = held
+            .as_ref()
+            .filter(|index| index.walks == Some(catalog.walks()))
+        {
+            return Ok(Arc::clone(index));
+        }
+        let mut index = read()?;
+        index.walks = Some(catalog.walks());
+        let index = Arc::new(index);
+        *held = Some(Arc::clone(&index));
+        Ok(index)
+    }
+}
+
+/// The headers of the candidate recordings a lineage read inspects, and the
+/// notes on what the candidate listing could not cover.
+#[derive(Debug)]
+struct ChildIndex {
+    /// The catalog walk the candidates came from.
+    walks: Option<usize>,
+    notes: Vec<String>,
+    /// Each inspected candidate that names a parent or could not be read, in
+    /// candidate order.
+    headers: Vec<CandidateHeader>,
+    /// The probe bound, when the store held more candidates than were read.
+    bound: Option<usize>,
+}
+
+#[derive(Debug)]
+enum CandidateHeader {
+    Child { parent: String, child: ChildHeader },
+    Unreadable { path: PathBuf, note: String },
+}
+
+impl ChildIndex {
+    /// Read the headers of the newest `MAX_LINEAGE_PROBES` candidates. A
+    /// failed read keeps its source and I/O cause as a coverage note.
+    fn read(files: &[CandidateRecording], notes: Vec<String>) -> Self {
+        let inspected = files.len().min(MAX_LINEAGE_PROBES);
+        let headers = files
+            .iter()
+            .take(inspected)
+            .filter_map(|candidate| {
+                let path = &candidate.path;
+                let unreadable = |error: anyhow::Error| CandidateHeader::Unreadable {
+                    path: path.clone(),
+                    note: format!(
                         "Codex lineage candidate header {} could not be read: {error:#}",
                         path.display()
-                    ));
-                    return None;
+                    ),
+                };
+                crate::counters::read_lineage_header();
+                let values = match head_jsonl(path) {
+                    Ok(values) => values,
+                    Err(error) => return Some(unreadable(error)),
+                };
+                for value in &values {
+                    if let Err(error) =
+                        super::validate_native_identity(value, "codex", &candidate.id)
+                    {
+                        return Some(unreadable(error));
+                    }
                 }
-            };
-            for value in &values {
-                if let Err(error) = super::validate_native_identity(value, "codex", expected) {
-                    notes.push(format!(
-                        "Codex lineage candidate header {} could not be read: {error:#}",
-                        path.display()
-                    ));
-                    return None;
-                }
-            }
-            let payload = values
-                .into_iter()
-                .find(|value| value["type"] == "session_meta")
-                .map(|value| value["payload"].clone())?;
-            (payload["parent_thread_id"].as_str() == Some(id)).then_some(())?;
-            Some(ChildHeader {
-                thread_id: payload["id"].as_str()?.to_owned(),
-                agent_path: payload["agent_path"].as_str()?.to_owned(),
-                nickname: payload["agent_nickname"].as_str().map(str::to_owned),
-                path: path.clone(),
+                let payload = values
+                    .into_iter()
+                    .find(|value| value["type"] == "session_meta")
+                    .map(|value| value["payload"].clone())?;
+                Some(CandidateHeader::Child {
+                    parent: payload["parent_thread_id"].as_str()?.to_owned(),
+                    child: ChildHeader {
+                        thread_id: payload["id"].as_str()?.to_owned(),
+                        agent_path: payload["agent_path"].as_str()?.to_owned(),
+                        nickname: payload["agent_nickname"].as_str().map(str::to_owned),
+                        path: path.clone(),
+                    },
+                })
             })
-        })
-        .collect();
-    (children, bound)
+            .collect();
+        Self {
+            walks: None,
+            notes,
+            headers,
+            bound: (files.len() > inspected).then_some(inspected),
+        }
+    }
+
+    /// The recordings other than `own` whose headers name `id` as their
+    /// parent, and the probe bound. Each unreadable header other than `own`'s
+    /// adds its note.
+    fn children(
+        &self,
+        own: &Path,
+        id: &str,
+        notes: &mut Vec<String>,
+    ) -> (Vec<ChildHeader>, Option<usize>) {
+        let mut children = Vec::new();
+        for header in &self.headers {
+            match header {
+                CandidateHeader::Unreadable { path, note } if path != own => {
+                    notes.push(note.clone());
+                }
+                CandidateHeader::Child { parent, child } if parent == id && child.path != own => {
+                    children.push(child.clone());
+                }
+                _ => {}
+            }
+        }
+        (children, self.bound)
+    }
 }
 
 /// The namespace an agent path sits in, where the harness organizes children
@@ -3433,7 +3521,10 @@ mod tests {
             assert_eq!(lineage.children.len(), 1);
             assert!(lineage.children[0].resolved);
         }
-        let (files, path, notes) = backend.lineage_inputs(&parent).unwrap();
+        // Another backend lists the store after the child was found, then
+        // reads the headers once the child has changed.
+        let backend = CodexBackend::new(&root.0);
+        let (files, notes) = backend.candidates().unwrap();
         assert!(notes.is_empty(), "{notes:?}");
         assert!(files.iter().any(|candidate| candidate.path == child_path));
         fs::remove_file(&child_path).unwrap();
@@ -3452,10 +3543,12 @@ mod tests {
         } else if read_failure {
             fs::create_dir(&child_path).unwrap();
         }
+        let index = ChildIndex::read(&files, notes);
+        let path = parent_path.clone();
         let lineage = if full {
-            backend.stream_lineage_from_inputs(&parent, files, path, notes)
+            backend.stream_lineage_from_inputs(&parent, &index, path)
         } else {
-            backend.lineage_from_inputs(&parent, files, path, notes)
+            backend.lineage_from_inputs(&parent, &index, path)
         }
         .unwrap();
         assert!(lineage.children.is_empty());
