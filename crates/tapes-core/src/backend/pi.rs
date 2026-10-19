@@ -1370,6 +1370,7 @@ impl PiUsage {
                         let totals = totals.finish(AccountingCoverage::Session, 0, None).unwrap();
                         ModelUsage {
                             list_price_estimate: None,
+                            cache_write_by_ttl: None,
                             measurement_completeness: totals.measurement_completeness,
                             model: key.model,
                             variant: key.variant,
@@ -1667,6 +1668,7 @@ impl PiConsumption {
                 let (tokens, measurement_coverage) = tokens.finish_covered();
                 ModelUsage {
                     list_price_estimate: None,
+                    cache_write_by_ttl: None,
                     measurement_completeness: Default::default(),
                     model,
                     variant: None,

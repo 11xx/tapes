@@ -612,7 +612,12 @@ PROBE BEFORE EXPORTING
   lacks qualifies its share unlisted-model and a missing category price
   missing-price. Every reason a category's counters carry (missing-counter,
   stopped-attempt, unrecognized-usage, read-window, ...) carries into the
-  estimate, whose amount is then a known subtotal. Pi consumption on other
+  estimate, whose amount is then a known subtotal. A model share carries
+  each reason its figure carries that describes the read rather than one
+  model's events (unreadable-record, unrecognized-usage, read-window,
+  since-reset, unestablished-scope, incomplete-attribution), so a
+  share-by-share estimate carries it too, and a share prices its cache
+  writes at the TTLs its own requests recorded. Pi consumption on other
   branches than the active one is priced by the model each event names, and
   usage no model names is incomplete-attribution. The estimate is
   absent, never zero, when nothing could be priced. A summary adds estimates

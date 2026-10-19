@@ -3057,6 +3057,7 @@ fn pi_usage_reports_the_model_and_effort_split() {
     let expected = Some(vec![
         ModelUsage {
             list_price_estimate: None,
+            cache_write_by_ttl: None,
             measurement_completeness: Default::default(),
             model: "pi-model-a".to_owned(),
             variant: Some("low".to_owned()),
@@ -3094,6 +3095,7 @@ fn pi_usage_reports_the_model_and_effort_split() {
         },
         ModelUsage {
             list_price_estimate: None,
+            cache_write_by_ttl: None,
             measurement_completeness: Default::default(),
             model: "pi-model-b".to_owned(),
             variant: Some("high".to_owned()),
@@ -3131,6 +3133,7 @@ fn pi_usage_reports_the_model_and_effort_split() {
         },
         ModelUsage {
             list_price_estimate: None,
+            cache_write_by_ttl: None,
             measurement_completeness: Default::default(),
             model: "pi-model-b".to_owned(),
             variant: Some("medium".to_owned()),
@@ -5787,6 +5790,7 @@ fn codex_usage_reports_the_context_window_and_the_newest_quota_windows() {
         view.by_model,
         Some(vec![ModelUsage {
             list_price_estimate: None,
+            cache_write_by_ttl: None,
             measurement_completeness: serde_json::from_value(
                 serde_json::json!({"cost": ["missing-price"], "cache_write": ["missing-counter"], "reasoning": ["missing-counter"]})
             )
@@ -7012,6 +7016,7 @@ fn claude_usage_reports_cost_state_durations_and_the_per_model_split() {
         Some(vec![
             ModelUsage {
                 list_price_estimate: None,
+                cache_write_by_ttl: None,
                 measurement_completeness: Default::default(),
                 model: "claude-first".to_owned(),
                 variant: None,
@@ -7030,6 +7035,7 @@ fn claude_usage_reports_cost_state_durations_and_the_per_model_split() {
             },
             ModelUsage {
                 list_price_estimate: None,
+                cache_write_by_ttl: None,
                 measurement_completeness: Default::default(),
                 model: "claude-second".to_owned(),
                 variant: None,

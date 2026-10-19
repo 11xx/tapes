@@ -1594,6 +1594,7 @@ fn cost_state_detail(value: &Value) -> UsageDetail {
             .iter()
             .map(|(model, usage)| ModelUsage {
                 list_price_estimate: None,
+                cache_write_by_ttl: None,
                 measurement_completeness: Default::default(),
                 model: model.clone(),
                 variant: None,
@@ -1692,8 +1693,9 @@ fn claude_request_tokens(values: &[Value]) -> RequestUsage {
 struct RequestTokens {
     requests: BTreeMap<String, RequestWitness>,
     unkeyed: TokenTotals,
-    /// Requests without a request id, by the model each names.
-    unkeyed_by_model: BTreeMap<(String, Option<String>), (TokenTotals, usize)>,
+    /// Requests without a request id, by the model each names, with their
+    /// cache writes by TTL.
+    unkeyed_by_model: BTreeMap<(String, Option<String>), (TokenTotals, usize, CacheWrites)>,
     dimensions: RequestDimensions,
     failures: usize,
     unrecognized_usage: usize,
@@ -1901,6 +1903,7 @@ impl RequestTokens {
         for witness in self.requests.into_values() {
             let model = witness.model.clone();
             let (tokens, request_dimensions) = witness.finish();
+            let request_writes = request_dimensions.cache_write;
             dimensions.add(request_dimensions);
             totals.add(
                 tokens.input,
@@ -1910,7 +1913,8 @@ impl RequestTokens {
                 tokens.cache_write,
             );
             if let Some(model) = model {
-                let (share, requests) = by_model.entry((model.id, model.variant)).or_default();
+                let (share, requests, writes) =
+                    by_model.entry((model.id, model.variant)).or_default();
                 share.add(
                     tokens.input,
                     tokens.output,
@@ -1919,15 +1923,17 @@ impl RequestTokens {
                     tokens.cache_write,
                 );
                 *requests += 1;
+                writes.add(&request_writes);
             }
         }
         let (tokens, coverage) = totals.finish_covered();
         let by_model = by_model
             .into_iter()
-            .map(|((model, variant), (share, requests))| {
+            .map(|((model, variant), (share, requests, writes))| {
                 let (tokens, measurement_coverage) = share.finish_covered();
                 ModelUsage {
                     list_price_estimate: None,
+                    cache_write_by_ttl: Some(writes),
                     measurement_completeness: Default::default(),
                     model,
                     variant,
@@ -2018,7 +2024,7 @@ impl RequestTokens {
                     tokens.cache_write,
                 );
                 if let Some(model) = claude_model(value) {
-                    let (share, requests) = self
+                    let (share, requests, writes) = self
                         .unkeyed_by_model
                         .entry((model.id, model.variant))
                         .or_default();
@@ -2030,6 +2036,7 @@ impl RequestTokens {
                         tokens.cache_write,
                     );
                     *requests += 1;
+                    writes.add(&dimensions.cache_write);
                 }
             }
         }

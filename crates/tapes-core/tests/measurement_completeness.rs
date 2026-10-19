@@ -675,6 +675,7 @@ fn a_recorded_models_share_follows_the_recorded_accounting() {
         cost_coverage: None,
         by_model: Some(vec![ModelUsage {
             list_price_estimate: None,
+            cache_write_by_ttl: None,
             model: "recorded-model".to_owned(),
             variant: None,
             tokens: Some(Tokens {
@@ -759,6 +760,7 @@ fn a_model_that_counted_requests_and_recorded_nothing_is_incomplete() {
     let detail = transcript.session.usage_detail.as_mut().unwrap();
     detail.by_model = Some(vec![ModelUsage {
         list_price_estimate: None,
+        cache_write_by_ttl: None,
         model: "counted-model".to_owned(),
         variant: None,
         tokens: None,

@@ -1270,6 +1270,7 @@ impl UsageCandidate {
                 let (tokens, measurement_coverage) = value.tokens.finish_covered();
                 ModelUsage {
                     list_price_estimate: None,
+                    cache_write_by_ttl: None,
                     measurement_completeness: Default::default(),
                     model: key.model,
                     variant: key.variant,
@@ -2041,6 +2042,7 @@ impl CodexSpanFigure {
                 let (tokens, measurement_coverage) = tokens.finish_covered();
                 ModelUsage {
                     list_price_estimate: None,
+                    cache_write_by_ttl: None,
                     measurement_completeness: Default::default(),
                     model,
                     variant,

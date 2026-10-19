@@ -524,7 +524,7 @@ impl PricedFigure<'_> {
             let convention = convention?;
             let tokens = model.tokens.as_ref()?;
             Some(
-                DisjointTokens::from_native(tokens, convention, None)
+                DisjointTokens::from_native(tokens, convention, model.cache_write_by_ttl.as_ref())
                     .with_completeness(&model.measurement_completeness),
             )
         };

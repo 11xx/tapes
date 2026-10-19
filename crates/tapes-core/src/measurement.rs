@@ -76,6 +76,23 @@ pub enum MeasurementReason {
 }
 
 impl MeasurementReason {
+    /// Whether the reason describes the read, or records it could place on
+    /// no model, rather than the events one model served. Such a reason on a
+    /// figure qualifies every share of it. A stopped attempt is not one: a
+    /// reader places it on the model it names, and one naming no model is
+    /// counted as a failure every share carries.
+    pub fn qualifies_every_share(self) -> bool {
+        matches!(
+            self,
+            Self::UnreadableRecord
+                | Self::UnrecognizedUsage
+                | Self::ReadWindow
+                | Self::SinceReset
+                | Self::UnestablishedScope
+                | Self::IncompleteAttribution
+        )
+    }
+
     pub fn label(self) -> &'static str {
         match self {
             Self::MissingCounter => "missing-counter",
@@ -165,6 +182,23 @@ impl MeasurementCompleteness {
         for counter in COUNTERS {
             self.qualify(counter, reason);
         }
+    }
+
+    /// The reasons `keep` admits, counter by counter.
+    pub fn retaining(&self, keep: impl Fn(MeasurementReason) -> bool) -> Self {
+        Self(
+            self.0
+                .iter()
+                .filter_map(|(counter, reasons)| {
+                    let kept = reasons
+                        .iter()
+                        .copied()
+                        .filter(|reason| keep(*reason))
+                        .collect::<BTreeSet<_>>();
+                    (!kept.is_empty()).then(|| (counter.clone(), kept))
+                })
+                .collect(),
+        )
     }
 
     pub fn merge(&mut self, other: &Self) {

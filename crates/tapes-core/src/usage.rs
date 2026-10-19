@@ -228,6 +228,11 @@ pub struct ModelUsage {
     /// The model's share priced by its own row of a caller's price table.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub list_price_estimate: Option<ListPriceEstimate>,
+    /// The share's cache writes by TTL, as its requests recorded them, so
+    /// its estimate prices each write at its own TTL. The figure's split is
+    /// the one a usage answer shows.
+    #[serde(skip)]
+    pub cache_write_by_ttl: Option<CacheWrites>,
 }
 
 impl ModelUsage {
@@ -1167,9 +1172,18 @@ impl Session {
     }
 
     /// Reasons that qualify every model's share, because the read could not
-    /// place them on one model.
+    /// place them on one model: the session-wide ones, and each reason the
+    /// figure carries that describes the read rather than one model's
+    /// events, such as a record the read could not decode.
     fn shared_model_reasons(&self) -> MeasurementCompleteness {
         let mut shared = self.session_wide_reasons();
+        if let Some(detail) = &self.usage_detail {
+            shared.merge(
+                &detail
+                    .measurement_completeness
+                    .retaining(MeasurementReason::qualifies_every_share),
+            );
+        }
         let attribution = self
             .usage_detail
             .as_ref()
@@ -2068,6 +2082,7 @@ mod tests {
             }),
             by_model: Some(vec![ModelUsage {
                 list_price_estimate: None,
+                cache_write_by_ttl: None,
                 measurement_completeness: Default::default(),
                 model: "fixture-model".to_owned(),
                 variant: None,
