@@ -3,12 +3,14 @@
 //! read folds its accounting into the transcript pass.
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use agent_tapes_core::backend::{codex::CodexBackend, Backend};
+use agent_tapes_core::backend::{codex::CodexBackend, pi::PiBackend, Backend};
 use agent_tapes_core::counters;
+use agent_tapes_core::usage::UsageOptions;
+use agent_tapes_core::{usage_with_options_with_backends, Selection};
 use serde_json::{json, Value};
 
 /// The counters are process-wide, so the tests that read them run one at a
@@ -142,4 +144,47 @@ fn codex_lineage_reads_each_candidate_header_once_per_walk() {
             LATE_CHILD.to_owned()
         ]
     );
+}
+
+/// Claim: a whole pi usage read streams its recording twice, the branch pass
+/// and the turn pass, and the session it folds from the turn pass is the one
+/// a separate accounting pass over the same read produces. Rejects a read
+/// that streams the recording a third time for its accounting.
+#[test]
+fn pi_whole_usage_folds_accounting_into_the_turn_pass() {
+    let _counted = COUNTED
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/pi");
+    for id in ["session-pi", "session-model-split"] {
+        let before = counters::recording_passes();
+        usage_with_options_with_backends(
+            &[Box::new(PiBackend::new(&fixtures)) as Box<dyn Backend>],
+            Selection::Id(id),
+            UsageOptions {
+                full: true,
+                series: None,
+                reconcile: false,
+                event_keys: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            counters::recording_passes() - before,
+            2,
+            "pi usage of {id} streams for its branch, then turns and accounting"
+        );
+
+        let backend = PiBackend::new(&fixtures);
+        let session = backend.locate(id).unwrap().unwrap();
+        let read = backend
+            .stream_transcript(&session, None, &mut |_| Ok(()))
+            .unwrap();
+        let folded = backend.stream_session(&session, &read).unwrap();
+        let mut asked_elsewhere = session.clone();
+        asked_elsewhere.title = Some("asked about another session".to_owned());
+        let mut replayed = backend.stream_session(&asked_elsewhere, &read).unwrap();
+        replayed.title.clone_from(&session.title);
+        assert_eq!(folded, replayed, "{id}");
+    }
 }

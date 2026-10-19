@@ -8,8 +8,8 @@ use super::{
     accounting_for, bounded_launch, default_native_store, enrich_native_session, head_directory,
     list_discovered_files, list_discovered_files_with_search, merge_launch, read_bounds,
     read_recording, replay_pin, skipped_records_note, stream_jsonl, timestamp, trailing_record,
-    transcript_from_recording, ActivityRange, Backend, Jsonl, Listing, ParsedFile, ParsedTurns,
-    Query, StreamedTranscript, TokenTotals, UnmappedTally,
+    transcript_from_recording, ActivityRange, Backend, FoldedSession, Jsonl, Listing, ParsedFile,
+    ParsedTurns, Query, StreamedTranscript, TokenTotals, UnmappedTally,
 };
 use crate::content::{
     bounded_shape, text_part, tool_coverage, tool_part, ContentAvailability, ContentCarrier,
@@ -21,8 +21,8 @@ use crate::measurement::{
     known_subtotal_notes, Measured, MeasurementCompleteness, MeasurementReason,
 };
 use crate::model::{
-    Accounting, AccountingBasis, AccountingCoverage, AccountingSelection, Cost, CostCoverage,
-    KindDeclaration, Launch, Model, ReadGap, Role, Session, SourceDescriptor, Tokens,
+    Accounting, AccountingBasis, AccountingCoverage, AccountingSelection, ByteSpan, Cost,
+    CostCoverage, KindDeclaration, Launch, Model, ReadGap, Role, Session, SourceDescriptor, Tokens,
     TrailingRecord, Transcript, Turn, TurnKind, TurnSelection, UserDefault,
 };
 use crate::overlap::CopyEvidence;
@@ -451,8 +451,12 @@ impl Backend for PiBackend {
         let mut placer = Placer::new(&[]);
         let mut turn_times = Vec::new();
         let mut turn = super::timed(&mut turn_times, turn);
+        // The session's accounting folds from the same entries, as
+        // `stream_session` would replay them.
+        let mut recorded = PiEntries::default();
         let read = stream_jsonl(path, Some(first.pin()), |value, span, revision| {
             super::validate_native_identity(value, "pi", &session.id)?;
+            recorded.observe(value, span, &session.id);
             if value["type"] == "session" {
                 count_unmapped(&mut unmapped, value);
                 return Ok(false);
@@ -496,7 +500,8 @@ impl Backend for PiBackend {
             Ok(produced)
         })?;
         drop(turn);
-        Ok(StreamedTranscript {
+        let recording = recorded.finish(read.skipped, read.gaps.clone());
+        let mut streamed = StreamedTranscript {
             coordinates: super::StreamCoordinates::FileBytes,
             source_length: read.source_length,
             source_bounds: Vec::new(),
@@ -513,7 +518,13 @@ impl Backend for PiBackend {
             folded: None,
             turn_times,
             requests: Some(placer.finish().timeline()),
-        })
+        };
+        let whole = recording.figure(session, &|_| true, recording.skipped, &streamed);
+        streamed.folded = Some(Box::new(FoldedSession {
+            asked: session.clone(),
+            whole,
+        }));
+        Ok(streamed)
     }
 
     /// pi records a relationship on the session that has one: its header
@@ -580,6 +591,9 @@ impl Backend for PiBackend {
     /// entry's place in the tree and the facts it carries; the branch is
     /// walked once the last entry is known.
     fn stream_session(&self, session: &Session, read: &StreamedTranscript) -> Result<Session> {
+        if let Some(whole) = read.folded_for(session) {
+            return Ok(whole);
+        }
         let recording = self.stream_entries(session, read)?;
         Ok(recording.figure(session, &|_| true, recording.skipped, read))
     }
@@ -637,74 +651,13 @@ impl PiBackend {
     /// walked from the last entry.
     fn stream_entries(&self, session: &Session, read: &StreamedTranscript) -> Result<PiRecording> {
         let path = self.recording(session)?;
-        let mut entries = Vec::<PiEntry>::new();
-        let mut positions = HashMap::<String, usize>::new();
-        let mut activity = ActivityRange::default();
-        let mut launch = None;
-        let mut forked_from = None;
+        let mut entries = PiEntries::default();
         let streamed = stream_jsonl(&path, Some(read.pin()?), |value, span, _| {
             super::validate_native_identity(value, "pi", &session.id)?;
-            activity.observe(value);
-            launch = merge_launch(launch, pi_launch_entry(value, &session.id));
-            if value["type"] == "session" {
-                if forked_from.is_none() {
-                    forked_from = pi_parent_session(value);
-                }
-                return Ok(false);
-            }
-            let id = value["id"].as_str().map(str::to_owned);
-            if let Some(id) = &id {
-                positions.insert(id.clone(), entries.len());
-            }
-            entries.push(PiEntry {
-                id,
-                parent: value["parentId"].as_str().map(str::to_owned),
-                consumed: pi_consumed(value),
-                unread_usage: pi_unread_usage(value),
-                model: pi_model(value).map(str::to_owned),
-                thinking: pi_thinking(value).map(str::to_owned),
-                timestamp: timestamp(&value["timestamp"]),
-                start: span.start,
-                end: span.end,
-            });
+            entries.observe(value, span, &session.id);
             Ok(false)
         })?;
-        let mut active = Vec::new();
-        let mut seen = HashSet::new();
-        let mut rooted = false;
-        let mut current = entries.len().checked_sub(1);
-        while let Some(position) = current {
-            let entry = &entries[position];
-            let Some(id) = entry.id.as_deref() else {
-                break;
-            };
-            if !seen.insert(id.to_owned()) {
-                break;
-            }
-            active.push(position);
-            rooted = entry.parent.is_none();
-            current = entry
-                .parent
-                .as_deref()
-                .and_then(|parent| positions.get(parent).copied());
-        }
-        active.reverse();
-        let coverage = branch_coverage(
-            rooted,
-            entries.last().map(|entry| entry.end),
-            &streamed.gaps,
-        );
-        Ok(PiRecording {
-            entries,
-            active,
-            seen,
-            coverage,
-            activity,
-            launch,
-            forked_from,
-            skipped: streamed.skipped,
-            gaps: streamed.gaps,
-        })
+        Ok(entries.finish(streamed.skipped, streamed.gaps))
     }
 
     fn recording(&self, session: &Session) -> Result<PathBuf> {
@@ -739,6 +692,89 @@ impl PiBackend {
             native_id,
             source: "session.parentSession".to_owned(),
         }))
+    }
+}
+
+/// The entries of a pi recording as a read streams them, and the session
+/// facts its records carry.
+#[derive(Default)]
+struct PiEntries {
+    entries: Vec<PiEntry>,
+    positions: HashMap<String, usize>,
+    activity: ActivityRange,
+    launch: Option<Launch>,
+    forked_from: Option<Option<String>>,
+}
+
+impl PiEntries {
+    fn observe(&mut self, value: &Value, span: ByteSpan, session_id: &str) {
+        self.activity.observe(value);
+        self.launch = merge_launch(self.launch, pi_launch_entry(value, session_id));
+        if value["type"] == "session" {
+            if self.forked_from.is_none() {
+                self.forked_from = pi_parent_session(value);
+            }
+            return;
+        }
+        let id = value["id"].as_str().map(str::to_owned);
+        if let Some(id) = &id {
+            self.positions.insert(id.clone(), self.entries.len());
+        }
+        self.entries.push(PiEntry {
+            id,
+            parent: value["parentId"].as_str().map(str::to_owned),
+            consumed: pi_consumed(value),
+            unread_usage: pi_unread_usage(value),
+            model: pi_model(value).map(str::to_owned),
+            thinking: pi_thinking(value).map(str::to_owned),
+            timestamp: timestamp(&value["timestamp"]),
+            start: span.start,
+            end: span.end,
+        });
+    }
+
+    /// The recording, with the active branch walked from the last entry.
+    /// `skipped` and `gaps` are what the read could not decode.
+    fn finish(self, skipped: usize, gaps: Vec<ReadGap>) -> PiRecording {
+        let Self {
+            entries,
+            positions,
+            activity,
+            launch,
+            forked_from,
+        } = self;
+        let mut active = Vec::new();
+        let mut seen = HashSet::new();
+        let mut rooted = false;
+        let mut current = entries.len().checked_sub(1);
+        while let Some(position) = current {
+            let entry = &entries[position];
+            let Some(id) = entry.id.as_deref() else {
+                break;
+            };
+            if !seen.insert(id.to_owned()) {
+                break;
+            }
+            active.push(position);
+            rooted = entry.parent.is_none();
+            current = entry
+                .parent
+                .as_deref()
+                .and_then(|parent| positions.get(parent).copied());
+        }
+        active.reverse();
+        let coverage = branch_coverage(rooted, entries.last().map(|entry| entry.end), &gaps);
+        PiRecording {
+            entries,
+            active,
+            seen,
+            coverage,
+            activity,
+            launch,
+            forked_from,
+            skipped,
+            gaps,
+        }
     }
 }
 
