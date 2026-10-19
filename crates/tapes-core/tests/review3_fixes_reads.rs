@@ -2,20 +2,27 @@
 //! independent review named: a recording's final record is whole without a
 //! trailing line feed, a launch marker names a parent in the harness it
 //! names, an external parent's store-declared fork outranks a marker it
-//! copied, and a discovery page charges the lineage metadata it retains.
+//! copied, rates grouped without parents resolve no parent, and a discovery
+//! page charges the lineage metadata it retains.
 
+use std::cell::Cell;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use agent_tapes_core::backend::{
     claude::ClaudeBackend, codex::CodexBackend, opencode::OpenCodeBackend, pi::PiBackend, Backend,
+    Listing, Query, StreamOptions, StreamedTranscript,
 };
-use agent_tapes_core::usage::GroupBy;
-use agent_tapes_core::window::WindowBounds;
+use agent_tapes_core::lineage::Lineage;
+use agent_tapes_core::model::{AccountingBasis, KindDeclaration, Session, Transcript, Turn};
+use agent_tapes_core::span::{SpanBounds, SpanSessions};
+use agent_tapes_core::usage::{GroupBy, UsageObservationOptions, UsageObservationResult};
+use agent_tapes_core::window::{QuotaKind, WindowBounds};
 use agent_tapes_core::{
-    usage_summary_with_backends, usage_window_with_backends, NativeStore, SessionSelection,
-    WindowAsk,
+    allowance_rates_with_backends, usage_summary_with_backends, usage_window_with_backends,
+    NativeStore, SessionSelection, WindowAsk,
 };
 use serde_json::{json, Value};
 
@@ -319,6 +326,186 @@ fn an_external_parent_s_declared_fork_outranks_the_marker_it_copied() {
         vec![(OPENCODE_MISSING_ORIGIN.to_owned(), 1)],
         "{summary:#}"
     );
+}
+
+/// A Codex backend that counts the relative lookups and first-prompt reads
+/// asked of it.
+struct CountedCodex {
+    inner: CodexBackend,
+    lookups: Rc<Cell<usize>>,
+    first_prompts: Rc<Cell<usize>>,
+}
+
+impl Backend for CountedCodex {
+    fn kinds(&self) -> KindDeclaration {
+        self.inner.kinds()
+    }
+    fn history_page(
+        &self,
+        session: &Session,
+        cursor: Option<&str>,
+        bytes: usize,
+    ) -> anyhow::Result<agent_tapes_core::history::Page> {
+        self.inner.history_page(session, cursor, bytes)
+    }
+    fn metadata_page(
+        &self,
+        session: &Session,
+        cursor: Option<&str>,
+        bytes: usize,
+    ) -> anyhow::Result<agent_tapes_core::history::Page> {
+        self.inner.metadata_page(session, cursor, bytes)
+    }
+    fn harness(&self) -> &'static str {
+        self.inner.harness()
+    }
+    fn accounting_bases(&self) -> &'static [AccountingBasis] {
+        self.inner.accounting_bases()
+    }
+    fn available(&self) -> bool {
+        self.inner.available()
+    }
+    fn list_titles(&self, query: &Query) -> anyhow::Result<Listing> {
+        self.inner.list_titles(query)
+    }
+    fn list(&self, query: &Query) -> anyhow::Result<Listing> {
+        self.inner.list(query)
+    }
+    fn list_with_search(
+        &self,
+        query: &Query,
+        needle: &str,
+        tail: usize,
+    ) -> anyhow::Result<Listing> {
+        self.inner.list_with_search(query, needle, tail)
+    }
+    fn locate(&self, id: &str) -> anyhow::Result<Option<Session>> {
+        self.inner.locate(id)
+    }
+    fn locate_relative(&self, id: &str) -> anyhow::Result<Option<Session>> {
+        self.lookups.set(self.lookups.get() + 1);
+        self.inner.locate_relative(id)
+    }
+    fn transcript(&self, session: &Session, tail: usize) -> anyhow::Result<Transcript> {
+        self.inner.transcript(session, tail)
+    }
+    fn supports_full_search(&self) -> bool {
+        self.inner.supports_full_search()
+    }
+    fn stream_transcript_with(
+        &self,
+        session: &Session,
+        replay: Option<&StreamedTranscript>,
+        options: StreamOptions,
+        turn: &mut dyn FnMut(Turn) -> anyhow::Result<()>,
+    ) -> anyhow::Result<StreamedTranscript> {
+        self.inner
+            .stream_transcript_with(session, replay, options, turn)
+    }
+    fn first_prompt_markers(
+        &self,
+        sessions: &[&Session],
+    ) -> Vec<Option<anyhow::Result<agent_tapes_core::launch_parent::LaunchMarker>>> {
+        self.first_prompts
+            .set(self.first_prompts.get() + sessions.len());
+        self.inner.first_prompt_markers(sessions)
+    }
+    fn lineage(&self, session: &Session) -> anyhow::Result<Lineage> {
+        self.inner.lineage(session)
+    }
+    fn stream_lineage(&self, session: &Session) -> anyhow::Result<Lineage> {
+        self.inner.stream_lineage(session)
+    }
+    fn stream_session(
+        &self,
+        session: &Session,
+        read: &StreamedTranscript,
+    ) -> anyhow::Result<Session> {
+        self.inner.stream_session(session, read)
+    }
+    fn allowance_timeline(
+        &self,
+        session: &Session,
+    ) -> anyhow::Result<Option<agent_tapes_core::allowance::Timeline>> {
+        self.inner.allowance_timeline(session)
+    }
+    fn stream_spans(
+        &self,
+        session: &Session,
+        read: &StreamedTranscript,
+        spans: &[SpanBounds],
+    ) -> anyhow::Result<SpanSessions> {
+        self.inner.stream_spans(session, read, spans)
+    }
+    fn usage_observations(
+        &self,
+        session: &Session,
+        read: Option<&agent_tapes_core::model::ReadEvidence>,
+        options: UsageObservationOptions,
+    ) -> anyhow::Result<UsageObservationResult> {
+        self.inner.usage_observations(session, read, options)
+    }
+}
+
+const SPAWN_PARENT: &str = "01a10000-0000-7000-8000-0000000000d1";
+const SPAWN_CHILD: &str = "01a10000-0000-7000-8000-0000000000d2";
+
+/// Relative lookups and first-prompt reads that rates grouped by `by` ask
+/// of a Codex store holding a spawn inside the lookback whose parent lies
+/// before it.
+fn rates_reads(by: GroupBy) -> (usize, usize) {
+    let store = Store::new("rates-parents");
+    let parent_stamp = "2026-01-10T08:00:00Z";
+    store.write(
+        &codex_path(SPAWN_PARENT, parent_stamp),
+        &codex_session(SPAWN_PARENT, parent_stamp, None, "Lead the fixture work."),
+    );
+    let child_stamp = "2026-01-10T10:00:00Z";
+    store.write(
+        &codex_path(SPAWN_CHILD, child_stamp),
+        &codex_session(
+            SPAWN_CHILD,
+            child_stamp,
+            Some(SPAWN_PARENT),
+            "Inspect the fixture.",
+        ),
+    );
+    let lookups = Rc::new(Cell::new(0));
+    let first_prompts = Rc::new(Cell::new(0));
+    let backends: Vec<Box<dyn Backend>> = vec![Box::new(CountedCodex {
+        inner: CodexBackend::new(&store.0),
+        lookups: lookups.clone(),
+        first_prompts: first_prompts.clone(),
+    })];
+    let selection = SessionSelection {
+        harness: Some("codex"),
+        limit: Some(50),
+        ..Default::default()
+    };
+    allowance_rates_with_backends(
+        &backends,
+        &selection,
+        &[by],
+        WindowBounds {
+            from: Some(at("2026-01-10T09:00:00Z")),
+            to: Some(at("2026-01-10T12:00:00Z")),
+        },
+        QuotaKind::Primary,
+    )
+    .unwrap();
+    (lookups.get(), first_prompts.get())
+}
+
+/// Claim: rates grouped by model resolve no parent of a lane, so a spawn
+/// whose parent lies outside the lookback asks the store neither for that
+/// parent nor for its first prompt; grouped by parent, they do. Rejects
+/// resolving every lane's parent chain whatever the grouping.
+#[test]
+fn rates_grouped_without_parents_resolve_no_parent() {
+    assert_eq!(rates_reads(GroupBy::Model), (0, 0));
+    let (lookups, first_prompts) = rates_reads(GroupBy::Parent);
+    assert!(lookups > 0, "a grouping by parent resolves the parent");
+    assert!(first_prompts > 0, "a grouping by parent reads its marker");
 }
 
 const LINEAGE_PARENT: &str = "01a10000-0000-7000-8000-0000000000d1";

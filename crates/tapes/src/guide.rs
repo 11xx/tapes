@@ -745,17 +745,18 @@ PROBE BEFORE EXPORTING
   in Claude, Codex and pi recordings, and from the first 256 characters of
   the first user message's first text part in OpenCode: one query per page of
   sessions, or one request per session through the API. Only an answer that
-  uses a parent reads it: `--by parent` (in a summary or allowance rates), a
-  window read, whose shares carry `parent` and `root`, the lookup of a parent
-  outside the selection, and one session's `usage`, whose notes report a
-  marker that names no parent. Listings and every other grouping read no
-  marker. It is read only for a session its store names no parent or fork
-  origin for, a parent outside the selection included.
-  A parent is looked up by its id in the stores of the harness that holds it:
+  uses a parent reads it, and only such an answer looks up a parent outside
+  the selection: `--by parent` (in a summary or allowance rates), a window
+  read, whose shares carry `parent` and `root`, and one session's `usage`,
+  whose notes report a marker that names no parent. Listings, every other
+  grouping of a summary or of allowance rates, and forecasts read no marker
+  and look up no parent. A marker is read only for a session its store names
+  no parent or fork origin for, a parent outside the selection included. A
+  parent is looked up by its id in the stores of the harness that holds it:
   the one a marker names, and the session's own for a subagent, a spawn or a
-  fork origin. One those stores do not hold stays the named, unresolved
-  root, as a missing fork origin does, even where another harness holds a
-  session of that id. A first prompt opening with `tapes-parent:` in any other form, or
+  fork origin. One those stores do not hold stays the named, unresolved root,
+  as a missing fork origin does, even where another harness holds a session of
+  that id. A first prompt opening with `tapes-parent:` in any other form, or
   naming the session itself, names no parent, and the session's usage notes
   say so. A launched session holds no copy of its parent, so the marker never
   makes the two an overlap group: their consumption adds. A derived title

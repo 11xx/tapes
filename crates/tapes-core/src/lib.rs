@@ -2129,14 +2129,15 @@ pub fn read_window(
 
 /// As [`read_window`], keeping, when `keep` names a bound, only the first
 /// `keep` listed sessions of each harness the window may hold, in the
-/// listing's order, and counting the rest, and reading launch markers only
-/// when the answer uses `parents`.
+/// listing's order, and counting the rest, and reading launch markers and
+/// following chains of parents only when the answer uses `parents`; without
+/// them each share is its own root.
 fn read_window_keeping(
     backends: &[Box<dyn Backend>],
     selection: &SessionSelection<'_>,
     ask: WindowAsk,
     keep: Option<usize>,
-    parents: bool,
+    uses_parents: bool,
 ) -> Result<WindowRead> {
     let scope = selection.within.resolve()?;
     let limit = selection.limit.unwrap_or(DEFAULT_LIST_LIMIT);
@@ -2317,7 +2318,7 @@ fn read_window_keeping(
             }
         }
     }
-    declare_origins(backends, &origins, &mut sessions, parents);
+    declare_origins(backends, &origins, &mut sessions, uses_parents);
     let mut figures = Vec::new();
     let mut shares = Vec::new();
     let mut parents = Vec::new();
@@ -2377,7 +2378,11 @@ fn read_window_keeping(
             figures.push(figure);
         }
     }
-    let (relations, resolved) = session_relations(backends, parents);
+    let (relations, resolved) = if uses_parents {
+        session_relations(backends, parents)
+    } else {
+        Default::default()
+    };
     for share in &mut shares {
         share.root = relations.root_of(&share.id).to_owned();
         share.root_resolved = resolved.get(&share.id).copied().unwrap_or(true);
