@@ -3159,8 +3159,10 @@ fn dispatch(cli: Cli) -> Result<()> {
             };
             let latest_warnings = query.latest_warnings(&single_backends)?;
             print_selection_warnings(&latest_warnings);
+            // A selection's summary carries no cost to price, but a table the
+            // caller named that cannot be read still refuses.
+            let prices = prices.table()?;
             if let Some(one) = query.single() {
-                let prices = prices.table()?;
                 let prices = prices.as_ref();
                 let stats = if full {
                     agent_tapes_core::stats_full_priced_with_backends(
