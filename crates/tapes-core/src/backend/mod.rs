@@ -1637,7 +1637,9 @@ pub(crate) fn first_prompt(
 
 /// A recording file's first prompt record, read record by record from the
 /// start through its first MiB, with each record's identity checked as an
-/// opening's are. `None` when no prompt lies within that bound.
+/// opening's are. A final line without a trailing newline is whole where the
+/// read reached the file's end, and a fragment where the bound cut it.
+/// `None` when no prompt lies within that bound.
 pub(crate) fn first_prompt_in_file(
     path: &Path,
     harness: &str,
@@ -1647,11 +1649,18 @@ pub(crate) fn first_prompt_in_file(
     use crate::launch_parent::is_prompt;
     let file =
         open_regular_file(path).with_context(|| format!("failed to open {}", path.display()))?;
+    let source_length = file.metadata()?.len();
     let mut reader = BufReader::new(file.take(FIRST_PROMPT_BYTES));
     let mut line = Vec::new();
+    let mut consumed = 0;
     loop {
         line.clear();
-        if reader.read_until(b'\n', &mut line)? == 0 || line.last() != Some(&b'\n') {
+        let read = reader.read_until(b'\n', &mut line)? as u64;
+        consumed += read;
+        let cut = line.last() != Some(&b'\n')
+            && consumed >= FIRST_PROMPT_BYTES
+            && consumed < source_length;
+        if read == 0 || cut {
             return Ok(None);
         }
         let Ok(value) = serde_json::from_slice::<Value>(&line) else {
