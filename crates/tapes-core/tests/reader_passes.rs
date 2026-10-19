@@ -143,6 +143,16 @@ fn codex_lineage_follows_the_walk() {
 /// and the turn pass, and the session it folds from the turn pass is the one
 /// a separate accounting pass over the same read produces. Rejects a read
 /// that streams the recording a third time for its accounting.
+///
+/// Two passes are the fewest a bounded read can make. pi's active branch is
+/// the ancestry of the recording's last entry, so whether an entry is on it
+/// is decided by entries written after it: in `session-pi`, `abandoned-1`
+/// and `tool-result-1` are both children of `assistant-1`, and only the last
+/// entry's ancestry, through `tool-result-1`, leaves `abandoned-1` off the
+/// branch. The read hands over the active branch's turns in recording order,
+/// so one pass would have to hold every turn until the last entry, the whole
+/// transcript in memory. The first pass keeps each entry's id and parent; the
+/// second emits the branch's turns and folds the accounting.
 #[test]
 fn pi_whole_usage_folds_accounting_into_the_turn_pass() {
     let _counted = COUNTED
