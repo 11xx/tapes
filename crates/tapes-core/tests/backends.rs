@@ -9,7 +9,7 @@ use std::os::unix::ffi::OsStringExt;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use agent_tapes_core::backend::claude::ClaudeBackend;
 use agent_tapes_core::backend::codex::CodexBackend;
@@ -35,8 +35,7 @@ use agent_tapes_core::{
     SessionSelection, Where, EXPORT_MANIFEST_SCHEMA, LIST_SEARCH_TAIL,
 };
 use chrono::{DateTime, TimeZone, Utc};
-
-static TEMP_ROOTS: AtomicU64 = AtomicU64::new(0);
+use tempfile::TempDir;
 
 fn fixtures(harness: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -550,15 +549,14 @@ fn long_pi_recording(root: &std::path::Path, id: &str, opening: &str, middle: Op
 
 #[test]
 fn a_bounded_pi_read_keeps_interactive_evidence_and_never_claims_headless() {
-    let root = std::env::temp_dir().join(format!("tapes-pi-launch-bounded-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&root);
-    std::fs::create_dir_all(&root).unwrap();
-    long_pi_recording(&root, "launch-pi-long-tui", "tui", None);
-    long_pi_recording(&root, "launch-pi-long-print", "print", None);
-    long_pi_recording(&root, "launch-pi-long-hidden", "print", Some("tui"));
+    let temporary = TempDir::with_prefix("tapes-pi-launch-bounded-").unwrap();
+    let root = temporary.path();
+    long_pi_recording(root, "launch-pi-long-tui", "tui", None);
+    long_pi_recording(root, "launch-pi-long-print", "print", None);
+    long_pi_recording(root, "launch-pi-long-hidden", "print", Some("tui"));
 
-    let bounded = PiBackend::new(&root).with_read_bytes(agent_tapes_core::backend::MIN_READ_BYTES);
-    let full = PiBackend::new(&root);
+    let bounded = PiBackend::new(root).with_read_bytes(agent_tapes_core::backend::MIN_READ_BYTES);
+    let full = PiBackend::new(root);
     for (id, bounded_launch, full_launch) in [
         (
             "launch-pi-long-tui",
@@ -592,16 +590,12 @@ fn a_bounded_pi_read_keeps_interactive_evidence_and_never_claims_headless() {
             "streamed read {id}"
         );
     }
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 #[test]
 fn a_bounded_claude_read_never_claims_headless() {
-    let root = std::env::temp_dir().join(format!(
-        "tapes-claude-launch-bounded-{}",
-        std::process::id()
-    ));
-    let _ = std::fs::remove_dir_all(&root);
+    let temporary = TempDir::with_prefix("tapes-claude-launch-bounded-").unwrap();
+    let root = temporary.path();
     let project = root.join("project");
     std::fs::create_dir_all(&project).unwrap();
     let id = "10000000-0000-4000-8000-000000000099";
@@ -616,17 +610,16 @@ fn a_bounded_claude_read_never_claims_headless() {
     std::fs::write(project.join(format!("{id}.jsonl")), lines.join("\n") + "\n").unwrap();
 
     let bounded =
-        ClaudeBackend::new(&root).with_read_bytes(agent_tapes_core::backend::MIN_READ_BYTES);
+        ClaudeBackend::new(root).with_read_bytes(agent_tapes_core::backend::MIN_READ_BYTES);
     let session = located(&bounded, id);
     let transcript = bounded.transcript(&session, usize::MAX).unwrap();
     assert!(transcript.truncated);
     assert_eq!(session.launch, None);
     assert_eq!(transcript.session.launch, None);
     assert_eq!(
-        located(&ClaudeBackend::new(&root), id).launch,
+        located(&ClaudeBackend::new(root), id).launch,
         Some(Launch::Headless)
     );
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 #[test]
@@ -913,8 +906,8 @@ fn opencode_refuses_a_two_pass_read_before_reading_a_message() {
     let api = OpenCodeAlias::counting();
     let backends: Vec<Box<dyn Backend>> = vec![Box::new(OpenCodeBackend::new(api.path()))];
     let id = "ses_000000fixtureSharedSession";
-    let directory =
-        std::env::temp_dir().join(format!("tapes-opencode-two-pass-{}", std::process::id()));
+    let temporary = TempDir::with_prefix("tapes-opencode-two-pass-").unwrap();
+    let directory = temporary.path().join("export");
 
     let stats = stats_full_with_backends(&backends, Selection::Id(id)).err();
     let export = export_with_backends(
@@ -1090,9 +1083,8 @@ fn every_file_backend_resolves_full_ids_and_unambiguous_prefixes() {
 
 #[test]
 fn an_explicit_claude_root_is_authoritative_and_a_missing_root_is_absent() {
-    let root =
-        std::env::temp_dir().join(format!("tapes-claude-explicit-root-{}", std::process::id()));
-    let _ = fs::remove_dir_all(&root);
+    let temporary = TempDir::with_prefix("tapes-claude-explicit-root-").unwrap();
+    let root = temporary.path();
     let project = root.join("project");
     fs::create_dir_all(&project).unwrap();
     fs::copy(
@@ -1101,7 +1093,7 @@ fn an_explicit_claude_root_is_authoritative_and_a_missing_root_is_absent() {
     )
     .unwrap();
 
-    let backend = ClaudeBackend::new(&root);
+    let backend = ClaudeBackend::new(root);
     assert!(backend.available());
     assert_eq!(
         backend.list(&Query::unscoped(10)).unwrap().sessions.len(),
@@ -1117,8 +1109,6 @@ fn an_explicit_claude_root_is_authoritative_and_a_missing_root_is_absent() {
         .sessions
         .is_empty());
     assert!(missing.locate("session-claude").unwrap().is_none());
-
-    let _ = fs::remove_dir_all(root);
 }
 
 #[test]
@@ -1355,13 +1345,9 @@ fn opencode_reads_parent_and_child_rows_from_both_projections() {
 /// path in the parent's outputs and the parent id in the child's header.
 #[test]
 fn codex_joins_a_child_rollout_to_the_spawn_that_named_it() {
-    let root = std::env::temp_dir().join(format!(
-        "tapes-codex-lineage-{}-{}",
-        std::process::id(),
-        OPENCODE_ALIAS_COUNTER.fetch_add(1, Ordering::Relaxed)
-    ));
+    let temporary = TempDir::with_prefix("tapes-codex-lineage-").unwrap();
+    let root = temporary.path();
     let sessions = root.join("2026/01/01");
-    let _ = fs::remove_dir_all(&root);
     fs::create_dir_all(&sessions).unwrap();
     let parent_id = "00000000-0000-0000-0000-0000000000a1";
     let child_id = "00000000-0000-0000-0000-0000000000b2";
@@ -1390,7 +1376,7 @@ fn codex_joins_a_child_rollout_to_the_spawn_that_named_it() {
     )
     .unwrap();
 
-    let backend = CodexBackend::new(&root);
+    let backend = CodexBackend::new(root);
     let parent = located(&backend, parent_id);
     let lineage = backend.lineage(&parent).unwrap();
 
@@ -1442,7 +1428,6 @@ fn codex_joins_a_child_rollout_to_the_spawn_that_named_it() {
 
     let listed = backend.list(&Query::unscoped(10)).unwrap().sessions;
     assert_eq!(listed.len(), 2, "{listed:#?}");
-    fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
@@ -1498,13 +1483,9 @@ fn claude_joins_a_subagent_transcript_to_the_call_that_spawned_it() {
 /// would hide exactly the case a reader is looking for.
 #[test]
 fn claude_keeps_a_spawn_whose_transcript_is_absent() {
-    let root = std::env::temp_dir().join(format!(
-        "tapes-claude-unresolved-agent-{}-{}",
-        std::process::id(),
-        OPENCODE_ALIAS_COUNTER.fetch_add(1, Ordering::Relaxed)
-    ));
+    let temporary = TempDir::with_prefix("tapes-claude-unresolved-agent-").unwrap();
+    let root = temporary.path();
     let project = root.join("-fixtures-project");
-    let _ = fs::remove_dir_all(&root);
     fs::create_dir_all(&project).unwrap();
     fs::write(
         project.join("session-absent-agent.jsonl"),
@@ -1522,7 +1503,7 @@ fn claude_keeps_a_spawn_whose_transcript_is_absent() {
     )
     .unwrap();
 
-    let backend = ClaudeBackend::new(&root);
+    let backend = ClaudeBackend::new(root);
     let session = located(&backend, "session-absent-agent");
     let lineage = backend.lineage(&session).unwrap();
 
@@ -1535,20 +1516,15 @@ fn claude_keeps_a_spawn_whose_transcript_is_absent() {
     assert_eq!(child.model.as_deref(), Some("claude-fixture-sonnet"));
     // A launch is not an ending, so nothing says the child finished.
     assert!(child.completed_at.is_none());
-    fs::remove_dir_all(root).unwrap();
 }
 
 /// Claude writes a `toolUseResult` beside every tool's result, so what makes
 /// one an agent is the `Agent` call it answers or the agent it names itself.
 #[test]
 fn claude_reads_an_agent_result_without_reading_every_tool_result() {
-    let root = std::env::temp_dir().join(format!(
-        "tapes-claude-agent-result-{}-{}",
-        std::process::id(),
-        OPENCODE_ALIAS_COUNTER.fetch_add(1, Ordering::Relaxed)
-    ));
+    let temporary = TempDir::with_prefix("tapes-claude-agent-result-").unwrap();
+    let root = temporary.path();
     let project = root.join("-fixtures-project");
-    let _ = fs::remove_dir_all(&root);
     fs::create_dir_all(&project).unwrap();
     fs::write(
         project.join("session-agent-result.jsonl"),
@@ -1563,7 +1539,7 @@ fn claude_reads_an_agent_result_without_reading_every_tool_result() {
     )
     .unwrap();
 
-    let backend = ClaudeBackend::new(&root);
+    let backend = ClaudeBackend::new(root);
     let session = located(&backend, "session-agent-result");
     let lineage = backend.lineage(&session).unwrap();
 
@@ -1574,7 +1550,6 @@ fn claude_reads_an_agent_result_without_reading_every_tool_result() {
     assert_eq!(child.disposition.as_deref(), Some("completed"));
     assert!(child.spawned_at.is_none(), "no call is in this read");
     assert!(!child.resolved);
-    fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
@@ -1704,8 +1679,8 @@ fn claude_request_sums_keep_cache_write_ttls_apart() {
 
 #[test]
 fn synthetic_claude_records_do_not_count_as_requests() {
-    let root =
-        std::env::temp_dir().join(format!("tapes-synthetic-dimensions-{}", std::process::id()));
+    let temporary = TempDir::with_prefix("tapes-synthetic-dimensions-").unwrap();
+    let root = temporary.path();
     let project = root.join("project");
     fs::create_dir_all(&project).unwrap();
     let mut recording = claude_dimensions_recording();
@@ -1723,7 +1698,7 @@ fn synthetic_claude_records_do_not_count_as_requests() {
         recording,
     )
     .unwrap();
-    let backend = ClaudeBackend::new(root.clone());
+    let backend = ClaudeBackend::new(root);
     let value = usage_value(&backend, CLAUDE_DIMENSIONS_SESSION);
     assert_eq!(value["requests"]["requests"], 2);
     assert!(value["requests"].get("missing").is_none());
@@ -1735,13 +1710,12 @@ fn synthetic_claude_records_do_not_count_as_requests() {
     .unwrap();
     assert_eq!(full["requests"], value["requests"]);
     assert_eq!(full["request_failures"], 1);
-    fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
 fn pi_zero_written_costs_are_unpriced_in_active_and_full_views() {
-    let root = std::env::temp_dir().join(format!("tapes-pi-zero-cost-{}", std::process::id()));
-    fs::create_dir_all(&root).unwrap();
+    let temporary = TempDir::with_prefix("tapes-pi-zero-cost-").unwrap();
+    let root = temporary.path();
     let name = "2026-01-01T10-00-00-000Z_session-pi.jsonl";
     let original = fs::read_to_string(fixtures("pi").join(name)).unwrap();
     for mixed in [false, true] {
@@ -1758,7 +1732,7 @@ fn pi_zero_written_costs_are_unpriced_in_active_and_full_views() {
             .join("\n")
             + "\n";
         fs::write(root.join(name), recording).unwrap();
-        let backend = PiBackend::new(root.clone());
+        let backend = PiBackend::new(root);
         let value = usage_value(&backend, "session-pi");
         if mixed {
             assert_eq!(value["cost"]["usd"], 0.25, "{value}");
@@ -1779,12 +1753,12 @@ fn pi_zero_written_costs_are_unpriced_in_active_and_full_views() {
         assert_eq!(full["cost_coverage"], value["cost_coverage"]);
         assert_eq!(full["cost"], value["cost"]);
     }
-    fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
 fn claude_zero_written_totals_and_model_costs_are_unpriced() {
-    let root = std::env::temp_dir().join(format!("tapes-claude-zero-cost-{}", std::process::id()));
+    let temporary = TempDir::with_prefix("tapes-claude-zero-cost-").unwrap();
+    let root = temporary.path();
     let project = root.join("project");
     fs::create_dir_all(&project).unwrap();
     let mut recording = claude_dimensions_recording();
@@ -1801,7 +1775,7 @@ fn claude_zero_written_totals_and_model_costs_are_unpriced() {
         recording,
     )
     .unwrap();
-    let backend = ClaudeBackend::new(root.clone());
+    let backend = ClaudeBackend::new(root);
     let value = usage_value(&backend, CLAUDE_DIMENSIONS_SESSION);
     assert!(value.get("cost").is_none(), "{value}");
     assert_eq!(value["cost_coverage"]["complete"], false);
@@ -1813,7 +1787,6 @@ fn claude_zero_written_totals_and_model_costs_are_unpriced() {
     .unwrap();
     assert_eq!(full["cost_coverage"], value["cost_coverage"]);
     assert!(full.get("cost").is_none());
-    fs::remove_dir_all(root).unwrap();
 }
 
 /// A dimension a request did not record is counted as missing for that
@@ -1821,13 +1794,10 @@ fn claude_zero_written_totals_and_model_costs_are_unpriced() {
 /// rather than assigning its writes one.
 #[test]
 fn claude_names_the_dimensions_a_request_or_a_recorded_total_did_not_record() {
-    let root = std::env::temp_dir().join(format!(
-        "tapes-claude-missing-dimensions-{}",
-        std::process::id()
-    ));
+    let temporary = TempDir::with_prefix("tapes-claude-missing-dimensions-").unwrap();
+    let root = temporary.path();
     let project = root.join("project");
     let path = project.join(format!("{CLAUDE_DIMENSIONS_SESSION}.jsonl"));
-    let _ = fs::remove_dir_all(&root);
     fs::create_dir_all(&project).unwrap();
     let undimensioned = format!(
         r#"{{"type":"assistant","sessionId":"{CLAUDE_DIMENSIONS_SESSION}","uuid":"assistant-4","requestId":"req_fixture_3","timestamp":"2026-01-01T10:00:05Z","cwd":"/fixtures/project","message":{{"id":"msg_fixture_3","role":"assistant","model":"claude-fixture","usage":{{"input_tokens":1,"cache_creation_input_tokens":40,"cache_read_input_tokens":0,"output_tokens":5,"service_tier":null}},"content":[{{"type":"text","text":"Done."}}]}}}}"#
@@ -1844,7 +1814,7 @@ fn claude_names_the_dimensions_a_request_or_a_recorded_total_did_not_record() {
         ),
     )
     .unwrap();
-    let backend = ClaudeBackend::new(&root);
+    let backend = ClaudeBackend::new(root);
 
     let summed = usage_value(&backend, CLAUDE_DIMENSIONS_SESSION);
     assert_eq!(
@@ -1905,7 +1875,6 @@ fn claude_names_the_dimensions_a_request_or_a_recorded_total_did_not_record() {
         recorded["cost"]["missing"],
         serde_json::json!(["pricing_basis"])
     );
-    fs::remove_dir_all(root).unwrap();
 }
 
 const CLAUDE_FAMILY_SESSION: &str = "40000000-0000-4000-8000-000000000001";
@@ -1913,15 +1882,10 @@ const CLAUDE_FAMILY_CHILD: &str = "agent-a0123456789abcdef";
 
 /// A copy of the family fixture whose parent and child recordings `edit`
 /// may rewrite, so each case varies one fact of the same family.
-fn claude_family(tag: &str, edit: impl FnOnce(&mut String, &mut String)) -> PathBuf {
+fn claude_family(tag: &str, edit: impl FnOnce(&mut String, &mut String)) -> TempDir {
     let source = fixtures("claude-family").join("project");
-    let root = std::env::temp_dir().join(format!(
-        "tapes-claude-family-{tag}-{}-{}",
-        std::process::id(),
-        TEMP_ROOTS.fetch_add(1, Ordering::Relaxed)
-    ));
-    let _ = fs::remove_dir_all(&root);
-    let project = root.join("project");
+    let root = TempDir::with_prefix(format!("tapes-claude-family-{tag}-")).unwrap();
+    let project = root.path().join("project");
     let subagents = project.join(CLAUDE_FAMILY_SESSION).join("subagents");
     fs::create_dir_all(&subagents).unwrap();
     let parent_name = format!("{CLAUDE_FAMILY_SESSION}.jsonl");
@@ -1940,9 +1904,9 @@ fn claude_family(tag: &str, edit: impl FnOnce(&mut String, &mut String)) -> Path
     root
 }
 
-fn claude_recording(tag: &str, edit: impl FnOnce(&mut String, &mut String)) -> PathBuf {
+fn claude_recording(tag: &str, edit: impl FnOnce(&mut String, &mut String)) -> TempDir {
     let root = claude_family(tag, edit);
-    let project = root.join("project");
+    let project = root.path().join("project");
     let path = project.join(format!("{CLAUDE_FAMILY_SESSION}.jsonl"));
     let subagents = project.join(CLAUDE_FAMILY_SESSION).join("subagents");
     let parent = fs::read_to_string(&path).unwrap();
@@ -1997,7 +1961,7 @@ fn all(status: &str) -> Vec<(String, String)> {
 #[test]
 fn reconciliation_failed_assistants_without_usage_remain_unmeasured() {
     for null_usage in [false, true] {
-        let root = claude_family(
+        let temporary = claude_family(
             if null_usage {
                 "failed-null"
             } else {
@@ -2012,17 +1976,17 @@ fn reconciliation_failed_assistants_without_usage_remain_unmeasured() {
                 parent.push_str(&format!("{value}\n"));
             },
         );
-        let report = reconciled(&root);
+        let root = temporary.path();
+        let report = reconciled(root);
         assert_eq!(report["sources"][0]["failed"], 1);
         assert_eq!(report["identified"]["complete"], false);
         assert!(report["sources"][0].get("failed_tokens").is_none());
-        fs::remove_dir_all(root).unwrap();
     }
 }
 
 #[test]
 fn reconciliation_requires_positive_child_parent_identity() {
-    let root = claude_family("unidentified-child", |_, child| {
+    let temporary = claude_family("unidentified-child", |_, child| {
         *child = child
             .lines()
             .map(|line| {
@@ -2034,34 +1998,34 @@ fn reconciliation_requires_positive_child_parent_identity() {
             .join("\n")
             + "\n";
     });
-    let report = reconciled(&root);
+    let root = temporary.path();
+    let report = reconciled(root);
     assert_eq!(report["sources"][1]["complete"], false);
     assert!(report["sources"][1].get("identified").is_none());
     assert_eq!(report["sources"][1]["requests"], 0);
     assert_namespace_withheld(&report);
     assert_eq!(report["identified"]["complete"], false);
-    fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
 fn reconciliation_rejects_child_contributions_before_a_late_identity_failure() {
-    let root = claude_family("late-foreign-identity", |_, child| {
+    let temporary = claude_family("late-foreign-identity", |_, child| {
         child.push_str(
             "{\"type\":\"assistant\",\"sessionId\":\"60000000-0000-4000-8000-000000000001\"}\n",
         );
     });
-    let report = reconciled(&root);
+    let root = temporary.path();
+    let report = reconciled(root);
     assert_eq!(report["sources"][1]["complete"], false);
     assert_eq!(report["sources"][1]["requests"], 0);
     assert!(report["sources"][1].get("identified").is_none());
     assert!(report["identified"].get("tokens").is_none());
-    fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
 fn reconciliation_rejects_a_child_recording_that_names_another_agent() {
     for late in [false, true] {
-        let root = claude_family(if late { "late-sibling" } else { "sibling" }, |_, child| {
+        let temporary = claude_family(if late { "late-sibling" } else { "sibling" }, |_, child| {
             if late {
                 child.push_str(&format!(
                     "{{\"type\":\"assistant\",\"sessionId\":\"{CLAUDE_FAMILY_SESSION}\",\"agentId\":\"a9999999999999999\"}}\n"
@@ -2070,7 +2034,8 @@ fn reconciliation_rejects_a_child_recording_that_names_another_agent() {
                 *child = child.replace("a0123456789abcdef", "a9999999999999999");
             }
         });
-        let report = reconciled(&root);
+        let root = temporary.path();
+        let report = reconciled(root);
         assert_eq!(
             report["sources"][1]["error"],
             format!("Claude session {CLAUDE_FAMILY_SESSION}: foreign-identity")
@@ -2078,7 +2043,6 @@ fn reconciliation_rejects_a_child_recording_that_names_another_agent() {
         assert_eq!(report["sources"][1]["complete"], false);
         assert_eq!(report["sources"][1]["requests"], 0);
         assert!(report["sources"][1].get("identified").is_none());
-        fs::remove_dir_all(root).unwrap();
     }
 }
 
@@ -2096,7 +2060,7 @@ fn reconciliation_failures_carry_reasons_and_no_error_text() {
         ("no-identity-failure", "no-identity"),
         ("unreadable-failure", "source-unreadable-or-changed"),
     ] {
-        let root = claude_family(tag, |_, child| match tag {
+        let temporary = claude_family(tag, |_, child| match tag {
             "foreign-failure" => {
                 *child = child.replace(
                     CLAUDE_FAMILY_SESSION,
@@ -2108,6 +2072,7 @@ fn reconciliation_failures_carry_reasons_and_no_error_text() {
             }
             _ => {}
         });
+        let root = temporary.path();
         if tag == "unreadable-failure" {
             let child = root
                 .join("project")
@@ -2117,32 +2082,31 @@ fn reconciliation_failures_carry_reasons_and_no_error_text() {
             fs::remove_file(&child).unwrap();
             fs::create_dir(&child).unwrap();
         }
-        let report = reconciled(&root);
+        let report = reconciled(root);
         assert_eq!(
             report["sources"][1]["error"],
             format!("{session_prefix}{reason}"),
             "{tag}"
         );
-        let rendered = without_locators(&report, &root);
+        let rendered = without_locators(&report, root);
         assert!(!rendered.contains(&*root.to_string_lossy()), "{rendered}");
-        fs::remove_dir_all(root).unwrap();
     }
 
-    let root = claude_family("unenumerated-failure", |_, _| {});
+    let temporary = claude_family("unenumerated-failure", |_, _| {});
+    let root = temporary.path();
     let directory = root
         .join("project")
         .join(CLAUDE_FAMILY_SESSION)
         .join("subagents");
     fs::remove_dir_all(&directory).unwrap();
     fs::write(directory, "enumeration unavailable").unwrap();
-    let report = reconciled(&root);
+    let report = reconciled(root);
     assert_eq!(
         report["notes"],
         serde_json::json!([format!("{session_prefix}subagents-unenumerated")])
     );
-    let rendered = without_locators(&report, &root);
+    let rendered = without_locators(&report, root);
     assert!(!rendered.contains(&*root.to_string_lossy()), "{rendered}");
-    fs::remove_dir_all(root).unwrap();
 }
 
 fn assert_namespace_withheld(report: &serde_json::Value) {
@@ -2165,35 +2129,36 @@ fn assert_namespace_withheld(report: &serde_json::Value) {
 
 #[test]
 fn reconciliation_namespace_is_withheld_for_foreign_children() {
-    let root = claude_family("foreign-namespace", |_, child| {
+    let temporary = claude_family("foreign-namespace", |_, child| {
         *child = child.replace(
             CLAUDE_FAMILY_SESSION,
             "60000000-0000-4000-8000-000000000001",
         );
     });
-    let report = reconciled(&root);
+    let root = temporary.path();
+    let report = reconciled(root);
     assert_namespace_withheld(&report);
     assert_eq!(report["sources"][1]["requests"], 0);
-    fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
 fn reconciliation_namespace_is_withheld_for_unenumerated_children() {
-    let root = claude_family("unenumerated-namespace", |_, _| {});
+    let temporary = claude_family("unenumerated-namespace", |_, _| {});
+    let root = temporary.path();
     let directory = root
         .join("project")
         .join(CLAUDE_FAMILY_SESSION)
         .join("subagents");
     fs::remove_dir_all(&directory).unwrap();
     fs::write(directory, "enumeration unavailable").unwrap();
-    assert_namespace_withheld(&reconciled(&root));
-    fs::remove_dir_all(root).unwrap();
+    assert_namespace_withheld(&reconciled(root));
 }
 
 #[test]
 fn reconciliation_namespace_is_withheld_for_sources_outside_the_family() {
     for tag in ["another-recording", "import", "fork"] {
-        let root = claude_family(tag, |_, _| {});
+        let temporary = claude_family(tag, |_, _| {});
+        let root = temporary.path();
         let child = root
             .join("project")
             .join(CLAUDE_FAMILY_SESSION)
@@ -2202,23 +2167,23 @@ fn reconciliation_namespace_is_withheld_for_sources_outside_the_family() {
         let outside = root.join(format!("{tag}.jsonl"));
         fs::rename(&child, &outside).unwrap();
         std::os::unix::fs::symlink(&outside, &child).unwrap();
-        let report = reconciled(&root);
+        let report = reconciled(root);
         assert_namespace_withheld(&report);
         assert_eq!(report["sources"][1]["identified"]["output"], 90);
-        fs::remove_dir_all(root).unwrap();
     }
 }
 
 #[test]
 fn reconciliation_withholds_totals_before_the_child_frontier() {
-    let root = claude_family("late-child", |_, child| {
+    let temporary = claude_family("late-child", |_, child| {
         let value = serde_json::json!({"type":"assistant", "sessionId":CLAUDE_FAMILY_SESSION,
             "requestId":"req_late_child", "timestamp":"2026-01-01T10:00:20Z",
             "message":{"role":"assistant", "model":"claude-fixture-small",
                 "usage":{"input_tokens":0,"output_tokens":100,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}});
         child.push_str(&format!("{value}\n"));
     });
-    let report = reconciled(&root);
+    let root = temporary.path();
+    let report = reconciled(root);
     assert_eq!(
         report["identified"]["identity_coverage"],
         "validated-family"
@@ -2232,19 +2197,14 @@ fn reconciliation_withholds_totals_before_the_child_frontier() {
         report["counters"][1]["reasons"],
         serde_json::json!(["frontier"])
     );
-    fs::remove_dir_all(root).unwrap();
 }
 
 fn claude_dimension_witnesses(
     tag: &str,
     edit: impl Fn(&mut serde_json::Value, bool),
-) -> (PathBuf, serde_json::Value, serde_json::Value) {
-    let root = std::env::temp_dir().join(format!(
-        "tapes-dimension-witness-{tag}-{}-{}",
-        std::process::id(),
-        TEMP_ROOTS.fetch_add(1, Ordering::Relaxed)
-    ));
-    let project = root.join("project");
+) -> (serde_json::Value, serde_json::Value) {
+    let root = TempDir::with_prefix(format!("tapes-dimension-witness-{tag}-")).unwrap();
+    let project = root.path().join("project");
     fs::create_dir_all(&project).unwrap();
     let records = claude_dimensions_recording()
         .lines()
@@ -2267,18 +2227,18 @@ fn claude_dimension_witnesses(
         records,
     )
     .unwrap();
-    let backend = ClaudeBackend::new(root.clone());
+    let backend = ClaudeBackend::new(root.path());
     let bounded = usage_value(&backend, CLAUDE_DIMENSIONS_SESSION);
     let backends: Vec<Box<dyn Backend>> = vec![Box::new(backend)];
     let full = serde_json::to_value(
         usage_full_with_backends(&backends, Selection::Id(CLAUDE_DIMENSIONS_SESSION)).unwrap(),
     )
     .unwrap();
-    (root, bounded, full)
+    (bounded, full)
 }
 
 fn check_sparse_later_dimensions(advancing: bool) {
-    let (root, bounded, full) = claude_dimension_witnesses(
+    let (bounded, full) = claude_dimension_witnesses(
         if advancing { "advance" } else { "equal" },
         |usage, later| {
             if later {
@@ -2314,7 +2274,6 @@ fn check_sparse_later_dimensions(advancing: bool) {
         assert!(dims.get("missing").is_none());
         assert!(dims.get("conflicting").is_none());
     }
-    fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
@@ -2329,8 +2288,8 @@ fn sparse_later_dimensions_preserve_advancing_counter_witnesses() {
 
 #[test]
 fn sparse_tool_observations_do_not_discharge_conflicts_without_fresh_evidence() {
-    let root =
-        std::env::temp_dir().join(format!("tapes-sparse-tool-evidence-{}", std::process::id()));
+    let temporary = TempDir::with_prefix("tapes-sparse-tool-evidence-").unwrap();
+    let root = temporary.path();
     let project = root.join("project");
     fs::create_dir_all(&project).unwrap();
     let prototype: serde_json::Value = claude_dimensions_recording()
@@ -2364,7 +2323,7 @@ fn sparse_tool_observations_do_not_discharge_conflicts_without_fresh_evidence() 
             recording,
         )
         .unwrap();
-        let backend = ClaudeBackend::new(root.clone());
+        let backend = ClaudeBackend::new(root);
         let bounded = usage_value(&backend, CLAUDE_DIMENSIONS_SESSION);
         let backends: Vec<Box<dyn Backend>> = vec![Box::new(backend)];
         let full = serde_json::to_value(
@@ -2388,12 +2347,11 @@ fn sparse_tool_observations_do_not_discharge_conflicts_without_fresh_evidence() 
             }
         }
     }
-    fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
 fn request_dimension_conflicts_are_qualified_without_summing_alternatives() {
-    let (root, bounded, full) = claude_dimension_witnesses("conflicts", |usage, later| {
+    let (bounded, full) = claude_dimension_witnesses("conflicts", |usage, later| {
         usage["server_tool_use"] = if later {
             serde_json::json!({"web_search_requests":1,"web_fetch_requests":2})
         } else {
@@ -2419,12 +2377,11 @@ fn request_dimension_conflicts_are_qualified_without_summing_alternatives() {
         assert!(dims.get("web_fetch_requests").is_none());
         assert!(dims.get("service_tier").is_none());
     }
-    fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
 fn retained_ttl_evidence_must_match_the_selected_cache_write_count() {
-    let (root, bounded, full) = claude_dimension_witnesses("ttl-count", |usage, later| {
+    let (bounded, full) = claude_dimension_witnesses("ttl-count", |usage, later| {
         if later {
             usage["cache_creation_input_tokens"] = serde_json::json!(400);
             usage.as_object_mut().unwrap().remove("cache_creation");
@@ -2437,12 +2394,12 @@ fn retained_ttl_evidence_must_match_the_selected_cache_write_count() {
         );
         assert_eq!(value["requests"]["missing"]["cache_write_ttl"], 1);
     }
-    fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
 fn bounded_ttl_witness_retention_reports_omissions() {
-    let root = std::env::temp_dir().join(format!("tapes-ttl-witness-bound-{}", std::process::id()));
+    let temporary = TempDir::with_prefix("tapes-ttl-witness-bound-").unwrap();
+    let root = temporary.path();
     let project = root.join("project");
     fs::create_dir_all(&project).unwrap();
     let prototype: serde_json::Value = claude_dimensions_recording()
@@ -2462,7 +2419,7 @@ fn bounded_ttl_witness_retention_reports_omissions() {
         records,
     )
     .unwrap();
-    let backend = ClaudeBackend::new(root.clone());
+    let backend = ClaudeBackend::new(root);
     let bounded = usage_value(&backend, CLAUDE_DIMENSIONS_SESSION);
     let backends: Vec<Box<dyn Backend>> = vec![Box::new(backend)];
     let full = serde_json::to_value(
@@ -2479,13 +2436,12 @@ fn bounded_ttl_witness_retention_reports_omissions() {
         );
         assert_eq!(value["requests"]["web_search_requests"], 1);
     }
-    fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
 fn claude_streamed_dimensions_follow_the_selected_usage_witness() {
-    let root =
-        std::env::temp_dir().join(format!("tapes-streamed-dimensions-{}", std::process::id()));
+    let temporary = TempDir::with_prefix("tapes-streamed-dimensions-").unwrap();
+    let root = temporary.path();
     let project = root.join("project");
     fs::create_dir_all(&project).unwrap();
     let recording = claude_dimensions_recording()
@@ -2512,7 +2468,7 @@ fn claude_streamed_dimensions_follow_the_selected_usage_witness() {
         recording,
     )
     .unwrap();
-    let backend = ClaudeBackend::new(root.clone());
+    let backend = ClaudeBackend::new(root);
     let value = usage_value(&backend, CLAUDE_DIMENSIONS_SESSION);
     assert_eq!(value["tokens"]["output"], 65);
     assert_eq!(value["requests"]["requests"], 2);
@@ -2529,12 +2485,12 @@ fn claude_streamed_dimensions_follow_the_selected_usage_witness() {
     )
     .unwrap();
     assert_eq!(full["requests"], value["requests"]);
-    fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
 fn ordinary_fallback_explains_and_retains_the_set_aside_cost_state() {
-    let root = std::env::temp_dir().join(format!("tapes-fallback-cost-{}", std::process::id()));
+    let temporary = TempDir::with_prefix("tapes-fallback-cost-").unwrap();
+    let root = temporary.path();
     let project = root.join("project");
     fs::create_dir_all(&project).unwrap();
     let mut recording = claude_dimensions_recording();
@@ -2546,7 +2502,7 @@ fn ordinary_fallback_explains_and_retains_the_set_aside_cost_state() {
         recording,
     )
     .unwrap();
-    let backend = ClaudeBackend::new(root.clone());
+    let backend = ClaudeBackend::new(root);
     let value = usage_value(&backend, CLAUDE_DIMENSIONS_SESSION);
     assert_eq!(value["accounting"]["basis"], "summed-requests");
     assert!(
@@ -2611,7 +2567,6 @@ fn ordinary_fallback_explains_and_retains_the_set_aside_cost_state() {
         "recorded-total"
     );
     assert_eq!(report["counters"][1]["difference"], -25);
-    fs::remove_dir_all(root).unwrap();
 }
 
 /// Positively validated children share their parent's request namespace;
@@ -2689,7 +2644,7 @@ fn a_difference_is_signed_and_a_positive_one_stays_a_discrepancy() {
             r#""modelUsage":{"claude-fixture-background":{"inputTokens":500,"outputTokens":20,"thinkingTokens":0,"cacheReadInputTokens":0,"cacheCreationInputTokens":0},"#,
         );
     });
-    let report = reconciled(&above);
+    let report = reconciled(above.path());
     let input = &report["counters"][0];
     assert_eq!(input["difference"], 500);
     assert_eq!(input["status"], "discrepancy");
@@ -2707,7 +2662,7 @@ fn a_difference_is_signed_and_a_positive_one_stays_a_discrepancy() {
     let below = claude_recording("below", |parent, _| {
         *parent = parent.replace(r#""outputTokens":130"#, r#""outputTokens":100"#);
     });
-    let report = reconciled(&below);
+    let report = reconciled(below.path());
     let output = &report["counters"][1];
     assert_eq!(output["recorded"], 160);
     assert_eq!(output["identified"], 190);
@@ -2731,7 +2686,7 @@ fn a_counter_reset_withholds_every_difference() {
         let (head, tail) = parent.split_at(parent.find(r#"{"type":"cost-state""#).unwrap());
         *parent = format!("{head}{earlier}\n{tail}");
     });
-    let report = reconciled(&reset);
+    let report = reconciled(reset.path());
     assert_eq!(report["recorded"]["observations"], 2);
     assert_eq!(report["recorded"]["resets"], 1);
     assert_eq!(statuses(&report), all("withheld"));
@@ -2739,7 +2694,6 @@ fn a_counter_reset_withholds_every_difference() {
         assert!(row.get("difference").is_none(), "{row}");
         assert_eq!(row["reasons"], serde_json::json!(["counter-reset"]));
     }
-    fs::remove_dir_all(reset).unwrap();
 }
 
 /// A recording that did not decode whole leaves the union incomplete: an
@@ -2749,7 +2703,7 @@ fn an_incomplete_source_read_keeps_the_union_from_reconciling() {
     let incomplete = claude_recording("incomplete", |_, child| {
         child.push_str("{\"type\":\"assistant\",\"truncated\n");
     });
-    let report = reconciled(&incomplete);
+    let report = reconciled(incomplete.path());
     assert_eq!(report["identified"]["complete"], false);
     assert_eq!(report["sources"][0]["complete"], false);
     assert_eq!(report["sources"][0]["skipped"], 1);
@@ -2768,7 +2722,7 @@ fn an_incomplete_source_read_keeps_the_union_from_reconciling() {
 {tail}"
         );
     });
-    let report = reconciled(&failed);
+    let report = reconciled(failed.path());
     assert_eq!(report["sources"][0]["failed"], 1);
     assert_eq!(report["sources"][0]["complete"], false);
     assert_eq!(report["identified"]["requests"], 3);
@@ -2788,7 +2742,7 @@ fn incompatible_counters_and_conflicting_witnesses_are_withheld() {
             .replace(r#""thinkingTokens":50,"#, "")
             .replace(r#""thinkingTokens":25,"#, "");
     });
-    let report = reconciled(&unrecorded);
+    let report = reconciled(unrecorded.path());
     assert_eq!(report["counters"][2]["status"], "withheld");
     assert_eq!(
         report["counters"][2]["reasons"],
@@ -2801,7 +2755,7 @@ fn incompatible_counters_and_conflicting_witnesses_are_withheld() {
     let partial = claude_recording("partial", |parent, _| {
         *parent = parent.replacen(r#""output_tokens_details":{"thinking_tokens":40},"#, "", 1);
     });
-    let report = reconciled(&partial);
+    let report = reconciled(partial.path());
     let reasoning = &report["counters"][2];
     assert_eq!(reasoning["identified"], 35);
     assert_eq!(reasoning["difference"], 40);
@@ -2811,7 +2765,6 @@ fn incompatible_counters_and_conflicting_witnesses_are_withheld() {
         serde_json::json!(["incomplete-union"])
     );
     assert_eq!(report["counters"][1]["status"], "reconciled");
-    fs::remove_dir_all(partial).unwrap();
 
     let conflicting = claude_recording("conflicting", |_, child| {
         *child = child.replacen(
@@ -2820,7 +2773,7 @@ fn incompatible_counters_and_conflicting_witnesses_are_withheld() {
             1,
         );
     });
-    let report = reconciled(&conflicting);
+    let report = reconciled(conflicting.path());
     assert_eq!(report["identified"]["conflicts"], 1);
     assert_eq!(
         report["identified"]["conflicting"],
@@ -2846,14 +2799,13 @@ fn a_total_recorded_before_a_parent_request_is_not_compared() {
         let lines = parent.lines().collect::<Vec<_>>();
         *parent = format!("{}\n{}\n{}\n{}\n", lines[0], lines[1], lines[3], lines[2]);
     });
-    let report = reconciled(&early);
+    let report = reconciled(early.path());
     assert_eq!(report["recorded"]["after_last_request"], false);
     assert_eq!(statuses(&report), all("withheld"));
     assert_eq!(
         report["counters"][0]["reasons"],
         serde_json::json!(["frontier"])
     );
-    fs::remove_dir_all(early).unwrap();
 }
 
 /// A subagent's streamed response is first written with a partial output
@@ -2877,10 +2829,10 @@ fn a_claude_request_sum_takes_each_requests_final_witness() {
 
 #[test]
 fn claude_cost_state_supplies_recorded_totals_over_request_usage() {
-    let root = std::env::temp_dir().join(format!("tapes-claude-cost-state-{}", std::process::id()));
+    let temporary = TempDir::with_prefix("tapes-claude-cost-state-").unwrap();
+    let root = temporary.path();
     let project = root.join("project");
     let path = project.join("session-cost-state.jsonl");
-    let _ = fs::remove_dir_all(&root);
     fs::create_dir_all(&project).unwrap();
     fs::write(
         &path,
@@ -2895,7 +2847,7 @@ fn claude_cost_state_supplies_recorded_totals_over_request_usage() {
     )
     .unwrap();
 
-    let backend = ClaudeBackend::new(&root);
+    let backend = ClaudeBackend::new(root);
     let session = located(&backend, "session-cost-state");
     assert_eq!(
         session.tokens,
@@ -2930,8 +2882,6 @@ fn claude_cost_state_supplies_recorded_totals_over_request_usage() {
             .map(|record| record.kind.as_str()),
         Some("cost-state")
     );
-
-    fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
@@ -3291,14 +3241,9 @@ fn opencode_is_unavailable_when_its_binary_is_absent() {
 /// Built rather than checked in because scoping is about directories that
 /// exist on disk: a recorded path that is gone cannot be attributed to any
 /// project.
-fn scoped_store(name: &str, directories: &[&Path]) -> PathBuf {
-    let root = std::env::temp_dir().join(format!(
-        "tapes-scoped-{name}-{}-{}",
-        std::process::id(),
-        TEMP_ROOTS.fetch_add(1, Ordering::Relaxed)
-    ));
-    let _ = fs::remove_dir_all(&root);
-    let day = root.join("2026/08/09");
+fn scoped_store(name: &str, directories: &[&Path]) -> TempDir {
+    let root = TempDir::with_prefix(format!("tapes-scoped-{name}-")).unwrap();
+    let day = root.path().join("2026/08/09");
     fs::create_dir_all(&day).unwrap();
     for (index, directory) in directories.iter().enumerate() {
         let id = format!("00000000-0000-0000-0000-00000000000{index}");
@@ -3333,14 +3278,9 @@ fn scoped_store(name: &str, directories: &[&Path]) -> PathBuf {
     root
 }
 
-fn filtered_store(name: &str) -> PathBuf {
-    let root = std::env::temp_dir().join(format!(
-        "tapes-filtered-{name}-{}-{}",
-        std::process::id(),
-        TEMP_ROOTS.fetch_add(1, Ordering::Relaxed)
-    ));
-    let _ = fs::remove_dir_all(&root);
-    let day = root.join("2026/08/09");
+fn filtered_store(name: &str) -> TempDir {
+    let root = TempDir::with_prefix(format!("tapes-filtered-{name}-")).unwrap();
+    let day = root.path().join("2026/08/09");
     fs::create_dir_all(&day).unwrap();
     let sessions = [
         ("wanted-a", "wanted-model", "/fixtures/wanted-project"),
@@ -3478,8 +3418,9 @@ fn metadata_filters_are_case_insensitive_and_keep_absent_values_absent() {
 
 #[test]
 fn metadata_filters_fill_the_limit_after_rejecting_candidates() {
-    let root = filtered_store("before-limit");
-    let native_page = agent_tapes_discovery::NativeStore::codex(&root).candidates(5_000);
+    let temporary = filtered_store("before-limit");
+    let root = temporary.path();
+    let native_page = agent_tapes_discovery::NativeStore::codex(root).candidates(5_000);
     assert_eq!(
         native_page
             .records
@@ -3490,7 +3431,7 @@ fn metadata_filters_fill_the_limit_after_rejecting_candidates() {
         "{native_page:?}"
     );
     assert!(native_page.complete);
-    let backends: Vec<Box<dyn Backend>> = vec![Box::new(CodexBackend::new(&root))];
+    let backends: Vec<Box<dyn Backend>> = vec![Box::new(CodexBackend::new(root))];
 
     let result =
         list_with_backends_filtered(&backends, Some("codex"), None, 2, Some("WANTED"), None)
@@ -3506,14 +3447,13 @@ fn metadata_filters_fill_the_limit_after_rejecting_candidates() {
     );
     assert_eq!(result.scanned, 3);
     assert!(!result.scan_truncated);
-
-    fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
 fn activity_filters_fill_the_limit_after_rejecting_candidates() {
-    let root = filtered_store("activity-window");
-    let backends: Vec<Box<dyn Backend>> = vec![Box::new(CodexBackend::new(&root))];
+    let temporary = filtered_store("activity-window");
+    let root = temporary.path();
+    let backends: Vec<Box<dyn Backend>> = vec![Box::new(CodexBackend::new(root))];
     let since = "2026-08-09T00:00:00Z".parse::<DateTime<Utc>>().unwrap();
     let until = "2026-08-09T00:00:02Z".parse::<DateTime<Utc>>().unwrap();
 
@@ -3541,14 +3481,12 @@ fn activity_filters_fill_the_limit_after_rejecting_candidates() {
     );
     assert_eq!(result.scanned, 3);
     assert!(!result.scan_truncated);
-
-    fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
 fn listing_ties_on_activity_by_session_id() {
-    let root = std::env::temp_dir().join(format!("tapes-activity-ties-{}", std::process::id()));
-    let _ = fs::remove_dir_all(&root);
+    let temporary = TempDir::with_prefix("tapes-activity-ties-").unwrap();
+    let root = temporary.path();
     let day = root.join("2026/08/09");
     fs::create_dir_all(&day).unwrap();
     for (index, id) in [(0, "tie-z"), (1, "tie-a")] {
@@ -3577,7 +3515,7 @@ fn listing_ties_on_activity_by_session_id() {
             .unwrap();
     }
 
-    let backends: Vec<Box<dyn Backend>> = vec![Box::new(CodexBackend::new(&root))];
+    let backends: Vec<Box<dyn Backend>> = vec![Box::new(CodexBackend::new(root))];
     let result = list_with_backends_options(
         &backends,
         Some("codex"),
@@ -3600,22 +3538,20 @@ fn listing_ties_on_activity_by_session_id() {
         result.sessions[0].last_activity_at,
         result.sessions[1].last_activity_at
     );
-
-    fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
 fn a_scoped_listing_finds_the_project_past_the_limit() {
-    let mine = std::env::temp_dir()
-        .join(format!("tapes-scoped-mine-{}", std::process::id()))
-        .join("nested");
-    let theirs = std::env::temp_dir().join(format!("tapes-scoped-theirs-{}", std::process::id()));
+    let mine_root = TempDir::with_prefix("tapes-scoped-mine-").unwrap();
+    let mine = mine_root.path().join("nested");
+    let theirs_root = TempDir::with_prefix("tapes-scoped-theirs-").unwrap();
+    let theirs = theirs_root.path();
     fs::create_dir_all(&mine).unwrap();
-    fs::create_dir_all(&theirs).unwrap();
     // The project's session is the older of the two, so a limit applied
     // before the scope would return the other one and report nothing.
-    let root = scoped_store("listing", &[&mine, &theirs]);
-    let backends: Vec<Box<dyn Backend>> = vec![Box::new(CodexBackend::new(&root))];
+    let temporary = scoped_store("listing", &[&mine, theirs]);
+    let root = temporary.path();
+    let backends: Vec<Box<dyn Backend>> = vec![Box::new(CodexBackend::new(root))];
     let scope = Scope::at(mine.parent().unwrap()).unwrap();
 
     let result = list_with_backends(&backends, None, Some(&scope), 1).unwrap();
@@ -3627,15 +3563,10 @@ fn a_scoped_listing_finds_the_project_past_the_limit() {
     assert_eq!(result.scanned, 2);
     assert!(!result.scan_truncated);
 
-    let elsewhere = Scope::at(&theirs).unwrap();
+    let elsewhere = Scope::at(theirs).unwrap();
     let result = list_with_backends(&backends, None, Some(&elsewhere), 10).unwrap();
     assert_eq!(result.sessions.len(), 1);
-    assert_eq!(
-        result.sessions[0].directory.as_deref(),
-        Some(theirs.as_path())
-    );
-
-    fs::remove_dir_all(root).unwrap();
+    assert_eq!(result.sessions[0].directory.as_deref(), Some(theirs));
 }
 
 /// The probe decides whether a candidate is skipped without parsing it, so a
@@ -3645,12 +3576,12 @@ fn a_scoped_listing_finds_the_project_past_the_limit() {
 /// resumed session can have moved away from the `session_meta` the probe sees.
 #[test]
 fn the_probe_and_the_parse_place_a_session_in_the_same_directory() {
-    let opening = std::env::temp_dir().join(format!("tapes-scoped-opening-{}", std::process::id()));
-    let later = std::env::temp_dir().join(format!("tapes-scoped-later-{}", std::process::id()));
-    fs::create_dir_all(&opening).unwrap();
-    fs::create_dir_all(&later).unwrap();
-    let root = std::env::temp_dir().join(format!("tapes-store-moved-{}", std::process::id()));
-    let _ = fs::remove_dir_all(&root);
+    let opening_root = TempDir::with_prefix("tapes-scoped-opening-").unwrap();
+    let opening = opening_root.path();
+    let later_root = TempDir::with_prefix("tapes-scoped-later-").unwrap();
+    let later = later_root.path();
+    let store = TempDir::with_prefix("tapes-store-moved-").unwrap();
+    let root = store.path();
     let day = root.join("2026/08/09");
     fs::create_dir_all(&day).unwrap();
 
@@ -3680,10 +3611,10 @@ fn the_probe_and_the_parse_place_a_session_in_the_same_directory() {
     }
     drop(file);
 
-    let backend = CodexBackend::new(&root);
+    let backend = CodexBackend::new(root);
     let session = located(&backend, id);
     let parsed = backend.transcript(&session, 1).unwrap().session.directory;
-    let backends: Vec<Box<dyn Backend>> = vec![Box::new(CodexBackend::new(&root))];
+    let backends: Vec<Box<dyn Backend>> = vec![Box::new(CodexBackend::new(root))];
     let scope = Scope::at(parsed.as_deref().expect("a directory was parsed")).unwrap();
     let result = list_with_backends(&backends, None, Some(&scope), 10).unwrap();
     assert_eq!(
@@ -3691,10 +3622,6 @@ fn the_probe_and_the_parse_place_a_session_in_the_same_directory() {
         1,
         "a scoped listing lost the session the parse places in that scope"
     );
-
-    fs::remove_dir_all(root).unwrap();
-    fs::remove_dir_all(opening).unwrap();
-    fs::remove_dir_all(later).unwrap();
 }
 
 /// The cheap directory probe reads a fixed window of a file's opening. A
@@ -3703,11 +3630,10 @@ fn the_probe_and_the_parse_place_a_session_in_the_same_directory() {
 /// a session would be a wrong answer rather than a fast one.
 #[test]
 fn a_session_the_probe_cannot_place_is_still_found() {
-    let project =
-        std::env::temp_dir().join(format!("tapes-scoped-unprobeable-{}", std::process::id()));
-    fs::create_dir_all(&project).unwrap();
-    let root = std::env::temp_dir().join(format!("tapes-store-unprobeable-{}", std::process::id()));
-    let _ = fs::remove_dir_all(&root);
+    let project_root = TempDir::with_prefix("tapes-scoped-unprobeable-").unwrap();
+    let project = project_root.path();
+    let store = TempDir::with_prefix("tapes-store-unprobeable-").unwrap();
+    let root = store.path();
     let day = root.join("2026/08/09");
     fs::create_dir_all(&day).unwrap();
 
@@ -3731,13 +3657,10 @@ fn a_session_the_probe_cannot_place_is_still_found() {
     .unwrap();
     drop(file);
 
-    let backends: Vec<Box<dyn Backend>> = vec![Box::new(CodexBackend::new(&root))];
-    let scope = Scope::at(&project).unwrap();
+    let backends: Vec<Box<dyn Backend>> = vec![Box::new(CodexBackend::new(root))];
+    let scope = Scope::at(project).unwrap();
     let result = list_with_backends(&backends, None, Some(&scope), 10).unwrap();
     assert_eq!(result.sessions.len(), 1, "the probe hid a session in scope");
-
-    fs::remove_dir_all(root).unwrap();
-    fs::remove_dir_all(project).unwrap();
 }
 
 /// pi writes the working directory once, on its header line, and the bounded
@@ -3746,9 +3669,8 @@ fn a_session_the_probe_cannot_place_is_still_found() {
 /// normalize with no directory at all — invisible to every scoped listing.
 #[test]
 fn a_transcript_past_the_read_window_still_reports_its_directory() {
-    let root = std::env::temp_dir().join(format!("tapes-pi-oversized-{}", std::process::id()));
-    let _ = fs::remove_dir_all(&root);
-    fs::create_dir_all(&root).unwrap();
+    let temporary = TempDir::with_prefix("tapes-pi-oversized-").unwrap();
+    let root = temporary.path();
     let path = root.join("2026-01-01T10-00-00-000Z_session-huge.jsonl");
 
     let mut file = BufWriter::new(File::create(&path).unwrap());
@@ -3773,7 +3695,7 @@ fn a_transcript_past_the_read_window_still_reports_its_directory() {
     drop(file);
     assert!(fs::metadata(&path).unwrap().len() > 4 * 1024 * 1024);
 
-    let backend = PiBackend::new(&root);
+    let backend = PiBackend::new(root);
     let sessions = backend.list(&Query::unscoped(10)).unwrap().sessions;
     let session = sessions
         .iter()
@@ -3801,20 +3723,16 @@ fn a_transcript_past_the_read_window_still_reports_its_directory() {
             .as_deref(),
         Some(Path::new("/fixtures/project"))
     );
-
-    fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
 fn the_latest_in_scope_needs_no_id_and_honours_exclusions() {
-    let project = std::env::temp_dir().join(format!(
-        "tapes-scoped-latest-project-{}",
-        std::process::id()
-    ));
-    fs::create_dir_all(&project).unwrap();
-    let root = scoped_store("latest", &[&project, &project]);
-    let backends: Vec<Box<dyn Backend>> = vec![Box::new(CodexBackend::new(&root))];
-    let scope = Scope::at(&project).unwrap();
+    let project_root = TempDir::with_prefix("tapes-scoped-latest-project-").unwrap();
+    let project = project_root.path();
+    let store = scoped_store("latest", &[project, project]);
+    let root = store.path();
+    let backends: Vec<Box<dyn Backend>> = vec![Box::new(CodexBackend::new(root))];
+    let scope = Scope::at(project).unwrap();
 
     let newest = latest_with_backends(&backends, None, Some(&scope), &[]).unwrap();
     assert_eq!(newest.session.id, "00000000-0000-0000-0000-000000000001");
@@ -3836,9 +3754,6 @@ fn the_latest_in_scope_needs_no_id_and_honours_exclusions() {
         &[newest.session.id, previous.session.id],
     );
     assert!(exhausted.is_err());
-
-    fs::remove_dir_all(root).unwrap();
-    fs::remove_dir_all(project).unwrap();
 }
 
 struct SearchFixture {
@@ -3958,8 +3873,8 @@ fn list_search_uses_a_fixed_tail_before_applying_the_limit() {
 
 #[test]
 fn file_search_does_not_match_before_the_fixed_recent_turn_window() {
-    let root = std::env::temp_dir().join(format!("tapes-search-window-{}", std::process::id()));
-    let _ = fs::remove_dir_all(&root);
+    let temporary = TempDir::with_prefix("tapes-search-window-").unwrap();
+    let root = temporary.path();
     let day = root.join("2026/08/09");
     fs::create_dir_all(&day).unwrap();
     let id = "00000000-0000-0000-0000-0000000000cc";
@@ -3984,7 +3899,7 @@ fn file_search_does_not_match_before_the_fixed_recent_turn_window() {
     }
     drop(file);
 
-    let backend: Vec<Box<dyn Backend>> = vec![Box::new(CodexBackend::new(&root))];
+    let backend: Vec<Box<dyn Backend>> = vec![Box::new(CodexBackend::new(root))];
     let old = list_with_backends_filtered_and_search(
         &backend,
         Some("codex"),
@@ -4027,8 +3942,6 @@ fn file_search_does_not_match_before_the_fixed_recent_turn_window() {
         assert_eq!(wider.sessions.len(), 1);
         assert!(wider.partial_search.is_empty());
     }
-
-    fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
@@ -4172,7 +4085,8 @@ fn resolver_accepts_only_unambiguous_prefixes() {
 
 #[test]
 fn transcript_reads_are_capped_at_four_megabytes() {
-    let root = std::env::temp_dir().join(format!("tapes-bounds-{}", std::process::id()));
+    let temporary = TempDir::with_prefix("tapes-bounds-").unwrap();
+    let root = temporary.path();
     let project = root.join("project");
     fs::create_dir_all(&project).unwrap();
     let path = project.join("bounded.jsonl");
@@ -4192,7 +4106,7 @@ fn transcript_reads_are_capped_at_four_megabytes() {
     .unwrap();
     file.flush().unwrap();
 
-    let backend = ClaudeBackend::new(&root);
+    let backend = ClaudeBackend::new(root);
     let session = located(&backend, "bounded");
     let transcript = backend.transcript(&session, 10).unwrap();
 
@@ -4216,7 +4130,6 @@ fn transcript_reads_are_capped_at_four_megabytes() {
             selection: None,
         })
     );
-    fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
@@ -4225,11 +4138,8 @@ fn unmatched_results_distinguish_missing_calls_from_calls_before_the_file_tail()
         ("whole", false, Incomplete::CallNotRecorded),
         ("bounded", true, Incomplete::CallBeforeReadBound),
     ] {
-        let root = std::env::temp_dir().join(format!(
-            "tapes-unmatched-result-{tag}-{}-{}",
-            std::process::id(),
-            TEMP_ROOTS.fetch_add(1, Ordering::Relaxed)
-        ));
+        let temporary = TempDir::with_prefix(format!("tapes-unmatched-result-{tag}-")).unwrap();
+        let root = temporary.path();
         let day = root.join("2026/01/01");
         fs::create_dir_all(&day).unwrap();
         let id = if padded {
@@ -4256,7 +4166,7 @@ fn unmatched_results_distinguish_missing_calls_from_calls_before_the_file_tail()
         .unwrap();
         drop(file);
 
-        let backend = CodexBackend::new(&root);
+        let backend = CodexBackend::new(root);
         let session = located(&backend, id);
         let events = project(
             backend.transcript(&session, usize::MAX).unwrap(),
@@ -4265,7 +4175,6 @@ fn unmatched_results_distinguish_missing_calls_from_calls_before_the_file_tail()
         assert_eq!(events.events.len(), 1);
         assert_eq!(events.events[0].incomplete, Some(expected));
         assert_eq!(events.pairs.incomplete, 1);
-        fs::remove_dir_all(root).unwrap();
     }
 }
 
@@ -4443,8 +4352,8 @@ fn a_hit_elsewhere_still_wins_over_a_broken_backend() {
 /// tail still decides truncation and supplies the turns.
 #[test]
 fn oversized_codex_and_claude_files_keep_their_header_facts() {
-    let root = std::env::temp_dir().join(format!("tapes-oversized-heads-{}", std::process::id()));
-    let _ = fs::remove_dir_all(&root);
+    let temporary = TempDir::with_prefix("tapes-oversized-heads-").unwrap();
+    let root = temporary.path();
     let codex_day = root.join("codex/2026/01/01");
     let claude_project = root.join("claude/-fixtures-project");
     fs::create_dir_all(&codex_day).unwrap();
@@ -4566,8 +4475,6 @@ fn oversized_codex_and_claude_files_keep_their_header_facts() {
         assert_eq!(listed.len(), 1, "{what}: listing finds the session");
         assert_eq!(listed[0].started_at, Some(start), "{what}: listing agrees");
     }
-
-    fs::remove_dir_all(root).unwrap();
 }
 
 /// A whole fixture read through a smaller window is windowed and nothing else,
@@ -4795,10 +4702,9 @@ fn codex_reads_cumulative_token_totals_from_the_latest_event_with_usage() {
 /// and a plan the next assistant message restates each appear once.
 #[test]
 fn codex_runtime_items_are_tool_turns_unless_a_record_read_before_names_them() {
-    let root =
-        std::env::temp_dir().join(format!("tapes-codex-runtime-items-{}", std::process::id()));
+    let temporary = TempDir::with_prefix("tapes-codex-runtime-items-").unwrap();
+    let root = temporary.path();
     let day = root.join("2026/01/01");
-    let _ = fs::remove_dir_all(&root);
     fs::create_dir_all(&day).unwrap();
     let id = "00000000-0000-0000-0000-00000000b001";
     let path = day.join(format!("rollout-2026-01-01T10-00-00-{id}.jsonl"));
@@ -4856,7 +4762,7 @@ fn codex_runtime_items_are_tool_turns_unless_a_record_read_before_names_them() {
         .collect::<String>();
     fs::write(&path, body).unwrap();
 
-    let backend = CodexBackend::new(&root);
+    let backend = CodexBackend::new(root);
     let session = located(&backend, id);
     let tools = backend
         .transcript(&session, usize::MAX)
@@ -4891,15 +4797,13 @@ fn codex_runtime_items_are_tool_turns_unless_a_record_read_before_names_them() {
             "web_search_call:ws_call",
         ]
     );
-    fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
 fn codex_terminal_prefers_nested_native_error_fields_and_keeps_later_accounting() {
-    let root =
-        std::env::temp_dir().join(format!("tapes-codex-terminal-error-{}", std::process::id()));
+    let temporary = TempDir::with_prefix("tapes-codex-terminal-error-").unwrap();
+    let root = temporary.path();
     let day = root.join("2026/01/01");
-    let _ = fs::remove_dir_all(&root);
     fs::create_dir_all(&day).unwrap();
     let id = "00000000-0000-0000-0000-00000000a001";
     let path = day.join(format!("rollout-2026-01-01T10-00-00-{id}.jsonl"));
@@ -4952,7 +4856,7 @@ fn codex_terminal_prefers_nested_native_error_fields_and_keeps_later_accounting(
     )
     .unwrap();
 
-    let backend = CodexBackend::new(&root);
+    let backend = CodexBackend::new(root);
     let session = located(&backend, id);
     let transcript = backend.transcript(&session, usize::MAX).unwrap();
     let terminal = transcript.terminal.as_ref().unwrap();
@@ -4985,8 +4889,6 @@ fn codex_terminal_prefers_nested_native_error_fields_and_keeps_later_accounting(
             selection: None,
         })
     );
-
-    fs::remove_dir_all(root).unwrap();
 }
 
 /// A read that reached fewer turns than the searched tail because of a source
@@ -5070,8 +4972,8 @@ fn the_paged_read_stops_exactly_at_the_message_ceiling() {
 /// emptying the opening, so the header behind it still supplies the start.
 #[test]
 fn a_first_line_longer_than_the_head_probe_still_yields_the_header() {
-    let root = std::env::temp_dir().join(format!("tapes-long-first-line-{}", std::process::id()));
-    let _ = fs::remove_dir_all(&root);
+    let temporary = TempDir::with_prefix("tapes-long-first-line-").unwrap();
+    let root = temporary.path();
     let day = root.join("2026/01/01");
     fs::create_dir_all(&day).unwrap();
     let id = "00000000-0000-0000-0000-00000000dddd";
@@ -5093,7 +4995,7 @@ fn a_first_line_longer_than_the_head_probe_still_yields_the_header() {
     }
     drop(file);
 
-    let backend = CodexBackend::new(&root);
+    let backend = CodexBackend::new(root);
     let session = located(&backend, id);
     assert_eq!(
         session.started_at,
@@ -5103,7 +5005,6 @@ fn a_first_line_longer_than_the_head_probe_still_yields_the_header() {
         session.directory.as_deref(),
         Some(Path::new("/fixtures/project"))
     );
-    fs::remove_dir_all(root).unwrap();
 }
 
 /// A first line longer than the head probe's ceiling leaves the opening
@@ -5111,8 +5012,8 @@ fn a_first_line_longer_than_the_head_probe_still_yields_the_header() {
 /// so, rather than presenting that record as the recorded start.
 #[test]
 fn a_first_line_past_the_probe_ceiling_marks_the_start_uncertain() {
-    let root = std::env::temp_dir().join(format!("tapes-huge-first-line-{}", std::process::id()));
-    let _ = fs::remove_dir_all(&root);
+    let temporary = TempDir::with_prefix("tapes-huge-first-line-").unwrap();
+    let root = temporary.path();
     let day = root.join("2026/01/01");
     fs::create_dir_all(&day).unwrap();
     let id = "00000000-0000-0000-0000-00000000eeee";
@@ -5134,7 +5035,7 @@ fn a_first_line_past_the_probe_ceiling_marks_the_start_uncertain() {
     }
     drop(file);
 
-    let backend = CodexBackend::new(&root);
+    let backend = CodexBackend::new(root);
     let session = located(&backend, id);
     assert!(session.start_uncertain);
     assert_eq!(
@@ -5157,7 +5058,6 @@ fn a_first_line_past_the_probe_ceiling_marks_the_start_uncertain() {
             .is_none(),
         "omitted when false"
     );
-    fs::remove_dir_all(root).unwrap();
 }
 
 /// The fast JSONL search path applies the same rule as the bounded read: a
@@ -5165,8 +5065,8 @@ fn a_first_line_past_the_probe_ceiling_marks_the_start_uncertain() {
 /// the search covers reports partial coverage only on a miss.
 #[test]
 fn file_search_short_of_the_tail_reports_partial_coverage() {
-    let root = std::env::temp_dir().join(format!("tapes-search-file-bound-{}", std::process::id()));
-    let _ = fs::remove_dir_all(&root);
+    let temporary = TempDir::with_prefix("tapes-search-file-bound-").unwrap();
+    let root = temporary.path();
     let day = root.join("2026/01/01");
     fs::create_dir_all(&day).unwrap();
     let id = "00000000-0000-0000-0000-00000000ffff";
@@ -5193,7 +5093,7 @@ fn file_search_short_of_the_tail_reports_partial_coverage() {
     }
     drop(file);
 
-    let backends: Vec<Box<dyn Backend>> = vec![Box::new(CodexBackend::new(&root))];
+    let backends: Vec<Box<dyn Backend>> = vec![Box::new(CodexBackend::new(root))];
     let miss = list_with_backends_filtered_and_search(
         &backends,
         Some("codex"),
@@ -5245,7 +5145,6 @@ fn file_search_short_of_the_tail_reports_partial_coverage() {
         "{:?}",
         filtered_out.unsearched
     );
-    fs::remove_dir_all(root).unwrap();
 }
 
 /// A backend walks its store newest first and stops at the limit, so an
@@ -5254,8 +5153,8 @@ fn file_search_short_of_the_tail_reports_partial_coverage() {
 /// them oldest first.
 #[test]
 fn sort_oldest_selects_the_oldest_sessions_before_the_limit() {
-    let root = std::env::temp_dir().join(format!("tapes-sort-oldest-{}", std::process::id()));
-    let _ = fs::remove_dir_all(&root);
+    let temporary = TempDir::with_prefix("tapes-sort-oldest-").unwrap();
+    let root = temporary.path();
     let day = root.join("2026/08/09");
     fs::create_dir_all(&day).unwrap();
     for (index, id) in [(0, "old"), (1, "mid"), (2, "new")] {
@@ -5284,7 +5183,7 @@ fn sort_oldest_selects_the_oldest_sessions_before_the_limit() {
             )
             .unwrap();
     }
-    let backends: Vec<Box<dyn Backend>> = vec![Box::new(CodexBackend::new(&root))];
+    let backends: Vec<Box<dyn Backend>> = vec![Box::new(CodexBackend::new(root))];
     let ids = |sort: ListSort| {
         list_with_backends_options(
             &backends,
@@ -5303,8 +5202,6 @@ fn sort_oldest_selects_the_oldest_sessions_before_the_limit() {
 
     assert_eq!(ids(ListSort::Oldest), vec!["old", "mid"]);
     assert_eq!(ids(ListSort::Newest), vec!["new", "mid"]);
-
-    fs::remove_dir_all(root).unwrap();
 }
 
 /// A `cost-state` record is the session's running total wherever the read
@@ -5312,13 +5209,10 @@ fn sort_oldest_selects_the_oldest_sessions_before_the_limit() {
 /// coverage from it; only a per-request sum is bounded by the read.
 #[test]
 fn a_truncated_claude_read_keeps_whole_session_coverage_for_a_cost_state_record() {
-    let root = std::env::temp_dir().join(format!(
-        "tapes-claude-truncated-cost-state-{}",
-        std::process::id()
-    ));
+    let temporary = TempDir::with_prefix("tapes-claude-truncated-cost-state-").unwrap();
+    let root = temporary.path();
     let project = root.join("project");
     let path = project.join("session-truncated-cost.jsonl");
-    let _ = fs::remove_dir_all(&root);
     fs::create_dir_all(&project).unwrap();
     let mut file = BufWriter::new(File::create(&path).unwrap());
     writeln!(
@@ -5342,7 +5236,7 @@ fn a_truncated_claude_read_keeps_whole_session_coverage_for_a_cost_state_record(
     drop(file);
     assert!(fs::metadata(&path).unwrap().len() > 4 * 1024 * 1024);
 
-    let backend = ClaudeBackend::new(&root);
+    let backend = ClaudeBackend::new(root);
     let session = located(&backend, "session-truncated-cost");
     assert_eq!(
         session.tokens,
@@ -5364,8 +5258,6 @@ fn a_truncated_claude_read_keeps_whole_session_coverage_for_a_cost_state_record(
         })
     );
     assert!(backend.transcript(&session, 1).unwrap().truncated);
-
-    fs::remove_dir_all(root).unwrap();
 }
 
 /// Every kind rests on a field the harness wrote beside the text, so a record
@@ -5494,9 +5386,8 @@ fn a_read_counts_the_records_it_represented_as_no_turn() {
         .unwrap();
     assert!(api_full.read_evidence(None).source_prefix_digest.is_none());
 
-    let root =
-        std::env::temp_dir().join(format!("tapes-claude-unrecognized-{}", std::process::id()));
-    let _ = fs::remove_dir_all(&root);
+    let temporary = TempDir::with_prefix("tapes-claude-unrecognized-").unwrap();
+    let root = temporary.path();
     let project = root.join("-fixtures-project");
     fs::create_dir_all(&project).unwrap();
     let id = "7f3c2a10-0000-4000-8000-000000000002";
@@ -5514,7 +5405,7 @@ fn a_read_counts_the_records_it_represented_as_no_turn() {
             .collect::<String>(),
     )
     .unwrap();
-    let backend = ClaudeBackend::new(&root);
+    let backend = ClaudeBackend::new(root);
     let session = located(&backend, id);
     let unmapped = backend
         .transcript(&session, usize::MAX)
@@ -5528,7 +5419,6 @@ fn a_read_counts_the_records_it_represented_as_no_turn() {
         unmapped.unrecognized,
         counts(&[("attachment/queued_command", 1), ("system/away_summary", 1)])
     );
-    fs::remove_dir_all(root).unwrap();
 }
 
 /// Each user record types from what Claude wrote beside it: an SDK prompt
@@ -5537,11 +5427,8 @@ fn a_read_counts_the_records_it_represented_as_no_turn() {
 /// verified, and text with no evidence at all, stay unknown.
 #[test]
 fn claude_types_sdk_shell_interruption_compaction_and_subagent_records() {
-    let root = std::env::temp_dir().join(format!(
-        "tapes-claude-user-populations-{}",
-        std::process::id()
-    ));
-    let _ = fs::remove_dir_all(&root);
+    let temporary = TempDir::with_prefix("tapes-claude-user-populations-").unwrap();
+    let root = temporary.path();
     let id = "7f3c2a10-0000-4000-8000-000000000001";
     let project = root.join("-fixtures-project");
     let subagents = project.join(id).join("subagents");
@@ -5576,7 +5463,7 @@ fn claude_types_sdk_shell_interruption_compaction_and_subagent_records() {
     )
     .unwrap();
 
-    let backend = ClaudeBackend::new(&root);
+    let backend = ClaudeBackend::new(root);
     let session = located(&backend, id);
     let transcript = backend.transcript(&session, usize::MAX).unwrap();
     let kind = |turns: &[Turn], native_id: &str| {
@@ -5602,7 +5489,6 @@ fn claude_types_sdk_shell_interruption_compaction_and_subagent_records() {
     let subagent = backend.child_transcript(&session, "a0fixture").unwrap();
     assert_eq!(kind(&subagent.turns, "brief"), TurnKind::Operator);
     assert_eq!(kind(&subagent.turns, "later"), TurnKind::Unknown);
-    fs::remove_dir_all(root).unwrap();
 }
 
 /// The ending a reader judges: the operator's last turn is the one before the
@@ -5642,12 +5528,9 @@ fn a_bundle_context_keeps_operator_turns_and_drops_harness_records() {
     let backend = ClaudeBackend::new(fixtures("claude"));
     let session = located(&backend, "session-claude");
     let transcript = backend.transcript(&session, usize::MAX).unwrap();
-    let directory = std::env::temp_dir().join(format!(
-        "tapes-context-kinds-{}-{}",
-        std::process::id(),
-        OPENCODE_ALIAS_COUNTER.fetch_add(1, Ordering::Relaxed)
-    ));
-    let bundle = agent_tapes_core::bundle::export(&transcript, &directory).unwrap();
+    let temporary = TempDir::with_prefix("tapes-context-kinds-").unwrap();
+    let directory = temporary.path();
+    let bundle = agent_tapes_core::bundle::export(&transcript, directory).unwrap();
 
     let context = fs::read_to_string(&bundle.context.path).unwrap();
     assert!(context.contains("Check the ending."), "{context}");
@@ -5663,7 +5546,6 @@ fn a_bundle_context_keeps_operator_turns_and_drops_harness_records() {
     assert!(trace.contains("## user/control #10"), "{trace}");
     assert!(trace.contains("## user/notice #12"), "{trace}");
     assert!(trace.contains("## user/ambient #7"), "{trace}");
-    fs::remove_dir_all(directory).unwrap();
 }
 
 /// Codex writes no sender field, so each user message is typed by the elements
@@ -5941,10 +5823,11 @@ fn codex_legacy_counter_resets_keep_the_newest_total_and_since_reset_coverage() 
         codex_token_count(3, 20, 10),
         codex_token_count(4, 5, 5),
     ];
-    let root = codex_rollout("legacy-reset", id, &records);
+    let temporary = codex_rollout("legacy-reset", id, &records);
+    let root = temporary.path();
 
     for full in [false, true] {
-        let view = codex_usage_with_options(&root, id, full, Some(8)).unwrap();
+        let view = codex_usage_with_options(root, id, full, Some(8)).unwrap();
         assert_eq!(
             view.tokens.as_ref().and_then(|tokens| tokens.input),
             Some(5),
@@ -5986,19 +5869,13 @@ fn codex_legacy_counter_resets_keep_the_newest_total_and_since_reset_coverage() 
             "full={full}"
         );
     }
-    fs::remove_dir_all(root).unwrap();
 }
 
 /// One synthetic Codex rollout, written under a per-test store root so a
 /// usage read can be driven end to end through the ordinary resolver.
-fn codex_rollout(tag: &str, id: &str, records: &[serde_json::Value]) -> PathBuf {
-    let root = std::env::temp_dir().join(format!(
-        "tapes-codex-{tag}-{}-{}",
-        std::process::id(),
-        TEMP_ROOTS.fetch_add(1, Ordering::Relaxed)
-    ));
-    let sessions = root.join("sessions/2026/01/01");
-    let _ = fs::remove_dir_all(&root);
+fn codex_rollout(tag: &str, id: &str, records: &[serde_json::Value]) -> TempDir {
+    let root = TempDir::with_prefix(format!("tapes-codex-{tag}-")).unwrap();
+    let sessions = root.path().join("sessions/2026/01/01");
     fs::create_dir_all(&sessions).unwrap();
     let lines = records
         .iter()
@@ -6057,18 +5934,14 @@ fn codex_token_count(ordinal: u64, total: u64, last: u64) -> serde_json::Value {
     })
 }
 
-fn non_utf8_test_roots(tag: &str) -> (PathBuf, PathBuf) {
-    let mut name = OsString::from(format!(
-        "tapes-{tag}-{}-{}",
-        std::process::id(),
-        TEMP_ROOTS.fetch_add(1, Ordering::Relaxed)
-    ));
-    name.push(OsString::from_vec(vec![b'-', 0xff]));
-    let native = std::env::temp_dir().join(name);
-    let display_shadow = PathBuf::from(native.to_string_lossy().into_owned());
-    let _ = fs::remove_dir_all(&native);
-    let _ = fs::remove_dir_all(&display_shadow);
-    (native, display_shadow)
+/// A root whose name is not UTF-8, inside a temporary directory that also
+/// holds the path the root's lossy display names instead.
+fn non_utf8_test_roots(tag: &str) -> (TempDir, PathBuf) {
+    let parent = TempDir::with_prefix(format!("tapes-{tag}-")).unwrap();
+    let native = parent
+        .path()
+        .join(OsString::from_vec(b"root-\xff".to_vec()));
+    (parent, native)
 }
 
 fn write_jsonl_records(path: &Path, records: &[serde_json::Value]) {
@@ -6085,7 +5958,7 @@ fn write_jsonl_records(path: &Path, records: &[serde_json::Value]) {
 fn codex_native_path_survives_transcript_history_full_usage_and_parent_reads() {
     let id = "91000000-0000-0000-0000-000000000001";
     let parent_id = "91000000-0000-0000-0000-000000000002";
-    let (root, shadow) = non_utf8_test_roots("codex-native-location");
+    let (_temporary, root) = non_utf8_test_roots("codex-native-location");
     let session_path = root
         .join("sessions/2026/01/01")
         .join(format!("rollout-2026-01-01T12-00-00-{id}.jsonl"));
@@ -6179,15 +6052,12 @@ fn codex_native_path_survives_transcript_history_full_usage_and_parent_reads() {
         Some(parent_id)
     );
     assert!(lineage.parent.unwrap().resolved);
-
-    fs::remove_dir_all(root).unwrap();
-    fs::remove_dir_all(shadow).unwrap();
 }
 
 #[test]
 fn claude_native_parent_path_survives_history_full_and_child_joins() {
     let id = "92000000-0000-4000-8000-000000000001";
-    let (root, shadow) = non_utf8_test_roots("claude-native-location");
+    let (_temporary, root) = non_utf8_test_roots("claude-native-location");
     let project = PathBuf::from("-fixtures-project");
     let parent_path = root.join(&project).join(format!("{id}.jsonl"));
     let shadow_parent = PathBuf::from(parent_path.to_string_lossy().into_owned());
@@ -6300,15 +6170,12 @@ fn claude_native_parent_path_survives_history_full_and_child_joins() {
         .children
         .iter()
         .any(|child| child.resolved));
-
-    fs::remove_dir_all(root).unwrap();
-    fs::remove_dir_all(shadow).unwrap();
 }
 
 #[test]
 fn pi_native_path_survives_transcript_full_and_parent_reads() {
     let id = "session-native-location";
-    let (root, shadow) = non_utf8_test_roots("pi-native-location");
+    let (_temporary, root) = non_utf8_test_roots("pi-native-location");
     let name = format!("2026-01-01T10-00-00-000Z_{id}.jsonl");
     let session_path = root.join("fixture-project").join(&name);
     let shadow_path = PathBuf::from(session_path.to_string_lossy().into_owned());
@@ -6365,9 +6232,6 @@ fn pi_native_path_survives_transcript_full_and_parent_reads() {
             .map(|parent| parent.native_id.as_str()),
         Some("selected-parent")
     );
-
-    fs::remove_dir_all(root).unwrap();
-    fs::remove_dir_all(shadow).unwrap();
 }
 
 fn codex_usage(root: &Path, id: &str) -> agent_tapes_core::usage::UsageView {
@@ -6393,14 +6257,9 @@ fn codex_usage_with_options(
     )
 }
 
-fn codex_rollout_text(tag: &str, id: &str, contents: &str) -> PathBuf {
-    let root = std::env::temp_dir().join(format!(
-        "tapes-codex-{tag}-{}-{}",
-        std::process::id(),
-        TEMP_ROOTS.fetch_add(1, Ordering::Relaxed)
-    ));
-    let sessions = root.join("sessions/2026/01/01");
-    let _ = fs::remove_dir_all(&root);
+fn codex_rollout_text(tag: &str, id: &str, contents: &str) -> TempDir {
+    let root = TempDir::with_prefix(format!("tapes-codex-{tag}-")).unwrap();
+    let sessions = root.path().join("sessions/2026/01/01");
     fs::create_dir_all(&sessions).unwrap();
     fs::write(
         sessions.join(format!("rollout-2026-01-01T12-00-00-{id}.jsonl")),
@@ -6514,16 +6373,15 @@ fn codex_series_gap_omissions_count_unique_source_gaps_for_bounded_and_full_read
     for index in 0..70 {
         source.push_str(&format!("malformed-{index}\n"));
     }
-    let root = codex_rollout_text("gap-budget", id, &source);
+    let temporary = codex_rollout_text("gap-budget", id, &source);
+    let root = temporary.path();
 
     for full in [false, true] {
-        let view = codex_usage_with_options(&root, id, full, Some(200)).unwrap();
+        let view = codex_usage_with_options(root, id, full, Some(200)).unwrap();
         let series = view.series.unwrap();
         assert_eq!(series.gaps.len(), 64, "full={full}");
         assert_eq!(series.gaps_omitted, 6, "full={full}");
     }
-
-    fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
@@ -6539,10 +6397,11 @@ fn codex_modern_reset_evidence_survives_basis_selection_and_separates_coverage()
         codex_usage_record(6, "response-3", 5),
         codex_token_count(7, 5, 5),
     ];
-    let root = codex_rollout("modern-reset", id, &records);
+    let temporary = codex_rollout("modern-reset", id, &records);
+    let root = temporary.path();
 
     for full in [false, true] {
-        let view = codex_usage_with_options(&root, id, full, Some(16)).unwrap();
+        let view = codex_usage_with_options(root, id, full, Some(16)).unwrap();
         assert_eq!(
             view.tokens.as_ref().and_then(|tokens| tokens.input),
             Some(5),
@@ -6578,8 +6437,6 @@ fn codex_modern_reset_evidence_survives_basis_selection_and_separates_coverage()
             "full={full}"
         );
     }
-
-    fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
@@ -6590,16 +6447,15 @@ fn codex_series_reports_row_byte_budget_omissions_without_dumping_rows() {
     for index in 0..600 {
         records.push(codex_token_count_with_plan(index, index + 1, 1, &plan));
     }
-    let root = codex_rollout("series-byte-budget", id, &records);
+    let temporary = codex_rollout("series-byte-budget", id, &records);
+    let root = temporary.path();
 
-    let view = codex_usage_with_options(&root, id, true, Some(1_000)).unwrap();
+    let view = codex_usage_with_options(root, id, true, Some(1_000)).unwrap();
     let series = view.series.unwrap();
     assert_eq!(series.observed, 600);
     assert!(series.omissions.byte_budget > 0);
     assert_eq!(series.omissions.oversized_row, 0);
     assert!(series.returned < series.observed);
-
-    fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
@@ -6611,16 +6467,15 @@ fn codex_series_reports_an_oversized_row_as_an_omission() {
         codex_turn_context("gpt-oversized-row"),
         codex_token_count_with_plan(2, 1, 1, &oversized_plan),
     ];
-    let root = codex_rollout("series-oversized-row", id, &records);
+    let temporary = codex_rollout("series-oversized-row", id, &records);
+    let root = temporary.path();
 
-    let view = codex_usage_with_options(&root, id, true, Some(8)).unwrap();
+    let view = codex_usage_with_options(root, id, true, Some(8)).unwrap();
     let series = view.series.unwrap();
     assert_eq!(series.observed, 1);
     assert_eq!(series.returned, 0);
     assert_eq!(series.omissions.oversized_row, 1);
     assert_eq!(series.omissions.byte_budget, 0);
-
-    fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
@@ -6634,8 +6489,9 @@ fn codex_bounded_prefix_reports_leading_uncounted_observation() {
         codex_token_count(3, 20, 10),
         codex_token_count(4, 5, 5),
     ];
-    let root = codex_rollout("leading-uncounted", id, &records);
-    let backend = CodexBackend::new(&root).with_read_bytes(MIN_READ_BYTES);
+    let temporary = codex_rollout("leading-uncounted", id, &records);
+    let root = temporary.path();
+    let backend = CodexBackend::new(root).with_read_bytes(MIN_READ_BYTES);
     let backends: Vec<Box<dyn Backend>> = vec![Box::new(backend)];
 
     let view = usage_with_options_with_backends(
@@ -6672,8 +6528,6 @@ fn codex_bounded_prefix_reports_leading_uncounted_observation() {
         .incomplete
         .iter()
         .any(|reason| reason == "leading-uncounted"));
-
-    fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
@@ -6690,8 +6544,9 @@ fn codex_bounded_modern_reset_evidence_keeps_read_window_coverage() {
         codex_usage_record(6, "bounded-response-3", 5),
         codex_token_count(7, 5, 5),
     ];
-    let root = codex_rollout("bounded-modern-reset", id, &records);
-    let backend = CodexBackend::new(&root).with_read_bytes(MIN_READ_BYTES);
+    let temporary = codex_rollout("bounded-modern-reset", id, &records);
+    let root = temporary.path();
+    let backend = CodexBackend::new(root).with_read_bytes(MIN_READ_BYTES);
     let backends: Vec<Box<dyn Backend>> = vec![Box::new(backend)];
 
     let view = usage_with_options_with_backends(
@@ -6728,8 +6583,6 @@ fn codex_bounded_modern_reset_evidence_keeps_read_window_coverage() {
             .and_then(|tokens| tokens.input),
         Some(25)
     );
-
-    fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
@@ -6739,9 +6592,10 @@ fn codex_response_id_dedup_budget_reports_skipped_counting() {
     for index in 0..20_000 {
         records.push(codex_usage_record(index, &format!("response-{index}"), 1));
     }
-    let root = codex_rollout("response-id-budget", id, &records);
+    let temporary = codex_rollout("response-id-budget", id, &records);
+    let root = temporary.path();
 
-    let view = codex_usage_with_options(&root, id, true, Some(1)).unwrap();
+    let view = codex_usage_with_options(root, id, true, Some(1)).unwrap();
     let attribution = view.attribution.as_ref().unwrap();
     assert_eq!(attribution.observed, 20_000);
     assert!(attribution.counted < attribution.observed);
@@ -6753,8 +6607,6 @@ fn codex_response_id_dedup_budget_reports_skipped_counting() {
         .bounds
         .iter()
         .any(|reason| reason == "response-id-budget"));
-
-    fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
@@ -6782,12 +6634,13 @@ fn public_full_usage_refuses_replacement_or_in_place_source_rewrite_between_pass
         .join("\n");
 
     for mutation in [CodexMutation::Replace, CodexMutation::InPlace] {
-        let root = codex_rollout_text("pinned-mutation", id, &format!("{initial}\n"));
+        let temporary = codex_rollout_text("pinned-mutation", id, &format!("{initial}\n"));
+        let root = temporary.path();
         let path = root
             .join("sessions/2026/01/01")
             .join(format!("rollout-2026-01-01T12-00-00-{id}.jsonl"));
         let backend = MutatingCodexBackend {
-            inner: CodexBackend::new(&root),
+            inner: CodexBackend::new(root),
             path,
             replacement: format!("{replacement}\n"),
             mutation,
@@ -6814,7 +6667,6 @@ fn public_full_usage_refuses_replacement_or_in_place_source_rewrite_between_pass
                 || error.to_string().contains("replaced"),
             "{error:#}"
         );
-        fs::remove_dir_all(root).unwrap();
     }
 }
 
@@ -6826,11 +6678,12 @@ fn codex_full_usage_rejects_roundtripped_evidence_without_prefix_integrity() {
         codex_turn_context("gpt-roundtrip-pin"),
         codex_usage_record(2, "roundtrip-response", 1),
     ];
-    let root = codex_rollout("roundtrip-pin", id, &records);
+    let temporary = codex_rollout("roundtrip-pin", id, &records);
+    let root = temporary.path();
     let path = root
         .join("sessions/2026/01/01")
         .join(format!("rollout-2026-01-01T12-00-00-{id}.jsonl"));
-    let backend = CodexBackend::new(&root);
+    let backend = CodexBackend::new(root);
     let session = backend.locate(id).unwrap().unwrap();
     let first = backend
         .stream_transcript(&session, None, &mut |_| Ok(()))
@@ -6870,8 +6723,6 @@ fn codex_full_usage_rejects_roundtripped_evidence_without_prefix_integrity() {
         Err(error) => error,
     };
     assert!(roundtripped_error.to_string().contains("prefix integrity"));
-
-    fs::remove_dir_all(root).unwrap();
 }
 
 /// `distinct_observed` answers how many model selections a read actually saw,
@@ -6884,13 +6735,12 @@ fn codex_model_observations_count_distinct_selections_not_switches() {
     for model in ["gpt-alpha", "gpt-beta", "gpt-alpha", "gpt-beta"] {
         records.push(codex_turn_context(model));
     }
-    let root = codex_rollout("distinct-selections", id, &records);
+    let temporary = codex_rollout("distinct-selections", id, &records);
+    let root = temporary.path();
 
-    let status = codex_usage(&root, id).session.model_observation.unwrap();
+    let status = codex_usage(root, id).session.model_observation.unwrap();
     assert!(status.mixed, "two selections alternated");
     assert_eq!(status.distinct_observed, Some(2));
-
-    fs::remove_dir_all(root).unwrap();
 }
 
 /// Past the retained model-key budget no exact distinct count exists, so the
@@ -6904,9 +6754,10 @@ fn codex_model_observations_withhold_the_count_past_the_key_budget() {
         records.push(codex_turn_context(&format!("gpt-m{index:02}")));
         records.push(codex_usage_record(index, &format!("response-{index}"), 1));
     }
-    let root = codex_rollout("key-budget", id, &records);
+    let temporary = codex_rollout("key-budget", id, &records);
+    let root = temporary.path();
 
-    let view = codex_usage(&root, id);
+    let view = codex_usage(root, id);
     let status = view.session.model_observation.as_ref().unwrap();
     assert!(status.mixed);
     assert_eq!(status.distinct_observed, None);
@@ -6918,8 +6769,6 @@ fn codex_model_observations_withhold_the_count_past_the_key_budget() {
         .bounds
         .iter()
         .any(|reason| reason == "model-key-budget"));
-
-    fs::remove_dir_all(root).unwrap();
 }
 
 /// A modern request record selects the modern basis for the whole read, and
@@ -6938,9 +6787,10 @@ fn codex_attribution_names_legacy_observations_the_modern_basis_discards() {
         codex_token_count(4, 40, 15),
         codex_usage_record(5, "response-late-1", 7),
     ];
-    let root = codex_rollout("late-modern", id, &records);
+    let temporary = codex_rollout("late-modern", id, &records);
+    let root = temporary.path();
 
-    let view = codex_usage(&root, id);
+    let view = codex_usage(root, id);
     assert_eq!(
         view.tokens.as_ref().and_then(|tokens| tokens.input),
         Some(40)
@@ -6962,8 +6812,6 @@ fn codex_attribution_names_legacy_observations_the_modern_basis_discards() {
             .unwrap()
             .attribution_uncertain
     );
-
-    fs::remove_dir_all(root).unwrap();
 }
 
 /// Modern rollouts write a `token_count` beside their request records, so a
@@ -6980,9 +6828,10 @@ fn codex_attribution_stays_complete_when_legacy_events_follow_the_modern_basis()
         codex_usage_record(4, "response-modern-2", 20),
         codex_token_count(5, 30, 20),
     ];
-    let root = codex_rollout("modern-with-events", id, &records);
+    let temporary = codex_rollout("modern-with-events", id, &records);
+    let root = temporary.path();
 
-    let view = codex_usage(&root, id);
+    let view = codex_usage(root, id);
     let attribution = view.attribution.as_ref().unwrap();
     assert_eq!(attribution.basis, ObservationBasis::UsageRecord);
     assert_eq!(attribution.counted, 2);
@@ -6995,17 +6844,15 @@ fn codex_attribution_stays_complete_when_legacy_events_follow_the_modern_basis()
             .unwrap()
             .attribution_uncertain
     );
-
-    fs::remove_dir_all(root).unwrap();
 }
 
 /// A Claude `cost-state` carries wall-clock durations and the per-model split
 /// beside its totals. A recording without one carries neither.
 #[test]
 fn claude_usage_reports_cost_state_durations_and_the_per_model_split() {
-    let root = std::env::temp_dir().join(format!("tapes-claude-usage-{}", std::process::id()));
+    let temporary = TempDir::with_prefix("tapes-claude-usage-").unwrap();
+    let root = temporary.path();
     let project = root.join("project");
-    let _ = fs::remove_dir_all(&root);
     fs::create_dir_all(&project).unwrap();
     fs::write(
         project.join("session-usage.jsonl"),
@@ -7018,7 +6865,7 @@ fn claude_usage_reports_cost_state_durations_and_the_per_model_split() {
     )
     .unwrap();
 
-    let backend = ClaudeBackend::new(&root);
+    let backend = ClaudeBackend::new(root);
     let session = located(&backend, "session-usage");
     let view = usage(&backend.transcript(&session, usize::MAX).unwrap());
 
@@ -7076,7 +6923,6 @@ fn claude_usage_reports_cost_state_durations_and_the_per_model_split() {
     );
     assert!(view.context_window.is_none(), "Claude records no window");
     assert!(view.rate_limits.is_none(), "Claude records no quota");
-    fs::remove_dir_all(root).unwrap();
 
     let fixture = ClaudeBackend::new(fixtures("claude"));
     let session = located(&fixture, "session-claude");
@@ -7126,9 +6972,9 @@ fn a_harness_without_usage_detail_omits_every_optional_object() {
 /// A read that stopped at the file tail counted only the turns it reached.
 #[test]
 fn a_bounded_read_reports_its_turn_counts_as_a_read_window() {
-    let root = std::env::temp_dir().join(format!("tapes-usage-bounds-{}", std::process::id()));
+    let temporary = TempDir::with_prefix("tapes-usage-bounds-").unwrap();
+    let root = temporary.path();
     let project = root.join("project");
-    let _ = fs::remove_dir_all(&root);
     fs::create_dir_all(&project).unwrap();
     let mut file = BufWriter::new(File::create(project.join("bounded-usage.jsonl")).unwrap());
     file.write_all(b"{\"padding\":\"").unwrap();
@@ -7141,14 +6987,13 @@ fn a_bounded_read_reports_its_turn_counts_as_a_read_window() {
     .unwrap();
     file.flush().unwrap();
 
-    let backend = ClaudeBackend::new(&root);
+    let backend = ClaudeBackend::new(root);
     let session = located(&backend, "bounded-usage");
     let view = usage(&backend.transcript(&session, usize::MAX).unwrap());
 
     assert_eq!(view.turns.total, 1);
     assert_eq!(view.turns.coverage, TurnCoverage::ReadWindow);
     assert!(view.truncated);
-    fs::remove_dir_all(root).unwrap();
 }
 
 /// A store that lists two sessions and can no longer read one of them.
@@ -7225,14 +7070,12 @@ impl Backend for BulkExportFixture {
     }
 }
 
-fn export_directory(name: &str) -> PathBuf {
-    let directory = std::env::temp_dir().join(format!(
-        "tapes-selection-{name}-{}-{}",
-        std::process::id(),
-        TEMP_ROOTS.fetch_add(1, Ordering::Relaxed)
-    ));
-    let _ = fs::remove_dir_all(&directory);
-    directory
+/// A temporary directory and an export directory inside it that does not
+/// exist yet.
+fn export_directory(name: &str) -> (TempDir, PathBuf) {
+    let parent = TempDir::with_prefix(format!("tapes-selection-{name}-")).unwrap();
+    let directory = parent.path().join("export");
+    (parent, directory)
 }
 
 fn selection() -> SessionSelection<'static> {
@@ -7257,7 +7100,7 @@ fn a_selection_exports_every_readable_session_and_records_the_rest() {
         ],
         unreadable: "ses_broken",
     })];
-    let directory = export_directory("partial");
+    let (_temporary, directory) = export_directory("partial");
 
     let export = export_selection_with_backends(
         &backends,
@@ -7301,8 +7144,6 @@ fn a_selection_exports_every_readable_session_and_records_the_rest() {
         let file = Path::new(manifest["sessions"][0]["files"][path].as_str().unwrap());
         assert!(file.is_file(), "{} is missing", file.display());
     }
-
-    fs::remove_dir_all(directory).unwrap();
 }
 
 /// Nothing selected could be read. The manifest still records the selection,
@@ -7313,7 +7154,7 @@ fn a_selection_whose_every_session_failed_says_so() {
         sessions: vec![resolver_session("ses_broken")],
         unreadable: "ses_broken",
     })];
-    let directory = export_directory("total-failure");
+    let (_temporary, directory) = export_directory("total-failure");
 
     let export = export_selection_with_backends(
         &backends,
@@ -7331,8 +7172,6 @@ fn a_selection_whose_every_session_failed_says_so() {
         1,
         "only the manifest is written"
     );
-
-    fs::remove_dir_all(directory).unwrap();
 }
 
 /// An empty selection is a fact, not a failure: the manifest records what was
@@ -7343,7 +7182,7 @@ fn an_empty_selection_writes_a_manifest_and_no_bundle() {
         sessions: Vec::new(),
         unreadable: "",
     })];
-    let directory = export_directory("empty");
+    let (_temporary, directory) = export_directory("empty");
 
     let export = export_selection_with_backends(
         &backends,
@@ -7358,8 +7197,6 @@ fn an_empty_selection_writes_a_manifest_and_no_bundle() {
     assert!(export.manifest.failed.is_empty());
     assert!(!export.every_session_failed());
     assert_eq!(export.manifest.selection.limit, 20);
-
-    fs::remove_dir_all(directory).unwrap();
 }
 
 #[test]
@@ -7455,9 +7292,9 @@ fn title_resolution_retains_the_first_opencode_projection_even_for_a_nonmatch() 
 /// placeholder.
 #[test]
 fn claude_model_carries_the_turn_effort_and_skips_synthetic_records() {
-    let root = std::env::temp_dir().join(format!("tapes-claude-effort-{}", std::process::id()));
+    let temporary = TempDir::with_prefix("tapes-claude-effort-").unwrap();
+    let root = temporary.path();
     let project = root.join("project");
-    let _ = fs::remove_dir_all(&root);
     fs::create_dir_all(&project).unwrap();
     fs::write(
         project.join("session-effort.jsonl"),
@@ -7472,7 +7309,7 @@ fn claude_model_carries_the_turn_effort_and_skips_synthetic_records() {
     )
     .unwrap();
 
-    let backend = ClaudeBackend::new(&root);
+    let backend = ClaudeBackend::new(root);
     let session = located(&backend, "session-effort");
     let expected = Model {
         id: "claude-fixture".to_owned(),
@@ -7481,16 +7318,15 @@ fn claude_model_carries_the_turn_effort_and_skips_synthetic_records() {
     assert_eq!(session.model.as_ref(), Some(&expected));
     let transcript = backend.transcript(&session, 10).unwrap();
     assert_eq!(transcript.session.model.as_ref(), Some(&expected));
-    let _ = fs::remove_dir_all(&root);
 }
 
 /// Older Codex rollouts name the effort as `reasoning_effort`, or inside the
 /// collaboration mode's settings, rather than as `effort`.
 #[test]
 fn codex_reads_effort_from_older_turn_context_fields() {
-    let root = std::env::temp_dir().join(format!("tapes-codex-effort-{}", std::process::id()));
+    let temporary = TempDir::with_prefix("tapes-codex-effort-").unwrap();
+    let root = temporary.path();
     let day = root.join("sessions/2026/01/01");
-    let _ = fs::remove_dir_all(&root);
     fs::create_dir_all(&day).unwrap();
     for (id, context) in [
         (
@@ -7517,7 +7353,7 @@ fn codex_reads_effort_from_older_turn_context_fields() {
         .unwrap();
     }
 
-    let backend = CodexBackend::new(&root);
+    let backend = CodexBackend::new(root);
     for (id, effort) in [
         ("00000000-0000-4000-8000-00000000e001", "medium"),
         ("00000000-0000-4000-8000-00000000e002", "low"),
@@ -7528,7 +7364,6 @@ fn codex_reads_effort_from_older_turn_context_fields() {
         assert_eq!(model.id, "gpt-fixture");
         assert_eq!(model.variant.as_deref(), Some(effort), "{id}");
     }
-    let _ = fs::remove_dir_all(&root);
 }
 
 /// Effort belongs to the assistant record that states it, so a newer real
@@ -7536,10 +7371,9 @@ fn codex_reads_effort_from_older_turn_context_fields() {
 /// inheriting an older record's.
 #[test]
 fn claude_model_variant_is_absent_when_the_newest_assistant_records_no_effort() {
-    let root =
-        std::env::temp_dir().join(format!("tapes-claude-effort-reset-{}", std::process::id()));
+    let temporary = TempDir::with_prefix("tapes-claude-effort-reset-").unwrap();
+    let root = temporary.path();
     let project = root.join("project");
-    let _ = fs::remove_dir_all(&root);
     fs::create_dir_all(&project).unwrap();
     fs::write(
         project.join("session-effort-reset.jsonl"),
@@ -7554,7 +7388,7 @@ fn claude_model_variant_is_absent_when_the_newest_assistant_records_no_effort() 
     )
     .unwrap();
 
-    let backend = ClaudeBackend::new(&root);
+    let backend = ClaudeBackend::new(root);
     let session = located(&backend, "session-effort-reset");
     let expected = Model {
         id: "claude-fixture-next".to_owned(),
@@ -7563,7 +7397,6 @@ fn claude_model_variant_is_absent_when_the_newest_assistant_records_no_effort() 
     assert_eq!(session.model.as_ref(), Some(&expected));
     let transcript = backend.transcript(&session, 10).unwrap();
     assert_eq!(transcript.session.model.as_ref(), Some(&expected));
-    let _ = fs::remove_dir_all(&root);
 }
 
 #[test]
@@ -7691,10 +7524,12 @@ fn native_prefix_digest_identifies_bytes_and_retains_the_replay_prefix() {
     use std::io::Write;
     let id = "90000000-0000-0000-0000-000000000014";
     let body = format!("{}\nnot json\n{{\"unfinished\":", codex_meta(id));
-    let root = codex_rollout_text("public-prefix", id, &body);
-    let copy_root = codex_rollout_text("public-prefix-copy", id, &body);
-    let backend = CodexBackend::new(&root);
-    let copy_backend = CodexBackend::new(&copy_root);
+    let store = codex_rollout_text("public-prefix", id, &body);
+    let root = store.path();
+    let copy_store = codex_rollout_text("public-prefix-copy", id, &body);
+    let copy_root = copy_store.path();
+    let backend = CodexBackend::new(root);
+    let copy_backend = CodexBackend::new(copy_root);
     let session = backend.locate(id).unwrap().unwrap();
     let copy_session = copy_backend.locate(id).unwrap().unwrap();
     let first = backend
@@ -7764,8 +7599,6 @@ fn native_prefix_digest_identifies_bytes_and_retains_the_replay_prefix() {
         mutated.read_evidence(None).source_prefix_digest.as_ref(),
         Some(digest)
     );
-    fs::remove_dir_all(root).unwrap();
-    fs::remove_dir_all(copy_root).unwrap();
 }
 
 #[test]
@@ -7914,13 +7747,8 @@ fn selected_identity_is_checked_on_every_recording_read() {
         let session = backend.locate(id).unwrap().unwrap();
         let location = session.source.location.as_ref().unwrap();
         let path = Path::new(&location.locator);
-        let root = std::env::temp_dir().join(format!(
-            "tapes-identity-{}-{}-{}",
-            backend.harness(),
-            std::process::id(),
-            TEMP_ROOTS.fetch_add(1, Ordering::Relaxed)
-        ));
-        fs::create_dir_all(&root).unwrap();
+        let temporary = TempDir::with_prefix("tapes-identity-").unwrap();
+        let root = temporary.path();
         let copied = root.join(path.file_name().unwrap());
         let contents = fs::read_to_string(path).unwrap();
         fs::write(&copied, contents.replace(id, "foreign-recording")).unwrap();
@@ -7949,7 +7777,6 @@ fn selected_identity_is_checked_on_every_recording_read() {
             "{} streamed lineage",
             backend.harness()
         );
-        fs::remove_dir_all(root).unwrap();
     }
 }
 
@@ -7960,13 +7787,8 @@ fn history_and_metadata_pages_validate_selected_identity() {
         .filter(|(backend, _)| backend.harness() != "pi")
     {
         let mut session = backend.locate(id).unwrap().unwrap();
-        let root = std::env::temp_dir().join(format!(
-            "tapes-page-identity-{}-{}-{}",
-            backend.harness(),
-            std::process::id(),
-            TEMP_ROOTS.fetch_add(1, Ordering::Relaxed)
-        ));
-        fs::create_dir_all(&root).unwrap();
+        let temporary = TempDir::with_prefix("tapes-page-identity-").unwrap();
+        let root = temporary.path();
         let path = Path::new(&session.source.location.as_ref().unwrap().locator);
         let copied = root.join(path.file_name().unwrap());
         fs::write(
@@ -7988,6 +7810,5 @@ fn history_and_metadata_pages_validate_selected_identity() {
             "{} metadata",
             backend.harness()
         );
-        fs::remove_dir_all(root).unwrap();
     }
 }
