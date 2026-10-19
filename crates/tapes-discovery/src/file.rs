@@ -48,6 +48,8 @@ struct FileEntry {
 
 #[derive(Clone, Debug)]
 struct Walk {
+    /// Which of its catalog's walks this is, counting from one.
+    generation: usize,
     entries: Vec<FileEntry>,
     scanned: usize,
     complete: bool,
@@ -59,6 +61,7 @@ struct Walk {
 impl Walk {
     fn new(entry_limit: usize) -> Self {
         Self {
+            generation: 0,
             entries: Vec::new(),
             scanned: 0,
             complete: true,
@@ -118,8 +121,20 @@ impl StoreCatalog {
     }
 
     fn counted(&self, store: &NativeStore, root: &Path) -> Walk {
-        self.walks.fetch_add(1, Ordering::Relaxed);
-        walk(store, root)
+        let generation = self.walks.fetch_add(1, Ordering::Relaxed) + 1;
+        let mut taken = walk(store, root);
+        taken.generation = generation;
+        taken
+    }
+
+    /// The generation of the walk this catalog shares, the one a lookup,
+    /// listing or join answers from now; none before the first walk.
+    pub fn generation(&self) -> Option<usize> {
+        self.walked
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_ref()
+            .map(|(_, walked)| walked.generation)
     }
 
     /// The shared walk of `root`, and whether this call took it.
@@ -165,17 +180,30 @@ pub(crate) fn candidates_in(
     catalog: &StoreCatalog,
     limit: usize,
 ) -> CandidatePage {
-    match (store.file(), store.root()) {
-        (Some(path), Some(root)) => merge_candidate_pages(
+    candidates_in_walk(store, catalog, limit).0
+}
+
+/// The candidates of `catalog`'s walk of the store, and that walk's
+/// generation; none for a store that is one explicit file.
+pub(crate) fn candidates_in_walk(
+    store: &NativeStore,
+    catalog: &StoreCatalog,
+    limit: usize,
+) -> (CandidatePage, Option<usize>) {
+    let walked = store.root().map(|root| catalog.walk(store, root).0);
+    let generation = walked.as_ref().map(|walked| walked.generation);
+    let page = match (store.file(), walked) {
+        (Some(path), Some(walked)) => merge_candidate_pages(
             store,
             explicit_file_candidates(store, path, limit),
-            candidates_from_root(store, catalog.walk(store, root).0, limit),
+            candidates_from_root(store, walked, limit),
             limit,
         ),
         (Some(path), None) => explicit_file_candidates(store, path, limit),
-        (None, Some(root)) => candidates_from_root(store, catalog.walk(store, root).0, limit),
+        (None, Some(walked)) => candidates_from_root(store, walked, limit),
         (None, None) => CandidatePage::empty(),
-    }
+    };
+    (page, generation)
 }
 
 fn candidates_from_root(store: &NativeStore, mut walk: Walk, limit: usize) -> CandidatePage {
@@ -944,7 +972,7 @@ fn probe_file(
             ));
         }
     };
-    let header_id = native_identity(store.harness(), &bytes, path)?;
+    let (header_id, lineage) = native_identity(store.harness(), &bytes, path)?;
     let (id, basis) = match header_id {
         Some(id) => (id, IdentityBasis::Header),
         None => (
@@ -961,13 +989,16 @@ fn probe_file(
             reason: "native filename identity is empty or contains a control character",
         });
     }
-    Ok(Some(NativeSession::file(
-        id,
-        store.harness(),
-        store.coordinate(),
-        path.to_path_buf(),
-        basis,
-    )))
+    Ok(Some(
+        NativeSession::file(
+            id,
+            store.harness(),
+            store.coordinate(),
+            path.to_path_buf(),
+            basis,
+        )
+        .with_lineage(lineage),
+    ))
 }
 
 struct Opening {
@@ -1000,11 +1031,17 @@ fn opening(file: &mut File, size: u64) -> io::Result<Opening> {
     })
 }
 
+/// The header fields a Codex child names its parent with.
+const CODEX_LINEAGE_FIELDS: [&str; 3] = ["parent_thread_id", "agent_path", "agent_nickname"];
+
+/// The native identity the opening's complete records name, and, for a
+/// Codex rollout whose `session_meta` names a parent, the header's
+/// `CODEX_LINEAGE_FIELDS`, so a lineage join reads no header again.
 fn native_identity(
     harness: Harness,
     opening: &Opening,
     path: &Path,
-) -> Result<Option<String>, DiscoveryError> {
+) -> Result<(Option<String>, Option<Value>), DiscoveryError> {
     let complete = if opening.reached_eof {
         opening.bytes.as_slice()
     } else {
@@ -1015,6 +1052,7 @@ fn native_identity(
             .map_or(&[][..], |index| &opening.bytes[..=index])
     };
     let mut found: Option<String> = None;
+    let mut lineage = None;
     for line in complete.split(|byte| *byte == b'\n') {
         if line.is_empty() {
             continue;
@@ -1029,8 +1067,24 @@ fn native_identity(
                 path,
             )?),
             Harness::Codex if value.get("type").and_then(Value::as_str) == Some("session_meta") => {
+                let payload = value.get("payload");
+                if lineage.is_none() {
+                    lineage = payload
+                        .filter(|payload| payload["parent_thread_id"].is_string())
+                        .map(|payload| {
+                            CODEX_LINEAGE_FIELDS
+                                .iter()
+                                .filter_map(|field| {
+                                    let value =
+                                        payload.get(*field).filter(|value| value.is_string());
+                                    value.map(|value| ((*field).to_owned(), value.clone()))
+                                })
+                                .collect::<serde_json::Map<_, _>>()
+                                .into()
+                        });
+                }
                 Some(identity_string(
-                    value.get("payload").and_then(|payload| payload.get("id")),
+                    payload.and_then(|payload| payload.get("id")),
                     "Codex session_meta id",
                     path,
                 )?)
@@ -1050,7 +1104,7 @@ fn native_identity(
             found = Some(identity);
         }
     }
-    Ok(found)
+    Ok((found, lineage))
 }
 
 fn identity_string(
@@ -1223,7 +1277,9 @@ mod tests {
         assert_eq!(opening.bytes.len(), MAX_OPENING_BYTES);
         assert!(!opening.reached_eof);
         assert_eq!(
-            native_identity(Harness::Claude, &opening, Path::new("filename-id.jsonl")).unwrap(),
+            native_identity(Harness::Claude, &opening, Path::new("filename-id.jsonl"))
+                .unwrap()
+                .0,
             None
         );
         let session = probe(&NativeStore::claude(&root), &path).unwrap().unwrap();

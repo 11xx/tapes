@@ -25,15 +25,3 @@ pub fn recording_passes() -> usize {
 pub(crate) fn streamed_recording() {
     RECORDING_PASSES.fetch_add(1, Ordering::Relaxed);
 }
-
-static LINEAGE_HEADER_READS: AtomicUsize = AtomicUsize::new(0);
-
-/// How many candidate recording headers lineage reads have opened while
-/// looking for children, since the process started.
-pub fn lineage_header_reads() -> usize {
-    LINEAGE_HEADER_READS.load(Ordering::Relaxed)
-}
-
-pub(crate) fn read_lineage_header() {
-    LINEAGE_HEADER_READS.fetch_add(1, Ordering::Relaxed);
-}

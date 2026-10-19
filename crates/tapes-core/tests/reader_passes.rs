@@ -1,6 +1,7 @@
 //! A read context pays for each recording once: lineage reads over many Codex
-//! sessions open each candidate's header once per store walk, and a pi usage
-//! read folds its accounting into the transcript pass.
+//! sessions join against one child index per store walk, and a pi usage
+//! read folds its accounting into the transcript pass. How often a lineage
+//! read opens each rollout is counted in `review2_fixes_reader_passes.rs`.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -86,12 +87,12 @@ fn children(backend: &CodexBackend, id: &str) -> Vec<String> {
 }
 
 /// Claim: one backend reading the lineage of every session in a Codex store
-/// opens each candidate rollout's header at most once, still finds each
-/// parent's children, and finds a child written later once a named lookup
-/// has walked the store again. Rejects a lineage read that opens every
-/// rollout header in the store for each session it is asked about.
+/// finds each parent's children, bounded and streamed, and finds a child
+/// written later once a named lookup has walked the store again. Rejects a
+/// child index that outlives the walk it was built from.
 #[test]
-fn codex_lineage_reads_each_candidate_header_once_per_walk() {
+fn codex_lineage_follows_the_walk() {
+    // Its streamed read moves the pass counter the pi test reads.
     let _counted = COUNTED
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -110,10 +111,8 @@ fn codex_lineage_reads_each_candidate_header_once_per_walk() {
     for (hour, other) in (13..).zip(OTHERS) {
         store.write_codex(hour, other, json!({}));
     }
-    let rollouts = 3 + OTHERS.len();
     let backend = CodexBackend::new(&store.0);
 
-    let before = counters::lineage_header_reads();
     assert_eq!(
         children(&backend, PARENT),
         vec![FIRST_CHILD.to_owned(), SECOND_CHILD.to_owned()]
@@ -123,12 +122,6 @@ fn codex_lineage_reads_each_candidate_header_once_per_walk() {
     }
     let parent = backend.locate(PARENT).unwrap().unwrap();
     assert_eq!(backend.stream_lineage(&parent).unwrap().children.len(), 2);
-    let opened = counters::lineage_header_reads() - before;
-    assert!(
-        opened <= rollouts,
-        "{opened} header reads for {rollouts} rollouts read by {} lineage reads",
-        rollouts + 1
-    );
 
     store.write_codex(
         16,

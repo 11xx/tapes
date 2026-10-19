@@ -6,7 +6,7 @@ use anyhow::{anyhow, Result};
 use serde_json::Value;
 
 use super::{
-    accounting_for, default_native_store, enrich_native_session, head_directory, head_jsonl,
+    accounting_for, default_native_store, enrich_native_session, head_directory,
     list_discovered_files, list_discovered_files_with_search, read_bounds, read_recording,
     recorded_total_coverage, replay_pin, skipped_records_note, stream_jsonl,
     stream_jsonl_with_gaps, streamed_trailing_record, terminal_from_values, timestamp,
@@ -58,11 +58,6 @@ type CodexTranscriptRead = (
     Option<TerminalObservation>,
     crate::model::UnmappedRecords,
 );
-
-struct CandidateRecording {
-    path: PathBuf,
-    id: String,
-}
 
 impl CodexBackend {
     /// A backend over the Codex store at `root`. Its listings answer from
@@ -873,45 +868,15 @@ impl CodexBackend {
         let path = super::session_file_path(session)
             .map(Path::to_path_buf)
             .ok_or_else(|| anyhow!("codex session {} has no file locator", session.id))?;
-        let index = self.lineage.current(&self.catalog, || {
-            let (files, notes) = self.candidates()?;
-            Ok(ChildIndex::read(&files, notes))
-        })?;
-        Ok((index, path))
-    }
-
-    /// The store's candidate recordings, as discovery-owned native locators,
-    /// and the notes on what the listing could not cover.
-    fn candidates(&self) -> Result<(Vec<CandidateRecording>, Vec<String>)> {
         let store = self
             .store
             .as_ref()
             .ok_or_else(|| anyhow!("codex store is unavailable"))?;
-        let page = store.candidates_in(&self.catalog, 100_000);
-        let files = page
-            .records
-            .iter()
-            .filter_map(|native| {
-                native.locator().map(|path| CandidateRecording {
-                    path: path.to_path_buf(),
-                    id: native.id().to_owned(),
-                })
-            })
-            .collect();
-        let mut notes = page
-            .failures
-            .into_iter()
-            .map(|failure| format!("Codex lineage candidate: {failure}"))
-            .collect::<Vec<_>>();
-        notes.extend(
-            page.unreadable_ids
-                .into_iter()
-                .map(|id| format!("Codex lineage candidate {id} could not be identified")),
-        );
-        if !page.complete && notes.is_empty() {
-            notes.push("Codex lineage candidate coverage is incomplete".to_owned());
-        }
-        Ok((files, notes))
+        let index = self.lineage.current(&self.catalog, || {
+            let (page, generation) = store.candidates_in_walk(&self.catalog, 100_000);
+            (ChildIndex::from_page(page), generation)
+        });
+        Ok((index, path))
     }
 
     /// The relatives a rollout's header and spawned agents name, joined to the
@@ -926,23 +891,26 @@ impl CodexBackend {
     ) -> Lineage {
         let mut notes = index.notes.clone();
         let parent = header["parent_thread_id"].as_str().map(|native_id| {
-            let resolved = match self
-                .store
-                .as_ref()
-                .ok_or_else(|| anyhow!("codex store is unavailable"))
-                .and_then(|store| {
-                    store
-                        .locate_exact_in(&self.catalog, native_id)
-                        .map_err(Into::into)
-                }) {
-                Ok(session) => session.is_some(),
-                Err(error) => {
-                    notes.push(format!(
-                        "Codex parent session {native_id} could not be resolved: {error:#}"
-                    ));
-                    false
-                }
-            };
+            // A parent among the walk's candidates resolves without opening
+            // it again; any other is looked up in the same walk.
+            let resolved = index.ids.contains(native_id)
+                || match self
+                    .store
+                    .as_ref()
+                    .ok_or_else(|| anyhow!("codex store is unavailable"))
+                    .and_then(|store| {
+                        store
+                            .locate_exact_in(&self.catalog, native_id)
+                            .map_err(Into::into)
+                    }) {
+                    Ok(session) => session.is_some(),
+                    Err(error) => {
+                        notes.push(format!(
+                            "Codex parent session {native_id} could not be resolved: {error:#}"
+                        ));
+                        false
+                    }
+                };
             ParentRef {
                 resolved,
                 native_id: native_id.to_owned(),
@@ -951,7 +919,7 @@ impl CodexBackend {
         });
 
         let mut agents = agents.agents;
-        let (probed, probe_bound) = index.children(path, &session.id, &mut notes);
+        let (probed, probe_bound) = index.children(path, &session.id);
         for child in probed {
             let entry = agents.entry(child.agent_path.clone()).or_default();
             entry.session_id = Some(child.thread_id);
@@ -3364,129 +3332,120 @@ fn payload_json(value: &Value) -> Value {
 }
 
 /// The child index of a backend's store walk, shared by the backend and its
-/// clones. It is read once per walk: a lineage read joins against the walk
-/// the catalog holds, and a walk taken again, after a named lookup missed,
-/// replaces the index with one read from it.
+/// clones. It is built once per walk, from the headers discovery read: a
+/// lineage read joins against the walk the catalog holds, and a walk taken
+/// again, after a named lookup missed, replaces the index with one built
+/// from it.
 #[derive(Clone, Debug, Default)]
 struct LineageIndex(Arc<Mutex<Option<Arc<ChildIndex>>>>);
 
 impl LineageIndex {
+    /// The index of the walk the catalog holds now, built by `build` when
+    /// the held one is of another walk. `build` names the walk its
+    /// candidates came from, so an index is never labelled with a walk
+    /// taken while it was being built.
     fn current(
         &self,
         catalog: &StoreCatalog,
-        read: impl FnOnce() -> Result<ChildIndex>,
-    ) -> Result<Arc<ChildIndex>> {
+        build: impl FnOnce() -> (ChildIndex, Option<usize>),
+    ) -> Arc<ChildIndex> {
         let mut held = self
             .0
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         if let Some(index) = held
             .as_ref()
-            .filter(|index| index.walks == Some(catalog.walks()))
+            .filter(|index| index.generation.is_some() && index.generation == catalog.generation())
         {
-            return Ok(Arc::clone(index));
+            return Arc::clone(index);
         }
-        let mut index = read()?;
-        index.walks = Some(catalog.walks());
+        let (mut index, generation) = build();
+        index.generation = generation;
         let index = Arc::new(index);
         *held = Some(Arc::clone(&index));
-        Ok(index)
+        index
     }
 }
 
-/// The headers of the candidate recordings a lineage read inspects, and the
-/// notes on what the candidate listing could not cover.
+/// The child headers among the candidate recordings a lineage read
+/// inspects, and the notes on what the candidate listing could not cover.
 #[derive(Debug)]
 struct ChildIndex {
     /// The catalog walk the candidates came from.
-    walks: Option<usize>,
+    generation: Option<usize>,
     notes: Vec<String>,
-    /// Each inspected candidate that names a parent or could not be read, in
-    /// candidate order.
-    headers: Vec<CandidateHeader>,
+    /// Each inspected candidate whose header names a parent, with that
+    /// parent, in candidate order.
+    children: Vec<(String, ChildHeader)>,
     /// The probe bound, when the store held more candidates than were read.
     bound: Option<usize>,
-}
-
-#[derive(Debug)]
-enum CandidateHeader {
-    Child { parent: String, child: ChildHeader },
-    Unreadable { path: PathBuf, note: String },
+    /// The native ids of the candidates discovery identified.
+    ids: HashSet<String>,
 }
 
 impl ChildIndex {
-    /// Read the headers of the newest `MAX_LINEAGE_PROBES` candidates. A
-    /// failed read keeps its source and I/O cause as a coverage note.
-    fn read(files: &[CandidateRecording], notes: Vec<String>) -> Self {
+    /// The index of the newest `MAX_LINEAGE_PROBES` candidates of a
+    /// discovery page, from the header fields discovery read. A header
+    /// discovery could not read is a failure of the page, which keeps its
+    /// source and I/O cause as a coverage note.
+    fn from_page(page: agent_tapes_discovery::CandidatePage) -> Self {
+        let mut notes = page
+            .failures
+            .into_iter()
+            .map(|failure| format!("Codex lineage candidate: {failure}"))
+            .collect::<Vec<_>>();
+        notes.extend(
+            page.unreadable_ids
+                .into_iter()
+                .map(|id| format!("Codex lineage candidate {id} could not be identified")),
+        );
+        if !page.complete && notes.is_empty() {
+            notes.push("Codex lineage candidate coverage is incomplete".to_owned());
+        }
+        let files = page
+            .records
+            .iter()
+            .filter(|native| native.locator().is_some())
+            .collect::<Vec<_>>();
         let inspected = files.len().min(MAX_LINEAGE_PROBES);
-        let headers = files
+        let children = files
             .iter()
             .take(inspected)
-            .filter_map(|candidate| {
-                let path = &candidate.path;
-                let unreadable = |error: anyhow::Error| CandidateHeader::Unreadable {
-                    path: path.clone(),
-                    note: format!(
-                        "Codex lineage candidate header {} could not be read: {error:#}",
-                        path.display()
-                    ),
-                };
-                crate::counters::read_lineage_header();
-                let values = match head_jsonl(path) {
-                    Ok(values) => values,
-                    Err(error) => return Some(unreadable(error)),
-                };
-                for value in &values {
-                    if let Err(error) =
-                        super::validate_native_identity(value, "codex", &candidate.id)
-                    {
-                        return Some(unreadable(error));
-                    }
-                }
-                let payload = values
-                    .into_iter()
-                    .find(|value| value["type"] == "session_meta")
-                    .map(|value| value["payload"].clone())?;
-                Some(CandidateHeader::Child {
-                    parent: payload["parent_thread_id"].as_str()?.to_owned(),
-                    child: ChildHeader {
-                        thread_id: payload["id"].as_str()?.to_owned(),
-                        agent_path: payload["agent_path"].as_str()?.to_owned(),
-                        nickname: payload["agent_nickname"].as_str().map(str::to_owned),
-                        path: path.clone(),
+            .filter_map(|native| {
+                let header = native.metadata()?;
+                Some((
+                    header["parent_thread_id"].as_str()?.to_owned(),
+                    ChildHeader {
+                        thread_id: native.id().to_owned(),
+                        agent_path: header["agent_path"].as_str()?.to_owned(),
+                        nickname: header["agent_nickname"].as_str().map(str::to_owned),
+                        path: native.locator()?.to_path_buf(),
                     },
-                })
+                ))
             })
             .collect();
         Self {
-            walks: None,
+            generation: None,
             notes,
-            headers,
+            children,
             bound: (files.len() > inspected).then_some(inspected),
+            ids: page
+                .records
+                .iter()
+                .map(|native| native.id().to_owned())
+                .collect(),
         }
     }
 
     /// The recordings other than `own` whose headers name `id` as their
-    /// parent, and the probe bound. Each unreadable header other than `own`'s
-    /// adds its note.
-    fn children(
-        &self,
-        own: &Path,
-        id: &str,
-        notes: &mut Vec<String>,
-    ) -> (Vec<ChildHeader>, Option<usize>) {
-        let mut children = Vec::new();
-        for header in &self.headers {
-            match header {
-                CandidateHeader::Unreadable { path, note } if path != own => {
-                    notes.push(note.clone());
-                }
-                CandidateHeader::Child { parent, child } if parent == id && child.path != own => {
-                    children.push(child.clone());
-                }
-                _ => {}
-            }
-        }
+    /// parent, and the probe bound.
+    fn children(&self, own: &Path, id: &str) -> (Vec<ChildHeader>, Option<usize>) {
+        let children = self
+            .children
+            .iter()
+            .filter(|(parent, child)| parent == id && child.path != own)
+            .map(|(_, child)| child.clone())
+            .collect();
         (children, self.bound)
     }
 }
@@ -3530,7 +3489,11 @@ mod tests {
         }
     }
 
-    fn failed_child_probe(full: bool, read_failure: bool, identity_failure: bool) {
+    /// A child header discovery cannot open is a coverage note naming its
+    /// source and I/O cause, on bounded and streamed lineage alike, and no
+    /// child.
+    fn unreadable_child_header(full: bool) {
+        use std::os::unix::fs::PermissionsExt;
         let root = Store(std::env::temp_dir().join(format!(
             "tapes-child-probe-{}-{}",
             std::process::id(),
@@ -3567,81 +3530,93 @@ mod tests {
             ),
         )
         .unwrap();
+        fs::set_permissions(&child_path, fs::Permissions::from_mode(0o000)).unwrap();
         let backend = CodexBackend::new(&root.0);
         let parent = backend.locate(parent_id).unwrap().unwrap();
-        for lineage in [backend.lineage(&parent), backend.stream_lineage(&parent)] {
-            let lineage = lineage.unwrap();
-            assert_eq!(lineage.children.len(), 1);
-            assert!(lineage.children[0].resolved);
-        }
-        // Another backend lists the store after the child was found, then
-        // reads the headers once the child has changed.
-        let backend = CodexBackend::new(&root.0);
-        let (files, notes) = backend.candidates().unwrap();
-        assert!(notes.is_empty(), "{notes:?}");
-        assert!(files.iter().any(|candidate| candidate.path == child_path));
-        fs::remove_file(&child_path).unwrap();
-        if identity_failure {
-            fs::write(
-                &child_path,
-                format!(
-                    "{}\n",
-                    serde_json::json!({
-                        "type": "session_meta", "payload": {"id": "foreign-recording",
-                            "parent_thread_id": parent_id, "agent_path": "/root/worker"}
-                    })
-                ),
-            )
-            .unwrap();
-        } else if read_failure {
-            fs::create_dir(&child_path).unwrap();
-        }
-        let index = ChildIndex::read(&files, notes);
-        let path = parent_path.clone();
         let lineage = if full {
-            backend.stream_lineage_from_inputs(&parent, &index, path)
+            backend.stream_lineage(&parent)
         } else {
-            backend.lineage_from_inputs(&parent, &index, path)
+            backend.lineage(&parent)
         }
         .unwrap();
-        assert!(lineage.children.is_empty());
-        assert_eq!(lineage.notes.len(), 1, "{lineage:?}");
-        assert!(lineage.notes[0].contains(&child_path.display().to_string()));
-        assert!(lineage.notes[0].contains("could not be read"));
-        if identity_failure {
-            assert!(lineage.notes[0].contains("native session ID"));
-            return;
+        fs::set_permissions(&child_path, fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(lineage.children.is_empty(), "{lineage:?}");
+        let source = child_path.display().to_string();
+        assert!(
+            lineage
+                .notes
+                .iter()
+                .any(|note| note.contains(&source) && note.contains("PermissionDenied")),
+            "{lineage:?}"
+        );
+    }
+
+    #[test]
+    fn bounded_lineage_notes_an_unreadable_child_header() {
+        unreadable_child_header(false);
+    }
+
+    #[test]
+    fn streamed_lineage_notes_an_unreadable_child_header() {
+        unreadable_child_header(true);
+    }
+
+    fn write_rollout(root: &Path, hour: u32, id: &str, parent: Option<&str>) {
+        let mut payload = serde_json::json!({"id": id, "timestamp": "2026-01-01T10:00:00Z"});
+        if let Some(parent) = parent {
+            payload["parent_thread_id"] = serde_json::json!(parent);
+            payload["agent_path"] = serde_json::json!(format!("/root/{id}"));
         }
-        let cause = std::io::Error::from_raw_os_error(if read_failure {
-            libc::EISDIR
-        } else {
-            libc::ENOENT
+        fs::write(
+            root.join(format!("rollout-2026-01-01T{hour:02}-00-00-{id}.jsonl")),
+            format!(
+                "{}\n",
+                serde_json::json!({"type": "session_meta", "payload": payload})
+            ),
+        )
+        .unwrap();
+    }
+
+    /// Claim: a child index built from one walk while a clone's named lookup
+    /// misses and walks the store again is labelled with the walk it was
+    /// built from, so the next lineage read rebuilds it from the newer walk
+    /// and finds the child that walk holds. Rejects stamping an index with
+    /// the catalog's walk count after building it, which labels the older
+    /// candidates current and keeps omitting the child.
+    #[test]
+    fn an_index_built_across_a_walk_taken_again_is_rebuilt_from_the_newer_walk() {
+        let root = Store(std::env::temp_dir().join(format!(
+            "tapes-child-walk-{}-{}",
+            std::process::id(),
+            NEXT_STORE.fetch_add(1, Ordering::Relaxed)
+        )));
+        fs::create_dir_all(&root.0).unwrap();
+        let parent = "01a20000-0000-7000-8000-000000000001";
+        let first = "01a20000-0000-7000-8000-000000000002";
+        let late = "01a20000-0000-7000-8000-000000000003";
+        write_rollout(&root.0, 10, parent, None);
+        write_rollout(&root.0, 11, first, Some(parent));
+        let backend = CodexBackend::new(&root.0);
+        let clone = backend.clone();
+        let store = backend.store.clone().unwrap();
+        let index = backend.lineage.current(&backend.catalog, || {
+            let (page, generation) = store.candidates_in_walk(&backend.catalog, 100_000);
+            // A clone finds a child written after this walk, walking again.
+            write_rollout(&root.0, 12, late, Some(parent));
+            assert!(clone.locate(late).unwrap().is_some());
+            (ChildIndex::from_page(page), generation)
         });
-        assert!(lineage.notes[0].contains(&cause.to_string()));
-    }
-
-    #[test]
-    fn bounded_lineage_retains_child_header_open_failure_after_discovery() {
-        failed_child_probe(false, false, false);
-    }
-
-    #[test]
-    fn streamed_lineage_retains_child_header_open_failure_after_discovery() {
-        failed_child_probe(true, false, false);
-    }
-
-    #[test]
-    fn bounded_lineage_retains_child_header_read_failure_after_discovery() {
-        failed_child_probe(false, true, false);
-    }
-
-    #[test]
-    fn streamed_lineage_retains_child_header_read_failure_after_discovery() {
-        failed_child_probe(true, true, false);
-    }
-    #[test]
-    fn child_header_identity_changes_after_discovery_are_rejected() {
-        failed_child_probe(false, false, true);
-        failed_child_probe(true, false, true);
+        assert_eq!(index.children.len(), 1, "built from the first walk");
+        assert_eq!(backend.catalog_walks(), 2);
+        let session = backend.locate(parent).unwrap().unwrap();
+        let mut children = backend
+            .lineage(&session)
+            .unwrap()
+            .children
+            .into_iter()
+            .filter_map(|child| child.session_id)
+            .collect::<Vec<_>>();
+        children.sort();
+        assert_eq!(children, vec![first.to_owned(), late.to_owned()]);
     }
 }

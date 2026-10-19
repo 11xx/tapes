@@ -273,6 +273,21 @@ impl NativeStore {
             _ => file::candidates_in(self, catalog, limit),
         }
     }
+
+    /// As [`NativeStore::candidates_in`], with the generation of the
+    /// catalog walk the candidates came from: a reader that keeps something
+    /// derived from them keeps it while [`StoreCatalog::generation`] is the
+    /// same. A store without a walk has none.
+    pub fn candidates_in_walk(
+        &self,
+        catalog: &StoreCatalog,
+        limit: usize,
+    ) -> (CandidatePage, Option<usize>) {
+        match self {
+            Self::OpenCode(store) => (store.candidates(limit), None),
+            _ => file::candidates_in_walk(self, catalog, limit),
+        }
+    }
 }
 
 /// A canonical native session with its originating store and native locator.
@@ -312,6 +327,10 @@ impl NativeSession {
         self.store_kind
     }
 
+    /// What the store recorded about the session beside its identity: an
+    /// OpenCode session row, or the lineage fields of a Codex child
+    /// rollout's header (`parent_thread_id`, `agent_path`,
+    /// `agent_nickname`).
     pub fn metadata(&self) -> Option<&serde_json::Value> {
         self.metadata.as_ref()
     }
@@ -337,6 +356,15 @@ impl NativeSession {
             },
             metadata: None,
         }
+    }
+
+    /// The session with the lineage fields its recording's header names,
+    /// which [`NativeSession::metadata`] then answers with.
+    pub(crate) fn with_lineage(mut self, lineage: Option<serde_json::Value>) -> Self {
+        if lineage.is_some() {
+            self.metadata = lineage;
+        }
+        self
     }
 
     fn opencode(
