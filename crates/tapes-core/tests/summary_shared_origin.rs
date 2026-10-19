@@ -6,7 +6,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use agent_tapes_core::backend::{
     codex::CodexBackend, opencode::OpenCodeBackend, pi::PiBackend, Backend,
@@ -33,7 +33,9 @@ impl Root {
         Self(root)
     }
 
-    fn write(&self, relative: &str, lines: &[Value]) -> PathBuf {
+    /// Writes a recording last modified at `hour`, so recency follows the
+    /// recorded hour and not the order of writes.
+    fn write(&self, relative: &str, lines: &[Value], hour: u32) -> PathBuf {
         let path = self.0.join(relative);
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         let body = lines
@@ -41,6 +43,12 @@ impl Root {
             .map(|line| format!("{line}\n"))
             .collect::<String>();
         fs::write(&path, body).unwrap();
+        fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(UNIX_EPOCH + Duration::from_secs(1_800_000_000 + u64::from(hour) * 3600))
+            .unwrap();
         path
     }
 }
@@ -92,6 +100,7 @@ fn codex_rollout(root: &Root, id: &str, hour: u32, forked_from: Option<&str>, in
                        "total_token_usage": usage, "last_token_usage": usage,
                        "model_context_window": 272000}, "rate_limits": null}}),
         ],
+        hour,
     );
 }
 
@@ -180,6 +189,7 @@ fn pi_store() -> Root {
             shared.clone(),
             pi_request("origin-request", Some("shared-request"), 1, 30),
         ],
+        10,
     );
     for (id, hour, input) in [(FIRST, 11, 40), (SECOND, 12, 50)] {
         root.write(
@@ -189,6 +199,7 @@ fn pi_store() -> Root {
                 shared.clone(),
                 pi_request(&format!("own-{id}"), Some("shared-request"), 2, input),
             ],
+            hour,
         );
     }
     root.write(
@@ -197,6 +208,7 @@ fn pi_store() -> Root {
             pi_header(UNRELATED, 13, None),
             pi_request("unrelated-request", None, 3, 7),
         ],
+        13,
     );
     root
 }
