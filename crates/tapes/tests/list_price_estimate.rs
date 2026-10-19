@@ -199,7 +199,7 @@ fn a_summary_withholds_the_estimate_where_its_totals_are_withheld() {
         "{text}"
     );
     let (summary, _) = store.json(&["--global", "--prices", table.to_str().unwrap()], &[]);
-    assert_eq!(summary["schema"], "tapes-usage-summary/13");
+    assert_eq!(summary["schema"], "tapes-usage-summary/14");
     assert_eq!(
         summary["totals"]["list_price_withheld"],
         serde_json::json!(["identity-unestablished"])

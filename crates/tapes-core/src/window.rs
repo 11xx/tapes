@@ -316,8 +316,10 @@ pub struct WindowShare {
     /// How the recording names `parent`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parent_evidence: Option<ParentEvidence>,
-    /// The session the chain of named parents ends at.
+    /// The id of the session the chain of named parents ends at.
     pub root: String,
+    /// The harness whose session `root` is.
+    pub root_harness: String,
     /// Whether the store holds the session the chain ends at.
     pub root_resolved: bool,
     pub requests: usize,

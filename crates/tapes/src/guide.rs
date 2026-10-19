@@ -736,11 +736,14 @@ PROBE BEFORE EXPORTING
   selected sessions that placed nothing inside it, and each session's share,
   largest first: its requests inside the window out of its own, its launch,
   the `parent` its recording names and how (`parent_evidence`), the `root`
-  that chain of parents ends at
+  that chain of parents ends at, the harness holding it (`root_harness`),
   and whether the store holds it, and its disjoint categories. --limit still
   bounds the sessions each harness lists. `--by session`, `launch` and
   `parent` group any summary by session, by recorded launch, and under the
-  root of each session's named parents.
+  root of each session's named parents. A parent group's key names that root
+  by `parent` and `parent_harness`: an id names a session only within one
+  harness, so roots sharing an id in different harnesses stay apart, and a
+  table writes such an id as `<harness>:<id>`.
   A recording names its parent in one of four ways, and a share's
   `parent_evidence` says which: `subagent` (a Claude subagent's recording,
   kept under its parent's), `spawn` (a Codex child's `parent_thread_id`),
@@ -772,8 +775,8 @@ PROBE BEFORE EXPORTING
   fork origin. One those stores do not hold stays the named, unresolved root,
   as a missing fork origin does, even where another harness holds a session of
   that id. A first prompt opening with `tapes-parent:` in any other form, or
-  naming the session itself, names no parent, and the session's usage notes
-  say so. A launched session holds no copy of its parent, so the marker never
+  naming the session itself by its harness and id, names no parent, and the
+  session's usage notes say so. A launched session holds no copy of its parent, so the marker never
   makes the two an overlap group: their consumption adds. A derived title
   leaves the marker line out.
   `usage --quota-window current|<instant> --harness codex|claude [--quota
@@ -862,7 +865,7 @@ PROBE BEFORE EXPORTING
   listed sessions. `lanes_read` names the limit, whether it is the caller's,
   the sessions the lookback may hold that it left out (`left_out_by_limit`),
   and `lane_bound_reached` when a listing stopped at its bound, so sessions
-  past it went unread. The answer is tapes-allowance-rates/4.
+  past it went unread. The answer is tapes-allowance-rates/5.
   `usage --forecast MODEL[#VARIANT]=LANES,... --harness H [--concurrency N]
   [--quota primary|secondary]` sizes a planned mix against that window, as
   tapes-allowance-forecast/2. It reads the rates grouped by model and
@@ -1291,7 +1294,7 @@ PROBE BEFORE EXPORTING
   its own first activity and not the parent's launch.
 
   Given a scope or a listing filter instead of a session, usage answers that
-  whole selection as tapes-usage-summary/13, using the flags list and export
+  whole selection as tapes-usage-summary/14, using the flags list and export
   take and grouping by --by (harness and model unless told otherwise). It sums
   the counters the listing already carries, so nothing is re-read. Read
   counted before a sum: it says how many of a group's sessions recorded that

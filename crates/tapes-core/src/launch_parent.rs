@@ -111,11 +111,12 @@ impl Session {
     }
 
     /// Keep the parent a first prompt's marker names, or note a marker that
-    /// names none. A marker naming the session itself names no parent.
+    /// names none. A marker naming the session itself, by its harness and its
+    /// id, names no parent.
     pub(crate) fn declare_launch_parent(&mut self, marker: LaunchMarker) {
         let note = match marker {
             LaunchMarker::Absent => return,
-            LaunchMarker::Parent { harness, id } if id != self.id => {
+            LaunchMarker::Parent { harness, id } if harness != self.harness() || id != self.id => {
                 self.usage_detail
                     .get_or_insert_with(Default::default)
                     .launch_parent = Some(LaunchParent { harness, id });

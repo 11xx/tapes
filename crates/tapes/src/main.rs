@@ -1589,7 +1589,7 @@ enum Command {
     /// --quota-window answer a selection's consumption inside a window of
     /// time, each session contributing its own span inside it. A scope or
     /// listing filter instead answers the whole selection as
-    /// tapes-usage-summary/13, grouped by --by and summing each counter over
+    /// tapes-usage-summary/14, grouped by --by and summing each counter over
     /// the sessions that recorded it. Native tokens follow each harness's own
     /// convention and add only within it; the disjoint categories (uncached
     /// input, cache read, cache write by TTL, output) add across harnesses.
@@ -1667,7 +1667,10 @@ enum Command {
         /// <harness>:<session-id>` (Claude, Codex, pi, OpenCode; the guide
         /// gives the exact form). A session that names none is its own group, and a
         /// parent the store of its harness does not hold is a group of its
-        /// own under that id, never joined to a guessed one. A launched session is never an
+        /// own under that id, never joined to a guessed one. A group's key
+        /// names its root as `parent` and `parent_harness`, so roots sharing
+        /// an id in different harnesses are different groups, and the table
+        /// writes such an id as `<harness>:<id>`. A launched session is never an
         /// overlap group with its launcher.
         #[arg(
             long,
@@ -1838,8 +1841,8 @@ enum Command {
         /// largest first: its requests inside the window, its launch, its
         /// named `parent`, how its recording names it (`parent_evidence`:
         /// `subagent`, `spawn`, `fork-origin` or `declared-launch-parent`),
-        /// the `root` its chain of parents ends at, and its
-        /// disjoint categories. --limit still bounds how many sessions each
+        /// the `root` its chain of parents ends at and that root's
+        /// `root_harness`, and its disjoint categories. --limit still bounds how many sessions each
         /// harness lists. Each share, group and total also carries
         /// `allowance`: the percent of each quota window it spent, apportioned
         /// over the disjoint tokens each session spent between consecutive
@@ -1997,7 +2000,7 @@ enum Command {
         /// identity-unestablished, exact-union).
         #[arg(long, value_name = "FILE")]
         prices: Option<PathBuf>,
-        /// Render the versioned tapes-usage/16 object, or tapes-usage-summary/13
+        /// Render the versioned tapes-usage/16 object, or tapes-usage-summary/14
         /// for a selection, as JSON. `session.model_observation` says
         /// whether more than one model and effort was observed (`mixed`) and
         /// whether a gap, partial read or budget kept the split incomplete
@@ -5820,13 +5823,20 @@ fn render_window(window: &WindowRecord) -> String {
         .any(|share| !share.allowance.is_empty());
     out.push_str("SESSION\tHARNESS\tLAUNCH\tROOT\tREQUESTS\tDISJOINT TOKENS");
     out.push_str(if allowance { "\tALLOWANCE\n" } else { "\n" });
+    let shared = shared_ids(window.sessions.iter().flat_map(|share| {
+        [
+            (share.harness.as_str(), share.id.as_str()),
+            (share.root_harness.as_str(), share.root.as_str()),
+        ]
+    }));
     for share in &window.sessions {
-        let root = if share.root == share.id {
+        let root = session_cell(&share.root_harness, &share.root, &shared);
+        let root = if (&share.root_harness, &share.root) == (&share.harness, &share.id) {
             "-".to_owned()
         } else if share.root_resolved {
-            share.root.clone()
+            root
         } else {
-            format!("{} (unresolved)", share.root)
+            format!("{root} (unresolved)")
         };
         out.push_str(&format!(
             "{}\t{}\t{}\t{}\t{} of {}{}\t{}\n",
@@ -5933,10 +5943,11 @@ fn render_allowance_rates(
     ]);
     out.push_str(&columns.join("\t"));
     out.push('\n');
+    let shared = shared_parents(rates.groups.iter().map(|group| &group.key));
     for group in &rates.groups {
         let mut cells = by
             .iter()
-            .map(|dimension| key_cell(&group.key, *dimension).unwrap_or_default())
+            .map(|dimension| key_cell(&group.key, *dimension, &shared).unwrap_or_default())
             .collect::<Vec<_>>();
         let stat_of =
             |lane: &agent_tapes_core::allowance::LanePercent,
@@ -6120,10 +6131,11 @@ fn render_usage_summary(summary: &UsageSummary, by: &[GroupBy]) -> String {
     } else {
         "\n"
     });
+    let shared = shared_parents(summary.groups.iter().map(|group| &group.key));
     for group in &summary.groups {
         let mut cells: Vec<String> = by
             .iter()
-            .map(|dimension| key_cell(&group.key, *dimension).unwrap_or_default())
+            .map(|dimension| key_cell(&group.key, *dimension, &shared).unwrap_or_default())
             .collect();
         cells.resize(key_columns.len(), String::new());
         cells.extend(tally_cells(&group.tally));
@@ -6368,7 +6380,13 @@ fn key_column(dimension: &GroupBy) -> &'static str {
     }
 }
 
-fn key_cell(key: &GroupKey, dimension: GroupBy) -> Option<String> {
+/// A group's cell for one dimension. A parent whose id `shared` holds is
+/// qualified with its harness.
+fn key_cell(
+    key: &GroupKey,
+    dimension: GroupBy,
+    shared: &std::collections::HashSet<&str>,
+) -> Option<String> {
     match dimension {
         GroupBy::Harness => key.harness.clone(),
         GroupBy::Model => key.model.clone(),
@@ -6376,7 +6394,42 @@ fn key_cell(key: &GroupKey, dimension: GroupBy) -> Option<String> {
         GroupBy::Directory => key.directory.clone(),
         GroupBy::Session => key.session.clone(),
         GroupBy::Launch => key.launch.clone(),
-        GroupBy::Parent => key.parent.clone(),
+        GroupBy::Parent => {
+            let harness = key.parent_harness.as_deref().unwrap_or_default();
+            Some(session_cell(harness, key.parent.as_deref()?, shared))
+        }
+    }
+}
+
+/// The parent ids that name roots of more than one harness among the groups.
+fn shared_parents<'a>(
+    keys: impl Iterator<Item = &'a GroupKey>,
+) -> std::collections::HashSet<&'a str> {
+    shared_ids(
+        keys.filter_map(|key| Some((key.parent_harness.as_deref()?, key.parent.as_deref()?))),
+    )
+}
+
+/// The ids among these sessions that name sessions of more than one harness.
+fn shared_ids<'a>(
+    sessions: impl Iterator<Item = (&'a str, &'a str)>,
+) -> std::collections::HashSet<&'a str> {
+    let mut harnesses = std::collections::HashMap::<&str, &str>::new();
+    let mut shared = std::collections::HashSet::new();
+    for (harness, id) in sessions {
+        if *harnesses.entry(id).or_insert(harness) != harness {
+            shared.insert(id);
+        }
+    }
+    shared
+}
+
+/// A session's id, as `<harness>:<id>` where `shared` holds the id.
+fn session_cell(harness: &str, id: &str, shared: &std::collections::HashSet<&str>) -> String {
+    if shared.contains(id) {
+        format!("{harness}:{id}")
+    } else {
+        id.to_owned()
     }
 }
 

@@ -61,7 +61,7 @@ pub mod workset;
 
 pub const LIST_SCHEMA: &str = "tapes-list/11";
 pub const EXPORT_MANIFEST_SCHEMA: &str = "tapes-export-manifest/7";
-pub const USAGE_SUMMARY_SCHEMA: &str = "tapes-usage-summary/13";
+pub const USAGE_SUMMARY_SCHEMA: &str = "tapes-usage-summary/14";
 /// Number of normalized turns a `list --search` query inspects per session.
 /// Keeping this fixed makes the listing's cost predictable for callers.
 pub const LIST_SEARCH_TAIL: usize = 32;
@@ -2390,6 +2390,7 @@ fn read_window_keeping(
                 parent: window::declared_parent(&member),
                 parent_evidence: window::named_parent(&member).map(|(_, evidence)| evidence),
                 root: String::new(),
+                root_harness: String::new(),
                 root_resolved: true,
                 requests: placement.requests,
                 session_requests: placement.session_requests,
@@ -2409,8 +2410,12 @@ fn read_window_keeping(
         Default::default()
     };
     for share in &mut shares {
-        share.root = relations.root_of(&share.id).to_owned();
-        share.root_resolved = resolved.get(&share.id).copied().unwrap_or(true);
+        let (harness, id) = relations.root_of(&share.harness, &share.id);
+        (share.root_harness, share.root) = (harness.to_owned(), id.to_owned());
+        share.root_resolved = resolved
+            .get(&(share.harness.clone(), share.id.clone()))
+            .copied()
+            .unwrap_or(true);
     }
     let mut order = (0..shares.len()).collect::<Vec<_>>();
     order.sort_by(|left, right| {
@@ -3144,7 +3149,7 @@ pub fn allowance_forecast_with_backends(
 }
 
 /// A session as relationship chains name it: its harness and its native id.
-type RelationNode = (String, String);
+type RelationNode = usage::SessionNode;
 
 /// The node a session is, and the node of the parent its recording names.
 fn relation_of(session: &Session) -> (RelationNode, Option<RelationNode>) {
@@ -3166,7 +3171,7 @@ fn session_relations(
     named: impl IntoIterator<Item = (RelationNode, Option<RelationNode>)>,
 ) -> (
     usage::SessionRelations,
-    std::collections::BTreeMap<String, bool>,
+    std::collections::BTreeMap<RelationNode, bool>,
 ) {
     const MAX_DEPTH: usize = 32;
     let mut parents: HashMap<RelationNode, Option<RelationNode>> = named.into_iter().collect();
@@ -3209,9 +3214,9 @@ fn session_relations(
                 _ => break,
             }
         }
-        resolved.insert(node.1.clone(), !unresolved.contains(&current));
-        if current.1 != node.1 {
-            roots.insert(node.1, current.1);
+        resolved.insert(node.clone(), !unresolved.contains(&current));
+        if current != node {
+            roots.insert(node, current);
         }
     }
     (usage::SessionRelations::new(roots), resolved)

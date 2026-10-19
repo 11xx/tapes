@@ -1345,25 +1345,36 @@ pub enum GroupBy {
     Launch,
     /// The session that launched or forked this one, followed to the first
     /// session that names no parent; a session that names none is its own.
+    /// Its value is the root's `<harness>:<id>`, the form a launch marker
+    /// names a session in.
     Parent,
 }
 
+/// A session as its harness and its native id, which together name it: ids
+/// are unique only within one harness's store.
+pub type SessionNode = (String, String);
+
 /// Which session each selected session descends from: the end of the chain
 /// of parents and fork origins its recordings name. A parent the store does
-/// not hold ends the chain under its own id.
+/// not hold ends the chain under its own harness and id.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SessionRelations {
-    roots: BTreeMap<String, String>,
+    roots: BTreeMap<SessionNode, SessionNode>,
 }
 
 impl SessionRelations {
-    pub fn new(roots: BTreeMap<String, String>) -> Self {
+    pub fn new(roots: BTreeMap<SessionNode, SessionNode>) -> Self {
         Self { roots }
     }
 
-    /// The session `id` groups under, itself when no chain names a parent.
-    pub fn root_of<'a>(&'a self, id: &'a str) -> &'a str {
-        self.roots.get(id).map_or(id, String::as_str)
+    /// The harness and id of the session `id` of `harness` groups under,
+    /// itself when no chain names a parent.
+    pub fn root_of<'a>(&'a self, harness: &'a str, id: &'a str) -> (&'a str, &'a str) {
+        self.roots
+            .get(&(harness.to_owned(), id.to_owned()))
+            .map_or((harness, id), |(harness, id)| {
+                (harness.as_str(), id.as_str())
+            })
     }
 }
 
@@ -1379,7 +1390,10 @@ impl GroupBy {
         match self {
             Self::Session => Some(session.id.clone()),
             Self::Launch => session.launch.map(|launch| launch.as_str().to_owned()),
-            Self::Parent => Some(relations.root_of(&session.id).to_owned()),
+            Self::Parent => {
+                let (harness, id) = relations.root_of(session.harness(), &session.id);
+                Some(format!("{harness}:{id}"))
+            }
             Self::Harness => Some(session.harness().to_owned()),
             Self::Model => session.model.as_ref().map(|model| model.id.clone()),
             Self::Variant => session
@@ -1410,8 +1424,12 @@ pub struct GroupKey {
     pub session: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub launch: Option<String>,
+    /// The id of the session the group's chains of parents end at.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parent: Option<String>,
+    /// The harness whose session `parent` is.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_harness: Option<String>,
 }
 
 /// How many sessions carried each counter. A sum says how much; this says
@@ -1748,7 +1766,12 @@ pub(crate) fn group_key(by: &[GroupBy], values: &[Option<String>]) -> GroupKey {
             GroupBy::Directory => &mut key.directory,
             GroupBy::Session => &mut key.session,
             GroupBy::Launch => &mut key.launch,
-            GroupBy::Parent => &mut key.parent,
+            GroupBy::Parent => {
+                let root = value.as_deref().and_then(|root| root.split_once(':'));
+                key.parent_harness = root.map(|(harness, _)| harness.to_owned());
+                key.parent = root.map(|(_, id)| id.to_owned());
+                continue;
+            }
         };
         slot.clone_from(value);
     }

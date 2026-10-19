@@ -21,7 +21,7 @@ use serde::Serialize;
 use crate::window::QuotaKind;
 
 pub const ALLOWANCE_KIND: &str = "apportioned-allowance";
-pub const RATES_SCHEMA: &str = "tapes-allowance-rates/4";
+pub const RATES_SCHEMA: &str = "tapes-allowance-rates/5";
 pub const FORECAST_SCHEMA: &str = "tapes-allowance-forecast/2";
 
 /// The allowance one observation reports on: one quota window of one plan
