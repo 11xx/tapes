@@ -476,6 +476,10 @@ pub struct Consumption {
     /// one by their own model.
     #[serde(skip)]
     pub served: Vec<ModelUsage>,
+    /// The counted events, kept for price-table terms priced by the request
+    /// at each event's own time.
+    #[serde(skip)]
+    pub request_uses: Option<crate::pricing::RequestUses>,
     /// Per-counter coverage among the counted events. Missing dimensions
     /// leave known subtotals, never complete measurements.
     pub measurement_coverage: BTreeMap<String, MeasurementCoverage>,

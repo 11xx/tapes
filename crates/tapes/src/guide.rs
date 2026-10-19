@@ -648,14 +648,17 @@ PROBE BEFORE EXPORTING
   not meet, so a dated price change is two rows. A /1 table refuses these
   keys, and prices exactly as it always has. A figure is priced by these
   terms request by request where its reader kept its requests — a Claude,
-  Codex or pi session, span or window share, and an OpenCode span or window
-  share, up to 100000 per read — and they sum to no more than the figure;
-  what they leave of it, or a figure whose requests are not known one by
-  one (a recorded total such as a Claude cost-state or an OpenCode session
-  row), is priced between every rate it could pay, as `at_least` and
-  `at_most`, its categories qualified request-terms-unknown, and never
-  reads complete. A request no row of its model is in effect for is
-  unpriced, its categories outside-validity; usage of no known time that
+  Codex or pi session, span or window share, a pi retained-branch
+  `consumption`, each event at its own time on whichever branch holds it,
+  and an OpenCode span or window share, up to 100000 per read — and they
+  sum to no more than the figure; what they leave of it, a kept request
+  whose recording holds no time for it, or a figure whose requests are not
+  known one by one (a recorded total such as a Claude cost-state or an
+  OpenCode session row), is priced between every rate it could pay, as
+  `at_least` and `at_most`, its categories qualified
+  request-terms-unknown, and never reads complete. A request no row of its
+  model is in effect for is unpriced, its categories outside-validity;
+  usage of no known time that
   the rows in effect leave part of the figure's span uncovered for is
   priced by the rows that cover it, its categories outside-validity too.
   Each recording's billing comes

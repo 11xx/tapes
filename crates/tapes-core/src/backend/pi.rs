@@ -845,7 +845,12 @@ impl PiRecording {
             }
             if let Some(consumed) = &entry.consumed {
                 let id = entry.id.as_deref();
-                consumption.observe(id, consumed, id.is_some_and(|id| self.seen.contains(id)));
+                consumption.observe_at(
+                    id,
+                    consumed,
+                    id.is_some_and(|id| self.seen.contains(id)),
+                    entry.timestamp,
+                );
                 billing.observe(consumed);
             }
             consumption.unrecognized_usage += usize::from(entry.unread_usage);
@@ -1184,7 +1189,12 @@ fn apply_recording_usage(
     for entry in &read.values {
         if let Some(consumed) = pi_consumed(entry) {
             let id = entry["id"].as_str();
-            consumption.observe(id, &consumed, id.is_some_and(|id| active_ids.contains(id)));
+            consumption.observe_at(
+                id,
+                &consumed,
+                id.is_some_and(|id| active_ids.contains(id)),
+                timestamp(&entry["timestamp"]),
+            );
             billing.observe(&consumed);
         }
         consumption.unrecognized_usage += usize::from(pi_unread_usage(entry));
@@ -1258,6 +1268,16 @@ struct PiRequest {
 }
 
 impl PiRequest {
+    fn tokens(&self) -> Tokens {
+        Tokens {
+            input: self.input,
+            output: self.output,
+            reasoning: self.reasoning,
+            cache_read: self.cache_read,
+            cache_write: self.cache_write,
+        }
+    }
+
     fn is_unpriced(&self) -> bool {
         self.cost == Some(0.0)
             && [
@@ -1376,25 +1396,11 @@ impl PiUsage {
         if !self.totals.observe(id, consumed, true) {
             return;
         }
-        let usage = consumed.usage;
-        let tokens = Tokens {
-            input: usage.input,
-            output: usage.output,
-            reasoning: usage.reasoning,
-            cache_read: usage.cache_read,
-            cache_write: usage.cache_write,
-        };
-        match crate::model::TokenConvention::of("pi") {
-            Some(convention) => {
-                let model = consumed.model.as_ref().map(|model| Model {
-                    id: model.clone(),
-                    variant: variant.map(str::to_owned),
-                });
-                let disjoint = crate::model::DisjointTokens::from_native(&tokens, convention, None);
-                self.uses.push(at, model.as_ref(), &disjoint);
-            }
-            None => self.uses.discard(),
-        }
+        let model = consumed.model.as_ref().map(|model| Model {
+            id: model.clone(),
+            variant: variant.map(str::to_owned),
+        });
+        keep_request_use(&mut self.uses, &consumed.usage.tokens(), model.as_ref(), at);
         match consumed.model.as_deref() {
             Some(model) => {
                 self.by_model
@@ -1447,6 +1453,23 @@ impl PiUsage {
             measurement_incomplete: totals.incomplete,
             measurement_completeness: totals.measurement_completeness,
         }
+    }
+}
+
+/// Keep one counted event for terms priced by the request, at its time and
+/// under the model it was attributed to.
+fn keep_request_use(
+    uses: &mut crate::pricing::RequestUses,
+    tokens: &Tokens,
+    model: Option<&Model>,
+    at: Option<chrono::DateTime<chrono::Utc>>,
+) {
+    match crate::model::TokenConvention::of("pi") {
+        Some(convention) => {
+            let disjoint = crate::model::DisjointTokens::from_native(tokens, convention, None);
+            uses.push(at, model, &disjoint);
+        }
+        None => uses.discard(),
     }
 }
 
@@ -1655,9 +1678,30 @@ struct PiConsumption {
     responses: HashSet<(String, String)>,
     /// Each model's assistant events, by the model each message names.
     models: BTreeMap<String, (TokenTotals, usize)>,
+    /// The events `observe_at` counted, kept for terms priced by the
+    /// request at each event's own time.
+    uses: crate::pricing::RequestUses,
 }
 
 impl PiConsumption {
+    /// Count an event as `observe` does, keeping it at `at` under the model
+    /// it names.
+    fn observe_at(
+        &mut self,
+        id: Option<&str>,
+        consumed: &PiConsumed,
+        on_branch: bool,
+        at: Option<chrono::DateTime<chrono::Utc>>,
+    ) {
+        if self.observe(id, consumed, on_branch) {
+            let model = consumed.model.as_ref().map(|model| Model {
+                id: model.clone(),
+                variant: None,
+            });
+            keep_request_use(&mut self.uses, &consumed.usage.tokens(), model.as_ref(), at);
+        }
+    }
+
     fn observe(&mut self, id: Option<&str>, consumed: &PiConsumed, on_branch: bool) -> bool {
         let id = id.filter(|id| !id.is_empty());
         let repeat = id.is_some_and(|id| !self.entries.insert(id.to_owned()))
@@ -1791,6 +1835,7 @@ impl PiConsumption {
             .collect();
         Some(Consumption {
             served,
+            request_uses: Some(self.uses).filter(|uses| !uses.is_empty()),
             list_price_estimate: None,
             accounting: Accounting {
                 basis: AccountingBasis::SummedRequests,

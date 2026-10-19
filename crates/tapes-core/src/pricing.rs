@@ -1678,12 +1678,6 @@ pub fn price_view(view: &mut crate::usage::UsageView, table: &PriceTable) {
         from: view.session.started_at,
         to: view.session.last_activity_at,
     };
-    // Consumption over other branches holds requests the active branch's
-    // figure does not, so it reads no requests.
-    let consumption_terms = RequestTerms {
-        requests: None,
-        ..terms
-    };
     let estimate = PricedFigure {
         disjoint: view.disjoint.as_ref(),
         convention: None,
@@ -1708,6 +1702,12 @@ pub fn price_view(view: &mut crate::usage::UsageView, table: &PriceTable) {
         // other branches are priced by the model each names, share by share,
         // and what no model names is left out as `incomplete-attribution`.
         let other_branches = consumption.events.other_branches > 0;
+        // Consumption holds its own events, those on other branches too, so
+        // it reads its own requests rather than the active branch's.
+        let consumption_terms = RequestTerms {
+            requests: consumption.request_uses.as_ref(),
+            ..terms
+        };
         let served = other_branches.then(|| {
             let mut served = consumption.served.clone();
             for share in &mut served {

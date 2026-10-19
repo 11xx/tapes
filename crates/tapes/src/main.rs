@@ -1973,7 +1973,8 @@ enum Command {
         /// that model's share whole, and one that names several, or whose
         /// uncertain attribution leaves part of it out of its model shares,
         /// is priced share by share from its recorded split; pi consumption
-        /// on other branches is priced by the model each event names. The
+        /// on other branches is priced by the model each event names, and
+        /// every consumption event by the request at its own time. The
         /// estimate carries
         /// `kind: list-price-estimate`, the currency, an `amount` (or
         /// `at_least` and `at_most` where cache writes recorded no TTL), the
