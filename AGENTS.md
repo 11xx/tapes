@@ -49,6 +49,11 @@ server, no session *writing* — `tapes` never mutates a harness's store.
   named for the test rather than for the harness tests the parser and not the
   tool: pi's `<timestamp>_<uuid>.jsonl` is where its session id lives, and a
   fixture that skips that hid a resolver that could not read any pi session.
+- A test removes every temp root it creates, whether it passes or fails:
+  hold the root in a `tempfile::TempDir` or the file's own drop guard, never
+  a bare path removed on the last line. A root every test in a process
+  shares, such as the OpenCode `XDG_DATA_HOME`, comes from
+  `crates/tapes-core/tests/support`, which removes it at process exit.
 - Verify a claim about a harness's format against a real transcript
   **before** writing it into a parser, a fixture, or a comment. The formats
   are undocumented and drift.
