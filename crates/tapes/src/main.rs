@@ -177,6 +177,40 @@ fn parse_window(value: &str) -> std::result::Result<WindowBounds, String> {
     Ok(bounds)
 }
 
+/// A planned lane mix, `MODEL[#VARIANT]=LANES,...`.
+#[derive(Clone, Debug)]
+struct ForecastPlan(Vec<agent_tapes_core::allowance::PlannedLanes>);
+
+fn parse_forecast(value: &str) -> std::result::Result<ForecastPlan, String> {
+    value
+        .split(',')
+        .map(|entry| {
+            let (named, lanes) = entry
+                .trim()
+                .rsplit_once('=')
+                .ok_or_else(|| format!("{entry:?} is not MODEL[#VARIANT]=LANES"))?;
+            let lanes = lanes
+                .parse::<usize>()
+                .ok()
+                .filter(|lanes| *lanes > 0)
+                .ok_or_else(|| format!("{entry:?} plans no whole positive number of lanes"))?;
+            let (model, variant) = match named.split_once('#') {
+                Some((model, variant)) => (model, Some(variant.to_owned())),
+                None => (named, None),
+            };
+            if model.is_empty() || variant.as_deref().is_some_and(str::is_empty) {
+                return Err(format!("{entry:?} names no model or an empty variant"));
+            }
+            Ok(agent_tapes_core::allowance::PlannedLanes {
+                model: model.to_owned(),
+                variant,
+                lanes,
+            })
+        })
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map(ForecastPlan)
+}
+
 fn parse_quota_at(value: &str) -> std::result::Result<QuotaAt, String> {
     if value == "current" {
         return Ok(QuotaAt::Current);
@@ -1834,13 +1868,15 @@ enum Command {
             value_name = "current|RFC3339",
             value_parser = parse_quota_at,
             conflicts_with_all = ["window", "session", "latest", "title", "occurrence", "full", "from", "to", "requests", "series", "reconcile", "event_keys"],
-            requires = "harness"
+            requires = "harness",
+            group = "quota_reader"
         )]
         quota_window: Option<QuotaAt>,
-        /// Which quota window --quota-window reads: `primary`, Codex's short
-        /// window and Claude's five-hour limit, or `secondary`, Codex's long
-        /// window and Claude's seven-day limit.
-        #[arg(long, value_enum, default_value = "primary", requires = "quota_window")]
+        /// Which quota window --quota-window, --allowance-rates or --forecast
+        /// reads: `primary`, Codex's short window and Claude's five-hour
+        /// limit, or `secondary`, Codex's long window and Claude's seven-day
+        /// limit.
+        #[arg(long, value_enum, default_value = "primary", requires = "quota_reader")]
         quota: QuotaArg,
         /// Report allowance rates per lane instead of a summary: every
         /// completed session (last activity at least fifteen minutes before
@@ -1856,13 +1892,55 @@ enum Command {
         /// no interval held, on neither side of the rate), the median minutes
         /// from a lane's first to its last
         /// request, and `measured_over`, the first and last request measured,
-        /// because rates drift with models and pricing. Claude lanes are left
-        /// out with the reason: Claude records no used percent.
+        /// because rates drift with models and pricing. Percent per lane is
+        /// given twice, each naming its `estimator`: `percent_per_lane` is
+        /// `interval-apportioned`, the attribution a window read gives, and
+        /// `smoothed_percent_per_lane` is `period-smoothed`, the lane's share
+        /// of each window period's tokens times the period's rise, with
+        /// bounds from the rounding of the observations that bound it, a
+        /// steadier lane cost where whole-percent steps land on whichever
+        /// lanes spent in them. `tokens_per_lane` gives the lanes' tokens.
+        /// Claude lanes are left out with the reason: Claude records no used
+        /// percent.
         #[arg(
             long,
-            conflicts_with_all = ["session", "latest", "title", "occurrence", "full", "from", "to", "requests", "series", "reconcile", "event_keys", "quota_window", "prices"]
+            conflicts_with_all = ["session", "latest", "title", "occurrence", "full", "from", "to", "requests", "series", "reconcile", "event_keys", "quota_window", "prices"],
+            group = "quota_reader"
         )]
         allowance_rates: bool,
+        /// Forecast a planned lane mix against the --quota window of
+        /// --harness, as tapes-allowance-forecast/1: MODEL[#VARIANT]=LANES,
+        /// comma-separated (`gpt-6.1-sol#xhigh=2,gpt-6.1-sol#low=4`). The
+        /// rates of --allowance-rates grouped by model and variant, over
+        /// --window, else --since..--until, else the last 14 days, size each
+        /// lane as its group's median lane tokens over the group's tokens
+        /// per one percent, carrying the ratio's bounds. The window is the
+        /// one the pools' newest observation is of, and its length is named
+        /// and never assumed: only lanes measured against a window of that
+        /// length size the plan. The newest observation gives the remaining
+        /// percent (100 less its used percent, bounded by its rounding, or
+        /// the whole window once its reported reset has passed) and the
+        /// newest period's reset. The answer gives the mix's percent, whether
+        /// it fits what is left (`yes`, `maybe`, `no`), the percent per
+        /// minute with --concurrency lanes running (each lane's percent over
+        /// its group's median duration), the minutes until the window is
+        /// spent at that pace, and whether that falls before the reset. A
+        /// bound the measurements leave open is null. A model and variant
+        /// with no measured lanes refuses, naming it; a Claude forecast
+        /// refuses, since Claude records no used percent.
+        #[arg(
+            long,
+            value_name = "MODEL[#VARIANT]=LANES,...",
+            value_parser = parse_forecast,
+            conflicts_with_all = ["session", "latest", "title", "occurrence", "full", "from", "to", "requests", "series", "reconcile", "event_keys", "quota_window", "prices", "allowance_rates"],
+            requires = "harness",
+            group = "quota_reader"
+        )]
+        forecast: Option<ForecastPlan>,
+        /// How many of the forecast's lanes run at once [default: all of
+        /// them].
+        #[arg(long, value_name = "N", requires = "forecast", value_parser = clap::value_parser!(u64).range(1..))]
+        concurrency: Option<u64>,
         /// Price the answer with this tapes-price-table/1 file: each figure
         /// gains `list_price_estimate` beside any cost its harness wrote,
         /// never in its place. Without the flag the table is the file
@@ -3146,6 +3224,8 @@ fn dispatch(cli: Cli) -> Result<()> {
             quota_window,
             quota,
             allowance_rates,
+            forecast,
+            concurrency,
             json,
         } => {
             query.validate_input()?;
@@ -3274,6 +3354,33 @@ fn dispatch(cli: Cli) -> Result<()> {
                             quota: quota.into(),
                             at,
                         }));
+                if let Some(ForecastPlan(plan)) = &forecast {
+                    if query.input.supplied() {
+                        return Err(anyhow!(
+                            "--forecast reads installed recordings whole; a supplied input refuses it"
+                        ));
+                    }
+                    let mut selection = query.set();
+                    let lookback = window.unwrap_or(WindowBounds {
+                        from: selection.filters.since,
+                        to: selection.filters.until,
+                    });
+                    selection.filters.until = None;
+                    let forecast = agent_tapes_core::allowance_forecast_with_backends(
+                        &query.input.backends()?,
+                        &selection,
+                        lookback,
+                        quota.into(),
+                        plan,
+                        concurrency.map(|lanes| lanes as usize),
+                    )?;
+                    if json {
+                        print_json(&forecast, &query.input)?;
+                    } else {
+                        print!("{}", render_forecast(&forecast));
+                    }
+                    return Ok(());
+                }
                 if allowance_rates {
                     if query.input.supplied() {
                         return Err(anyhow!(
@@ -5770,6 +5877,7 @@ fn render_allowance_rates(
         "%/LANE MEDIAN",
         "P90",
         "MAX",
+        "SMOOTHED %/LANE MEDIAN",
         "TOKENS/% TOTAL",
         "UNCACHED",
         "CACHE READ",
@@ -5785,14 +5893,18 @@ fn render_allowance_rates(
             .iter()
             .map(|dimension| key_cell(&group.key, *dimension).unwrap_or_default())
             .collect::<Vec<_>>();
-        let lane = &group.percent_per_lane;
+        let stat_of =
+            |lane: &agent_tapes_core::allowance::LanePercent,
+             pick: fn(&agent_tapes_core::allowance::Quantiles) -> f64| {
+                format!(
+                    "{:.2} ({:.2}-{:.2})",
+                    pick(&lane.estimate),
+                    pick(&lane.at_least),
+                    pick(&lane.at_most)
+                )
+            };
         let stat = |pick: fn(&agent_tapes_core::allowance::Quantiles) -> f64| {
-            format!(
-                "{:.2} ({:.2}-{:.2})",
-                pick(&lane.estimate),
-                pick(&lane.at_least),
-                pick(&lane.at_most)
-            )
+            stat_of(&group.percent_per_lane, pick)
         };
         let ratio = |ratio: &agent_tapes_core::allowance::TokensPerPercent| {
             format!("{:.0}", ratio.estimate)
@@ -5806,6 +5918,9 @@ fn render_allowance_rates(
         cells.push(stat(|quantiles| quantiles.median));
         cells.push(stat(|quantiles| quantiles.p90));
         cells.push(stat(|quantiles| quantiles.max));
+        cells.push(stat_of(&group.smoothed_percent_per_lane, |quantiles| {
+            quantiles.median
+        }));
         match &group.tokens_per_percent {
             Some(split) => cells.extend([
                 ratio(&split.total),
@@ -5830,6 +5945,81 @@ fn render_allowance_rates(
         rates.excluded_running,
         rates.excluded_without_allowance,
         rates.excluded_absent.len()
+    ));
+    out
+}
+
+fn render_forecast(forecast: &agent_tapes_core::allowance::AllowanceForecast) -> String {
+    let bounds = |bounds: &agent_tapes_core::allowance::PercentBounds, digits: usize| {
+        let open = |value: f64| {
+            if value.is_finite() {
+                format!("{value:.digits$}")
+            } else {
+                "open".to_owned()
+            }
+        };
+        format!(
+            "{} ({}-{})",
+            open(bounds.estimate),
+            open(bounds.at_least),
+            open(bounds.at_most)
+        )
+    };
+    let state = &forecast.window_state;
+    let mut out = format!(
+        "forecast: {} {} window of {}, plan {}\n",
+        state.pool.harness,
+        serde_kebab(&forecast.window),
+        state.window_minutes.map_or_else(
+            || "unrecorded length".to_owned(),
+            |minutes| format!("{minutes} minutes")
+        ),
+        state.pool.plan.as_deref().unwrap_or("unrecorded"),
+    );
+    out.push_str(&format!(
+        "newest observation {}: {}% used, {}% left{}{}\n",
+        state.observed_at.to_rfc3339(),
+        state.used_percent,
+        bounds(&state.remaining_percent, 1),
+        state
+            .resets_at
+            .map(|reset| format!(", resets {}", reset.to_rfc3339()))
+            .unwrap_or_default(),
+        if state.reset_since_observed {
+            " (passed: the window is taken as whole)"
+        } else {
+            ""
+        }
+    ));
+    out.push_str("MODEL\tVARIANT\tLANES\tMEASURED\tMEDIAN TOKENS\tTOKENS/%\t%/LANE\t%\n");
+    for lanes in &forecast.plan {
+        out.push_str(&format!(
+            "{}\t{}\t{}\t{}\t{:.0}\t{:.0}\t{}\t{}\n",
+            lanes.model,
+            lanes.variant.as_deref().unwrap_or("-"),
+            lanes.lanes,
+            lanes.measured_lanes,
+            lanes.median_lane_tokens,
+            lanes.tokens_per_percent.estimate,
+            bounds(&lanes.percent_per_lane, 2),
+            bounds(&lanes.percent, 2),
+        ));
+    }
+    out.push_str(&format!(
+        "mix: {}% of the window, fits: {}\n",
+        bounds(&forecast.percent, 2),
+        serde_kebab(&forecast.fits)
+    ));
+    out.push_str(&format!(
+        "with {} lanes at once: {}%/min, the window spent in {} min{}\n",
+        forecast.concurrency,
+        bounds(&forecast.percent_per_minute, 4),
+        bounds(&forecast.minutes_to_exhaustion, 0),
+        match forecast.exhausted_before_reset {
+            Some(true) => ", before the reset",
+            Some(false) => ", not before the reset",
+            None => "",
+        }
     ));
     out
 }

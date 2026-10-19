@@ -21,7 +21,8 @@ use serde::Serialize;
 use crate::window::QuotaKind;
 
 pub const ALLOWANCE_KIND: &str = "apportioned-allowance";
-pub const RATES_SCHEMA: &str = "tapes-allowance-rates/2";
+pub const RATES_SCHEMA: &str = "tapes-allowance-rates/3";
+pub const FORECAST_SCHEMA: &str = "tapes-allowance-forecast/1";
 
 /// The allowance one observation reports on: one quota window of one plan
 /// of one account, as the recordings name them.
@@ -268,6 +269,8 @@ pub struct Apportionment {
     covered: BTreeMap<String, Spent>,
     uncovered: BTreeMap<String, usize>,
     selected: BTreeMap<String, bool>,
+    /// The newest observation of the newest window period.
+    latest: Option<RateObservation>,
 }
 
 impl Apportionment {
@@ -385,9 +388,14 @@ impl Apportionment {
             uncovered.insert(member.id.to_owned(), missed);
             selected.insert(member.id.to_owned(), member.selected);
         }
+        let latest = chains
+            .last()
+            .and_then(|chain| chain.last())
+            .map(|observation| (*observation).clone());
         Self {
             pool,
             stale,
+            latest,
             observations: ordered.len() - stale,
             rounded,
             percents,
@@ -513,6 +521,40 @@ impl Apportionment {
             }
         }
         shares
+    }
+
+    /// The newest observation of the pool's newest window period: the used
+    /// percent and reset a forecast starts from.
+    pub fn latest(&self) -> Option<&RateObservation> {
+        self.latest.as_ref()
+    }
+
+    /// The percent the sessions `ids` spent, smoothed over each window
+    /// period: their share of the tokens spent in the period's intervals
+    /// that held any, times the rise across those intervals. Within a period
+    /// the share is constant, so a run of whole-percent steps that landed on
+    /// whichever sessions happened to spend in them is spread over all of
+    /// the period's spending. The bounds are those of the period's rise,
+    /// from the rounding of the observations that bound it.
+    pub fn smoothed(&self, ids: &[&str]) -> PercentBounds {
+        let mut spent = vec![0.0; self.totals.len()];
+        for cells in ids.iter().filter_map(|id| self.weights.get(*id)) {
+            for (chain, _, total, _) in cells {
+                spent[*chain] += total;
+            }
+        }
+        let periods = self
+            .totals
+            .iter()
+            .map(|intervals| intervals.iter().map(|(total, _)| total).sum::<f64>())
+            .collect::<Vec<_>>();
+        self.bound(|chain, interval| {
+            if self.totals[chain][interval].0 == 0.0 || periods[chain] == 0.0 {
+                0.0
+            } else {
+                spent[chain] / periods[chain]
+            }
+        })
     }
 
     /// The allowance the sessions `ids` spent from this pool.
@@ -692,10 +734,25 @@ pub struct TokensPerPercentSplit {
     pub reasoning: TokensPerPercent,
 }
 
+/// How a lane's percent of a window is estimated.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Estimator {
+    /// Each interval's rise apportioned over the tokens spent in it, the
+    /// attribution a window read gives.
+    #[default]
+    IntervalApportioned,
+    /// The lane's share of each window period's tokens times the period's
+    /// rise; see [`Apportionment::smoothed`].
+    PeriodSmoothed,
+}
+
 /// The percent statistics of a group's lanes: each statistic over the
-/// lanes' estimates and over their lower and upper bounds.
+/// lanes' estimates and over their lower and upper bounds, under the named
+/// estimator.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize)]
 pub struct LanePercent {
+    pub estimator: Estimator,
     pub estimate: Quantiles,
     pub at_least: Quantiles,
     pub at_most: Quantiles,
@@ -716,7 +773,14 @@ pub struct RateGroup {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub window_minutes: Option<u64>,
     pub lanes: usize,
+    /// Each lane's percent as a window read attributes it.
     pub percent_per_lane: LanePercent,
+    /// Each lane's percent smoothed over its window periods, a steadier lane
+    /// cost than the interval attribution at whole-percent resolution.
+    pub smoothed_percent_per_lane: LanePercent,
+    /// The tokens of each lane's requests that an interval of its pools
+    /// holds.
+    pub tokens_per_lane: Quantiles,
     /// Tokens per one percent: the tokens of the lanes' requests that an
     /// interval of their pools holds, over the percent apportioned on them.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -747,4 +811,89 @@ pub struct AllowanceRates {
     pub excluded_absent: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub unreadable: Vec<String>,
+}
+
+/// One model and variant of a planned mix, and how many lanes of it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PlannedLanes {
+    pub model: String,
+    pub variant: Option<String>,
+    pub lanes: usize,
+}
+
+/// One planned model's lanes as the rates size them.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct ForecastLanes {
+    pub model: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub variant: Option<String>,
+    pub lanes: usize,
+    /// The measured lanes the size rests on.
+    pub measured_lanes: usize,
+    /// Median tokens of a measured lane.
+    pub median_lane_tokens: f64,
+    /// The group's tokens per one percent of the window.
+    pub tokens_per_percent: TokensPerPercent,
+    /// One lane's percent: median lane tokens over tokens per percent,
+    /// bounded by the ratio's bounds.
+    pub percent_per_lane: PercentBounds,
+    /// Median minutes from a measured lane's first to its last request.
+    pub median_duration_minutes: f64,
+    /// All of this model's planned lanes together.
+    pub percent: PercentBounds,
+}
+
+/// Where a forecast's window stands: its newest observation.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct ForecastWindow {
+    pub pool: PoolKey,
+    /// The length of the window the forecast sizes against, as the
+    /// observations name it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub window_minutes: Option<u64>,
+    pub observed_at: DateTime<Utc>,
+    pub used_percent: f64,
+    /// The newest period's reset, as its newest observation reports it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resets_at: Option<DateTime<Utc>>,
+    /// What is left of the window: 100 less the used percent, bounded by
+    /// its rounding, or the whole window once the reported reset has passed.
+    pub remaining_percent: PercentBounds,
+    /// The reported reset passed before the forecast was made.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub reset_since_observed: bool,
+}
+
+/// A planned lane mix against an allowance window: the percent it consumes,
+/// and how long the window lasts running it.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct AllowanceForecast {
+    pub schema: &'static str,
+    pub lookback: crate::window::WindowBounds,
+    pub window: QuotaKind,
+    pub window_state: ForecastWindow,
+    pub plan: Vec<ForecastLanes>,
+    /// Lanes running at once.
+    pub concurrency: usize,
+    /// The whole mix's percent.
+    pub percent: PercentBounds,
+    /// Whether the mix fits in what is left: `yes` when even its upper
+    /// bound does, `no` when even its lower bound does not, else `maybe`.
+    pub fits: Fit,
+    /// Percent per minute while `concurrency` lanes of the mix run.
+    pub percent_per_minute: PercentBounds,
+    /// Minutes until the remaining percent is spent at that pace.
+    pub minutes_to_exhaustion: PercentBounds,
+    /// Whether that falls before the newest period's reset.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exhausted_before_reset: Option<bool>,
+}
+
+/// Whether a planned mix fits in a window's remaining percent.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Fit {
+    Yes,
+    Maybe,
+    No,
 }

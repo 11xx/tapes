@@ -2582,6 +2582,7 @@ pub fn apportion_window(
 #[derive(Default)]
 struct LaneAllowance {
     percent: allowance::PercentBounds,
+    smoothed: allowance::PercentBounds,
     covered: allowance::Spent,
     uncovered_requests: usize,
 }
@@ -2605,6 +2606,17 @@ pub fn allowance_rates_with_backends(
     lookback: window::WindowBounds,
     quota: window::QuotaKind,
 ) -> Result<allowance::AllowanceRates> {
+    Ok(allowance_rates_read(backends, selection, by, lookback, quota)?.0)
+}
+
+/// The rates and the apportioned pools they were measured from.
+fn allowance_rates_read(
+    backends: &[Box<dyn Backend>],
+    selection: &SessionSelection<'_>,
+    by: &[usage::GroupBy],
+    lookback: window::WindowBounds,
+    quota: window::QuotaKind,
+) -> Result<(allowance::AllowanceRates, ApportionedWindow)> {
     let mut read = read_window(backends, selection, WindowAsk::Bounds(lookback))?;
     let apportioned = apportion_window(backends, &mut read)?;
     let completed_before = Utc::now() - chrono::Duration::minutes(COMPLETED_AFTER_MINUTES);
@@ -2646,6 +2658,7 @@ pub fn allowance_rates_with_backends(
             }
             let lane = by_length.entry(allowance.window_minutes).or_default();
             lane.percent = lane.percent + allowance.percent;
+            lane.smoothed = lane.smoothed + pool.smoothed(&ids);
             lane.covered += pool.covered(&ids);
             lane.uncovered_requests += allowance.coverage.uncovered_requests;
         }
@@ -2674,6 +2687,16 @@ pub fn allowance_rates_with_backends(
                     .map(|member| part(&lanes[*member].1.percent))
                     .collect::<Vec<_>>()
             };
+            let smoothed = |part: fn(&allowance::PercentBounds) -> f64| {
+                members
+                    .iter()
+                    .map(|member| part(&lanes[*member].1.smoothed))
+                    .collect::<Vec<_>>()
+            };
+            let lane_tokens = members
+                .iter()
+                .map(|member| lanes[*member].1.covered.total() as f64)
+                .collect::<Vec<_>>();
             let quantiles =
                 |values: Vec<f64>| allowance::Quantiles::of(&values).unwrap_or_default();
             let percent = members
@@ -2723,10 +2746,18 @@ pub fn allowance_rates_with_backends(
                 window_minutes,
                 lanes: members.len(),
                 percent_per_lane: allowance::LanePercent {
+                    estimator: allowance::Estimator::IntervalApportioned,
                     estimate: quantiles(pick(|bounds| bounds.estimate)),
                     at_least: quantiles(pick(|bounds| bounds.at_least)),
                     at_most: quantiles(pick(|bounds| bounds.at_most)),
                 },
+                smoothed_percent_per_lane: allowance::LanePercent {
+                    estimator: allowance::Estimator::PeriodSmoothed,
+                    estimate: quantiles(smoothed(|bounds| bounds.estimate)),
+                    at_least: quantiles(smoothed(|bounds| bounds.at_least)),
+                    at_most: quantiles(smoothed(|bounds| bounds.at_most)),
+                },
+                tokens_per_lane: quantiles(lane_tokens),
                 tokens_per_percent,
                 uncovered_requests,
                 median_duration_minutes: allowance::Quantiles::of(&durations)
@@ -2738,7 +2769,7 @@ pub fn allowance_rates_with_backends(
             }
         })
         .collect();
-    Ok(allowance::AllowanceRates {
+    let rates = allowance::AllowanceRates {
         schema: allowance::RATES_SCHEMA,
         lookback,
         window: quota,
@@ -2754,6 +2785,212 @@ pub fn allowance_rates_with_backends(
         excluded_without_allowance,
         excluded_absent,
         unreadable: read.unreadable,
+    };
+    Ok((rates, apportioned))
+}
+
+/// The days a forecast measures its rates over when the caller names no
+/// start.
+pub const FORECAST_LOOKBACK_DAYS: i64 = 14;
+
+/// Forecast `plan`, a planned lane mix of `harness`, against its `quota`
+/// window: rates measured over `lookback` (from
+/// [`FORECAST_LOOKBACK_DAYS`] ago when it names no start) grouped by model
+/// and variant
+/// size each lane as its group's median lane tokens over the group's tokens
+/// per percent, and the window's newest observation gives what is left and
+/// when it resets. The window is the one the pools' newest observation is
+/// of, and only lanes measured against a window of its length size the
+/// plan. A model and variant no lane was measured for refuses, naming it,
+/// and a harness that records no used percent refuses with that reason.
+pub fn allowance_forecast_with_backends(
+    backends: &[Box<dyn Backend>],
+    selection: &SessionSelection<'_>,
+    lookback: window::WindowBounds,
+    quota: window::QuotaKind,
+    plan: &[allowance::PlannedLanes],
+    concurrency: Option<usize>,
+) -> Result<allowance::AllowanceForecast> {
+    let harness = selection
+        .harness
+        .ok_or_else(|| anyhow!("a forecast reads one harness's allowance: pass --harness"))?;
+    if let Some(reason) = allowance::absent_reason(harness) {
+        anyhow::bail!("no {harness} forecast: {reason}");
+    }
+    if plan.is_empty() || plan.iter().any(|planned| planned.lanes == 0) {
+        anyhow::bail!("a forecast plans at least one lane of each model it names");
+    }
+    let lookback = window::WindowBounds {
+        from: lookback
+            .from
+            .or_else(|| Some(Utc::now() - chrono::Duration::days(FORECAST_LOOKBACK_DAYS))),
+        ..lookback
+    };
+    let by = [usage::GroupBy::Model, usage::GroupBy::Variant];
+    let (rates, apportioned) = allowance_rates_read(backends, selection, &by, lookback, quota)?;
+    let (pool, latest) = apportioned
+        .pools
+        .iter()
+        .filter(|pool| pool.pool.window == quota && pool.pool.harness == harness)
+        .filter_map(|pool| pool.latest().map(|latest| (pool, latest)))
+        .max_by_key(|(_, latest)| latest.at)
+        .ok_or_else(|| {
+            anyhow!(
+                "no {harness} {} window observation in the lookback to forecast against",
+                serde_json::to_value(quota)
+                    .unwrap_or_default()
+                    .as_str()
+                    .unwrap_or("quota")
+            )
+        })?;
+    let window_minutes = pool.pool.window_minutes;
+    let length = window_minutes.map_or_else(
+        || "unrecorded-length".to_owned(),
+        |minutes| format!("{minutes}-minute"),
+    );
+    let mut sized = Vec::new();
+    for planned in plan {
+        let named = match &planned.variant {
+            Some(variant) => format!("{}#{variant}", planned.model),
+            None => planned.model.clone(),
+        };
+        let group = rates
+            .groups
+            .iter()
+            .find(|group| {
+                group.key.model.as_deref() == Some(planned.model.as_str())
+                    && group.key.variant == planned.variant
+                    && group.window_minutes == window_minutes
+            })
+            .ok_or_else(|| {
+                anyhow!(
+                    "{named} has no measured lanes against the {length} {harness} window in \
+                     the lookback; it cannot be sized"
+                )
+            })?;
+        let ratio = group
+            .tokens_per_percent
+            .as_ref()
+            .map(|split| split.total)
+            .ok_or_else(|| {
+                anyhow!("{named}'s measured lanes were apportioned no percent; it cannot be sized")
+            })?;
+        let median = group.tokens_per_lane.median;
+        let per = |tokens_per_percent: Option<f64>| {
+            tokens_per_percent
+                .filter(|ratio| *ratio > 0.0)
+                .map_or(f64::INFINITY, |ratio| median / ratio)
+        };
+        let percent_per_lane = allowance::PercentBounds {
+            estimate: median / ratio.estimate,
+            at_least: ratio.at_most.map_or(0.0, |ratio| median / ratio),
+            at_most: per(ratio.at_least),
+        };
+        let lanes = planned.lanes as f64;
+        sized.push(allowance::ForecastLanes {
+            model: planned.model.clone(),
+            variant: planned.variant.clone(),
+            lanes: planned.lanes,
+            measured_lanes: group.lanes,
+            median_lane_tokens: median,
+            tokens_per_percent: ratio,
+            percent_per_lane,
+            median_duration_minutes: group.median_duration_minutes,
+            percent: allowance::PercentBounds {
+                estimate: percent_per_lane.estimate * lanes,
+                at_least: percent_per_lane.at_least * lanes,
+                at_most: percent_per_lane.at_most * lanes,
+            },
+        });
+    }
+    let percent = sized
+        .iter()
+        .fold(allowance::PercentBounds::default(), |sum, lanes| {
+            sum + lanes.percent
+        });
+    let total_lanes = plan.iter().map(|planned| planned.lanes).sum::<usize>();
+    let concurrency = concurrency.unwrap_or(total_lanes).clamp(1, total_lanes);
+    // The mix's average lane spends its percent over its duration; that many
+    // lanes at once is the window's pace.
+    let pace = |pick: fn(&allowance::PercentBounds) -> f64| {
+        let per_minute = sized
+            .iter()
+            .map(|lanes| {
+                lanes.lanes as f64 * pick(&lanes.percent_per_lane)
+                    / lanes.median_duration_minutes.max(1.0)
+            })
+            .sum::<f64>();
+        per_minute / total_lanes as f64 * concurrency as f64
+    };
+    let percent_per_minute = allowance::PercentBounds {
+        estimate: pace(|bounds| bounds.estimate),
+        at_least: pace(|bounds| bounds.at_least),
+        at_most: pace(|bounds| bounds.at_most),
+    };
+    let now = Utc::now();
+    let reset_since_observed = latest.resets_at.is_some_and(|reset| reset <= now);
+    let remaining = if reset_since_observed {
+        allowance::PercentBounds {
+            estimate: 100.0,
+            at_least: 100.0,
+            at_most: 100.0,
+        }
+    } else {
+        let half = if latest.used_percent.fract() == 0.0 {
+            0.5
+        } else {
+            0.0
+        };
+        let left = (100.0 - latest.used_percent).max(0.0);
+        allowance::PercentBounds {
+            estimate: left,
+            at_least: (left - half).max(0.0),
+            at_most: (left + half).min(100.0),
+        }
+    };
+    let minutes = |left: f64, pace: f64| {
+        if pace > 0.0 {
+            left / pace
+        } else {
+            f64::INFINITY
+        }
+    };
+    let minutes_to_exhaustion = allowance::PercentBounds {
+        estimate: minutes(remaining.estimate, percent_per_minute.estimate),
+        at_least: minutes(remaining.at_least, percent_per_minute.at_most),
+        at_most: minutes(remaining.at_most, percent_per_minute.at_least),
+    };
+    let fits = if percent.at_most <= remaining.at_least {
+        allowance::Fit::Yes
+    } else if percent.at_least > remaining.at_most {
+        allowance::Fit::No
+    } else {
+        allowance::Fit::Maybe
+    };
+    let exhausted_before_reset = latest
+        .resets_at
+        .filter(|_| !reset_since_observed)
+        .map(|reset| (reset - now).num_seconds() as f64 / 60.0 > minutes_to_exhaustion.estimate);
+    Ok(allowance::AllowanceForecast {
+        schema: allowance::FORECAST_SCHEMA,
+        lookback,
+        window: quota,
+        window_state: allowance::ForecastWindow {
+            pool: pool.pool.clone(),
+            window_minutes,
+            observed_at: latest.at,
+            used_percent: latest.used_percent,
+            resets_at: latest.resets_at,
+            remaining_percent: remaining,
+            reset_since_observed,
+        },
+        plan: sized,
+        concurrency,
+        percent,
+        fits,
+        percent_per_minute,
+        minutes_to_exhaustion,
+        exhausted_before_reset,
     })
 }
 

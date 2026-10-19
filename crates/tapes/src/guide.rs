@@ -369,6 +369,7 @@ PROBE BEFORE EXPORTING
   tapes usage --global --window FROM..TO --by session,parent  What a window consumed, by session.
   tapes usage --global --quota-window current --harness codex  The same over the running quota window.
   tapes usage --global --allowance-rates --harness codex --since DATE --by model,variant  Allowance per lane.
+  tapes usage --global --forecast MODEL#VARIANT=LANES --harness codex  Window percent and time left for a planned mix.
   tapes endings --here --json    What each session of a project ends on.
 
   show returns the last 100 turns unless --tail says otherwise, and marks the
@@ -757,8 +758,35 @@ PROBE BEFORE EXPORTING
   request, and `measured_over`, the first and last request measured: rates
   drift with models and pricing, so a rate is read with its dates. A plan
   whose window lacks the --quota kind (a plan with one weekly window, say)
-  leaves its lanes `excluded_without_allowance`. The answer is
-  tapes-allowance-rates/2.
+  leaves its lanes `excluded_without_allowance`. Percent per lane comes
+  twice, each naming its `estimator`: `percent_per_lane` is
+  `interval-apportioned`, the attribution a window read gives, and
+  `smoothed_percent_per_lane` is `period-smoothed`: within each window
+  period, the lane's share of the tokens spent in the period's intervals
+  times the period's rise, bounded by the rounding of the observations that
+  bound it. At whole-percent resolution most intervals rise by nothing and a
+  step lands on whichever lanes spent in it, so the smoothed figure is the
+  steadier lane cost; both sum to the same group total. `tokens_per_lane`
+  gives the lanes' tokens. The answer is tapes-allowance-rates/3.
+  `usage --forecast MODEL[#VARIANT]=LANES,... --harness H [--concurrency N]
+  [--quota primary|secondary]` sizes a planned mix against that window, as
+  tapes-allowance-forecast/1. It reads the rates grouped by model and
+  variant over --window, else --since..--until, else the last 14 days, and
+  sizes each lane as its group's median lane tokens over the group's tokens
+  per one percent, with the ratio's bounds. The window is the one the pools'
+  newest observation is of; its length is named, never assumed, and only
+  lanes measured against a window of that length size the plan, since a
+  plan's windows differ by kind and length. That observation gives what is
+  left (100 less its used percent, bounded by its rounding, or the whole
+  window once its reported reset has passed) and the newest period's reset,
+  which moves, so it is read rather than assumed. The answer gives the mix's
+  percent and whether it fits what is left (`yes`, `maybe`, `no`), the
+  percent per minute with N lanes at once (each lane's percent over its
+  group's median duration; all of them at once by default), the minutes
+  until the window is spent at that pace, and whether that comes before the
+  reset. A bound the measurements leave open is null. A model and variant
+  with no measured lanes refuses, naming it; a Claude forecast refuses,
+  since Claude records no used percent.
   A summary adds sessions only where no recording relates them. Two sessions
   are related when one declares the other as its fork origin or parent (Codex
   `forked_from_id`, Pi's parent header, OpenCode `fork_session_id` and
