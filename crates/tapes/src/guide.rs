@@ -887,11 +887,13 @@ PROBE BEFORE EXPORTING
   otherwise. A mixed priced/unpriced sum is a known priced subtotal.
   Synthetic assistant records join no request tally; positively witnessed
   failures are counted separately and their consumption is unknown. A
-  Claude assistant record with no request id and every usage counter zero,
-  as a plugin writes when it mirrors work done elsewhere (a delegated run's
-  `delegated-agents:run` rows), stands in for a request without being one:
-  it counts as no request, and a recording made only of such records notes
-  that it holds no consumption of its own, with no measured zeros. A Claude
+  Claude assistant record with no request id that writes each of its four
+  usage counters as zero, as a plugin writes when it mirrors work done
+  elsewhere (a delegated run's `delegated-agents:run` rows), stands in for a
+  request without being one: it counts as no request, and a recording made
+  only of such records notes that it holds no consumption of its own, with
+  no measured zeros. One that leaves a counter out is a request of unknown
+  consumption, counted with that counter missing. A Claude
   read, whole or bounded, that skips an undecodable record qualifies every
   counter unreadable-record.
 

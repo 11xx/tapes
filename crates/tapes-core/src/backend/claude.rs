@@ -1501,6 +1501,9 @@ fn claude_usage_detail(
     basis: AccountingBasis,
     selected_tokens: Option<&Tokens>,
 ) -> Option<UsageDetail> {
+    // A request of unknown consumption counts with its counters missing, so
+    // a recording holding one holds consumption of its own.
+    let counted_requests = MeasurementCoverage::counted_any(&request_coverage);
     let RequestFacts {
         by_model,
         failures,
@@ -1536,17 +1539,17 @@ fn claude_usage_detail(
     }
     match placeholders {
         0 => {}
-        count if selected_tokens.is_none() && failures == 0 => {
+        count if selected_tokens.is_none() && !counted_requests && failures == 0 => {
             detail.accounting_notes.push(format!(
                 "{count} assistant records stand in for requests without being any (no request \
-                 id, every usage counter zero), as a delegated run's mirror rows are written; the \
+                 id, every usage counter written as zero), as a delegated run's mirror rows are written; the \
                  recording holds no consumption of its own, and its work's consumption is in that \
                  work's own recording."
             ));
         }
         count => detail.accounting_notes.push(format!(
             "{count} assistant records stand in for requests without being any (no request id, \
-             every usage counter zero); they count as no requests."
+             every usage counter written as zero); they count as no requests."
         )),
     }
     detail.requests = requests;
@@ -2067,7 +2070,7 @@ impl ClaudeRequests {
 }
 
 /// Whether an assistant record stands in for a request without being one:
-/// it names no request id and every usage counter it writes is zero. A
+/// it names no request id and writes every usage counter as zero. A
 /// plugin that mirrors work done elsewhere into a session as a native row,
 /// such as a delegated run's progress, writes these; that work's consumption
 /// is in its own recording, and the row carries none.
@@ -2084,7 +2087,7 @@ fn placeholder_request(value: &Value) -> bool {
                 "cache_read_input_tokens",
             ]
             .iter()
-            .all(|counter| usage.get(*counter).and_then(Value::as_u64).unwrap_or(0) == 0)
+            .all(|counter| usage.get(*counter).and_then(Value::as_u64) == Some(0))
         })
 }
 
