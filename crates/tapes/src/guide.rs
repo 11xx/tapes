@@ -749,8 +749,8 @@ PROBE BEFORE EXPORTING
   window read, whose shares carry `parent` and `root`, the lookup of a parent
   outside the selection, and one session's `usage`, whose notes report a
   marker that names no parent. Listings and every other grouping read no
-  marker. Among the listed sessions, it is read only for a session its
-  store names no parent or fork origin for.
+  marker. It is read only for a session its store names no parent or fork
+  origin for, a parent outside the selection included.
   A parent is looked up by its id in the stores of the harness that holds it:
   the one a marker names, and the session's own for a subagent, a spawn or a
   fork origin. One those stores do not hold stays the named, unresolved

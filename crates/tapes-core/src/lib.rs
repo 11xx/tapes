@@ -3116,13 +3116,7 @@ fn session_relations(
                 }
             }
         }
-        declare_launch_markers(
-            backends,
-            found
-                .iter_mut()
-                .map(|(_, found)| found)
-                .filter(|found| window::declared_parent(&found.session).is_none()),
-        );
+        declare_relatives(backends, found.iter_mut().map(|(_, found)| found));
         for (node, found) in found {
             let (_, parent) = relation_of(&found.session);
             parents.insert(node, parent);
@@ -3214,9 +3208,10 @@ fn declare_origins(
     }
 }
 
-/// Read the launch marker of each resolved session's first prompt, one
-/// batched question per backend.
-fn declare_launch_markers<'a>(
+/// Add to each resolved session the fork origins its harness's store
+/// declares outside its recording, then read the launch marker of each one
+/// the store relates to no other: one batched question per backend each.
+fn declare_relatives<'a>(
     backends: &[Box<dyn Backend>],
     resolved: impl IntoIterator<Item = &'a mut ResolvedSession>,
 ) {
@@ -3225,13 +3220,26 @@ fn declare_launch_markers<'a>(
     for found in resolved {
         by_backend[found.backend_index].push(found);
     }
-    for (backend, found) in backends.iter().zip(by_backend) {
+    for (backend, mut found) in backends.iter().zip(by_backend) {
         if found.is_empty() {
             continue;
         }
         let held: Vec<&Session> = found.iter().map(|found| &found.session).collect();
+        if let Ok(declared) = backend.declared_origins(&held) {
+            for (found, declared) in found.iter_mut().zip(declared) {
+                found.session.declare_origins(declared);
+            }
+        }
+        let unrelated: Vec<&mut ResolvedSession> = found
+            .into_iter()
+            .filter(|found| window::declared_parent(&found.session).is_none())
+            .collect();
+        if unrelated.is_empty() {
+            continue;
+        }
+        let held: Vec<&Session> = unrelated.iter().map(|found| &found.session).collect();
         let markers = backend.first_prompt_markers(&held);
-        for (found, marker) in found.into_iter().zip(markers) {
+        for (found, marker) in unrelated.into_iter().zip(markers) {
             if let Some(marker) = marker {
                 found.session.declare_launch_parent_read(marker);
             }

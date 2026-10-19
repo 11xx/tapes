@@ -1,14 +1,15 @@
 //! Reads stay inside the bounds and relationships they claim in the cases an
 //! independent review named: a recording's final record is whole without a
 //! trailing line feed, a launch marker names a parent in the harness it
-//! names, and a discovery page charges the lineage metadata it retains.
+//! names, an external parent's store-declared fork outranks a marker it
+//! copied, and a discovery page charges the lineage metadata it retains.
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use agent_tapes_core::backend::{
-    claude::ClaudeBackend, codex::CodexBackend, pi::PiBackend, Backend,
+    claude::ClaudeBackend, codex::CodexBackend, opencode::OpenCodeBackend, pi::PiBackend, Backend,
 };
 use agent_tapes_core::usage::GroupBy;
 use agent_tapes_core::window::WindowBounds;
@@ -231,6 +232,91 @@ fn a_final_first_prompt_without_a_line_feed_names_its_launcher() {
     assert_eq!(
         parent_groups(&summary),
         vec![(LAUNCHER.to_owned(), 2)],
+        "{summary:#}"
+    );
+}
+
+const OPENCODE_CHILD: &str = "ses_000000fixtureSharedSession";
+const OPENCODE_EXTERNAL: &str = "ses_database_only_fixture";
+const OPENCODE_MISSING_ORIGIN: &str = "ses_missing_origin_fixture";
+const MARKED_PARENT: &str = "30000000-0000-4000-8000-0000000000c1";
+
+/// The OpenCode fixture program over a database whose session table lists
+/// only `OPENCODE_CHILD`, a child of `OPENCODE_EXTERNAL`, which forks the
+/// missing `OPENCODE_MISSING_ORIGIN` and whose first prompt is a copied
+/// marker naming the Claude session `MARKED_PARENT`.
+fn opencode_fork_store(store: &Store) -> PathBuf {
+    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/opencode");
+    let program = store.0.join("opencode");
+    fs::create_dir_all(&program).unwrap();
+    fs::copy(fixtures.join("opencode2"), program.join("opencode2")).unwrap();
+    let child = json!({"id": OPENCODE_CHILD, "title": "Child fixture session",
+        "directory": "/fixtures/project", "time_created": 1_784_662_770_000_u64,
+        "time_updated": 1_784_662_790_000_u64, "model": "{\"id\":\"fixture-model\"}", "cost": 0.5,
+        "tokens_input": 100, "tokens_output": 40, "tokens_reasoning": 0, "tokens_cache_read": 0,
+        "tokens_cache_write": 0});
+    let external = json!({"id": OPENCODE_EXTERNAL, "title": "External fixture session",
+        "directory": "/fixtures/project", "time_created": 1_784_662_700_000_u64,
+        "time_updated": 1_784_662_710_000_u64, "model": "{\"id\":\"fixture-model\"}", "cost": 0.5,
+        "tokens_input": 100, "tokens_output": 40, "tokens_reasoning": 0, "tokens_cache_read": 0,
+        "tokens_cache_write": 0});
+    for (file, row) in [
+        ("database-sessions.json", child.clone()),
+        ("database-locate-shared.json", child),
+        ("database-locate-database-only.json", external),
+        (
+            "database-lineage-shared.json",
+            json!({"id": OPENCODE_CHILD, "parent_id": OPENCODE_EXTERNAL, "fork_session_id": null}),
+        ),
+        (
+            "database-lineage-database-only.json",
+            json!({"id": OPENCODE_EXTERNAL, "parent_id": null,
+                   "fork_session_id": OPENCODE_MISSING_ORIGIN}),
+        ),
+        (
+            "database-first-prompt-database-only.json",
+            json!({"session_id": OPENCODE_EXTERNAL,
+                   "first_prompt": marker("claude", MARKED_PARENT)}),
+        ),
+    ] {
+        fs::write(program.join(file), format!("{row}\n")).unwrap();
+    }
+    fs::create_dir_all(program.join("bin")).unwrap();
+    std::os::unix::fs::symlink(program.join("opencode2"), program.join("bin/opencode")).unwrap();
+    let data = store.0.join("data/opencode");
+    fs::create_dir_all(&data).unwrap();
+    fs::File::create(data.join("opencode.db")).unwrap();
+    std::env::set_var("XDG_DATA_HOME", store.0.join("data"));
+    program.join("bin/opencode")
+}
+
+/// Claim: a parent outside the selection is read with the relationships its
+/// store declares beside its recording, so an OpenCode parent that forks a
+/// missing session roots its child at that fork origin, unresolved, though
+/// its first prompt carries a marker it copied naming a present session.
+/// Rejects reading the external parent's marker without its store-declared
+/// fork origin, which roots the child at the session the copied marker names.
+#[test]
+fn an_external_parent_s_declared_fork_outranks_the_marker_it_copied() {
+    let store = Store::new("external-fork");
+    store.claude(MARKED_PARENT, 1, "Lead the fixture work.");
+    let program = opencode_fork_store(&store);
+    let backends: Vec<Box<dyn Backend>> = vec![
+        Box::new(OpenCodeBackend::new(&program)),
+        Box::new(ClaudeBackend::new(store.0.join("claude/projects"))),
+    ];
+    let selection = SessionSelection {
+        harness: Some("opencode"),
+        limit: Some(50),
+        ..Default::default()
+    };
+    let summary = serde_json::to_value(
+        usage_summary_with_backends(&backends, &selection, &[GroupBy::Parent]).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        parent_groups(&summary),
+        vec![(OPENCODE_MISSING_ORIGIN.to_owned(), 1)],
         "{summary:#}"
     );
 }
