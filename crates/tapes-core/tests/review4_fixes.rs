@@ -178,6 +178,104 @@ fn a_span_is_no_more_certain_of_billing_than_its_whole_recording() {
     }
 }
 
+const CLAUDE_ID: &str = "30000000-0000-4000-8000-0000000000e5";
+
+const HAIKU_TABLE: &str = r#"
+schema = "tapes-price-table/2"
+currency = "USD"
+
+[[models]]
+id = "claude-haiku-5-5"
+effective = 2026-10-18
+source = "fixture"
+per_million = { uncached_input = 0.10, cache_read = 0.01, cache_write_5m = 0.125, cache_write_1h = 0.20, output = 0.50 }
+
+[models.long_context]
+above_prompt_tokens = 100000
+prompt_tokens = ["uncached_input", "cache_read", "cache_write"]
+multipliers = { uncached_input = 5.0, cache_read = 5.0, cache_write_5m = 5.0, cache_write_1h = 5.0, output = 5.0 }
+"#;
+
+fn claude_user(entry: &str, stamp: &str, text: &str) -> Value {
+    json!({"type": "user", "sessionId": CLAUDE_ID, "uuid": entry, "parentUuid": null,
+           "timestamp": stamp, "cwd": "/fixtures/project",
+           "message": {"role": "user", "content": text}})
+}
+
+fn claude_api_request(stamp: &str, betas: &[&str]) -> Value {
+    json!({"type": "api-request", "sessionId": CLAUDE_ID, "timestamp": stamp,
+           "params": {"model": "claude-haiku-5-5", "betas": betas}})
+}
+
+/// Claim: a Claude recording past the bounded read that sent an API-key
+/// request before the retained tail and an OAuth request in it establishes
+/// no billing under --from covering the whole recording, as under --full,
+/// so its 110K-prompt request is priced between base and surcharged rates.
+/// Rejects a span that takes the subscription the tail's OAuth request
+/// alone suggests.
+#[test]
+fn a_claude_span_is_no_more_certain_of_billing_than_its_whole_recording() {
+    let store = Store::new("claude-span-billing");
+    let filler = "x".repeat(64 * 1024);
+    let mut lines = vec![
+        claude_user("user-1", "2026-10-19T10:00:00Z", "Survey the fixture."),
+        claude_api_request("2026-10-19T10:00:01Z", &["claude-code-20250219"]),
+    ];
+    for index in 0..96 {
+        lines.push(claude_user(
+            &format!("filler-{index}"),
+            "2026-10-19T10:10:00Z",
+            &filler,
+        ));
+    }
+    lines.push(claude_api_request(
+        "2026-10-19T10:29:59Z",
+        &["claude-code-20250219", "oauth-2025-04-20"],
+    ));
+    lines.push(
+        json!({"type": "assistant", "sessionId": CLAUDE_ID, "uuid": "assistant-large",
+        "parentUuid": "user-1", "timestamp": "2026-10-19T10:30:00Z", "cwd": "/fixtures/project",
+        "requestId": "req-large",
+        "message": {"id": "msg-large", "role": "assistant", "model": "claude-haiku-5-5",
+                    "content": [{"type": "text", "text": "Done."}],
+                    "usage": {"input_tokens": 20_000, "cache_read_input_tokens": 80_000,
+                              "cache_creation_input_tokens": 10_000, "output_tokens": 2_000,
+                              "cache_creation": {"ephemeral_5m_input_tokens": 10_000,
+                                                 "ephemeral_1h_input_tokens": 0}}}}),
+    );
+    store.write(&format!("-fixtures-project/{CLAUDE_ID}.jsonl"), &lines);
+    let table = PriceTable::parse(HAIKU_TABLE).unwrap();
+    let backend = || -> Box<dyn Backend> { Box::new(ClaudeBackend::new(&store.0)) };
+    let mut bounded = usage_with_backends(&[backend()], Selection::Id(CLAUDE_ID)).unwrap();
+    pricing::price_view(&mut bounded, &table);
+    let bounded = serde_json::to_value(bounded).unwrap()["list_price_estimate"].clone();
+    assert_eq!(
+        bounded["billing"][0]["terms"], "subscription",
+        "{bounded:#}"
+    );
+    let mut whole = usage_full_with_backends(&[backend()], Selection::Id(CLAUDE_ID)).unwrap();
+    pricing::price_view(&mut whole, &table);
+    let whole = serde_json::to_value(whole).unwrap()["list_price_estimate"].clone();
+    let mut spans = usage_spans_with_backends(
+        &[backend()],
+        Selection::Id(CLAUDE_ID),
+        &[SpanBounds::Time {
+            from: Some(at("2026-10-19T10:00:00Z")),
+            to: None,
+        }],
+    )
+    .unwrap();
+    pricing::price_spans(&mut spans, &table);
+    let span = serde_json::to_value(&spans.spans[0]).unwrap()["list_price_estimate"].clone();
+    for (read, estimate) in [("--full", whole), ("--from", span)] {
+        assert_eq!(
+            estimate["billing"][0]["terms"], "unestablished",
+            "{read}: {estimate:#}"
+        );
+        assert!(estimate.get("amount").is_none(), "{read}: {estimate:#}");
+    }
+}
+
 // --- --since before --limit for parents reached through children ------------
 
 fn subagent_record(parent: &str, agent: Option<&str>, entry: &str, stamp: &str) -> Value {
