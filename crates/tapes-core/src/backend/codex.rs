@@ -232,18 +232,25 @@ impl CodexBackend {
                 .get_or_insert_with(Default::default)
                 .declared_parent = Some(parent.to_owned());
         }
-        session.declare_launch_parent_read(super::first_prompt_marker(
-            &recording,
-            path,
-            "codex",
-            native.id(),
-            codex_prompt_text,
-        ));
+        let first_prompt =
+            super::first_prompt(&recording, path, "codex", native.id(), codex_prompt_text);
+        session.declare_launch_parent_read(match &first_prompt {
+            Ok(record) => Ok(super::marker_of(record.as_ref(), codex_prompt_text)),
+            Err(error) => Err(anyhow!("{error:#}")),
+        });
         // The opening is the start of the file, so its first user turn is the
-        // session's first user turn even when the tail cannot see it.
+        // session's first user turn even when the tail cannot see it. Codex
+        // records its instructions and environment first, which can fill the
+        // opening; the first prompt record follows them.
         let session = if read.truncated {
             let mut reader = CodexTurns::default();
-            session.with_derived_title_from(opening.iter().flat_map(|value| reader.counted(value)))
+            let first_prompt = first_prompt.as_ref().ok().and_then(Option::as_ref);
+            session.with_derived_title_from(
+                opening
+                    .iter()
+                    .chain(first_prompt)
+                    .flat_map(|value| reader.counted(value)),
+            )
         } else if all {
             session.with_derived_title(&turns)
         } else {

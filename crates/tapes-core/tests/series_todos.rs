@@ -1,14 +1,17 @@
 //! An OpenCode session names its launcher through the `tapes-parent` marker
-//! opening its first prompt, through the API and the database alike.
+//! opening its first prompt, through the API and the database alike, and a
+//! Codex rollout whose first prompt lies past a truncated read's opening is
+//! still titled by it.
 
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use agent_tapes_core::backend::{opencode::OpenCodeBackend, Backend};
+use agent_tapes_core::backend::{codex::CodexBackend, opencode::OpenCodeBackend, Backend, Query};
 use agent_tapes_core::usage::GroupBy;
 use agent_tapes_core::{usage_summary_with_backends, SessionSelection};
+use serde_json::{json, Value};
 
 fn fixtures() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/opencode")
@@ -115,5 +118,60 @@ fn an_opencode_database_session_groups_under_its_marker_parent() {
             .iter()
             .any(|(parent, _)| parent == "019f0000-0000-7000-8000-0000000000c2"),
         "{groups:?}"
+    );
+}
+
+const CODEX_ID: &str = "01a40000-0000-7000-8000-000000000001";
+
+/// Claim: a Codex rollout past the read window whose AGENTS.md instructions
+/// push the first prompt past the 64 KiB opening lists with the prompt as
+/// its derived title, read by the first-prompt probe within its 1 MiB bound.
+/// Rejects a listing that titles from the opening alone and leaves the
+/// session untitled.
+#[test]
+fn a_large_codex_rollout_is_titled_by_its_first_prompt() {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let root =
+        std::env::temp_dir().join(format!("tapes-series-codex-{}-{nonce}", std::process::id()));
+    let path = root.join(format!(
+        "2026/01/10/rollout-2026-01-10T10-00-00-{CODEX_ID}.jsonl"
+    ));
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let message = |text: String| {
+        json!({"timestamp": "2026-01-10T10:00:01Z", "type": "response_item",
+               "payload": {"type": "message", "role": "user",
+                           "content": [{"type": "input_text", "text": text}]}})
+    };
+    let mut lines = vec![
+        json!({"timestamp": "2026-01-10T10:00:00Z", "type": "session_meta",
+               "payload": {"id": CODEX_ID, "session_id": CODEX_ID, "timestamp": "2026-01-10T10:00:00Z",
+                           "cwd": "/fixtures/project", "source": "exec", "originator": "codex_exec"}}),
+        message(format!(
+            "# AGENTS.md instructions for /fixtures/project\n\n<INSTRUCTIONS>\n{}\n</INSTRUCTIONS>",
+            "r".repeat(100 * 1024)
+        )),
+        message("Survey the large fixture.".to_owned()),
+    ];
+    for index in 0..400 {
+        lines.push(json!({"timestamp": "2026-01-10T10:01:00Z", "type": "response_item",
+            "payload": {"type": "message", "role": "assistant",
+                        "content": [{"type": "output_text", "text": format!("Reply {index} {}", "x".repeat(200))}]}}));
+    }
+    let body: Vec<String> = lines.iter().map(Value::to_string).collect();
+    fs::write(&path, body.join("\n") + "\n").unwrap();
+    let backend = CodexBackend::new(&root).with_read_bytes(64 * 1024);
+    let listing = backend.list(&Query::unscoped(5)).unwrap();
+    let _ = fs::remove_dir_all(&root);
+    let session = listing
+        .sessions
+        .iter()
+        .find(|session| session.id == CODEX_ID)
+        .unwrap();
+    assert_eq!(
+        session.derived_title.as_deref(),
+        Some("Survey the large fixture.")
     );
 }

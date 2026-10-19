@@ -1515,14 +1515,42 @@ pub(crate) fn first_prompt_marker(
     expected: &str,
     prompt: impl Fn(&Value) -> Option<String>,
 ) -> Result<crate::launch_parent::LaunchMarker> {
-    use crate::launch_parent::{is_prompt, LaunchMarker};
-    if let Some(marker) =
-        LaunchMarker::of_first_prompt(recording.opening().iter().filter_map(&prompt))
-    {
-        return Ok(marker);
+    Ok(marker_of(
+        first_prompt(recording, path, harness, expected, &prompt)?.as_ref(),
+        prompt,
+    ))
+}
+
+/// The launch marker of a first prompt record `first_prompt` found.
+pub(crate) fn marker_of(
+    record: Option<&Value>,
+    prompt: impl Fn(&Value) -> Option<String>,
+) -> crate::launch_parent::LaunchMarker {
+    record
+        .and_then(prompt)
+        .map_or(crate::launch_parent::LaunchMarker::Absent, |text| {
+            crate::launch_parent::LaunchMarker::read(&text)
+        })
+}
+
+/// A recording's first prompt record, read as [`first_prompt_marker`]
+/// describes: from the opening when it holds it or the whole recording,
+/// else from the recording's first MiB. `None` when no prompt lies within
+/// that bound.
+pub(crate) fn first_prompt(
+    recording: &Recording,
+    path: &Path,
+    harness: &str,
+    expected: &str,
+    prompt: impl Fn(&Value) -> Option<String>,
+) -> Result<Option<Value>> {
+    use crate::launch_parent::is_prompt;
+    let is_first = |value: &Value| prompt(value).is_some_and(|text| is_prompt(&text));
+    if let Some(record) = recording.opening().iter().find(|value| is_first(value)) {
+        return Ok(Some(record.clone()));
     }
     if !recording.tail.truncated {
-        return Ok(LaunchMarker::Absent);
+        return Ok(None);
     }
     let file =
         open_regular_file(path).with_context(|| format!("failed to open {}", path.display()))?;
@@ -1531,14 +1559,14 @@ pub(crate) fn first_prompt_marker(
     loop {
         line.clear();
         if reader.read_until(b'\n', &mut line)? == 0 || line.last() != Some(&b'\n') {
-            return Ok(LaunchMarker::Absent);
+            return Ok(None);
         }
         let Ok(value) = serde_json::from_slice::<Value>(&line) else {
             continue;
         };
         validate_native_identity(&value, harness, expected)?;
-        if let Some(text) = prompt(&value).filter(|text| is_prompt(text)) {
-            return Ok(LaunchMarker::read(&text));
+        if is_first(&value) {
+            return Ok(Some(value));
         }
     }
 }
