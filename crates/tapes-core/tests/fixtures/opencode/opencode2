@@ -381,7 +381,21 @@ case $path in
   /api/session/*/message|/api/session/*/message\?*)
     case $mode in
       exit|malformed|absent) exit 7 ;;
-      *) /bin/cat "$fixture_dir/$messages" ;;
+      *)
+        # The endpoint pages in the order asked for: a response set with a
+        # newest-first copy answers `order=desc` with it.
+        newest_first=${messages%.json}-newest-first.json
+        case $path in
+          *order=desc*)
+            if [ -f "$fixture_dir/$newest_first" ]; then
+              /bin/cat "$fixture_dir/$newest_first"
+            else
+              /bin/cat "$fixture_dir/$messages"
+            fi
+            ;;
+          *) /bin/cat "$fixture_dir/$messages" ;;
+        esac
+        ;;
     esac
     ;;
   /api/session/*)

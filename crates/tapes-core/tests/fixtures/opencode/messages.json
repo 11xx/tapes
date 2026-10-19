@@ -1,58 +1,14 @@
 {
   "data": [
     {
-      "id": "msg_fixture_assistant_pending",
+      "id": "msg_000000fixtureSharedUser001",
       "time": {
-        "created": 1784663071000
+        "created": 1784592000000
       },
-      "type": "assistant",
-      "agent": "build",
-      "model": {
-        "id": "kimi-k3",
-        "providerID": "opencode-go",
-        "variant": "max"
-      },
-      "content": [
-        {
-          "type": "tool",
-          "id": "fixture_tool_pending",
-          "name": "fixture_pending",
-          "executed": false,
-          "state": {
-            "status": "pending",
-            "input": {
-              "path": "fixture-pending"
-            }
-          },
-          "time": {
-            "created": 1784663071001
-          }
-        }
-      ]
-    },
-    {
-      "id": "msg_fixture_assistant_final",
-      "time": {
-        "created": 1784663069000,
-        "completed": 1784663070000
-      },
-      "type": "assistant",
-      "agent": "build",
-      "model": {
-        "id": "kimi-k3",
-        "providerID": "opencode-go",
-        "variant": "max"
-      },
-      "content": [
-        {
-          "type": "text",
-          "text": "Fixture inspected.",
-          "time": {
-            "created": 1784663069001,
-            "completed": 1784663069999
-          }
-        }
-      ]
+      "type": "user",
+      "text": "Inspect the fixture.",
+      "agents": [],
+      "files": []
     },
     {
       "id": "msg_fixture_assistant_work",
@@ -99,18 +55,87 @@
             "completed": 1784663067999
           }
         }
-      ]
+      ],
+      "finish": "tool-calls",
+      "cost": 0.0125,
+      "tokens": {
+        "input": 1200,
+        "output": 80,
+        "reasoning": 30,
+        "cache": {
+          "read": 4000,
+          "write": 600
+        }
+      }
     },
     {
-      "id": "msg_000000fixtureSharedUser001",
+      "id": "msg_fixture_assistant_final",
       "time": {
-        "created": 1784592000000
+        "created": 1784663069000,
+        "completed": 1784663070000
       },
-      "type": "user",
-      "text": "Inspect the fixture.",
-      "agents": [],
-      "files": []
+      "type": "assistant",
+      "agent": "build",
+      "model": {
+        "id": "kimi-k3",
+        "providerID": "opencode-go",
+        "variant": "max"
+      },
+      "content": [
+        {
+          "type": "text",
+          "text": "Fixture inspected.",
+          "time": {
+            "created": 1784663069001,
+            "completed": 1784663069999
+          }
+        }
+      ],
+      "finish": "stop",
+      "cost": 0.004,
+      "tokens": {
+        "input": 300,
+        "output": 40,
+        "reasoning": 0,
+        "cache": {
+          "read": 5000,
+          "write": 0
+        }
+      }
+    },
+    {
+      "id": "msg_fixture_assistant_pending",
+      "time": {
+        "created": 1784663071000
+      },
+      "type": "assistant",
+      "agent": "build",
+      "model": {
+        "id": "kimi-k3",
+        "providerID": "opencode-go",
+        "variant": "max"
+      },
+      "content": [
+        {
+          "type": "tool",
+          "id": "fixture_tool_pending",
+          "name": "fixture_pending",
+          "executed": false,
+          "state": {
+            "status": "pending",
+            "input": {
+              "path": "fixture-pending"
+            }
+          },
+          "time": {
+            "created": 1784663071001
+          }
+        }
+      ]
     }
   ],
-  "cursor": {}
+  "cursor": {
+    "next": null,
+    "previous": null
+  }
 }
