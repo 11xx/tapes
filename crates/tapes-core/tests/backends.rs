@@ -5868,7 +5868,7 @@ fn codex_modern_usage_records_choose_the_modern_basis_and_keep_native_rows() {
     )
     .unwrap();
 
-    assert_eq!(view.schema, "tapes-usage/15");
+    assert_eq!(view.schema, "tapes-usage/16");
     assert_eq!(
         view.tokens.as_ref().and_then(|tokens| tokens.input),
         Some(60)

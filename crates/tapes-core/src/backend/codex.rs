@@ -184,6 +184,13 @@ impl CodexBackend {
             .flat_map(|value| reader.counted(value))
             .collect::<Vec<_>>();
         let mut records = CodexRecords::new(path, read.truncated);
+        // A truncated read's tail may not hold `session_meta`; the opening
+        // does.
+        records.observer.provider = opening
+            .iter()
+            .find(|value| value["type"] == "session_meta")
+            .and_then(|value| value["payload"]["model_provider"].as_str())
+            .map(str::to_owned);
         records.observe_read(&read.values, &read.spans, &read.gaps, &read.source_revision);
         let facts = records.finish();
 
@@ -1141,6 +1148,9 @@ struct UsageCandidate {
     unattributed_tokens: TokenTotals,
     incomplete: BoundedReasons,
     bounds: BoundedReasons,
+    /// Each counted request, kept for price-table terms priced by the
+    /// request.
+    uses: crate::pricing::RequestUses,
 }
 
 impl UsageCandidate {
@@ -1172,12 +1182,16 @@ impl UsageCandidate {
         );
     }
 
+    /// Count one request, keeping it for pricing; its position among the
+    /// kept requests, where it was kept, goes in `kept`.
     fn count_request(
         &mut self,
         tokens: Option<&Tokens>,
         model: Option<&Model>,
+        at: Option<chrono::DateTime<chrono::Utc>>,
         identity_valid: bool,
         model_budget: &mut ModelBudget,
+        kept: &mut Option<usize>,
     ) -> bool {
         if !identity_valid {
             self.add_unattributed(tokens);
@@ -1185,6 +1199,13 @@ impl UsageCandidate {
             return false;
         }
         self.counted += 1;
+        *kept = match codex_disjoint(tokens) {
+            Some(disjoint) => self.uses.push(at, model, &disjoint),
+            None => {
+                self.uses.discard();
+                None
+            }
+        };
         let Some(model) = model else {
             self.add_unattributed(tokens);
             self.incomplete.add("model-attribution-unknown");
@@ -1419,6 +1440,38 @@ struct CodexUsageObserver {
     unrecognized_usage: usize,
     activity: ActivityRange,
     series: Option<SeriesBuffer>,
+    /// The model provider `session_meta` names.
+    provider: Option<String>,
+    /// Set by a `rate_limits` window reporting a used percent: the quota of
+    /// a ChatGPT plan, with the plan's name where it was recorded.
+    plan_quota: Option<Option<String>>,
+}
+
+/// The longest provider or plan name a billing's evidence quotes.
+const MAX_BILLING_NAME_BYTES: usize = 64;
+
+/// A session's billing from what its recording names. A ChatGPT plan's
+/// quota windows report a used percent, which only a subscription has; a
+/// model provider other than `openai` bills through its own API key, since
+/// ChatGPT sign-in serves only the built-in provider. Both together, or
+/// neither, establish nothing.
+fn codex_billing(
+    provider: Option<&str>,
+    plan_quota: Option<Option<&str>>,
+) -> Option<crate::pricing::Billing> {
+    use crate::pricing::Billing;
+    let short = |name: &str| name.len() <= MAX_BILLING_NAME_BYTES;
+    let foreign = provider.filter(|provider| *provider != "openai");
+    match (foreign, plan_quota) {
+        (Some(provider), None) if short(provider) => {
+            Some(Billing::api(format!("codex model_provider `{provider}`")))
+        }
+        (None, Some(Some(plan))) if short(plan) => Some(Billing::subscription(format!(
+            "codex rate_limits quota window, plan `{plan}`"
+        ))),
+        (None, Some(_)) => Some(Billing::subscription("codex rate_limits quota window")),
+        _ => None,
+    }
 }
 
 impl CodexUsageObserver {
@@ -1455,6 +1508,8 @@ impl CodexUsageObserver {
             unrecognized_usage: 0,
             activity: ActivityRange::default(),
             series: series_limit.map(SeriesBuffer::new),
+            provider: None,
+            plan_quota: None,
         }
     }
 
@@ -1479,6 +1534,20 @@ impl CodexUsageObserver {
 
     fn observe(&mut self, value: &Value, span: Option<ByteSpan>, revision: &str) {
         self.activity.observe(value);
+        if value["type"] == "session_meta" && self.provider.is_none() {
+            self.provider = value["payload"]["model_provider"]
+                .as_str()
+                .map(str::to_owned);
+        }
+        if is_token_count(value) && self.plan_quota.is_none() {
+            let limits = &value["payload"]["rate_limits"];
+            if ["primary", "secondary"]
+                .iter()
+                .any(|window| limits[window]["used_percent"].is_number())
+            {
+                self.plan_quota = Some(limits["plan_type"].as_str().map(str::to_owned));
+            }
+        }
         if value["type"] == "turn_context" {
             self.observe_context(value);
         }
@@ -1636,11 +1705,14 @@ impl CodexUsageObserver {
         self.seen_response_id_bytes += response_id.len();
         self.seen_response_ids.insert(response_id.to_owned());
         let attributed_before = self.modern.attributed;
+        let mut kept = None;
         let counted = self.modern.count_request(
             Some(&usage),
             self.current_model.as_ref(),
+            timestamp(&value["timestamp"]),
             true,
             &mut self.model_budget,
+            &mut kept,
         );
         row.classification = if self.modern.attributed > attributed_before {
             ObservationClassification::Request
@@ -1655,6 +1727,7 @@ impl CodexUsageObserver {
                 at: timestamp(&value["timestamp"]),
                 response_id: response_id.to_owned(),
                 model: self.current_model.clone(),
+                kept,
             });
         }
         self.push_series(row, ObservationBasis::UsageRecord, counted);
@@ -1710,6 +1783,10 @@ impl CodexUsageObserver {
     fn leave_total(&mut self, requests: Vec<UsageRequest>) {
         for request in &requests {
             self.modern.leave_total(&request.usage);
+            // The figure is the cumulative total, which never counted it.
+            if let Some(kept) = request.kept {
+                self.modern.uses.uncount(kept);
+            }
         }
         if let Some(outside) = &mut self.outside {
             outside.extend(requests);
@@ -1782,8 +1859,10 @@ impl CodexUsageObserver {
                 let counted = self.legacy.count_request(
                     last.as_ref(),
                     self.current_model.as_ref(),
+                    row_timestamp,
                     true,
                     &mut self.model_budget,
+                    &mut None,
                 );
                 (ObservationClassification::Advance, counted)
             }
@@ -1799,8 +1878,10 @@ impl CodexUsageObserver {
                         self.legacy.count_request(
                             last.as_ref(),
                             self.current_model.as_ref(),
+                            row_timestamp,
                             true,
                             &mut self.model_budget,
+                            &mut None,
                         )
                     } else {
                         self.legacy.add_unattributed(None);
@@ -1817,8 +1898,10 @@ impl CodexUsageObserver {
                         self.legacy.count_request(
                             last.as_ref(),
                             self.current_model.as_ref(),
+                            row_timestamp,
                             true,
                             &mut self.model_budget,
+                            &mut None,
                         )
                     } else {
                         self.legacy.add_unattributed(None);
@@ -1897,6 +1980,7 @@ impl CodexUsageObserver {
             (selected.observed > 0 || self.modern_seen || self.legacy_seen).then(|| {
                 selected.attribution(basis, observation_coverage, &self.incomplete, &self.bounds)
             });
+        let request_uses = std::mem::take(&mut selected.uses);
         let by_model = selected.into_models();
         let (selection_status, model_selections) = self.selections.finish(!self.read_window);
         let model_observation = (self.model_observed
@@ -1944,6 +2028,11 @@ impl CodexUsageObserver {
             measurement_incomplete: known_subtotal_notes(&measurement_coverage),
             measurement_coverage,
             unrecognized_usage: self.unrecognized_usage,
+            request_uses: Some(request_uses).filter(|uses| !uses.is_empty()),
+            billing: codex_billing(
+                self.provider.as_deref(),
+                self.plan_quota.as_ref().map(Option::as_deref),
+            ),
             ..UsageDetail::default()
         }
         .into_option();
@@ -1990,6 +2079,21 @@ struct CodexSpanFigure {
     context_window: Option<u64>,
     rate_limits: Option<RateLimits>,
     unrecognized_usage: usize,
+    /// Each request of the span, kept for price-table terms priced by the
+    /// request.
+    uses: crate::pricing::RequestUses,
+}
+
+/// One request's counters in disjoint categories, for pricing.
+fn counters_disjoint(share: Counters) -> Option<DisjointTokens> {
+    let (input, output, reasoning, cache_read, cache_write) = share;
+    codex_disjoint(Some(&Tokens {
+        input,
+        output,
+        reasoning,
+        cache_read,
+        cache_write,
+    }))
 }
 
 type Counters = (
@@ -2002,7 +2106,18 @@ type Counters = (
 
 impl CodexSpanFigure {
     /// Count one request's share under the model in effect when it was made.
-    fn add(&mut self, model: Option<&Model>, share: Counters) {
+    fn add(
+        &mut self,
+        model: Option<&Model>,
+        share: Counters,
+        at: Option<chrono::DateTime<chrono::Utc>>,
+    ) {
+        match counters_disjoint(share) {
+            Some(disjoint) => {
+                self.uses.push(at, model, &disjoint);
+            }
+            None => self.uses.discard(),
+        }
         let (input, output, reasoning, cache_read, cache_write) = share;
         self.tokens
             .add(input, output, reasoning, cache_read, cache_write);
@@ -2107,7 +2222,7 @@ impl CodexSpans {
             self.restarts += usize::from(reset);
             for index in placer.request(at, response.as_deref()) {
                 let figure = self.figures.entry(index).or_default();
-                figure.add(self.model.as_ref(), request);
+                figure.add(self.model.as_ref(), request, at);
                 figure.since_reset |= reset;
                 if let Some(window) = codex_context_window(value) {
                     figure.context_window = Some(window);
@@ -2163,6 +2278,7 @@ impl CodexSpans {
                     usage.cache_read,
                     usage.cache_write,
                 ),
+                request.at,
             );
         }
     }
@@ -2241,6 +2357,8 @@ impl CodexSpans {
                     measurement_coverage,
                     unrecognized_usage: figure.unrecognized_usage,
                     by_model,
+                    request_uses: Some(std::mem::take(&mut figure.uses))
+                        .filter(|uses| !uses.is_empty()),
                     ..UsageDetail::default()
                 }
                 .into_option();
@@ -2401,6 +2519,8 @@ struct UsageRequest {
     at: Option<chrono::DateTime<chrono::Utc>>,
     response_id: String,
     model: Option<Model>,
+    /// Its position among the requests kept for pricing.
+    kept: Option<usize>,
 }
 
 struct CodexRecords {

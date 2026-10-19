@@ -518,8 +518,8 @@ fn reject_installed_selection(
 #[derive(Args, Clone, Debug, Default)]
 struct PriceArgs {
     /// Price each figure this command reports a harness cost for with this
-    /// tapes-price-table/1 file, adding `list_price_estimate` beside that
-    /// cost, never in its place, exactly as `usage --prices` prices it.
+    /// tapes-price-table/1 or /2 file, adding `list_price_estimate` beside
+    /// that cost, never in its place, exactly as `usage --prices` prices it.
     /// Without the flag the table is the file TAPES_PRICES names, then
     /// $XDG_CONFIG_HOME/tapes/prices.toml (or ~/.config/tapes/prices.toml);
     /// with none, no estimate is given. A table named here or by
@@ -1558,7 +1558,7 @@ enum Command {
         /// updated in place and a second read may not repeat the first.
         #[arg(long, conflicts_with = "read_bytes")]
         full: bool,
-        /// Render the versioned tapes-stats/15 object, or tapes-stats-summary/8
+        /// Render the versioned tapes-stats/16 object, or tapes-stats-summary/8
         /// for a selection, as JSON. `warnings` names the limits of the read:
         /// `read-window`, `tail-window`, `kind-unknown`, `kind-undeclared` (a
         /// turn of a kind its harness declares it cannot record, so the
@@ -1571,7 +1571,7 @@ enum Command {
         json: bool,
     },
     /// Where quota went. A session named by id or reached with --latest
-    /// answers that session as tapes-usage/15: its recorded tokens, cost, and
+    /// answers that session as tapes-usage/16: its recorded tokens, cost, and
     /// turn counts, plus whatever else its harness recorded — a context
     /// window, a provider quota window, wall-clock durations, a per-model
     /// split, the price-relevant dimensions its requests recorded. --from,
@@ -1583,7 +1583,7 @@ enum Command {
     /// --quota-window answer a selection's consumption inside a window of
     /// time, each session contributing its own span inside it. A scope or
     /// listing filter instead answers the whole selection as
-    /// tapes-usage-summary/12, grouped by --by and summing each counter over
+    /// tapes-usage-summary/13, grouped by --by and summing each counter over
     /// the sessions that recorded it. Native tokens follow each harness's own
     /// convention and add only within it; the disjoint categories (uncached
     /// input, cache read, cache write by TTL, output) add across harnesses.
@@ -1944,9 +1944,20 @@ enum Command {
         /// them].
         #[arg(long, value_name = "N", requires = "forecast", value_parser = clap::value_parser!(u64).range(1..))]
         concurrency: Option<u64>,
-        /// Price the answer with this tapes-price-table/1 file: each figure
-        /// gains `list_price_estimate` beside any cost its harness wrote,
-        /// never in its place. Without the flag the table is the file
+        /// Price the answer with this tapes-price-table/1 or /2 file (the
+        /// guide gives both formats): each figure gains `list_price_estimate`
+        /// beside any cost its harness wrote, never in its place. A /2 row may
+        /// carry a long-context rate for the whole request above a prompt
+        /// size, for the billing it names (per-token API billing unless it
+        /// says otherwise), UTC time-of-day rates, and an
+        /// effective_from..effective_until window; those terms are priced
+        /// request by request from the requests the read kept, and between
+        /// their rates, with request-terms-unknown, where the figure's
+        /// requests are not known one by one. The estimate's `billing` names
+        /// the billing each recording establishes and its evidence: a
+        /// subscription pays no surcharge, and unestablished billing is priced
+        /// between base and surcharged rates with billing-unestablished. A
+        /// request no row is in effect for is outside-validity. Without the flag the table is the file
         /// TAPES_PRICES names, then $XDG_CONFIG_HOME/tapes/prices.toml (or
         /// ~/.config/tapes/prices.toml). A table named here or by
         /// TAPES_PRICES that is missing or invalid refuses; an invalid default
@@ -1964,15 +1975,16 @@ enum Command {
         /// `source`, and `measurement_completeness` over the priced
         /// categories (uncached_input, cache_read, cache_write, output): a
         /// counter the figure measured incompletely keeps its reasons, and
-        /// unlisted-model, incomplete-attribution, missing-price and
-        /// ttl-unrecorded name what the table or the split could not price. It
+        /// unlisted-model, incomplete-attribution, missing-price,
+        /// ttl-unrecorded, request-terms-unknown, billing-unestablished and
+        /// outside-validity name what the table or the split could not price. It
         /// is absent when nothing could be priced. A summary adds estimates
         /// where its disjoint categories add and names why it withholds them
         /// under `list_price_withheld` (mixed-accounting,
         /// identity-unestablished, exact-union).
         #[arg(long, value_name = "FILE")]
         prices: Option<PathBuf>,
-        /// Render the versioned tapes-usage/15 object, or tapes-usage-summary/12
+        /// Render the versioned tapes-usage/16 object, or tapes-usage-summary/13
         /// for a selection, as JSON. `session.model_observation` says
         /// whether more than one model and effort was observed (`mixed`) and
         /// whether a gap, partial read or budget kept the split incomplete
@@ -2020,7 +2032,7 @@ enum Command {
         json: bool,
     },
     /// What a continuation of one session needs from its recording, as
-    /// tapes-brief/13: where the work stopped, the working directory and the
+    /// tapes-brief/14: where the work stopped, the working directory and the
     /// commit it sits on, the calls the read never saw a result for, the
     /// children whose outcome the store does not record, and a bounded tail
     /// of the exchange. It reads the recording alone and judges nothing —
@@ -2040,7 +2052,7 @@ enum Command {
         /// out of the tail.
         #[arg(long, value_name = "N", default_value_t = DEFAULT_BRIEF_TAIL)]
         tail: usize,
-        /// Render the versioned tapes-brief/13 object as JSON. Each `in_flight`
+        /// Render the versioned tapes-brief/14 object as JSON. Each `in_flight`
         /// list holds at most 20 entries, with a note when the bound cut it.
         #[arg(long)]
         json: bool,
@@ -5274,6 +5286,21 @@ fn estimate_incomplete(estimate: &ListPriceEstimate) -> Option<String> {
 
 fn render_estimate_lines(prefix: &str, estimate: &ListPriceEstimate) -> String {
     let mut out = format!("{prefix}{}\n", render_estimate(estimate));
+    for billing in &estimate.billing {
+        let terms = match billing.terms {
+            agent_tapes_core::pricing::BillingTerms::Subscription => {
+                "subscription terms, no long-context surcharge"
+            }
+            agent_tapes_core::pricing::BillingTerms::Api => "per-token API terms",
+            agent_tapes_core::pricing::BillingTerms::Unestablished => {
+                "billing unestablished, between base and long-context rates"
+            }
+        };
+        out.push_str(&format!(
+            "{prefix}list-price billing: {terms} ({})\n",
+            billing.evidence
+        ));
+    }
     if let Some(incomplete) = estimate_incomplete(estimate) {
         out.push_str(&format!(
             "{prefix}list-price estimate completeness: {incomplete}\n"

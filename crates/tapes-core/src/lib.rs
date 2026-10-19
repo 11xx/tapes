@@ -59,9 +59,9 @@ pub mod usage;
 pub mod window;
 pub mod workset;
 
-pub const LIST_SCHEMA: &str = "tapes-list/10";
+pub const LIST_SCHEMA: &str = "tapes-list/11";
 pub const EXPORT_MANIFEST_SCHEMA: &str = "tapes-export-manifest/7";
-pub const USAGE_SUMMARY_SCHEMA: &str = "tapes-usage-summary/12";
+pub const USAGE_SUMMARY_SCHEMA: &str = "tapes-usage-summary/13";
 /// Number of normalized turns a `list --search` query inspects per session.
 /// Keeping this fixed makes the listing's cost predictable for callers.
 pub const LIST_SEARCH_TAIL: usize = 32;
@@ -1224,7 +1224,9 @@ pub fn usage_spans_with_backends(
     })?;
     read.notes
         .extend(resolved.diagnostics.latest_warnings(&resolved.session));
-    let figures = backend.stream_spans(&resolved.session, &read, spans)?;
+    let figures = backend
+        .stream_spans(&resolved.session, &read, spans)?
+        .billed_as(&resolved.session);
     Ok(usage::spans(&figures, &turns, &read))
 }
 
@@ -2347,7 +2349,8 @@ fn read_window_keeping(
         for member in std::iter::once(session.clone()).chain(children) {
             let read = backend
                 .stream_transcript(&member, None, &mut |_| Ok(()))
-                .and_then(|read| backend.stream_spans(&member, &read, &[bounds.span()]));
+                .and_then(|read| backend.stream_spans(&member, &read, &[bounds.span()]))
+                .map(|spans| spans.billed_as(&member));
             let mut spans = match read {
                 Ok(spans) => spans,
                 Err(error) => {

@@ -27,7 +27,7 @@ use crate::pricing::{EstimateSum, ListPriceEstimate, PriceTable, PricedFigure};
 use crate::span::{RequestTimeline, SpanPlacement, SpanSessions, SPANS_SCHEMA};
 use crate::stretch::{Stretch, StretchFold};
 
-pub const USAGE_SCHEMA: &str = "tapes-usage/15";
+pub const USAGE_SCHEMA: &str = "tapes-usage/16";
 
 /// Recorded usage facts and measurement notes kept beside the session's
 /// normalized counters. A source fact that was not recorded remains absent.
@@ -82,6 +82,12 @@ pub struct UsageDetail {
     pub launch_parent: Option<String>,
     /// Quota observations the read holds beside `rate_limits`.
     pub quota_observations: Vec<crate::window::QuotaObservation>,
+    /// The requests the read counted, kept for price-table terms priced by
+    /// the request.
+    pub request_uses: Option<crate::pricing::RequestUses>,
+    /// How the recording says its tokens were billed, and the fact that
+    /// says so.
+    pub billing: Option<crate::pricing::Billing>,
 }
 
 impl UsageDetail {
@@ -109,6 +115,8 @@ impl UsageDetail {
             && self.declared_parent.is_none()
             && self.launch_parent.is_none()
             && self.quota_observations.is_empty()
+            && self.request_uses.is_none()
+            && self.billing.is_none()
     }
 
     /// The detail, or nothing when the harness recorded none of it.
@@ -834,6 +842,13 @@ pub struct UsageSession {
 pub struct UsageView {
     pub schema: &'static str,
     pub session: UsageSession,
+    /// The requests the figure's read kept, for price-table terms priced by
+    /// the request.
+    #[serde(skip)]
+    pub request_uses: Option<crate::pricing::RequestUses>,
+    /// The billing the session's recording establishes.
+    #[serde(skip)]
+    pub billing: Option<crate::pricing::Billing>,
     /// The span this figure answers, for a figure of part of the session.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub span: Option<SpanPlacement>,
@@ -1063,6 +1078,8 @@ fn project(session: &Session, turns: TurnTally, facts: ReadFacts) -> UsageView {
     notes.extend(detail.accounting_notes);
     UsageView {
         schema: USAGE_SCHEMA,
+        request_uses: detail.request_uses,
+        billing: detail.billing,
         session: UsageSession {
             id: session.id.clone(),
             source: session.source.clone(),
@@ -1176,6 +1193,12 @@ impl Session {
             selections: &self.model_selections,
             observation: self.model_observation.as_ref(),
             by_model: models.as_deref(),
+            terms: crate::pricing::RequestTerms {
+                requests: detail.and_then(|detail| detail.request_uses.as_ref()),
+                billing: detail.and_then(|detail| detail.billing.as_ref()),
+                from: self.started_at,
+                to: self.last_activity_at,
+            },
         }
         .estimate(table)
         .whole

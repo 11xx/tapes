@@ -27,7 +27,7 @@ fn public_usage_options_bound_keys_without_shortening_measurements() {
         assert_eq!(keys.keys[0].response_id.as_deref(), Some("response-parent"));
         assert_eq!(view.consumption.unwrap().cost.unwrap().usd, 0.75);
         assert_eq!(view.cost.unwrap().usd, 0.75);
-        assert_eq!(view.schema, "tapes-usage/15");
+        assert_eq!(view.schema, "tapes-usage/16");
     }
 }
 

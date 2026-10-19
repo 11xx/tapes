@@ -94,7 +94,7 @@ fn a_named_table_prices_the_answer() {
     let table = store.table();
     let table = table.to_str().unwrap();
     let (whole, _) = store.json(&[SESSION, "--full", "--prices", table], &[]);
-    assert_eq!(whole["schema"], "tapes-usage/15");
+    assert_eq!(whole["schema"], "tapes-usage/16");
     let estimate = &whole["list_price_estimate"];
     assert_eq!(estimate["kind"], "list-price-estimate");
     assert!((estimate["amount"].as_f64().unwrap() - 0.031854).abs() < 1e-12);
@@ -199,7 +199,7 @@ fn a_summary_withholds_the_estimate_where_its_totals_are_withheld() {
         "{text}"
     );
     let (summary, _) = store.json(&["--global", "--prices", table.to_str().unwrap()], &[]);
-    assert_eq!(summary["schema"], "tapes-usage-summary/12");
+    assert_eq!(summary["schema"], "tapes-usage-summary/13");
     assert_eq!(
         summary["totals"]["list_price_withheld"],
         serde_json::json!(["identity-unestablished"])

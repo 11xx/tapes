@@ -869,7 +869,12 @@ impl PiRecording {
             let entry = &entries[*position];
             let included = include(*position);
             if let Some(consumed) = entry.consumed.as_ref().filter(|_| included) {
-                usage.add(entry.id.as_deref(), consumed, variant.as_deref());
+                usage.add(
+                    entry.id.as_deref(),
+                    consumed,
+                    variant.as_deref(),
+                    entry.timestamp,
+                );
             }
             if let Some(id) = entry.model.as_ref().filter(|_| included) {
                 selections.observe(
@@ -910,6 +915,7 @@ impl PiRecording {
             unrecognized_usage,
             consumption,
             copy_evidence: Some(copies).filter(|copies| !copies.is_empty()),
+            request_uses: usage.uses,
             ..UsageDetail::default()
         }
         .into_option();
@@ -1207,6 +1213,7 @@ fn apply_recording_usage(
         unrecognized_usage: active.iter().filter(|entry| pi_unread_usage(entry)).count(),
         consumption,
         copy_evidence: Some(copies).filter(|copies| !copies.is_empty()),
+        request_uses: usage.uses,
         ..UsageDetail::default()
     }
     .into_option();
@@ -1220,7 +1227,12 @@ fn pi_usage(entries: &[&Value]) -> PiUsageResult {
             variant = Some(level);
         }
         if let Some(consumed) = pi_consumed(entry) {
-            usage.add(entry["id"].as_str(), &consumed, variant);
+            usage.add(
+                entry["id"].as_str(),
+                &consumed,
+                variant,
+                timestamp(&entry["timestamp"]),
+            );
         }
     }
     usage.finish()
@@ -1322,6 +1334,9 @@ struct PiUsage {
     totals: PiConsumption,
     unattributed: usize,
     by_model: BTreeMap<PiModelKey, PiConsumption>,
+    /// Each counted event, kept for price-table terms priced by the
+    /// request.
+    uses: crate::pricing::RequestUses,
 }
 
 #[derive(Default)]
@@ -1333,6 +1348,7 @@ struct PiUsageResult {
     measurement_coverage: BTreeMap<String, crate::usage::MeasurementCoverage>,
     measurement_incomplete: Vec<String>,
     measurement_completeness: MeasurementCompleteness,
+    uses: Option<crate::pricing::RequestUses>,
 }
 
 /// The model and reasoning level one request is attributed to, ordered by
@@ -1344,9 +1360,34 @@ struct PiModelKey {
 }
 
 impl PiUsage {
-    fn add(&mut self, id: Option<&str>, consumed: &PiConsumed, variant: Option<&str>) {
+    fn add(
+        &mut self,
+        id: Option<&str>,
+        consumed: &PiConsumed,
+        variant: Option<&str>,
+        at: Option<chrono::DateTime<chrono::Utc>>,
+    ) {
         if !self.totals.observe(id, consumed, true) {
             return;
+        }
+        let usage = consumed.usage;
+        let tokens = Tokens {
+            input: usage.input,
+            output: usage.output,
+            reasoning: usage.reasoning,
+            cache_read: usage.cache_read,
+            cache_write: usage.cache_write,
+        };
+        match crate::model::TokenConvention::of("pi") {
+            Some(convention) => {
+                let model = consumed.model.as_ref().map(|model| Model {
+                    id: model.clone(),
+                    variant: variant.map(str::to_owned),
+                });
+                let disjoint = crate::model::DisjointTokens::from_native(&tokens, convention, None);
+                self.uses.push(at, model.as_ref(), &disjoint);
+            }
+            None => self.uses.discard(),
         }
         match consumed.model.as_deref() {
             Some(model) => {
@@ -1393,6 +1434,7 @@ impl PiUsage {
         PiUsageResult {
             tokens: totals.tokens,
             cost: totals.cost,
+            uses: Some(self.uses).filter(|uses| !uses.is_empty()),
             by_model,
             cost_coverage: totals.cost_coverage,
             measurement_coverage: totals.measurement_coverage,

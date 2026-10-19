@@ -1,0 +1,1182 @@
+{
+  "claude-request-dimensions/30000000-0000-4000-8000-000000000001": {
+    "bounded": {
+      "by_model": [
+        {
+          "amount": 0.0035025000000000004,
+          "currency": "USD",
+          "kind": "list-price-estimate",
+          "models": [
+            {
+              "effective": "2026-01-01",
+              "id": "claude-fixture",
+              "source": "fixture"
+            }
+          ],
+          "schema": "tapes-price-table/1"
+        }
+      ],
+      "consumption": null,
+      "whole": {
+        "amount": 0.0035025000000000004,
+        "currency": "USD",
+        "kind": "list-price-estimate",
+        "models": [
+          {
+            "effective": "2026-01-01",
+            "id": "claude-fixture",
+            "source": "fixture"
+          }
+        ],
+        "schema": "tapes-price-table/1"
+      }
+    },
+    "session": {
+      "amount": 0.0035025000000000004,
+      "currency": "USD",
+      "kind": "list-price-estimate",
+      "models": [
+        {
+          "effective": "2026-01-01",
+          "id": "claude-fixture",
+          "source": "fixture"
+        }
+      ],
+      "schema": "tapes-price-table/1"
+    },
+    "whole": {
+      "by_model": [
+        {
+          "amount": 0.0035025000000000004,
+          "currency": "USD",
+          "kind": "list-price-estimate",
+          "models": [
+            {
+              "effective": "2026-01-01",
+              "id": "claude-fixture",
+              "source": "fixture"
+            }
+          ],
+          "schema": "tapes-price-table/1"
+        }
+      ],
+      "consumption": null,
+      "whole": {
+        "amount": 0.0035025000000000004,
+        "currency": "USD",
+        "kind": "list-price-estimate",
+        "models": [
+          {
+            "effective": "2026-01-01",
+            "id": "claude-fixture",
+            "source": "fixture"
+          }
+        ],
+        "schema": "tapes-price-table/1"
+      }
+    }
+  },
+  "claude-resumed/30000000-0000-4000-8000-000000000001": {
+    "bounded": {
+      "by_model": [
+        {
+          "amount": 0.031854,
+          "currency": "USD",
+          "kind": "list-price-estimate",
+          "models": [
+            {
+              "effective": "2026-01-01",
+              "id": "claude-fixture",
+              "source": "fixture"
+            }
+          ],
+          "schema": "tapes-price-table/1"
+        }
+      ],
+      "consumption": null,
+      "whole": {
+        "amount": 0.031854,
+        "currency": "USD",
+        "kind": "list-price-estimate",
+        "models": [
+          {
+            "effective": "2026-01-01",
+            "id": "claude-fixture",
+            "source": "fixture"
+          }
+        ],
+        "schema": "tapes-price-table/1"
+      }
+    },
+    "session": {
+      "amount": 0.031854,
+      "currency": "USD",
+      "kind": "list-price-estimate",
+      "models": [
+        {
+          "effective": "2026-01-01",
+          "id": "claude-fixture",
+          "source": "fixture"
+        }
+      ],
+      "schema": "tapes-price-table/1"
+    },
+    "whole": {
+      "by_model": [
+        {
+          "amount": 0.031854,
+          "currency": "USD",
+          "kind": "list-price-estimate",
+          "models": [
+            {
+              "effective": "2026-01-01",
+              "id": "claude-fixture",
+              "source": "fixture"
+            }
+          ],
+          "schema": "tapes-price-table/1"
+        }
+      ],
+      "consumption": null,
+      "whole": {
+        "amount": 0.031854,
+        "currency": "USD",
+        "kind": "list-price-estimate",
+        "models": [
+          {
+            "effective": "2026-01-01",
+            "id": "claude-fixture",
+            "source": "fixture"
+          }
+        ],
+        "schema": "tapes-price-table/1"
+      }
+    }
+  },
+  "claude-resumed/30000000-0000-4000-8000-000000000002": {
+    "bounded": {
+      "by_model": [
+        {
+          "amount": 0.031854,
+          "currency": "USD",
+          "kind": "list-price-estimate",
+          "measurement_completeness": {
+            "cache_read": [
+              "unreadable-record"
+            ],
+            "cache_write": [
+              "unreadable-record"
+            ],
+            "output": [
+              "unreadable-record"
+            ],
+            "uncached_input": [
+              "unreadable-record"
+            ]
+          },
+          "models": [
+            {
+              "effective": "2026-01-01",
+              "id": "claude-fixture",
+              "source": "fixture"
+            }
+          ],
+          "schema": "tapes-price-table/1"
+        }
+      ],
+      "consumption": null,
+      "whole": {
+        "amount": 0.031854,
+        "currency": "USD",
+        "kind": "list-price-estimate",
+        "measurement_completeness": {
+          "cache_read": [
+            "unreadable-record",
+            "incomplete-attribution"
+          ],
+          "cache_write": [
+            "unreadable-record",
+            "incomplete-attribution"
+          ],
+          "output": [
+            "unreadable-record",
+            "incomplete-attribution"
+          ],
+          "uncached_input": [
+            "unreadable-record",
+            "incomplete-attribution"
+          ]
+        },
+        "models": [
+          {
+            "effective": "2026-01-01",
+            "id": "claude-fixture",
+            "source": "fixture"
+          }
+        ],
+        "schema": "tapes-price-table/1"
+      }
+    },
+    "session": {
+      "amount": 0.031854,
+      "currency": "USD",
+      "kind": "list-price-estimate",
+      "measurement_completeness": {
+        "cache_read": [
+          "unreadable-record",
+          "incomplete-attribution"
+        ],
+        "cache_write": [
+          "unreadable-record",
+          "incomplete-attribution"
+        ],
+        "output": [
+          "unreadable-record",
+          "incomplete-attribution"
+        ],
+        "uncached_input": [
+          "unreadable-record",
+          "incomplete-attribution"
+        ]
+      },
+      "models": [
+        {
+          "effective": "2026-01-01",
+          "id": "claude-fixture",
+          "source": "fixture"
+        }
+      ],
+      "schema": "tapes-price-table/1"
+    },
+    "whole": {
+      "by_model": [
+        {
+          "amount": 0.031854,
+          "currency": "USD",
+          "kind": "list-price-estimate",
+          "measurement_completeness": {
+            "cache_read": [
+              "unreadable-record"
+            ],
+            "cache_write": [
+              "unreadable-record"
+            ],
+            "output": [
+              "unreadable-record"
+            ],
+            "uncached_input": [
+              "unreadable-record"
+            ]
+          },
+          "models": [
+            {
+              "effective": "2026-01-01",
+              "id": "claude-fixture",
+              "source": "fixture"
+            }
+          ],
+          "schema": "tapes-price-table/1"
+        }
+      ],
+      "consumption": null,
+      "whole": {
+        "amount": 0.031854,
+        "currency": "USD",
+        "kind": "list-price-estimate",
+        "measurement_completeness": {
+          "cache_read": [
+            "unreadable-record",
+            "incomplete-attribution"
+          ],
+          "cache_write": [
+            "unreadable-record",
+            "incomplete-attribution"
+          ],
+          "output": [
+            "unreadable-record",
+            "incomplete-attribution"
+          ],
+          "uncached_input": [
+            "unreadable-record",
+            "incomplete-attribution"
+          ]
+        },
+        "models": [
+          {
+            "effective": "2026-01-01",
+            "id": "claude-fixture",
+            "source": "fixture"
+          }
+        ],
+        "schema": "tapes-price-table/1"
+      }
+    }
+  },
+  "claude/malformed": {
+    "bounded": {
+      "by_model": [
+        null
+      ],
+      "consumption": null,
+      "whole": null
+    },
+    "session": null,
+    "whole": {
+      "by_model": [
+        null
+      ],
+      "consumption": null,
+      "whole": null
+    }
+  },
+  "claude/session-claude": {
+    "bounded": {
+      "by_model": [
+        {
+          "at_least": 0.0005379,
+          "at_most": 0.0006369,
+          "currency": "USD",
+          "kind": "list-price-estimate",
+          "measurement_completeness": {
+            "cache_read": [
+              "missing-counter"
+            ],
+            "cache_write": [
+              "missing-counter",
+              "ttl-unrecorded"
+            ],
+            "output": [
+              "missing-counter"
+            ],
+            "uncached_input": [
+              "missing-counter"
+            ]
+          },
+          "models": [
+            {
+              "effective": "2026-01-01",
+              "id": "claude-fixture",
+              "source": "fixture"
+            }
+          ],
+          "schema": "tapes-price-table/1"
+        }
+      ],
+      "consumption": null,
+      "whole": {
+        "at_least": 0.0005379,
+        "at_most": 0.0006369,
+        "currency": "USD",
+        "kind": "list-price-estimate",
+        "measurement_completeness": {
+          "cache_read": [
+            "missing-counter"
+          ],
+          "cache_write": [
+            "missing-counter",
+            "ttl-unrecorded"
+          ],
+          "output": [
+            "missing-counter"
+          ],
+          "uncached_input": [
+            "missing-counter"
+          ]
+        },
+        "models": [
+          {
+            "effective": "2026-01-01",
+            "id": "claude-fixture",
+            "source": "fixture"
+          }
+        ],
+        "schema": "tapes-price-table/1"
+      }
+    },
+    "session": {
+      "at_least": 0.0005379,
+      "at_most": 0.0006369,
+      "currency": "USD",
+      "kind": "list-price-estimate",
+      "measurement_completeness": {
+        "cache_read": [
+          "missing-counter"
+        ],
+        "cache_write": [
+          "missing-counter",
+          "ttl-unrecorded"
+        ],
+        "output": [
+          "missing-counter"
+        ],
+        "uncached_input": [
+          "missing-counter"
+        ]
+      },
+      "models": [
+        {
+          "effective": "2026-01-01",
+          "id": "claude-fixture",
+          "source": "fixture"
+        }
+      ],
+      "schema": "tapes-price-table/1"
+    },
+    "whole": {
+      "by_model": [
+        {
+          "at_least": 0.0005379,
+          "at_most": 0.0006369,
+          "currency": "USD",
+          "kind": "list-price-estimate",
+          "measurement_completeness": {
+            "cache_read": [
+              "missing-counter"
+            ],
+            "cache_write": [
+              "missing-counter",
+              "ttl-unrecorded"
+            ],
+            "output": [
+              "missing-counter"
+            ],
+            "uncached_input": [
+              "missing-counter"
+            ]
+          },
+          "models": [
+            {
+              "effective": "2026-01-01",
+              "id": "claude-fixture",
+              "source": "fixture"
+            }
+          ],
+          "schema": "tapes-price-table/1"
+        }
+      ],
+      "consumption": null,
+      "whole": {
+        "at_least": 0.0005379,
+        "at_most": 0.0006369,
+        "currency": "USD",
+        "kind": "list-price-estimate",
+        "measurement_completeness": {
+          "cache_read": [
+            "missing-counter"
+          ],
+          "cache_write": [
+            "missing-counter",
+            "ttl-unrecorded"
+          ],
+          "output": [
+            "missing-counter"
+          ],
+          "uncached_input": [
+            "missing-counter"
+          ]
+        },
+        "models": [
+          {
+            "effective": "2026-01-01",
+            "id": "claude-fixture",
+            "source": "fixture"
+          }
+        ],
+        "schema": "tapes-price-table/1"
+      }
+    }
+  },
+  "codex-resumed/40000000-0000-7000-8000-000000000001": {
+    "bounded": {
+      "by_model": [
+        null
+      ],
+      "consumption": null,
+      "whole": null
+    },
+    "session": null,
+    "whole": {
+      "by_model": [
+        null
+      ],
+      "consumption": null,
+      "whole": null
+    }
+  },
+  "codex-resumed/40000000-0000-7000-8000-000000000002": {
+    "bounded": {
+      "by_model": [
+        null
+      ],
+      "consumption": null,
+      "whole": null
+    },
+    "session": null,
+    "whole": {
+      "by_model": [
+        null
+      ],
+      "consumption": null,
+      "whole": null
+    }
+  },
+  "codex/00000000-0000-0000-0000-000000000001": {
+    "bounded": {
+      "by_model": [
+        {
+          "amount": 0.0032,
+          "currency": "USD",
+          "kind": "list-price-estimate",
+          "measurement_completeness": {
+            "cache_write": [
+              "missing-counter"
+            ],
+            "uncached_input": [
+              "missing-counter"
+            ]
+          },
+          "models": [
+            {
+              "effective": "2026-01-02",
+              "id": "gpt-fixture",
+              "source": "fixture"
+            }
+          ],
+          "schema": "tapes-price-table/1"
+        }
+      ],
+      "consumption": null,
+      "whole": {
+        "amount": 0.0036,
+        "currency": "USD",
+        "kind": "list-price-estimate",
+        "models": [
+          {
+            "effective": "2026-01-02",
+            "id": "gpt-fixture",
+            "source": "fixture"
+          }
+        ],
+        "schema": "tapes-price-table/1"
+      }
+    },
+    "session": {
+      "amount": 0.0036,
+      "currency": "USD",
+      "kind": "list-price-estimate",
+      "models": [
+        {
+          "effective": "2026-01-02",
+          "id": "gpt-fixture",
+          "source": "fixture"
+        }
+      ],
+      "schema": "tapes-price-table/1"
+    },
+    "whole": {
+      "by_model": [
+        {
+          "amount": 0.0032,
+          "currency": "USD",
+          "kind": "list-price-estimate",
+          "measurement_completeness": {
+            "cache_write": [
+              "missing-counter"
+            ],
+            "uncached_input": [
+              "missing-counter"
+            ]
+          },
+          "models": [
+            {
+              "effective": "2026-01-02",
+              "id": "gpt-fixture",
+              "source": "fixture"
+            }
+          ],
+          "schema": "tapes-price-table/1"
+        }
+      ],
+      "consumption": null,
+      "whole": {
+        "amount": 0.0036,
+        "currency": "USD",
+        "kind": "list-price-estimate",
+        "models": [
+          {
+            "effective": "2026-01-02",
+            "id": "gpt-fixture",
+            "source": "fixture"
+          }
+        ],
+        "schema": "tapes-price-table/1"
+      }
+    }
+  },
+  "codex/10000000-0000-0000-0000-000000000002": {
+    "bounded": {
+      "by_model": null,
+      "consumption": null,
+      "whole": null
+    },
+    "session": null,
+    "whole": {
+      "by_model": null,
+      "consumption": null,
+      "whole": null
+    }
+  },
+  "codex/10000000-0000-0000-0000-000000000003": {
+    "bounded": {
+      "by_model": null,
+      "consumption": null,
+      "whole": null
+    },
+    "session": null,
+    "whole": {
+      "by_model": null,
+      "consumption": null,
+      "whole": null
+    }
+  },
+  "codex/20000000-0000-0000-0000-000000000004": {
+    "bounded": {
+      "by_model": null,
+      "consumption": null,
+      "whole": null
+    },
+    "session": null,
+    "whole": {
+      "by_model": null,
+      "consumption": null,
+      "whole": null
+    }
+  },
+  "codex/30000000-0000-0000-0000-000000000005": {
+    "bounded": {
+      "by_model": null,
+      "consumption": null,
+      "whole": null
+    },
+    "session": null,
+    "whole": {
+      "by_model": null,
+      "consumption": null,
+      "whole": null
+    }
+  },
+  "codex/50000000-0000-7000-8000-000000000006": {
+    "bounded": {
+      "by_model": [
+        null
+      ],
+      "consumption": null,
+      "whole": null
+    },
+    "session": null,
+    "whole": {
+      "by_model": [
+        null
+      ],
+      "consumption": null,
+      "whole": null
+    }
+  },
+  "codex/60000000-0000-0000-0000-000000000007": {
+    "bounded": {
+      "by_model": [
+        null,
+        null
+      ],
+      "consumption": null,
+      "whole": null
+    },
+    "session": null,
+    "whole": {
+      "by_model": [
+        null,
+        null
+      ],
+      "consumption": null,
+      "whole": null
+    }
+  },
+  "pi-active-consumption/active-consumption": {
+    "bounded": {
+      "by_model": null,
+      "consumption": null,
+      "whole": null
+    },
+    "session": null,
+    "whole": {
+      "by_model": null,
+      "consumption": null,
+      "whole": null
+    }
+  },
+  "pi/malformed": {
+    "bounded": {
+      "by_model": [
+        null
+      ],
+      "consumption": null,
+      "whole": null
+    },
+    "session": null,
+    "whole": {
+      "by_model": [
+        null
+      ],
+      "consumption": null,
+      "whole": null
+    }
+  },
+  "pi/session-model-split": {
+    "bounded": {
+      "by_model": [
+        {
+          "at_least": 0.0000954,
+          "at_most": 0.0001004,
+          "currency": "USD",
+          "kind": "list-price-estimate",
+          "measurement_completeness": {
+            "cache_write": [
+              "ttl-unrecorded"
+            ]
+          },
+          "models": [
+            {
+              "effective": "2026-01-04",
+              "id": "pi-model-a",
+              "source": "fixture"
+            }
+          ],
+          "schema": "tapes-price-table/1"
+        },
+        null,
+        null
+      ],
+      "consumption": null,
+      "whole": {
+        "at_least": 0.0000954,
+        "at_most": 0.0001004,
+        "currency": "USD",
+        "kind": "list-price-estimate",
+        "measurement_completeness": {
+          "cache_read": [
+            "unlisted-model"
+          ],
+          "cache_write": [
+            "unlisted-model",
+            "ttl-unrecorded"
+          ],
+          "output": [
+            "unlisted-model"
+          ],
+          "uncached_input": [
+            "unlisted-model"
+          ]
+        },
+        "models": [
+          {
+            "effective": "2026-01-04",
+            "id": "pi-model-a",
+            "source": "fixture"
+          }
+        ],
+        "schema": "tapes-price-table/1"
+      }
+    },
+    "session": {
+      "at_least": 0.0000954,
+      "at_most": 0.0001004,
+      "currency": "USD",
+      "kind": "list-price-estimate",
+      "measurement_completeness": {
+        "cache_read": [
+          "unlisted-model"
+        ],
+        "cache_write": [
+          "unlisted-model",
+          "ttl-unrecorded"
+        ],
+        "output": [
+          "unlisted-model"
+        ],
+        "uncached_input": [
+          "unlisted-model"
+        ]
+      },
+      "models": [
+        {
+          "effective": "2026-01-04",
+          "id": "pi-model-a",
+          "source": "fixture"
+        }
+      ],
+      "schema": "tapes-price-table/1"
+    },
+    "whole": {
+      "by_model": [
+        {
+          "at_least": 0.0000954,
+          "at_most": 0.0001004,
+          "currency": "USD",
+          "kind": "list-price-estimate",
+          "measurement_completeness": {
+            "cache_write": [
+              "ttl-unrecorded"
+            ]
+          },
+          "models": [
+            {
+              "effective": "2026-01-04",
+              "id": "pi-model-a",
+              "source": "fixture"
+            }
+          ],
+          "schema": "tapes-price-table/1"
+        },
+        null,
+        null
+      ],
+      "consumption": null,
+      "whole": {
+        "at_least": 0.0000954,
+        "at_most": 0.0001004,
+        "currency": "USD",
+        "kind": "list-price-estimate",
+        "measurement_completeness": {
+          "cache_read": [
+            "unlisted-model"
+          ],
+          "cache_write": [
+            "unlisted-model",
+            "ttl-unrecorded"
+          ],
+          "output": [
+            "unlisted-model"
+          ],
+          "uncached_input": [
+            "unlisted-model"
+          ]
+        },
+        "models": [
+          {
+            "effective": "2026-01-04",
+            "id": "pi-model-a",
+            "source": "fixture"
+          }
+        ],
+        "schema": "tapes-price-table/1"
+      }
+    }
+  },
+  "pi/session-pi": {
+    "bounded": {
+      "by_model": [
+        {
+          "amount": 0.0006824,
+          "currency": "USD",
+          "kind": "list-price-estimate",
+          "measurement_completeness": {
+            "cache_read": [
+              "missing-counter"
+            ],
+            "cache_write": [
+              "missing-counter",
+              "missing-price"
+            ],
+            "output": [
+              "missing-counter"
+            ],
+            "uncached_input": [
+              "missing-counter"
+            ]
+          },
+          "models": [
+            {
+              "effective": "2026-01-02",
+              "id": "gpt-fixture",
+              "source": "fixture"
+            }
+          ],
+          "schema": "tapes-price-table/1"
+        }
+      ],
+      "consumption": {
+        "amount": 0.0234824,
+        "currency": "USD",
+        "kind": "list-price-estimate",
+        "measurement_completeness": {
+          "cache_read": [
+            "missing-counter"
+          ],
+          "cache_write": [
+            "missing-counter",
+            "missing-price"
+          ],
+          "output": [
+            "missing-counter"
+          ],
+          "uncached_input": [
+            "missing-counter"
+          ]
+        },
+        "models": [
+          {
+            "effective": "2026-01-02",
+            "id": "gpt-fixture",
+            "source": "fixture"
+          }
+        ],
+        "schema": "tapes-price-table/1"
+      },
+      "whole": {
+        "amount": 0.0006824,
+        "currency": "USD",
+        "kind": "list-price-estimate",
+        "measurement_completeness": {
+          "cache_read": [
+            "missing-counter"
+          ],
+          "cache_write": [
+            "missing-counter",
+            "missing-price"
+          ],
+          "output": [
+            "missing-counter"
+          ],
+          "uncached_input": [
+            "missing-counter"
+          ]
+        },
+        "models": [
+          {
+            "effective": "2026-01-02",
+            "id": "gpt-fixture",
+            "source": "fixture"
+          }
+        ],
+        "schema": "tapes-price-table/1"
+      }
+    },
+    "session": {
+      "amount": 0.0006824,
+      "currency": "USD",
+      "kind": "list-price-estimate",
+      "measurement_completeness": {
+        "cache_read": [
+          "missing-counter"
+        ],
+        "cache_write": [
+          "missing-counter",
+          "missing-price"
+        ],
+        "output": [
+          "missing-counter"
+        ],
+        "uncached_input": [
+          "missing-counter"
+        ]
+      },
+      "models": [
+        {
+          "effective": "2026-01-02",
+          "id": "gpt-fixture",
+          "source": "fixture"
+        }
+      ],
+      "schema": "tapes-price-table/1"
+    },
+    "whole": {
+      "by_model": [
+        {
+          "amount": 0.0006824,
+          "currency": "USD",
+          "kind": "list-price-estimate",
+          "measurement_completeness": {
+            "cache_read": [
+              "missing-counter"
+            ],
+            "cache_write": [
+              "missing-counter",
+              "missing-price"
+            ],
+            "output": [
+              "missing-counter"
+            ],
+            "uncached_input": [
+              "missing-counter"
+            ]
+          },
+          "models": [
+            {
+              "effective": "2026-01-02",
+              "id": "gpt-fixture",
+              "source": "fixture"
+            }
+          ],
+          "schema": "tapes-price-table/1"
+        }
+      ],
+      "consumption": {
+        "amount": 0.0234824,
+        "currency": "USD",
+        "kind": "list-price-estimate",
+        "measurement_completeness": {
+          "cache_read": [
+            "missing-counter"
+          ],
+          "cache_write": [
+            "missing-counter",
+            "missing-price"
+          ],
+          "output": [
+            "missing-counter"
+          ],
+          "uncached_input": [
+            "missing-counter"
+          ]
+        },
+        "models": [
+          {
+            "effective": "2026-01-02",
+            "id": "gpt-fixture",
+            "source": "fixture"
+          }
+        ],
+        "schema": "tapes-price-table/1"
+      },
+      "whole": {
+        "amount": 0.0006824,
+        "currency": "USD",
+        "kind": "list-price-estimate",
+        "measurement_completeness": {
+          "cache_read": [
+            "missing-counter"
+          ],
+          "cache_write": [
+            "missing-counter",
+            "missing-price"
+          ],
+          "output": [
+            "missing-counter"
+          ],
+          "uncached_input": [
+            "missing-counter"
+          ]
+        },
+        "models": [
+          {
+            "effective": "2026-01-02",
+            "id": "gpt-fixture",
+            "source": "fixture"
+          }
+        ],
+        "schema": "tapes-price-table/1"
+      }
+    }
+  },
+  "pi/session-turn-durations": {
+    "bounded": {
+      "by_model": [
+        {
+          "amount": 0.0005,
+          "currency": "USD",
+          "kind": "list-price-estimate",
+          "models": [
+            {
+              "effective": "2026-01-04",
+              "id": "pi-model-a",
+              "source": "fixture"
+            }
+          ],
+          "schema": "tapes-price-table/1"
+        }
+      ],
+      "consumption": {
+        "amount": 0.0005,
+        "currency": "USD",
+        "kind": "list-price-estimate",
+        "models": [
+          {
+            "effective": "2026-01-04",
+            "id": "pi-model-a",
+            "source": "fixture"
+          }
+        ],
+        "schema": "tapes-price-table/1"
+      },
+      "whole": {
+        "amount": 0.0005,
+        "currency": "USD",
+        "kind": "list-price-estimate",
+        "models": [
+          {
+            "effective": "2026-01-04",
+            "id": "pi-model-a",
+            "source": "fixture"
+          }
+        ],
+        "schema": "tapes-price-table/1"
+      }
+    },
+    "session": {
+      "amount": 0.0005,
+      "currency": "USD",
+      "kind": "list-price-estimate",
+      "models": [
+        {
+          "effective": "2026-01-04",
+          "id": "pi-model-a",
+          "source": "fixture"
+        }
+      ],
+      "schema": "tapes-price-table/1"
+    },
+    "whole": {
+      "by_model": [
+        {
+          "amount": 0.0005,
+          "currency": "USD",
+          "kind": "list-price-estimate",
+          "models": [
+            {
+              "effective": "2026-01-04",
+              "id": "pi-model-a",
+              "source": "fixture"
+            }
+          ],
+          "schema": "tapes-price-table/1"
+        }
+      ],
+      "consumption": {
+        "amount": 0.0005,
+        "currency": "USD",
+        "kind": "list-price-estimate",
+        "models": [
+          {
+            "effective": "2026-01-04",
+            "id": "pi-model-a",
+            "source": "fixture"
+          }
+        ],
+        "schema": "tapes-price-table/1"
+      },
+      "whole": {
+        "amount": 0.0005,
+        "currency": "USD",
+        "kind": "list-price-estimate",
+        "models": [
+          {
+            "effective": "2026-01-04",
+            "id": "pi-model-a",
+            "source": "fixture"
+          }
+        ],
+        "schema": "tapes-price-table/1"
+      }
+    }
+  }
+}

@@ -73,6 +73,16 @@ pub enum MeasurementReason {
     /// Cache writes recorded no TTL, so their price lies between the
     /// 5-minute and the 1-hour price.
     TtlUnrecorded,
+    /// A price-table term priced by the request, by its prompt size or its
+    /// time, may apply to usage whose requests the figure does not hold one
+    /// by one, so its price lies between the term's rates.
+    RequestTermsUnknown,
+    /// A long-context surcharge applies to per-token billing alone, and the
+    /// recording establishes neither per-token nor subscription billing, so
+    /// its price lies between the base and the surcharged rates.
+    BillingUnestablished,
+    /// No row of the model's prices is in effect at the request's time.
+    OutsideValidity,
 }
 
 impl MeasurementReason {
@@ -108,6 +118,9 @@ impl MeasurementReason {
             Self::Undetermined => "undetermined",
             Self::UnlistedModel => "unlisted-model",
             Self::TtlUnrecorded => "ttl-unrecorded",
+            Self::RequestTermsUnknown => "request-terms-unknown",
+            Self::BillingUnestablished => "billing-unestablished",
+            Self::OutsideValidity => "outside-validity",
         }
     }
 }

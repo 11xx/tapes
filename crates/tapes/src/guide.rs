@@ -350,7 +350,7 @@ READ A RECORDING ON ANOTHER MACHINE
 PROBE BEFORE EXPORTING
   tapes show <id> --tail 40      A window, costing no bundle.
   tapes show <id> --turn-chars 2000  Cap each turn’s readable text, naming omitted characters.
-  tapes show <id> --json         tapes-session/20 turns, typed context events, and bounded read, graph, artifact, terminal, and recorded launch evidence.
+  tapes show <id> --json         tapes-session/21 turns, typed context events, and bounded read, graph, artifact, terminal, and recorded launch evidence.
   tapes show <id> --exchange     Operator and assistant turns only, timestamps and ordinals kept; the name for --only operator,assistant.
   tapes show <id> --only operator --origin person  Operator turns with recorded person origin.
   tapes show <id> --omit tool    Every turn but tool calls and results; --only and --omit take kind labels, and export takes both.
@@ -506,7 +506,7 @@ PROBE BEFORE EXPORTING
   Claude, Codex, or Pi recording twice, pairing past the read bound and
   writing each event as it pairs, with the same filters and counts.
 
-  usage answers where a session's quota went as tapes-usage/15: its recorded
+  usage answers where a session's quota went as tapes-usage/16: its recorded
   launch mode when known, tokens, cost, accounting, turns, and any by-model attribution the source can
   support — Claude's recorded cost-state or, for a request sum, the model
   each request names; Codex's request observations; or pi's per-message
@@ -564,7 +564,7 @@ PROBE BEFORE EXPORTING
   unrecognized usage the read cannot place for or against a span is counted
   under `unplaced` and qualifies it `unreadable-record`, `stopped-attempt` or
   `unrecognized-usage`, so a span the read could not cover is never complete.
-  The library answers several spans in one pass, as tapes-usage-spans/4: a
+  The library answers several spans in one pass, as tapes-usage-spans/5: a
   figure per span, the `remainder`, and the `whole` in the spans' basis. A
   whole-recording read asked for its timeline also carries, without another
   pass, the request timeline the spans count (every counted request with its
@@ -604,11 +604,64 @@ PROBE BEFORE EXPORTING
   share of output and priced as output. A category a row leaves out has no
   price. Unknown keys, negative or non-finite prices, a non-date
   `effective`, and an id or alias named twice refuse, naming the entry.
+  tapes-price-table/2 takes the same rows, and a row may add terms priced
+  by the request:
+
+      schema = "tapes-price-table/2"
+      [[models]]
+      ...                              # as in /1
+      effective_from = 2027-01-01      # optional: a date (midnight UTC) or
+      effective_until = 2027-07-01     # an instant with an offset; until is
+                                       # exclusive
+      [models.long_context]
+      above_prompt_tokens = 272000     # or from_prompt_tokens: at or above
+      prompt_tokens = ["uncached_input", "cache_read", "cache_write"]
+      billing = ["api"]                # optional; "api", "subscription"
+      multipliers = { uncached_input = 2.0, cache_read = 2.0, output = 1.5 }
+                                       # or per_million = { ... }
+      [[models.time_of_day]]
+      from = "16:30"                   # UTC, inclusive
+      until = "00:30"                  # UTC, exclusive; past midnight when
+      per_million = { ... }            # not after `from`
+
+  A long-context term charges the whole request, every category, once the
+  request's prompt — the sum of the categories `prompt_tokens` names —
+  passes the threshold (`above_prompt_tokens`, more than; or
+  `from_prompt_tokens`, at least): its `per_million` replaces the request's
+  rates, or its `multipliers` scale them, a category it leaves out keeping
+  its rate. It applies to the billing it names, per-token API billing
+  unless it says otherwise. A time-of-day window's rates replace the row's
+  for a request made inside it. A row is in effect from `effective_from`
+  until `effective_until`; one id may name several rows whose windows do
+  not meet, so a dated price change is two rows. A /1 table refuses these
+  keys, and prices exactly as it always has. A figure is priced by these
+  terms request by request where its reader kept its requests — a Claude,
+  Codex or pi session, span or window share, and an OpenCode span or window
+  share, up to 100000 per read — and they sum to no more than the figure;
+  what they leave of it, or a figure whose requests are not known one by
+  one (a recorded total such as a Claude cost-state or an OpenCode session
+  row), is priced between every rate it could pay, as `at_least` and
+  `at_most`, its categories qualified request-terms-unknown, and never
+  reads complete. A request no row of its model is in effect for is
+  unpriced, its categories outside-validity. Each recording's billing comes
+  from what it records, named with its evidence in the estimate's
+  `billing` wherever a used row has a long-context term: a Codex
+  `rate_limits` window reporting a used percent is a ChatGPT plan's quota,
+  a subscription; a Codex `model_provider` other than `openai` bills per
+  token; a Claude `api-request` record carrying the `oauth-2025-04-20`
+  beta, or a `quotaLimits` refusal naming a plan quota, is a subscription,
+  and one sent without that beta bills per token; a pi or OpenCode
+  recording names no billing. A span or window share is billed as its
+  session is. A subscription pays no
+  long-context surcharge; billing the recording establishes neither way is
+  priced between base and surcharged rates, its categories
+  billing-unestablished.
   Each figure — a session, each model of `by_model`, a pi `consumption`, a
   span, a summary group, total or partition — gains `list_price_estimate`
   beside the harness's own `cost`, never in its place: `kind:
   list-price-estimate`, `currency`, an `amount`, the table `schema`, each
-  row it used in `models` (`id`, `effective`, `source`), and
+  row it used in `models` (`id`, `effective`, `source`), `billing` where
+  a used row has a long-context term, and
   `measurement_completeness` over uncached_input, cache_read, cache_write and
   output. A cache write that recorded no TTL is priced between the 5-minute
   and 1-hour prices, as `at_least` and `at_most` in place of `amount`, and
@@ -635,8 +688,9 @@ PROBE BEFORE EXPORTING
   in `list_price_withheld`: mixed-accounting, identity-unestablished, or
   exact-union for related sessions added by their events' union. Text output
   prints `list-price estimate <amount> <currency> (from the price table:
-  ...)` with a completeness line, and a summary adds a LIST-PRICE ESTIMATE
-  column when a table is given.
+  ...)` with a completeness line and a `list-price billing:` line per
+  billing it names, and a summary adds a LIST-PRICE ESTIMATE column when a
+  table is given.
   `usage --window FROM..TO` (RFC 3339, either end open) answers the
   consumption inside a window over the sessions the scope and filters select.
   --since and --until select sessions by their newest activity; --window cuts
@@ -873,8 +927,12 @@ PROBE BEFORE EXPORTING
   unestablished-scope, incomplete-attribution (a model split whose read could
   not attribute every request), undetermined (the convention cannot
   derive the category), and, for list-price estimates, unlisted-model (the
-  price table has no row for the model) and ttl-unrecorded (cache writes with
-  no TTL, priced between bounds). A figure that counted events and measured nothing
+  price table has no row for the model), ttl-unrecorded (cache writes with
+  no TTL, priced between bounds), request-terms-unknown (a term priced by
+  the request may apply to usage whose requests are not known one by one),
+  billing-unestablished (a long-context surcharge for per-token billing, on
+  a recording that establishes no billing) and outside-validity (no row of
+  the model is in effect at the request's time). A figure that counted events and measured nothing
   qualifies every counter missing-counter and keeps every other reason that
   applies to it: its scope, pricing and coverage. A counter it does not name is complete; a present
   amount it names is a known subtotal. Usage, consumption, model splits,
@@ -1127,7 +1185,7 @@ PROBE BEFORE EXPORTING
   idle_threshold. These figures cover the same read window as recorded span.
   Selection totals sum active milliseconds and stretches across readable sessions.
 
-  stats counts what one recording holds as tapes-stats/15: turns by kind
+  stats counts what one recording holds as tapes-stats/16: turns by kind
   beside the kinds the harness can record at all, so a zero for a kind it
   cannot record is not read as none observed, tool
   calls by name with their paired durations and error counts, unpaired calls
@@ -1196,7 +1254,7 @@ PROBE BEFORE EXPORTING
   its own first activity and not the parent's launch.
 
   Given a scope or a listing filter instead of a session, usage answers that
-  whole selection as tapes-usage-summary/12, using the flags list and export
+  whole selection as tapes-usage-summary/13, using the flags list and export
   take and grouping by --by (harness and model unless told otherwise). It sums
   the counters the listing already carries, so nothing is re-read. Read
   counted before a sum: it says how many of a group's sessions recorded that
@@ -1438,7 +1496,7 @@ CONTINUE A COLD SESSION
   tapes brief <id> --tail 20 --json
 
   A continuation has two halves. brief is the transcript's half, as
-  tapes-brief/13: where the session stopped, the directory it worked in and the
+  tapes-brief/14: where the session stopped, the directory it worked in and the
   commit that directory sits on, the tool calls the read never saw a result
   for, the children whose outcome its store does not record, and the last few
   operator and assistant turns, each cut at 600 characters. --tail sets how

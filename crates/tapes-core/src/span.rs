@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use crate::measurement::{MeasurementCompleteness, MeasurementReason};
 use crate::model::Session;
 
-pub const SPANS_SCHEMA: &str = "tapes-usage-spans/4";
+pub const SPANS_SCHEMA: &str = "tapes-usage-spans/5";
 
 /// An instant a time span is bounded by.
 pub type Instant = DateTime<Utc>;
@@ -413,6 +413,32 @@ pub struct SpanSessions {
     /// read counted more than [`MAX_TIMELINE_REQUESTS`].
     pub timeline: Option<RequestTimeline>,
     pub notes: Vec<String>,
+}
+
+impl SpanSessions {
+    /// Give every figure the billing `session`'s recording establishes:
+    /// each is part of the one recording.
+    pub(crate) fn billed_as(mut self, session: &Session) -> Self {
+        let billing = session
+            .usage_detail
+            .as_ref()
+            .and_then(|detail| detail.billing.clone());
+        if let Some(billing) = billing {
+            for figure in self
+                .spans
+                .iter_mut()
+                .map(|(figure, _)| figure)
+                .chain([&mut self.remainder.0, &mut self.whole])
+            {
+                figure
+                    .usage_detail
+                    .get_or_insert_with(Default::default)
+                    .billing
+                    .get_or_insert_with(|| billing.clone());
+            }
+        }
+        self
+    }
 }
 
 impl SpanSessions {

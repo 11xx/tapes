@@ -11,7 +11,7 @@ use crate::event::ToolEvent;
 use crate::measurement::{MeasurementCompleteness, MeasurementReason};
 use crate::usage::UsageDetail;
 
-pub const SESSION_SCHEMA: &str = "tapes-session/20";
+pub const SESSION_SCHEMA: &str = "tapes-session/21";
 /// How the recording identifies the session's launch mode.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]

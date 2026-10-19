@@ -153,7 +153,7 @@ fn a_window_sums_the_spans_inside_it() {
     )
     .unwrap();
     let summary = serde_json::to_value(summary).unwrap();
-    assert_eq!(summary["schema"], "tapes-usage-summary/12");
+    assert_eq!(summary["schema"], "tapes-usage-summary/13");
     assert_eq!(summary["window"]["boundary"], "requested");
     let mut expected = BTreeMap::new();
     for id in [

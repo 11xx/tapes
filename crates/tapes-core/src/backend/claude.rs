@@ -242,6 +242,8 @@ impl ClaudeBackend {
                 failures: requests.failures,
                 unrecognized_usage: requests.unrecognized_usage,
                 placeholders: requests.placeholders,
+                uses: requests.uses,
+                billing: requests.billing,
             },
             basis,
             tokens.as_ref(),
@@ -1257,6 +1259,8 @@ impl ClaudeRecords {
                 failures: requests.failures,
                 unrecognized_usage: requests.unrecognized_usage,
                 placeholders: requests.placeholders,
+                uses: requests.uses,
+                billing: requests.billing,
             },
             basis,
             tokens.as_ref(),
@@ -1508,6 +1512,8 @@ struct RequestFacts {
     failures: usize,
     unrecognized_usage: usize,
     placeholders: usize,
+    uses: crate::pricing::RequestUses,
+    billing: Option<crate::pricing::Billing>,
 }
 
 fn claude_usage_detail(
@@ -1526,6 +1532,8 @@ fn claude_usage_detail(
         failures,
         unrecognized_usage,
         placeholders,
+        uses,
+        billing,
     } = facts;
     let mut detail = if basis == AccountingBasis::RecordedTotal {
         cost_state.map(cost_state_detail).unwrap_or_default()
@@ -1572,6 +1580,8 @@ fn claude_usage_detail(
     detail.requests = requests;
     detail.request_failures = failures;
     detail.unrecognized_usage = unrecognized_usage;
+    detail.request_uses = Some(uses).filter(|uses| !uses.is_empty());
+    detail.billing = billing;
     detail.into_option()
 }
 
@@ -1718,10 +1728,68 @@ struct RequestTokens {
     unrecognized_usage: usize,
     /// Assistant records that stand in for a request without being one.
     placeholders: usize,
+    /// Requests without a request id, kept for pricing as they are read.
+    unkeyed_uses: crate::pricing::RequestUses,
+    billing: ClaudeBilling,
+}
+
+/// The OAuth beta Claude Code sends on every request of a subscription
+/// sign-in, and never with an API key.
+const OAUTH_BETA: &str = "oauth-2025-04-20";
+
+/// What a Claude recording says about its billing: whether its recorded
+/// API requests carried the OAuth beta, and a plan quota a refused request
+/// named.
+#[derive(Default)]
+struct ClaudeBilling {
+    oauth: bool,
+    without_oauth: bool,
+    quota: Option<String>,
+}
+
+impl ClaudeBilling {
+    fn observe(&mut self, value: &Value) {
+        if value["type"] == "api-request" {
+            if let Some(betas) = value["params"]["betas"].as_array() {
+                if betas.iter().any(|beta| beta == OAUTH_BETA) {
+                    self.oauth = true;
+                } else {
+                    self.without_oauth = true;
+                }
+            }
+        }
+        if self.quota.is_none() {
+            self.quota = value["quotaLimits"]["rateLimitType"]
+                .as_str()
+                .filter(|kind| kind.len() <= 32)
+                .map(str::to_owned);
+        }
+    }
+
+    /// A subscription sign-in sends the OAuth beta and has plan quotas; an
+    /// API key sends requests without it. Both, or neither, establish
+    /// nothing.
+    fn finish(self) -> Option<crate::pricing::Billing> {
+        use crate::pricing::Billing;
+        match (self.oauth, self.without_oauth, self.quota) {
+            (true, false, _) => Some(Billing::subscription(format!(
+                "claude api-request carries the `{OAUTH_BETA}` beta"
+            ))),
+            (false, false, Some(quota)) => Some(Billing::subscription(format!(
+                "claude quotaLimits refusal names the `{quota}` plan quota"
+            ))),
+            (false, true, None) => Some(Billing::api(format!(
+                "claude api-request without the `{OAUTH_BETA}` beta"
+            ))),
+            _ => None,
+        }
+    }
 }
 
 struct RequestWitness {
     tokens: Tokens,
+    /// When the request's first record was written.
+    at: Option<chrono::DateTime<chrono::Utc>>,
     /// The model the request's first record names.
     model: Option<Model>,
     dimensions: RequestDimensions,
@@ -1733,9 +1801,15 @@ const MAX_TTL_WITNESSES: usize = 16;
 const TOOL_DIMENSIONS: [&str; 2] = ["web_search_requests", "web_fetch_requests"];
 
 impl RequestWitness {
-    fn new(tokens: Tokens, model: Option<Model>, dimensions: RequestDimensions) -> Self {
+    fn new(
+        tokens: Tokens,
+        at: Option<chrono::DateTime<chrono::Utc>>,
+        model: Option<Model>,
+        dimensions: RequestDimensions,
+    ) -> Self {
         let mut witness = Self {
             tokens,
+            at,
             model,
             dimensions,
             ttl_witnesses: BTreeMap::new(),
@@ -1910,6 +1984,10 @@ struct RequestUsage {
     failures: usize,
     unrecognized_usage: usize,
     placeholders: usize,
+    /// Each counted request, kept for price-table terms priced by the
+    /// request.
+    uses: crate::pricing::RequestUses,
+    billing: Option<crate::pricing::Billing>,
 }
 
 impl RequestTokens {
@@ -1917,10 +1995,24 @@ impl RequestTokens {
         let mut totals = self.unkeyed;
         let mut by_model = self.unkeyed_by_model;
         let mut dimensions = self.dimensions;
+        let mut uses = self.unkeyed_uses;
+        let convention = crate::model::TokenConvention::of("claude");
         for witness in self.requests.into_values() {
             let model = witness.model.clone();
+            let at = witness.at;
             let (tokens, request_dimensions) = witness.finish();
             let request_writes = request_dimensions.cache_write;
+            match convention {
+                Some(convention) => {
+                    let disjoint = crate::model::DisjointTokens::from_native(
+                        &tokens,
+                        convention,
+                        Some(&request_writes),
+                    );
+                    uses.push(at, model.as_ref(), &disjoint);
+                }
+                None => uses.discard(),
+            }
             dimensions.add(request_dimensions);
             totals.add(
                 tokens.input,
@@ -1971,10 +2063,13 @@ impl RequestTokens {
             unrecognized_usage: self.unrecognized_usage,
             placeholders: self.placeholders,
             dimensions: (dimensions.requests > 0).then_some(dimensions),
+            uses,
+            billing: self.billing.finish(),
         }
     }
 
     fn add(&mut self, value: &Value) {
+        self.billing.observe(value);
         if claude_unread_usage(value) {
             self.unrecognized_usage += 1;
             return;
@@ -2027,12 +2122,32 @@ impl RequestTokens {
                 None => {
                     self.requests.insert(
                         request_id.to_owned(),
-                        RequestWitness::new(tokens, claude_model(value), dimensions),
+                        RequestWitness::new(
+                            tokens,
+                            timestamp(&value["timestamp"]),
+                            claude_model(value),
+                            dimensions,
+                        ),
                     );
                     return;
                 }
             },
             None => {
+                match crate::model::TokenConvention::of("claude") {
+                    Some(convention) => {
+                        let disjoint = crate::model::DisjointTokens::from_native(
+                            &tokens,
+                            convention,
+                            Some(&dimensions.cache_write),
+                        );
+                        self.unkeyed_uses.push(
+                            timestamp(&value["timestamp"]),
+                            claude_model(value).as_ref(),
+                            &disjoint,
+                        );
+                    }
+                    None => self.unkeyed_uses.discard(),
+                }
                 self.unkeyed.add(
                     tokens.input,
                     tokens.output,

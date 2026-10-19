@@ -1956,11 +1956,29 @@ struct MessageSum {
     model: Option<Model>,
     /// The model ids the summed messages name.
     models: HashSet<String>,
+    /// Each summed message, kept for price-table terms priced by the
+    /// request.
+    uses: crate::pricing::RequestUses,
 }
 
 impl MessageSum {
     fn add(&mut self, message: &Value) {
         let tokens = api_tokens(message);
+        let model = message["model"]["id"].as_str().map(|id| Model {
+            id: id.to_owned(),
+            variant: message["model"]["variant"].as_str().map(str::to_owned),
+        });
+        match (&tokens, crate::model::TokenConvention::of("opencode")) {
+            (Some(tokens), Some(convention)) => {
+                let disjoint = crate::model::DisjointTokens::from_native(tokens, convention, None);
+                self.uses.push(
+                    epoch_millis(&message["time"]["created"]),
+                    model.as_ref(),
+                    &disjoint,
+                );
+            }
+            _ => self.uses.discard(),
+        }
         let counter = |read: fn(&Tokens) -> Option<u64>| tokens.as_ref().and_then(read);
         self.tokens.add(
             counter(|tokens| tokens.input),
@@ -1980,12 +1998,9 @@ impl MessageSum {
             }
             None => self.cost_measurement.missing += 1,
         }
-        if let Some(id) = message["model"]["id"].as_str() {
-            self.models.insert(id.to_owned());
-            self.model = Some(Model {
-                id: id.to_owned(),
-                variant: message["model"]["variant"].as_str().map(str::to_owned),
-            });
+        if let Some(model) = model {
+            self.models.insert(model.id.clone());
+            self.model = Some(model);
         }
     }
 
@@ -2027,6 +2042,7 @@ impl MessageSum {
             measurement_incomplete: known_subtotal_notes(&measurement_coverage),
             measurement_coverage,
             unrecognized_usage: self.unrecognized_usage,
+            request_uses: Some(self.uses).filter(|uses| !uses.is_empty()),
             ..crate::usage::UsageDetail::default()
         };
         if self.unreadable {

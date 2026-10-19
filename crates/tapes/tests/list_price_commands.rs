@@ -154,22 +154,22 @@ fn each_command_carries_the_estimate_with_a_table() {
     for (what, estimate) in answers(&store, true) {
         assert_estimate(&estimate, what);
     }
-    assert_eq!(store.json(&["list"], true)["schema"], "tapes-list/10");
+    assert_eq!(store.json(&["list"], true)["schema"], "tapes-list/11");
     assert_eq!(
         store.json(&["show", SESSION], true)["schema"],
-        "tapes-session/20"
+        "tapes-session/21"
     );
     assert_eq!(
         store.json(&["stats", SESSION], true)["schema"],
-        "tapes-stats/15"
+        "tapes-stats/16"
     );
     assert_eq!(
         store.json(&["brief", SESSION], true)["schema"],
-        "tapes-brief/13"
+        "tapes-brief/14"
     );
     assert_eq!(
         store.json(&["usage", "--global"], true)["schema"],
-        "tapes-usage-summary/12"
+        "tapes-usage-summary/13"
     );
 }
 
