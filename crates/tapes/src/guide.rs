@@ -868,7 +868,8 @@ PROBE BEFORE EXPORTING
   gives the lanes' tokens. Lanes come from up to 10000 sessions per harness,
   not --limit's default of 20; an explicit --limit keeps that many in --sort
   order, a parent reached only through its subagents taking a place after the
-  listed sessions. `lanes_read` names the limit, whether it is the caller's,
+  listed sessions, and none when --since does not keep it. `lanes_read`
+  names the limit, whether it is the caller's,
   the sessions the lookback may hold that it left out (`left_out_by_limit`),
   and `lane_bound_reached` when a listing stopped at its bound, so sessions
   past it went unread. The answer is tapes-allowance-rates/5.

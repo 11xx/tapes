@@ -2255,7 +2255,9 @@ fn read_window_keeping(
     // through children written since the window opened, and since the
     // caller's --since where that is later. Every other filter, --search
     // included, still applies to the parent itself.
-    let mut through_children = HashSet::new();
+    // The children of each parent reached through them, by the parent's
+    // place in `sessions`.
+    let mut reached_children = HashMap::new();
     if let Some(from) = bounds.from {
         let written_since = selection
             .filters
@@ -2289,7 +2291,9 @@ fn read_window_keeping(
                 });
                 if !placed
                     || !admits.matches(&parent)
-                    || sessions.iter().any(|session| session.id == parent.id)
+                    || sessions.iter().any(|session| {
+                        session.harness() == parent.harness() && session.id == parent.id
+                    })
                 {
                     continue;
                 }
@@ -2314,6 +2318,20 @@ fn read_window_keeping(
                         }
                     }
                 }
+                // A recording's modification time only nominates a parent;
+                // the caller's --since keeps the family when one of its
+                // recordings has activity since it, as it keeps a listed
+                // session by its own, and a family it rejects takes no
+                // place under a keep bound.
+                let (children, failures) = backend.window_children(&parent);
+                unreadable.extend(failures);
+                if selection.filters.since.is_some_and(|since| {
+                    !std::iter::once(&parent)
+                        .chain(&children)
+                        .any(|member| member.last_activity_at.is_some_and(|last| last >= since))
+                }) {
+                    continue;
+                }
                 // Under a keep bound, a parent takes a place after the
                 // listed sessions of its harness.
                 if let Some(keep) = keep {
@@ -2324,7 +2342,7 @@ fn read_window_keeping(
                     }
                     *count += 1;
                 }
-                through_children.insert(parent.id.clone());
+                reached_children.insert(sessions.len(), children);
                 sessions.push(parent);
                 origins.push(origin);
             }
@@ -2336,28 +2354,17 @@ fn read_window_keeping(
     let mut parents = Vec::new();
     let mut empty = 0;
     for (index, session) in sessions.iter().enumerate() {
-        if !through_children.contains(&session.id)
-            && !bounds.may_hold(session.started_at, session.last_activity_at)
-        {
+        let nominated = reached_children.remove(&index);
+        if nominated.is_none() && !bounds.may_hold(session.started_at, session.last_activity_at) {
             continue;
         }
         let backend = backends[origins[index]].as_ref();
-        let reached = through_children.contains(&session.id);
-        let (children, failures) = backend.window_children(session);
-        unreadable.extend(failures);
-        // A recording's modification time only nominates a parent reached
-        // through its children; the caller's --since keeps the family when
-        // one of its recordings has activity since it, as it keeps a listed
-        // session by its own.
-        if reached
-            && selection.filters.since.is_some_and(|since| {
-                !std::iter::once(session)
-                    .chain(&children)
-                    .any(|member| member.last_activity_at.is_some_and(|last| last >= since))
-            })
-        {
-            continue;
-        }
+        let reached = nominated.is_some();
+        let children = nominated.unwrap_or_else(|| {
+            let (children, failures) = backend.window_children(session);
+            unreadable.extend(failures);
+            children
+        });
         for member in std::iter::once(session.clone()).chain(children) {
             let read = backend
                 .stream_transcript(&member, None, &mut |_| Ok(()))

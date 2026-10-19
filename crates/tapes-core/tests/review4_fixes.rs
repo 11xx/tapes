@@ -1,15 +1,20 @@
 //! A span bills as its whole recording even where a bounded read of it
-//! would establish a billing.
+//! would establish a billing, and a recorded-activity --since rejects a
+//! parent reached through its children before the parent takes a place
+//! under --limit.
 
-use std::fs;
+use std::fs::{self, File};
 use std::path::PathBuf;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use agent_tapes_core::backend::{pi::PiBackend, Backend};
+use agent_tapes_core::backend::{claude::ClaudeBackend, pi::PiBackend, Backend};
 use agent_tapes_core::pricing::{self, PriceTable};
 use agent_tapes_core::span::SpanBounds;
+use agent_tapes_core::usage::GroupBy;
+use agent_tapes_core::window::{QuotaKind, WindowBounds};
 use agent_tapes_core::{
-    usage_full_with_backends, usage_spans_with_backends, usage_with_backends, Selection,
+    allowance_rates_with_backends, usage_full_with_backends, usage_spans_with_backends,
+    usage_with_backends, ListFilters, Selection, SessionSelection,
 };
 use chrono::{DateTime, Utc};
 use serde_json::{json, Value};
@@ -162,4 +167,109 @@ fn a_span_is_no_more_certain_of_billing_than_its_whole_recording() {
         );
         assert!(estimate.get("amount").is_none(), "{read}: {estimate:#}");
     }
+}
+
+// --- --since before --limit for parents reached through children ------------
+
+fn subagent_record(parent: &str, agent: Option<&str>, entry: &str, stamp: &str) -> Value {
+    let mut record = json!({
+        "sessionId": parent, "cwd": "/fixtures/project", "entrypoint": "cli", "version": "2.1.0",
+        "type": "assistant", "uuid": entry, "parentUuid": null, "requestId": format!("req_{entry}"),
+        "timestamp": stamp,
+        "message": {"id": format!("msg_{entry}"), "role": "assistant", "model": "claude-fixture",
+            "usage": {"input_tokens": 10, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0,
+                      "output_tokens": 50},
+            "stop_reason": "end_turn", "content": [{"type": "text", "text": "Done."}]}
+    });
+    if let Some(agent) = agent {
+        record["isSidechain"] = json!(true);
+        record["agentId"] = json!(agent);
+    }
+    record
+}
+
+/// A quiet parent, its records ending at 09:59, whose one subagent's
+/// records end at `child_end`; the parent's recording is stamped `age`
+/// before now, so a younger parent is nominated first.
+fn quiet_parent(store: &Store, parent: &str, agent: &str, child_end: &str, age: u64) {
+    let recording = store.write(
+        &format!("project/{parent}.jsonl"),
+        &[subagent_record(
+            parent,
+            None,
+            &format!("{parent}-1"),
+            "2026-01-12T09:59:00Z",
+        )],
+    );
+    store.write(
+        &format!("project/{parent}/subagents/agent-{agent}.jsonl"),
+        &[subagent_record(
+            parent,
+            Some(agent),
+            &format!("{agent}-1"),
+            child_end,
+        )],
+    );
+    File::options()
+        .write(true)
+        .open(recording)
+        .unwrap()
+        .set_modified(SystemTime::now() - Duration::from_secs(age))
+        .unwrap();
+}
+
+/// Claim: under --since 10:30 and --limit 1, allowance rates over
+/// 10:00..11:00 read the subagent of quiet parent Q, whose records end at
+/// 10:45, and leave nothing out by the limit, though quiet parent P, whose
+/// subagent's records end at 10:05, is nominated first. Rejects counting P
+/// under the limit before --since rejects it, which leaves Q out by the
+/// limit and neither family read.
+#[test]
+fn a_parent_since_rejects_takes_no_place_under_the_limit() {
+    let store = Store::new("since-limit");
+    let (p, q) = (
+        "30000000-0000-4000-8000-0000000000e1",
+        "30000000-0000-4000-8000-0000000000e2",
+    );
+    let (p_agent, q_agent) = ("a000000000000000e1", "a000000000000000e2");
+    quiet_parent(&store, p, p_agent, "2026-01-12T10:05:00Z", 60);
+    quiet_parent(&store, q, q_agent, "2026-01-12T10:45:00Z", 120);
+    let selection = SessionSelection {
+        harness: Some("claude"),
+        limit: Some(1),
+        filters: ListFilters {
+            since: Some(at("2026-01-12T10:30:00Z")),
+            ..ListFilters::default()
+        },
+        ..Default::default()
+    };
+    let rates = serde_json::to_value(
+        allowance_rates_with_backends(
+            &[Box::new(ClaudeBackend::new(&store.0)) as Box<dyn Backend>],
+            &selection,
+            &[GroupBy::Session],
+            WindowBounds {
+                from: Some(at("2026-01-12T10:00:00Z")),
+                to: Some(at("2026-01-12T11:00:00Z")),
+            },
+            QuotaKind::Primary,
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert!(
+        rates["lanes_read"].get("left_out_by_limit").is_none(),
+        "{rates:#}"
+    );
+    let absent = rates["excluded_absent"]
+        .as_array()
+        .unwrap_or_else(|| panic!("{rates:#}"))
+        .iter()
+        .map(|lane| lane.as_str().unwrap().to_owned())
+        .collect::<Vec<_>>();
+    assert_eq!(absent.len(), 1, "{rates:#}");
+    assert!(
+        absent[0].starts_with(&format!("{q}::{q_agent} (claude)")),
+        "{rates:#}"
+    );
 }
