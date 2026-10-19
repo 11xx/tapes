@@ -387,7 +387,7 @@ fn rates_over(pools: &[(&'static str, &'static str, f64)]) -> Value {
 #[test]
 fn allowance_rates_keep_plans_sharing_a_window_length_apart() {
     let rates = rates_over(&[("codex", "pro", 10.0), ("codex", "plus", 1.0)]);
-    assert_eq!(rates["schema"], "tapes-allowance-rates/5", "{rates:#}");
+    assert_eq!(rates["schema"], "tapes-allowance-rates/6", "{rates:#}");
     let groups = rates["groups"].as_array().unwrap();
     assert_eq!(groups.len(), 2, "{rates:#}");
     for (plan, percent) in [("pro", 10.0), ("plus", 1.0)] {

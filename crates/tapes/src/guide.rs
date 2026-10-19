@@ -744,10 +744,11 @@ PROBE BEFORE EXPORTING
   and whether the store holds it, and its disjoint categories. --limit still
   bounds the sessions each harness lists. `--by session`, `launch` and
   `parent` group any summary by session, by recorded launch, and under the
-  root of each session's named parents. A parent group's key names that root
-  by `parent` and `parent_harness`: an id names a session only within one
-  harness, so roots sharing an id in different harnesses stay apart, and a
-  table writes such an id as `<harness>:<id>`.
+  root of each session's named parents. A session group's key names its
+  session by `session` and `session_harness`, and a parent group's names its
+  root by `parent` and `parent_harness`: an id names a session only within
+  one harness, so sessions or roots sharing an id in different harnesses
+  stay apart, and a table writes such an id as `<harness>:<id>`.
   A recording names its parent in one of four ways, and a share's
   `parent_evidence` says which: `subagent` (a Claude subagent's recording,
   kept under its parent's), `spawn` (a Codex child's `parent_thread_id`),
@@ -875,7 +876,7 @@ PROBE BEFORE EXPORTING
   names the limit, whether it is the caller's,
   the sessions the lookback may hold that it left out (`left_out_by_limit`),
   and `lane_bound_reached` when a listing stopped at its bound, so sessions
-  past it went unread. The answer is tapes-allowance-rates/5.
+  past it went unread. The answer is tapes-allowance-rates/6.
   `usage --forecast MODEL[#VARIANT]=LANES,... --harness H [--concurrency N]
   [--quota primary|secondary]` sizes a planned mix against that window, as
   tapes-allowance-forecast/2. It reads the rates grouped by model and
@@ -1306,7 +1307,7 @@ PROBE BEFORE EXPORTING
   its own first activity and not the parent's launch.
 
   Given a scope or a listing filter instead of a session, usage answers that
-  whole selection as tapes-usage-summary/14, using the flags list and export
+  whole selection as tapes-usage-summary/15, using the flags list and export
   take and grouping by --by (harness and model unless told otherwise). It sums
   the counters the listing already carries, so nothing is re-read. Read
   counted before a sum: it says how many of a group's sessions recorded that

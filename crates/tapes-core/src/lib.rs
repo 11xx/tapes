@@ -61,7 +61,7 @@ pub mod workset;
 
 pub const LIST_SCHEMA: &str = "tapes-list/11";
 pub const EXPORT_MANIFEST_SCHEMA: &str = "tapes-export-manifest/7";
-pub const USAGE_SUMMARY_SCHEMA: &str = "tapes-usage-summary/14";
+pub const USAGE_SUMMARY_SCHEMA: &str = "tapes-usage-summary/15";
 /// Number of normalized turns a `list --search` query inspects per session.
 /// Keeping this fixed makes the listing's cost predictable for callers.
 pub const LIST_SEARCH_TAIL: usize = 32;

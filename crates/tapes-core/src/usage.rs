@@ -1338,7 +1338,8 @@ pub enum GroupBy {
     /// one — a reasoning effort, a service tier.
     Variant,
     Directory,
-    /// The session itself, by id.
+    /// The session itself. Its value is the session's `<harness>:<id>`, since
+    /// an id names a session only within one harness.
     Session,
     /// Whether a person or a program launched the session, as its recording
     /// states it.
@@ -1388,7 +1389,7 @@ impl GroupBy {
 
     pub(crate) fn of_in(self, session: &Session, relations: &SessionRelations) -> Option<String> {
         match self {
-            Self::Session => Some(session.id.clone()),
+            Self::Session => Some(format!("{}:{}", session.harness(), session.id)),
             Self::Launch => session.launch.map(|launch| launch.as_str().to_owned()),
             Self::Parent => {
                 let (harness, id) = relations.root_of(session.harness(), &session.id);
@@ -1420,8 +1421,12 @@ pub struct GroupKey {
     pub variant: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub directory: Option<String>,
+    /// The id of the group's session.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session: Option<String>,
+    /// The harness whose session `session` is.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_harness: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub launch: Option<String>,
     /// The id of the session the group's chains of parents end at.
@@ -1764,18 +1769,28 @@ pub(crate) fn group_key(by: &[GroupBy], values: &[Option<String>]) -> GroupKey {
             GroupBy::Model => &mut key.model,
             GroupBy::Variant => &mut key.variant,
             GroupBy::Directory => &mut key.directory,
-            GroupBy::Session => &mut key.session,
             GroupBy::Launch => &mut key.launch,
+            GroupBy::Session => {
+                (key.session_harness, key.session) = harness_and_id(value.as_deref());
+                continue;
+            }
             GroupBy::Parent => {
-                let root = value.as_deref().and_then(|root| root.split_once(':'));
-                key.parent_harness = root.map(|(harness, _)| harness.to_owned());
-                key.parent = root.map(|(_, id)| id.to_owned());
+                (key.parent_harness, key.parent) = harness_and_id(value.as_deref());
                 continue;
             }
         };
         slot.clone_from(value);
     }
     key
+}
+
+/// The harness and id of a `<harness>:<id>` group value. A harness name holds
+/// no colon, so the id is everything after the first.
+fn harness_and_id(value: Option<&str>) -> (Option<String>, Option<String>) {
+    value
+        .and_then(|value| value.split_once(':'))
+        .map(|(harness, id)| (harness.to_owned(), id.to_owned()))
+        .unzip()
 }
 
 /// One counter being summed: the running total and how many sessions have

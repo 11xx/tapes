@@ -182,7 +182,7 @@ fn the_smoothed_lane_estimate_spreads_each_periods_rise() {
         "--by",
         "session",
     ]);
-    assert_eq!(rates["schema"], "tapes-allowance-rates/5");
+    assert_eq!(rates["schema"], "tapes-allowance-rates/6");
     for (id, smoothed, low, high, interval) in
         [(A, 3.25, 2.25, 4.25, 4.25), (B, 3.75, 2.75, 4.75, 2.75)]
     {

@@ -1590,7 +1590,7 @@ enum Command {
     /// --quota-window answer a selection's consumption inside a window of
     /// time, each session contributing its own span inside it. A scope or
     /// listing filter instead answers the whole selection as
-    /// tapes-usage-summary/14, grouped by --by and summing each counter over
+    /// tapes-usage-summary/15, grouped by --by and summing each counter over
     /// the sessions that recorded it. Native tokens follow each harness's own
     /// convention and add only within it; the disjoint categories (uncached
     /// input, cache read, cache write by TTL, output) add across harnesses.
@@ -1659,7 +1659,9 @@ enum Command {
         /// [default: harness,model]. `model` is the model id and `variant`
         /// the reasoning effort or tier qualifying it, so a session that
         /// recorded no variant is grouped under that absence. `session`
-        /// groups each session alone, and `launch` by the interactive or
+        /// groups each session alone, its key naming it as `session` and
+        /// `session_harness` so sessions sharing an id in different harnesses
+        /// are different groups, and `launch` by the interactive or
         /// headless launch its recording states. `parent` groups a session
         /// under the end of the chain of parents its recordings name: a Codex
         /// spawn's `parent_thread_id`, a declared fork origin (Codex, pi,
@@ -1671,7 +1673,8 @@ enum Command {
         /// own under that id, never joined to a guessed one. A group's key
         /// names its root as `parent` and `parent_harness`, so roots sharing
         /// an id in different harnesses are different groups, and the table
-        /// writes such an id as `<harness>:<id>`. A launched session is never an
+        /// writes a session or root id more than one harness holds as
+        /// `<harness>:<id>`. A launched session is never an
         /// overlap group with its launcher.
         #[arg(
             long,
@@ -2010,7 +2013,7 @@ enum Command {
         /// identity-unestablished, exact-union).
         #[arg(long, value_name = "FILE")]
         prices: Option<PathBuf>,
-        /// Render the versioned tapes-usage/16 object, or tapes-usage-summary/14
+        /// Render the versioned tapes-usage/16 object, or tapes-usage-summary/15
         /// for a selection, as JSON. `session.model_observation` says
         /// whether more than one model and effort was observed (`mixed`) and
         /// whether a gap, partial read or budget kept the split incomplete
@@ -5958,7 +5961,7 @@ fn render_allowance_rates(
     ]);
     out.push_str(&columns.join("\t"));
     out.push('\n');
-    let shared = shared_parents(rates.groups.iter().map(|group| &group.key));
+    let shared = SharedKeyIds::of(rates.groups.iter().map(|group| &group.key));
     for group in &rates.groups {
         let mut cells = by
             .iter()
@@ -6148,7 +6151,7 @@ fn render_usage_summary(summary: &UsageSummary, by: &[GroupBy]) -> String {
     } else {
         "\n"
     });
-    let shared = shared_parents(summary.groups.iter().map(|group| &group.key));
+    let shared = SharedKeyIds::of(summary.groups.iter().map(|group| &group.key));
     for group in &summary.groups {
         let mut cells: Vec<String> = by
             .iter()
@@ -6397,34 +6400,54 @@ fn key_column(dimension: &GroupBy) -> &'static str {
     }
 }
 
-/// A group's cell for one dimension. A parent whose id `shared` holds is
-/// qualified with its harness.
-fn key_cell(
-    key: &GroupKey,
-    dimension: GroupBy,
-    shared: &std::collections::HashSet<&str>,
-) -> Option<String> {
+/// A group's cell for one dimension. A session or parent whose id `shared`
+/// holds for that dimension is qualified with its harness.
+fn key_cell(key: &GroupKey, dimension: GroupBy, shared: &SharedKeyIds<'_>) -> Option<String> {
     match dimension {
         GroupBy::Harness => key.harness.clone(),
         GroupBy::Model => key.model.clone(),
         GroupBy::Variant => key.variant.clone(),
         GroupBy::Directory => key.directory.clone(),
-        GroupBy::Session => key.session.clone(),
+        GroupBy::Session => {
+            let harness = key.session_harness.as_deref().unwrap_or_default();
+            Some(session_cell(
+                harness,
+                key.session.as_deref()?,
+                &shared.sessions,
+            ))
+        }
         GroupBy::Launch => key.launch.clone(),
         GroupBy::Parent => {
             let harness = key.parent_harness.as_deref().unwrap_or_default();
-            Some(session_cell(harness, key.parent.as_deref()?, shared))
+            Some(session_cell(
+                harness,
+                key.parent.as_deref()?,
+                &shared.parents,
+            ))
         }
     }
 }
 
-/// The parent ids that name roots of more than one harness among the groups.
-fn shared_parents<'a>(
-    keys: impl Iterator<Item = &'a GroupKey>,
-) -> std::collections::HashSet<&'a str> {
-    shared_ids(
-        keys.filter_map(|key| Some((key.parent_harness.as_deref()?, key.parent.as_deref()?))),
-    )
+/// The session and parent ids that name sessions of more than one harness
+/// among the groups.
+struct SharedKeyIds<'a> {
+    sessions: std::collections::HashSet<&'a str>,
+    parents: std::collections::HashSet<&'a str>,
+}
+
+impl<'a> SharedKeyIds<'a> {
+    fn of(keys: impl Iterator<Item = &'a GroupKey> + Clone) -> Self {
+        Self {
+            sessions: shared_ids(keys.clone().filter_map(|key| {
+                Some((key.session_harness.as_deref()?, key.session.as_deref()?))
+            })),
+            parents: shared_ids(
+                keys.filter_map(|key| {
+                    Some((key.parent_harness.as_deref()?, key.parent.as_deref()?))
+                }),
+            ),
+        }
+    }
 }
 
 /// The ids among these sessions that name sessions of more than one harness.
