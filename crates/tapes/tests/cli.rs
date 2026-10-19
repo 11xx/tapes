@@ -1911,7 +1911,7 @@ fn supplied_single_conversation_reaches_list_show_and_export() {
         String::from_utf8_lossy(&listed.stderr)
     );
     let listed: Value = serde_json::from_slice(&listed.stdout).unwrap();
-    assert_eq!(listed["schema"], "tapes-list/9");
+    assert_eq!(listed["schema"], "tapes-list/10");
     assert_eq!(listed["sessions"].as_array().unwrap().len(), 1);
     assert_eq!(listed["sessions"][0]["id"], "supplied-1");
     assert_eq!(listed["sessions"][0]["source"]["kind"], "supplied-export");
@@ -2722,7 +2722,7 @@ fn supplied_zip_reads_conversations_and_retains_associated_report_evidence() {
         .unwrap();
     assert!(brief.status.success());
     let brief: Value = serde_json::from_slice(&brief.stdout).unwrap();
-    assert_eq!(brief["schema"], "tapes-brief/12");
+    assert_eq!(brief["schema"], "tapes-brief/13");
     let grouped_brief_part = brief["tail"]
         .as_array()
         .unwrap()
@@ -2830,7 +2830,7 @@ fn supplied_citation_descriptors_are_bounded_in_show_and_export() {
         .unwrap();
     assert!(shown.status.success());
     let shown: Value = serde_json::from_slice(&shown.stdout).unwrap();
-    assert_eq!(shown["schema"], "tapes-session/19");
+    assert_eq!(shown["schema"], "tapes-session/20");
     let citation = &shown["artifacts"][0]["citations"][0];
     assert_eq!(citation["uri"]["chars"], 5_024);
     assert_eq!(
@@ -2871,7 +2871,7 @@ fn supplied_citation_descriptors_are_bounded_in_show_and_export() {
         })
         .unwrap();
     let bundle_json: Value = serde_json::from_slice(&fs::read(json_path).unwrap()).unwrap();
-    assert_eq!(bundle_json["schema"], "tapes-session/19");
+    assert_eq!(bundle_json["schema"], "tapes-session/20");
     assert_eq!(
         bundle_json["artifacts"][0]["citations"][0]["title"]["text"]
             .as_str()
@@ -7206,7 +7206,7 @@ fn show_full_streams_a_claude_recording_past_the_read_bound() {
 
     let json: Value =
         serde_json::from_str(&stdout(&["show", "full-claude", "--full", "--json"])).unwrap();
-    assert_eq!(json["schema"], "tapes-session/19");
+    assert_eq!(json["schema"], "tapes-session/20");
     assert_eq!(json["turns"].as_array().unwrap().len(), 50);
     assert_eq!(json["turns"][0]["text"], "opening request");
     assert_eq!(json["turns"][49]["ordinal"], 49);
@@ -8320,7 +8320,7 @@ fn usage_help_names_the_schema_and_what_the_figures_mean() {
         "{help}"
     );
     assert!(help.contains("quota is a separate fact"), "{help}");
-    assert!(help.contains("tapes-usage-summary/11"), "{help}");
+    assert!(help.contains("tapes-usage-summary/12"), "{help}");
     assert!(help.contains("--by"), "{help}");
 }
 
@@ -8715,7 +8715,7 @@ fn usage_summary_sums_the_listings_own_counters_and_counts_the_sessions_behind_t
     );
     let value: Value = serde_json::from_slice(&output.stdout).unwrap();
 
-    assert_eq!(value["schema"], "tapes-usage-summary/11");
+    assert_eq!(value["schema"], "tapes-usage-summary/12");
     assert_eq!(value["selection"]["scope"], "global");
     assert_eq!(value["selection"]["harness"], "codex");
     assert_eq!(value["scanned"], 4);
@@ -9273,7 +9273,7 @@ fn stats_help_names_the_schema_and_what_the_figures_cover() {
     let output = tapes().args(["stats", "--help"]).output().unwrap();
     assert!(output.status.success());
     let help = String::from_utf8_lossy(&output.stdout);
-    assert!(help.contains("tapes-stats/14"), "{help}");
+    assert!(help.contains("tapes-stats/15"), "{help}");
     assert!(help.contains("complete pairs only"), "{help}");
     assert!(
         help.contains("share of recorded token counts rather than of cost"),
@@ -9927,7 +9927,7 @@ fn stats_json_counts_a_chosen_recording_exactly() {
     assert_eq!(
         comparable,
         serde_json::json!({
-            "schema": "tapes-stats/14",
+            "schema": "tapes-stats/15",
             "session": {
                 "id": id,
                 "source": {
@@ -10257,7 +10257,7 @@ fn brief_help_names_the_schema_and_the_half_it_reads() {
     assert!(output.status.success());
     let help = String::from_utf8_lossy(&output.stdout);
 
-    assert!(help.contains("tapes-brief/12"), "{help}");
+    assert!(help.contains("tapes-brief/13"), "{help}");
     assert!(help.contains("reads the recording alone"), "{help}");
     assert!(help.contains("--tail <N>"), "{help}");
     assert!(help.contains("[default: 12]"), "{help}");
@@ -10316,7 +10316,7 @@ fn brief_renders_the_continuation_in_reading_order() {
     assert!(narrow.contains("[assistant #4"), "{narrow}");
 
     let value: Value = serde_json::from_slice(&run(&["brief", id, "--json"])).unwrap();
-    assert_eq!(value["schema"], "tapes-brief/12");
+    assert_eq!(value["schema"], "tapes-brief/13");
     assert_eq!(value["session"]["id"], id);
     assert_eq!(value["working_set"]["directory_exists"], false);
     assert!(value["working_set"].get("git").is_none(), "{value}");
@@ -12115,7 +12115,7 @@ fn list_remote_answers_from_the_replica_and_names_it() {
         String::from_utf8_lossy(&output.stderr)
     );
     let value: Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(value["schema"], "tapes-list/9");
+    assert_eq!(value["schema"], "tapes-list/10");
     let sessions = value["sessions"].as_array().unwrap();
     assert_eq!(sessions.len(), 1, "{value}");
     assert_eq!(sessions[0]["id"], CODEX_ONE_ID);
@@ -12207,7 +12207,7 @@ fn show_remote_never_joins_the_local_liveness_registry() {
         String::from_utf8_lossy(&output.stderr)
     );
     let value: Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(value["schema"], "tapes-session/19");
+    assert_eq!(value["schema"], "tapes-session/20");
     assert_eq!(value["session"]["id"], CODEX_ONE_ID);
     assert_eq!(value["session"]["source"]["replica"], "replica-host");
     assert!(
@@ -12259,8 +12259,8 @@ fn remote_older_reports_keep_written_zero_as_unpriced_evidence() {
         "location":{"locator":"/fixtures/recording.jsonl"}},
         "tokens":{"input":40,"output":60}, "cost":{"usd":0},
         "accounting":{"basis":"summed-requests","coverage":"session"}});
-    let list = serde_json::json!({"schema":"tapes-list/9","sort":"newest","sessions":[native.clone()],"scanned":1});
-    let show = serde_json::json!({"schema":"tapes-session/19","session":native,"turns":[],"truncated":false});
+    let list = serde_json::json!({"schema":"tapes-list/10","sort":"newest","sessions":[native.clone()],"scanned":1});
+    let show = serde_json::json!({"schema":"tapes-session/20","session":native,"turns":[],"truncated":false});
     let transport = root.path().join("ssh");
     fs::write(&transport, format!("#!/bin/sh\ncase \"$2\" in *list*) cat <<'JSON'\n{list}\nJSON\n;; *) cat <<'JSON'\n{show}\nJSON\n;; esac\n")).unwrap();
     fs::set_permissions(&transport, fs::Permissions::from_mode(0o700)).unwrap();
@@ -12403,8 +12403,8 @@ fn a_replica_that_cannot_answer_names_the_cause_and_the_destination() {
         (
             "schema",
             "#!/bin/sh\necho '{\"schema\":\"tapes-list/999\",\"sort\":\"newest\",\"sessions\":[],\"unavailable\":[],\"unreadable\":[],\"unsearched\":[],\"scanned\":0,\"scan_truncated\":false}'\nexit 0\n",
-            "unsupported remote schema tapes-list/999; this reader reads tapes-list/9",
-            "unsupported remote schema tapes-list/999; this reader reads tapes-session/19",
+            "unsupported remote schema tapes-list/999; this reader reads tapes-list/10",
+            "unsupported remote schema tapes-list/999; this reader reads tapes-session/20",
         ),
         (
             "empty",
@@ -12630,7 +12630,7 @@ fn export_remote_runs_the_replica_export_and_tags_every_path() {
         .unwrap(),
     )
     .unwrap();
-    assert_eq!(written["schema"], "tapes-session/19");
+    assert_eq!(written["schema"], "tapes-session/20");
     assert!(
         !written["events"].as_array().unwrap().is_empty(),
         "the replica's export held no paired tool events: {written}"
@@ -13473,7 +13473,7 @@ fn claude_content_carriers_survive_cli_views_and_bundle_export() {
         })
         .unwrap();
     let bundle: Value = serde_json::from_slice(&fs::read(json_path).unwrap()).unwrap();
-    assert_eq!(bundle["schema"], "tapes-session/19");
+    assert_eq!(bundle["schema"], "tapes-session/20");
     assert_eq!(bundle["content"]["references"], 2);
 }
 
@@ -13569,7 +13569,7 @@ fn human_search_diagnostics_group_sessions_by_harness_and_reason() {
         "fold-search",
         r#"#!/bin/sh
 cat <<'JSON'
-{"schema":"tapes-list/9","sort":"newest","sessions":[],"unavailable":[],"unreadable":[],"unsearched":["codex session fixture-one: read failed","codex session fixture-two: read failed","claude session fixture-three: read failed"],"partial_search":["codex session fixture-four: partial coverage of the requested turn window","codex session fixture-five: partial coverage of the requested turn window"],"scanned":5,"scan_truncated":false}
+{"schema":"tapes-list/10","sort":"newest","sessions":[],"unavailable":[],"unreadable":[],"unsearched":["codex session fixture-one: read failed","codex session fixture-two: read failed","claude session fixture-three: read failed"],"partial_search":["codex session fixture-four: partial coverage of the requested turn window","codex session fixture-five: partial coverage of the requested turn window"],"scanned":5,"scan_truncated":false}
 JSON
 "#,
     );

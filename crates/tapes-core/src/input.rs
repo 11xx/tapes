@@ -1871,6 +1871,7 @@ fn parse_record_spanning(
         accounting: None,
         start_uncertain: false,
         usage_detail: None,
+        list_price_estimate: None,
     };
     if turns.is_empty() {
         notes.push("the selected source record has no readable canonical branch".to_owned());

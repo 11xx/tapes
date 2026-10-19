@@ -1141,6 +1141,13 @@ impl Session {
         completeness
     }
 
+    /// Set the session's `list_price_estimate` to its counters priced under
+    /// `table`, as its usage answer prices them; none when nothing could be
+    /// priced.
+    pub fn price(&mut self, table: &PriceTable) {
+        self.list_price_estimate = self.list_price(table).and_then(EstimateSum::finish);
+    }
+
     /// The session priced under `table`, as its usage answer prices it.
     /// Absent when no model is known to have served it.
     pub fn list_price(&self, table: &PriceTable) -> Option<EstimateSum> {
@@ -1498,6 +1505,10 @@ pub struct SessionUsageFigure {
     pub measurement_incomplete: Vec<String>,
     #[serde(skip_serializing_if = "MeasurementCompleteness::is_empty")]
     pub measurement_completeness: MeasurementCompleteness,
+    /// The session's figure priced by the summary's price table, as its own
+    /// usage answer prices it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub list_price_estimate: Option<ListPriceEstimate>,
 }
 
 impl From<&Session> for SessionUsageFigure {
@@ -1517,6 +1528,7 @@ impl From<&Session> for SessionUsageFigure {
                 .map(|detail| detail.measurement_incomplete.clone())
                 .unwrap_or_default(),
             measurement_completeness: session.measurement_completeness(),
+            list_price_estimate: None,
         }
     }
 }
@@ -1980,6 +1992,7 @@ mod tests {
             start_uncertain: false,
             occurrence: None,
             usage_detail: None,
+            list_price_estimate: None,
         }
     }
 
@@ -2565,7 +2578,10 @@ fn summarize(
     let mut position = std::collections::BTreeMap::new();
     for index in members {
         let session = &sessions[*index];
-        position.insert(*index, domains.add(session, &accounting_key(session)));
+        position.insert(
+            *index,
+            domains.add(session, &accounting_key(session), prices),
+        );
         if !bucketed.contains(index) {
             tally.add(session);
             if let Some(table) = prices {
@@ -2635,8 +2651,17 @@ struct Domains {
 
 impl Domains {
     /// Record `session`, answering the position of its figure.
-    fn add(&mut self, session: &Session, key: &(String, String)) -> usize {
-        self.figures.push(SessionUsageFigure::from(session));
+    fn add(
+        &mut self,
+        session: &Session,
+        key: &(String, String),
+        prices: Option<&PriceTable>,
+    ) -> usize {
+        let mut figure = SessionUsageFigure::from(session);
+        figure.list_price_estimate = prices
+            .and_then(|table| session.list_price(table))
+            .and_then(EstimateSum::finish);
+        self.figures.push(figure);
         if session
             .usage_detail
             .as_ref()

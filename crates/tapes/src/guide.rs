@@ -350,7 +350,7 @@ READ A RECORDING ON ANOTHER MACHINE
 PROBE BEFORE EXPORTING
   tapes show <id> --tail 40      A window, costing no bundle.
   tapes show <id> --turn-chars 2000  Cap each turn’s readable text, naming omitted characters.
-  tapes show <id> --json         tapes-session/19 turns, typed context events, and bounded read, graph, artifact, terminal, and recorded launch evidence.
+  tapes show <id> --json         tapes-session/20 turns, typed context events, and bounded read, graph, artifact, terminal, and recorded launch evidence.
   tapes show <id> --exchange     Operator and assistant turns only, timestamps and ordinals kept; the name for --only operator,assistant.
   tapes show <id> --only operator --origin person  Operator turns with recorded person origin.
   tapes show <id> --omit tool    Every turn but tool calls and results; --only and --omit take kind labels, and export takes both.
@@ -573,7 +573,14 @@ PROBE BEFORE EXPORTING
   100,000 requests or hands over more than 1,000,000 timed turns withholds
   both whole, with its reason, rather than keep part of them.
   Money beyond what a harness wrote comes from a price table the caller
-  supplies; tapes holds no prices. `usage --prices FILE` reads one, else the
+  supplies; tapes holds no prices. Every command that reports a session's
+  cost prices it the same way and puts `list_price_estimate` beside it:
+  `usage`, `list --json` and `show --json` (on each session), `stats` and
+  `brief` (in `usage`), and the per-session figures of a summary's overlap
+  groups. Text adds the estimate, labelled as one, only where it prints a
+  cost: `usage`, the `stats` usage block, and a summary's session figures.
+  A replica's answer under `--remote` is not priced. `--prices FILE` reads
+  a table, else the
   file `TAPES_PRICES` names, else `$XDG_CONFIG_HOME/tapes/prices.toml`
   (`~/.config/tapes/prices.toml` when that is unset). A table named by the
   flag or the variable that is missing or invalid refuses the command; an
@@ -1078,7 +1085,7 @@ PROBE BEFORE EXPORTING
   idle_threshold. These figures cover the same read window as recorded span.
   Selection totals sum active milliseconds and stretches across readable sessions.
 
-  stats counts what one recording holds as tapes-stats/14: turns by kind
+  stats counts what one recording holds as tapes-stats/15: turns by kind
   beside the kinds the harness can record at all, so a zero for a kind it
   cannot record is not read as none observed, tool
   calls by name with their paired durations and error counts, unpaired calls
@@ -1147,7 +1154,7 @@ PROBE BEFORE EXPORTING
   its own first activity and not the parent's launch.
 
   Given a scope or a listing filter instead of a session, usage answers that
-  whole selection as tapes-usage-summary/11, using the flags list and export
+  whole selection as tapes-usage-summary/12, using the flags list and export
   take and grouping by --by (harness and model unless told otherwise). It sums
   the counters the listing already carries, so nothing is re-read. Read
   counted before a sum: it says how many of a group's sessions recorded that
@@ -1389,7 +1396,7 @@ CONTINUE A COLD SESSION
   tapes brief <id> --tail 20 --json
 
   A continuation has two halves. brief is the transcript's half, as
-  tapes-brief/12: where the session stopped, the directory it worked in and the
+  tapes-brief/13: where the session stopped, the directory it worked in and the
   commit that directory sits on, the tool calls the read never saw a result
   for, the children whose outcome its store does not record, and the last few
   operator and assistant turns, each cut at 600 characters. --tail sets how

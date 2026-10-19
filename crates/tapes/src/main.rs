@@ -6,7 +6,7 @@ mod remote;
 mod self_token;
 
 use std::ffi::{OsStr, OsString};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use agent_tapes_core::brief::{Brief, OpenCall, OpenChild, DEFAULT_BRIEF_TAIL, TAIL_TEXT_CHARS};
 use agent_tapes_core::bundle::{Bundle, BundleFile, GitContext};
@@ -480,6 +480,42 @@ fn reject_installed_selection(
 }
 
 /// How much of each installed recording a transcript read takes.
+/// The price table a command prices its reported costs with.
+#[derive(Args, Clone, Debug, Default)]
+struct PriceArgs {
+    /// Price each figure this command reports a harness cost for with this
+    /// tapes-price-table/1 file, adding `list_price_estimate` beside that
+    /// cost, never in its place, exactly as `usage --prices` prices it.
+    /// Without the flag the table is the file TAPES_PRICES names, then
+    /// $XDG_CONFIG_HOME/tapes/prices.toml (or ~/.config/tapes/prices.toml);
+    /// with none, no estimate is given. A table named here or by
+    /// TAPES_PRICES that is missing or invalid refuses; an invalid default
+    /// table is reported on stderr and leaves the estimate absent. A
+    /// replica's answer under --remote is not priced.
+    #[arg(long, value_name = "FILE")]
+    prices: Option<PathBuf>,
+}
+
+impl PriceArgs {
+    /// The table to price with, as `usage` finds it.
+    fn table(&self) -> Result<Option<agent_tapes_core::pricing::PriceTable>> {
+        price_table(self.prices.as_deref())
+    }
+}
+
+/// The price table `named` or the environment selects, warning about an
+/// invalid default table, which leaves estimates absent.
+fn price_table(named: Option<&Path>) -> Result<Option<agent_tapes_core::pricing::PriceTable>> {
+    let prices = agent_tapes_core::pricing::lookup(named)?;
+    if let PriceLookup::DefaultInvalid { path, error } = &prices {
+        eprintln!(
+            "warning: the default price table {} is not used, so no list-price estimate is given: {error}",
+            path.display()
+        );
+    }
+    Ok(prices.table().cloned())
+}
+
 #[derive(Args, Clone, Copy, Debug, Default)]
 struct ReadArgs {
     /// Read at most this much from the end of each installed Claude, Codex,
@@ -1126,6 +1162,8 @@ enum Command {
         /// basis and coverage of any recorded cost or token counters.
         #[arg(long)]
         json: bool,
+        #[command(flatten)]
+        prices: PriceArgs,
         /// Answer from a named replica over ssh: run its own tapes with the
         /// same arguments and read its JSON. Every session then names that
         /// replica, its live state is whatever the replica reported, and
@@ -1202,6 +1240,8 @@ enum Command {
         /// assistant turns carry their record's model and effort (`variant`).
         #[arg(long)]
         json: bool,
+        #[command(flatten)]
+        prices: PriceArgs,
         /// Read the session from a named replica over ssh: run its own tapes
         /// with the same arguments and read its JSON. The session then names
         /// that replica, its live state is whatever the replica reported, and
@@ -1472,6 +1512,8 @@ enum Command {
         idle: i64,
         #[command(flatten)]
         read: ReadArgs,
+        #[command(flatten)]
+        prices: PriceArgs,
         /// Stream the whole recording instead of its bounded tail, twice: the
         /// first read counts turns and observes tool events, and the second
         /// replays it to pair and count them, so memory follows the calls
@@ -1482,7 +1524,7 @@ enum Command {
         /// updated in place and a second read may not repeat the first.
         #[arg(long, conflicts_with = "read_bytes")]
         full: bool,
-        /// Render the versioned tapes-stats/14 object, or tapes-stats-summary/8
+        /// Render the versioned tapes-stats/15 object, or tapes-stats-summary/8
         /// for a selection, as JSON. `warnings` names the limits of the read:
         /// `read-window`, `tail-window`, `kind-unknown`, `kind-undeclared` (a
         /// turn of a kind its harness declares it cannot record, so the
@@ -1507,7 +1549,7 @@ enum Command {
     /// --quota-window answer a selection's consumption inside a window of
     /// time, each session contributing its own span inside it. A scope or
     /// listing filter instead answers the whole selection as
-    /// tapes-usage-summary/11, grouped by --by and summing each counter over
+    /// tapes-usage-summary/12, grouped by --by and summing each counter over
     /// the sessions that recorded it. Native tokens follow each harness's own
     /// convention and add only within it; the disjoint categories (uncached
     /// input, cache read, cache write by TTL, output) add across harnesses.
@@ -1849,7 +1891,7 @@ enum Command {
         /// identity-unestablished, exact-union).
         #[arg(long, value_name = "FILE")]
         prices: Option<PathBuf>,
-        /// Render the versioned tapes-usage/15 object, or tapes-usage-summary/11
+        /// Render the versioned tapes-usage/15 object, or tapes-usage-summary/12
         /// for a selection, as JSON. `session.model_observation` says
         /// whether more than one model and effort was observed (`mixed`) and
         /// whether a gap, partial read or budget kept the split incomplete
@@ -1897,7 +1939,7 @@ enum Command {
         json: bool,
     },
     /// What a continuation of one session needs from its recording, as
-    /// tapes-brief/12: where the work stopped, the working directory and the
+    /// tapes-brief/13: where the work stopped, the working directory and the
     /// commit it sits on, the calls the read never saw a result for, the
     /// children whose outcome the store does not record, and a bounded tail
     /// of the exchange. It reads the recording alone and judges nothing —
@@ -1910,12 +1952,14 @@ enum Command {
         selection: SelectionArgs,
         #[command(flatten)]
         read: ReadArgs,
+        #[command(flatten)]
+        prices: PriceArgs,
         /// Render this many of the session's newest operator and assistant
         /// turns, each cut at 600 characters. Every other kind of turn stays
         /// out of the tail.
         #[arg(long, value_name = "N", default_value_t = DEFAULT_BRIEF_TAIL)]
         tail: usize,
-        /// Render the versioned tapes-brief/12 object as JSON. Each `in_flight`
+        /// Render the versioned tapes-brief/13 object as JSON. Each `in_flight`
         /// list holds at most 20 entries, with a note when the bound cut it.
         #[arg(long)]
         json: bool,
@@ -2347,6 +2391,7 @@ fn dispatch(cli: Cli) -> Result<()> {
             search_matches,
             input,
             json,
+            prices,
             remote,
         } => {
             input.validate_bulk()?;
@@ -2359,6 +2404,11 @@ fn dispatch(cli: Cli) -> Result<()> {
             }
             if remote.is_some() && input.native() {
                 return Err(anyhow!("--native-store conflicts with --remote"));
+            }
+            if remote.is_some() && prices.prices.is_some() {
+                return Err(anyhow!(
+                    "--prices prices a local read; a replica's answer under --remote is not priced"
+                ));
             }
             if let Some(destination) = remote.as_deref() {
                 let args = remote_list_args(&RemoteListQuery {
@@ -2452,6 +2502,12 @@ fn dispatch(cli: Cli) -> Result<()> {
                 liveness::annotate(&mut result.sessions);
                 result
             };
+            let mut result = result;
+            if let Some(table) = prices.table()? {
+                for session in &mut result.sessions {
+                    session.price(&table);
+                }
+            }
             if json {
                 print_json(&result, &input)?;
             } else {
@@ -2502,6 +2558,7 @@ fn dispatch(cli: Cli) -> Result<()> {
             kinds,
             full,
             json,
+            prices,
             remote,
         } => {
             selection.validate_input()?;
@@ -2519,6 +2576,11 @@ fn dispatch(cli: Cli) -> Result<()> {
             };
             if remote.is_some() && selection.input.native() {
                 return Err(anyhow!("--native-store conflicts with --remote"));
+            }
+            if remote.is_some() && prices.prices.is_some() {
+                return Err(anyhow!(
+                    "--prices prices a local read; a replica's answer under --remote is not priced"
+                ));
             }
             if let Some(destination) = remote.as_deref() {
                 let args =
@@ -2547,7 +2609,15 @@ fn dispatch(cli: Cli) -> Result<()> {
                          --scan-bytes, --decoded-bytes, and --record-bytes"
                     ));
                 }
-                return show_full(&selection, tail, turns, json, by_latest, turn_chars);
+                return show_full(
+                    &selection,
+                    tail,
+                    turns,
+                    json,
+                    by_latest,
+                    turn_chars,
+                    prices.table()?,
+                );
             }
             // A selection is cut from every turn the read reached, so its
             // window counts kept turns rather than turns of every kind.
@@ -2582,6 +2652,9 @@ fn dispatch(cli: Cli) -> Result<()> {
                 for turn in &mut transcript.turns {
                     turn.cap_text(limit);
                 }
+            }
+            if let Some(table) = prices.table()? {
+                transcript.session.price(&table);
             }
             if json {
                 print_json(&transcript, &selection.input)?;
@@ -2976,6 +3049,7 @@ fn dispatch(cli: Cli) -> Result<()> {
         Command::Stats {
             query,
             read,
+            prices,
             full,
             idle,
             json,
@@ -2993,17 +3067,25 @@ fn dispatch(cli: Cli) -> Result<()> {
             let latest_warnings = query.latest_warnings(&single_backends)?;
             print_selection_warnings(&latest_warnings);
             if let Some(one) = query.single() {
+                let prices = prices.table()?;
+                let prices = prices.as_ref();
                 let stats = if full {
-                    agent_tapes_core::stats_full_with_backends_and_idle(
+                    agent_tapes_core::stats_full_priced_with_backends(
                         &query.input.backends()?,
                         one,
                         idle,
+                        prices,
                     )?
                 } else if query.input.supplied() {
                     let backends = query.input.backends()?;
-                    agent_tapes_core::stats_with_backends_and_idle(&backends, one, idle)?
+                    agent_tapes_core::stats_priced_with_backends(&backends, one, idle, prices)?
                 } else {
-                    agent_tapes_core::stats_with_backends_and_idle(&single_backends, one, idle)?
+                    agent_tapes_core::stats_priced_with_backends(
+                        &single_backends,
+                        one,
+                        idle,
+                        prices,
+                    )?
                 };
                 if json {
                     print_json_with_selection_warnings(&stats, &query.input, &latest_warnings)?;
@@ -3067,14 +3149,8 @@ fn dispatch(cli: Cli) -> Result<()> {
             json,
         } => {
             query.validate_input()?;
-            let prices = agent_tapes_core::pricing::lookup(prices.as_deref())?;
-            if let PriceLookup::DefaultInvalid { path, error } = &prices {
-                eprintln!(
-                    "warning: the default price table {} is not used, so no list-price estimate is given: {error}",
-                    path.display()
-                );
-            }
-            let prices = prices.table();
+            let prices = price_table(prices.as_deref())?;
+            let prices = prices.as_ref();
             read.refuse_supplied(&query.input)?;
             let span = requests
                 .or((from.is_some() || to.is_some()).then_some(SpanBounds::Time { from, to }));
@@ -3277,6 +3353,7 @@ fn dispatch(cli: Cli) -> Result<()> {
         Command::Brief {
             selection,
             read,
+            prices,
             tail,
             json,
         } => {
@@ -3285,14 +3362,21 @@ fn dispatch(cli: Cli) -> Result<()> {
             let brief_backends = read.backends(&selection.input)?;
             let latest_warnings = selection.latest_warnings(&brief_backends)?;
             print_selection_warnings(&latest_warnings);
+            let prices = prices.table()?;
             let brief = if selection.input.supplied() {
                 let backends = selection.input.backends()?;
-                agent_tapes_core::brief_with_backends(&backends, selection.selection(), tail)?
+                agent_tapes_core::brief_priced_with_backends(
+                    &backends,
+                    selection.selection(),
+                    tail,
+                    prices.as_ref(),
+                )?
             } else {
-                let mut brief = agent_tapes_core::brief_with_backends(
+                let mut brief = agent_tapes_core::brief_priced_with_backends(
                     &brief_backends,
                     selection.selection(),
                     tail,
+                    prices.as_ref(),
                 )?;
                 liveness::annotate_brief(&mut brief);
                 brief
@@ -4375,6 +4459,9 @@ fn render_usage_stats(out: &mut String, usage: &UsageStats) {
     }
     if let Some(cost) = &usage.cost {
         out.push_str(&format!("cost: {}\n", render_cost(cost)));
+    }
+    if let Some(estimate) = &usage.list_price_estimate {
+        out.push_str(&render_estimate_lines("", estimate));
     }
     render_completeness(out, "", &usage.measurement_completeness);
     if let Some(accounting) = &usage.accounting {
@@ -5946,6 +6033,9 @@ fn render_identity_bounds(out: &mut String, tally: &UsageTally) {
         if figure.tokens.is_none() && figure.cost.is_none() {
             out.push_str(": unmeasured");
         }
+        if let Some(estimate) = &figure.list_price_estimate {
+            out.push_str(&format!("; {}", render_estimate(estimate)));
+        }
         out.push('\n');
         render_measurement_coverage(
             out,
@@ -6382,6 +6472,7 @@ fn print_transcript(transcript: &Transcript, by_latest: bool, selected_by: Optio
 
 /// `show --full` writes each turn as the reader produces it, so the whole
 /// recording is never held. `--tail` keeps only a ring of the newest turns.
+#[allow(clippy::too_many_arguments)]
 fn show_full(
     selection: &SelectionArgs,
     tail: Option<usize>,
@@ -6389,10 +6480,12 @@ fn show_full(
     json: bool,
     by_latest: bool,
     turn_chars: Option<usize>,
+    prices: Option<agent_tapes_core::pricing::PriceTable>,
 ) -> Result<()> {
     let stdout = std::io::stdout();
     let mut sink = FullShow {
         turn_chars,
+        prices,
         out: std::io::BufWriter::new(stdout.lock()),
         by_latest,
         tail,
@@ -6653,6 +6746,8 @@ impl<W: std::io::Write> FullEvents<W> {
 
 struct FullShow<W: std::io::Write> {
     turn_chars: Option<usize>,
+    /// The table the session is priced with, where one is in effect.
+    prices: Option<agent_tapes_core::pricing::PriceTable>,
     out: W,
     by_latest: bool,
     tail: Option<usize>,
@@ -6673,6 +6768,9 @@ impl<W: std::io::Write> agent_tapes_core::TurnSink for FullShow<W> {
     fn session(&mut self, session: &Session) -> Result<()> {
         let mut session = session.clone();
         liveness::annotate(std::slice::from_mut(&mut session));
+        if let Some(table) = &self.prices {
+            session.price(table);
+        }
         if self.json {
             self.writer = Some(agent_tapes_core::model::StreamedSessionJson::open(
                 &mut self.out,
@@ -7247,6 +7345,7 @@ mod tests {
                 start_uncertain: false,
                 occurrence: None,
                 usage_detail: None,
+                list_price_estimate: None,
             },
             turns: vec![Turn {
                 origin: None,

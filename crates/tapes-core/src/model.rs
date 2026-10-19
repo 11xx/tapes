@@ -11,7 +11,7 @@ use crate::event::ToolEvent;
 use crate::measurement::{MeasurementCompleteness, MeasurementReason};
 use crate::usage::UsageDetail;
 
-pub const SESSION_SCHEMA: &str = "tapes-session/19";
+pub const SESSION_SCHEMA: &str = "tapes-session/20";
 /// How the recording identifies the session's launch mode.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -95,6 +95,10 @@ pub struct Session {
     /// reports preserve written-zero evidence across replicas.
     #[serde(skip)]
     pub usage_detail: Option<UsageDetail>,
+    /// The session's counters priced by a caller's price table, beside the
+    /// cost its harness wrote and never in its place. Present only on an
+    /// answer that was priced.
+    pub list_price_estimate: Option<crate::pricing::ListPriceEstimate>,
 }
 
 /// The session wire carries pricing evidence independently of harness-shaped
@@ -148,6 +152,8 @@ struct SessionWire {
         skip_serializing_if = "crate::measurement::MeasurementCompleteness::is_empty"
     )]
     measurement_completeness: crate::measurement::MeasurementCompleteness,
+    #[serde(default, skip_serializing_if = "Option::is_none", skip_deserializing)]
+    list_price_estimate: Option<crate::pricing::ListPriceEstimate>,
 }
 impl From<SessionWire> for Session {
     fn from(wire: SessionWire) -> Self {
@@ -179,6 +185,7 @@ impl From<SessionWire> for Session {
                 ..UsageDetail::default()
             }
             .into_option(),
+            list_price_estimate: wire.list_price_estimate,
         };
         let coverage = session.cost_coverage();
         session.cost = session.estimated_cost();
@@ -222,6 +229,7 @@ impl From<Session> for SessionWire {
             measurement_coverage: detail.measurement_coverage,
             measurement_incomplete: detail.measurement_incomplete,
             measurement_completeness,
+            list_price_estimate: session.list_price_estimate,
         }
     }
 }
@@ -2343,6 +2351,7 @@ mod tests {
             start_uncertain: false,
             occurrence: None,
             usage_detail: None,
+            list_price_estimate: None,
         }
     }
 

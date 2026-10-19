@@ -59,9 +59,9 @@ pub mod usage;
 pub mod window;
 pub mod workset;
 
-pub const LIST_SCHEMA: &str = "tapes-list/9";
+pub const LIST_SCHEMA: &str = "tapes-list/10";
 pub const EXPORT_MANIFEST_SCHEMA: &str = "tapes-export-manifest/7";
-pub const USAGE_SUMMARY_SCHEMA: &str = "tapes-usage-summary/11";
+pub const USAGE_SUMMARY_SCHEMA: &str = "tapes-usage-summary/12";
 /// Number of normalized turns a `list --search` query inspects per session.
 /// Keeping this fixed makes the listing's cost predictable for callers.
 pub const LIST_SEARCH_TAIL: usize = 32;
@@ -1273,6 +1273,17 @@ pub fn stats_with_backends_and_idle(
     selection: Selection,
     idle: i64,
 ) -> Result<stats::StatsView> {
+    stats_priced_with_backends(backends, selection, idle, None)
+}
+
+/// As [`stats_with_backends_and_idle`], the usage priced under `prices` as
+/// a usage answer is.
+pub fn stats_priced_with_backends(
+    backends: &[Box<dyn Backend>],
+    selection: Selection,
+    idle: i64,
+    prices: Option<&pricing::PriceTable>,
+) -> Result<stats::StatsView> {
     let resolved = selection.resolve(backends)?;
     let backend = backends[resolved.backend_index].as_ref();
     let mut transcript = declared_transcript(backend, &resolved.session, EXPORT_TAIL)?;
@@ -1280,7 +1291,9 @@ pub fn stats_with_backends_and_idle(
         .notes
         .extend(resolved.diagnostics.latest_warnings(&resolved.session));
     let lineage = backend.lineage(&resolved.session)?;
-    Ok(stats::Counted::bounded_with_idle(transcript, idle).view(&lineage))
+    Ok(stats::Counted::bounded_with_idle(transcript, idle)
+        .priced(prices)
+        .view(&lineage))
 }
 
 /// One session's counted facts over its whole recording, streamed twice so
@@ -1298,9 +1311,20 @@ pub fn stats_full_with_backends_and_idle(
     selection: Selection,
     idle: i64,
 ) -> Result<stats::StatsView> {
+    stats_full_priced_with_backends(backends, selection, idle, None)
+}
+
+/// As [`stats_full_with_backends_and_idle`], the usage priced under
+/// `prices` as a usage answer is.
+pub fn stats_full_priced_with_backends(
+    backends: &[Box<dyn Backend>],
+    selection: Selection,
+    idle: i64,
+    prices: Option<&pricing::PriceTable>,
+) -> Result<stats::StatsView> {
     let resolved = selection.resolve(backends)?;
     let backend = backends[resolved.backend_index].as_ref();
-    let counted = stats::Counted::whole_with_idle(backend, &resolved.session, idle)?;
+    let counted = stats::Counted::whole_with_idle(backend, &resolved.session, idle)?.priced(prices);
     let lineage = backend.stream_lineage(&resolved.session)?;
     let mut view = counted.view(&lineage);
     view.notes
@@ -1324,6 +1348,17 @@ pub fn brief_with_backends(
     selection: Selection,
     tail: usize,
 ) -> Result<brief::Brief> {
+    brief_priced_with_backends(backends, selection, tail, None)
+}
+
+/// As [`brief_with_backends`], the usage priced under `prices` as a usage
+/// answer is.
+pub fn brief_priced_with_backends(
+    backends: &[Box<dyn Backend>],
+    selection: Selection,
+    tail: usize,
+    prices: Option<&pricing::PriceTable>,
+) -> Result<brief::Brief> {
     let resolved = selection.resolve(backends)?;
     let mut transcript =
         backends[resolved.backend_index].transcript(&resolved.session, EXPORT_TAIL)?;
@@ -1331,7 +1366,7 @@ pub fn brief_with_backends(
         .notes
         .extend(resolved.diagnostics.latest_warnings(&resolved.session));
     let lineage = backends[resolved.backend_index].lineage(&resolved.session);
-    Ok(brief::brief(transcript, lineage, tail))
+    Ok(brief::brief_priced(transcript, lineage, tail, prices))
 }
 
 pub fn events(selection: Selection, tail: Option<usize>) -> Result<event::EventTranscript> {

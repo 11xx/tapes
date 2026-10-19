@@ -2247,6 +2247,7 @@ mod tests {
             start_uncertain: false,
             occurrence: None,
             usage_detail: None,
+            list_price_estimate: None,
         }
     }
 

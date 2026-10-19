@@ -32,7 +32,7 @@ use crate::model::{
 };
 use crate::usage;
 
-pub const BRIEF_SCHEMA: &str = "tapes-brief/12";
+pub const BRIEF_SCHEMA: &str = "tapes-brief/13";
 /// Newest operator and assistant turns rendered when the caller names no
 /// window. Wide enough to hold the exchange that ended the session, narrow
 /// enough that the brief stays one screen.
@@ -158,6 +158,10 @@ pub struct BriefUsage {
     pub tokens: Option<Tokens>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cost: Option<Cost>,
+    /// The counters priced by a caller's price table, as `usage` prices
+    /// them, beside the harness's cost and never in its place.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub list_price_estimate: Option<crate::pricing::ListPriceEstimate>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub accounting: Option<Accounting>,
     #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
@@ -172,6 +176,7 @@ impl BriefUsage {
     fn is_empty(&self) -> bool {
         self.tokens.is_none()
             && self.cost.is_none()
+            && self.list_price_estimate.is_none()
             && self.accounting.is_none()
             && self.measurement_coverage.is_empty()
             && self.measurement_incomplete.is_empty()
@@ -214,6 +219,16 @@ pub struct Brief {
 /// The read is the whole one the reader can reach, so pairing sees every call
 /// and its result; `tail` bounds the rendered exchange alone.
 pub fn brief(transcript: Transcript, lineage: Result<Lineage>, tail: usize) -> Brief {
+    brief_priced(transcript, lineage, tail, None)
+}
+
+/// As [`brief`], its usage priced under `prices` as a usage answer is.
+pub fn brief_priced(
+    transcript: Transcript,
+    lineage: Result<Lineage>,
+    tail: usize,
+    prices: Option<&crate::pricing::PriceTable>,
+) -> Brief {
     let read = transcript.read.clone();
     let terminal = transcript.terminal.clone();
     let text_tail_evidence = transcript.text_tail.clone();
@@ -247,10 +262,14 @@ pub fn brief(transcript: Transcript, lineage: Result<Lineage>, tail: usize) -> B
     };
     let children_cut = bound(&mut children);
 
-    let usage = usage::usage(&transcript);
+    let mut usage = usage::usage(&transcript);
+    if let Some(table) = prices {
+        crate::pricing::price_view(&mut usage, table);
+    }
     let usage = BriefUsage {
         tokens: usage.tokens,
         cost: usage.cost,
+        list_price_estimate: usage.list_price_estimate,
         accounting: usage.accounting,
         measurement_coverage: usage.measurement_coverage,
         measurement_incomplete: usage.measurement_incomplete,

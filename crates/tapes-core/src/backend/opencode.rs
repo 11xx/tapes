@@ -2176,6 +2176,7 @@ fn parse_database_session(value: &Value) -> Result<Session> {
             ..crate::usage::UsageDetail::default()
         }
         .into_option(),
+        list_price_estimate: None,
     })
 }
 
@@ -2255,6 +2256,7 @@ fn parse_session(value: &Value) -> Result<Session> {
             ..crate::usage::UsageDetail::default()
         }
         .into_option(),
+        list_price_estimate: None,
     })
 }
 

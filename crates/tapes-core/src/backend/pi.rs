@@ -208,6 +208,7 @@ impl PiBackend {
             start_uncertain: recording.start_uncertain(),
             occurrence: None,
             usage_detail: None,
+            list_price_estimate: None,
         };
         apply_recording_usage(&mut session, &recording, &active, rooted);
         // The marker opens the prompt the session was launched with, the

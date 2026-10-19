@@ -208,6 +208,7 @@ impl CodexBackend {
             start_uncertain: recording.start_uncertain(),
             occurrence: None,
             usage_detail: facts.usage_detail,
+            list_price_estimate: None,
         };
         let forked_from: Vec<String> = opening
             .iter()

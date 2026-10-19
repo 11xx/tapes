@@ -24,7 +24,7 @@ use crate::usage::{self, ModelUsage, TurnCoverage, UsageSession, UsageView};
 
 pub const DEFAULT_IDLE_MS: i64 = 45 * 60 * 1000;
 
-pub const STATS_SCHEMA: &str = "tapes-stats/14";
+pub const STATS_SCHEMA: &str = "tapes-stats/15";
 
 /// One session's counted facts, in the order a reader takes them: what the
 /// figures cover, the turns, the tool calls behind them, the recorded clock,
@@ -249,6 +249,10 @@ pub struct UsageStats {
     pub tokens: Option<Tokens>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cost: Option<Cost>,
+    /// The counters priced by a caller's price table, as `usage` prices
+    /// them, beside the harness's cost and never in its place.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub list_price_estimate: Option<crate::pricing::ListPriceEstimate>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub accounting: Option<Accounting>,
     /// The session's counters split by the model, and the reasoning effort
@@ -316,6 +320,15 @@ pub(crate) struct Counted {
 }
 
 impl Counted {
+    /// The counted read with its usage priced under `prices`, as a usage
+    /// answer is priced.
+    pub(crate) fn priced(mut self, prices: Option<&crate::pricing::PriceTable>) -> Self {
+        if let Some(table) = prices {
+            crate::pricing::price_view(&mut self.usage, table);
+        }
+        self
+    }
+
     /// Count a read held whole, folding its turns and the records its event
     /// projection pairs.
     pub(crate) fn bounded(transcript: Transcript) -> Self {
@@ -806,6 +819,7 @@ fn usage_stats(usage: &UsageView) -> Option<UsageStats> {
         cache_write_ratio: context.map(|(_, write, counted)| write as f64 / counted as f64),
         tokens: usage.tokens.clone(),
         cost: usage.cost.clone(),
+        list_price_estimate: usage.list_price_estimate.clone(),
         accounting: usage.accounting.clone(),
         by_model: usage.by_model.clone(),
         measurement_coverage: usage.measurement_coverage.clone(),
@@ -932,6 +946,7 @@ mod tests {
             start_uncertain: false,
             occurrence: None,
             usage_detail: None,
+            list_price_estimate: None,
         }
     }
 
