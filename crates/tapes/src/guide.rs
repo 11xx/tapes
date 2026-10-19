@@ -1263,16 +1263,24 @@ PROBE BEFORE EXPORTING
   parent column on either projection, and pi carries a parent reference on the
   child alone. lineage --full streams every record, so a child spawned before
   the tail window is still named.
+  A Claude subagent run in the background answers its Agent call at once as
+  async_launched; its end reaches the parent later as a task notification
+  naming the call, written each time the subagent stops, on a queued-command
+  attachment or a user record of task-notification origin. The latest one is
+  its completion, its status the disposition, its record id in source. A
+  shell task notifies the same way and names no child.
   A Claude subagent a plugin launched has no Agent call in the parent, so the
-  parent states neither its spawn nor its end. When such a subagent takes no
-  further input, its completion is read from its own recording: the timestamp
-  of its final record, if that is an assistant record that stopped on end_turn
-  (known trailing housekeeping records, including cost-state and system
-  turn_duration/stop_hook_summary, are skipped), with that record's id in source
-  after the recording's file. Identity-bearing records in the bounded opening
+  parent states neither its spawn nor its end. Where the parent states no end, for that
+  reason or because the notification lies outside the read, the completion is
+  read from the subagent's own recording: the timestamp of its final record
+  when its meta record says it finished, or, for a plugin subagent that takes
+  no further input, when that final record is an assistant record that
+  stopped on end_turn (known trailing housekeeping records, including
+  cost-state and system turn_duration/stop_hook_summary, are skipped), with
+  that record's id in source after the recording's file. Identity-bearing records in the bounded opening
   and tail must name the selected native parent, and a record that names an agent
   must name this child; absent or conflicting identity fails the ending read.
-  Plugin child endings inspect a 64 KiB tail and the bounded opening first,
+  Child endings inspect a 64 KiB tail and the bounded opening first,
   expanding to the configured read bound when no complete substantive tail
   record is available. Counting children reads transcript filenames only.
   Recording and child metadata reads accept only regular opened files and never

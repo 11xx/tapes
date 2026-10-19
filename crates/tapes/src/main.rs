@@ -1460,10 +1460,16 @@ enum Command {
     /// store cannot resolve is kept and marked. A child is referred to, never
     /// absorbed: use `show` for an ordinary child session ID, or
     /// `child PARENT --reference CHILD` for a Claude subagent. A Claude
-    /// subagent a plugin launched has no spawn or completion in the parent's
-    /// records; one that takes no further input is stamped completed from its
-    /// own recording when that recording's final record is an assistant record
-    /// that stopped on `end_turn`, citing that record in `source`. Known trailing
+    /// subagent run in the background is stamped completed at the parent's
+    /// latest task notification naming its `Agent` call, with the
+    /// notification's status as its disposition and that record in `source`;
+    /// a shell task's notification names no child. Where the parent's records
+    /// state no end, because a plugin launched the subagent or the
+    /// notification lies outside the read, the subagent is stamped completed
+    /// from its own recording, citing its final record in `source`: whatever
+    /// that record is when the subagent's meta record says it finished, and,
+    /// for a plugin-launched one that takes no further input, an assistant
+    /// record that stopped on `end_turn`. Known trailing
     /// housekeeping, including cost-state and system turn_duration/stop_hook_summary,
     /// is skipped; unknown records and read gaps do not establish completion. Otherwise
     /// it has no completion stamp, which does not say it is still running.

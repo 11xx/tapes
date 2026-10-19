@@ -1101,14 +1101,22 @@ impl ClaudeBackend {
     /// A Claude session's children: the subagent transcripts under its own
     /// directory, joined to the `Agent` calls its records hold.
     fn relatives(&self, path: &Path, parent_id: &str, calls: AgentCalls) -> Result<Lineage> {
-        let AgentCalls(mut calls) = calls;
+        let AgentCalls {
+            mut calls,
+            mut stops,
+        } = calls;
+        for (call_id, call) in &mut calls {
+            if let Some(stop) = stops.remove(call_id) {
+                call.stop(stop);
+            }
+        }
         let mut children = Vec::new();
         let mut notes = Vec::new();
         for file in subagent_files(path)? {
             if let Some(note) = file.metadata_note {
                 notes.push(note);
             }
-            let call = file
+            let mut call = file
                 .tool_use_id
                 .as_ref()
                 .and_then(|call_id| calls.remove(call_id))
@@ -1120,6 +1128,9 @@ impl ClaudeBackend {
                     calls.remove(&call_id)
                 })
                 .unwrap_or_default();
+            if let Some(stop) = file.tool_use_id.as_ref().and_then(|id| stops.remove(id)) {
+                call.stop(stop);
+            }
             let mut source = vec![
                 SourceRef::File {
                     path: file.transcript.display().to_string(),
@@ -1129,7 +1140,7 @@ impl ClaudeBackend {
                 },
             ];
             source.extend(call.sources());
-            let ending = if file.plugin_steered && call.completed_at.is_none() {
+            let ending = if (file.plugin_steered || file.finished) && call.completed_at.is_none() {
                 child_ending(
                     &file.transcript,
                     parent_id,
@@ -3589,11 +3600,12 @@ struct AgentCall {
     disposition: Option<String>,
     completed_at: Option<chrono::DateTime<chrono::Utc>>,
     result_record: Option<String>,
+    stop_record: Option<String>,
 }
 
 impl AgentCall {
     fn sources(&self) -> Vec<SourceRef> {
-        [&self.call_record, &self.result_record]
+        [&self.call_record, &self.result_record, &self.stop_record]
             .into_iter()
             .flatten()
             .map(|native_id| SourceRef::Record {
@@ -3601,6 +3613,57 @@ impl AgentCall {
             })
             .collect()
     }
+
+    /// The call's child stopped as a task notification says, unless the call
+    /// already ended later.
+    fn stop(&mut self, stop: TaskStop) {
+        if self.completed_at.is_some_and(|ended| ended > stop.at) {
+            return;
+        }
+        self.completed_at = Some(stop.at);
+        self.disposition = stop.status.or(self.disposition.take());
+        self.stop_record = stop.record;
+    }
+}
+
+/// A background task's stop, as the parent's recording states it in a task
+/// notification: Claude writes one each time the task stops, naming the tool
+/// call that launched it.
+struct TaskStop {
+    status: Option<String>,
+    at: chrono::DateTime<chrono::Utc>,
+    record: Option<String>,
+}
+
+/// The tool call a task notification names and the stop it states. Claude
+/// carries a notification into the conversation on a queued-command
+/// attachment or on a user record of task-notification origin; the queue
+/// operations beside them name no record and repeat the attachment.
+fn task_stop(value: &Value) -> Option<(String, TaskStop)> {
+    let text = match value["type"].as_str()? {
+        "attachment"
+            if value["attachment"]["type"] == "queued_command"
+                && value["attachment"]["commandMode"] == "task-notification" =>
+        {
+            value["attachment"]["prompt"].as_str()?
+        }
+        "user" if value["origin"]["kind"] == "task-notification" => {
+            envelope_text(&value["message"]["content"])?
+        }
+        _ => return None,
+    };
+    let body = text.trim_start().strip_prefix("<task-notification>")?;
+    let element = |tag: &str| {
+        let (_, rest) = body.split_once(&format!("<{tag}>"))?;
+        let (inner, _) = rest.split_once(&format!("</{tag}>"))?;
+        Some(inner.trim().to_owned())
+    };
+    let stop = TaskStop {
+        status: element("status"),
+        at: timestamp(&value["timestamp"])?,
+        record: value["uuid"].as_str().map(str::to_owned),
+    };
+    Some((element("tool-use-id")?, stop))
 }
 
 /// A subagent transcript beside the parent's recording, and the meta record
@@ -3618,17 +3681,26 @@ struct SubagentFile {
     /// only statement of where it ended.
     plugin_steered: bool,
     /// The meta record says the subagent finished, which holds even where its
-    /// recording stops mid-turn.
+    /// recording stops mid-turn, and where the parent's statement of its end
+    /// lies outside what was read.
     finished: bool,
 }
 
-/// The agent calls a Claude recording holds, keyed by tool-use id and folded
-/// one record at a time.
+/// The agent calls a Claude recording holds, keyed by tool-use id, and the
+/// latest task notification naming each tool call, folded one record at a
+/// time.
 #[derive(Default)]
-struct AgentCalls(HashMap<String, AgentCall>);
+struct AgentCalls {
+    calls: HashMap<String, AgentCall>,
+    stops: HashMap<String, TaskStop>,
+}
 
 impl AgentCalls {
     fn observe(&mut self, value: &Value) {
+        if let Some((call_id, stop)) = task_stop(value) {
+            self.stops.insert(call_id, stop);
+            return;
+        }
         let ts = timestamp(&value["timestamp"]);
         let record = value["uuid"].as_str().map(str::to_owned);
         for block in value["message"]["content"].as_array().into_iter().flatten() {
@@ -3637,7 +3709,7 @@ impl AgentCalls {
                     let Some(call_id) = block["id"].as_str() else {
                         continue;
                     };
-                    let call = self.0.entry(call_id.to_owned()).or_default();
+                    let call = self.calls.entry(call_id.to_owned()).or_default();
                     call.role = block["input"]["subagent_type"]
                         .as_str()
                         .map(str::to_owned)
@@ -3657,10 +3729,10 @@ impl AgentCalls {
                     // call was an `Agent` or the payload names an agent
                     // itself — which is how a spawn behind the read bound is
                     // still recognized.
-                    if !self.0.contains_key(call_id) && outcome["agentId"].as_str().is_none() {
+                    if !self.calls.contains_key(call_id) && outcome["agentId"].as_str().is_none() {
                         continue;
                     }
-                    let call = self.0.entry(call_id.to_owned()).or_default();
+                    let call = self.calls.entry(call_id.to_owned()).or_default();
                     let status = outcome["status"].as_str();
                     call.agent_id = outcome["agentId"]
                         .as_str()
