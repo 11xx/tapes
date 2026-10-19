@@ -1233,9 +1233,7 @@ impl ClaudeRecords {
                 value["uuid"].as_str(),
             );
             self.model = Some(model);
-        } else if value["message"]["role"] == "assistant"
-            && value["message"]["model"] != "<synthetic>"
-        {
+        } else if interrupts_selection(value) {
             self.selections.interrupt();
         }
         if let Some(title) = value["aiTitle"].as_str() {
@@ -1434,7 +1432,7 @@ fn count_unmapped(tally: &mut UnmappedTally, value: &Value) {
         _ => None,
     };
     let native_type = detail.map_or_else(|| kind.to_owned(), |detail| format!("{kind}/{detail}"));
-    let declined = claude_trailing_kind(value).is_some();
+    let declined = claude_trailing_kind(value).is_some() || request_blob(value);
     tally.add(native_type, declined);
 }
 
@@ -2559,6 +2557,25 @@ pub(crate) fn parse_turns(value: &Value) -> Vec<Turn> {
     turns
 }
 
+/// Whether an assistant message that yields no model observation leaves the
+/// model selected around it unknown. It does not when it is Claude's
+/// `<synthetic>` message, which no request answered, or a request blob,
+/// which restates a message another record holds.
+fn interrupts_selection(value: &Value) -> bool {
+    value["message"]["role"] == "assistant"
+        && value["message"]["model"] != "<synthetic>"
+        && !request_blob(value)
+}
+
+/// A message of an API request Claude sent, written in a run of
+/// `api-request-blob` records just ahead of the `api-request` record that
+/// names them by hash. Its `role` and `content` restate the system prompt and
+/// conversation records written elsewhere, under no timestamp or uuid, so it
+/// is no turn and states nothing of when anything happened.
+fn request_blob(value: &Value) -> bool {
+    value["type"] == "api-request-blob"
+}
+
 fn claude_selections(
     read: &Jsonl,
 ) -> (
@@ -2576,9 +2593,7 @@ fn claude_selections(
                 timestamp(&value["timestamp"]),
                 value["uuid"].as_str(),
             );
-        } else if value["message"]["role"] == "assistant"
-            && value["message"]["model"] != "<synthetic>"
-        {
+        } else if interrupts_selection(value) {
             selections.interrupt();
         }
     }
@@ -2589,6 +2604,9 @@ fn claude_selections(
 }
 
 fn parse_turns_raw(value: &Value) -> Vec<Turn> {
+    if request_blob(value) {
+        return Vec::new();
+    }
     if value["type"] == "system" && value["subtype"] == "compact_boundary" {
         let metadata = &value["compactMetadata"];
         let messages = &metadata["preservedMessages"];
@@ -3697,6 +3715,9 @@ struct AgentCalls {
 
 impl AgentCalls {
     fn observe(&mut self, value: &Value) {
+        if request_blob(value) {
+            return;
+        }
         if let Some((call_id, stop)) = task_stop(value) {
             self.stops.insert(call_id, stop);
             return;

@@ -1218,7 +1218,8 @@ enum Command {
     /// character and tool counts and the recorded systemTurns boolean, without bodies.
     /// Attachment bodies retain at most 64Ki characters per field; cuts carry
     /// read-bound availability and omitted_reason. Repeated records stay separate.
-    /// Other attachment types remain unrecognized.
+    /// Other attachment types remain unrecognized. Claude api-request-blob records,
+    /// which restate a sent request's system prompt and messages, become no turn.
     /// Complete persisted-output tool results show their preview and a reference-only
     /// file with its recorded size label and opaque artifact reference; this view
     /// never reads the external body. Use artifact for an explicit confined read.

@@ -1470,6 +1470,10 @@ READ THE ENDING
   collection and descriptor bounds are also explicit coverage facts. These
   content bounds apply independently of source-file and page read bounds.
   Repeated records remain separate turns even when their text matches.
+  Claude's `api-request-blob` records are the exception: each restates one
+  message of a request Claude sent, its system prompt included, under no
+  timestamp or uuid, so it becomes no turn, names no spawn and no model, and
+  counts as `declined` in `read.unmapped`.
 
   A Claude tool-result string with a complete `<persisted-output>` envelope
   shows its recorded preview and a reference-only file under `tool-results/`.
