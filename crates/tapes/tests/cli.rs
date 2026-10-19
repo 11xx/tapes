@@ -7960,7 +7960,7 @@ fn lineage_help_names_the_schema_and_the_rule_it_follows() {
     let output = tapes().args(["lineage", "--help"]).output().unwrap();
     assert!(output.status.success());
     let help = String::from_utf8_lossy(&output.stdout);
-    assert!(help.contains("tapes-lineage/4"), "{help}");
+    assert!(help.contains("tapes-lineage/5"), "{help}");
     assert!(
         help.contains("A relationship exists only where a record states it"),
         "{help}"
@@ -8167,7 +8167,7 @@ fn lineage_reports_a_subagent_reference_and_an_unresolved_parent() {
 
     let value: Value =
         serde_json::from_slice(&run(&["lineage", "session-claude", "--json"])).unwrap();
-    assert_eq!(value["schema"], "tapes-lineage/4");
+    assert_eq!(value["schema"], "tapes-lineage/5");
     assert_eq!(value["session"]["id"], "session-claude");
     let children = value["lineage"]["children"].as_array().unwrap();
     assert_eq!(children.len(), 1, "{value}");

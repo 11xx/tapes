@@ -147,15 +147,13 @@ impl ClaudeBackend {
         let opening = recording.opening();
         let read = &recording.tail;
         let mut identity_seen = false;
+        let mut child_identity = child.map(|_| ChildIdentity::new(native_id, path));
         for value in opening.iter().chain(&read.values) {
-            if let Some(id) = value.get("sessionId") {
+            if let Some(identity) = child_identity.as_mut() {
+                identity_seen |= identity.check(value)?;
+            } else if let Some(id) = value.get("sessionId") {
                 identity_seen = true;
                 if id.as_str() != Some(native_id) {
-                    if child.is_some() {
-                        anyhow::bail!(
-                            "child recording contains a different or invalid native parent ID"
-                        );
-                    }
                     anyhow::bail!(
                         "Claude record contains a different or invalid native session ID"
                     );
@@ -369,7 +367,8 @@ impl Backend for ClaudeBackend {
 
     /// A Claude parent's subagents are recordings under its own directory
     /// that no listing returns, named `<parent>::<agent>` as a child read
-    /// names them.
+    /// names them. A subagent carried over from the session it was spawned
+    /// under is that session's child, and only its identity is read here.
     fn window_children(&self, session: &Session) -> (Vec<Session>, Vec<String>) {
         let Ok(path) = self.recording(session) else {
             return (Vec::new(), Vec::new());
@@ -396,6 +395,7 @@ impl Backend for ClaudeBackend {
                 Some(&file.agent_id),
                 ParsedTurns::TitleOnly,
             ) {
+                Ok(_) if file.carried_from.is_some() => {}
                 Ok((mut child, _, _)) => {
                     child.id = format!("{}::{}", session.id, file.agent_id);
                     if let Some(location) = child.source.location.as_mut() {
@@ -415,7 +415,9 @@ impl Backend for ClaudeBackend {
     /// A parent whose subagent recordings were written at or after `since`.
     /// A recording's modification time is no earlier than the newest record
     /// written to it, so a child that spent since then is never missed; the
-    /// window read decides from the records whether it did.
+    /// window read decides from the records whether it did. A recording
+    /// carried over from another session nominates that session, under
+    /// whose own directory it lies, and not this one.
     fn window_parents(&self, since: chrono::DateTime<chrono::Utc>) -> (Vec<Session>, Vec<String>) {
         let Some(store) = self.store.as_ref() else {
             return (Vec::new(), Vec::new());
@@ -433,6 +435,9 @@ impl Backend for ClaudeBackend {
             };
             let mut written = false;
             let visited = visit_subagent_transcripts(path, |_, transcript| {
+                if carried_from(native.id(), &transcript).is_some() {
+                    return;
+                }
                 written |= fs::metadata(&transcript)
                     .and_then(|metadata| metadata.modified())
                     .is_ok_and(|modified| chrono::DateTime::<chrono::Utc>::from(modified) >= since);
@@ -684,8 +689,9 @@ impl Backend for ClaudeBackend {
         let path = super::session_file_path(session)
             .ok_or_else(|| anyhow!("claude session {} has no file locator", session.id))?;
         let mut launch = None;
+        let mut identity = RecordIdentity::of(session);
         let opening = stream_jsonl(path, replay_pin(replay)?, |value, _, _| {
-            super::validate_native_identity(value, "claude", &session.id)?;
+            identity.check(value)?;
             launch = merge_launch(launch, claude_entrypoint(value));
             Ok(false)
         })?;
@@ -701,7 +707,7 @@ impl Backend for ClaudeBackend {
         let mut turn = super::timed(&mut turn_times, turn);
         let mut last_end = 0;
         let read = stream_jsonl(path, Some(opening.pin()), |value, span, revision| {
-            super::validate_native_identity(value, "claude", &session.id)?;
+            identity.check(value)?;
             if span.start != last_end {
                 records.selections.interrupt();
             }
@@ -782,7 +788,10 @@ impl Backend for ClaudeBackend {
     fn lineage(&self, session: &Session) -> Result<Lineage> {
         let path = self.recording(session)?;
         let recording = read_recording(&path, self.read_bytes)?;
-        super::validate_recording_identity(&recording, "claude", &session.id)?;
+        let mut identity = RecordIdentity::of(session);
+        for value in recording.opening().iter().chain(&recording.tail.values) {
+            identity.check(value)?;
+        }
         let read = &recording.tail;
         let mut calls = AgentCalls::default();
         for value in &read.values {
@@ -797,8 +806,9 @@ impl Backend for ClaudeBackend {
     fn stream_lineage(&self, session: &Session) -> Result<Lineage> {
         let path = self.recording(session)?;
         let mut calls = AgentCalls::default();
+        let mut identity = RecordIdentity::of(session);
         let read = stream_jsonl(&path, None, |value, _, _| {
-            super::validate_native_identity(value, "claude", &session.id)?;
+            identity.check(value)?;
             calls.observe(value);
             Ok(false)
         })?;
@@ -814,8 +824,9 @@ impl Backend for ClaudeBackend {
         let path = self.recording(session)?;
         let mut records = ClaudeRecords::default();
         let mut last_end = 0;
+        let mut identity = RecordIdentity::of(session);
         stream_jsonl(&path, Some(read.pin()?), |value, span, _| {
-            super::validate_native_identity(value, "claude", &session.id)?;
+            identity.check(value)?;
             if span.start != last_end {
                 records.selections.interrupt();
             }
@@ -850,8 +861,9 @@ impl Backend for ClaudeBackend {
         let mut requests = ClaudeRequests::default();
         let mut cost_states = 0usize;
         let mut last_end = 0;
+        let mut identity = RecordIdentity::of(session);
         stream_jsonl(&path, Some(read.pin()?), |value, span, _| {
-            super::validate_native_identity(value, "claude", &session.id)?;
+            identity.check(value)?;
             if span.start != last_end {
                 records.selections.interrupt();
                 for _ in unreadable_between(&read.gaps, last_end, span.start) {
@@ -942,6 +954,7 @@ impl Backend for ClaudeBackend {
             Ok(false)
         })?;
         let domain = format!("file:{}", path.display());
+        let mut identity = ChildIdentity::new(&parent.id, &path);
         let mut identified = false;
         let mut records = ClaudeRecords::default();
         // The first user turn that yields a title, which is all a derived
@@ -949,14 +962,7 @@ impl Backend for ClaudeBackend {
         let mut title_turn = None::<Turn>;
         let mut last_end = 0;
         let read = stream_jsonl(&path, Some(opening.pin()), |value, span, revision| {
-            if let Some(id) = value.get("sessionId") {
-                if id.as_str() != Some(parent.id.as_str()) {
-                    anyhow::bail!(
-                        "child recording contains a different or invalid native parent ID"
-                    );
-                }
-                identified = true;
-            }
+            identified |= identity.check(value)?;
             check_child_agent(value, reference)?;
             if span.start != last_end {
                 records.selections.interrupt();
@@ -1058,6 +1064,12 @@ impl ClaudeBackend {
         match subagent_files(&path) {
             Ok(files) => {
                 for file in files {
+                    if let Some(owner) = &file.carried_from {
+                        if carried_identity(&file.transcript, &session.id, &file.agent_id).is_ok() {
+                            ledger.carried_child(&file.agent_id, owner);
+                            continue;
+                        }
+                    }
                     let child = ledger.source(
                         SourceRole::Child,
                         Some(file.agent_id.clone()),
@@ -1099,7 +1111,9 @@ impl ClaudeBackend {
     }
 
     /// A Claude session's children: the subagent transcripts under its own
-    /// directory, joined to the `Agent` calls its records hold.
+    /// directory, joined to the `Agent` calls its records hold. A transcript
+    /// carried over from the session it was spawned under names that
+    /// session.
     fn relatives(&self, path: &Path, parent_id: &str, calls: AgentCalls) -> Result<Lineage> {
         let AgentCalls {
             mut calls,
@@ -1143,7 +1157,7 @@ impl ClaudeBackend {
             let ending = if (file.plugin_steered || file.finished) && call.completed_at.is_none() {
                 child_ending(
                     &file.transcript,
-                    parent_id,
+                    &mut ChildIdentity::new(parent_id, &file.transcript),
                     &file.agent_id,
                     file.finished,
                     self.read_bytes,
@@ -1161,6 +1175,7 @@ impl ClaudeBackend {
                 completed_at: call.completed_at.or(ending.map(|ending| ending.at)),
                 disposition: call.disposition,
                 resolved: true,
+                carried_from: file.carried_from,
                 source,
                 ..ChildRef::new(file.agent_id, self.harness())
             });
@@ -1190,11 +1205,7 @@ impl ClaudeBackend {
 
 /// The subagent recording a parent-qualified reference names.
 fn child_recording(parent: &Session, reference: &str) -> Result<PathBuf> {
-    if reference.is_empty()
-        || !reference
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
-    {
+    if !session_component(reference) {
         anyhow::bail!("child reference must contain only letters, digits, hyphens or underscores");
     }
     let parent_path =
@@ -1345,7 +1356,10 @@ fn read_transcript(
     crate::model::UnmappedRecords,
 )> {
     let recording = read_recording(path, read_bytes)?;
-    super::validate_recording_identity(&recording, "claude", &session.id)?;
+    let mut identity = RecordIdentity::of(session);
+    for value in recording.opening().iter().chain(&recording.tail.values) {
+        identity.check(value)?;
+    }
     let read = &recording.tail;
     let mut turns = Vec::new();
     let mut last_turn = None;
@@ -1437,16 +1451,31 @@ fn count_unmapped(tally: &mut UnmappedTally, value: &Value) {
 }
 
 /// Subagent transcripts are recordings of their own; a parent read names how
-/// many belong to it.
+/// many belong to it, and how many it carries over from the sessions that
+/// spawned them.
 fn subagent_notes(path: &Path) -> Vec<String> {
-    match subagent_transcript_count(path) {
-        Ok(0) => Vec::new(),
-        Ok(1) => vec!["1 subagent transcript belongs to this session.".to_owned()],
-        Ok(count) => vec![format!(
+    let (own, carried) = match subagent_transcript_count(path) {
+        Ok(counts) => counts,
+        Err(error) => return vec![format!("Subagent transcript count unavailable: {error:#}")],
+    };
+    let mut notes = Vec::new();
+    match own {
+        0 => {}
+        1 => notes.push("1 subagent transcript belongs to this session.".to_owned()),
+        count => notes.push(format!(
             "{count} subagent transcripts belong to this session."
-        )],
-        Err(error) => vec![format!("Subagent transcript count unavailable: {error:#}")],
+        )),
     }
+    match carried {
+        0 => {}
+        1 => notes.push(
+            "1 subagent transcript is carried over from the session that spawned it.".to_owned(),
+        ),
+        count => notes.push(format!(
+            "{count} subagent transcripts are carried over from the sessions that spawned them."
+        )),
+    }
+    notes
 }
 
 /// Claude repeats the working directory on every message line.
@@ -2362,14 +2391,49 @@ fn failure_reason(error: &anyhow::Error) -> FailureReason {
         })
 }
 
-/// Whether a record states the session's identity. A record in a child's
-/// recording that names another agent is foreign.
-fn source_identity(value: &Value, session_id: &str, agent: Option<&str>) -> Result<bool> {
+/// Whether a record states the source's identity: the family's session for
+/// its parent, and for a child the owner its [`ChildIdentity`] admits. A
+/// record in a child's recording that names another agent is foreign.
+fn source_identity(
+    value: &Value,
+    session_id: &str,
+    child: Option<&mut (&str, ChildIdentity)>,
+) -> Result<bool> {
     let foreign = || IdentityFailure(FailureReason::ForeignIdentity);
-    if let Some(agent) = agent {
-        check_child_agent(value, agent).map_err(|_| foreign())?;
+    match child {
+        Some((agent, identity)) => {
+            check_child_agent(value, agent).map_err(|_| foreign())?;
+            identity.admits(value).ok_or_else(|| foreign().into())
+        }
+        None => super::validate_native_identity(value, "claude", session_id)
+            .map_err(|_| foreign().into()),
     }
-    super::validate_native_identity(value, "claude", session_id).map_err(|_| foreign().into())
+}
+
+/// Stream a source whole, checking every record's identity. A child must
+/// name its owner.
+fn validate_source(
+    path: &Path,
+    session_id: &str,
+    child: Option<&str>,
+) -> Result<super::StreamedJsonl> {
+    let mut child = child.map(|agent| (agent, ChildIdentity::new(session_id, path)));
+    let mut identity_seen = false;
+    let validation = stream_jsonl(path, None, |value, _, _| {
+        identity_seen |= source_identity(value, session_id, child.as_mut())?;
+        Ok(false)
+    })?;
+    if child.is_some() && !identity_seen {
+        return Err(IdentityFailure(FailureReason::NoIdentity).into());
+    }
+    Ok(validation)
+}
+
+/// Whether a subagent kept under `parent_id` and carried over from another
+/// session names that session throughout its recording, as a family read of
+/// that session admits it.
+fn carried_identity(path: &Path, parent_id: &str, agent: &str) -> Result<()> {
+    validate_source(path, parent_id, Some(agent)).map(drop)
 }
 
 fn reconcile_source(
@@ -2385,20 +2449,14 @@ fn reconcile_source(
     let pin = match validated {
         Some(pin) => pin,
         None => {
-            let mut identity_seen = false;
-            validation = stream_jsonl(path, None, |value, _, _| {
-                identity_seen |= source_identity(value, session_id, child)?;
-                Ok(false)
-            })?;
-            if !parent && !identity_seen {
-                return Err(IdentityFailure(FailureReason::NoIdentity).into());
-            }
+            validation = validate_source(path, session_id, child)?;
             validation.pin()
         }
     };
+    let mut identity = child.map(|agent| (agent, ChildIdentity::new(session_id, path)));
     let mut position = 0;
     let read = stream_jsonl(path, Some(pin), |value, _, _| {
-        source_identity(value, session_id, child)?;
+        source_identity(value, session_id, identity.as_mut())?;
         position += 1;
         if let Some(at) = timestamp(&value["timestamp"]).filter(|_| parent) {
             ledger.parent_stamp(at);
@@ -2545,11 +2603,20 @@ fn claude_trailing_kind(value: &Value) -> Option<&'static str> {
     }
 }
 
-/// Count transcript filenames only when the entire child directory is readable.
-fn subagent_transcript_count(path: &Path) -> Result<usize> {
-    let mut count = 0;
-    visit_subagent_transcripts(path, |_, _| count += 1)?;
-    Ok(count)
+/// Count transcript filenames only when the entire child directory is
+/// readable: those that belong to the session, and those carried over from
+/// another.
+fn subagent_transcript_count(path: &Path) -> Result<(usize, usize)> {
+    let session = session_stem(path)?;
+    let (mut own, mut carried) = (0, 0);
+    visit_subagent_transcripts(path, |_, transcript| {
+        if carried_from(&session, &transcript).is_some() {
+            carried += 1;
+        } else {
+            own += 1;
+        }
+    })?;
+    Ok((own, carried))
 }
 
 pub(crate) fn parse_turns(value: &Value) -> Vec<Turn> {
@@ -3715,6 +3782,9 @@ struct SubagentFile {
     /// recording stops mid-turn, and where the parent's statement of its end
     /// lies outside what was read.
     finished: bool,
+    /// The session the subagent was spawned under, where its recording is
+    /// carried over from another session.
+    carried_from: Option<String>,
 }
 
 /// The agent calls a Claude recording holds, keyed by tool-use id, and the
@@ -3813,6 +3883,133 @@ fn check_child_agent(value: &Value, reference: &str) -> Result<()> {
     }
 }
 
+/// Whether `id` can name a Claude session directory: a single path component
+/// of letters, digits, hyphens and underscores.
+fn session_component(id: &str) -> bool {
+    !id.is_empty()
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+
+/// The session a subagent recording kept under `parent_id` was spawned
+/// under, where that is another session. Claude carries a subagent still
+/// running when a session continues into a new one by linking the new
+/// session's `subagents/agent-<id>.jsonl` to the recording of the same name
+/// under the earlier session's own `subagents/`.
+fn carried_from(parent_id: &str, transcript: &Path) -> Option<String> {
+    if !fs::symlink_metadata(transcript).ok()?.is_symlink() {
+        return None;
+    }
+    let target = transcript.canonicalize().ok()?;
+    let directory = target.parent()?;
+    if directory.file_name()? != "subagents" || target.file_name() != transcript.file_name() {
+        return None;
+    }
+    let owner = directory.parent()?.file_name()?.to_str()?;
+    (owner != parent_id && session_component(owner)).then(|| owner.to_owned())
+}
+
+/// Whether `session`'s own `subagents/` links to `transcript`'s recording:
+/// the session continued the one the subagent was spawned under and carries
+/// it.
+fn carries(session: &str, transcript: &Path) -> bool {
+    if !session_component(session) {
+        return false;
+    }
+    let Ok(target) = transcript.canonicalize() else {
+        return false;
+    };
+    let (Some(name), Some(project)) = (
+        target.file_name(),
+        target
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::parent),
+    ) else {
+        return false;
+    };
+    let link = project.join(session).join("subagents").join(name);
+    fs::symlink_metadata(&link).is_ok_and(|metadata| metadata.is_symlink())
+        && link.canonicalize().is_ok_and(|resolved| resolved == target)
+}
+
+/// The sessions a subagent recording's identity records may name. Its owner,
+/// the session that spawned it, is the parent it is kept under, or the
+/// session it is carried over from. A session that continued the owner
+/// while the subagent ran writes the subagent's later records under its own
+/// id, and is admitted only where its `subagents/` links to this recording.
+struct ChildIdentity {
+    owner: String,
+    transcript: PathBuf,
+    continuing: Vec<String>,
+}
+
+impl ChildIdentity {
+    fn new(parent_id: &str, transcript: &Path) -> Self {
+        Self {
+            owner: carried_from(parent_id, transcript).unwrap_or_else(|| parent_id.to_owned()),
+            transcript: transcript.to_owned(),
+            continuing: Vec::new(),
+        }
+    }
+
+    /// Whether a record names the owner, or `None` where it names a session
+    /// the recording's location does not admit.
+    fn admits(&mut self, value: &Value) -> Option<bool> {
+        let Some(id) = value.get("sessionId") else {
+            return Some(false);
+        };
+        let id = id.as_str()?;
+        if id == self.owner {
+            return Some(true);
+        }
+        if self.continuing.iter().any(|known| known == id) {
+            return Some(false);
+        }
+        carries(id, &self.transcript).then(|| {
+            self.continuing.push(id.to_owned());
+            false
+        })
+    }
+
+    /// As [`Self::admits`], refusing a record that names a session the
+    /// location does not admit.
+    fn check(&mut self, value: &Value) -> Result<bool> {
+        self.admits(value).ok_or_else(|| {
+            anyhow!("child recording contains a different or invalid native parent ID")
+        })
+    }
+}
+
+/// How a Claude session's records must name it: a session by its own id, and
+/// a subagent read as `<parent>::<agent>` as its [`ChildIdentity`] admits.
+enum RecordIdentity {
+    Session(String),
+    Child(ChildIdentity),
+}
+
+impl RecordIdentity {
+    fn of(session: &Session) -> Self {
+        match (
+            session.id.split_once("::"),
+            super::session_file_path(session),
+        ) {
+            (Some((parent, _)), Some(path)) => Self::Child(ChildIdentity::new(parent, path)),
+            _ => Self::Session(session.id.clone()),
+        }
+    }
+
+    fn check(&mut self, value: &Value) -> Result<bool> {
+        match self {
+            Self::Session(id) => super::validate_native_identity(value, "claude", id),
+            Self::Child(identity) => identity.admits(value).ok_or_else(|| {
+                anyhow!("claude recording contains a different or invalid native session ID")
+            }),
+        }
+    }
+}
+
 /// Where a subagent's own recording ends its turn.
 struct ChildEnding {
     at: chrono::DateTime<chrono::Utc>,
@@ -3826,11 +4023,12 @@ struct ChildEnding {
 /// Claude appends after the conversation do not reopen it. A recording whose
 /// final line cannot be parsed, whose final record lies outside the read bound,
 /// or whose ending carries no timestamp states no ending. The opening and tail
-/// must carry matching native parent identity evidence, and no record in either may
-/// name another agent. Identity and I/O failures are errors.
+/// must name the child's owner, every identity record in them must be one its
+/// [`ChildIdentity`] admits, and no record in either may name another agent.
+/// Identity and I/O failures are errors.
 fn child_ending(
     path: &Path,
-    parent_id: &str,
+    identity: &mut ChildIdentity,
     reference: &str,
     finished: bool,
     read_bytes: u64,
@@ -3839,12 +4037,7 @@ fn child_ending(
         .with_context(|| format!("Subagent ending {} unavailable", path.display()))?;
     let mut identified = false;
     for value in recording.opening().iter().chain(&recording.tail.values) {
-        if let Some(id) = value.get("sessionId") {
-            if id.as_str() != Some(parent_id) {
-                anyhow::bail!("child recording contains a different or invalid native parent ID");
-            }
-            identified = true;
-        }
+        identified |= identity.check(value)?;
         check_child_agent(value, reference)?;
     }
     if !identified {
@@ -3899,6 +4092,13 @@ fn child_ending_recording(path: &Path, read_bytes: u64) -> Result<super::Recordi
     Ok(recording)
 }
 
+/// The session id a Claude recording's filename carries.
+fn session_stem(path: &Path) -> Result<String> {
+    path.file_stem()
+        .map(|stem| stem.to_string_lossy().into_owned())
+        .ok_or_else(|| anyhow!("Claude recording has no file stem"))
+}
+
 /// Transcript filenames under the session's subagent directory, without metadata reads.
 fn visit_subagent_transcripts(path: &Path, mut visit: impl FnMut(String, PathBuf)) -> Result<()> {
     let session = path
@@ -3938,11 +4138,13 @@ fn visit_subagent_transcripts(path: &Path, mut visit: impl FnMut(String, PathBuf
 }
 
 fn subagent_files(path: &Path) -> Result<Vec<SubagentFile>> {
+    let session = session_stem(path)?;
     let mut files = Vec::new();
     visit_subagent_transcripts(path, |agent_id, path| {
         let meta = path.with_file_name(format!("agent-{agent_id}.meta.json"));
         let (recorded, metadata_note) = subagent_metadata(&meta);
         files.push(SubagentFile {
+            carried_from: carried_from(&session, &path),
             metadata_note,
             agent_id,
             transcript: path,
@@ -4288,7 +4490,7 @@ mod child_ending_cost_tests {
         assert!(read.tail.truncated);
         assert!(child_ending(
             &path,
-            "parent",
+            &mut ChildIdentity::new("parent", &path),
             "fixture",
             false,
             super::super::DEFAULT_READ_BYTES
@@ -4301,7 +4503,7 @@ mod child_ending_cost_tests {
         assert_eq!(read.tail.configured_bound, super::super::DEFAULT_READ_BYTES);
         assert!(child_ending(
             &path,
-            "parent",
+            &mut ChildIdentity::new("parent", &path),
             "fixture",
             false,
             super::super::DEFAULT_READ_BYTES

@@ -429,6 +429,16 @@ impl FamilyLedger {
         self.requests.retain(|(owner, _), _| *owner != source);
     }
 
+    /// A child kept under the parent but spawned under `owner`, which the
+    /// parent continued: its requests are the owner's family's, so this one
+    /// holds no source for it.
+    pub(crate) fn carried_child(&mut self, agent_id: &str, owner: &str) {
+        self.notes.push(format!(
+            "Subagent {agent_id} is carried over from session {owner}, which spawned it; its \
+             requests are counted in that session's family."
+        ));
+    }
+
     /// The family's children could not be listed, so the union cannot be
     /// complete.
     pub(crate) fn unenumerated(&mut self, session_id: &str, reason: FailureReason) {

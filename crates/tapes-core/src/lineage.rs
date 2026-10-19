@@ -15,7 +15,7 @@ use serde::Serialize;
 
 use crate::model::{Launch, Model, Session, SessionMetadata, SourceDescriptor, Truncation};
 
-pub const LINEAGE_SCHEMA: &str = "tapes-lineage/4";
+pub const LINEAGE_SCHEMA: &str = "tapes-lineage/5";
 
 /// One session's relatives, as its harness recorded them.
 #[derive(Clone, Debug, Default, PartialEq, Serialize)]
@@ -95,6 +95,12 @@ pub struct ChildRef {
     pub disposition: Option<String>,
     /// Whether the child's own recording is in the store.
     pub resolved: bool,
+    /// The session the child was spawned under, where that is not this one:
+    /// this session continued that one while the child ran, and its store
+    /// carries the child's recording over from that session's. The child's
+    /// consumption is that session's.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub carried_from: Option<String>,
     /// Where this reference was read from.
     pub source: Vec<SourceRef>,
 }
@@ -113,6 +119,7 @@ impl ChildRef {
             completed_at: None,
             disposition: None,
             resolved: false,
+            carried_from: None,
             source: Vec::new(),
         }
     }

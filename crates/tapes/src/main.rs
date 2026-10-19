@@ -1477,9 +1477,16 @@ enum Command {
     /// Endings first inspect a 64 KiB tail and bounded opening, expanding to
     /// --read-bytes when no complete substantive tail record is available.
     /// Child counts enumerate transcript filenames without reading metadata.
-    /// Child-ending opening and tail identity records must name the native
-    /// parent, and a record that names an agent must name the child itself;
-    /// missing or conflicting identity fails. Only regular opened recording and
+    /// Child-ending opening and tail identity records must name the session
+    /// that spawned the child, and a record that names an agent must name the
+    /// child itself; missing or conflicting identity fails. A Claude session
+    /// that continued another while a subagent ran keeps that subagent's
+    /// recording as a link into the earlier session's subagent directory: the
+    /// child is named with `carried_from`, the session it was spawned under,
+    /// whose records it carries beside the later ones the continuing session
+    /// wrote under its own id, and its consumption is that session's. A child
+    /// whose records name a session its location does not explain fails.
+    /// Only regular opened recording and
     /// metadata files supply evidence; FIFO reads never wait for a writer.
     /// Failed Claude subagent enumeration or a required child-ending read fails
     /// lineage with its source and I/O diagnostic. An absent subagent directory
@@ -1497,7 +1504,7 @@ enum Command {
         /// Installed Claude, Codex, Pi, and OpenCode sessions.
         #[arg(long, conflicts_with = "read_bytes")]
         full: bool,
-        /// Render the versioned tapes-lineage/4 object as JSON.
+        /// Render the versioned tapes-lineage/5 object as JSON.
         #[arg(long)]
         json: bool,
     },
@@ -1723,7 +1730,9 @@ enum Command {
         /// recorded-total/session accounting. Requests deduplicate across a
         /// validated native family: children under the parent's subagents
         /// directory must positively witness matching native parent identity
-        /// and name no agent but their own.
+        /// and name no agent but their own. A subagent carried over from the
+        /// session that spawned it, which this one continued, belongs to that
+        /// session's family and is named in a note here.
         /// Per-recording figures remain visible. Foreign, unvalidated or
         /// unenumerated children, and sources outside the family, withhold
         /// request-namespace and leave the union unestablished. Failed
@@ -1832,6 +1841,8 @@ enum Command {
         /// read whole, so a session that straddles an edge contributes what it
         /// consumed inside and nothing else. A Claude parent's subagent
         /// recordings contribute their own spans as `<parent>::<agent>`, a
+        /// subagent a continued session carries over contributing once, under
+        /// the session that spawned it, a
         /// parent whose own records end before the window reached through
         /// subagent recordings written since it opened and since --since,
         /// kept under --since only when it or a subagent has recorded
@@ -4429,6 +4440,9 @@ fn render_child(child: &ChildRef) -> String {
     ));
     if !child.resolved {
         rendered.push_str(" unresolved");
+    }
+    if let Some(owner) = &child.carried_from {
+        rendered.push_str(&format!(" carried from {owner}"));
     }
     rendered.push('\n');
     rendered

@@ -729,7 +729,8 @@ PROBE BEFORE EXPORTING
   `usage --from/--to` reads one session, so a session that straddles an edge
   contributes what it consumed inside and nothing else; a Claude parent's
   subagent recordings, which no listing returns, contribute their own spans as
-  `<parent>::<agent>`, and a parent whose own records end before the window is
+  `<parent>::<agent>`, a subagent a continued session carries over contributing
+  once, under the session that spawned it, and a parent whose own records end before the window is
   reached through subagent recordings written since it opened, and since
   --since where that is later; under --since it is kept only when it or one of
   its subagents has recorded activity since it. Every other filter applies to
@@ -1128,6 +1129,8 @@ PROBE BEFORE EXPORTING
   the parent's subagents directory must positively witness its native session
   identity and name no agent but their own. Such children share the parent's
   request namespace, reported as validated-family under identity_coverage.
+  A subagent carried over from the session that spawned it is that session's
+  family member, and the continuing session names it in a note instead.
   Per-recording figures remain visible. Foreign, unvalidated or unenumerated
   children, and sources outside the family, withhold request-namespace and
   leave family counts, counters and differences absent. Failed assistant records leave consumption unmeasured
@@ -1260,7 +1263,7 @@ PROBE BEFORE EXPORTING
   selection that is the shape of a reader that stopped recognizing a kind.
 
   lineage answers which sessions a recording names as relatives, as
-  tapes-lineage/4: the session it was spawned or forked from, and the children
+  tapes-lineage/5: the session it was spawned or forked from, and the children
   its own store records, each with the role, model, spawn and completion
   stamps, and outcome its harness wrote. A relationship exists only where a
   record states it — a child header naming a parent, a spawn or completion
@@ -1274,6 +1277,15 @@ PROBE BEFORE EXPORTING
   Claude lineage fails when subagent directory enumeration or a required
   child-ending read fails, naming the source and retaining the I/O error.
   An absent subagent directory establishes no stored child transcripts.
+  A Claude session that continued another while a subagent was running keeps
+  that subagent's recording as a link into the earlier session's subagent
+  directory, beside a fresh meta record. Lineage names that child with
+  carried_from, the session it was spawned under: its records name that
+  session, and the ones written after the continuation name the continuing
+  session, whose link is what admits them. Its consumption is the spawning
+  session's: family reconciliation and window shares count it there once,
+  and the continuing session's notes say it is carried over. A child whose
+  records name a session its location does not explain fails.
   Codex lineage notes retain candidate header probe failures with their source
   and I/O error; an unreadable header does not establish an absent relationship.
   These notes apply to bounded reads and lineage --full.
@@ -1298,7 +1310,7 @@ PROBE BEFORE EXPORTING
   stopped on end_turn (known trailing housekeeping records, including
   cost-state and system turn_duration/stop_hook_summary, are skipped), with
   that record's id in source after the recording's file. Identity-bearing records in the bounded opening
-  and tail must name the selected native parent, and a record that names an agent
+  and tail must name the session that spawned the child, and a record that names an agent
   must name this child; absent or conflicting identity fails the ending read.
   Child endings inspect a 64 KiB tail and the bounded opening first,
   expanding to the configured read bound when no complete substantive tail
