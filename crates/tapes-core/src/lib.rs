@@ -2658,9 +2658,18 @@ pub fn apportion_window(
     Ok(apportioned)
 }
 
-/// One lane's allowance from the pools of one window length: its percent,
-/// the tokens of its requests the pools' intervals hold, and its requests
-/// they do not.
+/// The allowance a lane's percent is of: its pools' plan, limit, and window
+/// length.
+#[derive(PartialEq, Eq, PartialOrd, Ord)]
+struct Capacity {
+    plan: Option<String>,
+    limit: Option<String>,
+    window_minutes: Option<u64>,
+}
+
+/// One lane's allowance from the pools of one capacity: its percent, the
+/// tokens of its requests the pools' intervals hold, and its requests they
+/// do not.
 #[derive(Default)]
 struct LaneAllowance {
     percent: allowance::PercentBounds,
@@ -2757,8 +2766,8 @@ fn rates_of(
     let mut excluded_running = 0;
     let mut excluded_without_allowance = 0;
     let mut excluded_absent = Vec::new();
-    // Lanes by their group's key values and their window's length.
-    type LaneGroups = std::collections::BTreeMap<(Vec<Option<String>>, Option<u64>), Vec<usize>>;
+    // Lanes by their group's key values and their window's capacity.
+    type LaneGroups = std::collections::BTreeMap<(Vec<Option<String>>, Capacity), Vec<usize>>;
     let mut groups = LaneGroups::new();
     let mut lanes = Vec::new();
     for (index, share) in read.record.sessions.iter().enumerate() {
@@ -2774,11 +2783,11 @@ fn rates_of(
             excluded_absent.push(format!("{} ({}): {reason}", share.id, share.harness));
             continue;
         }
-        // A percent is of one window: a plan whose window of this kind has
-        // another length is another window, so lanes group by length too.
-        // Each lane's tokens are the ones its pools' intervals hold, the
-        // tokens its percent is apportioned over.
-        let mut by_length: std::collections::BTreeMap<Option<u64>, LaneAllowance> =
+        // A percent is of one capacity: another plan or limit, or a window
+        // of this kind with another length, is another allowance, so lanes
+        // group by all three too. Each lane's tokens are the ones its pools'
+        // intervals hold, the tokens its percent is apportioned over.
+        let mut by_capacity: std::collections::BTreeMap<Capacity, LaneAllowance> =
             std::collections::BTreeMap::new();
         for pool in apportioned
             .pools
@@ -2796,13 +2805,19 @@ fn rates_of(
             if !spent(&allowance.percent) && !spent(&smoothed) {
                 continue;
             }
-            let lane = by_length.entry(allowance.window_minutes).or_default();
+            let lane = by_capacity
+                .entry(Capacity {
+                    plan: pool.pool.plan.clone(),
+                    limit: pool.pool.limit.clone(),
+                    window_minutes: allowance.window_minutes,
+                })
+                .or_default();
             lane.percent = lane.percent + allowance.percent;
             lane.smoothed = lane.smoothed + smoothed;
             lane.covered += pool.covered(&ids);
             lane.uncovered_requests += allowance.coverage.uncovered_requests;
         }
-        if by_length.is_empty() {
+        if by_capacity.is_empty() {
             excluded_without_allowance += 1;
             continue;
         }
@@ -2810,9 +2825,9 @@ fn rates_of(
             .iter()
             .map(|dimension| dimension.of_in(figure, &read.relations))
             .collect::<Vec<_>>();
-        for (minutes, percent) in by_length {
+        for (capacity, percent) in by_capacity {
             groups
-                .entry((values.clone(), minutes))
+                .entry((values.clone(), capacity))
                 .or_default()
                 .push(lanes.len());
             lanes.push((share, percent));
@@ -2820,7 +2835,7 @@ fn rates_of(
     }
     let groups = groups
         .into_iter()
-        .map(|((values, window_minutes), members)| {
+        .map(|((values, capacity), members)| {
             let pick = |part: fn(&allowance::PercentBounds) -> f64| {
                 members
                     .iter()
@@ -2883,7 +2898,9 @@ fn rates_of(
             }
             allowance::RateGroup {
                 key: usage::group_key(by, &values),
-                window_minutes,
+                plan: capacity.plan,
+                limit: capacity.limit,
+                window_minutes: capacity.window_minutes,
                 lanes: members.len(),
                 percent_per_lane: allowance::LanePercent {
                     estimator: allowance::Estimator::IntervalApportioned,
@@ -3013,6 +3030,8 @@ pub fn allowance_forecast_with_backends(
             .find(|group| {
                 group.key.model.as_deref() == Some(planned.model.as_str())
                     && group.key.variant == planned.variant
+                    && group.plan == pool.plan
+                    && group.limit == pool.limit
                     && group.window_minutes == window_minutes
             })
             .ok_or_else(|| {

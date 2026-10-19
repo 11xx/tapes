@@ -1892,8 +1892,11 @@ enum Command {
         /// completed session (last activity at least fifteen minutes before
         /// the read) with requests inside the lookback is a lane, its percent
         /// of the --quota window apportioned as a window read apportions it,
-        /// grouped by --by (`model,variant` reads cost per model and effort).
-        /// The lookback is --window, else --since..--until. Each group gives
+        /// grouped by --by (`model,variant` reads cost per model and effort)
+        /// and by the `plan`, `limit` and `window_minutes` of the pools it
+        /// was measured in, each group naming them, since a percent is of one
+        /// capacity. The lookback is --window, else --since..--until. Each
+        /// group gives
         /// lanes, percent per lane (median, p90 by nearest rank, max) over the
         /// lanes' estimates and their bounds, tokens per one percent by
         /// disjoint category (the tokens an interval of the lanes' pools
@@ -5929,6 +5932,8 @@ fn render_allowance_rates(
     );
     let mut columns = by.iter().map(key_column).collect::<Vec<_>>();
     columns.extend([
+        "PLAN",
+        "LIMIT",
         "WINDOW MIN",
         "LANES",
         "%/LANE MEDIAN",
@@ -5967,6 +5972,8 @@ fn render_allowance_rates(
         let ratio = |ratio: &agent_tapes_core::allowance::TokensPerPercent| {
             format!("{:.0}", ratio.estimate)
         };
+        cells.push(group.plan.clone().unwrap_or_else(|| "-".to_owned()));
+        cells.push(group.limit.clone().unwrap_or_else(|| "-".to_owned()));
         cells.push(
             group
                 .window_minutes

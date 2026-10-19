@@ -765,10 +765,17 @@ pub struct MeasuredOver {
     pub to: DateTime<Utc>,
 }
 
-/// One group's allowance rates: what one lane (a session) of it costs.
+/// One group's allowance rates: what one lane (a session) of it costs under
+/// one plan, limit, and window length.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct RateGroup {
     pub key: crate::usage::GroupKey,
+    /// The plan the percents are of, as the observations name it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub plan: Option<String>,
+    /// The quota limit the percents are of, as the observations name it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub limit: Option<String>,
     /// The length of the window the percents are of.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub window_minutes: Option<u64>,

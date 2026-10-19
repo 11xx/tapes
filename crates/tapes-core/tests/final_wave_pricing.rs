@@ -1,14 +1,21 @@
 //! A pi consumption on its active branch alone is priced as the session
 //! figure is: share by share when its events name several models, and whole
-//! by the one model in evidence when some of its usage names none.
+//! by the one model in evidence when some of its usage names none. Allowance
+//! rates keep lanes measured under different plans or limits apart even when
+//! their windows share a length.
 
 use std::fs;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use agent_tapes_core::backend::{pi::PiBackend, Backend};
+use agent_tapes_core::allowance_rates_with_backends;
+use agent_tapes_core::backend::{codex::CodexBackend, pi::PiBackend, Backend};
 use agent_tapes_core::pricing::{self, PriceTable};
-use agent_tapes_core::{usage_full_with_backends, usage_with_backends, Selection};
+use agent_tapes_core::usage::GroupBy;
+use agent_tapes_core::window::{QuotaKind, WindowBounds};
+use agent_tapes_core::{
+    usage_full_with_backends, usage_with_backends, Selection, SessionSelection,
+};
 use chrono::{DateTime, Utc};
 use serde_json::{json, Value};
 
@@ -275,5 +282,154 @@ fn a_consumption_with_usage_no_model_names_is_priced_as_its_figure() {
                 );
             }
         }
+    }
+}
+
+// --- Allowance rates per plan and limit -----------------------------------
+
+fn codex_usage(input: u64) -> Value {
+    json!({"input_tokens": input, "cached_input_tokens": 0, "cache_write_input_tokens": 0,
+           "output_tokens": 0, "reasoning_output_tokens": 0, "total_tokens": input})
+}
+
+enum Event {
+    /// The primary used percent of a 300-minute window, reported under a
+    /// limit and a plan.
+    Observed(&'static str, &'static str, &'static str, f64),
+    /// One request's uncached input.
+    Request(&'static str, u64),
+}
+
+fn rollout(store: &Store, id: &str, day: &str, events: &[Event]) {
+    let start = format!("{day}T09:00:00Z");
+    let mut lines = vec![
+        json!({"timestamp": start, "type": "session_meta", "payload": {"id": id,
+               "timestamp": start, "cwd": "/fixtures/project", "source": "exec",
+               "creator_account_id": "account-a"}}),
+        json!({"timestamp": start, "type": "turn_context",
+               "payload": {"cwd": "/fixtures/project", "model": "gpt-fixture", "effort": "high"}}),
+    ];
+    let mut total = 0;
+    for event in events {
+        match event {
+            Event::Observed(stamp, limit, plan, used) => lines.push(json!({
+                "timestamp": stamp, "type": "event_msg",
+                "payload": {"type": "token_count", "info": null, "rate_limits": {
+                    "limit_id": limit, "limit_name": null, "plan_type": plan,
+                    "primary": {"used_percent": used, "window_minutes": 300,
+                                "resets_at": 1_768_053_600},
+                    "secondary": null}}
+            })),
+            Event::Request(stamp, input) => {
+                total += input;
+                lines.push(json!({
+                    "timestamp": stamp, "type": "event_msg",
+                    "payload": {"type": "token_count", "info": {"total_token_usage": codex_usage(total),
+                        "last_token_usage": codex_usage(*input), "model_context_window": 272000},
+                        "rate_limits": null}
+                }));
+            }
+        }
+    }
+    let folder = day.replace('-', "/");
+    store.write(
+        &format!("{folder}/rollout-{day}T09-00-00-{id}.jsonl"),
+        &lines,
+    );
+}
+
+/// One lane of 1,000 tokens under each of `pools`, a (limit, plan, rise)
+/// per day, grouped by model.
+fn rates_over(pools: &[(&'static str, &'static str, f64)]) -> Value {
+    use Event::{Observed, Request};
+    let store = Store::new("rate-plans");
+    let days = ["2026-01-10", "2026-01-11", "2026-01-12"];
+    for (index, (limit, plan, rise)) in pools.iter().enumerate() {
+        let day = days[index];
+        let stamp = |time: &str| -> &'static str { format!("{day}T{time}Z").leak() };
+        rollout(
+            &store,
+            &format!("40000000-0000-7000-8000-00000000010{index}"),
+            day,
+            &[
+                Observed(stamp("10:00:00"), limit, plan, 20.0),
+                Request(stamp("10:05:00"), 1_000),
+                Observed(stamp("10:10:00"), limit, plan, 20.0 + rise),
+            ],
+        );
+    }
+    serde_json::to_value(
+        allowance_rates_with_backends(
+            &[Box::new(CodexBackend::new(&store.0)) as Box<dyn Backend>],
+            &SessionSelection {
+                harness: Some("codex"),
+                limit: Some(50),
+                ..Default::default()
+            },
+            &[GroupBy::Model],
+            WindowBounds {
+                from: Some(at("2026-01-10T00:00:00Z")),
+                to: Some(at("2026-01-13T00:00:00Z")),
+            },
+            QuotaKind::Primary,
+        )
+        .unwrap(),
+    )
+    .unwrap()
+}
+
+/// Claim: lanes of one model measured against 300-minute windows under
+/// `pro` at 10% and under `plus` at 1% form two rate groups, each naming its
+/// plan, limit and length with its own percent per lane and tokens per
+/// percent. Rejects grouping by the window's length alone, which merges the
+/// plans into one group of two lanes whose tokens per percent (2,000 over
+/// 11%) is neither plan's.
+#[test]
+fn allowance_rates_keep_plans_sharing_a_window_length_apart() {
+    let rates = rates_over(&[("codex", "pro", 10.0), ("codex", "plus", 1.0)]);
+    assert_eq!(rates["schema"], "tapes-allowance-rates/5", "{rates:#}");
+    let groups = rates["groups"].as_array().unwrap();
+    assert_eq!(groups.len(), 2, "{rates:#}");
+    for (plan, percent) in [("pro", 10.0), ("plus", 1.0)] {
+        let group = groups
+            .iter()
+            .find(|group| group["plan"] == plan)
+            .unwrap_or_else(|| panic!("a {plan} group: {rates:#}"));
+        assert_eq!(group["limit"], "codex", "{group:#}");
+        assert_eq!(group["window_minutes"], 300, "{group:#}");
+        assert_eq!(group["lanes"], 1, "{group:#}");
+        assert!(
+            close(&group["percent_per_lane"]["estimate"]["median"], percent),
+            "{group:#}"
+        );
+        assert!(
+            close(
+                &group["tokens_per_percent"]["total"]["estimate"],
+                1_000.0 / percent
+            ),
+            "{group:#}"
+        );
+    }
+}
+
+/// Claim: lanes measured under the same plan against two quota limits whose
+/// windows share a length form one rate group per limit. Rejects grouping by
+/// plan and length without the limit, which merges the limits' lanes.
+#[test]
+fn allowance_rates_keep_limits_sharing_a_window_length_apart() {
+    let rates = rates_over(&[("codex", "plus", 4.0), ("codex_spark", "plus", 2.0)]);
+    let groups = rates["groups"].as_array().unwrap();
+    assert_eq!(groups.len(), 2, "{rates:#}");
+    for (limit, percent) in [("codex", 4.0), ("codex_spark", 2.0)] {
+        let group = groups
+            .iter()
+            .find(|group| group["limit"] == limit)
+            .unwrap_or_else(|| panic!("a {limit} group: {rates:#}"));
+        assert_eq!(group["plan"], "plus", "{group:#}");
+        assert_eq!(group["lanes"], 1, "{group:#}");
+        assert!(
+            close(&group["percent_per_lane"]["estimate"]["median"], percent),
+            "{group:#}"
+        );
     }
 }

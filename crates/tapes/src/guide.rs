@@ -840,8 +840,10 @@ PROBE BEFORE EXPORTING
   read) with requests in the lookback (--window, else --since..--until) is a
   lane, its percent of the --quota window summed over that window's pools,
   grouped by --by (`model,variant` for cost per model and effort) and by the
-  window's length, since a plan change can give a window of the same kind
-  another length and a percent is of one window. Each group
+  `plan`, `limit` and `window_minutes` of the pools it was measured in, each
+  group naming them, since a percent is of one capacity: two plans or two
+  limits whose windows share a length spend different allowances, and a
+  plan change can give a window of the same kind another length. Each group
   gives lanes, percent per lane (median, 90th percentile by nearest rank,
   maximum) over the lanes' estimates and their bounds, tokens per one percent
   by disjoint category (the tokens of the lanes' requests an interval of their
