@@ -1902,8 +1902,9 @@ enum Command {
         /// lanes spent in them. `tokens_per_lane` gives the lanes' tokens.
         /// Claude lanes are left out with the reason: Claude records no used
         /// percent. Lanes are read from up to 10000 sessions per harness, or
-        /// --limit's, taken in --sort order; `lanes_read` names that limit,
-        /// the sessions it left out, and whether the listing reached it.
+        /// --limit's, taken in --sort order and then from the parents reached
+        /// only through their subagents; `lanes_read` names that limit, the
+        /// sessions it left out, and whether the listing reached it.
         #[arg(
             long,
             conflicts_with_all = ["session", "latest", "title", "occurrence", "full", "from", "to", "requests", "series", "reconcile", "event_keys", "quota_window", "prices"],

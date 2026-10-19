@@ -1,9 +1,10 @@
 //! Reads stay inside the bounds and relationships they claim in the cases an
-//! independent review named: a recording's final record is whole without a
-//! trailing line feed, a launch marker names a parent in the harness it
-//! names, an external parent's store-declared fork outranks a marker it
-//! copied, rates grouped without parents resolve no parent, and a discovery
-//! page charges the lineage metadata it retains.
+//! independent review named: a launch marker names a parent in the harness
+//! it names, a recording's final record is whole without a trailing line
+//! feed, an external parent's store-declared fork outranks a marker it
+//! copied, rates grouped without parents resolve no parent, a keep bound
+//! holds for parents reached through their children, and a discovery page
+//! charges the lineage metadata it retains.
 
 use std::cell::Cell;
 use std::fs;
@@ -508,7 +509,90 @@ fn rates_grouped_without_parents_resolve_no_parent() {
     assert!(first_prompts > 0, "a grouping by parent reads its marker");
 }
 
-const LINEAGE_PARENT: &str = "01a10000-0000-7000-8000-0000000000d1";
+const QUIET_PARENT: &str = "30000000-0000-4000-8000-0000000000e1";
+const QUIET_AGENT: &str = "a00000000000000e1";
+
+fn claude_request(id: &str, agent: Option<&str>, entry: &str, stamp: &str) -> Value {
+    let mut record = json!({
+        "sessionId": id, "cwd": "/fixtures/project", "entrypoint": "cli", "version": "2.1.0",
+        "type": "assistant", "uuid": entry, "parentUuid": null, "requestId": format!("req_{entry}"),
+        "timestamp": stamp,
+        "message": {"id": format!("msg_{entry}"), "role": "assistant", "model": "claude-fixture",
+            "usage": {"input_tokens": 10, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0,
+                      "output_tokens": 20},
+            "stop_reason": "end_turn", "content": [{"type": "text", "text": "Done."}]}
+    });
+    if let Some(agent) = agent {
+        record["isSidechain"] = json!(true);
+        record["agentId"] = json!(agent);
+    }
+    record
+}
+
+/// Claim: a caller's --limit bounds the sessions rates read, parents
+/// reached only through their children included, so `--limit 0` reads no
+/// lane and counts the parent as left out. Rejects adding a parent the
+/// listing left out after the bound was applied, which reads it and its
+/// subagent as lanes.
+#[test]
+fn a_keep_bound_holds_for_parents_reached_through_children() {
+    let store = Store::new("keep-parents");
+    store.write(
+        &format!("project/{QUIET_PARENT}.jsonl"),
+        &[claude_request(
+            QUIET_PARENT,
+            None,
+            "parent-1",
+            "2026-01-12T09:59:00Z",
+        )],
+    );
+    store.write(
+        &format!("project/{QUIET_PARENT}/subagents/agent-{QUIET_AGENT}.jsonl"),
+        &[claude_request(
+            QUIET_PARENT,
+            Some(QUIET_AGENT),
+            "child-1",
+            "2026-01-12T10:05:00Z",
+        )],
+    );
+    let backends: Vec<Box<dyn Backend>> = vec![Box::new(ClaudeBackend::new(&store.0))];
+    let rates = |limit| {
+        let selection = SessionSelection {
+            harness: Some("claude"),
+            limit: Some(limit),
+            ..Default::default()
+        };
+        serde_json::to_value(
+            allowance_rates_with_backends(
+                &backends,
+                &selection,
+                &[GroupBy::Session],
+                WindowBounds {
+                    from: Some(at("2026-01-12T10:00:00Z")),
+                    to: Some(at("2026-01-12T11:00:00Z")),
+                },
+                QuotaKind::Primary,
+            )
+            .unwrap(),
+        )
+        .unwrap()
+    };
+    let bounded = rates(0);
+    assert!(bounded.get("excluded_absent").is_none(), "{bounded:#}");
+    assert_eq!(bounded["excluded_running"], 0, "{bounded:#}");
+    assert_eq!(bounded["lanes_read"]["left_out_by_limit"], 1, "{bounded:#}");
+    let kept = rates(1);
+    assert_eq!(
+        kept["excluded_absent"].as_array().map(Vec::len),
+        Some(1),
+        "the subagent is the kept parent's lane: {kept:#}"
+    );
+    assert!(
+        kept["lanes_read"].get("left_out_by_limit").is_none(),
+        "{kept:#}"
+    );
+}
+
 const LINEAGE_HEADERS: usize = 64;
 const NICKNAME_BYTES: usize = 512 * 1024;
 
@@ -526,7 +610,7 @@ fn a_discovery_page_charges_the_lineage_metadata_it_retains() {
         let stamp = format!("2026-01-10T10:{:02}:{:02}Z", index / 60, index % 60);
         let header = json!({"timestamp": stamp, "type": "session_meta",
             "payload": {"id": id, "timestamp": stamp, "cwd": "/fixtures/project",
-                        "parent_thread_id": LINEAGE_PARENT, "agent_path": "/root/worker",
+                        "parent_thread_id": SPAWN_PARENT, "agent_path": "/root/worker",
                         "agent_nickname": nickname}});
         store.write(&codex_path(&id, &stamp), &[header]);
     }

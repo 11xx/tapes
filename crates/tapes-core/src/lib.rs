@@ -2106,8 +2106,9 @@ pub struct WindowRead {
     pub scanned: usize,
     pub scan_truncated: bool,
     pub unplaced: Vec<PathBuf>,
-    /// Listed sessions the window may hold that a caller's keep bound left
-    /// out, those first in the listing's order kept.
+    /// Sessions the window may hold that a caller's keep bound left out:
+    /// those first in the listing's order are kept, then the parents reached
+    /// through their children.
     pub left_out_by_limit: usize,
     /// The listing returned as many sessions of a harness as its limit
     /// allows, or stopped at its scan ceiling, so it may have left sessions
@@ -2128,8 +2129,9 @@ pub fn read_window(
 }
 
 /// As [`read_window`], keeping, when `keep` names a bound, only the first
-/// `keep` listed sessions of each harness the window may hold, in the
-/// listing's order, and counting the rest, and reading launch markers and
+/// `keep` sessions of each harness the window may hold, the listed ones in
+/// the listing's order and then the parents reached through their children,
+/// and counting the rest, and reading launch markers and
 /// following chains of parents only when the answer uses `parents`; without
 /// them each share is its own root.
 fn read_window_keeping(
@@ -2223,8 +2225,8 @@ fn read_window_keeping(
     let listing_bound_reached =
         listed.scan_truncated || per_harness.values().any(|count| *count >= limit);
     let mut left_out_by_limit = 0;
+    let mut kept = HashMap::<&str, usize>::new();
     if let Some(keep) = keep {
-        let mut kept = HashMap::<&str, usize>::new();
         let mut kept_sessions = Vec::new();
         let mut kept_origins = Vec::new();
         for (session, origin) in sessions.into_iter().zip(origins) {
@@ -2311,6 +2313,16 @@ fn read_window_keeping(
                             continue;
                         }
                     }
+                }
+                // Under a keep bound, a parent takes a place after the
+                // listed sessions of its harness.
+                if let Some(keep) = keep {
+                    let count = kept.entry(backend.harness()).or_default();
+                    if *count >= keep {
+                        left_out_by_limit += 1;
+                        continue;
+                    }
+                    *count += 1;
                 }
                 through_children.insert(parent.id.clone());
                 sessions.push(parent);

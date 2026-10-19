@@ -842,10 +842,11 @@ PROBE BEFORE EXPORTING
   steadier lane cost; both sum to the same group total. `tokens_per_lane`
   gives the lanes' tokens. Lanes come from up to 10000 sessions per harness,
   not --limit's default of 20; an explicit --limit keeps that many in --sort
-  order. `lanes_read` names the limit, whether it is the caller's, the
-  sessions the lookback may hold that it left out (`left_out_by_limit`), and
-  `lane_bound_reached` when a listing stopped at its bound, so sessions past
-  it went unread. The answer is tapes-allowance-rates/4.
+  order, a parent reached only through its subagents taking a place after the
+  listed sessions. `lanes_read` names the limit, whether it is the caller's,
+  the sessions the lookback may hold that it left out (`left_out_by_limit`),
+  and `lane_bound_reached` when a listing stopped at its bound, so sessions
+  past it went unread. The answer is tapes-allowance-rates/4.
   `usage --forecast MODEL[#VARIANT]=LANES,... --harness H [--concurrency N]
   [--quota primary|secondary]` sizes a planned mix against that window, as
   tapes-allowance-forecast/2. It reads the rates grouped by model and

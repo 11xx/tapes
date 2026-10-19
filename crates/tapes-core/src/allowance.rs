@@ -823,8 +823,9 @@ pub struct LanesRead {
     pub limit: usize,
     /// The limit is the caller's.
     pub explicit_limit: bool,
-    /// Sessions the lookback may hold that the limit left out, those first
-    /// in --sort order kept.
+    /// Sessions the lookback may hold that the limit left out: those first
+    /// in --sort order are kept, then the parents reached only through their
+    /// subagents.
     #[serde(skip_serializing_if = "is_zero")]
     pub left_out_by_limit: usize,
     /// The listing returned as many sessions of a harness as the lane bound
