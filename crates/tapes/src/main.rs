@@ -1660,8 +1660,8 @@ enum Command {
         /// prompt names on its first line as `tapes-parent:
         /// <harness>:<session-id>` (Claude, Codex, pi, OpenCode; the guide
         /// gives the exact form). A session that names none is its own group, and a
-        /// parent the store does not hold is a group of its own under that
-        /// id, never joined to a guessed one. A launched session is never an
+        /// parent the store of its harness does not hold is a group of its
+        /// own under that id, never joined to a guessed one. A launched session is never an
         /// overlap group with its launcher.
         #[arg(
             long,

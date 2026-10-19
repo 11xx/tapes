@@ -876,14 +876,6 @@ pub fn resolve_session(
 
 /// Resolve a session another session names, as a join over the backends'
 /// read context: a missing relative walks no store again.
-fn resolve_relative(
-    backends: &[Box<dyn Backend>],
-    query: &str,
-) -> std::result::Result<ResolvedSession, ResolveError> {
-    let indices = (0..backends.len()).collect::<Vec<_>>();
-    resolve_from_sources(backends, query, &indices, true)
-}
-
 fn resolve_session_scoped(
     backends: &[Box<dyn Backend>],
     query: &str,
@@ -2065,13 +2057,7 @@ pub fn usage_summary_priced(
             .ok()
     });
     let relations = if parents {
-        session_relations(
-            backends,
-            sessions
-                .iter()
-                .map(|session| (session.id.clone(), window::declared_parent(session))),
-        )
-        .0
+        session_relations(backends, sessions.iter().map(relation_of)).0
     } else {
         usage::SessionRelations::default()
     };
@@ -2368,7 +2354,7 @@ fn read_window_keeping(
                 }
                 continue;
             }
-            parents.push((member.id.clone(), window::declared_parent(&member)));
+            parents.push(relation_of(&member));
             shares.push(window::WindowShare {
                 id: member.id.clone(),
                 harness: member.harness().to_owned(),
@@ -2394,7 +2380,7 @@ fn read_window_keeping(
     let (relations, resolved) = session_relations(backends, parents);
     for share in &mut shares {
         share.root = relations.root_of(&share.id).to_owned();
-        share.root_resolved = resolved.get(&share.root).copied().unwrap_or(true);
+        share.root_resolved = resolved.get(&share.id).copied().unwrap_or(true);
     }
     let mut order = (0..shares.len()).collect::<Vec<_>>();
     order.sort_by(|left, right| {
@@ -3081,24 +3067,37 @@ pub fn allowance_forecast_with_backends(
     })
 }
 
+/// A session as relationship chains name it: its harness and its native id.
+type RelationNode = (String, String);
+
+/// The node a session is, and the node of the parent its recording names.
+fn relation_of(session: &Session) -> (RelationNode, Option<RelationNode>) {
+    (
+        (session.harness().to_owned(), session.id.clone()),
+        window::parent_in_harness(session).map(|(harness, parent, _)| (harness, parent)),
+    )
+}
+
 /// Follow each session's named parent to the end of its chain: through the
-/// sessions given, then through the store, a level of the chains at a time
-/// so each level's launch markers are one batched question per backend. A
-/// parent the store does not hold ends the chain under its own id and is
-/// reported unresolved; a cycle ends it at the session that closes it.
+/// sessions given, then through the store of the harness that names it, a
+/// level of the chains at a time so each level's launch markers are one
+/// batched question per backend. A parent that harness's store does not
+/// hold ends the chain under its own id and is reported unresolved; a cycle
+/// ends it at the session that closes it. The second map says, per session
+/// given, whether the store holds the session its chain ends at.
 fn session_relations(
     backends: &[Box<dyn Backend>],
-    named: impl IntoIterator<Item = (String, Option<String>)>,
+    named: impl IntoIterator<Item = (RelationNode, Option<RelationNode>)>,
 ) -> (
     usage::SessionRelations,
     std::collections::BTreeMap<String, bool>,
 ) {
     const MAX_DEPTH: usize = 32;
-    let mut parents: HashMap<String, Option<String>> = named.into_iter().collect();
-    let ids = parents.keys().cloned().collect::<Vec<_>>();
-    let mut resolved = std::collections::BTreeMap::new();
+    let mut parents: HashMap<RelationNode, Option<RelationNode>> = named.into_iter().collect();
+    let nodes = parents.keys().cloned().collect::<Vec<_>>();
+    let mut unresolved = HashSet::new();
     for _ in 0..MAX_DEPTH {
-        let level: std::collections::BTreeSet<String> = parents
+        let level: std::collections::BTreeSet<RelationNode> = parents
             .values()
             .flatten()
             .filter(|parent| !parents.contains_key(*parent))
@@ -3108,12 +3107,12 @@ fn session_relations(
             break;
         }
         let mut found = Vec::new();
-        for id in level {
-            match resolve_relative(backends, &id) {
-                Ok(session) => found.push((id, session)),
-                Err(_) => {
-                    resolved.insert(id.clone(), false);
-                    parents.insert(id, None);
+        for node in level {
+            match resolve_relative_in(backends, &node.0, &node.1) {
+                Some(session) => found.push((node, session)),
+                None => {
+                    unresolved.insert(node.clone());
+                    parents.insert(node, None);
                 }
             }
         }
@@ -3124,14 +3123,15 @@ fn session_relations(
                 .map(|(_, found)| found)
                 .filter(|found| window::declared_parent(&found.session).is_none()),
         );
-        for (id, found) in found {
-            resolved.insert(id.clone(), true);
-            parents.insert(id, window::declared_parent(&found.session));
+        for (node, found) in found {
+            let (_, parent) = relation_of(&found.session);
+            parents.insert(node, parent);
         }
     }
     let mut roots = std::collections::BTreeMap::new();
-    for id in ids {
-        let mut current = id.clone();
+    let mut resolved = std::collections::BTreeMap::new();
+    for node in nodes {
+        let mut current = node.clone();
         let mut seen = HashSet::from([current.clone()]);
         for _ in 0..MAX_DEPTH {
             match parents.get(&current).cloned().flatten() {
@@ -3139,11 +3139,33 @@ fn session_relations(
                 _ => break,
             }
         }
-        if current != id {
-            roots.insert(id, current);
+        resolved.insert(node.1.clone(), !unresolved.contains(&current));
+        if current.1 != node.1 {
+            roots.insert(node.1, current.1);
         }
     }
     (usage::SessionRelations::new(roots), resolved)
+}
+
+/// The session `id` of `harness` another session names, from the stores of
+/// that harness and supplied inputs, which hold sessions of every harness.
+fn resolve_relative_in(
+    backends: &[Box<dyn Backend>],
+    harness: &str,
+    id: &str,
+) -> Option<ResolvedSession> {
+    let indices = backends
+        .iter()
+        .enumerate()
+        .filter(|(_, backend)| matches!(backend.harness(), "input") || backend.harness() == harness)
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    if indices.is_empty() {
+        return None;
+    }
+    resolve_from_sources(backends, id, &indices, true)
+        .ok()
+        .filter(|found| found.session.harness() == harness)
 }
 
 /// Event keys read per session of a related pair when its exact union is

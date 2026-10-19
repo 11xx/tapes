@@ -79,7 +79,7 @@ pub struct UsageDetail {
     pub declared_parent: Option<String>,
     /// The session a `tapes-parent` marker opening the first prompt names
     /// as the one that launched this one.
-    pub launch_parent: Option<String>,
+    pub launch_parent: Option<crate::launch_parent::LaunchParent>,
     /// Quota observations the read holds beside `rate_limits`.
     pub quota_observations: Vec<crate::window::QuotaObservation>,
     /// The requests the read counted, kept for price-table terms priced by

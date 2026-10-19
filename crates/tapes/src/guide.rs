@@ -751,9 +751,11 @@ PROBE BEFORE EXPORTING
   marker that names no parent. Listings and every other grouping read no
   marker. Among the listed sessions, it is read only for a session its
   store names no parent or fork origin for.
-  The parent is looked up by its id in every store tapes reads; one the stores
-  do not hold stays the named, unresolved root, as a missing fork origin
-  does. A first prompt opening with `tapes-parent:` in any other form, or
+  A parent is looked up by its id in the stores of the harness that holds it:
+  the one a marker names, and the session's own for a subagent, a spawn or a
+  fork origin. One those stores do not hold stays the named, unresolved
+  root, as a missing fork origin does, even where another harness holds a
+  session of that id. A first prompt opening with `tapes-parent:` in any other form, or
   naming the session itself, names no parent, and the session's usage notes
   say so. A launched session holds no copy of its parent, so the marker never
   makes the two an overlap group: their consumption adds. A derived title

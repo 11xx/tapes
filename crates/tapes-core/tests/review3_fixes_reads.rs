@@ -1,15 +1,21 @@
 //! Reads stay inside the bounds and relationships they claim in the cases an
 //! independent review named: a recording's final record is whole without a
-//! trailing line feed, and a discovery page charges the lineage metadata it
-//! retains.
+//! trailing line feed, a launch marker names a parent in the harness it
+//! names, and a discovery page charges the lineage metadata it retains.
 
 use std::fs;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use agent_tapes_core::backend::{claude::ClaudeBackend, Backend};
+use agent_tapes_core::backend::{
+    claude::ClaudeBackend, codex::CodexBackend, pi::PiBackend, Backend,
+};
 use agent_tapes_core::usage::GroupBy;
-use agent_tapes_core::{usage_summary_with_backends, NativeStore, SessionSelection};
+use agent_tapes_core::window::WindowBounds;
+use agent_tapes_core::{
+    usage_summary_with_backends, usage_window_with_backends, NativeStore, SessionSelection,
+    WindowAsk,
+};
 use serde_json::{json, Value};
 
 /// A temporary store root, removed when dropped.
@@ -55,6 +61,10 @@ impl Drop for Store {
     }
 }
 
+fn at(stamp: &str) -> chrono::DateTime<chrono::Utc> {
+    stamp.parse().unwrap()
+}
+
 /// A headless Claude session whose first user message is `prompt`, then one
 /// request at `minute`.
 fn claude_session(id: &str, minute: u32, prompt: &str) -> Vec<Value> {
@@ -74,6 +84,31 @@ fn claude_session(id: &str, minute: u32, prompt: &str) -> Vec<Value> {
     ]
 }
 
+/// A Codex exec rollout's records: its header, with `parent` as its
+/// `parent_thread_id` where given, its first prompt, and one request, all
+/// at `stamp`.
+fn codex_session(id: &str, stamp: &str, parent: Option<&str>, prompt: &str) -> Vec<Value> {
+    let total = json!({"input_tokens": 100, "cached_input_tokens": 0, "output_tokens": 7,
+                       "reasoning_output_tokens": 0, "total_tokens": 107});
+    let mut meta = json!({"id": id, "session_id": id, "timestamp": stamp, "cwd": "/fixtures/project",
+                          "source": "exec", "originator": "codex_exec"});
+    if let Some(parent) = parent {
+        meta["parent_thread_id"] = json!(parent);
+    }
+    vec![
+        json!({"timestamp": stamp, "type": "session_meta", "payload": meta}),
+        json!({"timestamp": stamp, "type": "turn_context",
+               "payload": {"cwd": "/fixtures/project", "model": "gpt-fixture"}}),
+        json!({"timestamp": stamp, "type": "response_item",
+               "payload": {"type": "message", "role": "user",
+                           "content": [{"type": "input_text", "text": prompt}]}}),
+        json!({"timestamp": stamp, "type": "event_msg",
+               "payload": {"type": "token_count",
+                           "info": {"total_token_usage": total, "last_token_usage": total,
+                                    "model_context_window": 272000}}}),
+    ]
+}
+
 /// Where a Codex rollout of `id` starting at `stamp` lives under its root.
 fn codex_path(id: &str, stamp: &str) -> String {
     let date = &stamp[..10];
@@ -88,6 +123,15 @@ fn marker(harness: &str, id: &str) -> String {
     format!("tapes-parent: {harness}:{id}\nInspect the fixture.")
 }
 
+fn share<'a>(read: &'a Value, id: &str) -> &'a Value {
+    read["window"]["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|share| share["id"] == id)
+        .unwrap_or_else(|| panic!("no share of {id}: {:#}", read["window"]))
+}
+
 fn parent_groups(summary: &Value) -> Vec<(String, u64)> {
     summary["groups"]
         .as_array()
@@ -100,6 +144,60 @@ fn parent_groups(summary: &Value) -> Vec<(String, u64)> {
             )
         })
         .collect()
+}
+
+const CLAUDE_NAMED: &str = "30000000-0000-4000-8000-0000000000a1";
+const CLAUDE_ROOT: &str = "30000000-0000-4000-8000-0000000000a2";
+const CODEX_CHILD: &str = "01a10000-0000-7000-8000-0000000000a3";
+
+/// Claim: a marker naming `pi:<id>` names a Pi session, so where only a
+/// Claude session holds that id the child's root is the Pi id, unresolved.
+/// Rejects resolving the marker's id in every harness, which roots the
+/// child at the Claude session's own launcher, resolved.
+#[test]
+fn a_marker_names_its_parent_in_the_harness_it_names() {
+    let store = Store::new("marker-harness");
+    store.claude(CLAUDE_ROOT, 1, "Lead the fixture work.");
+    store.claude(CLAUDE_NAMED, 2, &marker("claude", CLAUDE_ROOT));
+    let stamp = "2026-01-10T10:03:00Z";
+    store.write(
+        &format!("codex/{}", codex_path(CODEX_CHILD, stamp)),
+        &codex_session(CODEX_CHILD, stamp, None, &marker("pi", CLAUDE_NAMED)),
+    );
+    fs::create_dir_all(store.0.join("pi")).unwrap();
+    let backends: Vec<Box<dyn Backend>> = vec![
+        Box::new(ClaudeBackend::new(store.0.join("claude/projects"))),
+        Box::new(CodexBackend::new(store.0.join("codex"))),
+        Box::new(PiBackend::new(store.0.join("pi"))),
+    ];
+    let selection = SessionSelection {
+        harness: Some("codex"),
+        limit: Some(50),
+        ..Default::default()
+    };
+    let read = serde_json::to_value(
+        usage_window_with_backends(
+            &backends,
+            &selection,
+            &[GroupBy::Parent],
+            WindowAsk::Bounds(WindowBounds {
+                from: Some(at("2026-01-10T09:00:00Z")),
+                to: None,
+            }),
+            None,
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let child = share(&read, CODEX_CHILD);
+    assert_eq!(child["parent"], CLAUDE_NAMED, "{child}");
+    assert_eq!(child["root"], CLAUDE_NAMED, "{child}");
+    assert_eq!(child["root_resolved"], false, "{child}");
+    assert_eq!(
+        parent_groups(&read),
+        vec![(CLAUDE_NAMED.to_owned(), 1)],
+        "{read:#}"
+    );
 }
 
 const LAUNCHER: &str = "30000000-0000-4000-8000-0000000000b1";

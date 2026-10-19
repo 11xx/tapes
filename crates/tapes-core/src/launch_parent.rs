@@ -27,6 +27,13 @@ const HARNESSES: [&str; 4] = ["claude", "codex", "pi", "opencode"];
 /// The longest session id a marker carries.
 const MAX_ID_BYTES: usize = 128;
 
+/// The session a marker names: its harness and its native id there.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LaunchParent {
+    pub harness: String,
+    pub id: String,
+}
+
 /// What a first prompt says about the session that launched it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LaunchMarker {
@@ -108,10 +115,10 @@ impl Session {
     pub(crate) fn declare_launch_parent(&mut self, marker: LaunchMarker) {
         let note = match marker {
             LaunchMarker::Absent => return,
-            LaunchMarker::Parent { id, .. } if id != self.id => {
+            LaunchMarker::Parent { harness, id } if id != self.id => {
                 self.usage_detail
                     .get_or_insert_with(Default::default)
-                    .launch_parent = Some(id);
+                    .launch_parent = Some(LaunchParent { harness, id });
                 return;
             }
             LaunchMarker::Parent { .. } => {

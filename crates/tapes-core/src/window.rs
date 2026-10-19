@@ -260,28 +260,39 @@ pub enum ParentEvidence {
 /// copies its origin's first prompt, marker included, so its origin outranks
 /// the marker.
 pub fn named_parent(session: &Session) -> Option<(String, ParentEvidence)> {
+    parent_in_harness(session).map(|(_, parent, evidence)| (parent, evidence))
+}
+
+/// As [`named_parent`], with the harness whose store holds the parent: the
+/// session's own for a subagent, a spawn or a fork origin, and the one a
+/// marker names for its launcher.
+pub fn parent_in_harness(session: &Session) -> Option<(String, String, ParentEvidence)> {
+    let own = || session.harness().to_owned();
     if let Some((parent, _)) = session.id.split_once("::") {
-        return Some((parent.to_owned(), ParentEvidence::Subagent));
+        return Some((own(), parent.to_owned(), ParentEvidence::Subagent));
     }
     let detail = session.usage_detail.as_ref()?;
     let spawn = || {
         detail
             .declared_parent
             .clone()
-            .map(|parent| (parent, ParentEvidence::Spawn))
+            .map(|parent| (own(), parent, ParentEvidence::Spawn))
     };
     let origin = || {
         detail
             .copy_evidence
             .as_ref()
             .and_then(|copies| copies.origins.first().cloned())
-            .map(|origin| (origin, ParentEvidence::ForkOrigin))
+            .map(|origin| (own(), origin, ParentEvidence::ForkOrigin))
     };
     let launcher = || {
-        detail
-            .launch_parent
-            .clone()
-            .map(|parent| (parent, ParentEvidence::DeclaredLaunchParent))
+        detail.launch_parent.clone().map(|parent| {
+            (
+                parent.harness,
+                parent.id,
+                ParentEvidence::DeclaredLaunchParent,
+            )
+        })
     };
     spawn().or_else(origin).or_else(launcher)
 }
