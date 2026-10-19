@@ -278,6 +278,10 @@ fn candidates_from_root(store: &NativeStore, mut walk: Walk, limit: usize) -> Ca
                             .locator()
                             .map(|path| path.as_os_str().len())
                             .unwrap_or_default()
+                        + session
+                            .metadata()
+                            .map(|metadata| metadata.to_string().len())
+                            .unwrap_or_default()
                         + size_of::<NativeSession>();
                     if retained.saturating_add(record_charge) > MAX_RETAINED_BYTES {
                         page.complete = false;
