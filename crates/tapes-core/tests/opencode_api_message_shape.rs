@@ -3,9 +3,10 @@
 //! assistant message. A whole read, which pages oldest first, sees the
 //! session in recording order and counts each message's usage.
 
-use std::fs::{self, File};
+mod support;
+
+use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
 
 use agent_tapes_core::backend::{opencode::OpenCodeBackend, Backend};
 use agent_tapes_core::model::Tokens;
@@ -19,16 +20,7 @@ fn fixtures() -> PathBuf {
 
 /// The fixture program, answering through its API with no database present.
 fn backend() -> OpenCodeBackend {
-    static XDG: OnceLock<PathBuf> = OnceLock::new();
-    let root = XDG.get_or_init(|| {
-        let root =
-            std::env::temp_dir().join(format!("tapes-opencode-shape-{}", std::process::id()));
-        let opencode = root.join("opencode");
-        fs::create_dir_all(&opencode).unwrap();
-        File::create(opencode.join("opencode.db")).unwrap();
-        root
-    });
-    std::env::set_var("XDG_DATA_HOME", root);
+    std::env::set_var("XDG_DATA_HOME", support::empty_opencode_data_home());
     OpenCodeBackend::new(fixtures().join("opencode2"))
 }
 

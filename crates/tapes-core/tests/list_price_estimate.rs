@@ -5,7 +5,7 @@
 
 mod support;
 
-use std::fs::{self};
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};

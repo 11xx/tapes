@@ -7,10 +7,8 @@
 mod support;
 
 use std::collections::BTreeMap;
-use std::fs::{self};
+use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use agent_tapes_core::backend::{
     claude::ClaudeBackend, codex::CodexBackend, opencode::OpenCodeBackend, pi::PiBackend, Backend,
@@ -20,8 +18,6 @@ use agent_tapes_core::usage::{SpanUsage, UsageView};
 use agent_tapes_core::{usage_full_with_backends, usage_spans_with_backends, Selection};
 use chrono::{DateTime, Duration, Utc};
 use serde_json::{json, Value};
-
-static TEMP_ROOTS: AtomicU64 = AtomicU64::new(0);
 
 fn fixtures(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -516,15 +512,8 @@ fn a_span_the_read_cannot_cover_is_not_complete() {
 /// figure, or a span reported complete beside it.
 #[test]
 fn a_request_without_a_timestamp_is_held_by_the_remainder() {
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let root = std::env::temp_dir().join(format!(
-        "tapes-span-{}-{}-{nonce}",
-        std::process::id(),
-        TEMP_ROOTS.fetch_add(1, Ordering::Relaxed)
-    ));
+    let temporary = tempfile::TempDir::with_prefix("tapes-span-").unwrap();
+    let root = temporary.path();
     let project = root.join("project");
     fs::create_dir_all(&project).unwrap();
     let id = "30000000-0000-4000-8000-000000000003";
@@ -548,7 +537,7 @@ fn a_request_without_a_timestamp_is_held_by_the_remainder() {
     fs::write(project.join(format!("{id}.jsonl")), lines.join("\n") + "\n").unwrap();
     let split = at("2026-01-05T10:00:03Z");
     let answer = spans(
-        Box::new(ClaudeBackend::new(&root)),
+        Box::new(ClaudeBackend::new(root)),
         id,
         &[time(None, Some(split)), time(Some(split), None)],
     );
@@ -569,5 +558,4 @@ fn a_request_without_a_timestamp_is_held_by_the_remainder() {
         &answer.whole,
         "timestamp-less request",
     );
-    let _ = fs::remove_dir_all(&root);
 }

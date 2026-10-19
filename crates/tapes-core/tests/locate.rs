@@ -4,7 +4,6 @@
 use std::fs;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use agent_tapes_core::backend::claude::ClaudeBackend;
 use agent_tapes_core::backend::codex::CodexBackend;
@@ -17,8 +16,7 @@ use agent_tapes_core::locate::{
 use agent_tapes_core::model::TurnKind;
 use agent_tapes_core::workset::{build_with_backends, write_manifest, MIN_LANE_BYTES};
 use agent_tapes_core::Selection;
-
-static TEMP_ROOTS: AtomicU64 = AtomicU64::new(0);
+use tempfile::TempDir;
 
 const CODEX_FIXTURE: &str =
     "rollout-2026-01-01T10-00-00-00000000-0000-0000-0000-000000000001.jsonl";
@@ -31,21 +29,14 @@ fn fixtures(harness: &str) -> PathBuf {
         .join(harness)
 }
 
-fn scratch(tag: &str) -> PathBuf {
-    let path = std::env::temp_dir().join(format!(
-        "tapes-locate-{tag}-{}-{}",
-        std::process::id(),
-        TEMP_ROOTS.fetch_add(1, Ordering::Relaxed)
-    ));
-    let _ = fs::remove_dir_all(&path);
-    fs::create_dir_all(&path).unwrap();
-    path
+fn scratch(tag: &str) -> TempDir {
+    TempDir::with_prefix(format!("tapes-locate-{tag}-")).unwrap()
 }
 
 /// A Codex store holding a copy of the fixture recording under its real name.
-fn codex_store(tag: &str) -> (PathBuf, PathBuf) {
+fn codex_store(tag: &str) -> (TempDir, PathBuf) {
     let root = scratch(tag);
-    let store = root.join("store");
+    let store = root.path().join("store");
     fs::create_dir_all(&store).unwrap();
     fs::copy(
         fixtures("codex").join(CODEX_FIXTURE),
@@ -75,7 +66,8 @@ fn codex(store: &Path) -> Box<dyn Backend> {
 
 #[test]
 fn an_unchanged_workset_checks_unchanged_and_resolves() {
-    let (root, store) = codex_store("unchanged");
+    let (temporary, store) = codex_store("unchanged");
+    let root = temporary.path();
     let bundle = root.join("bundle");
     freeze(codex(&store), CODEX_ID, &bundle);
     let report = locate(codex(&store), &bundle, "{\"ref\":\"s0#0\"}\n", 0);
@@ -86,12 +78,12 @@ fn an_unchanged_workset_checks_unchanged_and_resolves() {
     );
     assert!(!report.stale);
     assert_eq!(report.references[0].outcome, Outcome::Resolved);
-    fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
 fn an_appended_source_has_grown_and_a_rewritten_one_has_changed() {
-    let (root, store) = codex_store("grown");
+    let (temporary, store) = codex_store("grown");
+    let root = temporary.path();
     let bundle = root.join("bundle");
     freeze(codex(&store), CODEX_ID, &bundle);
     let recording = store.join(CODEX_FIXTURE);
@@ -128,12 +120,12 @@ fn an_appended_source_has_grown_and_a_rewritten_one_has_changed() {
     assert_eq!(report.sources[0].state, SourceState::Changed, "{report:?}");
     assert!(report.stale);
     assert_eq!(report.references[0].outcome, Outcome::SourceChanged);
-    fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
 fn a_shortened_source_has_changed() {
-    let (root, store) = codex_store("shortened");
+    let (temporary, store) = codex_store("shortened");
+    let root = temporary.path();
     let bundle = root.join("bundle");
     freeze(codex(&store), CODEX_ID, &bundle);
     let recording = store.join(CODEX_FIXTURE);
@@ -141,7 +133,6 @@ fn a_shortened_source_has_changed() {
     fs::write(&recording, &bytes[..bytes.len() / 2]).unwrap();
     let report = locate(codex(&store), &bundle, "", 0);
     assert_eq!(report.sources[0].state, SourceState::Changed, "{report:?}");
-    fs::remove_dir_all(root).unwrap();
 }
 
 /// A Claude store with one session long enough for several minimum-size
@@ -215,8 +206,9 @@ fn outcome(report: &Locate, line: usize) -> &Located {
 
 #[test]
 fn each_reference_gets_exactly_one_outcome() {
-    let root = scratch("refs");
-    let store = claude_store(&root);
+    let temporary = scratch("refs");
+    let root = temporary.path();
+    let store = claude_store(root);
     let bundle = root.join("bundle");
     freeze(claude(&store), CLAUDE_ID, &bundle);
     let manifest: serde_json::Value =
@@ -290,13 +282,13 @@ fn each_reference_gets_exactly_one_outcome() {
     }
     assert_eq!(report.counts[&Outcome::Malformed], 3);
     assert_eq!(report.references.len(), 9);
-    fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
 fn text_bytes_returns_the_whole_turn_past_the_projection_cap_and_truncates_at_the_bound() {
-    let root = scratch("text");
-    let store = claude_store(&root);
+    let temporary = scratch("text");
+    let root = temporary.path();
+    let store = claude_store(root);
     let bundle = root.join("bundle");
     freeze(claude(&store), CLAUDE_ID, &bundle);
 
@@ -342,12 +334,12 @@ fn text_bytes_returns_the_whole_turn_past_the_projection_cap_and_truncates_at_th
         .unwrap();
     assert_eq!(cut.text_truncated, Some(true));
     assert!(cut.text_bytes.unwrap() > 5 * 1024);
-    fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
 fn a_claude_child_read_through_its_root_checks_unchanged() {
-    let root = scratch("child");
+    let temporary = scratch("child");
+    let root = temporary.path();
     let bundle = root.join("bundle");
     freeze(claude(&fixtures("claude")), "session-claude", &bundle);
     let report = locate(
@@ -361,7 +353,6 @@ fn a_claude_child_read_through_its_root_checks_unchanged() {
         assert_eq!(check.state, SourceState::Unchanged, "{report:?}");
     }
     assert_eq!(report.references[0].outcome, Outcome::Resolved);
-    fs::remove_dir_all(root).unwrap();
 }
 
 /// A refs line tens of MiB long is malformed, and is skipped without ever
@@ -394,7 +385,8 @@ fn an_overlong_refs_line_is_skipped_in_bounded_memory() {
 /// mebibyte of text, return no more than the report's text budget.
 #[test]
 fn the_text_budget_is_charged_per_citation() {
-    let root = scratch("budget");
+    let temporary = scratch("budget");
+    let root = temporary.path();
     let project = root.join("claude/project");
     fs::create_dir_all(&project).unwrap();
     let record = serde_json::json!({
@@ -426,7 +418,6 @@ fn the_text_budget_is_charged_per_citation() {
         .iter()
         .all(|entry| entry.text_truncated == Some(true)));
     assert_eq!(report.references.last().unwrap().text.as_deref(), Some(""));
-    fs::remove_dir_all(root).unwrap();
 }
 
 /// A copy of the OpenCode fixture program and its response files, so a test
@@ -452,8 +443,9 @@ fn opencode_store(root: &Path) -> PathBuf {
 #[test]
 fn an_edited_opencode_message_reads_changed() {
     use agent_tapes_core::backend::opencode::OpenCodeBackend;
-    let root = scratch("opencode-edit");
-    let program = opencode_store(&root);
+    let temporary = scratch("opencode-edit");
+    let root = temporary.path();
+    let program = opencode_store(root);
     let opencode = || Box::new(OpenCodeBackend::new(program.clone())) as Box<dyn Backend>;
     let id = "ses_000000fixtureSharedSession";
     let bundle = root.join("bundle");
@@ -482,7 +474,6 @@ fn an_edited_opencode_message_reads_changed() {
     let report = locate(opencode(), &bundle, "", 0);
     assert_eq!(report.sources[0].state, SourceState::Changed, "{report:?}");
     assert!(report.stale);
-    fs::remove_dir_all(root).unwrap();
 }
 
 /// An unpinned source that is shorter than when it was frozen reads
@@ -493,8 +484,9 @@ fn an_edited_opencode_message_reads_changed() {
 #[test]
 fn a_shortened_unpinned_source_reads_changed() {
     use agent_tapes_core::backend::opencode::OpenCodeBackend;
-    let root = scratch("opencode-shortened");
-    let program = opencode_store(&root);
+    let temporary = scratch("opencode-shortened");
+    let root = temporary.path();
+    let program = opencode_store(root);
     let opencode = || Box::new(OpenCodeBackend::new(program.clone())) as Box<dyn Backend>;
     let id = "ses_000000fixtureSharedSession";
     let bundle = root.join("bundle");
@@ -509,7 +501,6 @@ fn a_shortened_unpinned_source_reads_changed() {
     let report = locate(opencode(), &bundle, "", 0);
     assert_eq!(report.sources[0].state, SourceState::Changed, "{report:?}");
     assert!(report.stale);
-    fs::remove_dir_all(root).unwrap();
 }
 
 /// A `ref` or `lane` longer than any workset identifier is malformed, so a

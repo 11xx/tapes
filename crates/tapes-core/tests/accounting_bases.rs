@@ -226,7 +226,8 @@ fn a_pi_reader_produces_only_its_declared_bases() {
 #[test]
 fn an_opencode_reader_produces_only_its_declared_bases() {
     let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/opencode");
-    let root = std::env::temp_dir().join(format!("tapes-bases-opencode-{}", std::process::id()));
+    let temporary = tempfile::TempDir::with_prefix("tapes-bases-opencode-").unwrap();
+    let root = temporary.path();
     let data = root.join("data/opencode");
     fs::create_dir_all(&data).unwrap();
     fs::File::create(data.join("opencode.db")).unwrap();
@@ -239,5 +240,4 @@ fn an_opencode_reader_produces_only_its_declared_bases() {
         let seen = produced(Box::new(OpenCodeBackend::new(program)));
         assert_eq!(seen, BTreeSet::from(["recorded-total".to_owned()]));
     }
-    let _ = fs::remove_dir_all(&root);
 }

@@ -1,5 +1,5 @@
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::AtomicU64;
 
 use agent_tapes_core::backend::{pi::PiBackend, Backend};
 use agent_tapes_core::usage::{ConsumptionKeyOptions, UsageOptions};
@@ -57,24 +57,15 @@ fn invalid_key_limits_refuse_before_session_resolution() {
 #[test]
 fn bounded_measurements_and_keys_share_the_transcript_frontier() {
     use std::fs;
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let root = std::env::temp_dir().join(format!(
-        "tapes-key-frontier-{}-{}-{nonce}",
-        std::process::id(),
-        TEMP_ROOTS.fetch_add(1, Ordering::Relaxed)
-    ));
-    fs::create_dir_all(&root).unwrap();
+    let temporary = tempfile::TempDir::with_prefix("tapes-key-frontier-").unwrap();
+    let root = temporary.path();
     let file = "2026-01-15T10-00-00-000Z_keys-parent.jsonl";
     let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures/pi-consumption-keys")
         .join(file);
     let path = root.join(file);
     fs::copy(fixture, &path).unwrap();
-    let backend = PiBackend::new(&root);
+    let backend = PiBackend::new(root);
     let cached = backend.locate("keys-parent").unwrap().unwrap();
     let extra = serde_json::json!({"type":"usage","id":"later-usage","parentId":"parent-request","timestamp":"2026-01-15T10:00:04Z","kind":"fixture","provider":"fixture-provider","model":"fixture-model","usage":{"input":100,"output":10,"reasoning":0,"cacheRead":0,"cacheWrite":0,"totalTokens":110,"cost":{"total":1}}});
     let contents = fs::read_to_string(&path).unwrap();
@@ -88,7 +79,6 @@ fn bounded_measurements_and_keys_share_the_transcript_frontier() {
         )
         .unwrap();
     let view = agent_tapes_core::usage::usage(&transcript);
-    fs::remove_dir_all(root).unwrap();
     assert_eq!(keys.observed, Some(4));
     assert_eq!(view.consumption.as_ref().unwrap().events.counted, 4);
     assert_eq!(view.cost.unwrap().usd, 1.75);

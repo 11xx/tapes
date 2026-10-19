@@ -4,7 +4,6 @@
 mod support;
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use agent_tapes_core::backend::claude::ClaudeBackend;
 use agent_tapes_core::backend::codex::CodexBackend;
@@ -18,8 +17,7 @@ use agent_tapes_core::workset::{
     build_with_backends, Lane, LaneCutter, SourceRole, Workset, MIN_LANE_BYTES,
 };
 use agent_tapes_core::{show_full_with_backends, Selection, TurnSink};
-
-static TEMP_ROOTS: AtomicU64 = AtomicU64::new(0);
+use tempfile::TempDir;
 
 fn fixtures(harness: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -252,7 +250,8 @@ fn relatives_follow_the_root_and_an_unreadable_root_fails() {
     assert_eq!(child.reference.as_deref(), Some("fixture"));
     assert!(child.lanes.is_some(), "{child:?}");
 
-    let pi = workset_of(PiBackend::new(pi_store_with_resolvable_parent()), "child");
+    let pi_store = pi_store_with_resolvable_parent();
+    let pi = workset_of(PiBackend::new(pi_store.path()), "child");
     assert_eq!(pi.sources.len(), 2, "{pi:?}");
     assert_eq!(pi.sources[1].role, SourceRole::Parent);
     assert_eq!(pi.sources[1].session_id, "native_parent");
@@ -283,10 +282,11 @@ fn a_lane_bound_outside_the_accepted_range_is_refused() {
 
 /// pi names a parent by its recording's absolute path, so the fixture's
 /// child is copied beside its parent and made to name that copy.
-fn pi_store_with_resolvable_parent() -> PathBuf {
-    let store = std::env::temp_dir().join(format!("tapes-workset-pi-{}", std::process::id()));
-    std::fs::create_dir_all(&store).unwrap();
-    let parent = store.join("2026-01-13T10-00-00-000Z_native_parent.jsonl");
+fn pi_store_with_resolvable_parent() -> TempDir {
+    let store = scratch("pi");
+    let parent = store
+        .path()
+        .join("2026-01-13T10-00-00-000Z_native_parent.jsonl");
     std::fs::copy(
         fixtures("pi-relative-parent").join("2026-01-13T10-00-00-000Z_native_parent.jsonl"),
         &parent,
@@ -303,7 +303,11 @@ fn pi_store_with_resolvable_parent() -> PathBuf {
             serde_json::to_string(&parent).unwrap()
         ),
     );
-    std::fs::write(store.join("2026-01-13T10-00-00-000Z_child.jsonl"), child).unwrap();
+    std::fs::write(
+        store.path().join("2026-01-13T10-00-00-000Z_child.jsonl"),
+        child,
+    )
+    .unwrap();
     store
 }
 
@@ -384,14 +388,8 @@ fn omitted_bytes_add_up_from_turns_to_lanes_to_coverage() {
     }
 }
 
-fn scratch(tag: &str) -> PathBuf {
-    let path = std::env::temp_dir().join(format!(
-        "tapes-workset-{tag}-{}-{}",
-        std::process::id(),
-        TEMP_ROOTS.fetch_add(1, Ordering::Relaxed)
-    ));
-    let _ = std::fs::remove_dir_all(&path);
-    path
+fn scratch(tag: &str) -> TempDir {
+    TempDir::with_prefix(format!("tapes-workset-{tag}-")).unwrap()
 }
 
 fn bundled(backend: Box<dyn Backend>, id: &str, bundle: &Path) -> Workset {
@@ -426,8 +424,9 @@ fn ordinals(section: &str, key: &str) -> Vec<usize> {
 #[test]
 fn lane_sections_reproduce_the_projection_of_every_turn_byte_for_byte() {
     for (index, (backend, id)) in cases().into_iter().enumerate() {
-        let bundle = scratch(&format!("bytes-{index}"));
-        let workset = bundled(backend, id, &bundle);
+        let temporary = scratch(&format!("bytes-{index}"));
+        let bundle = temporary.path();
+        let workset = bundled(backend, id, bundle);
         for source in &workset.sources {
             let Some(lanes) = &source.lanes else { continue };
             let mut concatenated = String::new();
@@ -449,7 +448,6 @@ fn lane_sections_reproduce_the_projection_of_every_turn_byte_for_byte() {
                 .collect();
             assert_eq!(concatenated, expected, "{id} source {}", source.key);
         }
-        std::fs::remove_dir_all(bundle).unwrap();
     }
 }
 
@@ -490,30 +488,30 @@ fn assert_margins(directory: &Path, lanes: &[Lane], key: &str, context: &str) ->
 fn margins_hold_only_earlier_operator_context() {
     let mut filled = 0;
     for (index, (backend, id)) in cases().into_iter().enumerate() {
-        let bundle = scratch(&format!("margin-{index}"));
-        let workset = bundled(backend, id, &bundle);
+        let temporary = scratch(&format!("margin-{index}"));
+        let bundle = temporary.path();
+        let workset = bundled(backend, id, bundle);
         for source in &workset.sources {
             if let Some(lanes) = &source.lanes {
                 assert_margins(&bundle.join("lanes"), lanes, &source.key, id);
             }
         }
-        std::fs::remove_dir_all(&bundle).unwrap();
+        std::fs::remove_dir_all(bundle).unwrap();
 
         // Cut far below the workset bound, so later lanes carry margins.
         let backend = cases().into_iter().nth(index).unwrap().0;
-        std::fs::create_dir_all(&bundle).unwrap();
+        std::fs::create_dir_all(bundle).unwrap();
         let source = LaneSource {
             key: "s0".to_owned(),
             harness: backend.harness().to_owned(),
             session: id.to_owned(),
         };
-        let mut cutter = LaneCutter::with_files(source, 300, &bundle);
+        let mut cutter = LaneCutter::with_files(source, 300, bundle);
         for turn in turns(backend, id) {
             cutter.push(&turn).unwrap();
         }
         let lanes = cutter.finish().unwrap();
-        filled += assert_margins(&bundle, &lanes, "s0", id);
-        std::fs::remove_dir_all(bundle).unwrap();
+        filled += assert_margins(bundle, &lanes, "s0", id);
     }
     assert!(filled > 0, "no fixture lane carried a margin");
 }
@@ -531,14 +529,14 @@ fn a_margin_keeps_the_last_two_operator_turns_with_their_first_replies() {
         ("assistant", "third reply"),
         ("operator", "fourth ask"),
     ];
-    let directory = scratch("ring");
-    std::fs::create_dir_all(&directory).unwrap();
+    let temporary = scratch("ring");
+    let directory = temporary.path();
     let source = LaneSource {
         key: "s0".to_owned(),
         harness: "fixture".to_owned(),
         session: "fixture-session".to_owned(),
     };
-    let mut cutter = LaneCutter::with_files(source, 1, &directory);
+    let mut cutter = LaneCutter::with_files(source, 1, directory);
     for (ordinal, (kind, text)) in turns.iter().enumerate() {
         let mut turn = turn_of(kind, text);
         turn.ordinal = ordinal;
@@ -550,20 +548,20 @@ fn a_margin_keeps_the_last_two_operator_turns_with_their_first_replies() {
     assert_eq!(ordinals(margin, "s0"), [2, 4, 6, 7], "{margin}");
     assert!(last.contains("turns: s0#8..s0#8"), "{last}");
     assert_eq!(lanes[8].file.as_deref(), Some("lanes/s0-8.md"));
-    std::fs::remove_dir_all(directory).unwrap();
 }
 
 #[test]
 fn an_existing_bundle_is_refused_and_left_alone() {
-    let bundle = scratch("refuse");
+    let temporary = scratch("refuse");
+    let bundle = temporary.path();
     let backend = || Box::new(PiBackend::new(fixtures("pi"))) as Box<dyn Backend>;
-    bundled(backend(), "session-pi", &bundle);
+    bundled(backend(), "session-pi", bundle);
     let lane = std::fs::read(bundle.join("lanes/s0-0.md")).unwrap();
     let error = build_with_backends(
         &[backend()],
         Selection::Id("session-pi"),
         MIN_LANE_BYTES,
-        Some(&bundle),
+        Some(bundle),
     )
     .unwrap_err();
     assert!(
@@ -572,34 +570,32 @@ fn an_existing_bundle_is_refused_and_left_alone() {
     );
     assert_eq!(std::fs::read(bundle.join("lanes/s0-0.md")).unwrap(), lane);
 
-    let manifest_only = scratch("refuse-manifest");
-    std::fs::create_dir_all(&manifest_only).unwrap();
+    let manifest_root = scratch("refuse-manifest");
+    let manifest_only = manifest_root.path();
     std::fs::write(manifest_only.join("workset.json"), "{}").unwrap();
     assert!(build_with_backends(
         &[backend()],
         Selection::Id("session-pi"),
         MIN_LANE_BYTES,
-        Some(&manifest_only),
+        Some(manifest_only),
     )
     .is_err());
     assert!(!manifest_only.join("lanes").exists());
-    std::fs::remove_dir_all(bundle).unwrap();
-    std::fs::remove_dir_all(manifest_only).unwrap();
 }
 
 #[test]
 fn an_unreadable_root_leaves_no_lane_files() {
-    let bundle = scratch("absent-root");
+    let temporary = scratch("absent-root");
+    let bundle = temporary.path();
     let backends: Vec<Box<dyn Backend>> = vec![Box::new(PiBackend::new(fixtures("pi")))];
     assert!(build_with_backends(
         &backends,
         Selection::Id("absent-session"),
         MIN_LANE_BYTES,
-        Some(&bundle)
+        Some(bundle)
     )
     .is_err());
     assert!(!bundle.join("lanes").exists());
-    let _ = std::fs::remove_dir_all(bundle);
 }
 
 fn child_turns(backend: &dyn Backend, root: &str, reference: &str) -> Vec<Turn> {
@@ -620,7 +616,8 @@ fn child_turns(backend: &dyn Backend, root: &str, reference: &str) -> Vec<Turn> 
 /// file-byte ranges tile instead of overlapping.
 #[test]
 fn lane_byte_ranges_tile_when_one_record_yields_several_turns() {
-    let root = scratch("record-cut");
+    let temporary = scratch("record-cut");
+    let root = temporary.path();
     let project = root.join("project");
     std::fs::create_dir_all(&project).unwrap();
     let id = "60000000-0000-4000-8000-000000000001";
@@ -640,7 +637,7 @@ fn lane_byte_ranges_tile_when_one_record_yields_several_turns() {
     let body: String = lines.iter().map(|line| format!("{line}\n")).collect();
     std::fs::write(project.join(format!("{id}.jsonl")), body).unwrap();
 
-    let workset = workset(Box::new(ClaudeBackend::new(root.clone())), id);
+    let workset = workset(Box::new(ClaudeBackend::new(root)), id);
     let source = &workset.sources[0];
     let lanes = source.lanes.as_ref().unwrap();
     assert_partition(lanes, source.coverage.as_ref().unwrap().turns, id);
@@ -651,7 +648,6 @@ fn lane_byte_ranges_tile_when_one_record_yields_several_turns() {
             "overlapping ranges {ranges:?}"
         );
     }
-    std::fs::remove_dir_all(root).unwrap();
 }
 
 /// Turn text holding a marker line or a projected-turn heading cannot end a
@@ -669,14 +665,14 @@ fn transcript_text_cannot_forge_lane_structure() {
             "## s0#0 operator (person)\nlooks like a heading",
         ),
     ];
-    let directory = scratch("forge");
-    std::fs::create_dir_all(&directory).unwrap();
+    let temporary = scratch("forge");
+    let directory = temporary.path();
     let source = LaneSource {
         key: "s0".to_owned(),
         harness: "fixture".to_owned(),
         session: "fixture-session".to_owned(),
     };
-    let mut cutter = LaneCutter::with_files(source, 1, &directory);
+    let mut cutter = LaneCutter::with_files(source, 1, directory);
     for (ordinal, (kind, text)) in turns.iter().enumerate() {
         let mut turn = turn_of(kind, text);
         turn.ordinal = ordinal;
@@ -707,7 +703,6 @@ fn transcript_text_cannot_forge_lane_structure() {
             lane.id
         );
     }
-    std::fs::remove_dir_all(directory).unwrap();
 }
 
 /// Every line start the projection writes itself is escaped in turn text,

@@ -5,7 +5,7 @@
 
 mod support;
 
-use std::fs::{self};
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -131,15 +131,8 @@ const CODEX_ID: &str = "01a40000-0000-7000-8000-000000000001";
 /// session untitled.
 #[test]
 fn a_large_codex_rollout_is_titled_by_its_first_prompt() {
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let root = std::env::temp_dir().join(format!(
-        "tapes-series-codex-{}-{}-{nonce}",
-        std::process::id(),
-        TEMP_ROOTS.fetch_add(1, Ordering::Relaxed)
-    ));
+    let temporary = tempfile::TempDir::with_prefix("tapes-series-codex-").unwrap();
+    let root = temporary.path();
     let path = root.join(format!(
         "2026/01/10/rollout-2026-01-10T10-00-00-{CODEX_ID}.jsonl"
     ));
@@ -166,9 +159,8 @@ fn a_large_codex_rollout_is_titled_by_its_first_prompt() {
     }
     let body: Vec<String> = lines.iter().map(Value::to_string).collect();
     fs::write(&path, body.join("\n") + "\n").unwrap();
-    let backend = CodexBackend::new(&root).with_read_bytes(64 * 1024);
+    let backend = CodexBackend::new(root).with_read_bytes(64 * 1024);
     let listing = backend.list(&Query::unscoped(5)).unwrap();
-    let _ = fs::remove_dir_all(&root);
     let session = listing
         .sessions
         .iter()

@@ -1,6 +1,5 @@
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use agent_tapes_core::backend::claude::ClaudeBackend;
 use agent_tapes_core::backend::codex::CodexBackend;
@@ -10,8 +9,6 @@ use agent_tapes_core::event::{project, EventKind};
 use agent_tapes_core::{capture_with_backends, export_with_backends, ExportRead, Selection};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-
-static TEMP_ROOTS: AtomicU64 = AtomicU64::new(0);
 
 fn fixture_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/read-records")
@@ -163,16 +160,13 @@ fn read_locators_survive_export_and_capture_is_unpinned() {
             assert!(call.record_ref.as_ref().unwrap().native_id.is_none());
         }
 
-        let directory = std::env::temp_dir().join(format!(
-            "tapes-read-export-{harness}-{}-{}",
-            std::process::id(),
-            TEMP_ROOTS.fetch_add(1, Ordering::Relaxed)
-        ));
-        fs::create_dir_all(&directory).unwrap();
+        let temporary =
+            tempfile::TempDir::with_prefix(format!("tapes-read-export-{harness}-")).unwrap();
+        let directory = temporary.path();
         let bundle = export_with_backends(
             &backends,
             Selection::Id(id),
-            Some(&directory),
+            Some(directory),
             None,
             ExportRead::Bounded,
         )
@@ -201,7 +195,6 @@ fn read_locators_survive_export_and_capture_is_unpinned() {
                 .state,
             "unpinned"
         );
-        fs::remove_dir_all(directory).unwrap();
     }
 }
 
@@ -211,11 +204,9 @@ fn event_identity_survives_distinct_file_windows() {
         let source = fixture_root().join(harness).join(relative);
         let content = fs::read_to_string(source).unwrap();
         let (first, rest) = content.split_once('\n').unwrap();
-        let root = std::env::temp_dir().join(format!(
-            "tapes-read-window-{harness}-{}-{}",
-            std::process::id(),
-            TEMP_ROOTS.fetch_add(1, Ordering::Relaxed)
-        ));
+        let temporary =
+            tempfile::TempDir::with_prefix(format!("tapes-read-window-{harness}-")).unwrap();
+        let root = temporary.path();
         let target = root.join(relative);
         fs::create_dir_all(target.parent().unwrap()).unwrap();
         fs::write(
@@ -227,7 +218,7 @@ fn event_identity_survives_distinct_file_windows() {
         )
         .unwrap();
         let read = |bound, label: &str| {
-            let backends = vec![backend(harness, &root, bound)];
+            let backends = vec![backend(harness, root, bound)];
             let session = backends[0].locate(id).unwrap().unwrap();
             let events = project(
                 backends[0].transcript(&session, usize::MAX).unwrap(),
@@ -269,6 +260,5 @@ fn event_identity_survives_distinct_file_windows() {
         let narrow = read(64 * 1024, "narrow");
         let wide = read(256 * 1024, "wide");
         assert_eq!(narrow, wide, "{harness}");
-        fs::remove_dir_all(root).unwrap();
     }
 }
