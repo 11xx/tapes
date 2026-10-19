@@ -1512,9 +1512,6 @@ fn recorded_accounting(
     }
 }
 
-/// Selected accounting detail, with a set-aside cumulative state kept
-/// separately. Request dimensions describe the requests read; their TTL split
-/// describes the session counters only under request-sum accounting.
 /// What a request sum established beside its counters and dimensions.
 struct RequestFacts {
     by_model: Option<Vec<ModelUsage>>,
@@ -1525,6 +1522,10 @@ struct RequestFacts {
     billing: Option<crate::pricing::Billing>,
 }
 
+/// Selected accounting detail, with a set-aside cumulative state kept
+/// separately. Request dimensions describe the requests read; their TTL
+/// split, overall and by model, splits the session counters and each model's
+/// share under either basis wherever it sums to their cache writes.
 fn claude_usage_detail(
     cost_state: Option<&Value>,
     requests: Option<RequestDimensions>,
@@ -1568,9 +1569,21 @@ fn claude_usage_detail(
             ));
             detail.recorded_total = Some(recorded);
         }
-        detail.cache_write_by_ttl = requests.as_ref().map(|requests| requests.cache_write);
         detail.by_model = by_model;
+    } else {
+        for model in detail.by_model.iter_mut().flatten() {
+            model.cache_write_by_ttl = by_model
+                .iter()
+                .flatten()
+                .filter(|share| share.model == model.model)
+                .filter_map(|share| share.cache_write_by_ttl)
+                .reduce(|mut sum, writes| {
+                    sum.add(&writes);
+                    sum
+                });
+        }
     }
+    detail.cache_write_by_ttl = requests.as_ref().map(|requests| requests.cache_write);
     match placeholders {
         0 => {}
         count if selected_tokens.is_none() && !counted_requests && failures == 0 => {

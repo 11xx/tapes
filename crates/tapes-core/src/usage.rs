@@ -46,8 +46,8 @@ pub struct UsageDetail {
     /// Request-observation attribution kept separate from the session's
     /// cumulative recorded total.
     pub attribution: Option<UsageAttribution>,
-    /// The session counters' cache writes split by TTL, where the counters
-    /// are a sum over requests that each recorded the split.
+    /// The TTL split of the cache writes the read's requests recorded. It is
+    /// the session counters' split only where it sums to their cache writes.
     pub cache_write_by_ttl: Option<CacheWrites>,
     /// Price-relevant facts the read's requests recorded beside their tokens.
     pub requests: Option<RequestDimensions>,

@@ -2022,6 +2022,9 @@ enum Command {
         /// Compatible observations retain a dimension when a later record
         /// omits it. TTL splits must match the selected cache-write count;
         /// conflicting values are withheld and counted under `conflicting`.
+        /// A Claude cost-state total, and each model's share of it, takes
+        /// its requests' TTL split only where that split sums exactly to its
+        /// cache writes; otherwise its writes are `ttl_unrecorded`.
         /// At most 16 TTL-count witnesses are held per request, with excess
         /// observations counted under `omitted_values`.
         /// A newest Claude cost-state below its request sum is set aside:

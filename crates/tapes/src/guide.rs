@@ -702,7 +702,8 @@ PROBE BEFORE EXPORTING
   model's events (unreadable-record, unrecognized-usage, read-window,
   since-reset, unestablished-scope, incomplete-attribution), so a
   share-by-share estimate carries it too, and a share prices its cache
-  writes at the TTLs its own requests recorded. Pi consumption is split by
+  writes at the TTLs its own requests recorded wherever those writes sum
+  exactly to the share's. Pi consumption is split by
   the model each event names. On the active branch alone it is priced as
   the session figure is, share by share where every event names a model;
   with events on other branches it is priced by that split, and usage no
@@ -1021,8 +1022,10 @@ PROBE BEFORE EXPORTING
   cells end with their reasons in brackets, and a withheld DISJOINT TOTAL
   cell reads `withheld [<categories: reasons>]`. Coverage lines are labelled
   `active` for a pi session's active branch and `session` otherwise.
-  A Claude request sum keeps the TTL split; a
-  cost-state total merges it, so its writes are ttl_unrecorded. requests
+  A Claude request sum keeps the TTL split. A cost-state total merges it,
+  so its writes take the split its requests recorded, for the figure and for
+  each model's share, only where that split sums exactly to the total's cache
+  writes; otherwise they are ttl_unrecorded. requests
   tallies what the read's deduplicated Claude requests recorded beside their
   tokens — cache writes by TTL, service tier, speed, inference geo, web
   search and fetch counts — and counts under missing each request that did
