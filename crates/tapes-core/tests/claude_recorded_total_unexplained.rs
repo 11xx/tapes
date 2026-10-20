@@ -92,12 +92,21 @@ impl Store {
     ///   more Haiku no request explains, and 100 Opus cache writes no request
     ///   recorded. Four of the lead's records fall between the two totals.
     fn lead(with_agent: bool) -> Self {
+        Self::lead_with(with_agent, None)
+    }
+
+    /// The lead with `api_request` written before its first request.
+    fn lead_with(with_agent: bool, api_request: Option<Value>) -> Self {
         let store = Self::new();
         store.write(
             store.project().join(format!("{LEAD}.jsonl")),
             &[
                 json!({"type": "mode", "mode": "default", "sessionId": LEAD}),
                 prompt(LEAD, "lead-user-1", "2026-10-20T10:00:00.000Z"),
+            ]
+            .into_iter()
+            .chain(api_request)
+            .chain([
                 opus(
                     LEAD,
                     "req_lead_1",
@@ -135,7 +144,8 @@ impl Store {
                     [[5, 300, 30, 3000, 1000], [36, 650, 0, 9500, 3100]],
                     3_600_019,
                 ),
-            ],
+            ])
+            .collect::<Vec<_>>(),
         );
         if with_agent {
             let subagents = store.project().join(LEAD).join("subagents");
@@ -194,6 +204,10 @@ impl Store {
     }
 
     fn window(&self, from: &str, to: Option<&str>) -> Value {
+        self.window_priced(from, to, None)
+    }
+
+    fn window_priced(&self, from: &str, to: Option<&str>, prices: Option<&PriceTable>) -> Value {
         let summary = usage_window_with_backends(
             &self.backends(),
             &SessionSelection {
@@ -205,7 +219,7 @@ impl Store {
                 from: Some(from.parse().unwrap()),
                 to: to.map(|to| to.parse().unwrap()),
             }),
-            None,
+            prices,
         )
         .unwrap();
         serde_json::to_value(summary).unwrap()
@@ -609,4 +623,61 @@ fn a_window_places_the_familys_unexplained_part_once() {
         Some([20, 400, 6000, 2000]),
         "{summary:#}"
     );
+}
+
+/// A table whose Haiku row bills long prompts at five times its rates, on API
+/// billing only.
+const API_LONG_CONTEXT_TABLE: &str = r#"
+schema = "tapes-price-table/2"
+currency = "USD"
+
+[[models]]
+id = "claude-opus-5-5"
+effective = 2026-10-18
+source = "fixture"
+per_million = { uncached_input = 4.0, cache_read = 0.2, cache_write_5m = 5.0, cache_write_1h = 8.0, output = 20.0 }
+
+[[models]]
+id = "claude-haiku-5-5"
+effective = 2026-10-18
+source = "fixture"
+per_million = { uncached_input = 1.0, cache_read = 0.1, cache_write_5m = 1.25, cache_write_1h = 2.0, output = 5.0 }
+
+[models.long_context]
+above_prompt_tokens = 100
+prompt_tokens = ["uncached_input", "cache_read", "cache_write"]
+billing = ["api"]
+multipliers = { uncached_input = 5.0, cache_read = 5.0, cache_write_5m = 5.0, cache_write_1h = 5.0, output = 5.0 }
+"#;
+
+/// Claim: a window's total prices each session's unexplained part under that
+/// session's own billing, as its usage answer does: a subscription-billed
+/// lead's 36/650/9500/3100 Haiku stays at the Haiku row's rates, $0.008111
+/// to $0.010436, in the window's total as in the session's view. Rejects a
+/// total priced with no billing, which ranges up to the API long-context
+/// rate five times over.
+#[test]
+fn a_window_total_prices_the_unexplained_part_under_each_sessions_billing() {
+    let store = Store::lead_with(
+        false,
+        Some(json!({"type": "api-request", "sessionId": LEAD,
+            "timestamp": "2026-10-20T10:00:30.000Z",
+            "params": {"model": "claude-opus-5-5", "betas": ["oauth-2025-04-20"]}})),
+    );
+    let table = PriceTable::parse(API_LONG_CONTEXT_TABLE).unwrap();
+    let mut view = usage_full_with_backends(&store.backends(), Selection::Id(LEAD)).unwrap();
+    pricing::price_view(&mut view, &table);
+    let view = serde_json::to_value(view).unwrap();
+    let session = &entry(&view["unexplained"]["by_model"], "claude-haiku-5-5").unwrap()
+        ["list_price_estimate"];
+    assert!(close(&session["at_least"], 0.008111), "{session:#}");
+    assert!(close(&session["at_most"], 0.010436), "{session:#}");
+    let summary = store.window_priced("2026-10-20T09:00:00Z", None, Some(&table));
+    let total = &entry(
+        &summary["totals"]["unexplained"]["by_model"],
+        "claude-haiku-5-5",
+    )
+    .unwrap_or_else(|| panic!("no unexplained Haiku: {summary:#}"))["list_price_estimate"];
+    assert!(close(&total["at_least"], 0.008111), "{total:#}");
+    assert!(close(&total["at_most"], 0.010436), "{total:#}");
 }

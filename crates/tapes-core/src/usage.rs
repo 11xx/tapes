@@ -1859,8 +1859,9 @@ struct Tally {
     /// Each added session's part of its recorded total that no request
     /// explains.
     unexplained: Vec<Unexplained>,
-    /// The token conventions those parts count in.
-    unexplained_conventions: std::collections::BTreeSet<Option<TokenConvention>>,
+    /// Those parts priced session by session, keyed by whether the entry is
+    /// placed and its model, where a price table was given.
+    unexplained_estimates: BTreeMap<(bool, String), EstimateSum>,
 }
 
 impl Tally {
@@ -1877,6 +1878,41 @@ impl Tally {
             }
             None => sum.qualify_all(MeasurementReason::IncompleteAttribution),
         }
+        // Each session's unexplained part is priced under its own billing
+        // and times, as its own usage answer prices it, and the sums add.
+        let detail = session.usage_detail.as_ref();
+        if let (Some(unexplained), Some(convention)) = (
+            detail.and_then(|detail| detail.unexplained.as_ref()),
+            TokenConvention::of(session.harness()),
+        ) {
+            let terms = crate::pricing::RequestTerms {
+                requests: None,
+                billing: detail.and_then(|detail| detail.billing.as_ref()),
+                from: session.started_at,
+                to: session.last_activity_at,
+            };
+            let keys = unexplained
+                .by_model
+                .iter()
+                .map(|entry| (true, entry.model.clone()))
+                .chain(
+                    unexplained
+                        .unplaced
+                        .iter()
+                        .map(|entry| (false, entry.model.clone())),
+                );
+            for (key, sum) in keys.zip(crate::pricing::unexplained_sums(
+                unexplained,
+                convention,
+                table,
+                terms,
+            )) {
+                self.unexplained_estimates
+                    .entry(key)
+                    .or_default()
+                    .merge(sum);
+            }
+        }
     }
 
     fn add(&mut self, session: &Session) {
@@ -1887,8 +1923,6 @@ impl Tally {
             .and_then(|detail| detail.unexplained.as_ref())
         {
             self.unexplained.push(unexplained.clone());
-            self.unexplained_conventions
-                .insert(TokenConvention::of(session.harness()));
         }
         self.measurement_completeness
             .merge(&session.selected_measurement_completeness());
@@ -2054,7 +2088,20 @@ impl Tally {
                 .estimate
                 .filter(|_| !self.unioned)
                 .and_then(EstimateSum::finish),
-            unexplained: Unexplained::sum(&self.unexplained),
+            unexplained: Unexplained::sum(&self.unexplained).map(|mut unexplained| {
+                let mut estimates = self.unexplained_estimates;
+                for (placed, entries) in [
+                    (true, &mut unexplained.by_model),
+                    (false, &mut unexplained.unplaced),
+                ] {
+                    for entry in entries {
+                        entry.list_price_estimate = estimates
+                            .remove(&(placed, entry.model.clone()))
+                            .and_then(EstimateSum::finish);
+                    }
+                }
+                unexplained
+            }),
         }
     }
 }
@@ -2711,24 +2758,8 @@ fn summarize(
             bucket.exact().is_some(),
         );
     }
-    // The parts no request explains are priced model by model where they
-    // count tokens in one convention.
-    let convention = match tally.unexplained_conventions.iter().collect::<Vec<_>>()[..] {
-        [Some(convention)] => Some(*convention),
-        _ => None,
-    };
     let mut tally = tally.finish();
     domains.apply(&mut tally);
-    if let (Some(table), Some(convention), Some(unexplained)) =
-        (prices, convention, tally.unexplained.as_mut())
-    {
-        crate::pricing::price_unexplained(
-            unexplained,
-            convention,
-            table,
-            crate::pricing::RequestTerms::default(),
-        );
-    }
     tally
 }
 

@@ -1775,19 +1775,38 @@ pub fn price_unexplained(
     table: &PriceTable,
     terms: RequestTerms<'_>,
 ) {
+    let sums = unexplained_sums(unexplained, convention, table, terms);
+    for (entry, sum) in unexplained.entries_mut().zip(sums) {
+        entry.list_price_estimate = sum.finish();
+    }
+}
+
+/// Each entry of `unexplained`, its placed models and then its unplaced
+/// ones, priced as [`price_unexplained`] prices it, as sums that add across
+/// the figures a summary holds.
+pub fn unexplained_sums(
+    unexplained: &crate::unexplained::Unexplained,
+    convention: TokenConvention,
+    table: &PriceTable,
+    terms: RequestTerms<'_>,
+) -> Vec<EstimateSum> {
     let terms = RequestTerms {
         requests: None,
         ..terms
     };
-    for entry in unexplained.entries_mut() {
-        let writes = CacheWrites {
-            ttl_unrecorded: entry.tokens.cache_write,
-            ..CacheWrites::default()
-        };
-        let disjoint = DisjointTokens::from_native(&entry.tokens, convention, Some(&writes));
-        entry.list_price_estimate =
-            price_model(&disjoint, &entry.model, None, table, &terms, false).finish();
-    }
+    unexplained
+        .by_model
+        .iter()
+        .chain(&unexplained.unplaced)
+        .map(|entry| {
+            let writes = CacheWrites {
+                ttl_unrecorded: entry.tokens.cache_write,
+                ..CacheWrites::default()
+            };
+            let disjoint = DisjointTokens::from_native(&entry.tokens, convention, Some(&writes));
+            price_model(&disjoint, &entry.model, None, table, &terms, false)
+        })
+        .collect()
 }
 
 /// Price every figure of a span answer under `table`.
