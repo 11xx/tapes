@@ -235,6 +235,8 @@ pub struct Claude {
     pub records: Vec<Value>,
     pub parent: Option<String>,
     pub serial: usize,
+    /// The 5-minute and 1-hour cache writes each later request records.
+    pub cache_writes: Option<(u64, u64)>,
 }
 
 impl Claude {
@@ -247,6 +249,7 @@ impl Claude {
             records: Vec::new(),
             parent: None,
             serial: 0,
+            cache_writes: None,
         }
     }
 
@@ -307,14 +310,19 @@ impl Claude {
             self.agent.as_deref().unwrap_or("lead"),
             self.serial + 1
         );
+        let mut usage = json!({"input_tokens": 10 + self.serial as u64,
+            "cache_creation_input_tokens": 0, "cache_read_input_tokens": 100, "output_tokens": 7});
+        if let Some((five, hour)) = self.cache_writes {
+            usage["cache_creation_input_tokens"] = json!(five + hour);
+            usage["cache_creation"] =
+                json!({"ephemeral_5m_input_tokens": five, "ephemeral_1h_input_tokens": hour});
+        }
         self.push(
             "assistant",
             when,
             json!({"requestId": format!("req_{request}"), "message": {
                 "id": format!("msg_{request}"), "role": "assistant", "model": "claude-fixture",
-                "content": content, "stop_reason": "end_turn",
-                "usage": {"input_tokens": 10 + self.serial as u64, "cache_creation_input_tokens": 0,
-                    "cache_read_input_tokens": 100, "output_tokens": 7}}}),
+                "content": content, "stop_reason": "end_turn", "usage": usage}}),
         );
     }
 
@@ -411,17 +419,24 @@ impl Claude {
     /// A `cost-state` record totalling the session's requests and a model
     /// no request explains.
     pub fn cost_state(&mut self) {
-        let requests: u64 = self
+        self.cost_state_covering(&[]);
+    }
+
+    /// A `cost-state` record totalling the session's requests, those of
+    /// `children`, its subagents, and a model no request explains, as a
+    /// lead's recorded total counts its subagents' requests.
+    pub fn cost_state_covering(&mut self, children: &[&Claude]) {
+        let assistants: Vec<&Value> = self
             .records
             .iter()
+            .chain(children.iter().flat_map(|child| child.records.iter()))
             .filter(|record| record["type"] == "assistant")
+            .collect();
+        let requests: u64 = assistants
+            .iter()
             .map(|record| record["message"]["usage"]["input_tokens"].as_u64().unwrap())
             .sum();
-        let count = self
-            .records
-            .iter()
-            .filter(|record| record["type"] == "assistant")
-            .count() as u64;
+        let count = assistants.len() as u64;
         let usage = |input: u64, output: u64, read: u64| {
             json!({"inputTokens": input, "outputTokens": output, "thinkingTokens": 0,
                 "cacheReadInputTokens": read, "cacheCreationInputTokens": 0,
