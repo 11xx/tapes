@@ -898,13 +898,15 @@ struct Figure {
     shared: usize,
 }
 
-/// One member's figure over its whole recording. `seen` holds the request ids
-/// the earlier recordings of its Claude family recorded; a request this
-/// recording records under one of them is left out of the counted figure.
+/// One member's figure over its whole recording. Each set of `seen` holds the
+/// request ids the earlier recordings of one Claude namespace recorded (a
+/// family of subagent recordings, a chain of continuations); a request this
+/// recording records under an id one holds is left out of the counted
+/// figure, and every id it records joins every set.
 fn member_figure(
     backend: &dyn Backend,
     member: &Member,
-    seen: Option<&mut HashSet<String>>,
+    mut seen: Vec<&mut HashSet<String>>,
 ) -> Result<Figure> {
     let read = backend.stream_transcript_with(
         &member.session,
@@ -914,12 +916,15 @@ fn member_figure(
     )?;
     let whole = backend.stream_session(&member.session, &read)?;
     let mut shared = Vec::new();
-    if let (Some(seen), Some(timeline)) = (seen, read.requests.as_ref()) {
+    if let Some(timeline) = read.requests.as_ref() {
         for request in &timeline.requests {
-            if let Some(id) = &request.id {
-                if !seen.insert(id.clone()) {
-                    shared.push(request.ordinal);
-                }
+            let Some(id) = &request.id else { continue };
+            let mut held = false;
+            for namespace in &mut seen {
+                held |= !namespace.insert(id.clone());
+            }
+            if held {
+                shared.push(request.ordinal);
             }
         }
     }
@@ -1035,7 +1040,20 @@ fn measure(
     let mut withheld = Vec::new();
     let mut families: HashMap<SessionKey, ClaudeFamily> = HashMap::new();
     let mut parent_figure: HashMap<SessionKey, usize> = HashMap::new();
-    for (position, member) in roster.members.iter().enumerate() {
+    // A continued session's recording preserves requests of the session it
+    // continued, so the earlier recordings are measured first and the later
+    // ones keep only requests they add.
+    let mut chain_seen: HashSet<String> = HashSet::new();
+    let mut order: Vec<usize> = (0..roster.members.len())
+        .filter(|position| roster.members[*position].link == Link::Continuation)
+        .rev()
+        .collect();
+    order.extend(
+        (0..roster.members.len())
+            .filter(|position| roster.members[*position].link != Link::Continuation),
+    );
+    for position in order {
+        let member = &roster.members[position];
         let backend = backends[member.backend].as_ref();
         let key = SessionKey::of(&member.session);
         let claude = member.session.harness() == "claude";
@@ -1050,7 +1068,12 @@ fn measure(
         let family = owner
             .as_ref()
             .map(|owner| families.entry(owner.clone()).or_default());
-        let seen = family.map(|family| &mut family.seen);
+        let in_chain = claude && matches!(member.link, Link::Root | Link::Continuation);
+        let seen: Vec<&mut HashSet<String>> = family
+            .map(|family| &mut family.seen)
+            .into_iter()
+            .chain(in_chain.then_some(&mut chain_seen))
+            .collect();
         match member_figure(backend, member, seen) {
             Ok(figure) => {
                 let mut in_parent_total = false;
@@ -1103,6 +1126,7 @@ fn measure(
             .then(|| chain.accrual(Some(&family.requests)).whole())
             .flatten();
     }
+    taken.sort_by_key(|taken| taken.position);
     for taken in &taken {
         if taken.figure.tokens.is_none() && taken.figure.cost.is_none() {
             let member = &roster.members[taken.position];

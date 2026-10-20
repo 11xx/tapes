@@ -1244,7 +1244,7 @@ PROBE BEFORE EXPORTING
   scan, an unreadable opening, the member bound, unenumerated subagent
   directories); `complete` is true only without any. A session launched
   without a marker, or whose recording began outside every member's interval,
-  is not found; agent-delegate writes the marker on every run it starts.
+  is not found: tapes names a member only from what a recording states.
   Each member's figure is the one `usage --full` reports for its recording.
   A Claude recording whose accounting is a recorded total counts its
   subagents' requests, so those subagent recordings are listed with their
@@ -1274,7 +1274,9 @@ PROBE BEFORE EXPORTING
   `uuid` of a record in the earlier recording, and no record names the
   earlier session. The link holds when exactly one recording kept beside the
   continuing one holds that record as its own, carrying that recording's
-  session id; the earlier session joins as a `lead` with its own family.
+  session id; the earlier session joins as a `lead` with its own family. A
+  continuing recording preserves requests of the earlier one, which count in
+  the earlier recording only.
   `continuations` reports each step as linked, not-continued,
   unsupported-harness, opening-unreadable, not-found or ambiguous, with the
   recordings and bytes read; nothing is linked on a guess, and the search

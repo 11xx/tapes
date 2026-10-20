@@ -639,3 +639,73 @@ fn a_recorded_total_that_counts_a_subagent_is_not_added_to_it_again() {
     );
     assert_eq!(family["totals"]["sessions"], 1, "{family:#}");
 }
+
+/// Claim: a continued session's recording preserves requests of the session
+/// it continued, and the family counts such a request once, in the earlier
+/// recording; the continuing member names how many it left out. Rejects a
+/// family that prices the preserved requests in both recordings.
+#[test]
+fn a_request_a_continued_session_preserves_is_counted_once() {
+    let store = Store::new("preserved");
+    store.claude(
+        EARLIER,
+        &[
+            claude_user(EARLIER, "earlier-user", stamp(0, 1), "Start."),
+            claude_request(EARLIER, "earlier-reply", "req_earlier", stamp(0, 30), 4),
+        ],
+    );
+    let mut preserved = claude_request(
+        CONTINUING,
+        "preserved-reply",
+        "req_earlier",
+        stamp(0, 30),
+        4,
+    );
+    preserved["isSidechain"] = json!(false);
+    store.claude(
+        CONTINUING,
+        &continuing(
+            vec![
+                preserved,
+                claude_request(
+                    CONTINUING,
+                    "continuing-reply",
+                    "req_continuing",
+                    stamp(21, 0),
+                    8,
+                ),
+            ],
+            "earlier-reply",
+        ),
+    );
+    let family = serde_json::to_value(
+        family_usage_with_backends(
+            &store.backends(),
+            Selection::Id(CONTINUING),
+            FamilyOptions {
+                continuations: true,
+                prices: None,
+            },
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        member(&family, CONTINUING)["shared_requests"],
+        1,
+        "{family:#}"
+    );
+    assert!(member(&family, EARLIER).get("shared_requests").is_none());
+    assert_eq!(
+        partition_total(&family),
+        (1 + 10 + 2 + 4) + (1 + 10 + 2 + 8),
+        "{family:#}"
+    );
+    let ids: Vec<&str> = family["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|session| session["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, [CONTINUING, EARLIER], "the root is listed first");
+}
