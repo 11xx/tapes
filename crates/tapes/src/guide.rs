@@ -1672,22 +1672,24 @@ KEEP A PRICE TABLE
   tapes prices show                    Which table usage reads, the fetch times, each model's rates now.
   tapes prices show MODEL --json       Every row naming MODEL, with its validity window.
 
-  `prices update` fetches, with `curl` over HTTPS, Anthropic's pricing page
-  (platform.claude.com/docs/en/about-claude/pricing.md), OpenAI's
-  (platform.openai.com/docs/pricing.md), and LiteLLM's community-maintained
-  model_prices_and_context_window.json for models neither page prices. It
-  keeps a tapes-price-table/2 table at `$XDG_DATA_HOME/tapes/prices.toml`
-  (`~/.local/share/tapes/prices.toml` when that is unset), which carries
-  no plan rules: plans come from the built-in rules and a /3 table the
-  user writes. Beside it, it keeps
+  `prices update` fetches, with `curl` over HTTPS, Anthropic's pricing
+  page (platform.claude.com/docs/en/about-claude/pricing.md), OpenAI's
+  (platform.openai.com/docs/pricing.md), and LiteLLM's
+  community-maintained model_prices_and_context_window.json for models
+  neither page prices. It keeps a tapes-price-table/2 table at
+  `$XDG_DATA_HOME/tapes/prices.toml` (`~/.local/share/tapes/prices.toml`
+  when that is unset), which carries no plan rules: plans come from the
+  built-in rules and a /3 table the user writes. Beside it, it keeps
   `prices-fetch.json` (tapes-price-fetch/1): the attempt's time and, per
   source, its URL, whether it succeeded, the error, and the time and model
-  count of its last success. `--from DIR` reads `anthropic.md`, `openai.md`
-  and `litellm.json` from DIR instead, for an offline machine; a file
-  missing there fails that source. Without `--from`, `TAPES_PRICES_FROM=DIR`
-  does the same, for every update. Both files are replaced whole, through
-  a temporary file and a rename; an update that leaves no table and finds
-  no row writes the record alone.
+  count of its last success. `--from DIR` reads `anthropic.md`,
+  `openai.md` and `litellm.json` from DIR instead, for an offline machine;
+  a file missing there fails that source. Without `--from`,
+  `TAPES_PRICES_FROM=DIR` does the same, for every update. It waits for a
+  refresh another command is running, which that refresh's time limits
+  bound. Both files are replaced whole, through a temporary file and a
+  rename; an update that leaves no table and finds no row writes the
+  record alone.
 
   No one needs to run it. A command that prices, with neither `--prices`
   nor `TAPES_PRICES` naming a table and outside `--remote`, first runs the
@@ -1698,15 +1700,18 @@ KEEP A PRICE TABLE
   --forecast` and `--allowance-rates`, price nothing and never do, though
   a table `--prices` names that cannot be read still refuses them. A
   replica answering a `--remote` read runs offline, so it never refreshes
-  either. It records the attempt before fetching, so commands started
-  together fetch once. The refresh gives each source 5 seconds to connect
-  and 10 to finish. It prints nothing when it succeeds. When a source
-  fails it prints one line: `warning: prices refreshed, except <source>:
-  <error>; …` when another source succeeded, else `warning: prices not
-  refreshed (<source>: <error>; …); using the table fetched <date>` (or
-  `no fetched table`). The command goes on, its exit status unchanged.
-  `--offline` on any command that prices, or `TAPES_OFFLINE=1`, skips the
-  refresh; the table already fetched still prices.
+  either. Concurrent commands refresh once: a refresh holds a lock on
+  `prices.lock` beside the table, a command that finds it held skips its
+  refresh silently, and the holder decides again once it has the lock. It
+  records the attempt before fetching, so a refresh that dies midway still
+  waits its hour. The refresh gives each source 5 seconds to connect and
+  10 to finish. It prints nothing when it succeeds. When a source fails it
+  prints one line: `warning: prices refreshed, except <source>: <error>;
+  …` when another source succeeded, else `warning: prices not refreshed
+  (<source>: <error>; …); using the table fetched <date>` (or `no fetched
+  table`). The command goes on, its exit status unchanged. `--offline` on
+  any command that prices, or `TAPES_OFFLINE=1`, skips the refresh; the
+  table already fetched still prices.
 
   The pages show only current prices, so the table keeps history as
   validity windows. A fetched price equal to the row in effect, from the

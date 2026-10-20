@@ -596,8 +596,9 @@ struct PriceArgs {
     /// one stderr warning, `prices refreshed, except …` or `prices not
     /// refreshed (…)`, and never fails the command. Only a command that
     /// prices refreshes: `stats` over a selection, and `usage --forecast` and
-    /// --allowance-rates, never do. A replica answering a --remote read runs
-    /// offline, so it never refreshes either.
+    /// --allowance-rates, never do. Concurrent commands refresh once. A
+    /// replica answering a --remote read runs offline, so it never refreshes
+    /// either.
     #[arg(long)]
     offline: bool,
 }
@@ -2261,7 +2262,8 @@ enum Command {
         /// succeeded in 24 hours, at most once an hour. A source that fails
         /// is one stderr warning, `prices refreshed, except …` or `prices
         /// not refreshed (…)`, and never fails the command. --forecast and
-        /// --allowance-rates price nothing and never refresh.
+        /// --allowance-rates price nothing and never refresh. Concurrent
+        /// commands refresh once.
         #[arg(long)]
         offline: bool,
         /// Render the versioned tapes-usage/17 object, tapes-usage-summary/16

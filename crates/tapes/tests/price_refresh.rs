@@ -261,3 +261,22 @@ fn commands_that_never_price_do_not_refresh() {
         .success());
     assert!(store.table().is_file());
 }
+
+#[test]
+fn a_refresh_another_process_holds_the_lock_for_is_skipped_silently() {
+    // Claim: while another process holds `prices.lock`, a due refresh is
+    // skipped without a write or a warning, and once the lock is released
+    // the next command refreshes. Rejects two processes fetching at once and
+    // the later one overwriting the earlier one's table and record.
+    let store = Store::new();
+    fs::create_dir_all(store.path("data/tapes")).unwrap();
+    let lock = fs::File::create(store.path("data/tapes/prices.lock")).unwrap();
+    lock.lock().unwrap();
+    let held = store.usage(&[], &sources(), &[]);
+    assert!(!store.table().exists());
+    assert!(!store.record().exists());
+    assert!(String::from_utf8_lossy(&held.stderr).is_empty());
+    lock.unlock().unwrap();
+    store.usage(&[], &sources(), &[]);
+    assert!(store.table().is_file());
+}

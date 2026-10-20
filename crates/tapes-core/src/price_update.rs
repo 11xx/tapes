@@ -41,6 +41,9 @@ pub const FETCH_SCHEMA: &str = "tapes-price-fetch/1";
 pub const TABLE_FILE: &str = "prices.toml";
 /// The fetch record's file name in the data directory.
 pub const FETCH_FILE: &str = "prices-fetch.json";
+/// The file in the data directory whose lock a process holds while it
+/// updates the table.
+pub const LOCK_FILE: &str = "prices.lock";
 /// The `source` of every row LiteLLM priced.
 pub const LITELLM_SOURCE: &str = "LiteLLM";
 /// The most of a source read into memory.
@@ -927,6 +930,22 @@ fn write_atomically(path: &Path, contents: &[u8]) -> Result<()> {
         let _ = std::fs::remove_file(&temporary);
         format!("cannot replace {}", path.display())
     })
+}
+
+/// `directory`'s lock file, created with the directory when absent. An
+/// update holds an exclusive lock on it, so concurrent updates run one at
+/// a time; the OS releases it when its holder exits.
+pub fn lock_file(directory: &Path) -> Result<std::fs::File> {
+    std::fs::create_dir_all(directory)
+        .with_context(|| format!("cannot create {}", directory.display()))?;
+    let path = directory.join(LOCK_FILE);
+    std::fs::File::options()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&path)
+        .with_context(|| format!("cannot open {}", path.display()))
 }
 
 /// Record an attempt at `now` in `directory`'s fetch record before

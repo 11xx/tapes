@@ -31,7 +31,11 @@ pub enum PricesCommand {
     /// reported, and the command exits non-zero. `prices-fetch.json` beside
     /// the table (tapes-price-fetch/1) records the attempt and each source's
     /// last success. OpenAI's 30m and 12h cache writes have no tapes category
-    /// and are left unpriced.
+    /// and are left unpriced. The update waits for a refresh another command
+    /// is running, which that refresh's own time limits bound; a pricing
+    /// command refreshes the same way, only in a command that prices, and
+    /// only once among concurrent commands. A replica never refreshes for a
+    /// --remote read.
     Update {
         /// Read `anthropic.md`, `openai.md` and `litellm.json` from DIR
         /// instead of fetching; a missing file fails that source. Without
@@ -80,7 +84,8 @@ pub fn offline(flag: bool) -> bool {
 
 /// Refresh the data table before a command prices with it: when neither
 /// `named` nor `TAPES_PRICES` names a table, the command is not offline, and
-/// [`price_update::refresh_due`] holds. Never fails; a refresh in which a
+/// [`price_update::refresh_due`] holds. A refresh another process is
+/// running skips this one silently. Never fails; a refresh in which a
 /// source fails is one stderr warning, naming what was not refreshed.
 pub fn refresh_before_pricing(named: Option<&Path>, offline_flag: bool) {
     if named.is_some() || pricing::environment_table_path().is_some() || offline(offline_flag) {
@@ -89,11 +94,37 @@ pub fn refresh_before_pricing(named: Option<&Path>, offline_flag: bool) {
     let Some(directory) = price_update::data_directory() else {
         return;
     };
-    let now = Utc::now();
-    let record = FetchRecord::read(&directory.join(FETCH_FILE));
-    if !price_update::refresh_due(record.as_ref(), directory.join(TABLE_FILE).exists(), now) {
+    let due = || {
+        let record = FetchRecord::read(&directory.join(FETCH_FILE));
+        price_update::refresh_due(
+            record.as_ref(),
+            directory.join(TABLE_FILE).exists(),
+            Utc::now(),
+        )
+    };
+    if !due() {
         return;
     }
+    let lock = match price_update::lock_file(&directory) {
+        Ok(lock) => lock,
+        Err(error) => {
+            eprintln!("warning: prices not refreshed ({error:#})");
+            return;
+        }
+    };
+    match lock.try_lock() {
+        Ok(()) => {}
+        Err(std::fs::TryLockError::WouldBlock) => return,
+        Err(std::fs::TryLockError::Error(error)) => {
+            eprintln!("warning: prices not refreshed (cannot lock the price table: {error})");
+            return;
+        }
+    }
+    // Another process may have refreshed between the check and the lock.
+    if !due() {
+        return;
+    }
+    let now = Utc::now();
     if let Err(error) = price_update::claim_attempt(&directory, now) {
         eprintln!("warning: prices not refreshed ({error:#})");
         return;
@@ -142,12 +173,12 @@ fn update(from: Option<&Path>, json: bool) -> Result<()> {
     let from = from
         .map(Path::to_path_buf)
         .or_else(price_update::from_environment);
-    let report = price_update::update(
-        &data_directory()?,
-        from.as_deref(),
-        FetchLimits::UPDATE,
-        Utc::now(),
-    )?;
+    let directory = data_directory()?;
+    let lock = price_update::lock_file(&directory)?;
+    lock.lock()
+        .map_err(|error| anyhow!("cannot lock the price table: {error}"))?;
+    let report =
+        price_update::update(&directory, from.as_deref(), FetchLimits::UPDATE, Utc::now())?;
     if json {
         println!("{}", serde_json::to_string(&report)?);
     } else {
