@@ -10,7 +10,9 @@ use agent_tapes_core::price_update::{
     self, merge, parse_anthropic, parse_litellm, parse_openai, FetchRecord, Fetched, ANTHROPIC,
     OPENAI,
 };
-use agent_tapes_core::pricing::{BillingKind, CategoryPrices, PriceTable, PromptCategory};
+use agent_tapes_core::pricing::{
+    self, BillingKind, CategoryPrices, ModelPrice, PriceTable, PromptCategory,
+};
 use chrono::{DateTime, TimeZone, Utc};
 
 fn sources() -> PathBuf {
@@ -491,4 +493,42 @@ fn an_openai_threshold_too_large_for_tokens_fails_the_source() {
         format!("{error:#}").contains("long context starts"),
         "{error:#}"
     );
+}
+
+#[test]
+fn an_update_that_would_outgrow_the_read_limit_writes_nothing() {
+    // Claim: an update whose table would exceed the size `PriceTable::read`
+    // accepts fails naming the limit and the size, and leaves the table and
+    // the fetch record as they were. Rejects writing a table that every
+    // later lookup and update refuses.
+    let (row, _) = merge(&[], &[priced("filler", 1.0)], at(1));
+    let filler = |count: usize| {
+        let rows: Vec<_> = (0..count)
+            .map(|index| ModelPrice {
+                id: format!("filler-{index:07}"),
+                ..row[0].clone()
+            })
+            .collect();
+        PriceTable::to_toml("USD", &rows).unwrap()
+    };
+    let limit = pricing::MAX_TABLE_BYTES as usize;
+    let per_row = filler(2).len() - filler(1).len();
+    let header = filler(1).len() - per_row;
+    let text = filler((limit - 1024 - header) / per_row);
+    assert!(text.len() <= limit - 1024 && text.len() > limit - 1024 - per_row);
+    let data = tempfile::tempdir().unwrap();
+    let table = data.path().join("prices.toml");
+    fs::write(&table, &text).unwrap();
+    PriceTable::read(&table).unwrap();
+    let error = price_update::update(
+        data.path(),
+        Some(&sources()),
+        price_update::FetchLimits::UPDATE,
+        at(2),
+    )
+    .unwrap_err();
+    let error = format!("{error:#}");
+    assert!(error.contains(&limit.to_string()), "{error}");
+    assert_eq!(fs::read_to_string(&table).unwrap(), text);
+    assert!(!data.path().join("prices-fetch.json").exists());
 }

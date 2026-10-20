@@ -932,7 +932,8 @@ pub fn claim_attempt(directory: &Path, now: DateTime<Utc>) -> Result<()> {
 /// contributes nothing; the others still update. An existing table that
 /// cannot be read refuses the whole update, so nothing it holds is lost.
 /// A table is written only when it holds a row or one existed before; the
-/// fetch record is written either way.
+/// fetch record is written either way. A table larger than
+/// [`pricing::MAX_TABLE_BYTES`] refuses the update and writes nothing.
 pub fn update(
     directory: &Path,
     from: Option<&Path>,
@@ -1030,6 +1031,15 @@ pub fn update(
         outcomes.push(outcome);
     }
     let text = PriceTable::to_toml(&currency, &rows)?;
+    if text.len() as u64 > pricing::MAX_TABLE_BYTES {
+        bail!(
+            "the updated price table would be {} bytes, over the {} a table may hold to be read \
+             back; {} is unchanged",
+            text.len(),
+            pricing::MAX_TABLE_BYTES,
+            table_path.display()
+        );
+    }
     PriceTable::parse(&text).context("the updated price table does not read back")?;
     if existed || !rows.is_empty() {
         write_atomically(&table_path, text.as_bytes())?;
