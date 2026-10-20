@@ -3246,6 +3246,9 @@ fn codex_tool_event(payload: &Value, subtype: &str) -> ToolEvent {
             })
             .flatten(),
         returned_read: (!call).then(|| codex_returned_read(&payload["output"])),
+        commit_scan: (!call)
+            .then(|| codex_commit_scan(&payload["output"]))
+            .flatten(),
         completed_ts: None,
         invocations: if call {
             crate::event::invocations_from_tool(
@@ -3269,6 +3272,28 @@ fn codex_tool_event(payload: &Value, subtype: &str) -> ToolEvent {
         exit: None,
         self_contained: false,
     }
+}
+
+/// The commit lines of a shell result, and how its process ended. Codex nests
+/// each command's result as a JSON object inside the text part, with its
+/// `exit_code`; a result may also state an exit code on a line of its own, and
+/// a script that threw as `Script failed`.
+fn codex_commit_scan(output: &Value) -> Option<crate::commit_observations::ResultScan> {
+    use crate::commit_observations::{decoded_result, Outcome, ResultScan};
+    let (text, recorded) = decoded_result(output)?;
+    let stated = text.lines().take(8).find_map(|line| {
+        line.strip_prefix("Process exited with code ")
+            .or_else(|| line.strip_prefix("Exit code: "))
+            .and_then(|code| code.trim().parse::<i64>().ok())
+            .map(|code| Outcome::from_exit(Some(code)))
+            .or_else(|| (line == "Script failed").then_some(Outcome::Failed))
+    });
+    let outcome = match (recorded, stated) {
+        (Outcome::Failed, _) | (_, Some(Outcome::Failed)) => Outcome::Failed,
+        (Outcome::Succeeded, _) | (_, Some(Outcome::Succeeded)) => Outcome::Succeeded,
+        _ => Outcome::Unknown,
+    };
+    Some(ResultScan::of(&text, outcome))
 }
 
 fn codex_returned_read(output: &Value) -> crate::event::ReturnedRead {
@@ -3340,6 +3365,19 @@ fn codex_runtime_tool_event(item: &Value, completed: bool, completed_only: bool)
                 item["exit_code"].as_i64().map(|code| code == 0),
             )
         }),
+        commit_scan: completed
+            .then(|| {
+                ["aggregated_output", "stdout", "formatted_output"]
+                    .into_iter()
+                    .find_map(|key| item[key].as_str())
+            })
+            .flatten()
+            .map(|text| {
+                crate::commit_observations::ResultScan::of(
+                    text,
+                    crate::commit_observations::Outcome::from_exit(item["exit_code"].as_i64()),
+                )
+            }),
         completed_ts: completed
             .then(|| timestamp(&item["completed_at"]))
             .flatten(),

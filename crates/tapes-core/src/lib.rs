@@ -26,6 +26,7 @@ pub mod brief;
 pub mod bundle;
 pub mod byte_size;
 pub mod child;
+pub mod commit_observations;
 pub mod consumption_union;
 pub mod content;
 pub mod counters;
@@ -1584,6 +1585,7 @@ pub fn events_full_for_session(
     if !opened {
         sink.session(&session)?;
     }
+    let commits = pairing.commit_counts();
     pairing.finish()?;
     let transcript = read.transcript(
         session,
@@ -1600,6 +1602,7 @@ pub fn events_full_for_session(
             terminal: transcript.terminal,
             text_tail: transcript.text_tail,
             content: content.into_option(),
+            commits,
             truncated: transcript.truncated,
             truncation: transcript.truncation,
             notes: transcript.notes,

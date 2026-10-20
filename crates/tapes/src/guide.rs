@@ -360,7 +360,7 @@ READ A RECORDING ON ANOTHER MACHINE
 PROBE BEFORE EXPORTING
   tapes show <id> --tail 40      A window, costing no bundle.
   tapes show <id> --turn-chars 2000  Cap each turn’s readable text, naming omitted characters.
-  tapes show <id> --json         tapes-session/22 turns, typed context events, locations, and bounded read, graph, artifact, terminal, and recorded launch evidence.
+  tapes show <id> --json         tapes-session/23 turns, typed context events, locations, and bounded read, graph, artifact, terminal, and recorded launch evidence.
   tapes show <id> --exchange     Operator and assistant turns only, timestamps and ordinals kept; the name for --only operator,assistant.
   tapes show <id> --only operator --origin person  Operator turns with recorded person origin.
   tapes show <id> --omit tool    Every turn but tool calls and results; --only and --omit take kind labels, and export takes both.
@@ -479,7 +479,7 @@ PROBE BEFORE EXPORTING
   human output is one line per turn. A selected session that cannot be read
   fails the command.
 
-  events <id> projects harness-neutral tool records as tapes-events/14.
+  events <id> projects harness-neutral tool records as tapes-events/15.
   --tool (alias --name) matches the recorded tool name exactly. --command
   matches a case-insensitive substring of a shell call's recorded command
   field (command or cmd), or the serialized input for other tools. Matching
@@ -487,12 +487,63 @@ PROBE BEFORE EXPORTING
   paired results and recorded exit status remain attached to selected calls,
   including results whose recordings omit the tool name.
   events --here or --global accepts the session filters and limits of stats.
-  Selection JSON uses tapes-events-selection/2: each sessions row contains
+  Selection JSON uses tapes-events-selection/3: each sessions row contains
   session, count of matching calls, partial, truncation, and a nested events
   object. --count omits that object, including for one named session. Zero
   matches still produce a row. Partial counts describe only the read window;
   --full streams each selected recording. An unreadable selected recording
   fails the command. Collection discovery diagnostics accompany the rows.
+  Shell results carry `commits`, the commits their call made or inspected.
+  An observation is {at, sha, subject?, branch?, created, found, call}: `at`
+  is the result's time, `sha` is as printed or named (abbreviated or full),
+  `call` names the call by ordinal and call_id, and only the sha, the commit
+  subject and a branch name are kept, never other output text. `created` is
+  true when the call made the commit, and `found` says how its sha was found,
+  strongest first: `git-operation` is the harness's structured record of the
+  commit (Claude's `toolUseResult.gitOperation.commit`, with its branch);
+  `summary-line` is git's `[<branch> <sha>] <subject>` line from a call that
+  ran a commit-creating command (commit including --amend, merge,
+  cherry-pick, rebase --continue, am, revert), wherever it falls in the
+  output, after hook output included, and it gives the branch unless the
+  head is detached; `chained-output` is for a quiet commit, whose sha a later
+  command of the same call printed, as `git log -1` or `git rev-parse HEAD`
+  does, and it names no branch. Most Claude commits are quiet, so a chained
+  print is the usual way a sha is found there. A printing command (`git log`,
+  `git show` or `git rev-parse HEAD`, with no other revision, path or filter)
+  lists the commits at HEAD newest first, so its first lines are the commits
+  made since the printer before it, one per commit-creating command; where a
+  script prints after each commit, each printer's lines are divided by its
+  own bound (`-N`, `head -N`, one line for `rev-parse`). A printer with no
+  bound leaves the lines after it unplaced. Chained lines count when the
+  printer runs only if the commits succeeded (`&&`), or when the call did not
+  fail and its output has no failure text. Otherwise the result says
+  `created_unnamed`: a commit-creating command ran without failing and the
+  result does not name its commit, as when a script makes several quiet
+  commits and prints fewer. A failed commit, a merge that fast-forwards, and
+  a summary-shaped line from a call that made no commit yield nothing. When
+  the structured record and the text of one result name different commits,
+  both are reported. A commit is inspected (`created` false, `found` is
+  `invocation`) when the call's command names it as a revision: the hex shas
+  of `git show`, `diff`, `log`, `diff-tree`, `range-diff`, `cat-file`,
+  `format-patch` and `rev-list`, each end of `A..B` and `A...B`. A branch or
+  a name such as `HEAD~1` is not a sha and is not reported, and a sha a result
+  merely prints (a `git log --oneline` listing) is not an inspection; a printed
+  sha only lengthens the name of a commit already named and gives its subject.
+  Treat inspections as weak evidence. The command is read from the call's
+  complete text by a tolerant shell split that follows quotes, heredoc
+  bodies, redirections, chains with other tools and `sh -c` operands, and for
+  Codex the `cmd` strings of `tools.exec_command` calls, because the strict
+  invocation evidence declines any script that uses substitution,
+  redirection or a heredoc. The shas come from the whole result text, not
+  the 200-character preview; Codex results are read after unwrapping the
+  JSON object each command's result is nested in, with its `exit_code`.
+  Claude `Bash`, Codex shell and exec calls (CommandExecution included) and
+  Pi `bash` take part; a result whose call is outside the read reports
+  nothing unless the harness recorded the commit itself. A result holds at
+  most 32 observations and says `truncated` when it saw more; a read holds at
+  most 1024, the first, and the events object states `commits` {kept,
+  omitted, truncated_calls} when a cap dropped any.
+  Library consumers read `EventRecord::commits`.
   Each record
   names its source turn with turn_ordinal, the same coordinate show prints;
   ordinal retains that turn coordinate, including for call/result pairs. Pairing is

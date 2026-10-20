@@ -7,13 +7,16 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
+use crate::commit_observations::{
+    CommandFacts, CommitCall, CommitCounts, EventCommits, ResultScan,
+};
 use crate::content::{self, ArtifactReference, ContentCoverage, ContentInventory, ContentPart};
 use crate::model::{
     BoundedText, ByteSpan, ReadEvidence, RecordRef, Session, SourceBound, TerminalObservation,
     TextTailEvidence, Transcript, Truncation, Turn,
 };
 
-pub const EVENTS_SCHEMA: &str = "tapes-events/14";
+pub const EVENTS_SCHEMA: &str = "tapes-events/15";
 const PREVIEW_CHARS: usize = 200;
 pub const MAX_INVOCATION_TEXT_CHARS: usize = 64 * 1024;
 pub const MAX_INVOCATIONS: usize = 32;
@@ -160,6 +163,13 @@ impl Bounded {
 
     /// Publish the complete retained text in place of the prefix. A value
     /// that retained nothing keeps the prefix it has.
+    /// The whole recorded text, when this value kept it or the prefix is all of it.
+    pub(crate) fn complete_text(&self) -> Option<&str> {
+        self.full
+            .as_deref()
+            .or_else(|| (self.chars == self.preview.chars().count()).then_some(&*self.preview))
+    }
+
     pub(crate) fn widen(&mut self) {
         if let Some(full) = self.full.take() {
             self.preview = full;
@@ -188,6 +198,9 @@ pub struct ToolEvent {
     pub read: Option<ReadLocator>,
     #[serde(skip)]
     pub(crate) returned_read: Option<ReturnedRead>,
+    /// The commit lines of a result's whole text, taken while it was in hand.
+    #[serde(skip)]
+    pub(crate) commit_scan: Option<ResultScan>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub completed_ts: Option<DateTime<Utc>>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -354,6 +367,9 @@ pub struct EventRecord {
     pub duration_ms: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub incomplete: Option<Incomplete>,
+    /// The commits a result shows its call made or inspected.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub commits: Option<EventCommits>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
@@ -376,6 +392,10 @@ pub struct EventTranscript {
     pub text_tail: Option<TextTailEvidence>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content: Option<ContentInventory>,
+    /// What the commit observations cost against their caps, present only when
+    /// a cap dropped some.
+    #[serde(skip_serializing_if = "CommitCounts::is_empty")]
+    pub commits: CommitCounts,
     pub truncated: bool,
     #[serde(skip_serializing_if = "truncation_is_empty")]
     pub truncation: Truncation,
@@ -571,6 +591,8 @@ struct EventsTail<'a> {
     text_tail: Option<&'a TextTailEvidence>,
     #[serde(skip_serializing_if = "Option::is_none")]
     content: Option<&'a ContentInventory>,
+    #[serde(skip_serializing_if = "CommitCounts::is_empty")]
+    commits: &'a CommitCounts,
     truncated: bool,
     #[serde(skip_serializing_if = "truncation_is_empty")]
     truncation: &'a Truncation,
@@ -586,6 +608,7 @@ impl<'a> EventsTail<'a> {
             terminal: events.terminal.as_ref(),
             text_tail: events.text_tail.as_ref(),
             content: events.content.as_ref(),
+            commits: &events.commits,
             truncated: events.truncated,
             truncation: &events.truncation,
             notes: &events.notes,
@@ -622,6 +645,7 @@ pub fn project_with(transcript: Transcript, tail: usize, options: EventOptions) 
         .map(|record| pairing.emit(record))
         .collect::<anyhow::Result<Vec<_>>>()
         .expect("records replayed from one vector match their observation");
+    let commits = pairing.commit_counts();
 
     let returned_turns = total_turns.min(tail);
     let first_ordinal = total_turns.saturating_sub(returned_turns);
@@ -651,6 +675,7 @@ pub fn project_with(transcript: Transcript, tail: usize, options: EventOptions) 
         terminal: transcript.terminal,
         text_tail: transcript.text_tail,
         content: content::inventory(&transcript.turns),
+        commits,
         truncated: !truncation.is_empty(),
         truncation,
         notes: transcript.notes,
@@ -692,6 +717,7 @@ pub fn turn_records(turn: &Turn) -> impl Iterator<Item = EventRecord> {
             pair: None,
             duration_ms: None,
             incomplete: None,
+            commits: None,
         }
     });
     let result = call
@@ -777,6 +803,7 @@ pub struct Pairing {
     observed: Replay,
     replay: Replay,
     counts: PairCounts,
+    commits: CommitCounts,
 }
 
 struct ObservedCall {
@@ -787,6 +814,8 @@ struct ObservedCall {
 struct EmittedCall {
     reference: PairRef,
     result: Option<PairRef>,
+    /// What the call's command text says about commits, when it says anything.
+    commands: Option<CommandFacts>,
 }
 
 /// What an answered call takes from its result.
@@ -870,6 +899,7 @@ impl PairIndex {
             observed: self.replay,
             replay: Replay::default(),
             counts: PairCounts::default(),
+            commits: CommitCounts::default(),
         }
     }
 }
@@ -907,9 +937,16 @@ impl Pairing {
                         self.counts.incomplete += 1;
                     }
                 }
+                let commands = record
+                    .event
+                    .arguments
+                    .as_ref()
+                    .and_then(Bounded::complete_text)
+                    .and_then(|text| CommandFacts::of_call(record.event.name.as_deref(), text));
                 self.open.entry(call_id).or_default().push(EmittedCall {
                     reference: reference(&record),
                     result: expected,
+                    commands,
                 });
             }
             EventKind::ToolResult => match pop_open(&mut self.open, &call_id) {
@@ -917,6 +954,26 @@ impl Pairing {
                     if call.result.as_ref() != Some(&reference(&record)) {
                         anyhow::bail!(REPLAY_DIVERGED);
                     }
+                    let call_ref = CommitCall {
+                        ordinal: call.reference.ordinal,
+                        call_id: record.event.call_id.clone(),
+                    };
+                    // A commit the harness recorded needs no command to read.
+                    let recorded = CommandFacts::default();
+                    record.commits = record
+                        .event
+                        .commit_scan
+                        .as_ref()
+                        .and_then(|scan| {
+                            call.commands
+                                .as_ref()
+                                .or_else(|| scan.has_operation().then_some(&recorded))
+                                .and_then(|commands| commands.observe(scan, &call_ref, record.ts))
+                        })
+                        .map(|mut commits| {
+                            self.commits.admit(&mut commits);
+                            commits
+                        });
                     record.pair = Some(call.reference);
                     self.counts.complete += 1;
                 }
@@ -927,6 +984,11 @@ impl Pairing {
             },
         }
         Ok(record)
+    }
+
+    /// What the commit observations emitted so far cost against their caps.
+    pub fn commit_counts(&self) -> CommitCounts {
+        self.commits
     }
 
     /// Close the emitting pass. The counts are those of the emitted records:
@@ -1523,15 +1585,15 @@ fn is_shell_assignment(value: &str) -> bool {
 }
 
 #[derive(Clone, Debug)]
-enum JsTokenKind {
+pub(crate) enum JsTokenKind {
     Identifier(String),
     String(String),
     Punctuation(char),
 }
 
 #[derive(Clone, Debug)]
-struct JsToken {
-    kind: JsTokenKind,
+pub(crate) struct JsToken {
+    pub(crate) kind: JsTokenKind,
     start: usize,
     end: usize,
 }
@@ -1795,7 +1857,7 @@ fn top_level_colon(field: &[JsToken]) -> Option<usize> {
     None
 }
 
-fn javascript_tokens(text: &str) -> Result<Vec<JsToken>, &'static str> {
+pub(crate) fn javascript_tokens(text: &str) -> Result<Vec<JsToken>, &'static str> {
     let chars = text.char_indices().collect::<Vec<_>>();
     let mut tokens = Vec::new();
     let mut index = 0;
@@ -2262,6 +2324,7 @@ mod tests {
             output: None,
             read: None,
             returned_read: None,
+            commit_scan: None,
             completed_ts: None,
             invocations: Vec::new(),
             artifact_references: Vec::new(),
@@ -2385,6 +2448,7 @@ mod tests {
             output: Some(Bounded::from_text("done")),
             read: None,
             returned_read: None,
+            commit_scan: None,
             completed_ts: None,
             invocations: Vec::new(),
             artifact_references: Vec::new(),

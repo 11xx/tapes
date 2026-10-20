@@ -161,7 +161,7 @@ fn each_command_carries_the_estimate_with_a_table() {
     assert_eq!(store.json(&["list"], true)["schema"], "tapes-list/11");
     assert_eq!(
         store.json(&["show", SESSION], true)["schema"],
-        "tapes-session/22"
+        "tapes-session/23"
     );
     assert_eq!(
         store.json(&["stats", SESSION], true)["schema"],

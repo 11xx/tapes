@@ -3882,6 +3882,21 @@ fn claude_tool_event(block: &Value, subtype: &str, structured: Option<&Value>) -
             }
             returned
         }),
+        commit_scan: (!call)
+            .then(|| {
+                crate::commit_observations::scan_result(
+                    &block["content"],
+                    crate::commit_observations::Outcome::from_error_flag(
+                        block["is_error"].as_bool(),
+                    ),
+                )
+                .map(|scan| {
+                    scan.with_operation(
+                        structured.and_then(crate::commit_observations::GitOperation::of_claude),
+                    )
+                })
+            })
+            .flatten(),
         completed_ts: None,
         invocations: if call {
             crate::event::invocations_from_tool(

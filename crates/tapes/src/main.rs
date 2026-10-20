@@ -1419,9 +1419,9 @@ enum Command {
         /// including text beyond the argument preview, and keeps paired results.
         #[arg(long, value_name = "SUBSTRING")]
         command: Option<String>,
-        /// Return tapes-events-selection/2 per-session call counts and partial-read
+        /// Return tapes-events-selection/3 per-session call counts and partial-read
         /// status without event records. Explicit selections use this schema with
-        /// nested tapes-events/14 objects when --count is absent.
+        /// nested tapes-events/15 objects when --count is absent.
         #[arg(long)]
         count: bool,
         /// Match the recorded tool call identifier exactly. Repeatable.
@@ -1433,7 +1433,7 @@ enum Command {
         program: Vec<String>,
         /// Stream the whole recording instead of its bounded tail, writing
         /// each event as it is paired so memory follows the calls awaiting a
-        /// result rather than the file; with --json the same tapes-events/14
+        /// result rather than the file; with --json the same tapes-events/15
         /// object is written event by event. The recording is read twice, the
         /// second read replaying the first; --tail, --name, --call-id, and
         /// --program, --tool, and --command select as they do over a bounded read. Installed Claude,
@@ -1441,7 +1441,7 @@ enum Command {
         /// updated in place and a second read may not repeat the first.
         #[arg(long, conflicts_with = "read_bytes")]
         full: bool,
-        /// Render the versioned tapes-events/14 object as JSON. `turn_ordinal`
+        /// Render the versioned tapes-events/15 object as JSON. `turn_ordinal`
         /// names the source turn at the same coordinate printed by show;
         /// `ordinal` retains that coordinate for both call and result. Completed Codex
         /// CommandExecution events include integer `exit` when recorded; other
@@ -1454,7 +1454,17 @@ enum Command {
         /// Unknown formats and truncated output omit it. An unpaired event's `incomplete` is `no-result-in-read` when
         /// the read ended before a result, `call-before-read-bound` when a
         /// source bound can hide the call, or `call-not-recorded` when the read
-        /// reached the recording's start and holds no call.
+        /// reached the recording's start and holds no call. A shell result
+        /// carries `commits` when its call made or inspected any: each
+        /// observation has `at`, `sha` (as printed or named), `subject` and
+        /// `branch` when the output or the harness gave one, `created`,
+        /// `found` (`git-operation`, `summary-line`, `chained-output` or
+        /// `invocation`) and `call`; the result says `truncated` past 32
+        /// observations and `created_unnamed` when a commit-creating command
+        /// ran without failing and nothing names its commit. Inspections are
+        /// the hex shas a command names as revisions, never shas a result
+        /// merely prints. The top-level `commits` {kept, omitted,
+        /// truncated_calls} appears when a cap dropped any.
         #[arg(long)]
         json: bool,
         /// Publish each tool call's complete recorded argument text in
@@ -7268,7 +7278,7 @@ fn events_selection(
     if json {
         write!(
             out,
-            "{{\"schema\":\"tapes-events-selection/2\",\"sessions\":["
+            "{{\"schema\":\"tapes-events-selection/3\",\"sessions\":["
         )?;
     }
     let mut first = true;
