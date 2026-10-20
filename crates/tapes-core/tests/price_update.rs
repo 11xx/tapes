@@ -475,3 +475,20 @@ fn curl_reads_no_curlrc_and_fetches_over_https_only() {
         assert_eq!(arguments.last().map(String::as_str), Some(ANTHROPIC.url));
     }
 }
+
+#[test]
+fn an_openai_threshold_too_large_for_tokens_fails_the_source() {
+    // Claim: a long-context threshold whose token count overflows fails the
+    // OpenAI source. Rejects a panic, or a wrapped threshold pricing long
+    // context from the wrong prompt size.
+    let huge = format!("{}K", u64::MAX / 10);
+    let page = source("openai.md").replace(
+        "Short context: ≤272K input tokens. Long context: >272K input tokens.",
+        &format!("Short context: ≤{huge} input tokens. Long context: >{huge} input tokens."),
+    );
+    let error = parse_openai(&page, OPENAI.url).unwrap_err();
+    assert!(
+        format!("{error:#}").contains("long context starts"),
+        "{error:#}"
+    );
+}

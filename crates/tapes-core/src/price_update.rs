@@ -464,7 +464,8 @@ fn dollar_price(cell: &str) -> Result<Option<f64>> {
 }
 
 /// The prompt size past which OpenAI's long-context prices apply, from
-/// `Short context: ≤272K input tokens. Long context: >272K input tokens.`
+/// `Short context: ≤272K input tokens. Long context: >272K input tokens.`,
+/// when that is a token count.
 fn openai_threshold(text: &str) -> Result<u64> {
     let kilo = |text: &str| {
         text.strip_suffix('K')
@@ -476,7 +477,7 @@ fn openai_threshold(text: &str) -> Result<u64> {
             let (short, rest) = rest.split_once(" input tokens. Long context: >")?;
             let long = rest.strip_suffix(" input tokens.")?;
             let (short, long) = (kilo(short)?, kilo(long)?);
-            (short == long).then_some(short * 1000)
+            (short == long).then(|| short.checked_mul(1000)).flatten()
         })
         .ok_or_else(|| {
             anyhow!(
