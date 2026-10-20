@@ -256,6 +256,39 @@ pub enum Unresolved {
     NoEquivalent,
 }
 
+/// One live worktree: its directory and the branch it has checked out.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Worktree {
+    pub path: PathBuf,
+    pub branch: Option<String>,
+}
+
+/// A branch a merge commit's subject names, and the commits it merged.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct MergedBranch {
+    pub merge: String,
+    pub branch: String,
+    pub commits: Vec<String>,
+}
+
+/// The branch a default merge subject names, without a remote's prefix.
+fn merged_branch_name(subject: &str) -> Option<String> {
+    let quoted = |rest: &str| rest.split_once('\'').map(|(name, _)| name.to_owned());
+    if let Some(rest) = subject.strip_prefix("Merge branch '") {
+        return quoted(rest);
+    }
+    if let Some(rest) = subject.strip_prefix("Merge remote-tracking branch '") {
+        return quoted(rest).map(|name| match name.split_once('/') {
+            Some((_, branch)) => branch.to_owned(),
+            None => name,
+        });
+    }
+    let rest = subject.strip_prefix("Merge pull request #")?;
+    let (_, from) = rest.split_once(" from ")?;
+    let name = from.split_whitespace().next()?;
+    Some(name.split_once('/').map_or(name, |(_, branch)| branch).to_owned())
+}
+
 /// A bounded, read-only view of one repository.
 #[derive(Debug, Clone)]
 pub struct GitReader {
@@ -498,6 +531,222 @@ impl GitReader {
                 candidates,
             }
         })
+    }
+
+    /// The commits the repository's branches, tags, remote branches and
+    /// `HEAD` reach whose interval from the earlier to the later of their
+    /// author and committer times meets `[from, to]`, oldest first, with their
+    /// changes. Git cuts the walk by committer time alone, so the walk reaches
+    /// back a day before `from` and each commit is then kept by both times.
+    /// References a tool keeps for itself outside those namespaces are not
+    /// walked.
+    pub fn commits_between(&self, from: DateTime<Utc>, to: DateTime<Utc>) -> Result<CommitSet> {
+        let since = (from - chrono::Duration::days(1)).timestamp();
+        let listing: Vec<String> = [
+            "rev-list",
+            "--topo-order",
+            "--reverse",
+            "--branches",
+            "--tags",
+            "--remotes",
+            "HEAD",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .chain([format!("--since=@{since}")])
+        .collect();
+        let listed = self.run_capped(
+            &listing.iter().map(String::as_str).collect::<Vec<_>>(),
+            None,
+        )?;
+        // A repository with no commit has no `HEAD` to walk.
+        if !listed.success && !listed.truncated {
+            return Ok(CommitSet {
+                commits: Vec::new(),
+                default_branch: None,
+                commits_truncated: false,
+                metadata_truncated: false,
+            });
+        }
+        let shas: Vec<String> = text(&listed.bytes)
+            .lines()
+            .filter(|line| !line.is_empty())
+            .map(str::to_owned)
+            .collect();
+        let (metadata, metadata_truncated) = self.metadata(&shas)?;
+        let mut kept: Vec<Metadata> = metadata
+            .into_iter()
+            .filter(|commit| {
+                commit.author_time.max(commit.committer_time) >= from
+                    && commit.author_time.min(commit.committer_time) <= to
+            })
+            .collect();
+        let commits_truncated = listed.truncated || kept.len() > self.limits.commits;
+        if kept.len() > self.limits.commits {
+            let surplus = kept.len() - self.limits.commits;
+            kept.drain(..surplus);
+        }
+        let commits = kept
+            .into_iter()
+            .map(|metadata| self.with_changes(metadata))
+            .collect::<Result<Vec<_>>>()?;
+        Ok(CommitSet {
+            commits,
+            default_branch: None,
+            commits_truncated,
+            metadata_truncated,
+        })
+    }
+
+    /// The live worktrees, the main one first: each one's directory and the
+    /// branch it has checked out, none for a detached head.
+    pub fn worktrees(&self) -> Result<Vec<Worktree>> {
+        let output = self.run_lenient(&["worktree", "list", "--porcelain"])?;
+        output.require_success()?;
+        let mut worktrees: Vec<Worktree> = Vec::new();
+        for line in text(&output.bytes).lines() {
+            if let Some(path) = line.strip_prefix("worktree ") {
+                worktrees.push(Worktree {
+                    path: PathBuf::from(path),
+                    branch: None,
+                });
+            } else if let Some(branch) = line.strip_prefix("branch ") {
+                if let Some(worktree) = worktrees.last_mut() {
+                    worktree.branch = Some(
+                        branch
+                            .strip_prefix("refs/heads/")
+                            .unwrap_or(branch)
+                            .to_owned(),
+                    );
+                }
+            }
+        }
+        Ok(worktrees)
+    }
+
+    /// The URLs of the repository's remotes, each once.
+    pub fn remote_urls(&self) -> Result<Vec<String>> {
+        let output = self.run_lenient(&["config", "--get-regexp", r"^remote\..*\.url$"])?;
+        let mut urls: Vec<String> = text(&output.bytes)
+            .lines()
+            .filter_map(|line| line.split_once(' ').map(|(_, url)| url.trim().to_owned()))
+            .filter(|url| !url.is_empty())
+            .collect();
+        urls.sort();
+        urls.dedup();
+        Ok(urls)
+    }
+
+    /// The commits a live branch holds that the default branch lacks, or
+    /// `None` when no local branch has that name.
+    pub fn branch_commits(&self, branch: &str) -> Result<Option<Vec<String>>> {
+        if require_revisions([branch]).is_err()
+            || !self.commit_exists(&format!("refs/heads/{branch}"))?
+        {
+            return Ok(None);
+        }
+        let Some(base) = self.default_branch()? else {
+            return Ok(None);
+        };
+        let range = format!("{}..refs/heads/{branch}", base.name);
+        let listed = self.run(
+            &[
+                "rev-list".to_owned(),
+                format!("--max-count={}", self.limits.commits),
+                "--end-of-options".to_owned(),
+                range,
+            ],
+            None,
+        )?;
+        Ok(Some(
+            text(&listed.bytes).lines().map(str::to_owned).collect(),
+        ))
+    }
+
+    /// What the merge commits committed at or after `since` say they merged:
+    /// for each merge whose subject is one git or a forge writes by default
+    /// (`Merge branch 'name'`, `Merge remote-tracking branch 'origin/name'`,
+    /// `Merge pull request #n from owner/name`), the branch name and the
+    /// commits its second parent brought that its first parent lacked.
+    pub fn merged_branches(&self, since: DateTime<Utc>) -> Result<Vec<MergedBranch>> {
+        let output = self.run_lenient(&[
+            "log",
+            "--branches",
+            "--tags",
+            "--remotes",
+            "--merges",
+            "--no-notes",
+            "-z",
+            &format!("--since=@{}", since.timestamp()),
+            "--format=%H%x1f%P%x1f%s",
+        ])?;
+        if !output.success {
+            return Ok(Vec::new());
+        }
+        let mut merged = Vec::new();
+        for record in text(&output.bytes).split('\0') {
+            let mut fields = record.trim_start_matches('\n').splitn(3, '\u{1f}');
+            let (Some(sha), Some(parents), Some(subject)) =
+                (fields.next(), fields.next(), fields.next())
+            else {
+                continue;
+            };
+            let parents: Vec<&str> = parents.split_whitespace().collect();
+            let [first, second] = parents[..] else {
+                continue;
+            };
+            let Some(branch) = merged_branch_name(subject) else {
+                continue;
+            };
+            let listed = self.run(
+                &[
+                    "rev-list".to_owned(),
+                    format!("--max-count={}", self.limits.commits),
+                    "--end-of-options".to_owned(),
+                    format!("{first}..{second}"),
+                ],
+                None,
+            )?;
+            merged.push(MergedBranch {
+                merge: sha.to_owned(),
+                branch,
+                commits: text(&listed.bytes).lines().map(str::to_owned).collect(),
+            });
+        }
+        Ok(merged)
+    }
+
+    /// Which of `names`, full or abbreviated hexadecimal shas, name a commit
+    /// the repository holds. Anything else names none.
+    pub fn existing_commits(
+        &self,
+        names: &std::collections::BTreeSet<String>,
+    ) -> Result<std::collections::BTreeSet<String>> {
+        let asked: Vec<&String> = names
+            .iter()
+            .filter(|name| {
+                (4..=64).contains(&name.len()) && name.bytes().all(|byte| byte.is_ascii_hexdigit())
+            })
+            .collect();
+        if asked.is_empty() {
+            return Ok(Default::default());
+        }
+        let mut input = String::new();
+        for name in &asked {
+            input.push_str(name);
+            input.push('\n');
+        }
+        let output = self.run_capped(
+            &["cat-file", "--batch-check=%(objecttype)"],
+            Some(input.into_bytes()),
+        )?;
+        output.require_success()?;
+        Ok(asked
+            .into_iter()
+            .zip(text(&output.bytes).lines())
+            .filter(|(_, kind)| *kind == "commit")
+            .map(|(name, _)| name.clone())
+            .collect())
     }
 
     fn commit_exists(&self, reference: &str) -> Result<bool> {
