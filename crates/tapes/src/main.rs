@@ -9468,6 +9468,68 @@ fn print_search_diagnostics(label: &str, diagnostics: &[String]) {
 
 #[cfg(test)]
 mod tests {
+    // Claim: token counts read exact below a thousand and with one decimal
+    // above, a value rounding up to a thousand of a unit taking the next.
+    // Rejects `1000.0K` for 999,950 and a decimal on counts below 1,000.
+    #[test]
+    fn compact_tokens_round_into_the_next_unit() {
+        for (tokens, text) in [
+            (999, "999"),
+            (1_000, "1.0K"),
+            (999_949, "999.9K"),
+            (999_950, "1.0M"),
+            (21_345_678, "21.3M"),
+        ] {
+            assert_eq!(super::compact_tokens(tokens), text, "{tokens}");
+        }
+    }
+
+    // Claim: a price reads as money in its currency, a bound as a range, a
+    // positive amount below a cent as `<$0.01`, and an incomplete estimate
+    // carries `*` with its reasons. Rejects a zero-looking price for a
+    // positive amount and an incomplete estimate shown as complete.
+    #[test]
+    fn compact_price_names_currency_bounds_and_incompleteness() {
+        let estimate = |currency: &str, amount, at_least, at_most, incomplete: bool| {
+            super::ListPriceEstimate {
+                kind: "list-price-estimate",
+                currency: currency.to_owned(),
+                amount,
+                at_least,
+                at_most,
+                schema: "tapes-price-table/1",
+                models: Vec::new(),
+                billing: Vec::new(),
+                measurement_completeness: if incomplete {
+                    serde_json::from_value(serde_json::json!({"output": ["missing-price"]}))
+                        .unwrap()
+                } else {
+                    Default::default()
+                },
+            }
+        };
+        let price = |estimate| super::compact_price(&estimate);
+        assert_eq!(
+            price(estimate("USD", Some(12.414), None, None, false)),
+            ("$12.41".to_owned(), None)
+        );
+        assert_eq!(
+            price(estimate("EUR", Some(12.41), None, None, false)),
+            ("12.41 EUR".to_owned(), None)
+        );
+        assert_eq!(
+            price(estimate("USD", None, Some(4.1), Some(5.8), false)),
+            ("$4.10–$5.80".to_owned(), None)
+        );
+        assert_eq!(
+            price(estimate("USD", Some(0.004), None, None, false)).0,
+            "<$0.01"
+        );
+        let (text, reasons) = price(estimate("USD", Some(1.0), None, None, true));
+        assert_eq!(text, "$1.00*");
+        assert!(reasons.unwrap().contains("output"));
+    }
+
     #[test]
     fn every_session_command_accepts_a_harness_with_an_id() {
         use clap::Parser;

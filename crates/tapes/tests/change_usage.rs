@@ -858,3 +858,117 @@ fn change_views_refuse_what_they_cannot_answer() {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+/// A figure as the default text prints it: the disjoint total, or `-`.
+fn printed_tokens(tally: &Value) -> String {
+    tally["disjoint"]["total"]
+        .as_u64()
+        .map_or_else(|| "-".to_owned(), |total| total.to_string())
+}
+
+// Claim: the default text leaves the unselected list out, and its
+// outside-the-selection line carries the unselected total the JSON holds.
+// Rejects an unselected list in the default view, and a default whose
+// figures stop adding up because the unselected total was dropped.
+#[test]
+fn the_default_text_sums_unselected_commits_in_one_figure() {
+    let change = change();
+    let view = json(&change, &["--commit", change.sha("a2")]);
+    let text = String::from_utf8(tapes(&change, &["--commit", change.sha("a2")]).stdout).unwrap();
+    assert!(!text.contains("Unselected commits"), "{text}");
+    assert!(!text.contains(&change.sha("a1")[..10]), "{text}");
+    let count = items(&view, "unselected").len();
+    let noun = if count == 1 { "commit" } else { "commits" };
+    let figure = format!(
+        "{count} unselected {noun} {}",
+        printed_tokens(&view["totals"]["unselected"])
+    );
+    let outside = text
+        .lines()
+        .find(|line| line.starts_with("Outside the selection: "))
+        .unwrap_or_else(|| panic!("no outside line: {text}"));
+    assert!(outside.contains(&figure), "{figure} in {outside}");
+}
+
+// Claim: the default JSON is tapes-change-usage/4 with `detail` false and
+// without the per-row evidence, the unselected list, the sessions and the
+// evidence files, while `totals.unselected` stays. Rejects --detail's keys
+// leaking into the default, and the unselected total dropped with its list.
+#[test]
+fn the_default_json_leaves_detail_keys_out() {
+    let change = change();
+    let view = answer(tapes(&change, &["--commit", change.sha("a2"), "--json"]));
+    assert_eq!(view["schema"], "tapes-change-usage/4");
+    assert_eq!(view["detail"], false);
+    for key in ["unselected", "sessions", "evidence"] {
+        assert!(view.get(key).is_none(), "{key}: {}", view[key]);
+    }
+    assert!(view["totals"].get("evidence").is_none());
+    for list in ["rows", "uncommitted", "labelled"] {
+        for item in view[list].as_array().into_iter().flatten() {
+            assert!(item.get("evidence").is_none(), "{list}: {item}");
+        }
+    }
+    assert!(view["totals"]["unselected"]["requests"].as_u64().unwrap() > 0);
+}
+
+// Claim: --detail --json carries every key the default leaves out, and the
+// keys both carry hold the same values. Rejects --detail ignored in JSON,
+// and a default whose shared figures differ from the detailed view.
+#[test]
+fn the_detailed_json_is_the_default_plus_its_keys() {
+    let change = change();
+    let plain = answer(tapes(&change, &["--commit", change.sha("a2"), "--json"]));
+    let detailed = json(&change, &["--commit", change.sha("a2")]);
+    assert_eq!(detailed["detail"], true);
+    for key in ["unselected", "sessions"] {
+        assert!(!items(&detailed, key).is_empty(), "{key}");
+    }
+    assert!(detailed["totals"].get("evidence").is_some());
+    assert!(items(&detailed, "rows")
+        .iter()
+        .all(|row| row.get("evidence").is_some()));
+    let mut trimmed = detailed.clone();
+    let object = trimmed.as_object_mut().unwrap();
+    object.insert("detail".to_owned(), Value::Bool(false));
+    for key in ["unselected", "sessions", "evidence"] {
+        object.remove(key);
+    }
+    object["totals"].as_object_mut().unwrap().remove("evidence");
+    for list in ["rows", "uncommitted", "labelled"] {
+        for item in object[list].as_array_mut().into_iter().flatten() {
+            item.as_object_mut().unwrap().remove("evidence");
+        }
+    }
+    assert_eq!(trimmed, plain);
+}
+
+// Claim: --detail text lists each unselected commit with its exact
+// requests and tokens. Rejects a detailed view that still summarises the
+// unselected commits, or prints them in compact figures.
+#[test]
+fn the_detailed_text_lists_each_unselected_commit() {
+    let change = change();
+    let view = json(&change, &["--commit", change.sha("a2")]);
+    let text =
+        String::from_utf8(tapes(&change, &["--commit", change.sha("a2"), "--detail"]).stdout)
+            .unwrap();
+    assert!(text.contains("Unselected commits"), "{text}");
+    for share in items(&view, "unselected") {
+        let sha = &share["commit"].as_str().unwrap()[..10];
+        let line = text
+            .lines()
+            .find(|line| line.trim_start().starts_with(sha))
+            .unwrap_or_else(|| panic!("{sha} missing: {text}"));
+        let cells: Vec<&str> = line.split_whitespace().collect();
+        let tail = &cells[cells.len() - 2..];
+        assert_eq!(
+            tail,
+            [
+                share["requests"].to_string().as_str(),
+                printed_tokens(&share).as_str()
+            ],
+            "{line}"
+        );
+    }
+}
