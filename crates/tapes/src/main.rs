@@ -7042,6 +7042,15 @@ fn compact_price(estimate: &ListPriceEstimate) -> (String, Option<String>) {
     }
 }
 
+/// `count noun`, the noun plural unless the count is one.
+fn counted(count: usize, noun: &str) -> String {
+    if count == 1 {
+        format!("1 {noun}")
+    } else {
+        format!("{count} {noun}s")
+    }
+}
+
 /// Rows as columns two spaces apart, text left-aligned and the columns
 /// `right` names right-aligned.
 fn aligned(indent: &str, rows: &[Vec<String>], right: &[bool]) -> Vec<String> {
@@ -7138,10 +7147,10 @@ fn render_change_usage(
         ),
     };
     let mut out = format!(
-        "Change usage of {asked} in {}: {} commits, {} sessions",
+        "Change usage of {asked} in {}: {}, {}",
         usage.repository.root.display(),
-        usage.commits.len(),
-        usage.sessions.len(),
+        counted(usage.commits.len(), "commit"),
+        counted(usage.sessions.len(), "session"),
     );
     if detail {
         let tiers: Vec<String> = usage.tiers.iter().map(serde_kebab).collect();
@@ -7338,12 +7347,9 @@ fn render_change_usage(
     }
     out.push_str(&lines[lines.len() - 1]);
     out.push('\n');
-    let sessions_line = {
+    let sessions_figures = {
         let tally = &usage.totals.sessions;
-        let mut text = match usage.sessions.len() {
-            1 => format!("All 1 session: {} tokens", tokens(tally)),
-            count => format!("All {count} sessions: {} tokens", tokens(tally)),
-        };
+        let mut text = format!("{} tokens", tokens(tally));
         if priced {
             text.push_str(&format!(
                 ", {} at API list price",
@@ -7354,13 +7360,9 @@ fn render_change_usage(
     };
     if detail {
         render_change_parts(&mut out, usage, &cells, &figures[..figure_count]);
-        let tally = &usage.totals.sessions;
         out.push_str(&format!(
-            "All sessions: {} requests, {}\n",
-            tally.requests,
-            sessions_line
-                .split_once(": ")
-                .map_or("", |(_, figures)| figures)
+            "All sessions: {} requests, {sessions_figures}\n",
+            usage.totals.sessions.requests
         ));
         let mut table = vec![vec![
             "SESSION".to_owned(),
@@ -7422,8 +7424,10 @@ fn render_change_usage(
             outside.push("none".to_owned());
         }
         out.push_str(&format!("Outside the selection: {}\n", outside.join(", ")));
-        out.push_str(&sessions_line);
-        out.push('\n');
+        out.push_str(&format!(
+            "All {}: {sessions_figures}\n",
+            counted(usage.sessions.len(), "session")
+        ));
     }
     for reasons in incomplete.borrow().iter() {
         out.push_str(&format!("* incomplete: {reasons}\n"));
