@@ -62,6 +62,7 @@ impl Root {
             args.push("--json");
         }
         let output = Command::new(env!("CARGO_BIN_EXE_tapes"))
+            .env("TAPES_OFFLINE", "1")
             .args(&args)
             .output()
             .unwrap();

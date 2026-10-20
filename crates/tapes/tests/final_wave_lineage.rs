@@ -60,9 +60,11 @@ impl Store {
 
     fn usage(&self, arguments: &[&str]) -> String {
         let output = Command::new(env!("CARGO_BIN_EXE_tapes"))
+            .env("TAPES_OFFLINE", "1")
             .env_remove("PI_SESSION_FILE")
             .env_remove("TAPES_PRICES")
             .env("XDG_CONFIG_HOME", self.0.join("config"))
+            .env("XDG_DATA_HOME", self.0.join("data"))
             .arg("usage")
             .args(arguments)
             .args(["--global", "--native-store", "claude", "--native-root"])

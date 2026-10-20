@@ -40,6 +40,7 @@ impl Store {
 
     fn run(&self, id: &str, options: &[&str]) -> Output {
         Command::new(env!("CARGO_BIN_EXE_tapes"))
+            .env("TAPES_OFFLINE", "1")
             .args(["usage", id, "--native-store", "pi", "--native-root"])
             .arg(&self.0)
             .args(options)
@@ -206,6 +207,7 @@ fn human_keys_and_help_report_limits_and_namespace_uncertainty() {
     assert!(!human.contains(store.0.to_str().unwrap()));
     assert!(!human.contains(".jsonl"));
     let help = Command::new(env!("CARGO_BIN_EXE_tapes"))
+        .env("TAPES_OFFLINE", "1")
         .args(["usage", "--help"])
         .output()
         .unwrap();
@@ -648,6 +650,7 @@ fn event_keys_refuse_selections_supplied_inputs_and_other_harnesses() {
         ],
     ] {
         let output = Command::new(env!("CARGO_BIN_EXE_tapes"))
+            .env("TAPES_OFFLINE", "1")
             .args(arguments)
             .output()
             .unwrap();
@@ -660,6 +663,7 @@ fn event_keys_refuse_selections_supplied_inputs_and_other_harnesses() {
     )
     .unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_tapes"))
+        .env("TAPES_OFFLINE", "1")
         .args(["usage", "--event-keys", "--input"])
         .arg(input)
         .output()

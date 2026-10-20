@@ -41,10 +41,12 @@ impl Store {
 
     fn run(&self, arguments: &[&str], prices: &Path) -> Output {
         Command::new(env!("CARGO_BIN_EXE_tapes"))
+            .env("TAPES_OFFLINE", "1")
             .env_remove("PI_SESSION_FILE")
             .env_remove("TAPES_PRICES")
             .env("HOME", self.0.join("home"))
             .env("XDG_CONFIG_HOME", self.0.join("config"))
+            .env("XDG_DATA_HOME", self.0.join("data"))
             .args(arguments)
             .args(["--native-store", "claude", "--native-root"])
             .arg(&self.0)

@@ -77,8 +77,10 @@ impl Store {
 
     fn json(&self, arguments: &[&str]) -> Value {
         let output = Command::new(env!("CARGO_BIN_EXE_tapes"))
+            .env("TAPES_OFFLINE", "1")
             .env("HOME", self.0.join("home"))
             .env("XDG_CONFIG_HOME", self.0.join("config"))
+            .env("XDG_DATA_HOME", self.0.join("data"))
             .arg("usage")
             .args(arguments)
             .args(["--harness", "codex", "--window", LOOKBACK, "--json"])

@@ -35,8 +35,10 @@ fn codex_session(root: &Path, id: &str, minute: u32) {
 
 fn tapes(root: &Path, args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_tapes"))
+        .env("TAPES_OFFLINE", "1")
         .env_remove("TAPES_PRICES")
         .env("XDG_CONFIG_HOME", root.join("config"))
+        .env("XDG_DATA_HOME", root.join("data"))
         .arg("usage")
         .args(args)
         .args(["--native-store", "codex", "--native-root"])

@@ -115,6 +115,7 @@ INSERT INTO part VALUES
 
 fn read(root: &Path, args: &[&str]) -> Value {
     let output = Command::new(env!("CARGO_BIN_EXE_tapes"))
+        .env("TAPES_OFFLINE", "1")
         .args(args)
         .env_remove("PI_SESSION_FILE")
         .env_remove("XDG_DATA_HOME")

@@ -36,8 +36,10 @@ fn a_single_session_refuses_a_quota_window() {
     let body = lines.iter().map(ToString::to_string).collect::<Vec<_>>();
     fs::write(&path, body.join("\n") + "\n").unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_tapes"))
+        .env("TAPES_OFFLINE", "1")
         .env_remove("TAPES_PRICES")
         .env("XDG_CONFIG_HOME", root.join("config"))
+        .env("XDG_DATA_HOME", root.join("data"))
         .args([
             "usage",
             id,

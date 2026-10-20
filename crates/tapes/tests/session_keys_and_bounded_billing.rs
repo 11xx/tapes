@@ -79,6 +79,7 @@ impl Store {
 
     fn usage(&self, arguments: &[&str]) -> String {
         let output = Command::new(env!("CARGO_BIN_EXE_tapes"))
+            .env("TAPES_OFFLINE", "1")
             .env_remove("PI_SESSION_FILE")
             .env_remove("PI_CODING_AGENT_DIR")
             .env_remove("PI_CODING_AGENT_SESSION_DIR")

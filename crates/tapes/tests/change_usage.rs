@@ -231,6 +231,7 @@ fn change() -> Change {
 fn tapes_in(change: &Change, dir: &Path, args: &[&str], stdin: Option<&str>) -> Output {
     let sandbox = &change.sandbox;
     let mut command = Command::new(env!("CARGO_BIN_EXE_tapes"));
+    command.env("TAPES_OFFLINE", "1");
     command
         .current_dir(dir)
         .env_clear()

@@ -64,6 +64,7 @@ const CODEX_SESSION_INVOCATIONS: &str = concat!(
 
 fn tapes() -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_tapes"));
+    command.env("TAPES_OFFLINE", "1");
     command.env_remove("PI_SESSION_FILE");
     command
 }
@@ -12003,7 +12004,7 @@ impl RemoteReplica {
                  while [ \"$1\" = '-o' ]; do shift 2; done\n\
                  destination=$1\nshift\nprintf '%s\\n' \"$destination\" >> '{}'\n\
                  printf '%s\\n' \"$1\" >> '{}'\nprintf '%s\\n' 'replica transport note' >&2\n\
-                 unset XDG_DATA_HOME\nexport HOME='{}'\nexport CODEX_HOME='{}'\n\
+                 unset XDG_DATA_HOME\nexport TAPES_OFFLINE=1\nexport HOME='{}'\nexport CODEX_HOME='{}'\n\
                  export PATH='{}:/usr/bin:/bin'\nexec sh -c \"$1\"\n",
                 self.argv.display(),
                 self.destinations.display(),

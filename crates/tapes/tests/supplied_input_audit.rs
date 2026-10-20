@@ -12,6 +12,7 @@ static TEMP_ROOTS: AtomicU64 = AtomicU64::new(0);
 
 fn tapes() -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_tapes"));
+    command.env("TAPES_OFFLINE", "1");
     command.env_remove("PI_SESSION_FILE");
     command
 }

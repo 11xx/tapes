@@ -37,6 +37,7 @@ const OUTSIDE: &str = "0123456789abcdef0123456789abcdef01234567";
 /// `tapes usage ARGS` in the repository, reading only the sandbox's stores.
 fn tapes(sandbox: &Sandbox, args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_tapes"))
+        .env("TAPES_OFFLINE", "1")
         .current_dir(sandbox.repo())
         .env_clear()
         .env("HOME", sandbox.dir("home"))

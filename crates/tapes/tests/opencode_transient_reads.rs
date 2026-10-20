@@ -40,6 +40,7 @@ exec "${{0%/*}}/opencode" db --format tsv "$query"
     fs::create_dir_all(&data).unwrap();
     fs::write(data.join("opencode.db"), b"SQLite format 3\0").unwrap();
     Command::new(env!("CARGO_BIN_EXE_tapes"))
+        .env("TAPES_OFFLINE", "1")
         .args(["usage", SESSION, "--harness", "opencode", "--json"])
         .env_remove("XDG_DATA_HOME")
         .env("HOME", root.path().join("home"))
