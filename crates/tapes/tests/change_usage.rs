@@ -421,6 +421,14 @@ fn every_selector_gives_a_commit_the_same_rows() {
             );
         }
     }
+    for name in ["a1", "a2"] {
+        let alone = json(&change, &["--commit", change.sha(name)]);
+        assert_eq!(
+            by_commit(&change, &alone)[name],
+            expected[name],
+            "{name} alone"
+        );
+    }
 }
 
 /// Claim: a lead whose recorded total counts its subagents' requests is
