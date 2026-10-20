@@ -1686,9 +1686,10 @@ enum Command {
     /// not established, or from sampled copy evidence when a long recording's
     /// id check kept only a sample of its ids, with `overlap.sampled` naming
     /// those sessions. `--family` instead answers one session and everything
-    /// it caused as tapes-family-usage/1: the session, its subagents, the
+    /// it caused as tapes-family-usage/2: the session, its subagents, the
     /// sessions that name a member in a `tapes-parent` launch marker in any
-    /// harness, and with `--continuations` the session it continued.
+    /// harness, and with `--evidence` the sessions an evidence file launches
+    /// from a member, and with `--continuations` the session it continued.
     Usage {
         #[command(flatten)]
         query: SessionQueryArgs,
@@ -1787,11 +1788,12 @@ enum Command {
         #[arg(long, conflicts_with = "by")]
         reconcile: bool,
         /// Price one session with everything it caused, as
-        /// tapes-family-usage/1: the session, its Claude subagents and Codex
+        /// tapes-family-usage/2: the session, its Claude subagents and Codex
         /// spawns, every session in any harness whose first prompt opens
         /// with a `tapes-parent: <harness>:<session-id>` line naming a member
         /// (recursively), and sessions that declare a member as their fork
-        /// origin, each counted once by harness and id. A Claude request
+        /// origin, and with --evidence the children an evidence file's lineage
+        /// records launch from a member, each counted once by harness and id. A Claude request
         /// recorded under one id in a parent's and its subagent's recordings
         /// counts once. Rows per agent (`harness:model#effort`) and role
         /// (`lead`, `subagent`, `delegate`, `fork`), one row per session, and
@@ -1804,7 +1806,8 @@ enum Command {
         /// `search` reports what was listed and examined and what left it
         /// incomplete (listing bound, unavailable store, unreadable opening,
         /// member bound); a launched session that began outside every
-        /// member's interval is not found. A member whose recording could not
+        /// member's interval is not found by the search, though an evidence
+        /// file that names it finds it by id. A member whose recording could not
         /// be read, or states no consumption, is listed under `withheld`
         /// with a fixed reason. Names one installed session by id, --latest
         /// or --title.
@@ -1823,6 +1826,27 @@ enum Command {
         /// not-found or ambiguous and nothing is linked.
         #[arg(long, requires = "family")]
         continuations: bool,
+        /// With --family, read a `tapes-attribution-evidence/1` file, or
+        /// every `*.jsonl` file directly inside a directory, and add the
+        /// sessions its `lineage` records launch from a member. Repeatable.
+        /// A child is looked up by harness and id in its harness's store,
+        /// wherever its recording began, and joins as a `delegate` with link
+        /// `evidence`, naming the file, producer, tier and the record's label
+        /// and subject. A session whose own recording names a parent (a
+        /// subagent directory, a spawn, a fork origin, a `tapes-parent`
+        /// marker) is placed by its recording; a file fills only what
+        /// recordings leave silent. Claims naming different parents for one
+        /// session are reported under `evidence.conflicts` and the session
+        /// counts once, under its recording's parent or else the first claimed
+        /// parent that became a member. A child no installed store holds is
+        /// listed under `evidence.unresolved` and adds nothing. `binding`
+        /// records are read and counted, and nothing uses them yet. Nothing
+        /// is read unless named: no default directory, no environment
+        /// variable. A missing path, and a file whose first line is not a
+        /// header of the schema, refuse. Malformed lines are reported with
+        /// their line numbers and a fixed reason, never their text.
+        #[arg(long = "evidence", value_name = "PATH", requires = "family")]
+        evidence: Vec<PathBuf>,
         /// Retain a recent suffix of Pi consumption event keys. Default: 200;
         /// range: 1..=10000; serialized key budget: 8 MiB. Omitted identities
         /// are counted, while measurements cover the whole read. Provider
@@ -2109,7 +2133,7 @@ enum Command {
         #[arg(long, value_name = "FILE")]
         prices: Option<PathBuf>,
         /// Render the versioned tapes-usage/17 object, tapes-usage-summary/16
-        /// for a selection, or tapes-family-usage/1 under --family, as JSON. `session.model_observation` says
+        /// for a selection, or tapes-family-usage/2 under --family, as JSON. `session.model_observation` says
         /// whether more than one model and effort was observed (`mixed`) and
         /// whether a gap, partial read or budget kept the split incomplete
         /// (`attribution_uncertain`); the session model is then only the latest
@@ -3379,6 +3403,7 @@ fn dispatch(cli: Cli) -> Result<()> {
             reconcile,
             family,
             continuations,
+            evidence,
             event_keys,
             from,
             to,
@@ -3445,16 +3470,24 @@ fn dispatch(cli: Cli) -> Result<()> {
                         "--family reads installed recordings whole; a supplied input refuses it"
                     ));
                 }
+                let evidence = if evidence.is_empty() {
+                    None
+                } else {
+                    Some(agent_tapes_core::attribution_evidence::read_paths(
+                        &evidence,
+                    )?)
+                };
                 let backends = query.input.backends()?;
                 let latest_warnings = query.latest_warnings(&backends)?;
                 print_selection_warnings(&latest_warnings);
-                let family = agent_tapes_core::family::family_usage_with_backends(
+                let family = agent_tapes_core::family::family_usage_with_evidence(
                     &backends,
                     one,
                     agent_tapes_core::family::FamilyOptions {
                         continuations,
                         prices,
                     },
+                    evidence.as_deref(),
                 )?;
                 if json {
                     print_json_with_selection_warnings(&family, &query.input, &latest_warnings)?;
@@ -6499,6 +6532,22 @@ fn render_family(family: &agent_tapes_core::family::FamilyUsage) -> String {
         row.extend(cells(&session.usage));
         out.push_str(&row.join("\t"));
         out.push('\n');
+        if let Some(link) = &session.evidence {
+            out.push_str(&format!(
+                "  linked by {} ({}, {}){}{}\n",
+                link.file,
+                link.producer,
+                serde_kebab(&link.tier),
+                link.label
+                    .as_ref()
+                    .map(|label| format!(", label {label}"))
+                    .unwrap_or_default(),
+                link.subject
+                    .as_ref()
+                    .map(|subject| format!(", subject {subject}"))
+                    .unwrap_or_default()
+            ));
+        }
         if session.shared_requests > 0 {
             out.push_str(&format!(
                 "  {} requests also recorded in an earlier member's recording are counted there only\n",
@@ -6635,7 +6684,98 @@ fn render_family(family: &agent_tapes_core::family::FamilyUsage) -> String {
     for unavailable in &search.unavailable {
         out.push_str(&format!("Unavailable: {unavailable}\n"));
     }
+    if let Some(evidence) = &family.evidence {
+        render_family_evidence(&mut out, evidence);
+    }
     out
+}
+
+/// The evidence files a family read, what their records did, the children
+/// that could not be found and the sessions with conflicting claims.
+fn render_family_evidence(out: &mut String, evidence: &agent_tapes_core::family::EvidenceUse) {
+    out.push_str(&format!(
+        "Evidence: {} files, {} children looked up by id, {} unresolved, {} conflicts\n",
+        evidence.files.len(),
+        evidence.looked_up,
+        evidence.unresolved.len(),
+        evidence.conflicts.len()
+    ));
+    for file in &evidence.files {
+        let report = &file.report;
+        out.push_str(&format!(
+            "  {} ({}): lineage {} read, {} used; binding {} read, {} used, not yet used; {} malformed; \
+             {} duplicates; adopted {}, agreed {}, conflicting {}, unresolved {}, not applied {}\n",
+            report.path,
+            report.producer,
+            report.lineage.read,
+            report.lineage.used,
+            report.binding.read,
+            report.binding.used,
+            report.malformed.len(),
+            report.duplicates,
+            file.adopted,
+            file.agreed,
+            file.conflicting,
+            file.unresolved,
+            file.not_applied
+        ));
+        for line in &report.malformed {
+            out.push_str(&format!(
+                "    line {}: malformed ({})\n",
+                line.line,
+                serde_kebab(&line.reason)
+            ));
+        }
+        for (kind, count) in &report.unknown_kinds {
+            out.push_str(&format!("    {count} records of unknown kind {kind:?}\n"));
+        }
+        if let Some(truncated) = &report.truncated {
+            out.push_str(&format!(
+                "    read stopped at line {}: {}\n",
+                truncated.line,
+                serde_kebab(&truncated.reason)
+            ));
+        }
+    }
+    for child in &evidence.unresolved {
+        out.push_str(&format!(
+            "Unresolved: {}:{} launched by {}:{} ({}, {}): {}\n",
+            child.child.harness,
+            child.child.id,
+            child.parent.harness,
+            child.parent.id,
+            child.file,
+            child.producer,
+            serde_kebab(&child.reason)
+        ));
+    }
+    for conflict in &evidence.conflicts {
+        out.push_str(&format!(
+            "Conflict: {}:{} counted {}\n",
+            conflict.session.harness,
+            conflict.session.id,
+            conflict.placed_under.as_ref().map_or_else(
+                || "nowhere (not a member)".to_owned(),
+                |parent| format!("under {}:{}", parent.harness, parent.id)
+            )
+        ));
+        for claim in &conflict.claims {
+            let source = match &claim.source {
+                agent_tapes_core::family::ClaimSource::Recording { link } => {
+                    format!("its recording ({})", serde_kebab(link))
+                }
+                agent_tapes_core::family::ClaimSource::Evidence {
+                    file,
+                    producer,
+                    tier,
+                } => format!("{file} ({producer}, {})", serde_kebab(tier)),
+            };
+            out.push_str(&format!(
+                "  names {}:{} by {source}\n",
+                claim.parent.harness, claim.parent.id
+            ));
+        }
+    }
 }
 
 /// A tagged value's tag, as it serializes.

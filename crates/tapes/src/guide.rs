@@ -1317,16 +1317,18 @@ PROBE BEFORE EXPORTING
   source-unreadable-or-changed, subagents-unenumerated), never error text,
   which can name a recording path.
 
-  `usage SESSION --family [--continuations]` prices a session with everything
-  it caused, as tapes-family-usage/1. A session that dispatches work causes
-  consumption in other sessions, and the family names them from what the
-  recordings state: the session itself (role `lead`); a Claude parent's
-  subagent recordings and a Codex spawn's `parent_thread_id` (`subagent`);
-  every session of any harness whose first prompt opens with `tapes-parent:
-  <harness>:<session-id>` naming a member, recursively (`delegate`); and a
-  session that declares a member as its fork origin (`fork`). Each member is
-  counted once by harness and id. Descent is never inferred from time or
-  proximity. Launched sessions are found by time, not by name: a launched
+  `usage SESSION --family [--continuations] [--evidence PATH]` prices a
+  session with everything it caused, as tapes-family-usage/2. A session that
+  dispatches work causes consumption in other sessions, and the family names
+  them from what the recordings state and the evidence a caller names: the
+  session itself (role `lead`); a Claude parent's subagent recordings and a
+  Codex spawn's `parent_thread_id` (`subagent`); every session of any harness
+  whose first prompt opens with `tapes-parent: <harness>:<session-id>` naming
+  a member, recursively (`delegate`, link `launch-marker`); the child of a
+  lineage record in an evidence file named with --evidence whose parent is a
+  member (`delegate`, link `evidence`); and a session that declares a member
+  as its fork origin (`fork`). Each member is counted once by harness and id.
+  Descent is never inferred from time or proximity. Launched sessions are found by time, not by name: a launched
   session's first activity lies inside its launcher's recorded interval in
   any project, so the search lists every session of every harness active
   since the family opened and reads the opening records, for the marker, of
@@ -1337,7 +1339,38 @@ PROBE BEFORE EXPORTING
   scan, an unreadable opening, the member bound, unenumerated subagent
   directories); `complete` is true only without any. A session launched
   without a marker, or whose recording began outside every member's interval,
-  is not found: tapes names a member only from what a recording states.
+  is not found by the search: tapes names a member only from what a recording
+  states and the evidence a caller names. Nothing is read unless named: there
+  is no default evidence directory and no environment variable, so the
+  command shows every input to its figure.
+  `--evidence PATH` (repeatable) reads a tapes-attribution-evidence/1 file, or
+  every `*.jsonl` file directly inside a directory in name order. A child a
+  lineage record names is looked up by its harness and id in that harness's
+  store, not through the time-windowed search, so a delegate whose recording
+  began outside every member's interval still joins; its subagents, marker
+  children and lineage children join in turn. The member's row carries
+  `evidence`: the file as written on the command line, the producer, the
+  tier, and the record's `label` and `subject` when present. A recording
+  outranks a file: a session whose own recording names a parent (a subagent
+  directory, a spawn, a fork origin, a marker) is placed by it, and a
+  recorded parent that is not a member keeps the session out of the family
+  whatever a file says. Evidence fills only what recordings leave silent, and
+  among silent recordings a session joins under whichever claimed parent
+  became a member first. A record naming a member under the parent it already
+  has changes nothing. Claims naming different parents for one session are
+  reported under `evidence.conflicts` with each claimed parent and its source
+  (the recording and its link, or the file, producer and tier); the session
+  counts once, `placed_under` names where, and a conflict is reported only
+  when a claimed parent is a member. Two parents the family links by
+  `--continuations` are one conversation across its recordings and do not
+  conflict; without it the same pair does. A child no installed store holds,
+  or whose opening cannot be read, is listed under `evidence.unresolved` with
+  its parent, file, producer and a fixed reason, and adds nothing.
+  `evidence.files` repeats each file's read report (producer, records read
+  and used by kind, malformed lines by line number and fixed reason, unknown
+  kinds, duplicates, any truncation) with what its records did: `adopted`,
+  `agreed`, `conflicting`, `unresolved` and `not_applied`. A binding record
+  is read and counted, and nothing uses it yet.
   Each member's figure is the one `usage --full` reports for its recording.
   A Claude recording whose accounting is a recorded total counts its
   subagents' requests, so those subagent recordings are listed with their
@@ -1350,7 +1383,7 @@ PROBE BEFORE EXPORTING
   recorded total's figure and never added to it. `agents` holds one
   row per `harness:model#effort` and role; `sessions` one row per member,
   root first, with its `link` (root, continuation, subagent-recording, spawn,
-  fork-origin, launch-marker) and `parent`; `totals` and `partitions` add the
+  fork-origin, launch-marker, evidence) and `parent`; `totals` and `partitions` add the
   counted members under the summary's accounting-basis, overlap and
   withholding rules, and `priced_across_bases` adds the partitions' list-price
   estimates under --prices where `totals` withholds its own because the
@@ -1906,6 +1939,61 @@ ONE READER PER MACHINE
   tool and drifted apart; if tapes cannot express what you need, add it here.
 
   tapes <command> --help for a command's full contract.
+
+DECLARE WHO LAUNCHED WHOM
+  Anything that starts an agent session on another's behalf can declare it,
+  and `usage SESSION --family` then prices the child with its launcher. There
+  are two ways to declare a launch:
+  1. The launch marker: the first line of the prompt the child starts with is
+         tapes-parent: <harness>:<session-id>
+     with nothing before it. The launcher writes it into the recording, so
+     it is read wherever the recording is, and it needs no file.
+  2. A lineage record in an evidence file, for a launcher that cannot change
+     the prompt, or that declares after the fact. Name the file, or a
+     directory of them, with `usage SESSION --family --evidence PATH`.
+  An evidence file is tapes-attribution-evidence/1: UTF-8 JSON Lines, one
+  object per line, blank lines ignored. The first line is the header:
+      {"schema":"tapes-attribution-evidence/1","producer":"nightly-tool/1.2.0","written_at":"2026-01-10T09:00:00Z"}
+  `schema` is exactly that string. `producer` is non-empty and names who
+  wrote the records, by convention `<tool>/<version>`; a person writing lines
+  by hand names themself or their tool. `written_at` is optional, RFC 3339.
+  A session reference is {"harness":H,"id":I}: H is a harness name as `tapes
+  list` prints it (claude, codex, pi, opencode) and I that harness's own
+  session id. Every later line is a record whose `kind` says what it states.
+  `lineage`: a session launched another.
+      {"kind":"lineage","parent":{"harness":"claude","id":"<id>"},"child":{"harness":"codex","id":"<id>"},"tier":"bound","at":"2026-01-10T09:03:20Z","label":"nightly-review","subject":"auth-rework"}
+  `parent` and `child` are required and the child is not the parent. `tier`
+  is required: `bound` when the producer launched the child itself and
+  recorded both sessions, `declared` when the relation is asserted without
+  that record, as a hand-written line is. `at` is optional, the RFC 3339
+  instant the child was launched. `label` and `subject` are optional strings
+  saying what the launch was called and the work it was for; they are shown
+  and never used to link.
+  `binding`: a session's consumption served a piece of work.
+      {"kind":"binding","session":{"harness":"claude","id":"<id>"},"work":{"commits":["<full object name>"],"label":"auth-rework","repository":"<path or remote URL>"},"tier":"bound","role":"implementer","span":{"from":"2026-01-10T08:30:00Z","to":"2026-01-10T09:20:00Z"}}
+  `session`, `work` and `tier` are required. `work` holds at least one of
+  `commits`, a non-empty array of full hexadecimal object names of 40 or 64
+  digits, and `label`, a non-empty name for the work; `repository` is
+  informational. `role` is optional (implementer, reviewer). `span`, optional,
+  is {"from":..,"to":..} in RFC 3339 with `from` no later than `to`: only the
+  session's requests inside it served the work; without it the whole session
+  did. A binding record is read and validated, and nothing uses it yet.
+  A producer writes the header first, one `lineage` record per distinct
+  (parent, child) pair, and only what its own records back, at the tier it
+  states.
+  A reader ignores fields it does not know; a field that narrows what a
+  record means arrives only with a new schema version. It counts a record of
+  an unknown `kind`, per kind, and reports it. A line is malformed when it is
+  not a JSON object, lacks a required field or carries one of the wrong type
+  or empty, or carries an invalid value: an unknown tier, a child equal to
+  its parent, an unparseable instant, an empty or non-hexadecimal commit
+  list, or `from` after `to`. A malformed line is counted with its line
+  number and a fixed reason, never its text, and reading goes on. Identical
+  records count once; for `lineage`, identical means the same parent and
+  child. A file whose first line is not a header of this schema, and a path
+  that does not exist, are refused naming the path. Reads are bounded: a line
+  past 256 KiB, a file past 10000 lines after the header, and a directory of
+  more than 1000 `.jsonl` files stop the read and say so.
 
 CHILD RECORDINGS
   tapes lineage PARENT --json
