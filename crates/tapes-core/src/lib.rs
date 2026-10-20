@@ -27,6 +27,7 @@ pub mod brief;
 pub mod bundle;
 pub mod byte_size;
 pub mod change_attribution;
+pub mod change_usage;
 pub mod child;
 pub mod commit_observations;
 pub mod consumption_union;

@@ -369,6 +369,7 @@ pub fn attribute_within(
         evidences.push((member.key(), evidence));
     }
     let mut partitions = divide(gathered, &evidences, &facts, params);
+    let mut placed_by_every_tier = None;
     // What only the tiers left out would place is named for them.
     if !params.tiers.is_all() {
         let every = Params {
@@ -381,6 +382,23 @@ pub fn attribute_within(
                 partition.name_tiers_not_asked(full);
             }
         }
+        placed_by_every_tier = Some(
+            full.iter()
+                .map(|(key, partition)| {
+                    let commits = partition
+                        .entries
+                        .iter()
+                        .filter_map(|entry| match &entry.owner {
+                            crate::attribution::Owner::Item { work, .. } => {
+                                work.sha().map(str::to_owned)
+                            }
+                            crate::attribution::Owner::Unattributed(_) => None,
+                        })
+                        .collect();
+                    (key.clone(), commits)
+                })
+                .collect::<BTreeMap<SessionKey, BTreeSet<String>>>(),
+        );
     }
 
     let mut reads: Vec<Result<Read, String>> = Vec::new();
@@ -433,6 +451,12 @@ pub fn attribute_within(
                 (None, None, None, agent_label(&member.session))
             }
         };
+        let placed_by_every_tier =
+            placed_by_every_tier
+                .as_ref()
+                .map(|placed: &BTreeMap<SessionKey, BTreeSet<String>>| {
+                    placed.get(&key).cloned().unwrap_or_default()
+                });
         sessions.push(SessionAttribution {
             session: key,
             parent: member.parent.clone(),
@@ -442,6 +466,7 @@ pub fn attribute_within(
             last_activity_at: member.session.last_activity_at,
             billing,
             measured,
+            placed_by_every_tier,
             partition,
             amounts,
             notes,

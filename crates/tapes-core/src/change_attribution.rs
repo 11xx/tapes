@@ -1610,6 +1610,10 @@ pub struct SessionAttribution {
     /// leaves absent is unmeasured in every share, never zero.
     #[serde(skip)]
     pub measured: Option<crate::model::Tokens>,
+    /// Where only some tiers took part, the commits a division by every
+    /// tier would give the session a share of.
+    #[serde(skip)]
+    pub placed_by_every_tier: Option<BTreeSet<String>>,
     pub partition: Partition,
     /// What the read took, absent where the session could not be read in
     /// pieces.
