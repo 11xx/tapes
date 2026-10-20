@@ -509,8 +509,9 @@ PROBE BEFORE EXPORTING
   command of the same call printed, as `git log -1` or `git rev-parse HEAD`
   does, and it names no branch. Most Claude commits are quiet, so a chained
   print is the usual way a sha is found there. A printing command (`git log`,
-  `git show` or `git rev-parse HEAD`, with no other revision, path or filter)
-  lists the commits at HEAD newest first, so its first lines are the commits
+  `git rev-list`, `git show` or `git rev-parse HEAD`, naming no revision but
+  HEAD or a range that ends at it, and no path or filter) lists the commits at
+  HEAD newest first, so its first lines are the commits
   made since the printer before it, one per commit-creating command; where a
   script prints after each commit, each printer's lines are divided by its
   own bound (`-N`, `head -N`, one line for `rev-parse`). A printer with no

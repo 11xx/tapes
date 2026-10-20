@@ -890,9 +890,18 @@ fn prints_head(sub: &str, args: &[&str]) -> bool {
         .iter()
         .filter(|arg| !arg.starts_with('-') && arg.parse::<u64>().is_err())
         .collect::<Vec<_>>();
+    // A range that ends at `HEAD` lists the commits since its start, `HEAD` first.
+    let ends_at_head = |rev: &&&str| {
+        **rev == "HEAD"
+            || rev
+                .strip_suffix("..HEAD")
+                .or_else(|| rev.strip_suffix(".."))
+                .is_some_and(|start| !start.is_empty() && !start.ends_with('.'))
+    };
     match sub {
-        "log" | "show" => {
-            revs.iter().all(|rev| **rev == "HEAD")
+        "log" | "show" | "rev-list" => {
+            revs.iter()
+                .all(|rev| **rev == "HEAD" || (sub != "show" && ends_at_head(rev)))
                 && !args.iter().any(|arg| {
                     FILTERS.iter().any(|filter| arg.starts_with(filter))
                         || arg.starts_with("-S")
@@ -1418,6 +1427,23 @@ mod tests {
     }
 
     #[test]
+    fn git_commands_chained_with_other_tools_are_read() {
+        let facts = facts(
+            "cargo test -q && git add -A && git commit -q -m x && arc snapshot --verify && git log -1 --oneline",
+        );
+        assert_eq!(facts.creates, [Creates::Commit]);
+        assert_eq!(
+            facts.blocks,
+            [Block {
+                run: 1,
+                from_head: true,
+                guarded: true,
+                limit: Some(1)
+            }]
+        );
+    }
+
+    #[test]
     fn a_shell_operand_is_read_as_commands() {
         let facts = facts("bash -lc 'git commit -m x; git rev-parse HEAD'");
         assert_eq!(facts.creates, [Creates::Commit]);
@@ -1469,6 +1495,18 @@ mod tests {
         );
         assert_eq!(
             blocks("git commit -q -m a; git log --oneline main"),
+            [(1, false, None)]
+        );
+        assert_eq!(
+            blocks("git commit -q -m a; git log --oneline main..HEAD"),
+            [(1, true, None)]
+        );
+        assert_eq!(
+            blocks("git commit -q -m a; git log --oneline origin/main.."),
+            [(1, true, None)]
+        );
+        assert_eq!(
+            blocks("git commit -q -m a; git log --oneline HEAD..main"),
             [(1, false, None)]
         );
         assert_eq!(
