@@ -1,5 +1,7 @@
-//! List-price estimates from a price table the caller supplies. tapes holds
-//! no prices of its own: a price table file names, per model, what a million
+//! List-price estimates from a price table. tapes ships no prices: a table
+//! is the caller's, or one `tapes prices update` fetched from the vendors'
+//! published pages (see [`crate::price_update`]). A price table file names,
+//! per model, what a million
 //! tokens of each disjoint category cost, and an estimate prices a figure's
 //! disjoint categories by the row of the model that served them. An
 //! estimate sits beside any cost a harness wrote and never replaces it.
@@ -14,12 +16,17 @@
 //! rates; and a validity window per row. A figure prices those terms request
 //! by request where its reader kept its requests, and between the terms'
 //! rates where it did not.
+//!
+//! A recorded id ending in `-YYYYMMDD` that no row names exactly is priced
+//! by the row named by the id without that date.
 
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Context, Result};
-use chrono::{DateTime, Datelike, NaiveDate, NaiveTime, Utc, Weekday};
+use std::str::FromStr;
+
+use chrono::{DateTime, Datelike, NaiveDate, NaiveTime, SecondsFormat, Utc, Weekday};
 use serde::{Deserialize, Serialize};
 
 use crate::measurement::{MeasurementCompleteness, MeasurementReason};
@@ -288,7 +295,9 @@ pub struct PriceTable {
     index: HashMap<String, Vec<usize>>,
 }
 
-#[derive(Deserialize)]
+/// A price table file as written, the form [`PriceTable::parse`] reads and
+/// [`PriceTable::to_toml`] writes.
+#[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct RawTable {
     schema: String,
@@ -297,41 +306,98 @@ struct RawTable {
     models: Vec<RawModel>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct RawModel {
     id: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     aliases: Vec<String>,
     effective: toml::value::Datetime,
     source: String,
-    per_million: CategoryPrices,
+    #[serde(skip_serializing_if = "Option::is_none")]
     effective_from: Option<toml::value::Datetime>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     effective_until: Option<toml::value::Datetime>,
+    per_million: CategoryPrices,
+    #[serde(skip_serializing_if = "Option::is_none")]
     long_context: Option<RawLongContext>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     time_of_day: Vec<RawTimeOfDay>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct RawLongContext {
+    #[serde(skip_serializing_if = "Option::is_none")]
     above_prompt_tokens: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     from_prompt_tokens: Option<u64>,
     prompt_tokens: Vec<PromptCategory>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     billing: Option<Vec<BillingKind>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     per_million: Option<CategoryPrices>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     multipliers: Option<CategoryPrices>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct RawTimeOfDay {
     from: String,
     until: String,
     per_million: CategoryPrices,
+    #[serde(skip_serializing_if = "Option::is_none")]
     days: Option<Vec<String>>,
+}
+
+impl RawModel {
+    fn of(row: &ModelPrice) -> Self {
+        let date = |date: NaiveDate| {
+            toml::value::Datetime::from_str(&date.format("%Y-%m-%d").to_string())
+                .expect("a formatted date is a TOML date")
+        };
+        let instant = |at: DateTime<Utc>| {
+            toml::value::Datetime::from_str(&at.to_rfc3339_opts(SecondsFormat::AutoSi, true))
+                .expect("an RFC 3339 instant is a TOML datetime")
+        };
+        Self {
+            id: row.id.clone(),
+            aliases: row.aliases.clone(),
+            effective: date(row.effective),
+            source: row.source.clone(),
+            effective_from: row.effective_from.map(instant),
+            effective_until: row.effective_until.map(instant),
+            per_million: row.per_million.clone(),
+            long_context: row.long_context.as_ref().map(|term| RawLongContext {
+                above_prompt_tokens: (!term.inclusive).then_some(term.prompt_tokens),
+                from_prompt_tokens: term.inclusive.then_some(term.prompt_tokens),
+                prompt_tokens: term.counts.clone(),
+                billing: Some(term.billing.clone()),
+                per_million: term.per_million.clone(),
+                multipliers: term.multipliers.clone(),
+            }),
+            time_of_day: row
+                .time_of_day
+                .iter()
+                .map(|window| RawTimeOfDay {
+                    from: window.from.format("%H:%M").to_string(),
+                    until: window.until.format("%H:%M").to_string(),
+                    per_million: window.per_million.clone(),
+                    days: window.days.as_ref().map(|days| {
+                        days.iter()
+                            .filter_map(|day| {
+                                DAY_NAMES
+                                    .iter()
+                                    .find(|(_, named)| named == day)
+                                    .map(|(name, _)| (*name).to_owned())
+                            })
+                            .collect()
+                    }),
+                })
+                .collect(),
+        }
+    }
 }
 
 /// Refuse a negative or non-finite price, naming the entry and category.
@@ -570,14 +636,35 @@ impl PriceTable {
         self.rows(id).next()
     }
 
-    /// Every row that names a model id, by id or alias.
+    /// Every row that names a model id, by id or alias. An id ending in
+    /// `-YYYYMMDD` that no row names is answered by the rows naming the id
+    /// without that date.
     pub fn rows<'a>(&'a self, id: &str) -> impl Iterator<Item = &'a ModelPrice> + 'a {
         self.index
             .get(id)
+            .or_else(|| undated(id).and_then(|undated| self.index.get(undated)))
             .into_iter()
             .flatten()
             .map(|position| &self.models[*position])
     }
+
+    /// The table written as a `tapes-price-table/2` document that
+    /// [`Self::parse`] reads back to the same rows.
+    pub fn to_toml(currency: &str, models: &[ModelPrice]) -> Result<String> {
+        let raw = RawTable {
+            schema: PRICE_TABLE_SCHEMA_V2.to_owned(),
+            currency: currency.to_owned(),
+            models: models.iter().map(RawModel::of).collect(),
+        };
+        toml::to_string(&raw).context("the price table could not be written")
+    }
+}
+
+/// `id` without a trailing `-YYYYMMDD`, when it has one.
+fn undated(id: &str) -> Option<&str> {
+    let (undated, date) = id.rsplit_once('-')?;
+    (date.len() == 8 && date.bytes().all(|byte| byte.is_ascii_digit()) && !undated.is_empty())
+        .then_some(undated)
 }
 
 /// Validate a long-context term.
