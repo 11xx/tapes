@@ -632,24 +632,23 @@ impl<K: Ord + Clone> Layer<K> {
             .collect()
     }
 
-    /// The parts of the items `selected` holds, in read order.
-    pub fn figure(&self, selected: &BTreeSet<K>) -> Vec<Part> {
+    /// The parts whose owner `keep` holds, in read order.
+    pub fn parts_of(&self, keep: impl Fn(&Owner<K>) -> bool) -> Vec<Part> {
         self.parts
             .iter()
-            .filter(
-                |(_, owner)| matches!(owner, Owner::Item { work, .. } if selected.contains(work)),
-            )
+            .filter(|(_, owner)| keep(owner))
             .map(|(part, _)| *part)
             .collect()
     }
 
+    /// The parts of the items `selected` holds, in read order.
+    pub fn figure(&self, selected: &BTreeSet<K>) -> Vec<Part> {
+        self.parts_of(|owner| matches!(owner, Owner::Item { work, .. } if selected.contains(work)))
+    }
+
     /// The parts no item holds, in read order.
     pub fn unattributed(&self) -> Vec<Part> {
-        self.parts
-            .iter()
-            .filter(|(_, owner)| matches!(owner, Owner::Unattributed(_)))
-            .map(|(part, _)| *part)
-            .collect()
+        self.parts_of(|owner| matches!(owner, Owner::Unattributed(_)))
     }
 
     /// The reasons of the unattributed parts that hold a request.

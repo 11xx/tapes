@@ -623,6 +623,12 @@ fn verdicts_alone_give_working_stretch_shares_beside_the_conserving_figure() {
         input(&figures, &estimated.figure(&selected(&["a", "b"]))),
         Some(1117)
     );
+    // The estimate's own part of an item, without its conserving share.
+    let estimated_b = estimated.parts_of(|owner| {
+        matches!(owner, Owner::Item { work, evidence }
+            if work == &key("b") && evidence.basis == Basis::WorkingStretch)
+    });
+    assert_eq!(input(&figures, &estimated_b), Some(1007));
     let parts: Vec<Part> = estimated.parts.iter().map(|(part, _)| *part).collect();
     assert_eq!(total(&figures, &parts), recording.whole());
 }
