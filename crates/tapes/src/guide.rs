@@ -233,6 +233,11 @@ FIND IT
   OpenCode keeps two stores, and the first answers for a session id both hold;
   a session it could not read fails the read naming both stores rather than
   answering from the other one.
+  A store read that fails for a reason that can pass, an OpenCode database
+  another reader or writer holds busy or locked or an API that answers 429 or
+  503, is retried within a third of a second. One that still fails says it
+  failed transiently and exits 75, so it never reads as a session with no
+  usage; a failure that cannot pass exits 1.
   A content search that cannot read one candidate's bounded tail reports that
   session separately in unsearched. A Codex row without model metadata can
   mean its model-bearing turn_context was before the bounded file tail; JSON

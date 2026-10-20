@@ -32,6 +32,7 @@ use crate::model::{
 };
 use crate::overlap::DeclaredOrigin;
 use crate::span::{Placer, SpanBounds, SpanSessions};
+use crate::transient::TransientFailure;
 use agent_tapes_discovery::{
     DiscoveryError, Harness as NativeHarness, NativeSession, NativeStore, NativeStoreKind,
     OpenCodeFlavor,
@@ -172,7 +173,13 @@ impl OpenCodeApiServer {
 }
 
 impl OpenCodeApiClient {
+    /// A response, requested again after a pause while the server answers
+    /// that it is momentarily unavailable, up to the transient attempt bound.
     fn request(&self, path: &str) -> Result<Value> {
+        retry_transient("opencode API", || self.request_attempt(path))
+    }
+
+    fn request_attempt(&self, path: &str) -> Result<Attempt<Value>> {
         let mut stream = TcpStream::connect(("127.0.0.1", self.port))
             .context("failed to connect to the opencode API server")?;
         stream
@@ -204,6 +211,9 @@ impl OpenCodeApiClient {
         let headers = &bytes[..separator];
         let body = &bytes[separator + 4..];
         let status = http_status(headers)?;
+        if agent_tapes_discovery::transient::transient_http_status(status) {
+            return Ok(Attempt::Busy(format!("HTTP {status}")));
+        }
         if !(200..300).contains(&status) {
             return Err(anyhow!("opencode API server returned HTTP {status}"));
         }
@@ -212,7 +222,9 @@ impl OpenCodeApiClient {
         } else {
             body.to_vec()
         };
-        serde_json::from_slice(&body).context("opencode API server returned invalid JSON")
+        serde_json::from_slice(&body)
+            .context("opencode API server returned invalid JSON")
+            .map(Attempt::Answered)
     }
 
     fn search(&self, session: &Session, needle: &str, tail: usize) -> Result<SearchCoverage> {
@@ -368,7 +380,13 @@ impl OpenCodeBackend {
         self.command_bytes_with(&self.program, args, source)
     }
 
+    /// A command's output, read again after a pause while it fails saying
+    /// the store is busy, up to the transient attempt bound.
     fn command_bytes_with(&self, program: &OsStr, args: &[&str], source: &str) -> Result<Vec<u8>> {
+        retry_transient(source, || self.command_attempt(program, args, source))
+    }
+
+    fn command_attempt(&self, program: &OsStr, args: &[&str], source: &str) -> Result<Attempt> {
         let store = self
             .store
             .opencode_store()
@@ -379,9 +397,10 @@ impl OpenCodeBackend {
             .args(args)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            .stderr(Stdio::piped())
             .spawn()
             .with_context(|| format!("failed to run {}", program.to_string_lossy()))?;
+        let stderr = bounded_stderr(child.stderr.take().expect("piped stderr is present"));
         let mut bytes = Vec::new();
         child
             .stdout
@@ -406,9 +425,13 @@ impl OpenCodeBackend {
             .wait()
             .with_context(|| format!("failed to wait for {source} process"))?;
         if !status.success() {
+            let stderr = finished_stderr(stderr);
+            if let Some(cause) = agent_tapes_discovery::transient::busy_output(&stderr) {
+                return Ok(Attempt::Busy(cause));
+            }
             return Err(anyhow!("{source} command exited with {status}"));
         }
-        Ok(bytes)
+        Ok(Attempt::Answered(bytes))
     }
 
     fn command_json(&self, args: &[&str], source: &str) -> Result<Value> {
@@ -554,6 +577,67 @@ impl OpenCodeBackend {
         let bytes =
             self.command_bytes_with(OsStr::new("sqlite3"), &args, "opencode v2 database")?;
         parse_sqlite_json(&bytes)
+    }
+}
+
+/// One attempt at a store read: its answer, or what the store said when it
+/// was busy.
+enum Attempt<T = Vec<u8>> {
+    Answered(T),
+    Busy(String),
+}
+
+/// Bytes of a failed command's stderr kept to classify its failure.
+const MAX_STDERR_BYTES: usize = 4 * 1024;
+
+/// Drain a child's stderr on its own thread, keeping its first bytes, so the
+/// child never blocks on a full pipe while its stdout is read.
+fn bounded_stderr(mut stderr: std::process::ChildStderr) -> thread::JoinHandle<Vec<u8>> {
+    thread::spawn(move || {
+        let mut kept = Vec::new();
+        let _ = (&mut stderr)
+            .take(MAX_STDERR_BYTES as u64)
+            .read_to_end(&mut kept);
+        let _ = std::io::copy(&mut stderr, &mut std::io::sink());
+        kept
+    })
+}
+
+/// How long a failed command's stderr may stay open after it exited, held by
+/// a process it started, before its failure is classified without it.
+const STDERR_GRACE: Duration = Duration::from_secs(1);
+
+/// The stderr [`bounded_stderr`] kept, once it reaches its end within
+/// [`STDERR_GRACE`]; nothing otherwise.
+fn finished_stderr(reader: thread::JoinHandle<Vec<u8>>) -> Vec<u8> {
+    let deadline = Instant::now() + STDERR_GRACE;
+    while !reader.is_finished() {
+        if Instant::now() >= deadline {
+            return Vec::new();
+        }
+        thread::sleep(Duration::from_millis(5));
+    }
+    reader.join().unwrap_or_default()
+}
+
+/// Run `attempt` until it answers, fails for good, or the store has stayed
+/// busy through every bounded attempt, which fails as [`TransientFailure`].
+fn retry_transient<T>(source: &str, mut attempt: impl FnMut() -> Result<Attempt<T>>) -> Result<T> {
+    let attempts = agent_tapes_discovery::transient::ATTEMPTS;
+    let mut made = 0;
+    loop {
+        made += 1;
+        match attempt()? {
+            Attempt::Answered(value) => return Ok(value),
+            Attempt::Busy(cause) if made >= attempts => {
+                return Err(TransientFailure {
+                    source: source.to_owned(),
+                    cause,
+                }
+                .into())
+            }
+            Attempt::Busy(_) => thread::sleep(agent_tapes_discovery::transient::retry_delay(made)),
+        }
     }
 }
 

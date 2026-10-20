@@ -269,7 +269,7 @@ fn parse_request_range(value: &str) -> std::result::Result<SpanBounds, String> {
     name = "tapes",
     version,
     about = "Read and export coding-agent sessions",
-    after_help = "Run `tapes` with no arguments for the workflow guide."
+    after_help = "Run `tapes` with no arguments for the workflow guide.\n\nA read that fails for a reason that can pass, such as a busy store, exits 75."
 )]
 struct Cli {
     /// Absent prints the workflow guide: what tapes owns, the order the
@@ -2385,8 +2385,19 @@ fn main() -> Result<()> {
         .into_boxed_str(),
     );
     let matches = Cli::command().long_version(long_version).get_matches();
-    dispatch(Cli::from_arg_matches(&matches)?)
+    let result = dispatch(Cli::from_arg_matches(&matches)?);
+    if let Err(error) = &result {
+        if agent_tapes_core::transient::is_transient(error) {
+            eprintln!("Error: {error:?}");
+            std::process::exit(TRANSIENT_EXIT);
+        }
+    }
+    result
 }
+
+/// The exit status of a read that failed for a reason that can pass,
+/// sysexits' EX_TEMPFAIL.
+const TRANSIENT_EXIT: i32 = 75;
 
 fn render_locate(report: &agent_tapes_core::locate::Locate) -> String {
     use agent_tapes_core::projection::single_line;
