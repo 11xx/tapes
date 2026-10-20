@@ -7,10 +7,10 @@
 //! project and keeps a submodule's sessions out of its superproject. Outside
 //! one, it is the current directory's subtree.
 
-use std::cell::RefCell;
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Mutex;
 
 use anyhow::{Context, Result};
 
@@ -26,11 +26,11 @@ pub struct Scope {
     roots: Vec<PathBuf>,
     /// A candidate directory's repository identity, once resolved. Candidates
     /// repeat heavily across a listing and each miss costs a process spawn.
-    identities: RefCell<HashMap<PathBuf, Option<PathBuf>>>,
+    identities: Mutex<HashMap<PathBuf, Option<PathBuf>>>,
     /// Recorded directories that no longer resolve on disk. Their repository
     /// cannot be proven, so they are excluded, and kept so the exclusion can
     /// be reported rather than silent.
-    unresolved: RefCell<BTreeSet<PathBuf>>,
+    unresolved: Mutex<BTreeSet<PathBuf>>,
 }
 
 impl Scope {
@@ -49,8 +49,8 @@ impl Scope {
         Ok(Self {
             identity,
             roots,
-            identities: RefCell::new(HashMap::new()),
-            unresolved: RefCell::new(BTreeSet::new()),
+            identities: Mutex::new(HashMap::new()),
+            unresolved: Mutex::new(BTreeSet::new()),
         })
     }
 
@@ -72,7 +72,10 @@ impl Scope {
             // repository it belonged to, so it is out of scope rather than
             // guessed at from its name — and recorded, so the caller learns
             // that a wider scope could reach it.
-            self.unresolved.borrow_mut().insert(directory.to_path_buf());
+            self.unresolved
+                .lock()
+                .expect("no reader panicked holding the scope")
+                .insert(directory.to_path_buf());
             return false;
         };
         if !self.roots.iter().any(|root| directory.starts_with(root)) {
@@ -81,12 +84,21 @@ impl Scope {
         let Some(identity) = self.identity.as_deref() else {
             return true;
         };
-        let mut identities = self.identities.borrow_mut();
-        identities
-            .entry(directory.clone())
-            .or_insert_with(|| repository_identity(&directory))
-            .as_deref()
-            == Some(identity)
+        let known = self
+            .identities
+            .lock()
+            .expect("no reader panicked holding the scope")
+            .get(&directory)
+            .cloned();
+        let found = known.unwrap_or_else(|| {
+            let found = repository_identity(&directory);
+            self.identities
+                .lock()
+                .expect("no reader panicked holding the scope")
+                .insert(directory, found.clone());
+            found
+        });
+        found.as_deref() == Some(identity)
     }
 
     /// The project's roots, for callers that can narrow a store by path before
@@ -98,7 +110,12 @@ impl Scope {
     /// Every recorded directory `contains` excluded because it no longer
     /// resolves, in path order.
     pub fn unresolved(&self) -> Vec<PathBuf> {
-        self.unresolved.borrow().iter().cloned().collect()
+        self.unresolved
+            .lock()
+            .expect("no reader panicked holding the scope")
+            .iter()
+            .cloned()
+            .collect()
     }
 
     /// The unresolved directories in relevance order for a human example

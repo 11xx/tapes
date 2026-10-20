@@ -1,6 +1,5 @@
 mod support;
 
-use std::cell::Cell;
 use std::collections::HashSet;
 use std::ffi::OsString;
 use std::fs::{self, File};
@@ -8,8 +7,8 @@ use std::io::{BufWriter, Write};
 use std::os::unix::ffi::OsStringExt;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
-use std::rc::Rc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::Arc;
 
 use agent_tapes_core::backend::claude::ClaudeBackend;
 use agent_tapes_core::backend::codex::CodexBackend;
@@ -3760,7 +3759,7 @@ fn the_latest_in_scope_needs_no_id_and_honours_exclusions() {
 
 struct SearchFixture {
     session: Session,
-    requested_tail: Rc<Cell<usize>>,
+    requested_tail: Arc<AtomicUsize>,
     fail: bool,
     /// The read stops at a source bound before the searched tail is covered.
     bounded: bool,
@@ -3796,7 +3795,7 @@ impl Backend for SearchFixture {
     }
 
     fn transcript(&self, session: &Session, tail: usize) -> anyhow::Result<Transcript> {
-        self.requested_tail.set(tail);
+        self.requested_tail.store(tail, Ordering::SeqCst);
         if self.fail {
             anyhow::bail!("bounded search read failed");
         }
@@ -3850,10 +3849,10 @@ impl Backend for SearchFixture {
 
 #[test]
 fn list_search_uses_a_fixed_tail_before_applying_the_limit() {
-    let requested_tail = Rc::new(Cell::new(0));
+    let requested_tail = Arc::new(AtomicUsize::new(0));
     let backends: Vec<Box<dyn Backend>> = vec![Box::new(SearchFixture {
         session: resolver_session("search-session"),
-        requested_tail: Rc::clone(&requested_tail),
+        requested_tail: Arc::clone(&requested_tail),
         fail: false,
         bounded: false,
     })];
@@ -3870,7 +3869,7 @@ fn list_search_uses_a_fixed_tail_before_applying_the_limit() {
     .unwrap();
 
     assert_eq!(result.sessions.len(), 1);
-    assert_eq!(requested_tail.get(), LIST_SEARCH_TAIL);
+    assert_eq!(requested_tail.load(Ordering::SeqCst), LIST_SEARCH_TAIL);
     assert!(result.unsearched.is_empty());
 }
 
@@ -3949,7 +3948,7 @@ fn file_search_does_not_match_before_the_fixed_recent_turn_window() {
 
 #[test]
 fn a_failed_bounded_search_is_reported_as_unsearched() {
-    let requested_tail = Rc::new(Cell::new(0));
+    let requested_tail = Arc::new(AtomicUsize::new(0));
     let backends: Vec<Box<dyn Backend>> = vec![Box::new(SearchFixture {
         session: resolver_session("unsearched-session"),
         requested_tail,
@@ -4899,7 +4898,7 @@ fn codex_terminal_prefers_nested_native_error_fields_and_keeps_later_accounting(
 /// non-match. A hit inside the reached turns is still a match.
 #[test]
 fn a_source_bounded_read_short_of_the_tail_reports_partial_coverage() {
-    let requested_tail = Rc::new(Cell::new(0));
+    let requested_tail = Arc::new(AtomicUsize::new(0));
     let backends: Vec<Box<dyn Backend>> = vec![Box::new(SearchFixture {
         session: resolver_session("bounded-session"),
         requested_tail,
@@ -4931,7 +4930,7 @@ fn a_source_bounded_read_short_of_the_tail_reports_partial_coverage() {
 fn a_matching_partial_read_has_no_search_diagnostic() {
     let backends: Vec<Box<dyn Backend>> = vec![Box::new(SearchFixture {
         session: resolver_session("bounded-match"),
-        requested_tail: Rc::new(Cell::new(0)),
+        requested_tail: Arc::new(AtomicUsize::new(0)),
         fail: false,
         bounded: true,
     })];
@@ -6302,12 +6301,12 @@ struct MutatingCodexBackend {
     path: PathBuf,
     replacement: String,
     mutation: CodexMutation,
-    mutated: Cell<bool>,
+    mutated: AtomicBool,
 }
 
 impl MutatingCodexBackend {
     fn mutate_after_first_stream(&self) {
-        if self.mutated.replace(true) {
+        if self.mutated.swap(true, Ordering::SeqCst) {
             return;
         }
         match self.mutation {
@@ -6647,7 +6646,7 @@ fn public_full_usage_refuses_replacement_or_in_place_source_rewrite_between_pass
             path,
             replacement: format!("{replacement}\n"),
             mutation,
-            mutated: Cell::new(false),
+            mutated: AtomicBool::new(false),
         };
         let backends: Vec<Box<dyn Backend>> = vec![Box::new(backend)];
         let result = usage_with_options_with_backends(

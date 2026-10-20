@@ -6,11 +6,10 @@
 //! holds for parents reached through their children, and a discovery page
 //! charges the lineage metadata it retains.
 
-use std::cell::Cell;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::rc::Rc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use agent_tapes_core::backend::{
@@ -337,8 +336,8 @@ fn an_external_parent_s_declared_fork_outranks_the_marker_it_copied() {
 /// asked of it.
 struct CountedCodex {
     inner: CodexBackend,
-    lookups: Rc<Cell<usize>>,
-    first_prompts: Rc<Cell<usize>>,
+    lookups: Arc<AtomicUsize>,
+    first_prompts: Arc<AtomicUsize>,
 }
 
 impl Backend for CountedCodex {
@@ -388,7 +387,7 @@ impl Backend for CountedCodex {
         self.inner.locate(id)
     }
     fn locate_relative(&self, id: &str) -> anyhow::Result<Option<Session>> {
-        self.lookups.set(self.lookups.get() + 1);
+        self.lookups.fetch_add(1, Ordering::SeqCst);
         self.inner.locate_relative(id)
     }
     fn transcript(&self, session: &Session, tail: usize) -> anyhow::Result<Transcript> {
@@ -412,7 +411,7 @@ impl Backend for CountedCodex {
         sessions: &[&Session],
     ) -> Vec<Option<anyhow::Result<agent_tapes_core::launch_parent::LaunchMarker>>> {
         self.first_prompts
-            .set(self.first_prompts.get() + sessions.len());
+            .fetch_add(sessions.len(), Ordering::SeqCst);
         self.inner.first_prompt_markers(sessions)
     }
     fn lineage(&self, session: &Session) -> anyhow::Result<Lineage> {
@@ -475,8 +474,8 @@ fn rates_reads(by: GroupBy) -> (usize, usize) {
             "Inspect the fixture.",
         ),
     );
-    let lookups = Rc::new(Cell::new(0));
-    let first_prompts = Rc::new(Cell::new(0));
+    let lookups = Arc::new(AtomicUsize::new(0));
+    let first_prompts = Arc::new(AtomicUsize::new(0));
     let backends: Vec<Box<dyn Backend>> = vec![Box::new(CountedCodex {
         inner: CodexBackend::new(&store.0),
         lookups: lookups.clone(),
@@ -498,7 +497,10 @@ fn rates_reads(by: GroupBy) -> (usize, usize) {
         QuotaKind::Primary,
     )
     .unwrap();
-    (lookups.get(), first_prompts.get())
+    (
+        lookups.load(Ordering::SeqCst),
+        first_prompts.load(Ordering::SeqCst),
+    )
 }
 
 /// Claim: rates grouped by model resolve no parent of a lane, so a spawn

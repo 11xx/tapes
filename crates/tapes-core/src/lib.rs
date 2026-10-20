@@ -580,25 +580,45 @@ pub(crate) fn list_scoped(
                 .or_default() += 1;
         }
     }
-    for (index, backend) in backends
+    let selected: Vec<(usize, &dyn Backend)> = backends
         .iter()
         .enumerate()
         .filter(|(_, backend)| harness.is_none_or(|name| backend.harness() == name))
-    {
+        .map(|(index, backend)| (index, backend.as_ref()))
+        .collect();
+    // Some harnesses expose the same session through more than one
+    // projection. Search obeys the same first-source rule as resolution: a
+    // later projection cannot turn an earlier projection's non-match into a
+    // match for the same global id, so such a backend is also listed
+    // unsearched. The stores are read at once; what they hold is merged in
+    // the backends' order.
+    let reads = parallel::map(&selected, |(_, backend)| {
         if !backend.available() {
-            unavailable_harnesses.push(backend.harness());
-            continue;
+            return None;
         }
-        // Some harnesses expose the same session through more than one
-        // projection. Search obeys the same first-source rule as resolution:
-        // a later projection cannot turn an earlier projection's non-match
-        // into a match for the same global id.
-        if filters.search.is_some()
+        let projections = (filters.search.is_some()
             && selected_harness_counts
                 .get(backend.harness())
-                .is_some_and(|count| *count > 1)
-        {
-            match backend.list(&query) {
+                .is_some_and(|count| *count > 1))
+        .then(|| backend.list(&query));
+        let listing = if let Some(needle) = filters.search {
+            backend.list_with_search(
+                &query,
+                needle,
+                filters.search_turns.unwrap_or(LIST_SEARCH_TAIL),
+            )
+        } else {
+            backend.list(&query)
+        };
+        Some((projections, listing))
+    });
+    for ((index, backend), read) in selected.into_iter().zip(reads) {
+        let Some((projections, listing)) = read else {
+            unavailable_harnesses.push(backend.harness());
+            continue;
+        };
+        if let Some(projections) = projections {
+            match projections {
                 Ok(listing) => {
                     if listing.scan_truncated
                         || !listing.unavailable.is_empty()
@@ -644,15 +664,6 @@ pub(crate) fn list_scoped(
                 }
             }
         }
-        let listing = if let Some(needle) = filters.search {
-            backend.list_with_search(
-                &query,
-                needle,
-                filters.search_turns.unwrap_or(LIST_SEARCH_TAIL),
-            )
-        } else {
-            backend.list(&query)
-        };
         match listing {
             Ok(Listing {
                 sessions,

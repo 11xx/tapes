@@ -407,7 +407,7 @@ impl Listing {
     }
 }
 
-pub trait Backend {
+pub trait Backend: Send + Sync {
     fn child_transcript(&self, _parent: &Session, _reference: &str) -> Result<Transcript> {
         anyhow::bail!(
             "{} does not support child-qualified transcript reads",
@@ -999,7 +999,7 @@ pub(crate) fn list_discovered_files(
     (store, catalog): (&NativeStore, &agent_tapes_discovery::StoreCatalog),
     query: &Query,
     probe: impl Fn(&NativeSession, &Path) -> Option<PathBuf>,
-    parse: impl Fn(&NativeSession, &Path) -> Result<Session>,
+    parse: impl Fn(&NativeSession, &Path) -> Result<Session> + Sync,
 ) -> Listing {
     if query.limit == 0 {
         return Listing::default();
@@ -1025,33 +1025,28 @@ pub(crate) fn list_discovered_files(
         files.push(path.clone());
         by_path.insert(path, native);
     }
-    let parse_errors = std::cell::RefCell::new(Vec::<(String, String)>::new());
+    let mut parse_errors = Vec::<(String, String)>::new();
     let mut listing = list_files(
         files,
         query,
         |path| by_path.get(path).and_then(|native| probe(native, path)),
         |path| {
             let native = by_path.get(path)?;
-            match parse(native, path) {
-                Ok(session) => match enrich_native_session(native, session) {
-                    Ok(session) => Some(session),
-                    Err(error) => {
-                        parse_errors
-                            .borrow_mut()
-                            .push((native.id().to_owned(), format!("{}", error)));
-                        None
-                    }
-                },
-                Err(error) => {
-                    parse_errors
-                        .borrow_mut()
-                        .push((native.id().to_owned(), format!("{error:#}")));
-                    None
-                }
+            Some(match parse(native, path) {
+                Ok(session) => enrich_native_session(native, session)
+                    .map_err(|error| (native.id().to_owned(), format!("{}", error))),
+                Err(error) => Err((native.id().to_owned(), format!("{error:#}"))),
+            })
+        },
+        |parsed| match parsed? {
+            Ok(session) => Some(session),
+            Err(error) => {
+                parse_errors.push(error);
+                None
             }
         },
     );
-    for (id, error) in parse_errors.into_inner() {
+    for (id, error) in parse_errors {
         listing
             .unavailable
             .push(format!("native session {id}: {error}"));
@@ -2790,19 +2785,68 @@ pub(crate) fn head_directory(
 /// full read would place there too — otherwise skipping would lose sessions.
 /// A candidate it cannot place at all is parsed and judged on what the full
 /// read reports, so a probe that misses costs time and never a session.
-pub(crate) fn list_files(
+///
+/// `parse` reads candidates at once, never more of them than sessions the
+/// limit still admits, so the walk stops at the candidate it would stop at
+/// reading them one by one; `settle` then takes each read in candidate order.
+pub(crate) fn list_files<P: Send>(
     files: Vec<PathBuf>,
     query: &Query,
     probe: impl Fn(&Path) -> Option<PathBuf>,
-    parse: impl Fn(&Path) -> Option<Session>,
+    parse: impl Fn(&Path) -> P + Sync,
+    mut settle: impl FnMut(P) -> Option<Session>,
 ) -> Listing {
-    list_files_inner(files, query, probe, |path| {
-        parse(path).map(|session| ParsedFile {
-            session,
-            turns: Vec::new(),
-            truncated: false,
-        })
-    })
+    let mut listing = Listing::default();
+    let mut files = files.into_iter();
+    loop {
+        let room = query.limit.saturating_sub(listing.sessions.len());
+        let mut wanted = Vec::new();
+        // Why the walk ended before the batch filled: the files ran out, or
+        // the ceiling was reached.
+        let mut ended = None;
+        while wanted.len() < room {
+            let Some(path) = files.next() else {
+                ended = Some(false);
+                break;
+            };
+            if listing.scanned >= query.ceiling {
+                ended = Some(true);
+                break;
+            }
+            listing.scanned += 1;
+            if query.predates_since(&path) {
+                continue;
+            }
+            if let Some(scope) = query.scope {
+                if probe(&path).is_some_and(|directory| !scope.contains(&directory)) {
+                    continue;
+                }
+            }
+            wanted.push(path);
+        }
+        for parsed in crate::parallel::map(&wanted, |path| parse(path)) {
+            let Some(session) = settle(parsed) else {
+                continue;
+            };
+            let placed = query.scope.is_none_or(|scope| {
+                session
+                    .directory
+                    .as_deref()
+                    .is_some_and(|directory| scope.contains(directory))
+            });
+            if placed && query.matches(&session) {
+                listing.sessions.push(session);
+            }
+        }
+        match ended {
+            Some(ceiling) => {
+                listing.scan_truncated = ceiling && listing.sessions.len() < query.limit;
+                return listing;
+            }
+            None if wanted.is_empty() => return listing,
+            None => {}
+        }
+    }
 }
 
 /// Search file-backed candidates with a conservative raw prefilter, then retain
@@ -2930,47 +2974,6 @@ fn list_files_with_search(
             listing.partial_search.push(coverage.diagnostic(&session));
         }
         if coverage.matched && listing.sessions.len() < query.limit {
-            listing.sessions.push(session);
-        }
-    }
-    listing
-}
-
-fn list_files_inner(
-    files: Vec<PathBuf>,
-    query: &Query,
-    probe: impl Fn(&Path) -> Option<PathBuf>,
-    parse: impl Fn(&Path) -> Option<ParsedFile>,
-) -> Listing {
-    let mut listing = Listing::default();
-    for path in files {
-        if listing.sessions.len() >= query.limit {
-            return listing;
-        }
-        if listing.scanned >= query.ceiling {
-            listing.scan_truncated = true;
-            return listing;
-        }
-        listing.scanned += 1;
-        if query.predates_since(&path) {
-            continue;
-        }
-        if let Some(scope) = query.scope {
-            if probe(&path).is_some_and(|directory| !scope.contains(&directory)) {
-                continue;
-            }
-        }
-        let Some(parsed) = parse(&path) else {
-            continue;
-        };
-        let session = parsed.session;
-        let placed = query.scope.is_none_or(|scope| {
-            session
-                .directory
-                .as_deref()
-                .is_some_and(|directory| scope.contains(directory))
-        });
-        if placed && query.matches(&session) {
             listing.sessions.push(session);
         }
     }

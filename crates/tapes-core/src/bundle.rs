@@ -1193,8 +1193,8 @@ mod tests {
     /// not replayed diverges from the first, and no file is placed.
     #[test]
     fn a_recording_appended_between_the_two_reads_exports_what_the_first_read_saw() {
-        use std::cell::Cell;
         use std::io::Write as _;
+        use std::sync::atomic::{AtomicBool, Ordering};
 
         use crate::backend::{claude::ClaudeBackend, Backend, Listing, Query, StreamedTranscript};
         use crate::ExportRead;
@@ -1202,7 +1202,7 @@ mod tests {
         struct Appending {
             inner: ClaudeBackend,
             path: PathBuf,
-            appended: Cell<bool>,
+            appended: AtomicBool,
             replays: bool,
         }
 
@@ -1233,7 +1233,7 @@ mod tests {
             ) -> Result<StreamedTranscript> {
                 let replay = replay.filter(|_| self.replays);
                 let read = self.inner.stream_transcript(session, replay, turn)?;
-                if !self.appended.replace(true) {
+                if !self.appended.swap(true, Ordering::SeqCst) {
                     // A later modification time, so the file's revision moves.
                     std::thread::sleep(std::time::Duration::from_millis(10));
                     let record = |uuid: &str, role: &str, content: Value| {
@@ -1284,7 +1284,7 @@ mod tests {
             let backend = Appending {
                 inner: ClaudeBackend::new(&store),
                 path: path.clone(),
-                appended: Cell::new(false),
+                appended: AtomicBool::new(false),
                 replays,
             };
             let session = backend.locate("appended").unwrap().unwrap();
