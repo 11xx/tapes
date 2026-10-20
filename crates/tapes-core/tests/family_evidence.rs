@@ -440,16 +440,23 @@ fn store_with_lead(label: &str) -> Store {
     store
 }
 
-fn family(store: &Store, files: Option<&[PathBuf]>) -> Value {
+fn family_of(store: &Store, root: &str, continuations: bool, files: Option<&[PathBuf]>) -> Value {
     let read = files.map(|files| read_paths(files).unwrap());
     let family = family_usage_with_evidence(
         &store.backends(),
-        Selection::Id(LEAD),
-        FamilyOptions::default(),
+        Selection::Id(root),
+        FamilyOptions {
+            continuations,
+            prices: None,
+        },
         read.as_deref(),
     )
     .unwrap();
     serde_json::to_value(family).unwrap()
+}
+
+fn family(store: &Store, files: Option<&[PathBuf]>) -> Value {
+    family_of(store, LEAD, false, files)
 }
 
 fn disjoint_total(figure: &Value) -> u64 {
@@ -518,8 +525,8 @@ fn two_generations_join_through_lineage_records_alone() {
     let mut grandchild = lineage(("codex", CODEX_CHILD), ("pi", PI_CHILD), "declared");
     grandchild["label"] = json!("review");
     let mut child = lineage(("claude", LEAD), ("codex", CODEX_CHILD), "bound");
-    child["label"] = json!("cc-n2");
-    child["subject"] = json!("change-fixture");
+    child["label"] = json!("nightly-review");
+    child["subject"] = json!("auth-rework");
     let file = store.evidence("lineage.jsonl", PRODUCER, &[grandchild, child]);
 
     let alone = family(&store, None);
@@ -547,8 +554,8 @@ fn two_generations_join_through_lineage_records_alone() {
     }
     let row = member(&family, CODEX_CHILD);
     assert_eq!(row["evidence"]["tier"], "bound");
-    assert_eq!(row["evidence"]["label"], "cc-n2");
-    assert_eq!(row["evidence"]["subject"], "change-fixture");
+    assert_eq!(row["evidence"]["label"], "nightly-review");
+    assert_eq!(row["evidence"]["subject"], "auth-rework");
     assert_eq!(member(&family, PI_CHILD)["evidence"]["tier"], "declared");
 
     let summed = full(&store, LEAD) + full(&store, CODEX_CHILD) + full(&store, PI_CHILD);
@@ -892,7 +899,7 @@ fn a_binding_is_counted_and_not_consumed() {
         PRODUCER,
         &[
             json!({"kind": "binding", "session": {"harness": "codex", "id": CODEX_CHILD},
-                  "work": {"label": "change-fixture"}, "tier": "bound",
+                  "work": {"label": "auth-rework"}, "tier": "bound",
                   "role": "implementer"}),
         ],
     );
@@ -928,4 +935,120 @@ fn a_family_without_evidence_carries_none() {
         .unwrap()
         .iter()
         .all(|session| session.get("evidence").is_none()));
+}
+
+const EARLIER: &str = "30000000-0000-4000-8000-0000000000e1";
+const CONTINUING: &str = "30000000-0000-4000-8000-0000000000e2";
+
+/// A session and the one it continued: the continuing recording opens with a
+/// compact boundary naming a record of the earlier one.
+fn store_with_continuation(label: &str) -> Store {
+    let store = Store::new(label);
+    store.claude(
+        EARLIER,
+        &[
+            claude_user(EARLIER, "earlier-user", stamp(10, 0, 1), "Start."),
+            claude_request(EARLIER, "earlier-reply", "req_earlier", stamp(10, 0, 30), 4),
+        ],
+    );
+    store.claude(
+        CONTINUING,
+        &[
+            json!({"type": "system", "subtype": "compact_boundary",
+                   "logicalParentUuid": "earlier-reply", "uuid": "boundary", "parentUuid": null,
+                   "sessionId": CONTINUING, "timestamp": stamp(10, 20, 0),
+                   "cwd": "/fixtures/project", "content": "Conversation compacted"}),
+            claude_request(
+                CONTINUING,
+                "continuing-reply",
+                "req_continuing",
+                stamp(10, 21, 0),
+                8,
+            ),
+        ],
+    );
+    store.codex(
+        CODEX_CHILD,
+        10,
+        10,
+        &codex_session(CODEX_CHILD, 10, 10, None, 9),
+    );
+    store
+}
+
+/// Claim: a markerless child claimed both by a session and by the session it
+/// continued is one member with no conflict, because the two are one
+/// conversation across its recordings; it joins under whichever became a
+/// member first. A pair of parents the family has not linked by continuation
+/// still conflicts, so the same pair with continuations off reports it.
+/// Rejects a reported conflict between a conversation's recordings and a
+/// double count.
+#[test]
+fn parents_that_are_one_conversation_do_not_conflict() {
+    let store = store_with_continuation("conversation");
+    // The earlier session's record comes first in the file.
+    let file = store.evidence(
+        "claims.jsonl",
+        PRODUCER,
+        &[
+            lineage(("claude", EARLIER), ("codex", CODEX_CHILD), "bound"),
+            lineage(("claude", CONTINUING), ("codex", CODEX_CHILD), "bound"),
+        ],
+    );
+    let linked = family_of(&store, CONTINUING, true, Some(std::slice::from_ref(&file)));
+    assert_eq!(linked["continuations"][0]["status"], "linked", "{linked:#}");
+    assert_eq!(
+        ids(&linked),
+        vec![CONTINUING, EARLIER, CODEX_CHILD],
+        "{linked:#}"
+    );
+    assert_eq!(member(&linked, CODEX_CHILD)["parent"]["id"], CONTINUING);
+    assert_eq!(linked["evidence"]["conflicts"], json!([]), "{linked:#}");
+    let used = &linked["evidence"]["files"][0];
+    assert_eq!(
+        (used["adopted"].clone(), used["agreed"].clone()),
+        (json!(1), json!(1))
+    );
+
+    let unlinked = family_of(&store, CONTINUING, false, Some(std::slice::from_ref(&file)));
+    assert_eq!(
+        ids(&unlinked),
+        vec![CONTINUING, CODEX_CHILD],
+        "{unlinked:#}"
+    );
+    assert_eq!(
+        claimed_parents(conflict(&unlinked, CODEX_CHILD)),
+        vec![("evidence", EARLIER), ("evidence", CONTINUING)]
+    );
+}
+
+/// Claim: a disagreement between two claimed parents that are both outside
+/// the family is not the family's, so a file that holds sessions the family
+/// does not is read without reporting their conflicts. Rejects reporting
+/// every disagreement a file holds.
+#[test]
+fn a_conflict_between_non_members_is_not_reported() {
+    let store = store_with_lead("outsiders");
+    store.codex(
+        CODEX_CHILD,
+        10,
+        10,
+        &codex_session(CODEX_CHILD, 10, 10, None, 9),
+    );
+    let file = store.evidence(
+        "everything.jsonl",
+        PRODUCER,
+        &[
+            lineage(("claude", OTHER_PARENT), ("codex", CODEX_CHILD), "bound"),
+            lineage(("claude", EARLIER), ("codex", CODEX_CHILD), "declared"),
+            lineage(("claude", OTHER_PARENT), ("codex", SECOND_CODEX), "bound"),
+            lineage(("claude", EARLIER), ("codex", SECOND_CODEX), "bound"),
+        ],
+    );
+    let family = family(&store, Some(std::slice::from_ref(&file)));
+    assert_eq!(ids(&family), vec![LEAD], "{family:#}");
+    assert_eq!(family["evidence"]["conflicts"], json!([]), "{family:#}");
+    assert_eq!(family["evidence"]["unresolved"], json!([]), "{family:#}");
+    assert_eq!(family["evidence"]["files"][0]["not_applied"], 4);
+    assert_eq!(family["evidence"]["looked_up"], 0);
 }

@@ -189,6 +189,25 @@ fn look_up(backends: &[Box<dyn Backend>], child: &SessionKey) -> Lookup {
     })
 }
 
+/// The first session of each conversation a family holds more than one
+/// recording of: a session a member continued is led by the session that
+/// continued it.
+fn conversations(roster: &Roster) -> HashMap<SessionKey, SessionKey> {
+    let mut leaders = HashMap::new();
+    for member in &roster.members {
+        if let (Link::Continuation, Some(continuing)) = (member.link, &member.parent) {
+            let leader = conversation(&leaders, continuing);
+            leaders.insert(SessionKey::of(&member.session), leader);
+        }
+    }
+    leaders
+}
+
+/// The session that leads the conversation `session` is a recording of.
+fn conversation(leaders: &HashMap<SessionKey, SessionKey>, session: &SessionKey) -> SessionKey {
+    leaders.get(session).unwrap_or(session).clone()
+}
+
 impl<'a> EvidenceRun<'a> {
     pub(super) fn new(files: &'a [EvidenceFile]) -> Self {
         let mut order = Vec::new();
@@ -291,6 +310,7 @@ impl<'a> EvidenceRun<'a> {
             .collect();
         let mut unresolved = Vec::new();
         let mut conflicts = Vec::new();
+        let leaders = conversations(roster);
         for child in &self.order {
             let member = roster.index.get(child).map(|at| &roster.members[*at]);
             // A root and the sessions it continues are placed by no parent.
@@ -305,16 +325,14 @@ impl<'a> EvidenceRun<'a> {
                     .map(|(parent, evidence)| (parent, placed_by(evidence).1)),
                 _ => None,
             };
-            let mut related = false;
             for &(file, position) in &self.by_child[child] {
                 let record = &self.files[file].lineage[position];
                 let parent = key(&record.parent);
                 let count = &mut files[file];
-                if !placeable || !roster.contains(&parent) {
+                if !placeable || (member.is_none() && !roster.contains(&parent)) {
                     count.not_applied += 1;
                     continue;
                 }
-                related = true;
                 match (member, lookup) {
                     (Some(member), _) => {
                         if member
@@ -323,7 +341,9 @@ impl<'a> EvidenceRun<'a> {
                             .is_some_and(|link| link.record == (file, position))
                         {
                             count.adopted += 1;
-                        } else if member.parent.as_ref() == Some(&parent) {
+                        } else if member.parent.as_ref().is_some_and(|placed| {
+                            conversation(&leaders, placed) == conversation(&leaders, &parent)
+                        }) {
                             count.agreed += 1;
                         } else {
                             count.conflicting += 1;
@@ -339,13 +359,17 @@ impl<'a> EvidenceRun<'a> {
                             reason: *reason,
                         });
                     }
-                    (None, _) if recorded.as_ref().is_some_and(|(named, _)| *named != parent) => {
+                    (None, _)
+                        if recorded.as_ref().is_some_and(|(named, _)| {
+                            conversation(&leaders, named) != conversation(&leaders, &parent)
+                        }) =>
+                    {
                         count.conflicting += 1;
                     }
                     (None, _) => count.not_applied += 1,
                 }
             }
-            if !related {
+            if !placeable {
                 continue;
             }
             let mut claims: Vec<ParentClaim> = recorded
@@ -366,8 +390,14 @@ impl<'a> EvidenceRun<'a> {
                     },
                 });
             }
-            let parents: HashSet<&SessionKey> = claims.iter().map(|claim| &claim.parent).collect();
-            if parents.len() > 1 {
+            // A conflict concerns the family only when a claimed parent is
+            // one of its members: a file may hold sessions the family does
+            // not, and their disagreements are not its.
+            let parents: HashSet<SessionKey> = claims
+                .iter()
+                .map(|claim| conversation(&leaders, &claim.parent))
+                .collect();
+            if parents.len() > 1 && claims.iter().any(|claim| roster.contains(&claim.parent)) {
                 conflicts.push(Conflict {
                     session: child.clone(),
                     placed_under: member.and_then(|member| member.parent.clone()),
