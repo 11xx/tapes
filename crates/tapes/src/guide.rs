@@ -1773,7 +1773,8 @@ PRICE A CHANGE
   A change view shows its selected rows by default: requests, disjoint
   tokens in compact figures such as `21.3M`, and with --prices the list
   price. An agent, role or tier the same on every row is printed once above
-  the table. Under the total, one line names what lies outside the selected
+  the table, and a row leaves blank the leading cells that repeat the row
+  above, so a commit's sha and subject head its rows once. Under the total, one line names what lies outside the selected
   commits (uncommitted, the unselected commits' shares, unattributed and
   labelled work, each only when non-zero) and one line the sessions' wholes:
   the total and the outside parts add up to the wholes. --detail adds exact
