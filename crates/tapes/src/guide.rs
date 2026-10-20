@@ -1696,6 +1696,7 @@ PRICE A CHANGE
   tapes usage --range main~5..main          What the last five commits cost, by commit, agent and role.
   tapes usage --branch feat-x --by merge    A branch's commits, live or merged and deleted, by the merge that landed them.
   tapes usage --commit SHA --explain        One commit, with the evidence behind each row.
+  tapes usage --range A..B --detail         Every part of the view: unselected commits, evidence, sessions.
   git log --format=%H -5 | tapes usage --commits-from -  The commits a list names, one per line.
   tapes usage --pr 123                      A GitHub pull request, found through `gh`, by how it was merged.
   tapes usage <id> --by commit              One session divided across the repository's commits.
@@ -1768,6 +1769,23 @@ PRICE A CHANGE
   them, so `--tiers bound` shows how much of a change rests on bound evidence
   alone: the commits sessions created, and the records an evidence file
   binds.
+
+  A change view shows its selected rows by default: requests, disjoint
+  tokens in compact figures such as `21.3M`, and with --prices the list
+  price. An agent, role or tier the same on every row is printed once above
+  the table. Under the total, one line names what lies outside the selected
+  commits (uncommitted, the unselected commits' shares, unattributed and
+  labelled work, each only when non-zero) and one line the sessions' wholes:
+  the total and the outside parts add up to the wholes. --detail adds exact
+  counts, every dimension column and full subjects, the evidence behind each
+  row by tier and basis, the tier list, unexplained parts, uncommitted work
+  by place, unattributed work by reason, each unselected commit, labelled
+  work, the sessions with what placed them, and the evidence files. --json
+  answers tapes-change-usage/4 with the same split, `detail` saying which:
+  without --detail it leaves out `rows[].evidence`, `uncommitted[].evidence`,
+  `labelled[].evidence`, `totals.evidence`, `unselected`, `sessions` and
+  `evidence`, and keeps every total, `totals.unselected` among them.
+  --explain adds each row's evidence either way.
 
   Select commits with --commit (repeatable), --range A..B, --branch NAME (a
   live branch against the default branch, otherwise the merges whose subjects

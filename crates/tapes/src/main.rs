@@ -2707,7 +2707,10 @@ struct ChangeAsk {
     /// name of which the repository holds no commit, also out of it; and
     /// totals, in which rows, uncommitted, unattributed, unselected and
     /// labelled add up to the sessions' wholes. Each session names what
-    /// placed it (`placement`: recording, evidence, inherited). With
+    /// placed it (`placement`: recording, evidence, inherited). Without
+    /// --detail the answer leaves out the per-row evidence, `unselected`,
+    /// `sessions` and `evidence` and keeps every total, so the rows, what
+    /// lies outside the selection and the sessions' wholes still add up. With
     /// --evidence, the sessions its records name are placed by them alone.
     /// A change view refuses a session selection other than
     /// `<SESSION> --by commit`, --family, --global, --window, span flags,
