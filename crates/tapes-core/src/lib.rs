@@ -51,6 +51,7 @@ pub mod model;
 mod model_observation;
 pub mod overlap;
 mod parallel;
+pub mod price_update;
 pub mod pricing;
 pub mod projection;
 pub mod pull_request;

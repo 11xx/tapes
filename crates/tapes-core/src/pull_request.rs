@@ -169,7 +169,7 @@ pub fn fetch(directory: &Path, number: u64) -> Result<PullRequest> {
     PullRequest::parse(&stdout)
 }
 
-fn read_bounded(mut source: impl Read, limit: u64) -> Result<(Vec<u8>, bool)> {
+pub(crate) fn read_bounded(mut source: impl Read, limit: u64) -> Result<(Vec<u8>, bool)> {
     let mut kept = Vec::new();
     (&mut source).take(limit + 1).read_to_end(&mut kept)?;
     let truncated = kept.len() as u64 > limit;
