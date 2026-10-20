@@ -454,9 +454,25 @@ impl<K: Ord + Clone> Plan<K> {
     /// [`crate::usage::stretches`] gives them; with none, or with no event to
     /// estimate by, the plan has no windows.
     pub fn new(spans: &[Span<K>], events: &[Event<K>], starts: Option<&[Instant]>) -> Self {
+        Self::with_cues(spans, events, &[], starts)
+    }
+
+    /// As [`Plan::new`], with cues beside the events. A cue is point evidence
+    /// that only estimates: it cuts the working stretch it falls in exactly as
+    /// an event does, and gives its item no event window, so it covers no
+    /// segment.
+    pub fn with_cues(
+        spans: &[Span<K>],
+        events: &[Event<K>],
+        cues: &[Event<K>],
+        starts: Option<&[Instant]>,
+    ) -> Self {
         let segments = segments(spans, events);
         let windows = match starts {
-            Some(starts) if !events.is_empty() => estimate_windows(&segments, starts, events),
+            Some(starts) if !events.is_empty() || !cues.is_empty() => {
+                let cutting: Vec<Event<K>> = events.iter().chain(cues).cloned().collect();
+                estimate_windows(&segments, starts, &cutting)
+            }
             _ => Vec::new(),
         };
         Self { segments, windows }
