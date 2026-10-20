@@ -32,6 +32,7 @@ pub mod counters;
 pub mod endings;
 pub mod event;
 pub mod evidence;
+pub mod family;
 pub mod git_reader;
 pub mod history;
 pub mod input;
