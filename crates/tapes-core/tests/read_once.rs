@@ -206,6 +206,54 @@ fn a_recording_written_before_the_window_is_skipped_without_parsing() {
     }
 }
 
+/// A content-searched listing of a window skips the same files: a recording
+/// last written before the window is not parsed for its turns either.
+#[test]
+fn a_searched_listing_skips_a_recording_written_before_the_window() {
+    for harness in HARNESSES {
+        let sandbox = Sandbox::new();
+        let long_ago = at("09:00:00") - Duration::days(60);
+        let old = harness.write(&sandbox, OLD, long_ago, long_ago, long_ago);
+        harness.corrupt(&old, long_ago);
+        harness.write(
+            &sandbox,
+            RECENT,
+            at("09:00:00"),
+            at("09:30:00"),
+            at("09:30:00"),
+        );
+        let backend = harness.backend(&sandbox);
+        let search = |since| {
+            backend
+                .list_with_search(
+                    &Query::unscoped_with_filters(
+                        100,
+                        QueryFilters {
+                            since,
+                            ..Default::default()
+                        },
+                    ),
+                    "done",
+                    32,
+                )
+                .unwrap()
+        };
+
+        assert_eq!(
+            search(None).unavailable.len(),
+            1,
+            "{harness:?}: the corrupted recording is unreadable when parsed"
+        );
+        let window = search(Some(at("08:00:00")));
+        assert_eq!(ids(&window), [RECENT], "{harness:?}");
+        assert!(
+            window.unavailable.is_empty(),
+            "{harness:?}: {:?}",
+            window.unavailable
+        );
+    }
+}
+
 /// The skip leaves a day of slack: a recording written up to a day before the
 /// window began is still read, so clock skew and coarse file times cannot
 /// hide a session.
