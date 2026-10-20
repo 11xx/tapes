@@ -454,7 +454,7 @@ fn failed_edits_and_reads_yield_nothing() {
         (
             Box::new(ClaudeBackend::new(fixtures("claude"))) as Box<dyn Backend>,
             "c6000000-0000-4000-8000-000000000001",
-            vec!["edit-failed", "shell-read"],
+            vec!["edit-failed", "shell-scratch", "shell-read"],
         ),
         (
             Box::new(PiBackend::new(fixtures("pi"))),
