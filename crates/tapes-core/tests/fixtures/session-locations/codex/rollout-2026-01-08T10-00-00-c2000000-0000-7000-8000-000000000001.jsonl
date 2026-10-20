@@ -1,0 +1,8 @@
+{"timestamp":"2026-01-08T10:00:00Z","type":"session_meta","payload":{"id":"c2000000-0000-7000-8000-000000000001","session_id":"c2000000-0000-7000-8000-000000000001","timestamp":"2026-01-08T10:00:00Z","cwd":"/work/repo","model_provider":"openai","git":{"commit_hash":"1111111111111111111111111111111111111111","branch":"main","repository_url":"https://builder:s3cret@example.test/org/repo.git"}}}
+{"timestamp":"2026-01-08T10:00:01Z","type":"turn_context","payload":{"cwd":"/work/repo","model":"gpt-fixture","effort":"high"}}
+{"timestamp":"2026-01-08T10:00:02Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Prompt 1."}]}}
+{this line is not json
+{"timestamp":"2026-01-08T10:01:00Z","type":"turn_context","payload":{"cwd":"/work/repo-wt","model":"gpt-fixture","effort":"high"}}
+{"timestamp":"2026-01-08T10:01:01Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Prompt 2."}]}}
+{"timestamp":"2026-01-08T10:02:00Z","type":"turn_context","payload":{"cwd":"/work/repo-wt","model":"gpt-fixture","effort":"high"}}
+{"timestamp":"2026-01-08T10:03:00Z","type":"turn_context","payload":{"cwd":"/work/repo","model":"gpt-fixture","effort":"high"}}
