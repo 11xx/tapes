@@ -144,6 +144,9 @@ pub fn gather(
         },
         ListSort::Oldest,
     )?;
+    // Each burst of parallel reads hands back what it freed before the
+    // next begins.
+    crate::parallel::release_freed();
     let mut membership = Membership {
         listed: listed.sessions.len(),
         listing_bounded: listed.scan_truncated,
@@ -195,6 +198,7 @@ fn read_members(
         |(session, _)| recording_bytes(session),
         |(session, backend)| read_session(backends[*backend].as_ref(), session),
     );
+    crate::parallel::release_freed();
     let mut candidates: Vec<(usize, SessionRead)> = Vec::new();
     for ((session, backend), read) in wanted.iter().zip(reads) {
         match read {
@@ -340,6 +344,7 @@ pub(super) fn add_children(
     let windows = crate::parallel::map(&parents, |member| {
         backends[member.backend].window_children(&member.session)
     });
+    crate::parallel::release_freed();
     let found: Vec<(Session, usize)> = parents
         .iter()
         .zip(&windows)
@@ -351,6 +356,7 @@ pub(super) fn add_children(
         |(child, backend)| read_session(backends[*backend].as_ref(), child),
     )
     .into_iter();
+    crate::parallel::release_freed();
     let mut children: Vec<Member> = Vec::new();
     let mut unreadable: Vec<(SessionKey, String)> = Vec::new();
     let mut read_count = 0;
@@ -566,6 +572,7 @@ pub fn attribute_with(
         cut.push(partition);
     }
     let pairs: Vec<(&Member, &Partition)> = gathered.members.iter().zip(&cut).collect();
+    crate::parallel::release_freed();
     let mut reads: Vec<Result<Read, String>> = crate::parallel::map_costliest_first(
         &pairs,
         |(member, _)| recording_bytes(&member.session),

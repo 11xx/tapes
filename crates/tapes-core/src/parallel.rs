@@ -180,6 +180,18 @@ pub(crate) fn map_costliest_first<T: Sync, R: Send, C: Ord>(
         .collect()
 }
 
+/// Hand back to the system what finished work freed. glibc keeps what a
+/// thread frees in that thread's arena, where work begun later on other
+/// threads seldom finds room for what it needs, so each burst of parallel
+/// reads would otherwise add its own peak to the process's.
+pub(crate) fn release_freed() {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    // SAFETY: `malloc_trim` takes no pointer and only returns free pages.
+    unsafe {
+        libc::malloc_trim(0);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{cores, map, map_costliest_first};
