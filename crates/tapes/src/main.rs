@@ -1667,7 +1667,10 @@ enum Command {
     /// `overlap.disjointness` says that is inferred from absent copy evidence,
     /// not established, or from sampled copy evidence when a long recording's
     /// id check kept only a sample of its ids, with `overlap.sampled` naming
-    /// those sessions.
+    /// those sessions. `--family` instead answers one session and everything
+    /// it caused as tapes-family-usage/1: the session, its subagents, the
+    /// sessions that name a member in a `tapes-parent` launch marker in any
+    /// harness, and with `--continuations` the session it continued.
     Usage {
         #[command(flatten)]
         query: SessionQueryArgs,
@@ -1765,6 +1768,43 @@ enum Command {
         /// subagents-unenumerated), never the underlying error text.
         #[arg(long, conflicts_with = "by")]
         reconcile: bool,
+        /// Price one session with everything it caused, as
+        /// tapes-family-usage/1: the session, its Claude subagents and Codex
+        /// spawns, every session in any harness whose first prompt opens
+        /// with a `tapes-parent: <harness>:<session-id>` line naming a member
+        /// (recursively), and sessions that declare a member as their fork
+        /// origin, each counted once by harness and id. A Claude request
+        /// recorded under one id in a parent's and its subagent's recordings
+        /// counts once. Rows per agent (`harness:model#effort`) and role
+        /// (`lead`, `subagent`, `delegate`, `fork`), one row per session, and
+        /// totals per accounting basis, priced with --prices; the part of a
+        /// Claude recorded total no request of the family explains is
+        /// reported apart as `unexplained`. Launched sessions are found by
+        /// time: every session of every harness active since the family
+        /// opened is listed, and only those that began inside a member's
+        /// recorded interval have their opening records read for the marker.
+        /// `search` reports what was listed and examined and what left it
+        /// incomplete (listing bound, unavailable store, unreadable opening,
+        /// member bound); a launched session that began outside every
+        /// member's interval is not found. A member whose recording could not
+        /// be read, or states no consumption, is listed under `withheld`
+        /// with a fixed reason. Names one installed session by id, --latest
+        /// or --title.
+        #[arg(
+            long,
+            conflicts_with_all = ["by", "series", "reconcile", "event_keys", "from", "to", "requests", "window", "quota_window", "forecast", "allowance_rates", "full"]
+        )]
+        family: bool,
+        /// With --family, follow a continued Claude session back to the
+        /// session it carried over from, and add that session's family. A
+        /// continuing recording opens with a `compact_boundary` record whose
+        /// `logicalParentUuid` is the `uuid` of a record in the earlier
+        /// recording, which no record names by session id; the link holds
+        /// when exactly one recording beside the continuing one holds that
+        /// record as its own, and otherwise `continuations` reports it as
+        /// not-found or ambiguous and nothing is linked.
+        #[arg(long, requires = "family")]
+        continuations: bool,
         /// Retain a recent suffix of Pi consumption event keys. Default: 200;
         /// range: 1..=10000; serialized key budget: 8 MiB. Omitted identities
         /// are counted, while measurements cover the whole read. Provider
@@ -2050,8 +2090,8 @@ enum Command {
         /// identity-unestablished, exact-union).
         #[arg(long, value_name = "FILE")]
         prices: Option<PathBuf>,
-        /// Render the versioned tapes-usage/17 object, or tapes-usage-summary/16
-        /// for a selection, as JSON. `session.model_observation` says
+        /// Render the versioned tapes-usage/17 object, tapes-usage-summary/16
+        /// for a selection, or tapes-family-usage/1 under --family, as JSON. `session.model_observation` says
         /// whether more than one model and effort was observed (`mixed`) and
         /// whether a gap, partial read or budget kept the split incomplete
         /// (`attribution_uncertain`); the session model is then only the latest
@@ -3319,6 +3359,8 @@ fn dispatch(cli: Cli) -> Result<()> {
             full,
             series,
             reconcile,
+            family,
+            continuations,
             event_keys,
             from,
             to,
@@ -3372,6 +3414,36 @@ fn dispatch(cli: Cli) -> Result<()> {
                     "--reconcile answers one installed session; name a session id, --latest, or \
                      --title"
                 ));
+            }
+            if family {
+                let Some(one) = query.single() else {
+                    return Err(anyhow!(
+                        "--family answers one installed session; name a session id, --latest, or \
+                         --title"
+                    ));
+                };
+                if query.input.supplied() {
+                    return Err(anyhow!(
+                        "--family reads installed recordings whole; a supplied input refuses it"
+                    ));
+                }
+                let backends = query.input.backends()?;
+                let latest_warnings = query.latest_warnings(&backends)?;
+                print_selection_warnings(&latest_warnings);
+                let family = agent_tapes_core::family::family_usage_with_backends(
+                    &backends,
+                    one,
+                    agent_tapes_core::family::FamilyOptions {
+                        continuations,
+                        prices,
+                    },
+                )?;
+                if json {
+                    print_json_with_selection_warnings(&family, &query.input, &latest_warnings)?;
+                } else {
+                    print!("{}", render_family(&family));
+                }
+                return Ok(());
             }
             if full {
                 refuse_full_supplied(&query.input)?;
@@ -6350,6 +6422,210 @@ fn render_usage_summary(summary: &UsageSummary, by: &[GroupBy]) -> String {
         render_identity_bounds(&mut out, &partition.tally);
     }
     out
+}
+
+/// A family: its agent rows, one row per session, its totals per accounting
+/// basis, and what the search for launched sessions covered.
+fn render_family(family: &agent_tapes_core::family::FamilyUsage) -> String {
+    let priced = family
+        .agents
+        .iter()
+        .map(|agent| &agent.usage)
+        .chain(family.sessions.iter().map(|session| &session.usage))
+        .chain(std::iter::once(&family.totals))
+        .any(|tally| tally.list_price_estimate.is_some() || !tally.list_price_withheld.is_empty());
+    let cells = |tally: &UsageTally| {
+        let mut cells = tally_cells(tally);
+        if priced {
+            cells.push(estimate_cell(tally));
+        }
+        cells
+    };
+    let header = |first: &str| {
+        let mut out = format!(
+            "{first}\tSESSIONS\tINPUT\tOUTPUT\tREASONING\tCACHE READ\tCACHE WRITE\tDISJOINT TOTAL\t\
+             COST\tCOVERAGE (RECORDED/SUMMED/WINDOW/SINCE-RESET/NONE)"
+        );
+        out.push_str(if priced {
+            "\tLIST-PRICE ESTIMATE\n"
+        } else {
+            "\n"
+        });
+        out
+    };
+    let mut out = format!(
+        "Family of {}:{} ({} members)\n",
+        family.root.harness,
+        family.root.id,
+        family.sessions.len()
+    );
+    out.push_str(&header("AGENT\tROLE"));
+    for agent in &family.agents {
+        let mut row = vec![agent.agent.clone(), serde_kebab(&agent.role)];
+        row.extend(cells(&agent.usage));
+        out.push_str(&row.join("\t"));
+        out.push('\n');
+    }
+    let mut total = vec!["TOTAL".to_owned(), String::new()];
+    total.extend(cells(&family.totals));
+    out.push_str(&total.join("\t"));
+    out.push('\n');
+    out.push_str(&header("SESSION\tROLE\tAGENT\tLINK"));
+    for session in &family.sessions {
+        let mut row = vec![
+            format!("{}:{}", session.harness, session.id),
+            serde_kebab(&session.role),
+            session.agent.clone(),
+            serde_kebab(&session.link),
+        ];
+        row.extend(cells(&session.usage));
+        out.push_str(&row.join("\t"));
+        out.push('\n');
+        if session.shared_requests > 0 {
+            out.push_str(&format!(
+                "  {} requests also recorded in an earlier member's recording are counted there only\n",
+                session.shared_requests
+            ));
+        }
+    }
+    if let Some(disjoint) = &family.totals.disjoint {
+        out.push_str(&render_disjoint_sum(disjoint));
+    }
+    if let Some(coverage) = &family.totals.cost_coverage {
+        out.push_str(&format!(
+            "Cost coverage: {}\n",
+            render_cost_coverage(coverage)
+        ));
+    }
+    if let Some(estimate) = &family.totals.list_price_estimate {
+        out.push_str(&format!("Total {}", render_estimate_lines("", estimate)));
+    }
+    if let Some(unexplained) = &family.totals.unexplained {
+        out.push_str(&render_unexplained("Total ", unexplained));
+    }
+    if !family.totals.list_price_withheld.is_empty() {
+        out.push_str(&format!(
+            "List-price estimate withheld: {}\n",
+            family
+                .totals
+                .list_price_withheld
+                .iter()
+                .map(serde_kebab)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    if family.totals.mixed_accounting {
+        out.push_str(
+            "Mixed accounting: total counters are omitted; compatible partitions follow.\n",
+        );
+    }
+    if let Some(priced) = &family.priced_across_bases {
+        let range = if priced.at_least == priced.at_most {
+            format!("{:.4}", priced.at_least)
+        } else {
+            format!("{:.4}-{:.4}", priced.at_least, priced.at_most)
+        };
+        out.push_str(&format!(
+            "List-price estimate across {} accounting partitions: {range} {}{}\n",
+            priced.partitions,
+            priced.currency,
+            if priced.unpriced_partitions > 0 {
+                format!(
+                    " (at least; {} partitions carry no estimate)",
+                    priced.unpriced_partitions
+                )
+            } else {
+                String::new()
+            }
+        ));
+    }
+    render_identity_bounds(&mut out, &family.totals);
+    for partition in &family.partitions {
+        out.push_str(&format!(
+            "Accounting partition {} ({}): {} sessions; {}\n",
+            partition.harness,
+            partition
+                .accounting
+                .as_ref()
+                .map(render_accounting)
+                .unwrap_or_else(|| "no accounting".to_owned()),
+            partition.tally.sessions,
+            cells(&partition.tally).join(" | ")
+        ));
+        render_identity_bounds(&mut out, &partition.tally);
+    }
+    for member in &family.withheld {
+        out.push_str(&format!(
+            "Withheld: {}:{} ({}): {}\n",
+            member.harness,
+            member.id,
+            serde_kebab(&member.role),
+            serde_kebab(&member.reason)
+        ));
+    }
+    for continuation in &family.continuations {
+        out.push_str(&format!(
+            "Continuation of {}:{}: {}{}; {} recordings read, {} bytes\n",
+            continuation.session.harness,
+            continuation.session.id,
+            serde_kebab(&continuation.status),
+            continuation
+                .from
+                .as_ref()
+                .map(|from| format!(" from {}:{}", from.harness, from.id))
+                .unwrap_or_default(),
+            continuation.recordings_examined,
+            continuation.bytes_examined
+        ));
+    }
+    let search = &family.search;
+    out.push_str(&format!(
+        "Search for launched sessions: {} listed since {}, {} opened for a marker, {} began outside \
+         every member's interval{}; {}\n",
+        search.candidates_listed,
+        search
+            .since
+            .map_or_else(|| "-".to_owned(), |since| since.to_rfc3339()),
+        search.candidates_examined,
+        search.outside_interval,
+        if search.untimed > 0 {
+            format!(", {} with no recorded start", search.untimed)
+        } else {
+            String::new()
+        },
+        if search.complete {
+            "complete".to_owned()
+        } else {
+            format!(
+                "incomplete ({})",
+                search
+                    .incomplete
+                    .iter()
+                    .map(serde_kebab_tag)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        }
+    ));
+    for unreadable in &search.unreadable {
+        out.push_str(&format!(
+            "Unreadable opening: {}:{}\n",
+            unreadable.harness, unreadable.id
+        ));
+    }
+    for unavailable in &search.unavailable {
+        out.push_str(&format!("Unavailable: {unavailable}\n"));
+    }
+    out
+}
+
+/// A tagged value's tag, as it serializes.
+fn serde_kebab_tag<T: Serialize>(value: &T) -> String {
+    serde_json::to_value(value)
+        .ok()
+        .and_then(|value| value["reason"].as_str().map(str::to_owned))
+        .unwrap_or_default()
 }
 
 fn render_overlap(out: &mut String, tally: &UsageTally) {

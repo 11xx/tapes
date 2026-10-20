@@ -839,8 +839,10 @@ PROBE BEFORE EXPORTING
   sessions, or one request per session through the API. Only an answer that
   uses a parent reads it, and only such an answer looks up a parent outside
   the selection: `--by parent` (in a summary or allowance rates), a window
-  read, whose shares carry `parent` and `root`, and one session's `usage`,
-  whose notes report a marker that names no parent. Listings, every other
+  read, whose shares carry `parent` and `root`, one session's `usage`,
+  whose notes report a marker that names no parent, and `usage --family`,
+  which reads the marker of every launched-session candidate that began
+  inside a member's interval. Listings, every other
   grouping of a summary or of allowance rates, and forecasts read no marker
   and look up no parent. A marker is read only for a session its store names
   no parent or fork origin for, a parent outside the selection included. A
@@ -1221,6 +1223,62 @@ PROBE BEFORE EXPORTING
   session id and one fixed reason (foreign-identity, no-identity,
   source-unreadable-or-changed, subagents-unenumerated), never error text,
   which can name a recording path.
+
+  `usage SESSION --family [--continuations]` prices a session with everything
+  it caused, as tapes-family-usage/1. A session that dispatches work causes
+  consumption in other sessions, and the family names them from what the
+  recordings state: the session itself (role `lead`); a Claude parent's
+  subagent recordings and a Codex spawn's `parent_thread_id` (`subagent`);
+  every session of any harness whose first prompt opens with `tapes-parent:
+  <harness>:<session-id>` naming a member, recursively (`delegate`); and a
+  session that declares a member as its fork origin (`fork`). Each member is
+  counted once by harness and id. Descent is never inferred from time or
+  proximity. Launched sessions are found by time, not by name: a launched
+  session's first activity lies inside its launcher's recorded interval in
+  any project, so the search lists every session of every harness active
+  since the family opened and reads the opening records, for the marker, of
+  only those that began inside some member's interval. `search` reports the
+  candidates listed, the openings read, those that began outside every
+  interval, unreadable openings and unavailable stores, and `incomplete`
+  names what may have hidden a member (a listing at its bound, a truncated
+  scan, an unreadable opening, the member bound, unenumerated subagent
+  directories); `complete` is true only without any. A session launched
+  without a marker, or whose recording began outside every member's interval,
+  is not found; agent-delegate writes the marker on every run it starts.
+  Each member's figure is the one `usage --full` reports for its recording.
+  A Claude recording whose accounting is a recorded total counts its
+  subagents' requests, so those subagent recordings are listed with their
+  own figure, marked `counted_in_parent_total`, and not added again; where
+  the parent sums requests, its subagents' requests are added, and a request
+  recorded under one id in the parent's and a subagent's recordings is
+  counted in the earlier one only (`shared_requests` on the later). The part
+  of a recorded total that no request of the family explains is reported
+  apart as `unexplained`, `explained_by` `family-requests`; it is part of a
+  recorded total's figure and never added to it. `agents` holds one
+  row per `harness:model#effort` and role; `sessions` one row per member,
+  root first, with its `link` (root, continuation, subagent-recording, spawn,
+  fork-origin, launch-marker) and `parent`; `totals` and `partitions` add the
+  counted members under the summary's accounting-basis, overlap and
+  withholding rules, and `priced_across_bases` adds the partitions' list-price
+  estimates under --prices where `totals` withholds its own because the
+  members' accounting differs (a lower bound while a partition carries no
+  estimate). A member whose recording could not be read, or states no
+  consumption, is listed under `withheld` with a fixed reason
+  (recording-unreadable-or-changed, no-measured-consumption), never dropped.
+  A session that declares a member as its fork origin copies that member's
+  history; the overlap rules decide whether their union is exact or bounded,
+  and a fork's copied history is never added twice.
+  `--continuations` follows a continued Claude session back to the session
+  it carried over from: its recording opens, before any user or assistant
+  record, with a `compact_boundary` record whose `logicalParentUuid` is the
+  `uuid` of a record in the earlier recording, and no record names the
+  earlier session. The link holds when exactly one recording kept beside the
+  continuing one holds that record as its own, carrying that recording's
+  session id; the earlier session joins as a `lead` with its own family.
+  `continuations` reports each step as linked, not-continued,
+  unsupported-harness, opening-unreadable, not-found or ambiguous, with the
+  recordings and bytes read; nothing is linked on a guess, and the search
+  stops at a bound of bytes.
 
   `usage SESSION --event-keys[=N]` exposes Pi's counted consumption identities
   under `consumption_event_keys`: 200 recent keys by default, 1..=10000 keys,
