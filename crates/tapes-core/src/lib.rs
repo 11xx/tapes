@@ -52,6 +52,7 @@ pub mod reader;
 pub mod reconcile;
 pub mod scope;
 pub mod search;
+mod shell_commands;
 pub mod span;
 pub mod stats;
 pub mod stats_summary;
