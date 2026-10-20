@@ -848,6 +848,8 @@ fn write_atomically(path: &Path, contents: &[u8]) -> Result<()> {
 /// when given, else fetched within `limits`. A source that fails
 /// contributes nothing; the others still update. An existing table that
 /// cannot be read refuses the whole update, so nothing it holds is lost.
+/// A table is written only when it holds a row or one existed before; the
+/// fetch record is written either way.
 pub fn update(
     directory: &Path,
     from: Option<&Path>,
@@ -857,7 +859,8 @@ pub fn update(
     let now = now.trunc_subsecs(0);
     let table_path = directory.join(TABLE_FILE);
     let record_path = directory.join(FETCH_FILE);
-    let (currency, mut rows) = if table_path.exists() {
+    let existed = table_path.exists();
+    let (currency, mut rows) = if existed {
         let table = PriceTable::read(&table_path)?;
         (table.currency, table.models)
     } else {
@@ -945,7 +948,9 @@ pub fn update(
     }
     let text = PriceTable::to_toml(&currency, &rows)?;
     PriceTable::parse(&text).context("the updated price table does not read back")?;
-    write_atomically(&table_path, text.as_bytes())?;
+    if existed || !rows.is_empty() {
+        write_atomically(&table_path, text.as_bytes())?;
+    }
     let mut json = serde_json::to_vec_pretty(&record)?;
     json.push(b'\n');
     write_atomically(&record_path, &json)?;

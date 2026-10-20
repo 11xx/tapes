@@ -1684,7 +1684,8 @@ KEEP A PRICE TABLE
   and `litellm.json` from DIR instead, for an offline machine; a file
   missing there fails that source. Without `--from`, `TAPES_PRICES_FROM=DIR`
   does the same, for every update. Both files are replaced whole, through
-  a temporary file and a rename.
+  a temporary file and a rename; an update that leaves no table and finds
+  no row writes the record alone.
 
   No one needs to run it. A command that prices, with neither `--prices`
   nor `TAPES_PRICES` naming a table and outside `--remote`, first runs the

@@ -361,3 +361,23 @@ fn litellm_never_prices_a_dated_form_of_an_official_id() {
         .iter()
         .all(|row| row.id != "claude-sonnet-4-5-20250929"));
 }
+
+#[test]
+fn an_update_where_every_source_fails_writes_no_empty_table() {
+    // Claim: with no table yet and every source failing, the update writes
+    // the fetch record but no table, so no lookup reads a table that prices
+    // nothing. Rejects an empty `models = []` table taking the data slot.
+    let data = tempfile::tempdir().unwrap();
+    let empty = tempfile::tempdir().unwrap();
+    let report = price_update::update(
+        data.path(),
+        Some(empty.path()),
+        price_update::FetchLimits::UPDATE,
+        at(1),
+    )
+    .unwrap();
+    assert!(report.sources.iter().all(|source| !source.ok));
+    assert!(!data.path().join("prices.toml").exists());
+    let record = FetchRecord::read(&data.path().join("prices-fetch.json")).unwrap();
+    assert_eq!(record.attempted_at, at(1));
+}
