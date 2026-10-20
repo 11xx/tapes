@@ -16,6 +16,7 @@ zip = ["agent-tapes-core/zip", "dep:zip"]
 
 [dependencies]
 anyhow.workspace = true
+chrono.workspace = true
 clap.workspace = true
 libc.workspace = true
 humantime.workspace = true

@@ -731,8 +731,9 @@ PROBE BEFORE EXPORTING
   fall in it. A read not asked keeps neither. One that counts more than
   100,000 requests or hands over more than 1,000,000 timed turns withholds
   both whole, with its reason, rather than keep part of them.
-  Money beyond what a harness wrote comes from a price table the caller
-  supplies; tapes holds no prices. Every command that reports a session's
+  Money beyond what a harness wrote comes from a price table: tapes ships no
+  prices, so the table is the caller's, or one `tapes prices update` fetched
+  (see KEEP A PRICE TABLE). Every command that reports a session's
   cost prices it the same way and puts `list_price_estimate` beside it:
   `usage`, `list --json` and `show --json` (on each session), `stats` and
   `brief` (in `usage`), and the per-session figures of a summary's overlap
@@ -761,7 +762,9 @@ PROBE BEFORE EXPORTING
   Prices are per million tokens of each disjoint category; reasoning is a
   share of output and priced as output. A category a row leaves out has no
   price. Unknown keys, negative or non-finite prices, a non-date
-  `effective`, and an id or alias named twice refuse, naming the entry.
+  `effective`, and an id or alias named twice refuse, naming the entry. A
+  recorded id ending in `-YYYYMMDD` that no row names is priced by the row
+  naming the id without that date.
   tapes-price-table/2 takes the same rows, and a row may add terms priced
   by the request:
 
@@ -1631,6 +1634,61 @@ PROBE BEFORE EXPORTING
   of a long edit sequence. Start fresh when the session never reached a
   decision worth keeping, when its approach was already failing, or when
   redoing the task is faster than reconstructing it.
+
+KEEP A PRICE TABLE
+  tapes prices update                  Fetch the vendors' prices into the data table.
+  tapes prices update --from DIR       Read copies of the sources instead of fetching.
+  tapes prices show                    Which table usage reads, the fetch times, each model's rates now.
+  tapes prices show MODEL --json       Every row naming MODEL, with its validity window.
+
+  `prices update` fetches, with `curl` over HTTPS, Anthropic's pricing page
+  (platform.claude.com/docs/en/about-claude/pricing.md), OpenAI's
+  (platform.openai.com/docs/pricing.md), and LiteLLM's community-maintained
+  model_prices_and_context_window.json for models neither page prices. It
+  keeps a tapes-price-table/2 table at `$XDG_DATA_HOME/tapes/prices.toml`
+  (`~/.local/share/tapes/prices.toml` when that is unset) and, beside it,
+  `prices-fetch.json` (tapes-price-fetch/1): the attempt's time and, per
+  source, its URL, whether it succeeded, the error, and the time and model
+  count of its last success. `--from DIR` reads `anthropic.md`, `openai.md`
+  and `litellm.json` from DIR instead, for an offline machine; a file
+  missing there fails that source. Both files are replaced whole, through
+  a temporary file and a rename.
+
+  The pages show only current prices, so the table keeps history as
+  validity windows. A fetched price equal to the row in effect keeps that
+  row; a different one closes it at the update instant (`effective_until`)
+  and opens a new row there (`effective_from`), so last month's sessions
+  keep last month's price; an id seen for the first time gets a row with no
+  start, which also prices earlier sessions. Rows are never dropped, and an
+  id a fetch no longer lists keeps its rows. Each row records the date it
+  was read (`effective`) and its source: the page's URL, or LiteLLM.
+
+  Each source fails closed. A page whose table no longer has the shape
+  tapes reads (a changed header, an unparseable price, a parenthetical it
+  does not know, half of a prompt-size pair, OpenAI's page without its
+  long-context sentence, or one model priced two ways) fails that source:
+  it contributes nothing and keeps its earlier rows, the other sources
+  still update, every outcome is reported, and the command exits non-zero.
+
+  Anthropic's `## Model pricing` table gives every category; a model priced
+  in two rows, for prompts up to and over a size, gets one row whose
+  long-context term starts above that size, counting uncached input, cache
+  reads and cache writes. OpenAI's `### Standard pricing data` tables give
+  uncached input, cache reads and output; long-context columns give a term
+  above the size the page states (272K), counting uncached input and cache
+  reads. OpenAI's 30m and 12h cache writes have no tapes category and are
+  left unpriced, and those rows' source says so. LiteLLM gives bare chat
+  model ids whose prices have no `_above_` tier, never an id an official
+  page priced.
+
+  Any table, not only this one, answers a recorded id ending in `-YYYYMMDD`
+  that no row names with the row named by the id without that date, so
+  `claude-sonnet-4-5-20250929` is priced by a `claude-sonnet-4-5` row.
+
+  `prices show` names the table usage pricing reads and how it was chosen
+  (`--prices`, `TAPES_PRICES`, the default path, or none) next to the data
+  table, which usage reads only when named that way. JSON is
+  tapes-prices-show/1.
 
 PRICE A CHANGE
   tapes usage --range main~5..main          What the last five commits cost, by commit, agent and role.

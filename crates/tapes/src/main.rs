@@ -2,6 +2,7 @@ use agent_tapes_core::EventSink;
 mod guide;
 mod integration;
 mod liveness;
+mod prices;
 mod remote;
 mod self_token;
 
@@ -2182,7 +2183,8 @@ enum Command {
         /// ~/.config/tapes/prices.toml). A table named here or by
         /// TAPES_PRICES that is missing or invalid refuses; an invalid default
         /// table is reported on stderr and leaves the estimate absent, as no
-        /// table does. tapes holds no prices of its own. Each served model's
+        /// table does. tapes ships no prices; `tapes prices update` fetches
+        /// a table from the vendors' pages. Each served model's
         /// share is priced by its own row; a figure that names one model is
         /// that model's share whole, and one that names several, or whose
         /// uncertain attribution leaves part of it out of its model shares,
@@ -2532,6 +2534,12 @@ enum Command {
     Uninstall {
         #[arg(value_enum)]
         harness: IntegrationArg,
+    },
+    /// Fetch the vendors' published prices into a dated table, and show the
+    /// price tables. tapes ships no prices.
+    Prices {
+        #[command(subcommand)]
+        command: prices::PricesCommand,
     },
 }
 
@@ -4331,6 +4339,7 @@ fn dispatch(cli: Cli) -> Result<()> {
         Command::Uninstall {
             harness: IntegrationArg::Opencode,
         } => integration::uninstall_opencode()?,
+        Command::Prices { command } => prices::run(command)?,
         Command::Export {
             query,
             read,
