@@ -1745,8 +1745,8 @@ KEEP A PRICE TABLE
   id an official page priced nor a dated form (`-YYYYMMDD`) of one, which
   the official row prices instead. When an official page prices an id,
   every dated form of it the table holds takes that price and source too,
-  so a LiteLLM row written while the page failed does not outlive the
-  official price.
+  unless a page prices that dated form itself, so a LiteLLM row written
+  while the page failed does not outlive the official price.
 
   Any table, not only this one, answers a recorded id ending in `-YYYYMMDD`
   that no row names with the row named by the id without that date, so

@@ -534,6 +534,36 @@ fn an_update_that_would_outgrow_the_read_limit_writes_nothing() {
 }
 
 #[test]
+fn a_dated_id_an_official_page_prices_keeps_its_own_price() {
+    // Claim: a dated id OpenAI's page prices itself keeps that price across
+    // updates. Rejects the undated id's price superseding it as a dated form
+    // on the second update.
+    let data = tempfile::tempdir().unwrap();
+    let copies = copied_sources();
+    let openai = copies.path().join("openai.md");
+    let text = fs::read_to_string(&openai).unwrap();
+    let row = "| o3 | $2.00 | $8.00 | $0.50 |\n";
+    assert!(text.contains(row));
+    fs::write(
+        &openai,
+        text.replacen(
+            row,
+            &format!("{row}| o3-20260101 | $4.00 | $16.00 | $1.00 |\n"),
+            1,
+        ),
+    )
+    .unwrap();
+    let limits = price_update::FetchLimits::UPDATE;
+    price_update::update(data.path(), Some(copies.path()), limits, at(1)).unwrap();
+    price_update::update(data.path(), Some(copies.path()), limits, at(2)).unwrap();
+    let table = PriceTable::read(&data.path().join("prices.toml")).unwrap();
+    let rows: Vec<_> = table.rows("o3-20260101").collect();
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(rows[0].per_million.uncached_input, Some(4.0));
+    assert_eq!(rows[0].effective_until, None);
+}
+
+#[test]
 fn an_official_price_supersedes_a_fallback_row_for_its_dated_form() {
     // Claim: once Anthropic prices `claude-sonnet-4-5`, the row in effect for
     // `claude-sonnet-4-5-20250929` carries Anthropic's price and source, and

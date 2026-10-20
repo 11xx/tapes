@@ -13,8 +13,9 @@
 //! the same source, keeps that row; a different one closes the row at the
 //! update instant and opens a new one there; a new id gets a row open
 //! backwards, so it also prices earlier sessions. Rows are never dropped.
-//! An official price also prices every stored dated form of its id, so a
-//! row another source wrote for a dated id does not outlive it.
+//! An official price also prices every stored dated form of its id that no
+//! official source prices itself, so a row another source wrote for a
+//! dated id does not outlive it.
 //!
 //! Usage pricing reads this table beneath the user's config table (see
 //! [`crate::pricing::lookup`]). A command that prices refreshes it first
@@ -998,10 +999,17 @@ pub fn update(
         });
         parsed.push((source, result));
     }
+    // A dated id an official source prices itself keeps that price.
+    let priced: BTreeSet<&str> = parsed
+        .iter()
+        .filter_map(|(_, result)| result.as_ref().ok())
+        .flatten()
+        .map(|price| price.id.as_str())
+        .collect();
     let dated: Vec<String> = rows
         .iter()
         .map(|row| row.id.clone())
-        .filter(|id| pricing::undated(id).is_some())
+        .filter(|id| pricing::undated(id).is_some() && !priced.contains(id.as_str()))
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect();
