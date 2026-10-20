@@ -5744,7 +5744,7 @@ fn render_unexplained(prefix: &str, unexplained: &Unexplained) -> String {
         )),
         Some(Placement::Estimated { basis, .. }) => out.push_str(&format!(
             "{prefix}unexplained placement: estimated, an interval between recorded totals \
-             prorated ({basis})\n"
+             shared where cut ({basis})\n"
         )),
         _ => {}
     }
