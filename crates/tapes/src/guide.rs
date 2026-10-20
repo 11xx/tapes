@@ -901,7 +901,8 @@ PROBE BEFORE EXPORTING
   exact-union for related sessions added by their events' union. Text output
   prints `list-price estimate <amount> <currency> (from the price table:
   ...)` with a completeness line and a `list-price billing:` line per
-  billing it names, and a summary adds a LIST-PRICE ESTIMATE column when a
+  billing it names, its plan and the terms it resolved to where known, such
+  as `opencode-go plan, billed as api`, then its evidence, and a summary adds a LIST-PRICE ESTIMATE column when a
   table is given.
   `usage --window FROM..TO` (RFC 3339, either end open) answers the
   consumption inside a window over the sessions the scope and filters select.

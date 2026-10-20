@@ -573,7 +573,7 @@ fn reject_installed_selection(
 #[derive(Args, Clone, Debug, Default)]
 struct PriceArgs {
     /// Price each figure this command reports a harness cost for with this
-    /// tapes-price-table/1 or /2 file, adding `list_price_estimate` beside
+    /// tapes-price-table/1, /2 or /3 file, adding `list_price_estimate` beside
     /// that cost, never in its place, exactly as `usage --prices` prices it.
     /// Without the flag the table is the file TAPES_PRICES names, then
     /// $XDG_CONFIG_HOME/tapes/prices.toml (or ~/.config/tapes/prices.toml);
@@ -2158,8 +2158,8 @@ enum Command {
         concurrency: Option<u64>,
         #[command(flatten)]
         change: Box<ChangeAsk>,
-        /// Price the answer with this tapes-price-table/1 or /2 file (the
-        /// guide gives both formats): each figure gains `list_price_estimate`
+        /// Price the answer with this tapes-price-table/1, /2 or /3 file (the
+        /// guide gives each format): each figure gains `list_price_estimate`
         /// beside any cost its harness wrote, never in its place. A /2 row may
         /// carry a long-context rate for the whole request above a prompt
         /// size, for the billing it names (per-token API billing unless it
@@ -2168,8 +2168,10 @@ enum Command {
         /// effective_from..effective_until window; those terms are priced
         /// request by request from the requests the read kept, and between
         /// their rates, with request-terms-unknown, where the figure's
-        /// requests are not known one by one. The estimate's `billing` names
-        /// the billing each recording establishes and its evidence, a span
+        /// requests are not known one by one. A /3 table may add `[[plans]]`
+        /// rules, each naming the billing a plan pays the terms of, over the
+        /// built-in ones. The estimate's `billing` names the billing each
+        /// recording establishes, its plan where known, and its evidence, a span
         /// or window share billed as its whole recording, unestablished
         /// where the whole recording establishes none, and a bounded read
         /// that leaves part of its recording unread unestablished, its
@@ -5981,13 +5983,19 @@ fn estimate_incomplete(estimate: &ListPriceEstimate) -> Option<String> {
 fn render_estimate_lines(prefix: &str, estimate: &ListPriceEstimate) -> String {
     let mut out = format!("{prefix}{}\n", render_estimate(estimate));
     for billing in &estimate.billing {
-        let terms = match billing.terms {
-            agent_tapes_core::pricing::BillingTerms::Subscription => {
-                "subscription terms, no long-context surcharge"
+        use agent_tapes_core::pricing::BillingTerms;
+        let terms = match (billing.terms, &billing.plan) {
+            (BillingTerms::Subscription, Some(plan)) => {
+                format!("{plan} plan, billed as subscription")
             }
-            agent_tapes_core::pricing::BillingTerms::Api => "per-token API terms",
-            agent_tapes_core::pricing::BillingTerms::Unestablished => {
-                "billing unestablished, between base and long-context rates"
+            (BillingTerms::Api, Some(plan)) => format!("{plan} plan, billed as api"),
+            (BillingTerms::Unestablished, Some(plan)) => format!(
+                "{plan} plan, no plan rule, billing unestablished, between base and long-context rates"
+            ),
+            (BillingTerms::Subscription, None) => "subscription terms".to_owned(),
+            (BillingTerms::Api, None) => "per-token API terms".to_owned(),
+            (BillingTerms::Unestablished, None) => {
+                "billing unestablished, between base and long-context rates".to_owned()
             }
         };
         out.push_str(&format!(
