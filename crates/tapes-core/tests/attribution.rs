@@ -7,8 +7,8 @@ use std::collections::BTreeSet;
 
 use agent_tapes_core::attribution::{
     even_amount, even_split, sum_amounts, sum_counts, Allocation, Attribution, Basis, Conservation,
-    Event, Evidence, Figure, Figures, Owner, Part, Plan, Reason, Requests, Segment, Span, Take,
-    Tier, Window,
+    Event, Evidence, Figure, Figures, Owner, Part, Piece, Plan, Reason, Requests, Segment, Span,
+    Take, Tier, Window,
 };
 use agent_tapes_core::span::{Instant, PlacedRequest, RequestTimeline};
 
@@ -450,8 +450,10 @@ fn sequential_items_split_exactly_and_name_what_lies_outside() {
 // neither: they are unattributed as `overlap`, and the conserving layer
 // stays the same when an allocation is asked for. An even allocation divides
 // them between the two, the first item in key order taking the odd token,
-// labelled `even`. Rejects counting an overlapped request in both items, an
-// allocation that changes the conserving layer, and an uneven split.
+// labelled `even`, after the item's whole segments. Rejects counting an
+// overlapped request in both items, an allocation that changes the
+// conserving layer, an uneven split, and parts out of the order they add up
+// in.
 #[test]
 fn interleaved_items_leave_the_overlap_unattributed_unless_allocated_evenly() {
     let recording = Recording::of(&[("10:05", 10), ("10:15", 1001), ("10:25", 100000)]);
@@ -492,6 +494,24 @@ fn interleaved_items_leave_the_overlap_unattributed_unless_allocated_evenly() {
         .shares()
         .iter()
         .any(|share| share.evidence.basis == Basis::Even));
+    // Money adds up in order, so a figure lists its whole segments before
+    // its even shares, whatever segment each comes from.
+    let pieces: Vec<Piece> = allocated
+        .figure(&selected(&["second"]))
+        .iter()
+        .map(|part| part.piece)
+        .collect();
+    assert_eq!(
+        pieces,
+        [
+            Piece::Segment(3),
+            Piece::Even {
+                segment: 2,
+                index: 1,
+                shares: 2
+            }
+        ]
+    );
     assert!(even.layer(Take::Allocated(Allocation::Following)).is_none());
 }
 
@@ -649,12 +669,19 @@ fn a_stretch_with_no_event_stays_unattributed() {
 // Claim: a following allocation gives what stays unattributed between two
 // items, here a stretch with no event of the participant, to the next item,
 // in its own layer beside the conserving and the estimated ones, labelled
-// `following`. Rejects adding it to the conserving or the estimated figure.
+// `following`; a stretch before the first item stays unattributed. Rejects
+// adding it to the conserving or the estimated figure, and giving what
+// precedes every item to the first.
 #[test]
 fn following_gives_what_remains_between_items_to_the_next() {
-    let recording = Recording::of(&[("10:05", 10), ("11:30", 20), ("12:50", 300)]);
+    let recording = Recording::of(&[
+        ("08:00", 4000),
+        ("10:05", 10),
+        ("11:30", 20),
+        ("12:50", 300),
+    ]);
     let events = [event("a", "10:20"), event("b", "13:00")];
-    let starts = [at("10:05"), at("11:30"), at("12:50")];
+    let starts = [at("08:00"), at("10:05"), at("11:30"), at("12:50")];
     let plan = Plan::new(&[], &events, Some(&starts));
     let (attribution, figures) = attribute(&recording, &plan, Some(Allocation::Following));
     let b = selected(&["b"]);
@@ -677,6 +704,13 @@ fn following_gives_what_remains_between_items_to_the_next() {
     assert_eq!(given.len(), 1);
     assert_eq!(given[0].work, key("b"));
     assert_eq!(input(&figures, &given[0].parts), Some(20));
+    let before: Vec<_> = following
+        .remainders()
+        .into_iter()
+        .filter(|remainder| remainder.reason == Reason::BeforeFirstItem)
+        .collect();
+    assert_eq!(before.len(), 1);
+    assert_eq!(input(&figures, &before[0].parts), Some(4000));
 }
 
 // Claim: an executor's recording read as a participant's, with one event
@@ -915,10 +949,7 @@ fn every_layer_conserves_the_whole_per_counter() {
                 .parts
                 .iter()
                 .map(|(part, _)| *part)
-                .filter(|part| {
-                    part.requests > 0
-                        || part.piece != agent_tapes_core::attribution::Piece::Remainder
-                })
+                .filter(|part| part.requests > 0 || part.piece != Piece::Remainder)
                 .collect();
             parts.sort_by_key(|part| part.piece);
             all.sort_by_key(|part| part.piece);
