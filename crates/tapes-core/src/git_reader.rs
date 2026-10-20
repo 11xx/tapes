@@ -788,6 +788,25 @@ impl GitReader {
         ))
     }
 
+    /// The `count` commits ending at `tip` along first parents, oldest
+    /// first: fewer where the history is shorter.
+    pub fn first_parent_chain(&self, tip: &str, count: usize) -> Result<Vec<CommitSummary>> {
+        require_revisions([tip])?;
+        let listed = self.run(
+            &[
+                "rev-list".to_owned(),
+                "--first-parent".to_owned(),
+                format!("--max-count={}", count.min(self.limits.commits)),
+                "--end-of-options".to_owned(),
+                tip.to_owned(),
+            ],
+            None,
+        )?;
+        let mut shas: Vec<String> = text(&listed.bytes).lines().map(str::to_owned).collect();
+        shas.reverse();
+        self.describe(&shas)
+    }
+
     /// What the merge commits committed at or after `since` say they merged:
     /// for each merge whose subject is one git or a forge writes by default
     /// (`Merge branch 'name'`, `Merge remote-tracking branch 'origin/name'`,

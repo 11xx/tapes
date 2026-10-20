@@ -52,6 +52,7 @@ mod model_observation;
 pub mod overlap;
 pub mod pricing;
 pub mod projection;
+pub mod pull_request;
 pub mod reader;
 pub mod reconcile;
 pub mod scope;

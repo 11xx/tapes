@@ -1631,9 +1631,10 @@ PRICE A CHANGE
   tapes usage --branch feat-x --by merge    A branch's commits, live or merged and deleted, by the merge that landed them.
   tapes usage --commit SHA --explain        One commit, with the evidence behind each row.
   git log --format=%H -5 | tapes usage --commits-from -  The commits a list names, one per line.
+  tapes usage --pr 123                      A GitHub pull request, found through `gh`, by how it was merged.
   tapes usage <id> --by commit              One session divided across the repository's commits.
   tapes usage --window FROM..TO --by commit  What a window consumed, by commit.
-  tapes usage --range A..B --prices FILE --json  tapes-change-usage/1, with list-price estimates.
+  tapes usage --range A..B --prices FILE --json  tapes-change-usage/2, with list-price estimates.
 
   A change view answers what a set of commits cost from the recordings and
   the repository alone; it needs no ledger, hook or configuration. Run it
@@ -1690,10 +1691,47 @@ PRICE A CHANGE
   Select commits with --commit (repeatable), --range A..B, --branch NAME (a
   live branch against the default branch, otherwise the merges whose subjects
   name it: `Merge branch 'NAME'`, or `merge(N): ...` where N is NAME or its
-  last segment) or --commits-from FILE|-. A branch that is neither, a revision
-  git does not know and an empty selection refuse, as do --family, --global
-  and a session or window beside a selector. --explain lists each row's
-  evidence: shas, paths and times, never transcript text.
+  last segment), --commits-from FILE|- or --pr N. A branch that is neither,
+  a revision git does not know and an empty selection refuse, as do --family,
+  --global and a session or window beside a selector. --explain lists each
+  row's evidence: shas, paths and times, never transcript text.
+
+  A pull request is priced by number with --pr N, which asks `gh pr view N
+  --json ...` for the commits it listed and when it lived, and reads nothing
+  else from the forge: tapes never runs `git fetch` and never writes to the
+  repository. Without `gh`, or when `gh` fails (not authenticated, no GitHub
+  remote, no such pull request), --pr refuses and names which; --commits-from
+  prices the same work. The commits depend on how the pull request ended, and
+  the output names the rule under `method`:
+  - open, or closed unmerged: the listed commits that exist locally. The
+    others are reported by sha under `missing`.
+  - merged with a merge commit (two parents, the second reaching the listed
+    commits): the listed commits. The merge commit authors nothing and is not
+    selected.
+  - rebase-merged (one parent, and the last n commits along first parents
+    ending at the merge commit, n being the number listed, carry the listed
+    subjects in order): those commits on the base branch.
+  - squash-merged (one parent, not a rebase): the squash commit, and any
+    listed commit that still exists locally.
+  - none of these: the listed commits that exist locally, with the reason
+    under `unrecognized`, such as a merge commit this repository never
+    fetched.
+  A squash or a rebase makes the pull request's work again under new shas,
+  after it happened. So those commits also admit evidence over the pull
+  request's lifetime, from its creation to its merge, widened by the usual
+  hour before and half hour after; edits a session made on the branch days
+  before link to the squash commit by their content digests, one tier down
+  (matched, never bound). This is the one selection that adds evidence:
+  `--commit SQUASH_SHA` alone uses the commit's own window and finds none of
+  that work. A wider lifetime reads the recordings of a wider interval. The
+  view reports the pull request's number, state, method, base and head names,
+  title and lifetime. `--by merge` groups by the first-parent merge offline;
+  --pr is the forge's view of the same grouping.
+
+  Work from another forge is priced with --commits-from, which lists the
+  request's commits: `git log --format=%H BASE..HEAD > commits.txt`, then
+  `tapes usage --commits-from commits.txt`. The listed commits keep their
+  own windows.
 
 EXPORT, THEN INGEST PROGRESSIVELY
   tapes export <id|--latest> [--bundle <dir>]

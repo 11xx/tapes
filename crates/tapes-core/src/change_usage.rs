@@ -39,10 +39,11 @@ use crate::change_attribution::{
 use crate::git_reader::{CommitSummary, Selector};
 use crate::model::{CacheWrites, DisjointTokens, TokenConvention, Tokens};
 use crate::pricing::{EstimateSum, ListPriceEstimate, PriceTable, PricedShare, RequestTerms};
+use crate::pull_request::{PullRequestSelection, PullRequestView};
 use crate::span::Instant;
 use crate::usage::DisjointSum;
 
-pub const SCHEMA: &str = "tapes-change-usage/1";
+pub const SCHEMA: &str = "tapes-change-usage/2";
 
 /// What a change view's rows are grouped by.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
@@ -112,6 +113,9 @@ pub enum ChangeSelection<'a> {
         source: String,
         revisions: Vec<String>,
     },
+    /// The commits a pull request selects, by the rule its merge method
+    /// gives.
+    PullRequest(Box<PullRequestSelection>),
     /// One session's partition across every commit.
     Session(crate::Selection<'a>),
     /// The consumption of `[from, to)` across every commit, `to` now where
@@ -151,6 +155,7 @@ pub enum Asked {
         source: String,
         revisions: usize,
     },
+    PullRequest(PullRequestView),
     Session {
         session: SessionKey,
     },
@@ -500,6 +505,17 @@ pub fn change_usage(
                 None,
             )
         }
+        ChangeSelection::PullRequest(pr) => {
+            if let Some((from, to)) = pr.lifetime {
+                repository.widen(&pr.view.widened, from, to);
+            }
+            (
+                Asked::PullRequest(pr.view.clone()),
+                Some(pr.commits.clone()),
+                None,
+                None,
+            )
+        }
         ChangeSelection::Session(selection) => {
             let resolved = selection.resolve(backends)?;
             let key = SessionKey {
@@ -576,6 +592,17 @@ pub fn change_usage(
             }),
         ) => (from, to),
         _ => unreachable!("every selection names commits, a session or a window"),
+    };
+
+    let (from, to) = match &request.selection {
+        ChangeSelection::PullRequest(pr) => match pr.lifetime {
+            Some((begun, ended)) => (
+                from.min(begun - params.lookback),
+                to.max(ended + params.lookahead),
+            ),
+            None => (from, to),
+        },
+        _ => (from, to),
     };
 
     let gathered = gather(backends, repository, from, to)?;

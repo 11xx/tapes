@@ -2189,7 +2189,7 @@ enum Command {
         #[arg(long, value_name = "FILE")]
         prices: Option<PathBuf>,
         /// Render the versioned tapes-usage/17 object, tapes-usage-summary/16
-        /// for a selection, tapes-change-usage/1 for a change view, or
+        /// for a selection, tapes-change-usage/2 for a change view, or
         /// tapes-family-usage/2 under --family, as JSON. `session.model_observation` says
         /// whether more than one model and effort was observed (`mixed`) and
         /// whether a gap, partial read or budget kept the split incomplete
@@ -2659,7 +2659,7 @@ fn print_selection_warnings(warnings: &[String]) {
 #[derive(Args, Debug)]
 struct ChangeAsk {
     /// Price the commits these revisions name, as
-    /// tapes-change-usage/1. Repeatable. A change view reads the
+    /// tapes-change-usage/2. Repeatable. A change view reads the
     /// repository holding the current directory, or the one --project
     /// names, read-only through git, and every installed Claude, Codex
     /// and Pi recording active from an hour before the earliest selected
@@ -2700,9 +2700,43 @@ struct ChangeAsk {
     branch: Option<String>,
     /// Price the commits a file lists, or standard input for `-`, as
     /// --commit does: one revision per line, blank lines and lines
-    /// starting with `#` ignored.
+    /// starting with `#` ignored. This is how work from a forge other than
+    /// GitHub is priced; `git log --format=%H BASE..HEAD` lists a
+    /// branch's commits.
     #[arg(long, value_name = "FILE|-")]
     commits_from: Option<String>,
+    /// Price pull request N of the repository's GitHub remote, as --commit
+    /// does. tapes asks `gh pr view N --json ...` and fetches nothing else:
+    /// it never runs `git fetch` or writes to the repository. Without `gh`,
+    /// or when `gh` fails (not authenticated, no GitHub remote, no such
+    /// pull request), --pr refuses, naming what failed; --commits-from
+    /// takes the commits instead. The commits depend on how the pull
+    /// request ended, and the output names the rule under `method`: an
+    /// open or unmerged closed pull request selects its listed commits that
+    /// exist locally, reporting the others by sha; one merged with a merge
+    /// commit (two parents, the second reaching the listed commits)
+    /// selects the listed commits, not the merge commit; one rebase-merged
+    /// (one parent, and the last n first-parent commits ending at the merge
+    /// commit, n being the number listed, carry the listed subjects in
+    /// order) selects those commits; one squash-merged (one parent, not a
+    /// rebase) selects the squash commit and any listed commit that still
+    /// exists locally; when none of these fits, the listed commits that
+    /// exist locally are selected and the output says why. A squashed or
+    /// rebased commit admits evidence over the pull request's lifetime,
+    /// from its creation to its merge, widened by the usual lookback and
+    /// lookahead, besides its own window, so edits made days before the
+    /// merge link to it by their content digests, one tier down; this is
+    /// the one selection that adds evidence, and `--commit SQUASH_SHA`
+    /// alone uses the commit's own window. The view reports the pull
+    /// request's number, state, method, base and head names and lifetime.
+    /// `--by merge` groups by first-parent merge offline; --pr is the
+    /// forge's view of the same grouping.
+    #[arg(
+        long,
+        value_name = "N",
+        conflicts_with_all = ["commit", "range", "branch", "commits_from"]
+    )]
+    pr: Option<u64>,
     /// List the evidence behind each change-view row and bucket: its
     /// session, kind (created, edited, worktree, proximity, inspected),
     /// tier, time or span, the commits it names, and how an observed sha
@@ -2728,6 +2762,7 @@ impl ChangeAsk {
             || self.range.is_some()
             || self.branch.is_some()
             || self.commits_from.is_some()
+            || self.pr.is_some()
     }
 
     /// Whether the arguments ask for a change view: a change selector, a
@@ -2851,40 +2886,43 @@ fn usage_change(
             ));
         }
     }
-    let selection = match (change.selection()?, query.single(), window) {
-        (Some(selection), None, None) => selection,
-        (Some(_), Some(_), _) => {
+    // `None` is a pull request, read once the repository is open.
+    let selection = match (change.selection()?, change.pr.is_some(), query.single(), window) {
+        (Some(selection), _, None, None) => Some(selection),
+        (None, true, None, None) => None,
+        (_, true, Some(_), _) | (Some(_), _, Some(_), _) => {
             return Err(anyhow!(
-                "--commit, --range, --branch and --commits-from select commits, and a session \
-                 selection does not combine with them; `<SESSION> --by commit` divides one \
-                 session across the repository's commits"
+                "--commit, --range, --branch, --commits-from and --pr select commits, and a \
+                 session selection does not combine with them; `<SESSION> --by commit` divides \
+                 one session across the repository's commits"
             ))
         }
-        (Some(_), None, Some(_)) => {
+        (_, true, None, Some(_)) | (Some(_), _, None, Some(_)) => {
             return Err(anyhow!(
-                "--window does not combine with --commit, --range, --branch or --commits-from; \
-                 `--window FROM..TO --by commit` divides a window's consumption across commits"
+                "--window does not combine with --commit, --range, --branch, --commits-from or \
+                 --pr; `--window FROM..TO --by commit` divides a window's consumption across \
+                 commits"
             ))
         }
-        (None, Some(one), None) => ChangeSelection::Session(one),
-        (None, None, Some(window)) => {
+        (None, false, Some(one), None) => Some(ChangeSelection::Session(one)),
+        (None, false, None, Some(window)) => {
             let from = window.from.ok_or_else(|| {
                 anyhow!("a change view of a window needs its start: --window FROM..[TO]")
             })?;
-            ChangeSelection::Window {
+            Some(ChangeSelection::Window {
                 from,
                 to: window.to,
-            }
+            })
         }
-        (None, Some(_), Some(_)) => {
+        (None, false, Some(_), Some(_)) => {
             return Err(anyhow!(
                 "--window answers a selection of sessions; it does not combine with a session id"
             ))
         }
-        (None, None, None) => {
+        (None, false, None, None) => {
             return Err(anyhow!(
-                "a change view needs commits (--commit, --range, --branch or --commits-from), a \
-                 session (`<SESSION> --by commit`) or a window (`--window FROM..TO --by commit`)"
+                "a change view needs commits (--commit, --range, --branch, --commits-from or \
+                 --pr), a session (`<SESSION> --by commit`) or a window (`--window FROM..TO --by commit`)"
             ))
         }
     };
@@ -2904,6 +2942,15 @@ fn usage_change(
     }
     let repository =
         agent_tapes_core::change_attribution::Repository::with_reader(reader, &directory)?;
+    let selection = match (selection, change.pr) {
+        (Some(selection), _) => selection,
+        (None, Some(number)) => {
+            let pr = agent_tapes_core::pull_request::fetch(&directory, number)?;
+            let selected = agent_tapes_core::pull_request::select(repository.reader(), &pr)?;
+            ChangeSelection::PullRequest(Box::new(selected))
+        }
+        (None, None) => unreachable!("a change view without a selection was refused"),
+    };
     let tiers = if change.tiers.is_empty() {
         agent_tapes_core::change_attribution::Tiers::all()
     } else {
@@ -6887,6 +6934,12 @@ fn render_change_usage(usage: &agent_tapes_core::change_usage::ChangeUsage) -> S
         Asked::CommitsFrom { source, revisions } => {
             format!("{revisions} revisions from {source}")
         }
+        Asked::PullRequest(pr) => format!(
+            "pull request #{} ({}, {})",
+            pr.number,
+            serde_kebab(&pr.state),
+            serde_kebab(&pr.method)
+        ),
         Asked::Session { session } => format!("session {}:{}", session.harness, session.id),
         Asked::Window { from, to } => format!(
             "window {}..{}",
@@ -6902,6 +6955,53 @@ fn render_change_usage(usage: &agent_tapes_core::change_usage::ChangeUsage) -> S
         usage.sessions.len(),
         tiers.join(", ")
     );
+    if let Asked::PullRequest(pr) = &usage.selection {
+        out.push_str(&format!(
+            "Pull request #{} {:?}: {}, method {} ({})\n  base {}, head {}; created {}",
+            pr.number,
+            pr.title,
+            serde_kebab(&pr.state),
+            serde_kebab(&pr.method),
+            pr.rule,
+            pr.base,
+            pr.head,
+            human_timestamp(pr.created_at)
+        ));
+        if let Some(ended) = pr.ended_at {
+            let how = if pr.state == agent_tapes_core::pull_request::State::Merged {
+                "merged"
+            } else {
+                "closed"
+            };
+            out.push_str(&format!(", {how} {}", human_timestamp(ended)));
+        }
+        out.push('\n');
+        if let Some(why) = &pr.unrecognized {
+            out.push_str(&format!("  no rule fits: {why}\n"));
+        }
+        if !pr.widened.is_empty() {
+            out.push_str(&format!(
+                "  evidence for {} admitted over the pull request's lifetime\n",
+                pr.widened
+                    .iter()
+                    .map(|sha| short(sha))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+        if !pr.missing.is_empty() {
+            out.push_str(&format!(
+                "  {} of {} listed commits are not in the repository: {}\n",
+                pr.missing.len(),
+                pr.listed,
+                pr.missing
+                    .iter()
+                    .map(|sha| short(sha))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+    }
     let mut header: Vec<&str> = Vec::new();
     for dimension in &usage.by {
         match dimension {
