@@ -87,9 +87,10 @@ impl Store {
     ///   recording's records then end at 10:10 and its total is written
     ///   twice: Opus as its request, and Haiku that no request explains.
     /// - 10:40 a resumed run's Opus request writes 500 more; at 10:45 the
-    ///   subagent makes a Haiku request; the records end at 11:20 and the
-    ///   total grows by the subagent's request, more Haiku no request
-    ///   explains, and 100 Opus cache writes no request recorded.
+    ///   subagent makes a Haiku request; a message is queued at 11:00; the
+    ///   records end at 11:20 and the total grows by the subagent's request,
+    ///   more Haiku no request explains, and 100 Opus cache writes no request
+    ///   recorded. Four of the lead's records fall between the two totals.
     fn lead(with_agent: bool) -> Self {
         let store = Self::new();
         store.write(
@@ -121,6 +122,8 @@ impl Store {
                     "2026-10-20T10:40:00.000Z",
                     [3, 2000, 0, 500, 200, 20],
                 ),
+                json!({"type": "queue-operation", "operation": "enqueue", "sessionId": LEAD,
+                    "timestamp": "2026-10-20T11:00:00.000Z"}),
                 turn_duration(LEAD, "2026-10-20T11:20:00.000Z"),
                 cost_state(
                     LEAD,
@@ -435,18 +438,19 @@ fn the_unexplained_part_is_priced_by_its_model_as_a_range() {
 
 /// Claim: a span holds each total's increase by the interval the records
 /// around it bound. The first total's 10/200/3000/1000 Haiku lies wholly in
-/// a span to 10:10, which holds it `bounded`; a span from 10:10 to 10:45
-/// holds half of the second interval (10:10 to 11:20), prorated and
-/// `estimated` with its basis; and the remainder holds the rest, so the
-/// spans and the remainder add up to the whole. Rejects a span with no
-/// unexplained part, one that takes the whole session's part, and an
-/// estimate that does not say so.
+/// a span to 10:15, which holds it `bounded`; a span from 10:15 to 10:45
+/// holds two of the four records written between the totals, so half of the
+/// second increase, `estimated` with its basis; and the remainder holds the
+/// rest, so the spans and the remainder add up to the whole. Rejects a span
+/// with no unexplained part, one that takes the whole session's part, a share
+/// by duration (30 of the interval's 70 minutes), and an estimate that does
+/// not say so.
 #[test]
 fn spans_place_each_totals_increase_in_its_interval() {
     let store = Store::lead(true);
     let answer = store.spans(&[
-        time_span(Some("2026-10-20T09:00:00Z"), Some("2026-10-20T10:10:00Z")),
-        time_span(Some("2026-10-20T10:10:00Z"), Some("2026-10-20T10:45:00Z")),
+        time_span(Some("2026-10-20T09:00:00Z"), Some("2026-10-20T10:15:00Z")),
+        time_span(Some("2026-10-20T10:15:00Z"), Some("2026-10-20T10:45:00Z")),
     ]);
     let first = &answer["spans"][0]["unexplained"];
     assert_eq!(first["placement"]["status"], "bounded", "{first:#}");
@@ -462,7 +466,7 @@ fn spans_place_each_totals_increase_in_its_interval() {
     let second = &answer["spans"][1]["unexplained"];
     assert_eq!(second["placement"]["status"], "estimated", "{second:#}");
     assert_eq!(
-        second["placement"]["basis"], "cost-state-interval-prorated-by-time",
+        second["placement"]["basis"], "cost-state-interval-prorated-by-records",
         "{second:#}"
     );
     assert_eq!(
@@ -564,14 +568,14 @@ fn a_family_read_explains_the_subagents_requests() {
 
 /// Claim: a window holds the subagent's request as a share of its own, so
 /// the lead's share places only what the family leaves unexplained inside
-/// the window: from 10:10 on, 20/400/6000/2000 Haiku and the 100 Opus
+/// the window: from 10:15 on, 20/400/6000/2000 Haiku and the 100 Opus
 /// writes, whole, since the window holds the second interval whole; and the
 /// window's total names the same part. Rejects a lead share that counts the
 /// subagent's request again, and a window with no unexplained part.
 #[test]
 fn a_window_places_the_familys_unexplained_part_once() {
     let store = Store::lead(true);
-    let summary = store.window("2026-10-20T10:10:00Z", None);
+    let summary = store.window("2026-10-20T10:15:00Z", None);
     let lead = summary["window"]["sessions"]
         .as_array()
         .unwrap()

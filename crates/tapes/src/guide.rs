@@ -580,9 +580,12 @@ PROBE BEFORE EXPORTING
   timestamp, so each one's increase is bounded by the newest timestamped
   record before the previous total and the newest before itself: a span
   holding that interval whole holds the increase whole (`placement.status:
-  bounded`), one cutting it holds the share of its duration it covers
-  (`estimated`, with `basis: cost-state-interval-prorated-by-time`), and
-  what no span holds is the remainder's, so spans that share no time and the
+  bounded`), one cutting it holds the share of the recording's timestamped
+  records between the two totals that it holds, so a span over an idle
+  stretch holds little (`estimated`, with `basis:
+  cost-state-interval-prorated-by-records`; past a million records, the
+  share of the interval's duration, `cost-state-interval-prorated-by-time`),
+  and what no span holds is the remainder's, so spans that share no time and the
   remainder add up to the whole's. An increase no timestamped record
   bounds, and every increase for a `--requests` span, which places nothing
   in time, stays with the remainder and is named under the span's

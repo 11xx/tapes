@@ -10,9 +10,10 @@
 //! one bounds in time what accrued since the one before it: after the newest
 //! timestamped record preceding the previous total, and no later than the
 //! newest one preceding it. A span holds the part of each interval that falls
-//! inside it, an interval it cuts shared by the time it holds; an interval no
-//! timestamped record bounds is placed in no span and stays with the
-//! remainder.
+//! inside it, an interval it cuts shared by the recording's own timestamped
+//! records between the two totals that it holds, so a span over an idle
+//! stretch of a long interval holds little of it; an interval no timestamped
+//! record bounds is placed in no span and stays with the remainder.
 
 use std::collections::{BTreeMap, HashSet};
 
@@ -28,16 +29,30 @@ use crate::span::SpanBounds;
 pub const MAX_MARKS: usize = 4096;
 
 /// The most related requests a family read keeps. A family with more
-/// explains nothing beyond the recording's own requests.
+/// leaves its requests unknown, and its part is withheld.
 pub const MAX_FAMILY_REQUESTS: usize = 100_000;
 
-/// How a cut interval is shared, as a placement names it.
-pub const PLACEMENT_BASIS: &str = "cost-state-interval-prorated-by-time";
+/// The most record timestamps a chain keeps to share cut intervals by.
+/// Past it, cut intervals are shared by duration instead.
+pub const MAX_STAMPS: usize = 1_000_000;
+
+/// How a cut interval is shared by the records it holds, as a placement
+/// names it.
+pub const PLACEMENT_BASIS: &str = "cost-state-interval-prorated-by-records";
+
+/// How a cut interval is shared by duration, where the chain kept no record
+/// timestamps.
+pub const PLACEMENT_BASIS_TIME: &str = "cost-state-interval-prorated-by-time";
 
 const PLACEMENT_STATEMENT: &str = "each recorded total's increase accrued after the newest \
      timestamped record preceding the total before it and no later than the newest one \
-     preceding it; a figure holding that interval whole holds the increase whole, and a \
-     figure cutting it holds the share of its duration it covers";
+     preceding it; a figure holding every timestamped record written between the two totals \
+     holds the increase whole, and one holding some of them holds that share of it";
+
+const PLACEMENT_STATEMENT_TIME: &str = "each recorded total's increase accrued after the \
+     newest timestamped record preceding the total before it and no later than the newest one \
+     preceding it; a figure holding that interval whole holds the increase whole, and a figure \
+     cutting it holds the share of its duration it covers";
 
 /// Counters in the order input, output, reasoning, cache read, cache write.
 /// An unrecorded counter counts as zero.
@@ -123,6 +138,9 @@ pub struct RecordedChain {
     /// mark `k - 1` and before mark `k`; the last entry follows the newest
     /// mark, so no total counts it.
     pub explained: Vec<BTreeMap<String, Spent>>,
+    /// `stamps[k]` holds the timestamps of the records written between the
+    /// same two marks; none past [`MAX_STAMPS`].
+    pub stamps: Option<Vec<Vec<DateTime<Utc>>>>,
 }
 
 /// Folds a recording's timestamps, recorded totals and requests into its
@@ -133,6 +151,8 @@ pub(crate) struct ChainBuilder {
     newest: Option<DateTime<Utc>>,
     marks: Vec<Mark>,
     explained: Vec<BTreeMap<String, Spent>>,
+    stamps: Option<Vec<Vec<DateTime<Utc>>>>,
+    kept_stamps: usize,
     /// Marks merged away past [`MAX_MARKS`].
     dropped: usize,
 }
@@ -144,6 +164,8 @@ impl Default for ChainBuilder {
             newest: None,
             marks: Vec::new(),
             explained: vec![BTreeMap::new()],
+            stamps: Some(vec![Vec::new()]),
+            kept_stamps: 0,
             dropped: 0,
         }
     }
@@ -155,6 +177,16 @@ impl ChainBuilder {
         let Some(at) = at else { return };
         self.opened = Some(self.opened.map_or(at, |opened| opened.min(at)));
         self.newest = Some(self.newest.map_or(at, |newest| newest.max(at)));
+        if self.kept_stamps == MAX_STAMPS {
+            self.stamps = None;
+        }
+        if let Some(stamps) = &mut self.stamps {
+            stamps
+                .last_mut()
+                .expect("a chain always has an open epoch")
+                .push(at);
+            self.kept_stamps += 1;
+        }
     }
 
     /// A recorded total of `models`, counting the run that started at `run`.
@@ -165,6 +197,10 @@ impl ChainBuilder {
             for (model, spent) in oldest {
                 self.explained[0].entry(model).or_default().add(&spent);
             }
+            if let Some(stamps) = &mut self.stamps {
+                let oldest = stamps.remove(0);
+                stamps[0].splice(0..0, oldest);
+            }
             self.dropped += 1;
         }
         self.marks.push(Mark {
@@ -173,6 +209,9 @@ impl ChainBuilder {
             models,
         });
         self.explained.push(BTreeMap::new());
+        if let Some(stamps) = &mut self.stamps {
+            stamps.push(Vec::new());
+        }
     }
 
     /// How many totals the recording has written so far: the epoch of a
@@ -198,6 +237,7 @@ impl ChainBuilder {
             opened: self.opened,
             marks: self.marks,
             explained: self.explained,
+            stamps: self.stamps,
         })
     }
 }
@@ -218,7 +258,7 @@ pub enum ExplainedBy {
 pub enum Placement {
     /// Every interval it holds lies wholly inside it.
     Bounded,
-    /// It cuts an interval and holds a share prorated by time.
+    /// It cuts an interval and holds a prorated share of it.
     Estimated {
         basis: &'static str,
         statement: &'static str,
@@ -226,18 +266,35 @@ pub enum Placement {
 }
 
 impl Placement {
-    fn estimated() -> Self {
-        Self::Estimated {
-            basis: PLACEMENT_BASIS,
-            statement: PLACEMENT_STATEMENT,
+    fn estimated(by_records: bool) -> Self {
+        if by_records {
+            Self::Estimated {
+                basis: PLACEMENT_BASIS,
+                statement: PLACEMENT_STATEMENT,
+            }
+        } else {
+            Self::Estimated {
+                basis: PLACEMENT_BASIS_TIME,
+                statement: PLACEMENT_STATEMENT_TIME,
+            }
         }
     }
 
     fn merge(left: Option<Self>, right: Option<Self>) -> Option<Self> {
         match (left, right) {
-            (Some(Self::Estimated { .. }), _) | (_, Some(Self::Estimated { .. })) => {
-                Some(Self::estimated())
+            (Some(left @ Self::Estimated { .. }), Some(right @ Self::Estimated { .. })) => {
+                Some(if left == right {
+                    left
+                } else {
+                    Self::Estimated {
+                        basis: "cost-state-interval-prorated",
+                        statement: "the figures added share their cut intervals on different \
+                             bases, by records and by duration",
+                    }
+                })
             }
+            (Some(estimated @ Self::Estimated { .. }), _)
+            | (_, Some(estimated @ Self::Estimated { .. })) => Some(estimated),
             (Some(Self::Bounded), _) | (_, Some(Self::Bounded)) => Some(Self::Bounded),
             (None, None) => None,
         }
@@ -357,6 +414,9 @@ impl Unexplained {
 pub struct Interval {
     pub from: Option<DateTime<Utc>>,
     pub to: Option<DateTime<Utc>>,
+    /// The timestamps of the recording's records written in the interval,
+    /// where the chain kept them.
+    pub stamps: Option<Vec<DateTime<Utc>>>,
     pub models: BTreeMap<String, Counts>,
 }
 
@@ -462,6 +522,7 @@ impl RecordedChain {
                     None => self.opened,
                 },
                 to: self.marks[index].after,
+                stamps: self.stamps.as_ref().map(|stamps| stamps[index].clone()),
                 models: BTreeMap::new(),
             })
             .collect::<Vec<_>>();
@@ -532,7 +593,9 @@ impl Accrual {
 
     /// Place every interval's part in the spans that hold it. A time span
     /// holds the part of each interval inside it, whole where the interval
-    /// lies inside it and prorated by duration where it cuts the interval;
+    /// lies inside it and, where it cuts the interval, prorated by the
+    /// recording's records in the interval it holds, or by duration where the
+    /// chain kept no record timestamps;
     /// what no span holds is the remainder's. An interval no timestamped
     /// record bounds, and every interval for a span selecting by ordinal,
     /// stays whole with the remainder and is named `unplaced` in the span.
@@ -547,6 +610,7 @@ impl Accrual {
         let mut reasons = vec![Vec::<UnplacedReason>::new(); figures];
         let mut cut = vec![false; figures];
         let mut held_any = vec![false; figures];
+        let mut by_records = vec![true; figures];
         let times = spans
             .iter()
             .map(|span| match *span {
@@ -573,7 +637,11 @@ impl Accrual {
                     reasons[index].push(UnplacedReason::OrdinalSpan);
                 }
             }
-            let segments = segments(low, high, &times);
+            let segments = match &interval.stamps {
+                Some(stamps) => record_segments(stamps, high, &times),
+                None => segments(low, high, &times),
+            };
+            let interval_by_records = interval.stamps.is_some();
             let weights = segments
                 .iter()
                 .map(|segment| segment.weight)
@@ -590,7 +658,10 @@ impl Accrual {
             for (figure, count) in holds.iter().enumerate() {
                 if *count > 0 {
                     held_any[figure] = true;
-                    cut[figure] |= *count < segments.len();
+                    if *count < segments.len() {
+                        cut[figure] = true;
+                        by_records[figure] &= interval_by_records;
+                    }
                 }
             }
             for (model, counts) in &interval.models {
@@ -624,7 +695,7 @@ impl Accrual {
                     explained_by: Some(self.explained_by),
                     by_model: models(&placed[index]),
                     placement: Some(if cut[index] && held_any[index] {
-                        Placement::estimated()
+                        Placement::estimated(by_records[index])
                     } else {
                         Placement::Bounded
                     }),
@@ -697,6 +768,40 @@ fn segments(low: DateTime<Utc>, high: DateTime<Utc>, times: &[TimeBounds]) -> Ve
                 holders,
             }
         })
+        .collect()
+}
+
+/// The recording's records in an interval grouped by the time spans holding
+/// each, every group weighted by its count. An interval no record falls in
+/// is the instant `high`, held by the spans that hold it.
+fn record_segments(
+    stamps: &[DateTime<Utc>],
+    high: DateTime<Utc>,
+    times: &[TimeBounds],
+) -> Vec<Segment> {
+    let holders_at = |at: DateTime<Utc>| {
+        times
+            .iter()
+            .enumerate()
+            .filter_map(|(index, time)| {
+                let (from, to) = (*time)?;
+                (from.is_none_or(|from| from <= at) && to.is_none_or(|to| at < to)).then_some(index)
+            })
+            .collect::<Vec<_>>()
+    };
+    if stamps.is_empty() {
+        return vec![Segment {
+            weight: 1,
+            holders: holders_at(high),
+        }];
+    }
+    let mut groups = BTreeMap::<Vec<usize>, u64>::new();
+    for at in stamps {
+        *groups.entry(holders_at(*at)).or_default() += 1;
+    }
+    groups
+        .into_iter()
+        .map(|(holders, weight)| Segment { weight, holders })
         .collect()
 }
 

@@ -1800,8 +1800,8 @@ enum Command {
         /// explains (`unexplained`): each cost-state's increase falls between
         /// the newest timestamped records before it and before the previous
         /// one, held whole by a span holding that interval (`bounded`) and
-        /// prorated by duration where the span cuts it (`estimated`, with its
-        /// basis); an increase no record bounds, or any for a --requests
+        /// prorated by the recording's records between the two totals the
+        /// span holds where it cuts it (`estimated`, with its basis); an increase no record bounds, or any for a --requests
         /// span, stays with the remainder and is named `unplaced`. A pi span keeps the
         /// active-branch counters and the retained-branch `consumption`
         /// apart. A request
@@ -5744,7 +5744,7 @@ fn render_unexplained(prefix: &str, unexplained: &Unexplained) -> String {
         )),
         Some(Placement::Estimated { basis, .. }) => out.push_str(&format!(
             "{prefix}unexplained placement: estimated, an interval between recorded totals \
-             prorated by the time held ({basis})\n"
+             prorated ({basis})\n"
         )),
         _ => {}
     }
