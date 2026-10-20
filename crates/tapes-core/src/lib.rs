@@ -21,6 +21,7 @@ pub use event::{
 pub mod allowance;
 pub mod artifact;
 pub mod attribution;
+pub mod attribution_evidence;
 pub mod backend;
 pub mod brief;
 pub mod bundle;
