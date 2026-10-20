@@ -1057,6 +1057,7 @@ impl OpenCodeBackend {
             turn_times: Vec::new(),
             timeline_withheld: None,
             requests: None,
+            locations: None,
         })
     }
 
@@ -1186,6 +1187,7 @@ impl OpenCodeBackend {
             turn_times: Vec::new(),
             timeline_withheld: None,
             requests: None,
+            locations: None,
         })
     }
 }
@@ -1422,11 +1424,14 @@ impl Backend for OpenCodeBackend {
     }
 
     fn transcript(&self, session: &Session, tail: usize) -> Result<Transcript> {
-        if self.uses_database() {
-            return self.database_transcript(session.clone(), tail);
-        }
-        let pages = paged_messages(&|path| self.request(path), &session.id, tail)?;
-        Ok(paged_transcript(session.clone(), &pages, tail))
+        let mut transcript = if self.uses_database() {
+            self.database_transcript(session.clone(), tail)?
+        } else {
+            let pages = paged_messages(&|path| self.request(path), &session.id, tail)?;
+            paged_transcript(session.clone(), &pages, tail)
+        };
+        transcript.locations = Some(opencode_locations(session));
+        Ok(transcript)
     }
 
     fn supports_full_search(&self) -> bool {
@@ -1461,6 +1466,7 @@ impl Backend for OpenCodeBackend {
         drop(turn);
         (read.turn_times, read.requests, read.timeline_withheld) =
             turn_times.finish(placer.finish().timeline());
+        read.locations = Some(opencode_locations(session));
         Ok(read)
     }
 
@@ -2655,6 +2661,17 @@ fn paged_truncation(
         }),
     }
     Truncation { window, source }
+}
+
+/// OpenCode records a directory on the session itself and no later one, so
+/// the session's directory is the one place its recording shows, whatever
+/// part of the messages a read reached.
+fn opencode_locations(session: &Session) -> crate::model::SessionLocations {
+    let mut locations = crate::locations::LocationStream::default();
+    if let Some(directory) = session.directory.as_deref().and_then(Path::to_str) {
+        locations.observe_directory(session.started_at, directory);
+    }
+    locations.finish(true)
 }
 
 /// A transcript from a paged API read, whose truncation depends on why the

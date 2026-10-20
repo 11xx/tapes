@@ -905,6 +905,7 @@ mod tests {
             notes: vec!["1 entry belongs to an abandoned branch.".into()],
             projection: None,
             kinds: None,
+            locations: None,
         }
     }
 

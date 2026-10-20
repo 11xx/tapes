@@ -1233,7 +1233,17 @@ enum Command {
     /// and a verified trailing record is named when the store ends after its
     /// last rendered turn. Activity comparisons use the whole-second
     /// timestamps shown to the reader. Claude subagent count notes report
-    /// failed directory enumeration instead of a count.
+    /// failed directory enumeration instead of a count. JSON adds `locations`:
+    /// the distinct places the recording shows the session working, as
+    /// changes only, in recording order, each `at` (record time), `cwd`, and
+    /// the `branch`, `head_commit` and `repository_url` the harness recorded
+    /// (a field it did not record is absent). `coverage` is `whole` for a
+    /// --full read and `from-window-start` for a bounded tail read, whose first
+    /// place is where the window opens. At most the newest 1024 are kept and
+    /// `omitted` counts the older ones dropped. Claude records a directory and
+    /// branch on every message; Codex a directory, branch, commit and
+    /// repository on its header and a directory on each turn; Pi and OpenCode
+    /// only the session's directory.
     Show {
         /// Cap each shown turn's text at N Unicode characters. JSON includes
         /// text_truncated: true and the original text_chars on capped turns;
@@ -1366,7 +1376,8 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Read a Claude child's own transcript, accounting and ending as tapes-child/10 under its parent session.
+    /// Read a Claude child's own transcript, accounting and ending as tapes-child/11 under its parent session.
+    /// The transcript's `locations` are the places the child's own recording shows, as show reports them.
     Child {
         #[command(flatten)]
         selection: SelectionArgs,
@@ -7848,6 +7859,7 @@ mod tests {
             notes: vec!["Skipped 1 unparseable line.".to_owned()],
             projection: None,
             kinds: None,
+            locations: None,
         }
     }
 

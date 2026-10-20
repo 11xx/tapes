@@ -3843,6 +3843,7 @@ impl Backend for SearchFixture {
             notes: Vec::new(),
             projection: None,
             kinds: None,
+            locations: None,
         })
     }
 }
@@ -7068,6 +7069,7 @@ impl Backend for BulkExportFixture {
             notes: Vec::new(),
             projection: None,
             kinds: None,
+            locations: None,
         })
     }
 }

@@ -38,6 +38,7 @@ pub mod lane_file;
 pub mod launch_parent;
 pub mod lineage;
 pub mod locate;
+mod locations;
 pub mod measurement;
 pub mod model;
 mod model_observation;

@@ -1767,6 +1767,9 @@ pub struct StreamedTranscript {
     pub(crate) requests: Option<crate::span::RequestTimeline>,
     /// Why a read asked for its timeline holds none: it outgrew a bound.
     pub(crate) timeline_withheld: Option<&'static str>,
+    /// The places the read showed the session working, for a backend whose
+    /// records name any.
+    pub(crate) locations: Option<crate::model::SessionLocations>,
 }
 
 /// What a whole read keeps beside the turns it hands over.
@@ -1915,6 +1918,7 @@ impl StreamedTranscript {
             turn_times: Vec::new(),
             timeline_withheld: None,
             requests: None,
+            locations: None,
         }
     }
 
@@ -1992,6 +1996,7 @@ impl StreamedTranscript {
         transcript.read = Some(read);
         transcript.terminal = self.terminal.clone();
         transcript.kinds = self.kinds.clone();
+        transcript.locations = self.locations.clone();
         transcript
     }
 }

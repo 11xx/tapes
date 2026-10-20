@@ -378,6 +378,11 @@ impl Backend for PiBackend {
         if let Some(read) = &mut transcript.read {
             read.unmapped = Some(unmapped);
         }
+        let mut locations = crate::locations::LocationStream::default();
+        for value in &recording.tail.values {
+            observe_pi_place(&mut locations, value);
+        }
+        transcript.locations = Some(locations.finish(!recording.tail.truncated));
         Ok(transcript)
     }
 
@@ -411,9 +416,11 @@ impl Backend for PiBackend {
         let mut launch = None;
         let mut last = None;
         let mut entries = 0;
+        let mut locations = crate::locations::LocationStream::default();
         let first = stream_jsonl(path, replay_pin(replay)?, |value, _, _| {
             super::validate_native_identity(value, "pi", &session.id)?;
             launch = merge_launch(launch, pi_launch_entry(value, &session.id));
+            observe_pi_place(&mut locations, value);
             if value["type"] == "session" {
                 return Ok(false);
             }
@@ -523,6 +530,7 @@ impl Backend for PiBackend {
             turn_times,
             requests,
             timeline_withheld,
+            locations: Some(locations.finish(true)),
         };
         let whole = recording.figure(session, &|_| true, recording.skipped, &streamed);
         streamed.folded = Some(Box::new(FoldedSession {
@@ -1095,6 +1103,17 @@ fn pi_cwd(value: &Value) -> Option<&str> {
     (value["type"] == "session")
         .then(|| value["cwd"].as_str())
         .flatten()
+}
+
+/// The header's directory is the only place a pi recording names.
+fn observe_pi_place(locations: &mut crate::locations::LocationStream, value: &Value) {
+    if let Some(cwd) = pi_cwd(value) {
+        locations.observe(crate::locations::Place {
+            at: timestamp(&value["timestamp"]),
+            cwd,
+            ..Default::default()
+        });
+    }
 }
 
 /// What a fork's header says about the history it copied: the session it

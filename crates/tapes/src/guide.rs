@@ -360,7 +360,7 @@ READ A RECORDING ON ANOTHER MACHINE
 PROBE BEFORE EXPORTING
   tapes show <id> --tail 40      A window, costing no bundle.
   tapes show <id> --turn-chars 2000  Cap each turn’s readable text, naming omitted characters.
-  tapes show <id> --json         tapes-session/21 turns, typed context events, and bounded read, graph, artifact, terminal, and recorded launch evidence.
+  tapes show <id> --json         tapes-session/22 turns, typed context events, locations, and bounded read, graph, artifact, terminal, and recorded launch evidence.
   tapes show <id> --exchange     Operator and assistant turns only, timestamps and ordinals kept; the name for --only operator,assistant.
   tapes show <id> --only operator --origin person  Operator turns with recorded person origin.
   tapes show <id> --omit tool    Every turn but tool calls and results; --only and --omit take kind labels, and export takes both.
@@ -442,6 +442,27 @@ PROBE BEFORE EXPORTING
   selection. Library consumers use `Session::newest_model_selection()` to
   obtain a `ModelSelectionSpan` and its `last: ModelSelectionRecord` without
   decoding the native records.
+
+  Claude, Codex, Pi and OpenCode report `locations` beside `turns`: where the
+  recording shows the session working, as changes only, in recording order.
+  Each observation has `at` (the record's time) and `cwd`, plus `branch`,
+  `head_commit` and `repository_url` where the harness recorded them; a field
+  it did not record is absent, never defaulted. Claude writes a directory and
+  branch on every message record, a subagent recording its own, and writes
+  `HEAD` where no branch is checked out (a detached head, or a directory
+  outside any repository); `HEAD` is no branch name, so the branch is absent.
+  Codex records a directory, branch, commit and repository on `session_meta`
+  and a directory on each `turn_context`; a turn in another directory is a
+  place with the directory alone, because that record says nothing of the
+  branch or commit there, and a detached head has a commit and no branch.
+  A URL's `user:password@` is dropped from `repository_url`. Pi's header
+  directory and OpenCode's session directory are each one observation, since
+  neither records a later one. `coverage` is `whole` for a --full
+  read and `from-window-start` for a bounded tail read, whose records are
+  only those its window holds: its first place is where the window opens,
+  not where the session began, and a window past the Pi header holds none.
+  At most the newest 1024 observations are kept; `omitted` counts the older
+  ones the cap dropped. Library consumers read `Transcript::locations`.
 
   show --turn-chars N caps each turn's text at N Unicode characters after
   selecting turns. Capped JSON turns carry text_truncated: true and text_chars
@@ -1736,13 +1757,15 @@ ONE READER PER MACHINE
 CHILD RECORDINGS
   tapes lineage PARENT --json
   tapes child PARENT --reference CHILD --tail 40 --json
-  Read a Claude child's own transcript, usage and ending as tapes-child/10,
+  Read a Claude child's own transcript, usage and ending as tapes-child/11,
   retaining its parent and reference. It is not an ordinary listed session; nested lineage
   remains uninspected and child activity is never added to parent totals.
   The child's id is qualified as PARENT::CHILD, and a child whose recorded
   native session ids do not name the parent, or name none, is refused.
   --full streams the child's whole recording: usage covers every turn, and the
-  transcript and ending keep the newest --tail turns.
+  transcript and ending keep the newest --tail turns. The transcript's
+  `locations` are the places the child's own recording shows, as show reports
+  them.
 HISTORICAL READS
   tapes page SESSION --bytes 65536 --json
   tapes history-search SESSION --search TEXT --pages 8 --json

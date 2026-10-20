@@ -10,7 +10,7 @@ use crate::model::{Session, Transcript, TranscriptEvidence, Truncation};
 use crate::usage::{self, TurnTally, UsageView};
 use crate::Selection;
 
-pub const CHILD_SCHEMA: &str = "tapes-child/10";
+pub const CHILD_SCHEMA: &str = "tapes-child/11";
 
 #[derive(Debug, Serialize)]
 pub struct ChildView {
@@ -114,6 +114,7 @@ pub fn read_full_with_backends(
         read.trailing_record.clone(),
         usage.notes.clone(),
     );
+    transcript.locations = read.locations.clone();
     transcript.notes.extend(selection_notes.clone());
     let mut ending = endings::ending(
         transcript.clone(),

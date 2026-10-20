@@ -465,6 +465,11 @@ impl Backend for CodexBackend {
         if let Some(read) = &mut transcript.read {
             read.unmapped = Some(unmapped);
         }
+        let mut locations = crate::locations::LocationStream::default();
+        for value in &recording.tail.values {
+            observe_codex_place(&mut locations, value);
+        }
+        transcript.locations = Some(locations.finish(!recording.tail.truncated));
         Ok(transcript)
     }
 
@@ -485,6 +490,7 @@ impl Backend for CodexBackend {
         let mut terminal = None;
         let mut launch = None;
         let mut reader = CodexTurns::default();
+        let mut locations = crate::locations::LocationStream::default();
         let mut turn_times = super::TurnStamps::new(options);
         let mut turn = super::timed(&mut turn_times, turn);
         // The session's accounting folds from the same records and gaps as
@@ -508,6 +514,7 @@ impl Backend for CodexBackend {
                 if value["type"] == "session_meta" {
                     launch = codex_launch(value);
                 }
+                observe_codex_place(&mut locations, value);
                 if let Some(observed) = codex_terminal(value) {
                     terminal = Some(observed);
                 }
@@ -554,6 +561,7 @@ impl Backend for CodexBackend {
             turn_times,
             requests,
             timeline_withheld,
+            locations: Some(locations.finish(true)),
         })
     }
 
@@ -1023,6 +1031,35 @@ fn codex_cwd(value: &Value) -> Option<&str> {
     match value["type"].as_str() {
         Some("session_meta") | Some("turn_context") => value["payload"]["cwd"].as_str(),
         _ => None,
+    }
+}
+
+/// `session_meta` names the starting directory with the repository state it
+/// was in; each `turn_context` names only the directory the turn ran in, so a
+/// turn in another directory is a place with no branch or commit recorded.
+fn observe_codex_place(locations: &mut crate::locations::LocationStream, value: &Value) {
+    let at = timestamp(&value["timestamp"]);
+    let payload = &value["payload"];
+    match value["type"].as_str() {
+        Some("session_meta") => {
+            let Some(cwd) = payload["cwd"].as_str() else {
+                return;
+            };
+            let git = &payload["git"];
+            locations.observe(crate::locations::Place {
+                at,
+                cwd,
+                branch: git["branch"].as_str(),
+                head_commit: git["commit_hash"].as_str(),
+                repository_url: git["repository_url"].as_str(),
+            });
+        }
+        Some("turn_context") => {
+            if let Some(cwd) = payload["cwd"].as_str() {
+                locations.observe_directory(at, cwd);
+            }
+        }
+        _ => {}
     }
 }
 

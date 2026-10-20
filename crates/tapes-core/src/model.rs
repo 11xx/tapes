@@ -11,7 +11,7 @@ use crate::event::ToolEvent;
 use crate::measurement::{MeasurementCompleteness, MeasurementReason};
 use crate::usage::UsageDetail;
 
-pub const SESSION_SCHEMA: &str = "tapes-session/21";
+pub const SESSION_SCHEMA: &str = "tapes-session/22";
 /// How the recording identifies the session's launch mode.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -480,6 +480,53 @@ pub struct ModelSelectionSpan {
     pub first: ModelSelectionRecord,
     pub last: ModelSelectionRecord,
 }
+
+/// Where a recording shows its session working at one moment. A field the
+/// harness did not record in the observed record is absent, and every
+/// observation is a change from the one before it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LocationObservation {
+    /// The stamp of the record that showed this location.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub at: Option<DateTime<Utc>>,
+    pub cwd: String,
+    /// The branch name. A detached head, or a directory outside any
+    /// repository, has none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub head_commit: Option<String>,
+    /// The repository's remote as the harness wrote it, without any
+    /// credentials a URL carried.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repository_url: Option<String>,
+}
+
+/// Which part of a recording a location stream covers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum LocationCoverage {
+    /// Every record of the recording was read.
+    Whole,
+    /// A bounded read of the recording's tail: only the records its window
+    /// holds were read, so the first observation is where the window opens,
+    /// not where the session began.
+    FromWindowStart,
+}
+
+/// The distinct places a recording shows its session working, in recording
+/// order. At most [`MAX_LOCATION_OBSERVATIONS`] are kept, the newest.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionLocations {
+    pub coverage: LocationCoverage,
+    pub observations: Vec<LocationObservation>,
+    /// How many of the oldest observations the cap dropped.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub omitted: usize,
+}
+
+/// The most location observations a read keeps.
+pub const MAX_LOCATION_OBSERVATIONS: usize = 1024;
 
 impl Session {
     /// The newest observed selection and its last native record coordinate.
@@ -1843,6 +1890,9 @@ pub struct Transcript {
     /// The kinds the harness's records can evidence, where the reader that
     /// produced the transcript is known.
     pub kinds: Option<KindDeclaration>,
+    /// The places the read shows the session working, where the harness
+    /// records any.
+    pub locations: Option<SessionLocations>,
 }
 
 /// Which turn kinds a harness's records can evidence, and the kind its reader
@@ -1908,6 +1958,7 @@ impl Transcript {
             notes,
             projection: None,
             kinds: None,
+            locations: None,
         }
     }
 
@@ -2140,6 +2191,7 @@ impl<'de> Deserialize<'de> for Transcript {
             notes: serialized.notes,
             projection: serialized.projection,
             kinds: serialized.kinds,
+            locations: serialized.locations,
         })
     }
 }
@@ -2181,6 +2233,8 @@ struct TranscriptTail<'a> {
     projection: Option<&'a Projection>,
     #[serde(skip_serializing_if = "Option::is_none")]
     kinds: Option<&'a KindDeclaration>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    locations: Option<&'a SessionLocations>,
 }
 
 impl<'a> TranscriptTail<'a> {
@@ -2198,6 +2252,7 @@ impl<'a> TranscriptTail<'a> {
             notes: &transcript.notes,
             projection: transcript.projection.as_ref(),
             kinds: transcript.kinds.as_ref(),
+            locations: transcript.locations.as_ref(),
         }
     }
 }
@@ -2291,6 +2346,8 @@ struct SerializedTranscript {
     projection: Option<Projection>,
     #[serde(default)]
     kinds: Option<KindDeclaration>,
+    #[serde(default)]
+    locations: Option<SessionLocations>,
 }
 
 #[cfg(test)]
@@ -2465,6 +2522,7 @@ mod tests {
             notes: vec!["One record was unavailable.".into()],
             projection: None,
             kinds: None,
+            locations: None,
         };
 
         assert_round_trip(&model);
@@ -2790,6 +2848,7 @@ mod tests {
             notes: Vec::new(),
             projection: None,
             kinds: None,
+            locations: None,
         };
 
         let value = serde_json::to_value(&transcript).unwrap();
@@ -2976,6 +3035,7 @@ mod tests {
             notes: Vec::new(),
             projection: None,
             kinds: None,
+            locations: None,
         };
 
         let value = serde_json::to_value(&transcript).unwrap();

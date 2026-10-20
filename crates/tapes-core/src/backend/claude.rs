@@ -489,14 +489,10 @@ impl Backend for ClaudeBackend {
             .iter()
             .rposition(|value| !parse_turns(value).is_empty());
         let trailing = trailing_record(read.values.iter(), last_turn, claude_trailing_kind);
-        Ok(transcript(
-            session,
-            turns,
-            usize::MAX,
-            &read,
-            trailing,
-            Vec::new(),
-        ))
+        let locations = claude_locations(&read);
+        let mut child = transcript(session, turns, usize::MAX, &read, trailing, Vec::new());
+        child.locations = Some(locations);
+        Ok(child)
     }
 
     fn history_page(
@@ -686,6 +682,7 @@ impl Backend for ClaudeBackend {
         if let Some(read) = &mut transcript.read {
             read.unmapped = Some(unmapped);
         }
+        transcript.locations = Some(claude_locations(&recording.tail));
         Ok(transcript)
     }
 
@@ -751,6 +748,7 @@ impl Backend for ClaudeBackend {
         if !read.gaps.is_empty() {
             records.selections.interrupt();
         }
+        let locations = std::mem::take(&mut records.locations).finish(true);
         let mut whole = session.clone();
         records.apply(&mut whole);
         let whole = super::with_unreadable_records(whole, read.skipped);
@@ -777,6 +775,7 @@ impl Backend for ClaudeBackend {
             turn_times,
             requests,
             timeline_withheld,
+            locations: Some(locations),
         })
     }
 
@@ -1068,6 +1067,7 @@ impl Backend for ClaudeBackend {
         if !read.gaps.is_empty() {
             records.selections.interrupt();
         }
+        let locations = std::mem::take(&mut records.locations).finish(true);
         records.apply(&mut session);
         let session = super::with_unreadable_records(session, read.skipped);
         Ok(StreamedChild {
@@ -1090,6 +1090,7 @@ impl Backend for ClaudeBackend {
                 turn_times: Vec::new(),
                 timeline_withheld: None,
                 requests: None,
+                locations: Some(locations),
             },
         })
     }
@@ -1273,6 +1274,7 @@ struct ClaudeRecords {
     selections: crate::model_observation::Selections,
     title: Option<String>,
     directory: Option<String>,
+    locations: crate::locations::LocationStream,
     activity: ActivityRange,
     copies: CopyEvidence,
 }
@@ -1301,6 +1303,7 @@ impl ClaudeRecords {
         if self.directory.is_none() {
             self.directory = claude_cwd(value).map(str::to_owned);
         }
+        observe_claude_place(&mut self.locations, value);
         self.activity.observe(value);
     }
 
@@ -1531,6 +1534,33 @@ fn subagent_notes(path: &Path) -> Vec<String> {
 /// Claude repeats the working directory on every message line.
 fn claude_cwd(value: &Value) -> Option<&str> {
     value["cwd"].as_str()
+}
+
+/// Claude repeats the working directory and checked-out branch on every
+/// message record. A record without a `cwd` states no place. `HEAD` is the
+/// name git reports when no branch is checked out, so it is no branch name;
+/// Claude writes it both for a detached head and outside any repository.
+fn observe_claude_place(locations: &mut crate::locations::LocationStream, value: &Value) {
+    let Some(cwd) = claude_cwd(value) else {
+        return;
+    };
+    locations.observe(crate::locations::Place {
+        at: timestamp(&value["timestamp"]),
+        cwd,
+        branch: value["gitBranch"]
+            .as_str()
+            .filter(|branch| *branch != "HEAD"),
+        ..Default::default()
+    });
+}
+
+/// The places a bounded read's window shows the session working.
+fn claude_locations(read: &Jsonl) -> crate::model::SessionLocations {
+    let mut locations = crate::locations::LocationStream::default();
+    for value in &read.values {
+        observe_claude_place(&mut locations, value);
+    }
+    locations.finish(!read.truncated)
 }
 
 fn newest_cost_state(values: &[Value]) -> Option<&Value> {
