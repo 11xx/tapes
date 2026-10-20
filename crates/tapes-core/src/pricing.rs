@@ -33,7 +33,7 @@ use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use chrono::{DateTime, Datelike, NaiveDate, NaiveTime, SecondsFormat, Utc, Weekday};
 use serde::{Deserialize, Serialize};
 
@@ -60,7 +60,30 @@ pub const ESTIMATE_KIND: &str = "list-price-estimate";
 /// The environment variable naming a price table, after `--prices`.
 pub const PRICES_ENV: &str = "TAPES_PRICES";
 /// The most of a price table file read into memory.
-const MAX_TABLE_BYTES: u64 = 4 * 1024 * 1024;
+pub const MAX_TABLE_BYTES: u64 = 4 * 1024 * 1024;
+
+/// The bytes of the regular file at `path`, which holds at most `limit`
+/// bytes. The open never waits on a FIFO's writer, and anything but a
+/// regular file is refused before it is read.
+pub fn read_regular_file(path: &Path, limit: u64) -> Result<Vec<u8>> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let file = std::fs::File::options()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(path)
+        .with_context(|| format!("cannot open {}", path.display()))?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() {
+        bail!("{} is not a regular file", path.display());
+    }
+    if metadata.len() > limit {
+        bail!("{} is larger than {limit} bytes", path.display());
+    }
+    let mut bytes = Vec::new();
+    std::io::Read::read_to_end(&mut std::io::Read::take(file, limit), &mut bytes)
+        .with_context(|| format!("cannot read {}", path.display()))?;
+    Ok(bytes)
+}
 
 /// The disjoint categories an estimate prices. Reasoning is a share of
 /// output and is priced as output.
@@ -653,30 +676,13 @@ impl PriceTable {
         })
     }
 
-    /// Read and validate the table at `path`, a regular file of bounded size.
-    /// The open never waits on a FIFO's writer; anything but a regular file
-    /// is refused before it is read.
+    /// Read and validate the table at `path`, a regular file of at most
+    /// [`MAX_TABLE_BYTES`].
     pub fn read(path: &Path) -> Result<Self> {
-        use std::os::unix::fs::OpenOptionsExt;
-        let file = std::fs::File::options()
-            .read(true)
-            .custom_flags(libc::O_NONBLOCK)
-            .open(path)
-            .with_context(|| format!("cannot open the price table {}", path.display()))?;
-        let metadata = file.metadata()?;
-        if !metadata.is_file() {
-            return Err(anyhow!("the price table {} is not a file", path.display()));
-        }
-        if metadata.len() > MAX_TABLE_BYTES {
-            return Err(anyhow!(
-                "the price table {} is larger than {} bytes",
-                path.display(),
-                MAX_TABLE_BYTES
-            ));
-        }
-        let mut text = String::new();
-        std::io::Read::read_to_string(&mut std::io::Read::take(file, MAX_TABLE_BYTES), &mut text)
+        let bytes = read_regular_file(path, MAX_TABLE_BYTES)
             .with_context(|| format!("cannot read the price table {}", path.display()))?;
+        let text = String::from_utf8(bytes)
+            .with_context(|| format!("the price table {} is not UTF-8", path.display()))?;
         Self::parse(&text).with_context(|| format!("in the price table {}", path.display()))
     }
 

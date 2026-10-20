@@ -43,6 +43,8 @@ pub const FETCH_FILE: &str = "prices-fetch.json";
 pub const LITELLM_SOURCE: &str = "LiteLLM";
 /// The most of a source read into memory.
 const SOURCE_BYTES: u64 = 16 * 1024 * 1024;
+/// The most of a fetch record read into memory.
+pub const FETCH_RECORD_BYTES: u64 = 64 * 1024;
 /// Bytes of `curl`'s own error kept to name what failed.
 const ERROR_BYTES: u64 = 2 * 1024;
 /// The environment variable naming a directory of copies every update
@@ -749,10 +751,11 @@ pub struct FetchRecord {
 }
 
 impl FetchRecord {
-    /// The record at `path`; none when it is absent or not one.
+    /// The record at `path`; none when it is absent, not a regular file of
+    /// at most [`FETCH_RECORD_BYTES`], or not a record.
     pub fn read(path: &Path) -> Option<Self> {
-        let text = std::fs::read_to_string(path).ok()?;
-        serde_json::from_str::<Self>(&text)
+        let bytes = pricing::read_regular_file(path, FETCH_RECORD_BYTES).ok()?;
+        serde_json::from_slice::<Self>(&bytes)
             .ok()
             .filter(|record| record.schema == FETCH_SCHEMA)
     }

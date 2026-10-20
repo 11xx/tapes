@@ -381,3 +381,35 @@ fn an_update_where_every_source_fails_writes_no_empty_table() {
     let record = FetchRecord::read(&data.path().join("prices-fetch.json")).unwrap();
     assert_eq!(record.attempted_at, at(1));
 }
+
+/// A FIFO at `path`, which no process writes.
+fn fifo(path: &Path) {
+    let name = std::ffi::CString::new(path.to_str().unwrap()).unwrap();
+    assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+}
+
+#[test]
+fn a_fetch_record_that_is_a_fifo_or_oversized_reads_as_none_without_waiting() {
+    // Claim: a fetch record that is a FIFO, or a well-formed record padded
+    // past 64 KiB, reads as no record, at once. Rejects an unbounded read
+    // that waits on the FIFO's writer or pulls the whole file into memory.
+    let data = tempfile::tempdir().unwrap();
+    let record = data.path().join("prices-fetch.json");
+    let padded = format!(
+        "{{\"schema\":\"tapes-price-fetch/1\",\"attempted_at\":\"2026-10-01T12:00:00Z\",\
+         \"sources\":{{}}}}{}",
+        " ".repeat(70 * 1024)
+    );
+    fs::write(&record, padded).unwrap();
+    assert_eq!(FetchRecord::read(&record), None);
+    fs::remove_file(&record).unwrap();
+    fifo(&record);
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = sender.send(FetchRecord::read(&record));
+    });
+    let read = receiver
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .expect("reading a FIFO record returns without a writer");
+    assert_eq!(read, None);
+}
