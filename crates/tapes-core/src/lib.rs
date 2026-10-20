@@ -20,6 +20,7 @@ pub use event::{
 
 pub mod allowance;
 pub mod artifact;
+pub mod attribution;
 pub mod backend;
 pub mod brief;
 pub mod bundle;

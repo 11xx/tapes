@@ -397,6 +397,15 @@ impl Placed {
     pub(crate) fn figures(&self) -> usize {
         self.placements.len()
     }
+
+    /// The requests each figure holds: one count per span and then the
+    /// remainder.
+    pub(crate) fn requests(&self) -> Vec<usize> {
+        self.placements
+            .iter()
+            .map(|placement| placement.requests)
+            .collect()
+    }
 }
 
 /// A backend's span read: one session figure per span and the remainder,
