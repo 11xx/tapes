@@ -725,6 +725,7 @@ const AMENDED: &str = "c1a00000-0000-4000-8000-000000000007";
 const LINGERING: &str = "c1a00000-0000-4000-8000-000000000008";
 const LONG: &str = "c1a00000-0000-4000-8000-000000000009";
 const ON_MAIN: &str = "c1a00000-0000-4000-8000-00000000000a";
+const INTEGRATOR: &str = "c1a00000-0000-4000-8000-00000000000b";
 
 /// An interactive session in the main checkout: on `feat-a` it edits and
 /// commits c1 at 10:08 and talks on; at 10:12 it switches to `feat-b`, where
@@ -988,6 +989,39 @@ fn on_main(sandbox: &Sandbox) -> Names {
     claude.reply(at("10:30:00"));
     claude.write(sandbox, &repo);
     names(&[("m1", &m1), ("n", &n)])
+}
+
+/// A delegate's commit d1 lands at 11:00 on `lane-d`; an integrator in the
+/// main checkout runs a tool that fast-forwards `main` to it at 11:04, which
+/// records the lines d1 adds as the call's shell edit.
+fn integrator(sandbox: &Sandbox) -> Names {
+    let repo = sandbox.repo();
+    let wt_d = sandbox.worktree("wt-d", "lane-d");
+    let d1_lines = lines("upsilon");
+    let d1 = sandbox.commit(&wt_d, at("11:00:00"), "lane_d.rs", &refs(&d1_lines), "d1");
+    sandbox.git(&repo, None, &["merge", "-q", "--ff-only", "lane-d"]);
+    sandbox.retire(&wt_d, "lane-d");
+
+    let file = repo.join("lane_d.rs");
+    let mut hunk: Vec<String> = Vec::new();
+    hunk.extend(d1_lines.iter().map(|line| format!("+{line}")));
+    let mut claude = Claude::lead(INTEGRATOR, &repo, "main");
+    claude.prompt(at("10:50:00"));
+    claude.reply(at("10:50:05"));
+    claude.reply(at("10:55:00"));
+    claude.call(
+        at("11:04:00"),
+        "Bash",
+        json!({"command": "arc integrate lane-d"}),
+        "integrated lane-d",
+        json!({"stdout": "integrated lane-d\n", "stderr": "", "interrupted": false,
+            "isImage": false, "bashEditDiff": {"changedFiles": [file], "moreFiles": 0,
+                "files": [{"filePath": file, "created": true, "hunks": [{"oldStart": 0,
+                    "oldLines": 0, "newStart": 1, "newLines": 3, "lines": hunk}]}]}}),
+    );
+    claude.reply(at("11:06:00"));
+    claude.write(sandbox, &repo);
+    names(&[("d1", &d1)])
 }
 
 /// A pi session in a live worktree on `lane-u` commits u1 at 16:05 and works
@@ -1361,6 +1395,33 @@ fn uncommitted_work_ends_when_the_branch_moves_on() {
     );
     assert_eq!(
         labels(session, &names)["n"],
+        BTreeSet::from([(Tier::Estimated, Basis::WorkingStretch)])
+    );
+}
+
+/// Claim: an edit recorded after a commit was committed applied the commit
+/// rather than wrote it, so it is no evidence of authoring: an integrator
+/// whose tool records the merged lines four minutes after the commit is
+/// placed only by its proximity to the commit. Rejects a tolerance wide
+/// enough to admit an integration's edit as matched evidence.
+#[test]
+fn an_edit_after_the_commit_is_not_authoring() {
+    let sandbox = Sandbox::new();
+    let names = integrator(&sandbox);
+    let attribution = sandbox.day();
+    let session = session(&attribution, INTEGRATOR);
+    assert!(
+        !session
+            .partition
+            .evidence
+            .iter()
+            .any(|admitted| admitted.kind == Kind::Edited),
+        "{:?}",
+        session.partition.evidence
+    );
+    assert_eq!(requests(session, &names), expect(&[("d1", 4)]));
+    assert_eq!(
+        labels(session, &names)["d1"],
         BTreeSet::from([(Tier::Estimated, Basis::WorkingStretch)])
     );
 }

@@ -85,8 +85,9 @@ pub struct Params {
     /// The fewest distinct added lines an edit must have to match.
     pub edit_lines: usize,
     /// How long after a commit's committer time an edit may still be
-    /// evidence of writing it; a later edit applied the commit. `None`
-    /// admits an edit anywhere in the commit's window.
+    /// evidence of writing it: a later edit applied the commit rather than
+    /// wrote it, and the tolerance holds a call that edits and commits at
+    /// once. `None` admits an edit anywhere in the commit's window.
     pub edit_authoring: Option<Duration>,
     /// How close to a commit's author time a request must lie.
     pub proximity: Duration,
@@ -103,7 +104,7 @@ impl Default for Params {
             idle: Duration::minutes(45),
             edit_overlap: 0.5,
             edit_lines: 2,
-            edit_authoring: Some(Duration::minutes(5)),
+            edit_authoring: Some(Duration::minutes(1)),
             proximity: Duration::minutes(30),
             presence_share: 0.25,
         }
