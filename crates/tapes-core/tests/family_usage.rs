@@ -280,7 +280,7 @@ fn full(store: &Store, id: &str) -> Value {
 fn a_family_prices_every_member_once_across_harnesses() {
     let store = family_store();
     let family = family(&store, false);
-    assert_eq!(family["schema"], "tapes-family-usage/2");
+    assert_eq!(family["schema"], "tapes-family-usage/3");
 
     let members: Vec<(String, String, String)> = family["sessions"]
         .as_array()

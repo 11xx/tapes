@@ -58,7 +58,7 @@ pub use evidence::{
     UnresolvedChild, UnresolvedReason,
 };
 
-pub const FAMILY_SCHEMA: &str = "tapes-family-usage/2";
+pub const FAMILY_SCHEMA: &str = "tapes-family-usage/3";
 
 /// The most sessions a family holds; a search that finds more stops and says
 /// so.

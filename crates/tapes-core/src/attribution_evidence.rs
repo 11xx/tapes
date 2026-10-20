@@ -5,7 +5,9 @@
 //! line is a record whose `kind` says what it states:
 //!
 //! - `lineage`: a session launched another;
-//! - `binding`: a session's consumption served a piece of work.
+//! - `binding`: a session's consumption served a piece of work, over a span
+//!   or the whole session;
+//! - `event`: a session acted for a piece of work at an instant.
 //!
 //! A reader keeps what is valid, counts what is not, and ignores what it does
 //! not know: an unknown field is ignored, an unknown `kind` is counted by
@@ -53,11 +55,13 @@ pub struct SessionRef {
     pub id: String,
 }
 
-/// How a producer stands behind a record.
+/// How a producer stands behind a record. A reader that ranks evidence
+/// ranks `bound` first.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Tier {
-    /// The producer itself launched the child and recorded both sessions.
+    /// The producer's own record: it launched the child, or ran or recorded
+    /// the work, and recorded the sessions involved.
     Bound,
     /// The relation is asserted without such a record.
     Declared,
@@ -77,7 +81,8 @@ pub struct Lineage {
     pub subject: Option<String>,
 }
 
-/// The work a binding names.
+/// The work a binding or an event names. Its identity is its label when it
+/// has one, and otherwise its commits.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize)]
 pub struct Work {
     /// Full object names, lowercase.
@@ -106,6 +111,17 @@ pub struct Binding {
     pub role: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub span: Option<Span>,
+}
+
+/// A session acted for a piece of work at an instant.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize)]
+pub struct Event {
+    pub session: SessionRef,
+    pub work: Work,
+    pub tier: Tier,
+    pub at: DateTime<Utc>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
 }
 
 /// Why a line is malformed.
@@ -169,6 +185,7 @@ pub struct FileReport {
     pub written_at: Option<DateTime<Utc>>,
     pub lineage: KindCount,
     pub binding: KindCount,
+    pub event: KindCount,
     pub malformed: Vec<MalformedLine>,
     /// Records of a kind this reader does not know, by kind.
     pub unknown_kinds: BTreeMap<String, usize>,
@@ -184,6 +201,7 @@ pub struct EvidenceFile {
     pub report: FileReport,
     pub lineage: Vec<Lineage>,
     pub bindings: Vec<Binding>,
+    pub events: Vec<Event>,
 }
 
 /// Why a path named as evidence is refused.
@@ -347,6 +365,7 @@ pub fn read_file(path: &Path) -> Result<EvidenceFile, EvidenceError> {
             written_at,
             lineage: KindCount::default(),
             binding: KindCount::default(),
+            event: KindCount::default(),
             malformed: Vec::new(),
             unknown_kinds: BTreeMap::new(),
             duplicates: 0,
@@ -354,9 +373,11 @@ pub fn read_file(path: &Path) -> Result<EvidenceFile, EvidenceError> {
         },
         lineage: Vec::new(),
         bindings: Vec::new(),
+        events: Vec::new(),
     };
     let mut pairs: HashSet<(SessionRef, SessionRef)> = HashSet::new();
     let mut bindings: HashSet<Binding> = HashSet::new();
+    let mut events: HashSet<Event> = HashSet::new();
     let mut number = 1usize;
     let mut after_header = 0usize;
     loop {
@@ -402,6 +423,15 @@ pub fn read_file(path: &Path) -> Result<EvidenceFile, EvidenceError> {
                     read.report.duplicates += 1;
                 }
             }
+            Ok(Parsed::Event(record)) => {
+                read.report.event.read += 1;
+                if events.insert(record.clone()) {
+                    read.report.event.used += 1;
+                    read.events.push(record);
+                } else {
+                    read.report.duplicates += 1;
+                }
+            }
             Ok(Parsed::Unknown(kind)) => {
                 *read.report.unknown_kinds.entry(kind).or_default() += 1;
             }
@@ -436,6 +466,7 @@ fn parse_header(line: &[u8]) -> Result<(String, Option<DateTime<Utc>>), HeaderFa
 enum Parsed {
     Lineage(Lineage),
     Binding(Binding),
+    Event(Event),
     Unknown(String),
 }
 
@@ -450,6 +481,7 @@ fn parse_record(line: &[u8]) -> Result<Parsed, Malformed> {
     match kind {
         "lineage" => parse_lineage(&record).map(Parsed::Lineage),
         "binding" => parse_binding(&record).map(Parsed::Binding),
+        "event" => parse_event(&record).map(Parsed::Event),
         other => Ok(Parsed::Unknown(
             other.chars().take(MAX_KIND_CHARS).collect(),
         )),
@@ -473,8 +505,7 @@ fn parse_lineage(record: &Map<String, Value>) -> Result<Lineage, Malformed> {
     })
 }
 
-fn parse_binding(record: &Map<String, Value>) -> Result<Binding, Malformed> {
-    let session = session_ref(record.get("session")).ok_or(Malformed::MissingField)?;
+fn parse_work(record: &Map<String, Value>) -> Result<Work, Malformed> {
     let Some(Value::Object(work)) = record.get("work") else {
         return Err(Malformed::MissingField);
     };
@@ -487,6 +518,33 @@ fn parse_binding(record: &Map<String, Value>) -> Result<Binding, Malformed> {
     if commits.is_empty() && label.is_none() {
         return Err(Malformed::MissingField);
     }
+    Ok(Work {
+        commits,
+        label,
+        repository: optional_text(work.get("repository")),
+    })
+}
+
+fn parse_event(record: &Map<String, Value>) -> Result<Event, Malformed> {
+    let session = session_ref(record.get("session")).ok_or(Malformed::MissingField)?;
+    let work = parse_work(record)?;
+    let tier = parse_tier(record)?;
+    let at = match record.get("at") {
+        None | Some(Value::Null) => return Err(Malformed::MissingField),
+        Some(value) => instant(value).ok_or(Malformed::InvalidInstant)?,
+    };
+    Ok(Event {
+        session,
+        work,
+        tier,
+        at,
+        role: optional_text(record.get("role")),
+    })
+}
+
+fn parse_binding(record: &Map<String, Value>) -> Result<Binding, Malformed> {
+    let session = session_ref(record.get("session")).ok_or(Malformed::MissingField)?;
+    let work = parse_work(record)?;
     let tier = parse_tier(record)?;
     let span = match record.get("span") {
         None | Some(Value::Null) => None,
@@ -505,11 +563,7 @@ fn parse_binding(record: &Map<String, Value>) -> Result<Binding, Malformed> {
     };
     Ok(Binding {
         session,
-        work: Work {
-            commits,
-            label,
-            repository: optional_text(work.get("repository")),
-        },
+        work,
         tier,
         role: optional_text(record.get("role")),
         span,

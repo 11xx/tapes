@@ -140,7 +140,7 @@ fn a_family_with_evidence_names_what_links_each_delegate() {
         String::from_utf8_lossy(&output.stderr)
     );
     let family: Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(family["schema"], "tapes-family-usage/2");
+    assert_eq!(family["schema"], "tapes-family-usage/3");
     let sessions = family["sessions"].as_array().unwrap();
     assert_eq!(sessions.len(), 2, "{family:#}");
     assert_eq!(sessions[1]["id"], CHILD);

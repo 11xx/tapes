@@ -534,7 +534,7 @@ fn two_generations_join_through_lineage_records_alone() {
     assert!(alone.get("evidence").is_none(), "{alone:#}");
 
     let family = family(&store, Some(std::slice::from_ref(&file)));
-    assert_eq!(family["schema"], "tapes-family-usage/2");
+    assert_eq!(family["schema"], "tapes-family-usage/3");
     assert_eq!(
         ids(&family),
         vec![LEAD, CODEX_CHILD, PI_CHILD],

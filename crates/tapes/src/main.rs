@@ -1742,7 +1742,7 @@ enum Command {
     /// not established, or from sampled copy evidence when a long recording's
     /// id check kept only a sample of its ids, with `overlap.sampled` naming
     /// those sessions. `--family` instead answers one session and everything
-    /// it caused as tapes-family-usage/2: the session, its subagents, the
+    /// it caused as tapes-family-usage/3: the session, its subagents, the
     /// sessions that name a member in a `tapes-parent` launch marker in any
     /// harness, and with `--evidence` the sessions an evidence file launches
     /// from a member, and with `--continuations` the session it continued.
@@ -1845,7 +1845,7 @@ enum Command {
         #[arg(long, conflicts_with = "by")]
         reconcile: bool,
         /// Price one session with everything it caused, as
-        /// tapes-family-usage/2: the session, its Claude subagents and Codex
+        /// tapes-family-usage/3: the session, its Claude subagents and Codex
         /// spawns, every session in any harness whose first prompt opens
         /// with a `tapes-parent: <harness>:<session-id>` line naming a member
         /// (recursively), and sessions that declare a member as their fork
@@ -1897,7 +1897,7 @@ enum Command {
         /// counts once, under its recording's parent or else the first claimed
         /// parent that became a member. A child no installed store holds is
         /// listed under `evidence.unresolved` and adds nothing. `binding`
-        /// records are read and counted, and nothing uses them yet. Nothing
+        /// and `event` records are read and counted, and none is used. Nothing
         /// is read unless named: no default directory, no environment
         /// variable. A missing path, and a file whose first line is not a
         /// header of the schema, refuse. Malformed lines are reported with
@@ -2193,7 +2193,7 @@ enum Command {
         prices: Option<PathBuf>,
         /// Render the versioned tapes-usage/17 object, tapes-usage-summary/16
         /// for a selection, tapes-change-usage/2 for a change view, or
-        /// tapes-family-usage/2 under --family, as JSON. `session.model_observation` says
+        /// tapes-family-usage/3 under --family, as JSON. `session.model_observation` says
         /// whether more than one model and effort was observed (`mixed`) and
         /// whether a gap, partial read or budget kept the split incomplete
         /// (`attribution_uncertain`); the session model is then only the latest

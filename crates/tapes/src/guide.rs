@@ -1325,7 +1325,7 @@ PROBE BEFORE EXPORTING
   which can name a recording path.
 
   `usage SESSION --family [--continuations] [--evidence PATH]` prices a
-  session with everything it caused, as tapes-family-usage/2. A session that
+  session with everything it caused, as tapes-family-usage/3. A session that
   dispatches work causes consumption in other sessions, and the family names
   them from what the recordings state and the evidence a caller names: the
   session itself (role `lead`); a Claude parent's subagent recordings and a
@@ -1376,8 +1376,8 @@ PROBE BEFORE EXPORTING
   `evidence.files` repeats each file's read report (producer, records read
   and used by kind, malformed lines by line number and fixed reason, unknown
   kinds, duplicates, any truncation) with what its records did: `adopted`,
-  `agreed`, `conflicting`, `unresolved` and `not_applied`. A binding record
-  is read and counted, and nothing uses it yet.
+  `agreed`, `conflicting`, `unresolved` and `not_applied`. A family counts
+  `binding` and `event` records and uses none.
   Each member's figure is the one `usage --full` reports for its recording.
   A Claude recording whose accounting is a recorded total counts its
   subagents' requests, so those subagent recordings are listed with their
@@ -2076,40 +2076,64 @@ DECLARE WHO LAUNCHED WHOM
   A session reference is {"harness":H,"id":I}: H is a harness name as `tapes
   list` prints it (claude, codex, pi, opencode) and I that harness's own
   session id. Every later line is a record whose `kind` says what it states.
+  `tier` is required on every record: `bound` when it is the producer's own
+  record (it launched the child, or ran or recorded the work, and recorded
+  the sessions involved), `declared` when it is asserted without that
+  record, as a hand-written line is. A reader that ranks evidence ranks
+  `bound` first.
   `lineage`: a session launched another.
       {"kind":"lineage","parent":{"harness":"claude","id":"<id>"},"child":{"harness":"codex","id":"<id>"},"tier":"bound","at":"2026-01-10T09:03:20Z","label":"nightly-review","subject":"auth-rework"}
-  `parent` and `child` are required and the child is not the parent. `tier`
-  is required: `bound` when the producer launched the child itself and
-  recorded both sessions, `declared` when the relation is asserted without
-  that record, as a hand-written line is. `at` is optional, the RFC 3339
-  instant the child was launched. `label` and `subject` are optional strings
-  saying what the launch was called and the work it was for; they are shown
-  and never used to link.
+  `parent` and `child` are required and the child is not the parent. `at` is
+  optional, the RFC 3339 instant the child was launched. `label` and
+  `subject` are optional strings saying what the launch was called and the
+  work it was for; they are shown and never used to link.
   `binding`: a session's consumption served a piece of work.
       {"kind":"binding","session":{"harness":"claude","id":"<id>"},"work":{"commits":["<full object name>"],"label":"auth-rework","repository":"<path or remote URL>"},"tier":"bound","role":"implementer","span":{"from":"2026-01-10T08:30:00Z","to":"2026-01-10T09:20:00Z"}}
   `session`, `work` and `tier` are required. `work` holds at least one of
   `commits`, a non-empty array of full hexadecimal object names of 40 or 64
   digits, and `label`, a non-empty name for the work; `repository` is
-  informational. `role` is optional (implementer, reviewer). `span`, optional,
-  is {"from":..,"to":..} in RFC 3339 with `from` no later than `to`: only the
-  session's requests inside it served the work; without it the whole session
-  did. A binding record is read and validated, and nothing uses it yet.
+  informational. `role` is optional (implementer, reviewer, integrator).
+  `span`, optional, is {"from":..,"to":..} in RFC 3339 with `from` no later
+  than `to`. A run still open is written with `to` set to the header's
+  `written_at`, since a span names both ends.
+  `event`: a session acted for a piece of work at an instant.
+      {"kind":"event","session":{"harness":"claude","id":"<id>"},"work":{"label":"auth-rework","commits":["<full object name>"]},"tier":"bound","at":"2026-01-10T09:12:00Z","role":"integrator"}
+  `session`, `work`, `tier` and `at` are required; `work` and `role` are as
+  for a binding.
+  What a session's bindings and events mean together:
+  - A binding with a `span` is interval evidence for its work over [from,
+    to); one without covers the whole session, untimed requests included.
+    An event is point evidence at `at`.
+  - A session's events on one piece of work span that work from the first
+    to the last, inclusive.
+  - Where several pieces of work cover the same time, the time is shared
+    evenly among them.
+  - Time no piece of work covers is placed by the session's working
+    stretches (45 minutes idle ends one): requests up to an event in a
+    stretch serve that event's work, those after the stretch's last event
+    serve the same work, and a stretch with no event serves none.
+  One piece of work is named by its `label` when it has one, and otherwise
+  by its commit set. Records naming one label name the same commits; records
+  that disagree are reported, never silently merged, and the label's
+  commits are then every commit its records name. A piece of work the
+  repository holds no commit of keeps its label as its identity.
   A producer writes the header first, one `lineage` record per distinct
   (parent, child) pair, and only what its own records back, at the tier it
   states.
   A reader ignores fields it does not know; a field that narrows what a
   record means arrives only with a new schema version. It counts a record of
-  an unknown `kind`, per kind, and reports it. A line is malformed when it is
-  not a JSON object, lacks a required field or carries one of the wrong type
-  or empty, or carries an invalid value: an unknown tier, a child equal to
-  its parent, an unparseable instant, an empty or non-hexadecimal commit
-  list, or `from` after `to`. A malformed line is counted with its line
-  number and a fixed reason, never its text, and reading goes on. Identical
-  records count once; for `lineage`, identical means the same parent and
-  child. A file whose first line is not a header of this schema, and a path
-  that does not exist, are refused naming the path. Reads are bounded: a line
-  past 256 KiB, a file past 10000 lines after the header, and a directory of
-  more than 1000 `.jsonl` files stop the read and say so.
+  an unknown `kind`, per kind, and reports it, so a reader that predates a
+  kind uses nothing from it. A line is malformed when it is not a JSON
+  object, lacks a required field or carries one of the wrong type or empty,
+  or carries an invalid value: an unknown tier, a child equal to its parent,
+  an unparseable instant, an empty or non-hexadecimal commit list, or `from`
+  after `to`. A malformed line is counted with its line number and a fixed
+  reason, never its text, and reading goes on. Identical records count once;
+  for `lineage`, identical means the same parent and child. A file whose
+  first line is not a header of this schema, and a path that does not exist,
+  are refused naming the path. Reads are bounded: a line past 256 KiB, a file
+  past 10000 lines after the header, and a directory of more than 1000
+  `.jsonl` files stop the read and say so.
 
 CHILD RECORDINGS
   tapes lineage PARENT --json
