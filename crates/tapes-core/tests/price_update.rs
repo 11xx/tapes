@@ -603,3 +603,23 @@ fn an_official_price_supersedes_a_fallback_row_for_its_dated_form() {
         .iter()
         .any(|row| row.source == "LiteLLM" && row.effective_until == Some(at(2))));
 }
+
+#[test]
+fn a_held_lock_is_waited_for_no_longer_than_the_limit() {
+    // Claim: a command waits for the price table's lock at most the limit it
+    // gives, then answers that it was not taken, and takes it at once when it
+    // is free. Rejects an unbounded wait, under which a suspended holder
+    // hangs every pricing command on a machine with no table yet.
+    let data = tempfile::tempdir().unwrap();
+    let holder = price_update::lock_file(data.path()).unwrap();
+    holder.lock().unwrap();
+    let waiter = price_update::lock_file(data.path()).unwrap();
+    let limit = std::time::Duration::from_millis(300);
+    let started = std::time::Instant::now();
+    assert!(!price_update::lock_within(&waiter, limit).unwrap());
+    let waited = started.elapsed();
+    assert!(waited >= limit, "{waited:?}");
+    assert!(waited < std::time::Duration::from_secs(5), "{waited:?}");
+    holder.unlock().unwrap();
+    assert!(price_update::lock_within(&waiter, limit).unwrap());
+}

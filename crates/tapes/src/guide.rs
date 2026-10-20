@@ -1685,9 +1685,10 @@ KEEP A PRICE TABLE
   count of its last success. `--from DIR` reads `anthropic.md`,
   `openai.md` and `litellm.json` from DIR instead, for an offline machine;
   a file missing there fails that source. Without `--from`,
-  `TAPES_PRICES_FROM=DIR` does the same, for every update. It waits for a
-  refresh another command is running, which that refresh's time limits
-  bound. Both files are replaced whole, through a temporary file and a
+  `TAPES_PRICES_FROM=DIR` does the same, for every update. It waits for an
+  update or refresh another command is running, for at most as long as an
+  update can take, and past that fails without updating. Both files are
+  replaced whole, through a temporary file and a
   rename; an update that leaves no table and finds no row writes the
   record alone.
 
@@ -1703,8 +1704,9 @@ KEEP A PRICE TABLE
   either. Concurrent commands refresh once: a refresh holds a lock on
   `prices.lock` beside the table, a command that finds it held skips its
   refresh silently when a data table exists and prices with it, or, when
-  none does, waits for the holder, bounded by its time limits, and prices
-  with the table it wrote; whoever takes the lock decides again first. It
+  none does, waits for the holder for at most as long as a refresh can
+  take, 45 seconds, and prices with the table it wrote, or, past that,
+  warns and prices nothing; whoever takes the lock decides again first. It
   records the attempt before fetching, so a refresh that dies midway still
   waits its hour. The refresh gives each source 5 seconds to connect and
   10 to finish. It prints nothing when it succeeds. When a source fails it

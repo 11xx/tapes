@@ -85,6 +85,12 @@ impl FetchLimits {
         transfer: Duration::from_secs(10),
         kill: Duration::from_secs(15),
     };
+
+    /// The longest an update within these limits fetches: every source run
+    /// to its kill deadline.
+    pub fn whole(self) -> Duration {
+        self.kill * [ANTHROPIC, OPENAI, LITELLM].len() as u32
+    }
 }
 
 /// The directory of copies `TAPES_PRICES_FROM` names, when it names one.
@@ -947,6 +953,22 @@ pub fn lock_file(directory: &Path) -> Result<std::fs::File> {
         .truncate(false)
         .open(&path)
         .with_context(|| format!("cannot open {}", path.display()))
+}
+
+/// Take `lock`'s exclusive lock, waiting at most `limit` while another
+/// process holds it. Whether it was taken.
+pub fn lock_within(lock: &std::fs::File, limit: Duration) -> std::io::Result<bool> {
+    let deadline = Clock::now() + limit;
+    loop {
+        match lock.try_lock() {
+            Ok(()) => return Ok(true),
+            Err(std::fs::TryLockError::WouldBlock) if Clock::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Err(std::fs::TryLockError::WouldBlock) => return Ok(false),
+            Err(std::fs::TryLockError::Error(error)) => return Err(error),
+        }
+    }
 }
 
 /// Record an attempt at `now` in `directory`'s fetch record before

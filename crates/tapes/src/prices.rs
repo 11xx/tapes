@@ -2,6 +2,7 @@
 //! directory's table, and show what the tables hold.
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use agent_tapes_core::price_update::{
     self, FetchLimits, FetchRecord, RefreshDecision, UpdateReport, FETCH_FILE, TABLE_FILE,
@@ -31,8 +32,9 @@ pub enum PricesCommand {
     /// reported, and the command exits non-zero. `prices-fetch.json` beside
     /// the table (tapes-price-fetch/1) records the attempt and each source's
     /// last success. OpenAI's 30m and 12h cache writes have no tapes category
-    /// and are left unpriced. The update waits for a refresh another command
-    /// is running, which that refresh's own time limits bound; a pricing
+    /// and are left unpriced. The update waits for an update or refresh
+    /// another command is running, for at most as long as an update can
+    /// take, and past that fails without updating; a pricing
     /// command refreshes the same way, only in a command that prices, and
     /// only once among concurrent commands. A replica never refreshes for a
     /// --remote read.
@@ -105,9 +107,9 @@ pub fn refresh_before_pricing(named: Option<&Path>, offline_flag: bool) {
         )
     };
     // With a table to price with, a refresh that is not due, or that another
-    // process holds, is skipped. Without one, this command waits for any
-    // refresh running, whose recorded attempt makes it look not due, and
-    // prices with the table it writes.
+    // process holds, is skipped. Without one, this command waits, for as
+    // long as a refresh can take, for any refresh running, whose recorded
+    // attempt makes it look not due, and prices with the table it writes.
     let table_exists = directory.join(TABLE_FILE).exists();
     if table_exists && !due() {
         return;
@@ -119,18 +121,26 @@ pub fn refresh_before_pricing(named: Option<&Path>, offline_flag: bool) {
             return;
         }
     };
-    let locked = if table_exists {
-        match lock.try_lock() {
-            Ok(()) => Ok(()),
-            Err(std::fs::TryLockError::WouldBlock) => return,
-            Err(std::fs::TryLockError::Error(error)) => Err(error),
-        }
+    let wait = if table_exists {
+        Duration::ZERO
     } else {
-        lock.lock()
+        FetchLimits::REFRESH.whole()
     };
-    if let Err(error) = locked {
-        eprintln!("warning: prices not refreshed (cannot lock the price table: {error})");
-        return;
+    match price_update::lock_within(&lock, wait) {
+        Ok(true) => {}
+        Ok(false) if table_exists => return,
+        Ok(false) => {
+            eprintln!(
+                "warning: prices not refreshed (another command held the price table for {} \
+                 seconds); no fetched table",
+                wait.as_secs()
+            );
+            return;
+        }
+        Err(error) => {
+            eprintln!("warning: prices not refreshed (cannot lock the price table: {error})");
+            return;
+        }
     }
     // Another process may have refreshed between the check and the lock.
     if !due() {
@@ -187,8 +197,16 @@ fn update(from: Option<&Path>, json: bool) -> Result<()> {
         .or_else(price_update::from_environment);
     let directory = data_directory()?;
     let lock = price_update::lock_file(&directory)?;
-    lock.lock()
-        .map_err(|error| anyhow!("cannot lock the price table: {error}"))?;
+    let wait = FetchLimits::UPDATE.whole();
+    if !price_update::lock_within(&lock, wait)
+        .map_err(|error| anyhow!("cannot lock the price table: {error}"))?
+    {
+        bail!(
+            "another command held the price table in {} for {} seconds; nothing was updated",
+            directory.display(),
+            wait.as_secs()
+        );
+    }
     let report =
         price_update::update(&directory, from.as_deref(), FetchLimits::UPDATE, Utc::now())?;
     if json {
