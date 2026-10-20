@@ -4,7 +4,10 @@
 //! The items are the repository's commits. Beside them stand two buckets: a
 //! session's work at a place after its last commit there is *uncommitted*,
 //! per worktree and branch, and what no evidence places is *unattributed*,
-//! each part with its [`Reason`].
+//! each part with its [`Reason`]. A session's time in a directory that exists
+//! outside the repository is unattributed as [`Reason::Elsewhere`]: its
+//! requests there are no proximity evidence, and no working-stretch estimate
+//! reaches into it.
 //!
 //! Evidence is tiered by what establishes it:
 //!
@@ -317,6 +320,8 @@ pub struct Location {
     pub at: Option<Instant>,
     pub cwd: PathBuf,
     pub branch: Option<String>,
+    /// The directory exists and the repository does not hold it.
+    pub outside: bool,
 }
 
 /// A commit a session's recording names, as the repository resolved it.
@@ -373,6 +378,29 @@ impl SessionEvidence {
         let mut timed: Vec<Instant> = self.requests.iter().flatten().copied().collect();
         timed.sort();
         timed
+    }
+
+    /// The stretches of the timeline the session spent outside the
+    /// repository, oldest first.
+    fn elsewhere(&self) -> Vec<Piece> {
+        let mut marks: Vec<&Location> = self.locations.iter().collect();
+        marks.sort_by_key(|location| location.at);
+        let mut outside: Vec<Piece> = Vec::new();
+        for (index, location) in marks.iter().enumerate() {
+            if !location.outside {
+                continue;
+            }
+            let to = marks.get(index + 1).and_then(|next| next.at);
+            match outside.last_mut() {
+                Some(last) if last.to == location.at => last.to = to,
+                _ => outside.push(Piece {
+                    from: location.at,
+                    to,
+                }),
+            }
+        }
+        outside.retain(|piece| piece.from.zip(piece.to).is_none_or(|(from, to)| from < to));
+        outside
     }
 }
 
@@ -695,10 +723,15 @@ fn inputs(evidence: &SessionEvidence, facts: &Facts, params: &Params) -> Inputs 
     worktree_spans(evidence, facts, &index, params, &mut inputs);
 
     // Requests near a commit's author time.
-    let timed = if evidence.inherits {
+    let elsewhere = evidence.elsewhere();
+    let timed: Vec<Instant> = if evidence.inherits {
         Vec::new()
     } else {
-        evidence.timed()
+        evidence
+            .timed()
+            .into_iter()
+            .filter(|at| !elsewhere.iter().any(|piece| piece.holds(*at)))
+            .collect()
     };
     for commit in facts.commits.iter().filter(|commit| !commit.merge) {
         let at = commit.author;
@@ -990,6 +1023,7 @@ pub fn partition(evidence: &SessionEvidence, facts: &Facts, params: &Params) -> 
             }
         }
     }
+    let entries = cut_elsewhere(&mut pieces, entries, &evidence.elsewhere());
     let mut admitted = inputs.admitted;
     admitted.sort_by(|a, b| {
         (a.at, a.kind, &a.work, a.tier, a.to).cmp(&(b.at, b.kind, &b.work, b.tier, b.to))
@@ -1001,6 +1035,57 @@ pub fn partition(evidence: &SessionEvidence, facts: &Facts, params: &Params) -> 
         evidence: admitted,
         stretches: evidence.starts.is_some(),
     }
+}
+
+/// Give the parts of working-stretch estimates that lie where the session
+/// worked outside the repository to [`Reason::Elsewhere`]: a stretch's
+/// evidence speaks for the repository only while the session was in it.
+fn cut_elsewhere(pieces: &mut Vec<Piece>, entries: Vec<Entry>, elsewhere: &[Piece]) -> Vec<Entry> {
+    if elsewhere.is_empty() {
+        return entries;
+    }
+    let mut cut = Vec::new();
+    for entry in entries {
+        let estimated = matches!(
+            &entry.owner,
+            Owner::Item { evidence, .. } if evidence.basis == Basis::WorkingStretch
+        );
+        let Some(at) = entry.piece.filter(|_| estimated) else {
+            cut.push(entry);
+            continue;
+        };
+        let own = pieces[at];
+        let mut away: Vec<Piece> = elsewhere
+            .iter()
+            .filter_map(|piece| own.meet(piece))
+            .collect();
+        if away.is_empty() {
+            cut.push(entry);
+            continue;
+        }
+        let mut place = |piece: Piece| match pieces.iter().position(|held| *held == piece) {
+            Some(position) => position,
+            None => {
+                pieces.push(piece);
+                pieces.len() - 1
+            }
+        };
+        for piece in away.clone() {
+            cut.push(Entry {
+                piece: Some(place(piece)),
+                split: entry.split.clone(),
+                owner: Owner::Unattributed(Reason::Elsewhere),
+            });
+        }
+        for piece in uncovered(own, &mut away) {
+            cut.push(Entry {
+                piece: Some(place(piece)),
+                split: entry.split.clone(),
+                owner: entry.owner.clone(),
+            });
+        }
+    }
+    cut
 }
 
 impl Partition {
@@ -1027,7 +1112,10 @@ impl Partition {
             }
         }
         for entry in &self.entries {
-            let (Some(at), Owner::Unattributed(reason)) = (entry.piece, &entry.owner) else {
+            let inheritable = !matches!(entry.owner, Owner::Unattributed(Reason::Elsewhere));
+            let (Some(at), Owner::Unattributed(reason), true) =
+                (entry.piece, &entry.owner, inheritable)
+            else {
                 let piece = entry.piece.map(|at| place(&mut pieces, self.pieces[at]));
                 entries.push(Entry {
                     piece,

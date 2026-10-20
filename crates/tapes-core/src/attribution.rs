@@ -90,7 +90,8 @@ pub struct Evidence {
 
 /// Why part of a session is in no selected item's share. Ordered as the
 /// reasons are listed: the segment reasons by name, then untimed requests,
-/// then the selection, then the recorded total.
+/// then the selection, then the recorded total, then what a caller places
+/// outside every item's scope.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Reason {
     AfterLastItem,
@@ -100,6 +101,9 @@ pub enum Reason {
     RequestTimeUnrecorded,
     UnselectedItem,
     RecordedTotalNotSplittable,
+    /// The session was working where no item can be: a caller's judgment,
+    /// never the engine's.
+    Elsewhere,
 }
 
 impl Reason {
@@ -112,6 +116,7 @@ impl Reason {
             Self::RequestTimeUnrecorded => "request time unrecorded",
             Self::RecordedTotalNotSplittable => "recorded total not splittable",
             Self::UnselectedItem => "unselected item",
+            Self::Elsewhere => "elsewhere",
         }
     }
 }

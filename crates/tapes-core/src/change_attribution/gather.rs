@@ -595,6 +595,7 @@ fn locations(read: &SessionRead) -> Vec<Location> {
             at: observation.at,
             cwd: PathBuf::from(&observation.cwd),
             branch: observation.branch.clone(),
+            outside: false,
         })
         .collect();
     if held.is_empty() {
@@ -603,6 +604,7 @@ fn locations(read: &SessionRead) -> Vec<Location> {
                 at: read.session.started_at,
                 cwd: directory.clone(),
                 branch: None,
+                outside: false,
             });
         }
     }
@@ -632,7 +634,13 @@ fn evidence(
     Ok(SessionEvidence {
         requests: requests(&read.read),
         starts,
-        locations: locations(read),
+        locations: locations(read)
+            .into_iter()
+            .map(|location| Location {
+                outside: repository.holds(&location.cwd) == Some(false),
+                ..location
+            })
+            .collect(),
         commits,
         mentions: read.mentions.clone(),
         edits: read.edits.clone(),

@@ -259,6 +259,11 @@ impl Claude {
         self.branch = Some(branch.to_owned());
     }
 
+    fn step_into(&mut self, cwd: &Path, branch: Option<&str>) {
+        self.cwd = cwd.to_owned();
+        self.branch = branch.map(str::to_owned);
+    }
+
     fn push(&mut self, kind: &str, when: Time, fields: Value) -> String {
         self.serial += 1;
         let uuid = format!(
@@ -726,6 +731,7 @@ const LINGERING: &str = "c1a00000-0000-4000-8000-000000000008";
 const LONG: &str = "c1a00000-0000-4000-8000-000000000009";
 const ON_MAIN: &str = "c1a00000-0000-4000-8000-00000000000a";
 const INTEGRATOR: &str = "c1a00000-0000-4000-8000-00000000000b";
+const VISITOR: &str = "c1a00000-0000-4000-8000-00000000000c";
 
 /// An interactive session in the main checkout: on `feat-a` it edits and
 /// commits c1 at 10:08 and talks on; at 10:12 it switches to `feat-b`, where
@@ -1022,6 +1028,33 @@ fn integrator(sandbox: &Sandbox) -> Names {
     claude.reply(at("11:06:00"));
     claude.write(sandbox, &repo);
     names(&[("d1", &d1)])
+}
+
+/// A Claude session working in a directory outside the repository from
+/// 09:00 steps into the main checkout at 09:50, commits v1 there at 10:00,
+/// and goes back out at 10:05.
+fn visitor(sandbox: &Sandbox) -> Names {
+    let repo = sandbox.repo();
+    let other = sandbox.dir("other");
+    fs::create_dir(&other).unwrap();
+    let v1 = sandbox.commit(&repo, at("10:00:00"), "v.rs", &refs(&lines("phi")), "v1");
+
+    let mut claude = Claude::lead(VISITOR, &other, "main");
+    claude.step_into(&other, None);
+    claude.prompt(at("09:00:00"));
+    claude.reply(at("09:00:05"));
+    claude.reply(at("09:20:00"));
+    claude.reply(at("09:40:00"));
+    claude.step_into(&repo, Some("main"));
+    claude.prompt(at("09:50:00"));
+    claude.reply(at("09:55:00"));
+    claude.commit(at("10:00:00"), &v1, "committed", "v1");
+    claude.step_into(&other, None);
+    claude.prompt(at("10:05:00"));
+    claude.reply(at("10:10:00"));
+    claude.reply(at("10:20:00"));
+    claude.write(sandbox, &other);
+    names(&[("v1", &v1)])
 }
 
 /// A pi session in a live worktree on `lane-u` commits u1 at 16:05 and works
@@ -1423,6 +1456,22 @@ fn an_edit_after_the_commit_is_not_authoring() {
     assert_eq!(
         labels(session, &names)["d1"],
         BTreeSet::from([(Tier::Estimated, Basis::WorkingStretch)])
+    );
+}
+
+/// Claim: what a session does while it works outside the repository is
+/// unattributed as elsewhere, never estimated onto the repository's
+/// commits, though its commit there makes it a member. Rejects a working
+/// stretch that carries its whole length to the one commit it holds.
+#[test]
+fn work_outside_the_repository_is_elsewhere() {
+    let sandbox = Sandbox::new();
+    let names = visitor(&sandbox);
+    let attribution = sandbox.day();
+    let session = session(&attribution, VISITOR);
+    assert_eq!(
+        requests(session, &names),
+        expect(&[("v1", 2), ("unattributed elsewhere", 5)])
     );
 }
 
