@@ -1,3 +1,4 @@
+use crate::transient;
 use crate::{CandidatePage, DiscoveryError, NativeSession};
 use serde_json::Value;
 use std::ffi::{OsStr, OsString};
@@ -961,6 +962,8 @@ fn run_command(
     run_command_with_xdg(program, args, coordinate, None, deadline_after)
 }
 
+/// Run a metadata command, again after a pause when it failed because the
+/// store was busy, up to the transient attempt bound.
 fn run_command_with_xdg(
     program: &OsStr,
     args: &[OsString],
@@ -968,6 +971,48 @@ fn run_command_with_xdg(
     xdg_data_home: Option<&OsStr>,
     deadline_after: Duration,
 ) -> Result<Vec<u8>, DiscoveryError> {
+    let mut attempt = 0;
+    loop {
+        match run_command_once(program, args, coordinate, xdg_data_home, deadline_after) {
+            Ok(bytes) => return Ok(bytes),
+            Err(CommandFailure::Failed(error)) => return Err(error),
+            Err(CommandFailure::Busy(cause)) => {
+                attempt += 1;
+                if attempt >= transient::ATTEMPTS {
+                    return Err(DiscoveryError::Transient {
+                        coordinate: coordinate.to_owned(),
+                        cause,
+                    });
+                }
+                thread::sleep(transient::retry_delay(attempt));
+            }
+        }
+    }
+}
+
+/// Why one run of a metadata command produced no response.
+enum CommandFailure {
+    /// The command failed saying the store was busy or locked.
+    Busy(String),
+    Failed(DiscoveryError),
+}
+
+impl From<DiscoveryError> for CommandFailure {
+    fn from(error: DiscoveryError) -> Self {
+        Self::Failed(error)
+    }
+}
+
+/// Bytes of a failed command's stderr kept to classify its failure.
+const MAX_STDERR_BYTES: usize = 4 * 1024;
+
+fn run_command_once(
+    program: &OsStr,
+    args: &[OsString],
+    coordinate: &str,
+    xdg_data_home: Option<&OsStr>,
+    deadline_after: Duration,
+) -> Result<Vec<u8>, CommandFailure> {
     let deadline = Instant::now() + deadline_after;
     let mut command = Command::new(program);
     if let Some(xdg_data_home) = xdg_data_home {
@@ -1006,11 +1051,14 @@ fn run_command_with_xdg(
     let mut stderr_reader = Some(thread::spawn(move || {
         let mut stderr = stderr;
         let mut buffer = [0_u8; 8192];
-        let mut drained = 0_u64;
+        let mut kept = Vec::new();
         loop {
             match stderr.read(&mut buffer) {
-                Ok(0) => return Ok(drained),
-                Ok(count) => drained = drained.saturating_add(count as u64),
+                Ok(0) => return Ok(kept),
+                Ok(count) => {
+                    let room = MAX_STDERR_BYTES.saturating_sub(kept.len()).min(count);
+                    kept.extend_from_slice(&buffer[..room]);
+                }
                 Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
                 Err(error) => return Err(error),
             }
@@ -1031,10 +1079,10 @@ fn run_command_with_xdg(
                 if let Some(reader) = stderr_reader.take() {
                     let _ = reader.join();
                 }
-                return Err(DiscoveryError::BoundExhausted {
+                return Err(CommandFailure::Failed(DiscoveryError::BoundExhausted {
                     coordinate: coordinate.to_owned(),
                     bound: "8 MiB OpenCode response",
-                });
+                }));
             }
             completed_stdout = Some(bytes);
         }
@@ -1062,9 +1110,9 @@ fn run_command_with_xdg(
             if let Some(reader) = stderr_reader.take() {
                 let _ = reader.join();
             }
-            return Err(DiscoveryError::TimedOut {
+            return Err(CommandFailure::Failed(DiscoveryError::TimedOut {
                 coordinate: coordinate.to_owned(),
-            });
+            }));
         }
         thread::sleep(Duration::from_millis(5));
     }
@@ -1076,19 +1124,22 @@ fn run_command_with_xdg(
             status: "stderr reader stopped".to_owned(),
         })?
         .map_err(|error| DiscoveryError::io(coordinate, "drain metadata stderr", &error))?;
-    let _stderr_was_drained = stderr_bytes;
     if bytes.len() as u64 > MAX_RESPONSE_BYTES {
         return Err(DiscoveryError::BoundExhausted {
             coordinate: coordinate.to_owned(),
             bound: "8 MiB OpenCode response",
-        });
+        }
+        .into());
     }
     let status = status.expect("command status set before loop exit");
     if !status.success() {
-        return Err(DiscoveryError::CommandFailed {
+        if let Some(cause) = transient::busy_output(&stderr_bytes) {
+            return Err(CommandFailure::Busy(cause));
+        }
+        return Err(CommandFailure::Failed(DiscoveryError::CommandFailed {
             coordinate: coordinate.to_owned(),
             status: exit_status_label(status),
-        });
+        }));
     }
     Ok(bytes)
 }

@@ -55,6 +55,7 @@ pub mod stretch;
 mod test_support;
 pub mod timeline;
 pub mod title;
+pub mod transient;
 pub mod unexplained;
 pub mod usage;
 pub mod window;

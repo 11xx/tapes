@@ -6,6 +6,7 @@
 mod error;
 mod file;
 mod opencode;
+pub mod transient;
 
 pub use error::DiscoveryError;
 pub use file::{pi_recording_id, CandidatePage, StoreCatalog};
@@ -494,6 +495,19 @@ pub enum ResolveError {
         answered_by: String,
         failures: Vec<String>,
     },
+    /// A store's exact lookup failed for a reason that can pass, and nothing
+    /// else answered; looking again may.
+    Transient {
+        query: String,
+        failures: Vec<String>,
+    },
+}
+
+impl ResolveError {
+    /// Whether the failure can pass, so that resolving again may succeed.
+    pub fn is_transient(&self) -> bool {
+        matches!(self, Self::Transient { .. })
+    }
 }
 
 impl std::fmt::Display for ResolveError {
@@ -529,6 +543,11 @@ impl std::fmt::Display for ResolveError {
             Self::StoreFailed { query, answered_by, failures } => write!(
                 f,
                 "native session query {query:?} could not use preceding store before {answered_by}: {}",
+                failures.join("; ")
+            ),
+            Self::Transient { query, failures } => write!(
+                f,
+                "native session query {query:?} failed transiently, and a later read may succeed: {}",
                 failures.join("; ")
             ),
         }
@@ -609,6 +628,8 @@ impl IdentityRecord for NativeSession {
 pub struct ExactLookupFailure {
     pub message: String,
     pub refuses_prefix: bool,
+    /// The failure can pass, so that looking again may answer.
+    pub transient: bool,
 }
 
 /// A source adapted to the shared exact/prefix selector.
@@ -626,6 +647,7 @@ pub trait IdentitySource<R: IdentityRecord> {
             .map_err(|message| ExactLookupFailure {
                 message,
                 refuses_prefix: false,
+                transient: false,
             })
     }
     fn candidates(&self, limit: usize) -> CandidatePage<R, String>;
@@ -758,6 +780,7 @@ impl IdentitySource<NativeSession> for NativeStore {
     ) -> Result<Option<NativeSession>, ExactLookupFailure> {
         NativeStore::locate_exact(self, query).map_err(|error| ExactLookupFailure {
             refuses_prefix: matches!(error, DiscoveryError::IdentityMismatch { .. }),
+            transient: error.is_transient(),
             message: error.to_string(),
         })
     }
@@ -791,9 +814,29 @@ pub struct Resolved<R> {
 }
 
 /// Resolve exact IDs before prefixes and preserve uncertainty across sources.
+/// A resolution an exact lookup's transient failure left unanswered is
+/// [`ResolveError::Transient`], since reading again may answer it.
 pub fn resolve_with_sources<R: IdentityRecord + Clone>(
     sources: &[&dyn IdentitySource<R>],
     query: &str,
+) -> Result<Resolved<R>, ResolveError> {
+    let mut transient = Vec::new();
+    match resolve_with_sources_noting(sources, query, &mut transient) {
+        Err(error @ (ResolveError::InvalidQuery | ResolveError::Ambiguous { .. })) => Err(error),
+        Err(_) if !transient.is_empty() => Err(ResolveError::Transient {
+            query: query.to_owned(),
+            failures: transient,
+        }),
+        resolved => resolved,
+    }
+}
+
+/// [`resolve_with_sources`], noting each exact lookup failure that can pass
+/// in `transient`.
+fn resolve_with_sources_noting<R: IdentityRecord + Clone>(
+    sources: &[&dyn IdentitySource<R>],
+    query: &str,
+    transient: &mut Vec<String>,
 ) -> Result<Resolved<R>, ResolveError> {
     if query.trim().is_empty() || query.contains('\0') {
         return Err(ResolveError::InvalidQuery);
@@ -825,6 +868,9 @@ pub fn resolve_with_sources<R: IdentityRecord + Clone>(
                     precedence.record_store_failure(source.harness(), true, source_index);
                 }
                 refuses_prefix |= error.refuses_prefix;
+                if error.transient {
+                    transient.push(format!("{}: {}", source.harness(), error.message));
+                }
                 failures.push((source_index, source.harness().to_owned(), error.message));
             }
         }

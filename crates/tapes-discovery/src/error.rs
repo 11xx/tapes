@@ -25,6 +25,12 @@ pub enum DiscoveryError {
         coordinate: String,
         status: String,
     },
+    /// The store stayed busy or locked through every bounded attempt; a
+    /// later read may succeed.
+    Transient {
+        coordinate: String,
+        cause: String,
+    },
     /// A file named for the queried session records a different session.
     IdentityMismatch {
         coordinate: String,
@@ -47,6 +53,11 @@ impl DiscoveryError {
         }
     }
 
+    /// Whether the failure can pass, so that reading again may succeed.
+    pub fn is_transient(&self) -> bool {
+        matches!(self, Self::Transient { .. })
+    }
+
     pub fn coordinate(&self) -> &str {
         match self {
             Self::Io { coordinate, .. }
@@ -54,6 +65,7 @@ impl DiscoveryError {
             | Self::BoundExhausted { coordinate, .. }
             | Self::TimedOut { coordinate }
             | Self::CommandFailed { coordinate, .. }
+            | Self::Transient { coordinate, .. }
             | Self::IdentityMismatch { coordinate, .. } => coordinate,
         }
     }
@@ -78,6 +90,11 @@ impl fmt::Display for DiscoveryError {
             Self::CommandFailed { coordinate, status } => {
                 write!(f, "{coordinate}: metadata command failed ({status})")
             }
+            Self::Transient { coordinate, cause } => write!(
+                f,
+                "{coordinate}: store busy after {} attempts, a transient failure a later read may not meet ({cause})",
+                crate::transient::ATTEMPTS
+            ),
             Self::IdentityMismatch {
                 coordinate,
                 path,

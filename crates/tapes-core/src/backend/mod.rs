@@ -815,6 +815,7 @@ impl IdentitySource<Session> for BackendIdentitySource<'_> {
                     error.downcast_ref::<agent_tapes_discovery::DiscoveryError>(),
                     Some(agent_tapes_discovery::DiscoveryError::IdentityMismatch { .. })
                 ),
+                transient: crate::transient::is_transient(&error),
                 message: format!("{error:#}"),
             })
     }

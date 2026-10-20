@@ -47,6 +47,7 @@ fn error_class(error: &ResolveError) -> &'static str {
         ResolveError::Ambiguous { .. } => "ambiguous",
         ResolveError::BackendFailed { .. } => "backend-failed",
         ResolveError::StoreFailed { .. } => "store-failed",
+        ResolveError::Transient { .. } => "transient",
     }
 }
 
