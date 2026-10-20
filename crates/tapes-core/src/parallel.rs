@@ -53,9 +53,30 @@ pub(crate) fn map_on<T: Sync, R: Send>(
         .collect()
 }
 
+/// As [`map`], starting the items `cost` ranks highest first, so the longest
+/// work does not begin last; the results still come back in the items'
+/// order.
+pub(crate) fn map_costliest_first<T: Sync, R: Send, C: Ord>(
+    items: &[T],
+    cost: impl Fn(&T) -> C,
+    work: impl Fn(&T) -> R + Sync,
+) -> Vec<R> {
+    let mut order: Vec<usize> = (0..items.len()).collect();
+    order.sort_by_cached_key(|at| std::cmp::Reverse(cost(&items[*at])));
+    let mut results: Vec<Option<R>> = Vec::with_capacity(items.len());
+    results.resize_with(items.len(), || None);
+    for (at, result) in order.iter().zip(map(&order, |at| work(&items[*at]))) {
+        results[*at] = Some(result);
+    }
+    results
+        .into_iter()
+        .map(|result| result.expect("every item was worked"))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
-    use super::map;
+    use super::{map, map_costliest_first};
 
     #[test]
     fn results_keep_the_order_of_their_items() {
@@ -68,6 +89,11 @@ mod tests {
         assert_eq!(
             doubled,
             items.iter().map(|item| item * 2).collect::<Vec<_>>()
+        );
+        let ranked = map_costliest_first(&items, |item| item % 7, |item| item + 1);
+        assert_eq!(
+            ranked,
+            items.iter().map(|item| item + 1).collect::<Vec<_>>()
         );
     }
 }

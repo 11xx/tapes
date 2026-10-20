@@ -399,18 +399,22 @@ impl Backend for ClaudeBackend {
                 )
             }
         };
-        let mut children = Vec::new();
-        let mut failures = Vec::new();
-        for file in files {
-            match self.parse_with_identity(
+        let parsed = crate::parallel::map(&files, |file| {
+            self.parse_with_identity(
                 &file.transcript,
                 &session.id,
                 true,
                 Some(&file.agent_id),
                 ParsedTurns::TitleOnly,
-            ) {
+            )
+            .map(|(child, _, _)| child)
+        });
+        let mut children = Vec::new();
+        let mut failures = Vec::new();
+        for (file, parsed) in files.into_iter().zip(parsed) {
+            match parsed {
                 Ok(_) if file.carried_from.is_some() => {}
-                Ok((mut child, _, _)) => {
+                Ok(mut child) => {
                     child.id = format!("{}::{}", session.id, file.agent_id);
                     if let Some(location) = child.source.location.as_mut() {
                         location.native_path = Some(file.transcript.clone());

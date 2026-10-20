@@ -21,6 +21,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::Result;
 use serde::Serialize;
@@ -28,9 +29,9 @@ use serde::Serialize;
 use super::evidence::{Conflict, Records};
 use super::repository::Repository;
 use super::{
-    inputs, partition, Amount, Amounts, Counts, EditInput, Facts, Kind, Location, Mention, Params,
-    Partition, Piece, Placement, SeenCommit, SessionAttribution, SessionEvidence, SessionKey,
-    Tiers,
+    inputs, partition_indexed, Amount, Amounts, Counts, EditInput, Facts, Index, Kind, Location,
+    Mention, Params, Partition, Piece, Placement, SeenCommit, SessionAttribution, SessionEvidence,
+    SessionKey, Tiers,
 };
 use crate::backend::{Backend, StreamOptions, StreamedTranscript};
 use crate::commit_observations::CommitObservation;
@@ -148,17 +149,59 @@ pub fn gather(
         listing_bounded: listed.scan_truncated,
         ..Default::default()
     };
-    let mut candidates: Vec<(usize, SessionRead)> = Vec::new();
-    for (session, backend) in listed.sessions.into_iter().zip(listed.origins) {
-        if session.started_at.is_some_and(|started| started > to) {
-            continue;
+    let wanted: Vec<(Session, usize)> = listed
+        .sessions
+        .into_iter()
+        .zip(listed.origins)
+        .filter(|(session, _)| !session.started_at.is_some_and(|started| started > to))
+        .collect();
+    membership.read += wanted.len();
+    // The commits the members' requests could meet are read ahead while
+    // the members are read, over the span the listing says the sessions
+    // were active, widened as the default attribution widens it. A read
+    // that wants a commit it did not reach reads that commit itself.
+    let active = wanted
+        .iter()
+        .filter_map(|(session, _)| {
+            let started = session.started_at?;
+            Some((started, session.last_activity_at.unwrap_or(started)))
+        })
+        .reduce(|(first, last), (started, ended)| (first.min(started), last.max(ended)));
+    let stop = AtomicBool::new(false);
+    std::thread::scope(|scope| {
+        if let Some((first, last)) = active {
+            let widened = Params::default();
+            let (reader, stop) = (repository.reader(), &stop);
+            scope.spawn(move || {
+                reader.read_ahead_between(first - widened.lookahead, last + widened.lookback, stop)
+            });
         }
-        membership.read += 1;
-        match read_session(backends[backend].as_ref(), &session) {
-            Ok(read) => candidates.push((backend, read)),
+        let gathered = read_members(backends, repository, wanted, membership);
+        stop.store(true, Ordering::Relaxed);
+        gathered
+    })
+}
+
+/// The members among `wanted`, each read once, with their subagent
+/// recordings.
+fn read_members(
+    backends: &[Box<dyn Backend>],
+    repository: &Repository,
+    wanted: Vec<(Session, usize)>,
+    mut membership: Membership,
+) -> Result<Gathered> {
+    let reads = crate::parallel::map_costliest_first(
+        &wanted,
+        |(session, _)| recording_bytes(session),
+        |(session, backend)| read_session(backends[*backend].as_ref(), session),
+    );
+    let mut candidates: Vec<(usize, SessionRead)> = Vec::new();
+    for ((session, backend), read) in wanted.iter().zip(reads) {
+        match read {
+            Ok(read) => candidates.push((*backend, read)),
             Err(error) => membership
                 .unreadable
-                .push((key_of(&session), format!("{error:#}"))),
+                .push((key_of(session), format!("{error:#}"))),
         }
     }
     let named: BTreeSet<String> = candidates
@@ -290,18 +333,34 @@ pub(super) fn add_children(
     gathered: &mut Gathered,
     positions: &[usize],
 ) {
-    let mut children: Vec<Member> = Vec::new();
-    for member in positions
+    let parents: Vec<&Member> = positions
         .iter()
         .map(|position| &gathered.members[*position])
-    {
-        let (found, failures) = backends[member.backend].window_children(&member.session);
+        .collect();
+    let windows = crate::parallel::map(&parents, |member| {
+        backends[member.backend].window_children(&member.session)
+    });
+    let found: Vec<(Session, usize)> = parents
+        .iter()
+        .zip(&windows)
+        .flat_map(|(member, (found, _))| found.iter().map(|child| (child.clone(), member.backend)))
+        .collect();
+    let mut reads = crate::parallel::map_costliest_first(
+        &found,
+        |(child, _)| recording_bytes(child),
+        |(child, backend)| read_session(backends[*backend].as_ref(), child),
+    )
+    .into_iter();
+    let mut children: Vec<Member> = Vec::new();
+    let mut unreadable: Vec<(SessionKey, String)> = Vec::new();
+    let mut read_count = 0;
+    for (member, (found, failures)) in parents.iter().zip(windows) {
         for failure in failures {
-            gathered.membership.unreadable.push((member.key(), failure));
+            unreadable.push((member.key(), failure));
         }
         for child in found {
-            gathered.membership.read += 1;
-            match read_session(backends[member.backend].as_ref(), &child) {
+            read_count += 1;
+            match reads.next().expect("every child was read") {
                 Ok(read) => children.push(Member {
                     session: child,
                     backend: member.backend,
@@ -309,13 +368,12 @@ pub(super) fn add_children(
                     parent: Some(member.key()),
                     read,
                 }),
-                Err(error) => gathered
-                    .membership
-                    .unreadable
-                    .push((key_of(&child), format!("{error:#}"))),
+                Err(error) => unreadable.push((key_of(&child), format!("{error:#}"))),
             }
         }
     }
+    gathered.membership.read += read_count;
+    gathered.membership.unreadable.extend(unreadable);
     gathered.members.extend(children);
 }
 
@@ -412,6 +470,7 @@ pub fn attribute_with(
         branch_commits,
         arrivals,
     };
+    let index = facts.index();
 
     let named = |key: &SessionKey| records.is_some_and(|records| records.names(key));
     let parents: BTreeMap<SessionKey, SessionKey> = gathered
@@ -447,7 +506,7 @@ pub fn attribute_with(
         evidence.inherits = member.parent.is_some();
         let placement = match records {
             Some(records) if records.names(&key) => {
-                conflicts.extend(unbound_creations(&evidence, &facts, params, records, &key));
+                conflicts.extend(unbound_creations(&evidence, &index, params, records, &key));
                 evidence.declared = records.declared(&key);
                 Placement::Evidence
             }
@@ -465,7 +524,7 @@ pub fn attribute_with(
         placements.insert(key.clone(), placement);
         evidences.push((key, evidence));
     }
-    let mut partitions = divide(gathered, &evidences, &facts, params);
+    let mut partitions = divide(gathered, &evidences, &index, params);
     let mut placed_by_every_tier = None;
     // What only the tiers left out would place is named for them.
     if !params.tiers.is_all() {
@@ -473,7 +532,7 @@ pub fn attribute_with(
             tiers: super::Tiers::all(),
             ..*params
         };
-        let full = divide(gathered, &evidences, &facts, &every);
+        let full = divide(gathered, &evidences, &index, &every);
         for (key, partition) in &mut partitions {
             if let Some(full) = full.get(key) {
                 partition.name_tiers_not_asked(full);
@@ -498,24 +557,23 @@ pub fn attribute_with(
         );
     }
 
-    let mut reads: Vec<Result<Read, String>> = Vec::new();
     let mut cut: Vec<Partition> = Vec::new();
     for member in &gathered.members {
         let mut partition = partitions.remove(&member.key()).unwrap_or_default();
         if let Some(within) = within {
             partition.cut_to(within);
         }
-        reads.push(
-            read_amounts(
-                backends[member.backend].as_ref(),
-                member,
-                &partition,
-                within,
-            )
-            .map_err(|error| format!("{error:#}")),
-        );
         cut.push(partition);
     }
+    let pairs: Vec<(&Member, &Partition)> = gathered.members.iter().zip(&cut).collect();
+    let mut reads: Vec<Result<Read, String>> = crate::parallel::map_costliest_first(
+        &pairs,
+        |(member, _)| recording_bytes(&member.session),
+        |(member, partition)| {
+            read_amounts(backends[member.backend].as_ref(), member, partition, within)
+                .map_err(|error| format!("{error:#}"))
+        },
+    );
     let withheld = explain_by_families(gathered, &mut reads);
 
     let mut sessions = Vec::new();
@@ -586,7 +644,7 @@ pub fn attribute_with(
 /// that no record naming it binds it to.
 fn unbound_creations(
     evidence: &SessionEvidence,
-    facts: &Facts,
+    index: &Index<'_>,
     params: &Params,
     records: &Records,
     key: &SessionKey,
@@ -596,7 +654,7 @@ fn unbound_creations(
         ..*params
     };
     let bound = records.commits_of(key);
-    let created: BTreeSet<String> = inputs(evidence, facts, &every)
+    let created: BTreeSet<String> = inputs(evidence, index, &every)
         .admitted
         .into_iter()
         .filter(|admitted| {
@@ -622,12 +680,18 @@ fn unbound_creations(
 fn divide(
     gathered: &Gathered,
     evidences: &[(SessionKey, SessionEvidence)],
-    facts: &Facts,
+    index: &Index<'_>,
     params: &Params,
 ) -> BTreeMap<SessionKey, Partition> {
+    let divided = crate::parallel::map_costliest_first(
+        evidences,
+        |(_, evidence)| evidence.requests.len(),
+        |(_, evidence)| partition_indexed(evidence, index, params),
+    );
     let mut partitions: BTreeMap<SessionKey, Partition> = evidences
         .iter()
-        .map(|(key, evidence)| (key.clone(), partition(evidence, facts, params)))
+        .map(|(key, _)| key.clone())
+        .zip(divided)
         .collect();
     let parents: BTreeMap<SessionKey, SessionKey> = gathered
         .members
@@ -962,6 +1026,14 @@ pub(super) fn read_session(backend: &dyn Backend, session: &Session) -> Result<S
         mentions: sink.mentions,
         edits: sink.edits,
     })
+}
+
+/// The size of a session's recording, which is what reading it costs; zero
+/// for one with no file.
+fn recording_bytes(session: &Session) -> u64 {
+    crate::backend::session_file_path(session)
+        .and_then(|path| std::fs::metadata(path).ok())
+        .map_or(0, |metadata| metadata.len())
 }
 
 /// The stamp of each request the read counted, in recording order.

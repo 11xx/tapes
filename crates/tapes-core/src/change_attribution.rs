@@ -835,8 +835,8 @@ fn one_ns() -> Duration {
 }
 
 /// Turn a session's evidence into spans, events and cues.
-fn inputs(evidence: &SessionEvidence, facts: &Facts, params: &Params) -> Inputs {
-    let index = facts.index();
+fn inputs(evidence: &SessionEvidence, index: &Index<'_>, params: &Params) -> Inputs {
+    let facts = index.facts;
     let mut inputs = Inputs {
         spans: Vec::new(),
         events: Vec::new(),
@@ -945,7 +945,7 @@ fn inputs(evidence: &SessionEvidence, facts: &Facts, params: &Params) -> Inputs 
     }
 
     // Worktree spans.
-    worktree_spans(evidence, facts, &index, params, &mut inputs);
+    worktree_spans(evidence, facts, index, params, &mut inputs);
 
     // Requests near a commit's author time.
     // Only a request the session made inside the repository is near a
@@ -1326,9 +1326,15 @@ fn push_owned(
 /// Divide one session by its own evidence, or by what evidence records
 /// state about it where they state anything.
 pub fn partition(evidence: &SessionEvidence, facts: &Facts, params: &Params) -> Partition {
+    partition_indexed(evidence, &facts.index(), params)
+}
+
+/// As [`partition`], over facts already indexed, so many sessions divided
+/// by the same facts share one index.
+fn partition_indexed(evidence: &SessionEvidence, index: &Index<'_>, params: &Params) -> Partition {
     let (inputs, whole) = match &evidence.declared {
         Some(declared) => declared_inputs(declared, evidence, params),
-        None => (inputs(evidence, facts, params), Vec::new()),
+        None => (inputs(evidence, index, params), Vec::new()),
     };
     let plan = Plan::with_cues(
         &inputs.spans,
