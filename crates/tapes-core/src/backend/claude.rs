@@ -10,10 +10,10 @@ use sha2::{Digest, Sha256};
 use super::{
     accounting_for, bounded_launch, default_native_store, enrich_native_session, head_directory,
     list_discovered_files, list_discovered_files_with_search, merge_launch, read_bounds,
-    read_recording, replay_pin, skipped_records_note, stream_jsonl, streamed_trailing_record,
-    timestamp, trailing_record, transcript, transcript_from_recording, unreadable_between,
-    ActivityRange, Backend, FoldedSession, Jsonl, Listing, ParsedFile, ParsedTurns, Query, ReadPin,
-    StreamedChild, StreamedTranscript, TokenTotals, UnmappedTally,
+    read_recording, replay_pin, skipped_records_note, stream_jsonl, stream_jsonl_matching,
+    streamed_trailing_record, timestamp, trailing_record, transcript, transcript_from_recording,
+    unreadable_between, ActivityRange, Backend, FoldedSession, Jsonl, Listing, ParsedFile,
+    ParsedTurns, Query, ReadPin, StreamedChild, StreamedTranscript, TokenTotals, UnmappedTally,
 };
 use crate::content::{
     bounded_shape, bounded_text, text_part, tool_coverage, tool_part, ArtifactReference,
@@ -699,13 +699,30 @@ impl Backend for ClaudeBackend {
     ) -> Result<StreamedTranscript> {
         let path = super::session_file_path(session)
             .ok_or_else(|| anyhow!("claude session {} has no file locator", session.id))?;
-        let mut launch = None;
         let mut identity = RecordIdentity::of(session);
-        let opening = stream_jsonl(path, replay_pin(replay)?, |value, _, _| {
-            identity.check(value)?;
-            launch = merge_launch(launch, claude_entrypoint(value));
-            Ok(false)
-        })?;
+        // The launch is the whole recording's, so it is fixed before the
+        // first turn is handed over. A replay takes it from the read it
+        // replays, which folded the same bytes; any other read finds it in a
+        // pass of its own, reading each line's entrypoint without decoding
+        // the record. The records' identity is checked by the pass that
+        // follows, over the same bytes.
+        let opening;
+        let (launch, pin) = match replay.and_then(|read| read.folded.as_deref()) {
+            Some(folded) => (folded.whole.launch, replay_pin(replay)?),
+            None => {
+                let mut launch = None;
+                opening = stream_jsonl_matching(
+                    path,
+                    replay_pin(replay)?,
+                    |line| {
+                        launch = merge_launch(launch, line_entrypoint(line));
+                        false
+                    },
+                    |_, _, _| Ok(false),
+                )?;
+                (launch, Some(opening.pin()))
+            }
+        };
         let domain = format!("file:{}", path.display());
         let mut unmapped = UnmappedTally::default();
         // The session's accounting folds from the same records as the turns,
@@ -721,7 +738,7 @@ impl Backend for ClaudeBackend {
         let mut turn_times = super::TurnStamps::new(options);
         let mut turn = super::timed(&mut turn_times, turn);
         let mut last_end = 0;
-        let read = stream_jsonl(path, Some(opening.pin()), |value, span, revision| {
+        let read = stream_jsonl(path, pin, |value, span, revision| {
             identity.check(value)?;
             if span.start != last_end {
                 records.selections.interrupt();
@@ -996,10 +1013,15 @@ impl Backend for ClaudeBackend {
     ) -> Result<StreamedChild> {
         let path = child_recording(parent, reference)?;
         let mut launch = None;
-        let opening = stream_jsonl(&path, replay_pin(replay)?, |value, _, _| {
-            launch = merge_launch(launch, claude_entrypoint(value));
-            Ok(false)
-        })?;
+        let opening = stream_jsonl_matching(
+            &path,
+            replay_pin(replay)?,
+            |line| {
+                launch = merge_launch(launch, line_entrypoint(line));
+                false
+            },
+            |_, _, _| Ok(false),
+        )?;
         let domain = format!("file:{}", path.display());
         let mut identity = ChildIdentity::new(&parent.id, &path);
         let mut identified = false;
@@ -1355,14 +1377,38 @@ fn observe_copies(copies: &mut CopyEvidence, value: &Value) {
     copies.observe_record(value["requestId"].as_str(), value["uuid"].as_str());
 }
 
+/// What [`claude_entrypoint`] reads from a record, taken from its line
+/// without building the record. A line this cannot read in that shape, a
+/// repeated key included, is decoded whole.
+fn line_entrypoint(line: &[u8]) -> Option<Launch> {
+    #[derive(serde::Deserialize)]
+    struct Entry<'a> {
+        #[serde(borrow, rename = "type")]
+        kind: Option<std::borrow::Cow<'a, str>>,
+        #[serde(borrow)]
+        entrypoint: Option<std::borrow::Cow<'a, str>>,
+    }
+    // Claude writes the key as plain text, so a line without it names none.
+    memchr::memmem::find(line, b"\"entrypoint\"")?;
+    // A struct also reads from a JSON array, which no record is.
+    let object = line.iter().find(|byte| !byte.is_ascii_whitespace()) == Some(&b'{');
+    match serde_json::from_slice::<Entry>(line) {
+        Ok(Entry { kind, entrypoint }) if object => {
+            launch_of_entrypoint(kind.as_deref()?, entrypoint.as_deref()?)
+        }
+        _ => claude_entrypoint(&serde_json::from_slice(line).ok()?),
+    }
+}
+
 fn claude_entrypoint(value: &Value) -> Option<Launch> {
-    if !matches!(
-        value["type"].as_str(),
-        Some("user" | "assistant" | "attachment" | "system")
-    ) {
+    launch_of_entrypoint(value["type"].as_str()?, value["entrypoint"].as_str()?)
+}
+
+fn launch_of_entrypoint(kind: &str, entrypoint: &str) -> Option<Launch> {
+    if !matches!(kind, "user" | "assistant" | "attachment" | "system") {
         return None;
     }
-    match value["entrypoint"].as_str()? {
+    match entrypoint {
         "cli" | "claude-desktop" => Some(Launch::Interactive),
         "sdk-cli" => Some(Launch::Headless),
         _ => None,

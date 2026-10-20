@@ -1,23 +1,33 @@
 //! A listing opens only the recordings that can hold activity inside its
-//! window. Each test names the caller-visible claim it holds and the wrong
+//! window, and a change view decodes each member's recording no more often
+//! than its evidence, the replay that pairs tool calls, and its span figures
+//! need. Each test names the caller-visible claim it holds and the wrong
 //! behaviour it rejects.
 
 #[path = "support/recordings.rs"]
 mod recordings;
 
+use std::cell::RefCell;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::time::{Duration as StdDuration, SystemTime};
 
 use agent_tapes_core::backend::claude::ClaudeBackend;
 use agent_tapes_core::backend::codex::CodexBackend;
 use agent_tapes_core::backend::pi::PiBackend;
 use agent_tapes_core::backend::{Backend, Listing, Query, QueryFilters};
-use agent_tapes_core::change_attribution::{gather, MemberRule};
+use agent_tapes_core::change_attribution::{attribute, gather, MemberRule, Params};
+use agent_tapes_core::counters;
+use agent_tapes_core::model::OperatorOrigin;
 use chrono::{DateTime, Duration, Utc};
 use serde_json::{json, Value};
 
 use recordings::*;
+
+/// The counters are process-wide, so every test that streams a recording
+/// runs one at a time.
+static COUNTED: Mutex<()> = Mutex::new(());
 
 const OLD: &str = "e1000000-0000-4000-8000-000000000001";
 const RECENT: &str = "e1000000-0000-4000-8000-000000000002";
@@ -244,6 +254,7 @@ fn a_session_begun_long_ago_and_active_inside_the_window_is_listed() {
 /// subagent is newer than its own file is listed and gathered with it.
 #[test]
 fn a_subagent_newer_than_its_parent_file_hides_neither() {
+    let _counted = COUNTED.lock().unwrap_or_else(|e| e.into_inner());
     let sandbox = Sandbox::new();
     let cwd = sandbox.repo();
     let long_ago = at("09:00:00") - Duration::days(60);
@@ -349,4 +360,180 @@ fn a_listing_with_the_skip_equals_the_full_listing_filtered_afterwards() {
             "{harness:?}"
         );
     }
+}
+
+// ---------------------------------------------------------------- reads
+
+fn file_size(path: &Path) -> u64 {
+    fs::metadata(path).unwrap().len()
+}
+
+/// Decode a Claude member's recording through the change view and report the
+/// bytes streaming passes decoded beside the recording's size.
+fn decoded_for_view(write: impl FnOnce(&Sandbox) -> PathBuf) -> (u64, u64, usize) {
+    let sandbox = Sandbox::new();
+    let path = write(&sandbox);
+    let size = file_size(&path);
+    let backends = sandbox.backends();
+    let repository = sandbox.repository();
+    let passes = counters::recording_passes();
+    let decoded = counters::decoded_bytes();
+    let gathered = gather(&backends, &repository, at("07:00:00"), at("18:00:00")).unwrap();
+    assert_eq!(gathered.members.len(), 1, "the session is a member");
+    attribute(&backends, &repository, &gathered, &Params::default()).unwrap();
+    (
+        counters::decoded_bytes() - decoded,
+        size,
+        counters::recording_passes() - passes,
+    )
+}
+
+/// A change view decodes a member's recording at most three times: its
+/// evidence pass, the replay that pairs its tool calls, and its span
+/// figures. The pass that settles the launch decodes nothing, and the replay
+/// does not make it again.
+#[test]
+fn a_claude_member_is_decoded_no_more_than_three_times() {
+    let _counted = COUNTED.lock().unwrap_or_else(|e| e.into_inner());
+    let (decoded, size, passes) = decoded_for_view(|sandbox| {
+        let cwd = sandbox.repo();
+        let mut claude = Claude::lead(MEMBER, &cwd, "main");
+        claude.prompt(at("09:00:00"));
+        claude.bash(at("09:01:00"), "git status", "clean");
+        claude.reply(at("09:05:00"));
+        claude.write(sandbox, &cwd);
+        recording_of(&Harness::Claude.root(sandbox), MEMBER)
+    });
+    assert!(
+        decoded <= 3 * size,
+        "decoded {decoded} bytes of a {size}-byte recording"
+    );
+    assert!(passes <= 4, "{passes} passes over the recording");
+}
+
+/// The same bound holds for a Codex member, whose evidence read is a pass and
+/// its replay, and whose spans are a third.
+#[test]
+fn a_codex_member_is_decoded_no_more_than_three_times() {
+    let _counted = COUNTED.lock().unwrap_or_else(|e| e.into_inner());
+    let (decoded, size, passes) = decoded_for_view(|sandbox| {
+        let mut codex = Codex::new(MEMBER, at("09:00:00"), &sandbox.repo(), "main");
+        codex.exec(at("09:01:00"), "git status", "clean");
+        codex.reply(at("09:05:00"));
+        codex.write(sandbox);
+        recording_of(&Harness::Codex.root(sandbox), MEMBER)
+    });
+    assert!(
+        decoded <= 3 * size,
+        "decoded {decoded} bytes of a {size}-byte recording"
+    );
+    assert!(passes <= 3, "{passes} passes over the recording");
+}
+
+fn claude_store(lines: &[String]) -> (Sandbox, ClaudeBackend, agent_tapes_core::model::Session) {
+    let sandbox = Sandbox::new();
+    let project = Claude::project(&sandbox, &sandbox.repo());
+    fs::create_dir_all(&project).unwrap();
+    fs::write(
+        project.join(format!("{MEMBER}.jsonl")),
+        lines
+            .iter()
+            .map(|line| format!("{line}\n"))
+            .collect::<String>(),
+    )
+    .unwrap();
+    let backend = ClaudeBackend::new(sandbox.dir("claude/projects"));
+    let session = backend.locate(MEMBER).unwrap().unwrap();
+    (sandbox, backend, session)
+}
+
+/// One typed prompt per entrypoint, as record lines.
+fn prompts(entrypoints: &[&str]) -> Vec<String> {
+    let mut claude = Claude::lead(MEMBER, Path::new("/work"), "main");
+    for (index, entrypoint) in entrypoints.iter().enumerate() {
+        claude.prompt(at("09:00:00") + Duration::minutes(index as i64));
+        let prompt = claude.records.last_mut().unwrap();
+        prompt["entrypoint"] = json!(entrypoint);
+        prompt["promptSource"] = json!("typed");
+    }
+    claude.records.iter().map(Value::to_string).collect()
+}
+
+/// The origins of the turns of a first read and of its replay.
+fn origins(
+    backend: &ClaudeBackend,
+    session: &agent_tapes_core::model::Session,
+) -> [Vec<Option<OperatorOrigin>>; 2] {
+    let first = RefCell::new(Vec::new());
+    let read = backend
+        .stream_transcript(session, None, &mut |turn| {
+            first.borrow_mut().push(turn.origin);
+            Ok(())
+        })
+        .unwrap();
+    let replay = RefCell::new(Vec::new());
+    backend
+        .stream_transcript(session, Some(&read), &mut |turn| {
+            replay.borrow_mut().push(turn.origin);
+            Ok(())
+        })
+        .unwrap();
+    [first.into_inner(), replay.into_inner()]
+}
+
+/// The launch of a whole recording decides the origin of every operator turn:
+/// a headless session's prompts come from a program, and one interactive
+/// record anywhere makes them a person's. A replay hands over the same
+/// origins as the read it replays, and the launch is read from a record's
+/// line as a JSON reader would: the last of a repeated key stands, and an
+/// escaped `type` is the type it spells.
+#[test]
+fn a_launch_found_without_decoding_orders_every_turn_as_before() {
+    let _counted = COUNTED.lock().unwrap_or_else(|e| e.into_inner());
+    let (_sandbox, backend, session) = claude_store(&prompts(&["sdk-cli", "sdk-cli"]));
+    for turns in origins(&backend, &session) {
+        assert_eq!(turns, [Some(OperatorOrigin::Program); 2]);
+    }
+
+    let (_sandbox, backend, session) = claude_store(&prompts(&["sdk-cli", "cli"]));
+    for turns in origins(&backend, &session) {
+        assert!(!turns.contains(&Some(OperatorOrigin::Program)), "{turns:?}");
+    }
+
+    let mut repeated = prompts(&["sdk-cli"]);
+    repeated.push(r#"{"type":"user","entrypoint":"sdk-cli","entrypoint":"cli"}"#.to_owned());
+    let (_sandbox, backend, session) = claude_store(&repeated);
+    for turns in origins(&backend, &session) {
+        assert!(!turns.contains(&Some(OperatorOrigin::Program)), "{turns:?}");
+    }
+
+    let escaped = prompts(&["sdk-cli"])[0].replace(r#""type":"user""#, r#""type":"us\u0065r""#);
+    assert!(escaped.contains(r"us\u0065r"));
+    let (_sandbox, backend, session) = claude_store(&[escaped]);
+    for turns in origins(&backend, &session) {
+        assert_eq!(turns, [Some(OperatorOrigin::Program)]);
+    }
+}
+
+/// A first read of a Claude recording decodes each record once, and its
+/// replay decodes each record once: finding the launch decodes none.
+#[test]
+fn a_streamed_read_and_its_replay_each_decode_a_recording_once() {
+    let _counted = COUNTED.lock().unwrap_or_else(|e| e.into_inner());
+    let records = prompts(&["cli", "cli", "cli"]);
+    let (sandbox, backend, session) = claude_store(&records);
+    let size = file_size(&recording_of(&sandbox.dir("claude/projects"), MEMBER));
+
+    let before = counters::decoded_bytes();
+    let read = backend
+        .stream_transcript(&session, None, &mut |_| Ok(()))
+        .unwrap();
+    let first = counters::decoded_bytes() - before;
+    backend
+        .stream_transcript(&session, Some(&read), &mut |_| Ok(()))
+        .unwrap();
+    let replay = counters::decoded_bytes() - before - first;
+
+    assert!(first <= size, "first read decoded {first} of {size} bytes");
+    assert!(replay <= size, "replay decoded {replay} of {size} bytes");
 }

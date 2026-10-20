@@ -2185,10 +2185,36 @@ pub(crate) fn replay_pin(replay: Option<&StreamedTranscript>) -> Result<Option<R
     replay.map(StreamedTranscript::pin).transpose()
 }
 
+/// As [`stream_jsonl`], decoding only the lines `wanted` accepts. `wanted`
+/// sees every line's bytes, in order, and may read what it needs from them
+/// itself. A line it rejects is neither decoded nor reported, whether or not
+/// it is valid JSON, so it raises no gap and counts no skipped record; the
+/// pass still reads and digests every byte, and a pin names the same bytes it
+/// would for the full decode.
+pub(crate) fn stream_jsonl_matching(
+    path: &Path,
+    pin: Option<ReadPin<'_>>,
+    wanted: impl FnMut(&[u8]) -> bool,
+    record: impl FnMut(&Value, ByteSpan, &str) -> Result<bool>,
+) -> Result<StreamedJsonl> {
+    stream_jsonl_wanting(path, FULL_RECORD_BYTES, pin, wanted, record, |_| {})
+}
+
 fn stream_jsonl_within(
     path: &Path,
     record_bytes: u64,
     pin: Option<ReadPin<'_>>,
+    record: impl FnMut(&Value, ByteSpan, &str) -> Result<bool>,
+    gap: impl FnMut(&ReadGap),
+) -> Result<StreamedJsonl> {
+    stream_jsonl_wanting(path, record_bytes, pin, |_| true, record, gap)
+}
+
+fn stream_jsonl_wanting(
+    path: &Path,
+    record_bytes: u64,
+    pin: Option<ReadPin<'_>>,
+    mut wanted: impl FnMut(&[u8]) -> bool,
     mut record: impl FnMut(&Value, ByteSpan, &str) -> Result<bool>,
     mut gap: impl FnMut(&ReadGap),
 ) -> Result<StreamedJsonl> {
@@ -2223,6 +2249,7 @@ fn stream_jsonl_within(
     };
     let mut line = Vec::new();
     let mut offset = 0;
+    let mut decoded = 0;
     loop {
         line.clear();
         let read = (&mut reader)
@@ -2246,7 +2273,8 @@ fn stream_jsonl_within(
             streamed.gaps.push(read_gap);
         } else {
             let content = line[..].strip_suffix(b"\n").unwrap_or(&line[..]);
-            if !content.iter().all(u8::is_ascii_whitespace) {
+            if wanted(content) && !content.iter().all(u8::is_ascii_whitespace) {
+                decoded += content.len() as u64;
                 match serde_json::from_slice::<Value>(content) {
                     Ok(value) => {
                         let produced = record(&value, span, &streamed.revision)?;
@@ -2271,6 +2299,7 @@ fn stream_jsonl_within(
             line = Vec::new();
         }
     }
+    crate::counters::decoded(decoded);
     streamed.prefix_sha256 = reader.get_ref().get_ref().digest.clone().finalize().into();
     if let Some(expected) = pin.and_then(|pin| pin.prefix_sha256) {
         if expected != &streamed.prefix_sha256 {

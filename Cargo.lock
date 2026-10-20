@@ -34,6 +34,7 @@ dependencies = [
  "base64",
  "chrono",
  "libc",
+ "memchr",
  "serde",
  "serde_json",
  "sha2",
