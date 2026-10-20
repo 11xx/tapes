@@ -151,8 +151,9 @@ FIND IT
   which sessions the limit keeps: the newest of each harness, or the oldest,
   which inspects every candidate the scan reaches as --search does. Ties use
   session id ascending, then harness ascending. A Claude, Codex or Pi
-  recording file last modified more than a day before --since is not opened:
-  recordings are only appended to, so it holds no later activity, and the day
+  recording file last modified more than a day before --since is skipped
+  without being parsed: recordings are only appended to, so it holds no later
+  activity, and the day
   absorbs clock skew and coarse file times. Such a file raises no
   unreadable-recording note, and the sessions listed are the same.
 
