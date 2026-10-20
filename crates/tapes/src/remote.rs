@@ -350,8 +350,11 @@ impl Replica {
 /// remote `tapes` as the caller wrote it, and nothing in a title or a search
 /// string may be interpreted there. `json` appends the flag that asks for a
 /// schema object, for a command whose answer is one.
+/// The replica's command line. It runs offline, so a remote read never
+/// refreshes the replica's price table; a replica that predates the
+/// variable ignores it, where an unknown flag would fail.
 fn remote_command(args: &[OsString], json: bool) -> std::result::Result<String, String> {
-    let mut command = String::from("tapes");
+    let mut command = String::from("env TAPES_OFFLINE=1 tapes");
     for arg in args {
         command.push(' ');
         command.push_str(&quote(arg)?);
@@ -525,11 +528,17 @@ mod tests {
     }
 
     #[test]
-    fn a_remote_command_quotes_every_word_and_asks_for_json() {
+    fn a_remote_command_runs_offline_quotes_every_word_and_asks_for_json() {
+        // Claim: the replica's command runs with TAPES_OFFLINE=1 and quotes
+        // every word. Rejects a remote read refreshing the replica's price
+        // table and writing its data directory.
         let command = remote_command(&args(&["show", "a b", "--title", "it's"]), true).unwrap();
-        assert_eq!(command, "tapes 'show' 'a b' '--title' 'it'\\''s' --json");
+        assert_eq!(
+            command,
+            "env TAPES_OFFLINE=1 tapes 'show' 'a b' '--title' 'it'\\''s' --json"
+        );
         let plain = remote_command(&args(&["export", "a b"]), false).unwrap();
-        assert_eq!(plain, "tapes 'export' 'a b'");
+        assert_eq!(plain, "env TAPES_OFFLINE=1 tapes 'export' 'a b'");
     }
 
     #[test]

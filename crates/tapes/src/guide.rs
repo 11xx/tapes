@@ -739,7 +739,9 @@ PROBE BEFORE EXPORTING
   `show --json` (on each session), `stats` and `brief` (in `usage`), and
   the per-session figures of a summary's overlap groups. Text adds the estimate, labelled as one, only where it prints a
   cost: `usage`, the `stats` usage block, and a summary's session figures.
-  A replica's answer under `--remote` is not priced. `--prices FILE` reads
+  A replica's answer under `--remote` is not priced, and the replica runs
+  its command with `TAPES_OFFLINE=1`, so a remote read refreshes no price
+  table on either side. `--prices FILE` reads
   a table, else the file `TAPES_PRICES` names, each used alone; else the
   config table `$XDG_CONFIG_HOME/tapes/prices.toml`
   (`~/.config/tapes/prices.toml`) merged over the fetched data table
@@ -1691,16 +1693,17 @@ KEEP A PRICE TABLE
   nor `TAPES_PRICES` naming a table and outside `--remote`, first runs the
   same update when the data table is absent or no source succeeded in the
   last 24 hours, and the last attempt is over an hour old or unrecorded:
-  so about once a day, and at most hourly while fetches fail. It records
-  the attempt before fetching, so commands started together fetch once.
-  The refresh gives each source 5 seconds to connect and 10 to finish. It
-  prints nothing when it succeeds. When a source fails it prints one
-  line: `warning: prices refreshed, except <source>: <error>; …` when
-  another source succeeded, else `warning: prices not refreshed (<source>:
-  <error>; …); using the table fetched <date>` (or `no fetched table`).
-  The command goes on, its exit status unchanged. `--offline` on any
-  command that prices, or `TAPES_OFFLINE=1`, skips the refresh; the table
-  already fetched still prices.
+  so about once a day, and at most hourly while fetches fail. A replica
+  answering a `--remote` read runs offline, so it never refreshes either.
+  It records the attempt before fetching, so commands started together
+  fetch once. The refresh gives each source 5 seconds to connect and 10 to
+  finish. It prints nothing when it succeeds. When a source fails it
+  prints one line: `warning: prices refreshed, except <source>: <error>;
+  …` when another source succeeded, else `warning: prices not refreshed
+  (<source>: <error>; …); using the table fetched <date>` (or `no fetched
+  table`). The command goes on, its exit status unchanged. `--offline` on
+  any command that prices, or `TAPES_OFFLINE=1`, skips the refresh; the
+  table already fetched still prices.
 
   The pages show only current prices, so the table keeps history as
   validity windows. A fetched price equal to the row in effect, from the

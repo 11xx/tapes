@@ -12157,7 +12157,7 @@ fn list_remote_answers_from_the_replica_and_names_it() {
     );
     assert_eq!(
         replica.queried(),
-        vec!["tapes 'list' '--global' '--sort' 'newest' --json"],
+        vec!["env TAPES_OFFLINE=1 tapes 'list' '--global' '--sort' 'newest' --json"],
         "the replica was not asked with the caller's arguments"
     );
     assert_eq!(replica.destinations(), vec!["replica-host"]);
@@ -12165,7 +12165,7 @@ fn list_remote_answers_from_the_replica_and_names_it() {
         replica.argv(),
         vec![
             "replica-host",
-            "tapes 'list' '--global' '--sort' 'newest' --json"
+            "env TAPES_OFFLINE=1 tapes 'list' '--global' '--sort' 'newest' --json"
         ],
         "a program named through TAPES_SSH received options it did not ask for"
     );
@@ -12242,7 +12242,9 @@ fn show_remote_never_joins_the_local_liveness_registry() {
     );
     assert_eq!(
         replica.queried(),
-        vec![format!("tapes 'show' '{CODEX_ONE_ID}' '--tail' '1' --json")]
+        vec![format!(
+            "env TAPES_OFFLINE=1 tapes 'show' '{CODEX_ONE_ID}' '--tail' '1' --json"
+        )]
     );
 
     let human = run_against_replica(
@@ -12362,7 +12364,7 @@ fn the_default_ssh_is_invoked_non_interactively() {
             "-o",
             "BatchMode=yes",
             "replica-host",
-            "tapes 'list' '--global' '--sort' 'newest' --json"
+            "env TAPES_OFFLINE=1 tapes 'list' '--global' '--sort' 'newest' --json"
         ]
     );
 
@@ -12562,7 +12564,7 @@ fn a_remote_query_carries_the_callers_arguments_intact() {
     assert_eq!(
         replica.queried(),
         vec![
-            "tapes 'show' '--title' 'Title with '\\''quotes'\\'', $HOME, `ticks`, and \"double\"' \
+            "env TAPES_OFFLINE=1 tapes 'show' '--title' 'Title with '\\''quotes'\\'', $HOME, `ticks`, and \"double\"' \
              '--read-bytes' '1048576' '--only' 'operator,assistant' --json"
                 .to_owned()
         ]
@@ -12651,7 +12653,7 @@ fn export_remote_runs_the_replica_export_and_tags_every_path() {
     assert_eq!(
         replica.queried(),
         vec![format!(
-            "tapes 'export' '{CODEX_ONE_ID}' '--bundle' '{}'",
+            "env TAPES_OFFLINE=1 tapes 'export' '{CODEX_ONE_ID}' '--bundle' '{}'",
             bundles.display()
         )]
     );

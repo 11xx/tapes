@@ -594,7 +594,8 @@ struct PriceArgs {
     /// shorter time limits when the fetched table is absent or no source
     /// succeeded in 24 hours, at most once an hour. A source that fails is
     /// one stderr warning, `prices refreshed, except …` or `prices not
-    /// refreshed (…)`, and never fails the command.
+    /// refreshed (…)`, and never fails the command. A replica answering a
+    /// --remote read runs offline, so it never refreshes either.
     #[arg(long)]
     offline: bool,
 }
