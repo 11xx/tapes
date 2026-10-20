@@ -733,11 +733,11 @@ PROBE BEFORE EXPORTING
   both whole, with its reason, rather than keep part of them.
   Money beyond what a harness wrote comes from a price table: tapes ships no
   prices, so the table is the caller's, or the one tapes fetches from the
-  vendors' pages and keeps fresh (see KEEP A PRICE TABLE). Every command that reports a session's
-  cost prices it the same way and puts `list_price_estimate` beside it:
-  `usage`, `list --json` and `show --json` (on each session), `stats` and
-  `brief` (in `usage`), and the per-session figures of a summary's overlap
-  groups. Text adds the estimate, labelled as one, only where it prints a
+  vendors' pages and keeps fresh (see KEEP A PRICE TABLE). Every command
+  that reports a session's cost prices it the same way and puts
+  `list_price_estimate` beside it: `usage`, `list --json` and
+  `show --json` (on each session), `stats` and `brief` (in `usage`), and
+  the per-session figures of a summary's overlap groups. Text adds the estimate, labelled as one, only where it prints a
   cost: `usage`, the `stats` usage block, and a summary's session figures.
   A replica's answer under `--remote` is not priced. `--prices FILE` reads
   a table, else the file `TAPES_PRICES` names, each used alone; else the
