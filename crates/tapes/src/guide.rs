@@ -802,7 +802,17 @@ PROBE BEFORE EXPORTING
   day of its weekday. A row is in effect from `effective_from`
   until `effective_until`; one id may name several rows whose windows do
   not meet, so a dated price change is two rows. A /1 table refuses these
-  keys, and prices exactly as it always has. A figure is priced by these
+  keys, and prices exactly as it always has. tapes-price-table/3 takes
+  everything /2 does, and top-level plan rules:
+
+      schema = "tapes-price-table/3"
+      [[plans]]
+      id = "opencode-go"               # a plan a recording names
+      billing = "subscription"         # "api" or "subscription"
+
+  A plan rule overrides the built-in rule of its id, or adds one. A
+  duplicate plan id, any other `billing`, an unknown key, and `[[plans]]`
+  in a /1 or /2 table refuse. A figure is priced by these
   terms request by request where its reader kept its requests — a Claude,
   Codex or pi session, span or window share, a pi retained-branch
   `consumption`, each event at its own time on whichever branch holds it,
@@ -818,17 +828,21 @@ PROBE BEFORE EXPORTING
   the rows in effect leave part of the figure's span uncovered for is
   priced by the rows that cover it, its categories outside-validity too.
   Each recording's billing comes
-  from what it records, named with its evidence in the estimate's
-  `billing` wherever a used row has a long-context term: a Codex
-  `rate_limits` window reporting a used percent is a ChatGPT plan's quota,
-  a subscription; a Codex `model_provider` other than `openai` bills per
-  token; a Claude `api-request` record carrying the `oauth-2025-04-20`
-  beta, or a `quotaLimits` refusal naming a plan quota, is a subscription,
-  and one sent without that beta bills per token; a pi recording whose
-  every token-carrying event is a request on the `openai-codex-responses`
-  API, which takes only a ChatGPT account's sign-in, is a subscription; any
-  other pi recording, a compaction or tool result naming no API included,
-  and every OpenCode recording name no billing. A span or window share is
+  from what it records, named with its `plan` where known and its evidence
+  in the estimate's `billing` wherever a used row has a long-context term:
+  a Codex `rate_limits` window reporting a used percent is a ChatGPT plan's
+  quota, plan `chatgpt-subscription`; a Codex `model_provider` other than
+  `openai` bills per token, the plan that provider names; a Claude
+  `api-request` record carrying the `oauth-2025-04-20` beta, or a
+  `quotaLimits` refusal naming a plan quota, is plan `claude-subscription`,
+  and one sent without that beta is plan `anthropic-api`; a pi recording
+  whose every token-carrying event is a request on the
+  `openai-codex-responses` API, which takes only a ChatGPT account's
+  sign-in, is plan `chatgpt-subscription`, and one whose every
+  token-carrying event names one and the same other `provider` is the plan
+  that provider names, such as `opencode-go`; any other pi recording, mixed
+  providers or a compaction or tool result naming none included, and every
+  OpenCode recording name no billing. A span or window share is
   billed as its whole recording is, whatever records it holds, and names
   no billing where the whole recording names none. A bounded read that
   leaves part of its recording unread — the default `usage` view, a
@@ -836,9 +850,15 @@ PROBE BEFORE EXPORTING
   billing: its billing is unestablished, its evidence naming what the read
   window shows, or that it shows none, since a record the read skipped can
   contradict that, and `--full` reads the recording's billing whole. A
-  subscription pays no long-context surcharge; billing the recording
-  establishes neither way is priced between base and surcharged rates, its
-  categories billing-unestablished.
+  plan rule decides which terms a plan pays, the table's rule before the
+  built-in one: built in, `claude-subscription` and `chatgpt-subscription`
+  pay `subscription` terms, so no term naming only `api` reaches them, and
+  `anthropic-api` and `opencode-go`, a subscription billed at API rates,
+  pay `api` terms. A plan with no rule keeps the billing its reader
+  established: a Codex provider bills per token, and a pi provider names
+  none. The estimate's `billing` carries the resolved `terms`. Billing the
+  recording establishes neither way is priced between base and surcharged
+  rates, its categories billing-unestablished.
   Each figure — a session, each model of `by_model`, a pi `consumption`, a
   span, a summary group, total or partition — gains `list_price_estimate`
   beside the harness's own `cost`, never in its place: `kind:

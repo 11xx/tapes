@@ -2024,23 +2024,33 @@ impl ClaudeBilling {
         }
     }
 
-    /// A subscription sign-in sends the OAuth beta and has plan quotas; an
-    /// API key sends requests without it. Both, or neither, establish
-    /// nothing.
+    /// A subscription sign-in sends the OAuth beta and has plan quotas, the
+    /// `claude-subscription` plan; an API key sends requests without it, the
+    /// `anthropic-api` plan. Both, or neither, establish nothing.
     fn finish(self) -> Option<crate::pricing::Billing> {
         use crate::pricing::Billing;
-        match (self.oauth, self.without_oauth, self.quota) {
-            (true, false, _) => Some(Billing::subscription(format!(
-                "claude api-request carries the `{OAUTH_BETA}` beta"
-            ))),
-            (false, false, Some(quota)) => Some(Billing::subscription(format!(
-                "claude quotaLimits refusal names the `{quota}` plan quota"
-            ))),
-            (false, true, None) => Some(Billing::api(format!(
-                "claude api-request without the `{OAUTH_BETA}` beta"
-            ))),
-            _ => None,
-        }
+        let (plan, billing) = match (self.oauth, self.without_oauth, self.quota) {
+            (true, false, _) => (
+                "claude-subscription",
+                Billing::subscription(format!(
+                    "claude api-request carries the `{OAUTH_BETA}` beta"
+                )),
+            ),
+            (false, false, Some(quota)) => (
+                "claude-subscription",
+                Billing::subscription(format!(
+                    "claude quotaLimits refusal names the `{quota}` plan quota"
+                )),
+            ),
+            (false, true, None) => (
+                "anthropic-api",
+                Billing::api(format!(
+                    "claude api-request without the `{OAUTH_BETA}` beta"
+                )),
+            ),
+            _ => return None,
+        };
+        Some(billing.with_plan(plan))
     }
 }
 

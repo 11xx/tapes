@@ -19,6 +19,13 @@
 //!
 //! A recorded id ending in `-YYYYMMDD` that no row names exactly is priced
 //! by the row named by the id without that date.
+//!
+//! Whether a long-context term applies depends on the billing plan a
+//! recording names: a Claude or ChatGPT subscription pays the terms for
+//! `subscription` billing, while the Anthropic API and opencode-go pay those
+//! for `api`. [`BUILTIN_PLANS`] holds those rules, and
+//! `tapes-price-table/3` adds `[[plans]]` rows that override a built-in rule
+//! or add one. A plan with no rule keeps the billing its reader established.
 
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
@@ -37,6 +44,16 @@ use crate::usage::ModelUsage;
 pub const PRICE_TABLE_SCHEMA: &str = "tapes-price-table/1";
 /// The table format whose rows may carry terms priced by the request.
 pub const PRICE_TABLE_SCHEMA_V2: &str = "tapes-price-table/2";
+/// The table format that may also carry plan rules.
+pub const PRICE_TABLE_SCHEMA_V3: &str = "tapes-price-table/3";
+/// The billing each plan a reader names pays the terms of, absent a table's
+/// own rule for it.
+pub const BUILTIN_PLANS: [(&str, BillingKind); 4] = [
+    ("claude-subscription", BillingKind::Subscription),
+    ("chatgpt-subscription", BillingKind::Subscription),
+    ("anthropic-api", BillingKind::Api),
+    ("opencode-go", BillingKind::Api),
+];
 pub const ESTIMATE_KIND: &str = "list-price-estimate";
 /// The environment variable naming a price table, after `--prices`.
 pub const PRICES_ENV: &str = "TAPES_PRICES";
@@ -291,7 +308,17 @@ pub struct PriceTable {
     pub models: Vec<ModelPrice>,
     /// The format the table was written in.
     pub schema: &'static str,
+    /// The table's plan rules, each overriding a built-in rule of its id.
+    pub plans: Vec<PlanRule>,
     index: HashMap<String, Vec<usize>>,
+}
+
+/// A plan rule: which billing's long-context terms a plan pays.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PlanRule {
+    pub id: String,
+    pub billing: BillingKind,
 }
 
 /// A price table file as written, the form [`PriceTable::parse`] reads and
@@ -303,6 +330,8 @@ struct RawTable {
     currency: String,
     #[serde(default)]
     models: Vec<RawModel>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    plans: Vec<PlanRule>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -454,22 +483,41 @@ fn validity_overlaps(first: &ModelPrice, second: &ModelPrice) -> bool {
 }
 
 impl PriceTable {
-    /// Parse and validate a `tapes-price-table/1` or `/2` document. Unknown
-    /// keys, negative or non-finite prices, and an id or alias named twice
-    /// refuse, naming the entry; a version 2 table names one id in several
-    /// rows only when their validity windows do not meet. A version 1 table
-    /// refuses the version 2 terms.
+    /// Parse and validate a `tapes-price-table/1`, `/2` or `/3` document.
+    /// Unknown keys, negative or non-finite prices, and an id or alias named
+    /// twice refuse, naming the entry; a version 2 or 3 table names one id in
+    /// several rows only when their validity windows do not meet. A version
+    /// 1 table refuses the version 2 terms, and only a version 3 table
+    /// carries plan rules, each id once.
     pub fn parse(text: &str) -> Result<Self> {
         let raw: RawTable = toml::from_str(text).context("the price table is not valid")?;
         let schema = match raw.schema.as_str() {
             PRICE_TABLE_SCHEMA => PRICE_TABLE_SCHEMA,
             PRICE_TABLE_SCHEMA_V2 => PRICE_TABLE_SCHEMA_V2,
+            PRICE_TABLE_SCHEMA_V3 => PRICE_TABLE_SCHEMA_V3,
             other => {
                 return Err(anyhow!(
-                    "the price table's schema is `{other}`, not `{PRICE_TABLE_SCHEMA}` or `{PRICE_TABLE_SCHEMA_V2}`"
+                    "the price table's schema is `{other}`, not `{PRICE_TABLE_SCHEMA}`, `{PRICE_TABLE_SCHEMA_V2}` or `{PRICE_TABLE_SCHEMA_V3}`"
                 ))
             }
         };
+        if !raw.plans.is_empty() && schema != PRICE_TABLE_SCHEMA_V3 {
+            return Err(anyhow!("plans need schema `{PRICE_TABLE_SCHEMA_V3}`"));
+        }
+        for (position, plan) in raw.plans.iter().enumerate() {
+            if plan.id.is_empty() {
+                return Err(anyhow!("plans[{position}] has an empty id"));
+            }
+            if let Some(earlier) = raw.plans[..position]
+                .iter()
+                .position(|earlier| earlier.id == plan.id)
+            {
+                return Err(anyhow!(
+                    "plans[{position}] names `{}`, which plans[{earlier}] already names",
+                    plan.id
+                ));
+            }
+        }
         if raw.currency.trim().is_empty() {
             return Err(anyhow!("the price table names no currency"));
         }
@@ -598,6 +646,7 @@ impl PriceTable {
             currency: raw.currency,
             models,
             schema,
+            plans: raw.plans,
             index,
         })
     }
@@ -629,6 +678,21 @@ impl PriceTable {
         Self::parse(&text).with_context(|| format!("in the price table {}", path.display()))
     }
 
+    /// The billing whose long-context terms `plan` pays: the table's rule
+    /// for it, else the built-in one, else none.
+    pub fn plan_billing(&self, plan: &str) -> Option<BillingKind> {
+        self.plans
+            .iter()
+            .find(|rule| rule.id == plan)
+            .map(|rule| rule.billing)
+            .or_else(|| {
+                BUILTIN_PLANS
+                    .iter()
+                    .find(|(id, _)| *id == plan)
+                    .map(|(_, billing)| *billing)
+            })
+    }
+
     /// The row for a model id as a harness records it, by id or alias: the
     /// first in the table where several rows name it for different times.
     pub fn price(&self, id: &str) -> Option<&ModelPrice> {
@@ -654,6 +718,7 @@ impl PriceTable {
             schema: PRICE_TABLE_SCHEMA_V2.to_owned(),
             currency: currency.to_owned(),
             models: models.iter().map(RawModel::of).collect(),
+            plans: Vec::new(),
         };
         toml::to_string(&raw).context("the price table could not be written")
     }
@@ -951,7 +1016,8 @@ impl RequestUses {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum BillingTerms {
-    /// A subscription plan's quota, which no long-context surcharge reaches.
+    /// A subscription plan's quota: a long-context term applies when it
+    /// names `subscription` billing.
     Subscription,
     /// Tokens billed one by one, as an API key bills them.
     Api,
@@ -959,10 +1025,13 @@ pub enum BillingTerms {
     Unestablished,
 }
 
-/// A session's billing and the recorded fact that establishes it.
+/// A session's billing, the plan it names where known, and the recorded
+/// fact that establishes it.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 pub struct Billing {
     pub terms: BillingTerms,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub plan: Option<String>,
     pub evidence: String,
 }
 
@@ -970,6 +1039,7 @@ impl Billing {
     pub fn subscription(evidence: impl Into<String>) -> Self {
         Self {
             terms: BillingTerms::Subscription,
+            plan: None,
             evidence: evidence.into(),
         }
     }
@@ -977,6 +1047,7 @@ impl Billing {
     pub fn api(evidence: impl Into<String>) -> Self {
         Self {
             terms: BillingTerms::Api,
+            plan: None,
             evidence: evidence.into(),
         }
     }
@@ -985,8 +1056,43 @@ impl Billing {
     pub fn unestablished() -> Self {
         Self {
             terms: BillingTerms::Unestablished,
+            plan: None,
             evidence: "the recording names no billing".to_owned(),
         }
+    }
+
+    /// A recording that names `plan` but no terms of its own: its terms come
+    /// from a plan rule, and stay unestablished without one.
+    pub fn of_plan(plan: impl Into<String>, evidence: impl Into<String>) -> Self {
+        Self {
+            terms: BillingTerms::Unestablished,
+            plan: Some(plan.into()),
+            evidence: evidence.into(),
+        }
+    }
+
+    /// The same billing, naming `plan`.
+    pub fn with_plan(self, plan: impl Into<String>) -> Self {
+        Self {
+            plan: Some(plan.into()),
+            ..self
+        }
+    }
+
+    /// The billing with the terms `table`'s rule, or a built-in one, gives
+    /// its plan in place of the reader's.
+    pub fn resolved(&self, table: &PriceTable) -> Self {
+        let rule = self
+            .plan
+            .as_deref()
+            .and_then(|plan| table.plan_billing(plan));
+        let mut resolved = self.clone();
+        match rule {
+            Some(BillingKind::Api) => resolved.terms = BillingTerms::Api,
+            Some(BillingKind::Subscription) => resolved.terms = BillingTerms::Subscription,
+            None => {}
+        }
+        resolved
     }
 
     /// The billing of a read that left part of its recording unread: what
@@ -996,17 +1102,24 @@ impl Billing {
         let Some(shown) = shown else {
             return Self {
                 terms: BillingTerms::Unestablished,
+                plan: None,
                 evidence: "the read window names no billing, and records outside it went unread"
                     .to_owned(),
             };
         };
-        let terms = match shown.terms {
-            BillingTerms::Subscription => "a subscription",
-            BillingTerms::Api => "per-token billing",
-            BillingTerms::Unestablished => return shown,
+        let terms = match (shown.terms, &shown.plan) {
+            (BillingTerms::Subscription, _) => "a subscription",
+            (BillingTerms::Api, _) => "per-token billing",
+            (BillingTerms::Unestablished, Some(_)) => "a plan",
+            (BillingTerms::Unestablished, None) => return shown,
+        };
+        let terms = match &shown.plan {
+            Some(plan) => format!("{terms}, plan `{plan}`"),
+            None => terms.to_owned(),
         };
         Self {
             terms: BillingTerms::Unestablished,
+            plan: None,
             evidence: format!(
                 "the read window shows {terms} ({}), but records outside it went unread",
                 shown.evidence
@@ -1323,8 +1436,7 @@ fn price_with_terms(
     }
     let billing = terms
         .billing
-        .cloned()
-        .unwrap_or_else(Billing::unestablished);
+        .map_or_else(Billing::unestablished, |billing| billing.resolved(table));
     let requests = terms
         .requests
         .and_then(|uses| uses.of_share(id, variant, sole))

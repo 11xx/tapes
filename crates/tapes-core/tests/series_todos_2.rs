@@ -1,7 +1,9 @@
 //! A Claude id lookup answers from identities a walk reads in filenames and
 //! headers, so a miss does not depend on unrelated live recordings, and a
 //! recording that changes under a read is read again. A pi recording whose
-//! requests all went through a ChatGPT sign-in is billed by subscription.
+//! requests all went through a ChatGPT sign-in is billed by subscription,
+//! and one whose requests all name one other provider is billed as that
+//! provider's plan rule says.
 
 use std::fs::{self, OpenOptions};
 use std::io::Write;
@@ -279,7 +281,14 @@ fn pi_usage(input: u64, read: u64, output: u64) -> Value {
 /// A pi session, as pi writes one, of a large and a small request through
 /// `provider`'s `api`, with `extra` entries after them.
 fn pi_session(store: &Store, provider: &str, api: &str, extra: &[Value]) {
-    let assistant = |id: &str, parent: &str, usage: Value| {
+    pi_session_of(store, [provider, provider], api, extra);
+}
+
+/// A pi session whose large request goes through the first provider and
+/// whose small one goes through the second.
+fn pi_session_of(store: &Store, providers: [&str; 2], api: &str, extra: &[Value]) {
+    let provider = providers[0];
+    let assistant = |id: &str, parent: &str, provider: &str, usage: Value| {
         json!({"type": "message", "id": id, "parentId": parent,
                "timestamp": "2026-10-19T10:00:30.000Z",
                "message": {"role": "assistant", "content": [{"type": "text", "text": "Done."}],
@@ -300,9 +309,19 @@ fn pi_session(store: &Store, provider: &str, api: &str, extra: &[Value]) {
                "timestamp": "2026-10-19T10:00:00.000Z", "provider": provider,
                "modelId": "gpt-6-fixture"}),
         user("user-1", "model-1"),
-        assistant("assistant-1", "user-1", pi_usage(100_000, 200_000, 1_000)),
+        assistant(
+            "assistant-1",
+            "user-1",
+            provider,
+            pi_usage(100_000, 200_000, 1_000),
+        ),
         user("user-2", "assistant-1"),
-        assistant("assistant-2", "user-2", pi_usage(10_000, 40_000, 500)),
+        assistant(
+            "assistant-2",
+            "user-2",
+            providers[1],
+            pi_usage(10_000, 40_000, 500),
+        ),
     ];
     lines.extend_from_slice(extra);
     let body: String = lines.iter().map(|line| format!("{line}\n")).collect();
@@ -318,7 +337,12 @@ fn pi_session(store: &Store, provider: &str, api: &str, extra: &[Value]) {
 /// The session's estimate from the bounded and the whole usage view, and
 /// as a listing prices it.
 fn pi_estimates(store: &Store) -> [Value; 3] {
-    let table = PriceTable::parse(GPT_TABLE).unwrap();
+    pi_estimates_under(store, GPT_TABLE)
+}
+
+/// [`pi_estimates`] under the price table `table`.
+fn pi_estimates_under(store: &Store, table: &str) -> [Value; 3] {
+    let table = PriceTable::parse(table).unwrap();
     let backend = || -> Box<dyn Backend> { Box::new(PiBackend::new(&store.0)) };
     let mut view = usage_with_backends(&[backend()], Selection::Id(PI_ID)).unwrap();
     pricing::price_view(&mut view, &table);
@@ -360,7 +384,7 @@ fn a_pi_chatgpt_session_above_the_threshold_pays_base_rates() {
         );
         assert_eq!(
             estimate["billing"],
-            json!([{"terms": "subscription",
+            json!([{"terms": "subscription", "plan": "chatgpt-subscription",
                     "evidence": "pi `openai-codex-responses` requests, a ChatGPT sign-in"}])
         );
         assert!(
@@ -402,4 +426,132 @@ fn a_pi_session_with_any_other_token_event_establishes_no_billing() {
             assert_eq!(estimate["billing"][0]["terms"], "unestablished", "{label}");
         }
     }
+}
+
+// --- plan rules --------------------------------------------------------------
+
+/// [`GPT_TABLE`] as a `tapes-price-table/3` table whose long-context term
+/// names `api` billing, with `plans` rows after it.
+fn plan_table(plans: &str) -> String {
+    GPT_TABLE
+        .replace("tapes-price-table/2", "tapes-price-table/3")
+        .replace("multipliers = {", "billing = [\"api\"]\nmultipliers = {")
+        + plans
+}
+
+/// Claim: a pi session whose every request names provider `opencode-go`, a
+/// subscription billed at API rates, is plan `opencode-go`, whose built-in
+/// rule pays `api` terms: its request above 272K pays the long-context rates
+/// for the whole request, and the estimate is complete and names the plan.
+/// Rejects a provider plan priced between base and surcharged rates, or a
+/// surcharge waived because the plan is a subscription.
+#[test]
+fn a_pi_opencode_go_session_above_the_threshold_pays_the_surcharge() {
+    let store = Store::new("pi-opencode-go");
+    pi_session(&store, "opencode-go", "openai-completions", &[]);
+    for estimate in pi_estimates_under(&store, &plan_table("")) {
+        assert!(
+            close(&estimate["amount"], LARGE_SURCHARGED + SMALL),
+            "{estimate:#}"
+        );
+        assert_eq!(
+            estimate["billing"],
+            json!([{"terms": "api", "plan": "opencode-go",
+                    "evidence": "pi requests all name provider `opencode-go`"}])
+        );
+        assert!(
+            estimate.get("measurement_completeness").is_none(),
+            "{estimate:#}"
+        );
+    }
+}
+
+/// Claim: a `tapes-price-table/3` table's `[[plans]]` row overrides the
+/// built-in rule of its id, so `opencode-go` billed as `subscription` pays
+/// base rates above the threshold, and the estimate's terms are the
+/// resolved ones. Rejects a table rule ignored in favour of the built-in one.
+#[test]
+fn a_table_plan_rule_overrides_the_built_in_one() {
+    let store = Store::new("pi-opencode-go-rule");
+    pi_session(&store, "opencode-go", "openai-completions", &[]);
+    let table = plan_table("\n[[plans]]\nid = \"opencode-go\"\nbilling = \"subscription\"\n");
+    for estimate in pi_estimates_under(&store, &table) {
+        assert!(
+            close(&estimate["amount"], LARGE_BASE + SMALL),
+            "{estimate:#}"
+        );
+        assert_eq!(
+            estimate["billing"][0]["terms"], "subscription",
+            "{estimate:#}"
+        );
+        assert_eq!(
+            estimate["billing"][0]["plan"], "opencode-go",
+            "{estimate:#}"
+        );
+    }
+}
+
+/// Claim: a pi session whose requests name two providers establishes no
+/// plan, so its request above 272K is bounded billing-unestablished.
+/// Rejects the first provider's plan taken for the whole session.
+#[test]
+fn a_pi_session_mixing_providers_establishes_no_plan() {
+    let store = Store::new("pi-mixed-providers");
+    pi_session_of(
+        &store,
+        ["opencode-go", "fixture-provider"],
+        "openai-completions",
+        &[],
+    );
+    for estimate in pi_estimates_under(&store, &plan_table("")) {
+        assert!(estimate.get("amount").is_none(), "{estimate:#}");
+        assert_eq!(
+            estimate["billing"][0]["terms"], "unestablished",
+            "{estimate:#}"
+        );
+        assert!(estimate["billing"][0].get("plan").is_none(), "{estimate:#}");
+    }
+}
+
+/// Claim: plan rules parse only in a `tapes-price-table/3` table, each id
+/// once, with `billing` `api` or `subscription` and no other key. Rejects a
+/// `/2` table that quietly takes plan rules, a duplicate rule whose order
+/// decides, and a misspelled billing taken for some default.
+#[test]
+fn a_table_refuses_a_misplaced_or_malformed_plan_rule() {
+    let rule =
+        |id: &str, billing: &str| format!("[[plans]]\nid = \"{id}\"\nbilling = \"{billing}\"\n");
+    let refused = |text: String, expected: &str| {
+        let error = format!("{:#}", PriceTable::parse(&text).unwrap_err());
+        assert!(error.contains(expected), "{expected}: {error}");
+    };
+    refused(
+        format!("{GPT_TABLE}{}", rule("opencode-go", "api")),
+        "plans need schema `tapes-price-table/3`",
+    );
+    refused(
+        plan_table(&format!(
+            "{}{}",
+            rule("opencode-go", "api"),
+            rule("opencode-go", "subscription")
+        )),
+        "plans[1] names `opencode-go`, which plans[0] already names",
+    );
+    refused(
+        plan_table(&rule("opencode-go", "metered")),
+        "unknown variant `metered`",
+    );
+    refused(
+        plan_table("[[plans]]\nid = \"opencode-go\"\nbilling = \"api\"\nrate = 1\n"),
+        "unknown field `rate`",
+    );
+    let table = PriceTable::parse(&plan_table(&rule("fixture-plan", "subscription"))).unwrap();
+    assert_eq!(
+        table.plan_billing("fixture-plan"),
+        Some(pricing::BillingKind::Subscription)
+    );
+    assert_eq!(
+        table.plan_billing("opencode-go"),
+        Some(pricing::BillingKind::Api)
+    );
 }

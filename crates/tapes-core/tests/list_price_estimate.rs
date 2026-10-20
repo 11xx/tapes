@@ -404,7 +404,7 @@ fn an_invalid_table_refuses_naming_the_entry() {
         "models[0] (id `a`): effective must be a date",
     );
     refused(
-        row("").replace("tapes-price-table/1", "tapes-price-table/3"),
+        row("").replace("tapes-price-table/1", "tapes-price-table/4"),
         "schema",
     );
     assert!(PriceTable::parse(&row("")).is_ok());

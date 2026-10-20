@@ -1485,13 +1485,17 @@ struct CodexUsageObserver {
 }
 
 /// The longest provider or plan name a billing's evidence quotes.
-const MAX_BILLING_NAME_BYTES: usize = 64;
+pub(super) const MAX_BILLING_NAME_BYTES: usize = 64;
+
+/// The plan a ChatGPT sign-in bills under.
+const CHATGPT_PLAN: &str = "chatgpt-subscription";
 
 /// A session's billing from what its recording names. A ChatGPT plan's
-/// quota windows report a used percent, which only a subscription has; a
-/// model provider other than `openai` bills through its own API key, since
-/// ChatGPT sign-in serves only the built-in provider. Both together, or
-/// neither, establish nothing.
+/// quota windows report a used percent, which only a subscription has: the
+/// `chatgpt-subscription` plan. A model provider other than `openai` bills
+/// through its own API key, since ChatGPT sign-in serves only the built-in
+/// provider, and is the plan that provider names. Both together, or neither,
+/// establish nothing.
 fn codex_billing(
     provider: Option<&str>,
     plan_quota: Option<Option<&str>>,
@@ -1501,12 +1505,15 @@ fn codex_billing(
     let foreign = provider.filter(|provider| *provider != "openai");
     match (foreign, plan_quota) {
         (Some(provider), None) if short(provider) => {
-            Some(Billing::api(format!("codex model_provider `{provider}`")))
+            Some(Billing::api(format!("codex model_provider `{provider}`")).with_plan(provider))
         }
-        (None, Some(Some(plan))) if short(plan) => Some(Billing::subscription(format!(
-            "codex rate_limits quota window, plan `{plan}`"
-        ))),
-        (None, Some(_)) => Some(Billing::subscription("codex rate_limits quota window")),
+        (None, Some(Some(plan))) if short(plan) => Some(
+            Billing::subscription(format!("codex rate_limits quota window, plan `{plan}`"))
+                .with_plan(CHATGPT_PLAN),
+        ),
+        (None, Some(_)) => {
+            Some(Billing::subscription("codex rate_limits quota window").with_plan(CHATGPT_PLAN))
+        }
         _ => None,
     }
 }

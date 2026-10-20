@@ -184,7 +184,7 @@ fn a_codex_subscription_session_above_the_threshold_pays_base_rates() {
         assert_eq!(estimate["schema"], "tapes-price-table/2");
         assert_eq!(
             estimate["billing"],
-            json!([{"terms": "subscription",
+            json!([{"terms": "subscription", "plan": "chatgpt-subscription",
                     "evidence": "codex rate_limits quota window, plan `plus`"}])
         );
         assert!(
@@ -207,7 +207,8 @@ fn an_api_billed_codex_session_above_the_threshold_pays_the_surcharge() {
         );
         assert_eq!(
             estimate["billing"],
-            json!([{"terms": "api", "evidence": "codex model_provider `azure`"}])
+            json!([{"terms": "api", "plan": "azure",
+                    "evidence": "codex model_provider `azure`"}])
         );
         assert!(
             estimate.get("measurement_completeness").is_none(),
@@ -327,6 +328,10 @@ fn a_claude_haiku_request_over_100k_pays_five_fold_when_api_billed() {
             "{estimate:#}"
         );
         assert_eq!(estimate["billing"][0]["terms"], "api", "{estimate:#}");
+        assert_eq!(
+            estimate["billing"][0]["plan"], "anthropic-api",
+            "{estimate:#}"
+        );
         assert!(
             estimate.get("measurement_completeness").is_none(),
             "{estimate:#}"
@@ -339,7 +344,7 @@ fn a_claude_haiku_request_over_100k_pays_five_fold_when_api_billed() {
         );
         assert_eq!(
             estimate["billing"],
-            json!([{"terms": "subscription",
+            json!([{"terms": "subscription", "plan": "claude-subscription",
                     "evidence": "claude api-request carries the `oauth-2025-04-20` beta"}])
         );
     }

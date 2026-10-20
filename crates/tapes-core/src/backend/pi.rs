@@ -1561,6 +1561,10 @@ struct PiConsumed {
     /// key depends only on what it consumed.
     #[serde(skip)]
     api: Option<String>,
+    /// The provider an assistant message names, the plan its request billed
+    /// under. Kept out of the event's digest with `api`.
+    #[serde(skip)]
+    provider: Option<String>,
 }
 
 /// The API pi's `openai-codex` provider speaks. It posts to the ChatGPT
@@ -1568,11 +1572,17 @@ struct PiConsumed {
 const PI_CHATGPT_API: &str = "openai-codex-responses";
 
 /// What a pi recording says about its billing, over the events that carry
-/// tokens: whether each was a request through a ChatGPT sign-in.
+/// tokens: whether each was a request through a ChatGPT sign-in, and which
+/// provider each names.
 #[derive(Default)]
 struct PiBilling {
     chatgpt: bool,
     other: bool,
+    /// The provider the first token-carrying event names.
+    provider: Option<String>,
+    /// Some token-carrying event names no provider, a provider too long to
+    /// quote, or one other than the first.
+    providers_differ: bool,
 }
 
 impl PiBilling {
@@ -1596,17 +1606,36 @@ impl PiBilling {
         } else {
             self.other = true;
         }
+        let provider = consumed
+            .provider
+            .as_deref()
+            .filter(|provider| provider.len() <= super::codex::MAX_BILLING_NAME_BYTES);
+        match (&self.provider, provider) {
+            (_, None) => self.providers_differ = true,
+            (None, Some(provider)) => self.provider = Some(provider.to_owned()),
+            (Some(first), Some(provider)) => self.providers_differ |= first != provider,
+        }
     }
 
     /// A recording whose every token-carrying event is a ChatGPT sign-in's
-    /// request draws on a ChatGPT plan's quota. Any other event, including
-    /// a compaction or tool result that names no API, establishes nothing.
+    /// request draws on a ChatGPT plan's quota. One whose every
+    /// token-carrying event names one and the same other provider is that
+    /// provider's plan, whose terms come from a plan rule. Any other event,
+    /// including a compaction or tool result that names no API or provider,
+    /// establishes nothing.
     fn finish(self) -> Option<crate::pricing::Billing> {
-        (self.chatgpt && !self.other).then(|| {
-            crate::pricing::Billing::subscription(format!(
-                "pi `{PI_CHATGPT_API}` requests, a ChatGPT sign-in"
-            ))
-        })
+        use crate::pricing::Billing;
+        if self.chatgpt && !self.other {
+            return Some(
+                Billing::subscription(format!("pi `{PI_CHATGPT_API}` requests, a ChatGPT sign-in"))
+                    .with_plan("chatgpt-subscription"),
+            );
+        }
+        let provider = self
+            .provider
+            .filter(|_| !self.chatgpt && !self.providers_differ)?;
+        let evidence = format!("pi requests all name provider `{provider}`");
+        Some(Billing::of_plan(provider, evidence))
     }
 }
 
@@ -1652,6 +1681,10 @@ fn pi_consumed(entry: &Value) -> Option<PiConsumed> {
         api: assistant
             .then(|| message["api"].as_str().map(str::to_owned))
             .flatten(),
+        provider: assistant
+            .then(|| message["provider"].as_str().filter(|id| !id.is_empty()))
+            .flatten()
+            .map(str::to_owned),
     })
 }
 
