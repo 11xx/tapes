@@ -26,7 +26,7 @@ use serde::Serialize;
 use super::repository::Repository;
 use super::{
     partition, Amount, Amounts, Counts, EditInput, Facts, Location, Mention, Params, Partition,
-    SeenCommit, SessionAttribution, SessionEvidence, SessionKey,
+    Piece, SeenCommit, SessionAttribution, SessionEvidence, SessionKey,
 };
 use crate::backend::{Backend, StreamOptions, StreamedTranscript};
 use crate::commit_observations::CommitObservation;
@@ -304,6 +304,19 @@ pub fn attribute(
     gathered: &Gathered,
     params: &Params,
 ) -> Result<RepositoryAttribution> {
+    attribute_within(backends, repository, gathered, params, None)
+}
+
+/// As [`attribute`], each member's consumption cut to `within` where it is
+/// given: only what its requests inside it consumed is divided, by the
+/// partition its whole evidence gives, and its whole is that part.
+pub fn attribute_within(
+    backends: &[Box<dyn Backend>],
+    repository: &Repository,
+    gathered: &Gathered,
+    params: &Params,
+    within: Option<Piece>,
+) -> Result<RepositoryAttribution> {
     let stamps: Vec<Instant> = gathered
         .members
         .iter()
@@ -388,28 +401,63 @@ pub fn attribute(
         }
     }
 
-    let mut sessions = Vec::new();
+    let mut reads: Vec<Result<Read, String>> = Vec::new();
+    let mut cut: Vec<Partition> = Vec::new();
     for member in &gathered.members {
+        let mut partition = partitions.remove(&member.key()).unwrap_or_default();
+        if let Some(within) = within {
+            partition.cut_to(within);
+        }
+        reads.push(
+            read_amounts(
+                backends[member.backend].as_ref(),
+                member,
+                &partition,
+                within,
+            )
+            .map_err(|error| format!("{error:#}")),
+        );
+        cut.push(partition);
+    }
+    let withheld = explain_by_families(gathered, &mut reads);
+
+    let mut sessions = Vec::new();
+    for (index, (member, partition)) in gathered.members.iter().zip(cut).enumerate() {
         let key = member.key();
-        let partition = partitions.remove(&key).unwrap_or_default();
         let mut notes = Vec::new();
         if !partition.stretches {
             notes.push(
                 "the read kept no request timeline, so no working stretch was estimated".to_owned(),
             );
         }
-        let amounts = match read_amounts(backends[member.backend].as_ref(), member, &partition) {
-            Ok(amounts) => Some(amounts),
+        if withheld.contains(&index) {
+            notes.push(
+                "the part of the recorded total no request explains is withheld: its subagents' \
+                 requests, which the total counts, are not all known"
+                    .to_owned(),
+            );
+        }
+        let (amounts, billing, agent) = match reads[index].as_ref() {
+            Ok(read) => (
+                Some(read.amounts.clone()),
+                read.billing.clone(),
+                read.agent.clone(),
+            ),
             Err(error) => {
                 notes.push(format!(
-                    "the recording could not be read in pieces: {error:#}"
+                    "the recording could not be read in pieces: {error}"
                 ));
-                None
+                (None, None, agent_label(&member.session))
             }
         };
         sessions.push(SessionAttribution {
             session: key,
             parent: member.parent.clone(),
+            agent,
+            rules: member.rules.clone(),
+            started_at: member.session.started_at,
+            last_activity_at: member.session.last_activity_at,
+            billing,
             partition,
             amounts,
             notes,
@@ -426,24 +474,176 @@ pub fn attribute(
     })
 }
 
-/// The partition's pieces, read from the recording in one pass.
-fn read_amounts(backend: &dyn Backend, member: &Member, partition: &Partition) -> Result<Amounts> {
-    let bounds: Vec<_> = partition
+/// What one member's read took: its amounts, the bounds they were read
+/// over, and what its family's measure of a recorded total needs.
+struct Read {
+    amounts: Amounts,
+    bounds: Vec<crate::span::SpanBounds>,
+    /// The recorded totals of a recording whose part no request explains.
+    chain: Option<crate::unexplained::RecordedChain>,
+    /// A subagent recording's requests in time, for its parent's total.
+    timed: Option<Vec<crate::unexplained::TimedRequest>>,
+    measured: bool,
+    billing: Option<crate::pricing::Billing>,
+    agent: String,
+}
+
+/// A Claude parent's recorded total counts its subagents' requests, and
+/// those subagents are members measured by their own requests, so the part
+/// of the total no request explains is measured against the whole family's
+/// requests, as a window read measures it: each request is counted once. A
+/// family whose subagents' requests are not all known withholds the
+/// parent's part, which its subagents' shares may hold again. The members
+/// whose part was withheld are returned.
+fn explain_by_families(gathered: &Gathered, reads: &mut [Result<Read, String>]) -> BTreeSet<usize> {
+    let mut families: BTreeMap<SessionKey, Vec<usize>> = BTreeMap::new();
+    for (index, member) in gathered.members.iter().enumerate() {
+        if let (true, Some(parent)) = (member.rules.contains(&MemberRule::Child), &member.parent) {
+            families.entry(parent.clone()).or_default().push(index);
+        }
+    }
+    let mut withheld = BTreeSet::new();
+    for (index, member) in gathered.members.iter().enumerate() {
+        let Some(children) = families.get(&member.key()) else {
+            continue;
+        };
+        let Some(chain) = reads[index]
+            .as_ref()
+            .ok()
+            .and_then(|read| read.chain.clone())
+        else {
+            continue;
+        };
+        let mut requests = Vec::new();
+        let mut complete = true;
+        for child in children {
+            match &reads[*child] {
+                Ok(Read {
+                    timed: Some(timed), ..
+                }) if requests.len() + timed.len() <= crate::unexplained::MAX_FAMILY_REQUESTS => {
+                    requests.extend(timed.iter().cloned());
+                }
+                Ok(Read {
+                    timed: None,
+                    measured: false,
+                    ..
+                }) => {}
+                _ => complete = false,
+            }
+        }
+        let Ok(read) = reads[index].as_mut() else {
+            continue;
+        };
+        let placed = complete
+            .then(|| chain.accrual(Some(&requests)).place(&read.bounds))
+            .flatten();
+        if !complete {
+            withheld.insert(index);
+        }
+        read.amounts.explain(placed.as_ref());
+    }
+    withheld
+}
+
+impl Amounts {
+    /// Replace every figure's unexplained part with what `placed` gives it,
+    /// or with none.
+    fn explain(&mut self, placed: Option<&crate::unexplained::PlacedUnexplained>) {
+        let parts = |unexplained: Option<&crate::unexplained::Unexplained>| {
+            let mut models: BTreeMap<String, Counts> = BTreeMap::new();
+            for model in unexplained
+                .map(|part| part.by_model.as_slice())
+                .unwrap_or_default()
+            {
+                models
+                    .entry(model.model.clone())
+                    .or_default()
+                    .add(&Counts::of(&model.tokens, None));
+            }
+            models.retain(|_, counts| !counts.is_zero());
+            models
+        };
+        for (position, piece) in self.pieces.iter_mut().enumerate() {
+            piece.unexplained = parts(placed.and_then(|placed| placed.spans.get(position)));
+        }
+        let count = self.pieces.len();
+        match self.within {
+            true => {
+                self.whole.unexplained = parts(placed.and_then(|placed| placed.spans.get(count)));
+            }
+            false => {
+                self.remainder.unexplained = parts(placed.map(|placed| &placed.remainder));
+                self.whole.unexplained = parts(placed.map(|placed| &placed.whole));
+            }
+        }
+    }
+}
+
+/// The label of the agent a figure was served by: `harness:model#effort`.
+fn agent_label(session: &Session) -> String {
+    let mut label = session.harness().to_owned();
+    if let Some(model) = &session.model {
+        label.push(':');
+        label.push_str(&model.id);
+        if let Some(variant) = &model.variant {
+            label.push('#');
+            label.push_str(variant);
+        }
+    }
+    label
+}
+
+/// The partition's pieces, read from the recording in one pass, and the
+/// window the pieces were cut to as the whole, where one was.
+fn read_amounts(
+    backend: &dyn Backend,
+    member: &Member,
+    partition: &Partition,
+    within: Option<Piece>,
+) -> Result<Read> {
+    let mut bounds: Vec<_> = partition
         .pieces
         .iter()
         .map(|piece| piece.bounds())
         .collect();
-    let figures = backend
+    if let Some(within) = within {
+        bounds.push(within.bounds());
+    }
+    let mut figures = backend
         .stream_spans(&member.read.session, &member.read.read, &bounds)?
         .billed_as_whole();
-    Ok(Amounts {
-        pieces: figures
-            .spans
-            .iter()
-            .map(|(figure, placement)| amount(figure, Some(placement)))
-            .collect(),
-        remainder: amount(&figures.remainder.0, Some(&figures.remainder.1)),
-        whole: amount(&figures.whole, None),
+    let detail = figures.whole.usage_detail.as_ref();
+    let chain = detail
+        .filter(|detail| detail.unexplained.is_some())
+        .and_then(|detail| detail.recorded_chain.clone());
+    let timed = detail.and_then(|detail| detail.timed_requests.clone());
+    let billing = detail.and_then(|detail| detail.billing.clone());
+    let measured = figures.whole.tokens.is_some();
+    let agent = agent_label(&figures.whole);
+    let whole = match within {
+        Some(_) => {
+            let (figure, placement) = figures.spans.pop().expect("the window was read");
+            amount(&figure, Some(&placement))
+        }
+        None => amount(&figures.whole, None),
+    };
+    Ok(Read {
+        amounts: Amounts {
+            pieces: figures
+                .spans
+                .iter()
+                .map(|(figure, placement)| amount(figure, Some(placement)))
+                .collect(),
+            remainder: amount(&figures.remainder.0, Some(&figures.remainder.1)),
+            whole,
+            within: within.is_some(),
+        },
+        bounds,
+        chain,
+        timed,
+        measured,
+        billing,
+        agent,
     })
 }
 
@@ -476,7 +676,7 @@ fn amount(figure: &Session, placement: Option<&SpanPlacement>) -> Amount {
                         .models
                         .entry(model.model.clone())
                         .or_default()
-                        .add(&Counts::of(tokens));
+                        .add(&Counts::of(tokens, model.cache_write_by_ttl.as_ref()));
                 }
             }
         }
@@ -486,11 +686,12 @@ fn amount(figure: &Session, placement: Option<&SpanPlacement>) -> Amount {
                     .model
                     .as_ref()
                     .map_or_else(String::new, |model| model.id.clone());
+                let ttl = detail.and_then(|detail| detail.cache_write_by_ttl.as_ref());
                 amount
                     .models
                     .entry(model)
                     .or_default()
-                    .add(&Counts::of(tokens));
+                    .add(&Counts::of(tokens, ttl));
             }
         }
     }
@@ -501,7 +702,7 @@ fn amount(figure: &Session, placement: Option<&SpanPlacement>) -> Amount {
                 .unexplained
                 .entry(model.model.clone())
                 .or_default()
-                .add(&Counts::of(&model.tokens));
+                .add(&Counts::of(&model.tokens, None));
         }
     }
     amount

@@ -52,6 +52,13 @@
 //!
 //! The partition of a session runs over every commit its evidence admits, so
 //! a commit's amount never depends on which commits a view selects.
+//!
+//! Amounts count each request once. A Claude recording's recorded total
+//! counts its subagents' requests, which are members with amounts of their
+//! own, so the part of the total no request explains is measured against
+//! the requests of the whole family. Cache writes keep the TTL each request
+//! recorded, through every even share, so each share is priced at its own
+//! rates.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
@@ -69,7 +76,8 @@ mod gather;
 mod repository;
 
 pub use gather::{
-    attribute, gather, Gathered, Member, MemberRule, Membership, RepositoryAttribution,
+    attribute, attribute_within, gather, Gathered, Member, MemberRule, Membership,
+    RepositoryAttribution,
 };
 pub use repository::{normalize_remote, Repository};
 
@@ -1098,6 +1106,31 @@ fn cut_elsewhere(pieces: &mut Vec<Piece>, entries: Vec<Entry>, elsewhere: &[Piec
 }
 
 impl Partition {
+    /// Keep only what lies inside `within`: each piece cut to it, and the
+    /// entries of the pieces it meets. Requests no time places lie in no
+    /// window.
+    pub fn cut_to(&mut self, within: Piece) {
+        let mut pieces = Vec::new();
+        let mut moved: BTreeMap<usize, usize> = BTreeMap::new();
+        for (position, piece) in self.pieces.iter().enumerate() {
+            if let Some(inside) = piece.meet(&within) {
+                moved.insert(position, pieces.len());
+                pieces.push(inside);
+            }
+        }
+        self.entries = std::mem::take(&mut self.entries)
+            .into_iter()
+            .filter_map(|entry| {
+                let piece = *moved.get(&entry.piece?)?;
+                Some(Entry {
+                    piece: Some(piece),
+                    ..entry
+                })
+            })
+            .collect();
+        self.pieces = pieces;
+    }
+
     /// Give what this partition leaves unattributed in time to whatever
     /// `parent` gives the same time, with basis `inherited`; what the parent
     /// leaves unattributed there stays unattributed.
@@ -1228,7 +1261,10 @@ fn uncovered(piece: Piece, covered: &mut [Piece]) -> Vec<Piece> {
     rest
 }
 
-/// Tokens one share holds, by counter.
+/// Tokens one share holds, by counter. `cache_write` counts every cache
+/// write; `ephemeral_5m` and `ephemeral_1h` the part of it the requests
+/// recorded at each TTL, and the rest was written at no recorded TTL, so a
+/// share's writes are priced at their own rates.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
 pub struct Counts {
     pub input: u64,
@@ -1236,35 +1272,89 @@ pub struct Counts {
     pub reasoning: u64,
     pub cache_read: u64,
     pub cache_write: u64,
+    #[serde(skip_serializing_if = "is_zero")]
+    pub ephemeral_5m: u64,
+    #[serde(skip_serializing_if = "is_zero")]
+    pub ephemeral_1h: u64,
+}
+
+fn is_zero(count: &u64) -> bool {
+    *count == 0
 }
 
 impl Counts {
-    pub fn of(tokens: &crate::model::Tokens) -> Self {
+    /// A figure's counters, its cache writes split by `ttl` where the split
+    /// accounts for every one of them, and otherwise at no recorded TTL.
+    pub fn of(tokens: &crate::model::Tokens, ttl: Option<&crate::model::CacheWrites>) -> Self {
+        let cache_write = tokens.cache_write.unwrap_or(0);
+        let split = ttl.filter(|split| split.total() == cache_write);
         Self {
             input: tokens.input.unwrap_or(0),
             output: tokens.output.unwrap_or(0),
             reasoning: tokens.reasoning.unwrap_or(0),
             cache_read: tokens.cache_read.unwrap_or(0),
-            cache_write: tokens.cache_write.unwrap_or(0),
+            cache_write,
+            ephemeral_5m: split.and_then(|split| split.ephemeral_5m).unwrap_or(0),
+            ephemeral_1h: split.and_then(|split| split.ephemeral_1h).unwrap_or(0),
         }
     }
 
-    fn add(&mut self, other: &Self) {
+    /// The cache writes no request recorded a TTL for.
+    pub fn ttl_unrecorded(&self) -> u64 {
+        self.cache_write
+            .saturating_sub(self.ephemeral_5m)
+            .saturating_sub(self.ephemeral_1h)
+    }
+
+    /// The cache writes by TTL.
+    pub fn cache_writes(&self) -> crate::model::CacheWrites {
+        let some = |count: u64| (count > 0).then_some(count);
+        crate::model::CacheWrites {
+            ephemeral_5m: some(self.ephemeral_5m),
+            ephemeral_1h: some(self.ephemeral_1h),
+            ttl_unrecorded: some(self.ttl_unrecorded()),
+        }
+    }
+
+    /// The counters as a figure records them.
+    pub fn tokens(&self) -> crate::model::Tokens {
+        crate::model::Tokens {
+            input: Some(self.input),
+            output: Some(self.output),
+            reasoning: Some(self.reasoning),
+            cache_read: Some(self.cache_read),
+            cache_write: Some(self.cache_write),
+        }
+    }
+
+    pub fn add(&mut self, other: &Self) {
         self.input += other.input;
         self.output += other.output;
         self.reasoning += other.reasoning;
         self.cache_read += other.cache_read;
         self.cache_write += other.cache_write;
+        self.ephemeral_5m += other.ephemeral_5m;
+        self.ephemeral_1h += other.ephemeral_1h;
     }
 
+    /// One even share. Each TTL's writes are split on their own, and the
+    /// share's cache writes are the parts it takes, so every TTL's writes
+    /// add up over the shares.
     fn even_share(&self, split: Split) -> Self {
         let share = |count| even_split(count, split.shares, split.index);
+        let (five, hour, rest) = (
+            share(self.ephemeral_5m),
+            share(self.ephemeral_1h),
+            share(self.ttl_unrecorded()),
+        );
         Self {
             input: share(self.input),
             output: share(self.output),
             reasoning: share(self.reasoning),
             cache_read: share(self.cache_read),
-            cache_write: share(self.cache_write),
+            cache_write: five + hour + rest,
+            ephemeral_5m: five,
+            ephemeral_1h: hour,
         }
     }
 
@@ -1329,12 +1419,16 @@ impl Amount {
 }
 
 /// The amounts a read took for a partition: one per piece, the requests no
-/// piece holds, and the whole session.
+/// piece holds, and the whole session, or the window the pieces were cut
+/// to.
 #[derive(Clone, Debug, Default, PartialEq, Serialize)]
 pub struct Amounts {
     pub pieces: Vec<Amount>,
     pub remainder: Amount,
     pub whole: Amount,
+    /// The pieces were cut to a window, which `whole` is.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub within: bool,
 }
 
 /// One owner's part of a session by one tier and basis.
@@ -1360,6 +1454,18 @@ pub struct SessionAttribution {
     /// places nothing.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parent: Option<SessionKey>,
+    /// The agent that served it, `harness:model#effort` as its recording
+    /// names them.
+    pub agent: String,
+    /// Why its recording is part of the repository's evidence.
+    pub rules: BTreeSet<MemberRule>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<Instant>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_activity_at: Option<Instant>,
+    /// The billing its whole recording establishes.
+    #[serde(skip)]
+    pub billing: Option<crate::pricing::Billing>,
     pub partition: Partition,
     /// What the read took, absent where the session could not be read in
     /// pieces.
