@@ -1688,11 +1688,12 @@ PRICE A CHANGE
   evidence alone.
 
   Select commits with --commit (repeatable), --range A..B, --branch NAME (a
-  live branch against the default branch, otherwise the merges whose
-  subjects name it) or --commits-from FILE|-. A branch that is neither, a
-  revision git does not know and an empty selection refuse, as do --family,
-  --global and a session or window beside a selector. --explain lists each
-  row's evidence: shas, paths and times, never transcript text.
+  live branch against the default branch, otherwise the merges whose subjects
+  name it: `Merge branch 'NAME'`, or `merge(N): ...` where N is NAME or its
+  last segment) or --commits-from FILE|-. A branch that is neither, a revision
+  git does not know and an empty selection refuse, as do --family, --global
+  and a session or window beside a selector. --explain lists each row's
+  evidence: shas, paths and times, never transcript text.
 
 EXPORT, THEN INGEST PROGRESSIVELY
   tapes export <id|--latest> [--bundle <dir>]

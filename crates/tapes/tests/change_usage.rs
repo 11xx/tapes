@@ -68,6 +68,8 @@ fn refs(lines: &[String]) -> Vec<&str> {
 ///   counts its subagent's requests; `feat-d` is fast-forwarded onto `main`.
 /// - 14:00 a Claude session in `wt-t` on `feat-t` writes 5-minute and
 ///   1-hour cache entries and commits t1; the branch stays live.
+/// - 15:10 e1 is committed on `lane/feat-e`, merged at 15:20 as
+///   `merge(feat-e): land e1`, then removed.
 fn change() -> Change {
     let sandbox = Sandbox::new();
     let repo = sandbox.repo();
@@ -189,6 +191,23 @@ fn change() -> Change {
     cached.commit(at("14:10:00"), &t1, "committed", "t1");
     cached.write(&sandbox, &wt_t);
 
+    let wt_e = sandbox.worktree("wt-e", "lane/feat-e");
+    let e1 = sandbox.commit(&wt_e, at("15:10:00"), "e.rs", &refs(&lines("theta")), "e1");
+    sandbox.git(
+        &repo,
+        Some(at("15:20:00")),
+        &[
+            "merge",
+            "-q",
+            "--no-ff",
+            "-m",
+            "merge(feat-e): land e1",
+            "lane/feat-e",
+        ],
+    );
+    let merge_e = sandbox.git(&repo, None, &["rev-parse", "HEAD"]);
+    sandbox.retire(&wt_e, "lane/feat-e");
+
     let names = BTreeMap::from([
         ("base", base),
         ("a1", a1),
@@ -200,6 +219,8 @@ fn change() -> Change {
         ("c1", c1),
         ("d1", d1),
         ("t1", t1),
+        ("e1", e1),
+        ("Me", merge_e),
     ]);
     Change { sandbox, names }
 }
@@ -571,10 +592,10 @@ fn by_merge_groups_by_the_mainline_merge() {
 }
 
 /// Claim: `--branch` reads a live branch's commits beyond the default
-/// branch, a deleted branch's commits through the merge naming it, and
-/// refuses a name that is neither, naming the selectors that still work.
-/// Rejects an empty answer for a merged branch and a guess for an unknown
-/// one.
+/// branch, a deleted branch's commits through the merge naming it in a
+/// default or a conventional `merge(name):` subject, and refuses a name that
+/// is neither, naming the selectors that still work. Rejects an empty answer
+/// for a merged branch and a guess for an unknown one.
 #[test]
 fn branch_reads_live_then_merged_else_refuses() {
     let change = change();
@@ -594,6 +615,15 @@ fn branch_reads_live_then_merged_else_refuses() {
         .map(|commit| change.name(commit["sha"].as_str().unwrap()))
         .collect();
     assert_eq!(shas, ["b1"]);
+
+    let conventional = json(&change, &["--branch", "lane/feat-e"]);
+    assert_eq!(conventional["selection"]["resolved"], "merged");
+    assert_eq!(conventional["selection"]["merges"][0], change.sha("Me"));
+    let shas: Vec<&str> = items(&conventional, "commits")
+        .iter()
+        .map(|commit| change.name(commit["sha"].as_str().unwrap()))
+        .collect();
+    assert_eq!(shas, ["e1"]);
 
     let stderr = refusal(&change, &["--branch", "feat-gone"]);
     assert!(

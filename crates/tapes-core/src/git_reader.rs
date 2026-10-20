@@ -313,6 +313,27 @@ pub struct MergedBranch {
     pub commits: Vec<String>,
 }
 
+/// Whether a merge subject names `branch`: a default subject naming it, or
+/// a conventional `merge(<name>): <summary>` whose name is the branch or its
+/// last segment, as `arc/<name>` is merged.
+fn subject_names_branch(subject: &str, branch: &str) -> bool {
+    if merged_branch_name(subject).as_deref() == Some(branch) {
+        return true;
+    }
+    let Some(name) = subject
+        .strip_prefix("merge(")
+        .and_then(|rest| rest.split_once("):"))
+        .map(|(name, _)| name)
+        .filter(|name| !name.is_empty() && !name.contains(char::is_whitespace))
+    else {
+        return false;
+    };
+    name == branch
+        || branch
+            .rsplit_once('/')
+            .is_some_and(|(_, tail)| tail == name)
+}
+
 /// The branch a default merge subject names, without a remote's prefix.
 fn merged_branch_name(subject: &str) -> Option<String> {
     let quoted = |rest: &str| rest.split_once('\'').map(|(name, _)| name.to_owned());
@@ -821,11 +842,14 @@ impl GitReader {
     }
 
     /// What the merges any branch, tag or remote branch reaches say they
-    /// merged from `branch`, as [`GitReader::merged_branches`] reads a merge
-    /// subject, over the whole history.
+    /// merged from `branch`, over the whole history: a default merge subject
+    /// naming it, as [`GitReader::merged_branches`] reads one, or a
+    /// conventional `merge(<name>): <summary>` naming it or its last
+    /// segment.
     pub fn merges_naming(&self, branch: &str) -> Result<Vec<MergedBranch>> {
         require_revisions([branch])?;
-        let grep = format!("--grep={branch}");
+        let tail = branch.rsplit_once('/').map_or(branch, |(_, tail)| tail);
+        let grep = format!("--grep={tail}");
         let output = self.run_lenient(&[
             "log",
             "--branches",
@@ -853,7 +877,7 @@ impl GitReader {
             let [first, second] = parents[..] else {
                 continue;
             };
-            if merged_branch_name(subject).as_deref() != Some(branch) {
+            if !subject_names_branch(subject, branch) {
                 continue;
             }
             let listed = self.run(

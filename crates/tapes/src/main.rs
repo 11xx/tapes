@@ -2693,8 +2693,9 @@ struct ChangeAsk {
     /// commits the default branch lacks, or, for a branch with none, the
     /// commits each merge whose subject names it (`Merge branch 'name'`,
     /// `Merge remote-tracking branch 'origin/name'`, `Merge pull request
-    /// #n from owner/name`) brought from its second parent. A branch that
-    /// is neither refuses, naming --range and --commits-from.
+    /// #n from owner/name`, or `merge(name): ...` for a branch named
+    /// `name` or ending in `/name`) brought from its second parent. A
+    /// branch that is neither refuses, naming --range and --commits-from.
     #[arg(long, value_name = "NAME", conflicts_with = "commits_from")]
     branch: Option<String>,
     /// Price the commits a file lists, or standard input for `-`, as
