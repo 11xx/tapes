@@ -25,6 +25,7 @@ pub mod backend;
 pub mod brief;
 pub mod bundle;
 pub mod byte_size;
+pub mod change_attribution;
 pub mod child;
 pub mod commit_observations;
 pub mod consumption_union;
@@ -1527,6 +1528,28 @@ pub fn events_full_for_session(
     options: event::EventOptions,
     sink: &mut dyn EventSink,
 ) -> Result<StreamedEvents> {
+    events_full_for_session_with(
+        backend,
+        session,
+        tail,
+        filter,
+        options,
+        backend::StreamOptions::default(),
+        sink,
+    )
+}
+
+/// As [`events_full_for_session`], with the first pass streamed as
+/// `stream` asks, so the returned read keeps what it asks for.
+pub(crate) fn events_full_for_session_with(
+    backend: &dyn Backend,
+    session: &Session,
+    tail: usize,
+    filter: &event::EventFilter<'_>,
+    options: event::EventOptions,
+    stream: backend::StreamOptions,
+    sink: &mut dyn EventSink,
+) -> Result<StreamedEvents> {
     let mut index = event::PairIndex::default();
     let mut content = content::ContentInventory::default();
     let mut title = None;
@@ -1535,7 +1558,7 @@ pub fn events_full_for_session(
     // program and command, so the window can decide which matches it holds.
     let mut declared = HashMap::<String, usize>::new();
     backend.replayable(session)?;
-    let read = stream_numbered(backend, session, None, &mut |turn| {
+    let read = stream_numbered_with(backend, session, None, stream, &mut |turn| {
         turns += 1;
         content.add(&turn);
         keep_title_turn(&mut title, &turn);
@@ -1774,12 +1797,34 @@ pub(crate) fn stream_numbered(
     replay: Option<&backend::StreamedTranscript>,
     turn: &mut dyn FnMut(model::Turn) -> Result<()>,
 ) -> Result<backend::StreamedTranscript> {
+    stream_numbered_with(
+        backend,
+        session,
+        replay,
+        backend::StreamOptions::default(),
+        turn,
+    )
+}
+
+/// As [`stream_numbered`], streamed as `options` asks.
+pub(crate) fn stream_numbered_with(
+    backend: &dyn Backend,
+    session: &Session,
+    replay: Option<&backend::StreamedTranscript>,
+    options: backend::StreamOptions,
+    turn: &mut dyn FnMut(model::Turn) -> Result<()>,
+) -> Result<backend::StreamedTranscript> {
     let mut ordinal = 0;
-    let mut read = backend.stream_transcript(session, replay, &mut |mut streamed| {
+    let mut numbered = |mut streamed: model::Turn| {
         streamed.ordinal = ordinal;
         ordinal += 1;
         turn(streamed)
-    })?;
+    };
+    let mut read = if options.timeline {
+        backend.stream_transcript_with(session, replay, options, &mut numbered)?
+    } else {
+        backend.stream_transcript(session, replay, &mut numbered)?
+    };
     read.kinds = Some(backend.kinds());
     Ok(read)
 }

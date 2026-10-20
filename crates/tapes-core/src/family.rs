@@ -104,7 +104,7 @@ pub struct SessionKey {
 }
 
 impl SessionKey {
-    fn of(session: &Session) -> Self {
+    pub(crate) fn of(session: &Session) -> Self {
         Self {
             harness: session.harness().to_owned(),
             id: session.id.clone(),
@@ -624,38 +624,51 @@ fn read_markers(
     pool: &mut [Candidate],
     positions: &[usize],
 ) -> Vec<SessionKey> {
+    let mut held: Vec<(usize, &mut Session)> = pool
+        .iter_mut()
+        .enumerate()
+        .filter(|(position, _)| positions.contains(position))
+        .map(|(_, candidate)| (candidate.backend, &mut candidate.session))
+        .collect();
+    declare_parents(backends, &mut held)
+}
+
+/// Declare, for each session and the index of the backend that listed it,
+/// the origins its store states and the launch marker its first prompt
+/// opens with, so [`window::parent_in_harness`] names its parent: one
+/// batched question per backend each. The sessions whose opening could not
+/// be read.
+pub(crate) fn declare_parents(
+    backends: &[Box<dyn Backend>],
+    sessions: &mut [(usize, &mut Session)],
+) -> Vec<SessionKey> {
     let mut unreadable = Vec::new();
     for (index, backend) in backends.iter().enumerate() {
-        let own: Vec<usize> = positions
-            .iter()
-            .copied()
-            .filter(|position| pool[*position].backend == index)
+        let own: Vec<usize> = (0..sessions.len())
+            .filter(|position| sessions[*position].0 == index)
             .collect();
         if own.is_empty() {
             continue;
         }
-        let held: Vec<&Session> = own
-            .iter()
-            .map(|position| &pool[*position].session)
-            .collect();
+        let held: Vec<&Session> = own.iter().map(|position| &*sessions[*position].1).collect();
         if let Ok(declared) = backend.declared_origins(&held) {
             for (position, declared) in own.iter().zip(declared) {
-                pool[*position].session.declare_origins(declared);
+                sessions[*position].1.declare_origins(declared);
             }
         }
         let unrelated: Vec<usize> = own
             .into_iter()
-            .filter(|position| window::declared_parent(&pool[*position].session).is_none())
+            .filter(|position| window::declared_parent(sessions[*position].1).is_none())
             .collect();
         let held: Vec<&Session> = unrelated
             .iter()
-            .map(|position| &pool[*position].session)
+            .map(|position| &*sessions[*position].1)
             .collect();
         let markers = backend.first_prompt_markers(&held);
         for (position, marker) in unrelated.iter().zip(markers) {
             match marker {
-                Some(Ok(marker)) => pool[*position].session.declare_launch_parent(marker),
-                Some(Err(_)) => unreadable.push(SessionKey::of(&pool[*position].session)),
+                Some(Ok(marker)) => sessions[*position].1.declare_launch_parent(marker),
+                Some(Err(_)) => unreadable.push(SessionKey::of(sessions[*position].1)),
                 None => {}
             }
         }
