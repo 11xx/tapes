@@ -23,6 +23,15 @@
 //! the commit and has no authoring evidence for it; `proximate` when only
 //! time places it near the commit. A share a child inherits takes the role
 //! its parent holds for the commit.
+//!
+//! Evidence files place the sessions their `binding` and `event` records
+//! name, alone, as [`crate::change_attribution`] says, and bring in those
+//! whose work the view selects wherever their recordings began. A record's
+//! role is the session's role for its work's commits: `reviewer` where the
+//! records say so, and `author` otherwise. Work of which the repository
+//! holds no commit stands apart as `labelled`, out of the rows' total like
+//! `unselected`. With only the records asked for, the sessions they name
+//! are the view's only sessions.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
@@ -31,10 +40,15 @@ use anyhow::{anyhow, bail, Context, Result};
 use serde::Serialize;
 
 use crate::attribution::{Basis, Owner, Reason, Tier};
+use crate::attribution_evidence::{EvidenceFile, FileReport};
 use crate::backend::Backend;
+use crate::change_attribution::evidence::{
+    self, Conflict, Disagreement, ParentConflict, Records, Unresolved, Wanted,
+};
 use crate::change_attribution::{
-    attribute, attribute_within, gather, Admitted, Amount, Counts, Kind, Params, Piece, Repository,
-    RepositoryAttribution, SessionAttribution, SessionKey, Tiers, Work,
+    attribute_with, gather, Admitted, Amount, Counts, Gathered, Item, Kind, Labelled, Membership,
+    Params, Piece, Placement, Repository, RepositoryAttribution, SessionAttribution, SessionKey,
+    Tiers, Work,
 };
 use crate::git_reader::{CommitSummary, Selector};
 use crate::model::{CacheWrites, DisjointTokens, TokenConvention, Tokens};
@@ -43,7 +57,7 @@ use crate::pull_request::{PullRequestSelection, PullRequestView};
 use crate::span::Instant;
 use crate::usage::DisjointSum;
 
-pub const SCHEMA: &str = "tapes-change-usage/2";
+pub const SCHEMA: &str = "tapes-change-usage/3";
 
 /// What a change view's rows are grouped by.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
@@ -132,6 +146,10 @@ pub struct Request<'a> {
     /// List the evidence behind each row.
     pub explain: bool,
     pub prices: Option<&'a PriceTable>,
+    /// Evidence files whose records place the sessions they name.
+    pub evidence: Option<&'a [EvidenceFile]>,
+    /// Only the sessions the evidence files' records name take part.
+    pub evidence_only: bool,
 }
 
 /// How the view was asked, as it resolved.
@@ -269,6 +287,10 @@ pub struct EvidenceTally {
 pub struct RowKey {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub commit: Option<String>,
+    /// The label of the work an evidence record names that the commit's
+    /// share is part of.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub merge: Option<MergeGroup>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -339,15 +361,29 @@ pub struct Unselected {
     pub tally: Tally,
 }
 
-/// The view's figures added up. `rows`, `uncommitted`, `unattributed` and
-/// `unselected` add up to `sessions`, the whole of every session in the
-/// view; the change's own figure is `rows`.
+/// Work evidence records name of which the repository holds no commit, and
+/// what the view's sessions gave it.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct LabelledWork {
+    #[serde(flatten)]
+    pub work: Labelled,
+    #[serde(flatten)]
+    pub tally: Tally,
+    pub evidence: Vec<EvidenceTally>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub explain: Vec<Explained>,
+}
+
+/// The view's figures added up. `rows`, `uncommitted`, `unattributed`,
+/// `unselected` and `labelled` add up to `sessions`, the whole of every
+/// session in the view; the change's own figure is `rows`.
 #[derive(Clone, Debug, Default, PartialEq, Serialize)]
 pub struct Totals {
     pub rows: Tally,
     pub uncommitted: Tally,
     pub unattributed: Tally,
     pub unselected: Tally,
+    pub labelled: Tally,
     pub sessions: Tally,
     /// The rows by the tier and basis that placed them.
     pub evidence: Vec<EvidenceTally>,
@@ -362,13 +398,58 @@ pub struct SessionView {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parent: Option<SessionKey>,
     pub rules: Vec<crate::change_attribution::MemberRule>,
+    /// What placed its consumption: its recording, the evidence records
+    /// that name it, or its parent's allocation alone.
+    pub placement: Placement,
+    /// The evidence files whose records place it.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub evidence_files: Vec<String>,
     pub whole: Tally,
     pub rows: Tally,
     pub uncommitted: Tally,
     pub unattributed: Tally,
     pub unselected: Tally,
+    pub labelled: Tally,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub notes: Vec<String>,
+}
+
+/// One evidence file and what its records did in the view.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct EvidenceFileView {
+    #[serde(flatten)]
+    pub report: FileReport,
+    /// Its bindings and events that name a session in the view.
+    pub placed: PlacedRecords,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct PlacedRecords {
+    pub binding: usize,
+    pub event: usize,
+}
+
+/// The evidence files a view read and what they did.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct EvidenceView {
+    pub files: Vec<EvidenceFileView>,
+    pub producers: Vec<String>,
+    /// Only the sessions the records name took part.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub only: bool,
+    /// Sessions in the view placed by records, and placed by inheriting
+    /// from one.
+    pub placed: usize,
+    pub inherited: usize,
+    /// Sessions looked up by id in a store.
+    pub looked_up: usize,
+    /// Members a lineage record made a child of another member.
+    pub lineage_applied: usize,
+    pub unresolved: Vec<Unresolved>,
+    pub conflicts: Vec<Conflict>,
+    pub disagreements: Vec<Disagreement>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub parent_conflicts: Vec<ParentConflict>,
 }
 
 /// What the gathering listed and read.
@@ -405,9 +486,13 @@ pub struct ChangeUsage {
     pub uncommitted: Vec<Bucket>,
     pub unattributed: Vec<Unattributed>,
     pub unselected: Vec<Unselected>,
+    pub labelled: Vec<LabelledWork>,
     pub totals: Totals,
     pub sessions: Vec<SessionView>,
     pub membership: MembershipView,
+    /// The evidence files read, where any were named.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub evidence: Option<EvidenceView>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub notes: Vec<String>,
 }
@@ -612,11 +697,45 @@ pub fn change_usage(
         _ => (from, to),
     };
 
-    let gathered = gather(backends, repository, from, to)?;
-    let attribution = match within {
-        Some(within) => attribute_within(backends, repository, &gathered, &params, Some(within))?,
-        None => attribute(backends, repository, &gathered, &params)?,
+    let records = request
+        .evidence
+        .map(|files| Records::new(files, repository))
+        .transpose()?;
+    let mut gathered = if request.evidence_only {
+        Gathered {
+            members: Vec::new(),
+            membership: Membership::default(),
+        }
+    } else {
+        gather(backends, repository, from, to)?
     };
+    let selected_shas: BTreeSet<String> = selected
+        .iter()
+        .flatten()
+        .map(|commit| commit.sha.clone())
+        .collect();
+    let evidence_membership = records.as_ref().map(|records| {
+        let wanted = match (&selected, &only) {
+            (Some(_), _) => Wanted::Commits(&selected_shas),
+            (None, Some((key, _, _))) => Wanted::Session(key.clone()),
+            (None, None) => Wanted::Window { from, to },
+        };
+        evidence::extend(
+            backends,
+            &mut gathered,
+            records,
+            &wanted,
+            request.evidence_only,
+        )
+    });
+    let attribution = attribute_with(
+        backends,
+        repository,
+        &gathered,
+        &params,
+        within,
+        records.as_ref(),
+    )?;
     if gathered.membership.listing_bounded {
         notes.push(
             "a harness's listing reached its bound, so sessions active in the interval may be \
@@ -729,6 +848,7 @@ pub fn change_usage(
     };
 
     let roles = Roles::of(&attribution);
+    let labels = by.contains(&Dimension::Commit);
     let mut builder = Builder {
         by: &by,
         prices: request.prices,
@@ -736,10 +856,13 @@ pub fn change_usage(
         chosen: &chosen,
         groups: &groups,
         roles: &roles,
+        labels,
+        records: records.as_ref(),
         rows: BTreeMap::new(),
         buckets: BTreeMap::new(),
         unattributed: BTreeMap::new(),
         unselected: BTreeMap::new(),
+        labelled: BTreeMap::new(),
         totals: TotalsAcc::default(),
         sessions: Vec::new(),
     };
@@ -828,6 +951,78 @@ pub fn change_usage(
         let time = |sha: &str| described.get(sha).map(|commit| commit.committer_time);
         (time(&a.commit), &a.commit).cmp(&(time(&b.commit), &b.commit))
     });
+    let labelled = builder
+        .labelled
+        .into_iter()
+        .map(|(work, acc)| LabelledWork {
+            work,
+            tally: acc.tally.finish(),
+            evidence: finish_evidence(acc.evidence),
+            explain: acc.explain,
+        })
+        .collect();
+    let evidence = records.as_ref().map(|records| {
+        let membership = evidence_membership.unwrap_or_default();
+        let placed: BTreeSet<SessionKey> = in_view
+            .iter()
+            .filter(|session| session.placement == Placement::Evidence)
+            .map(|session| session.session.clone())
+            .collect();
+        let applied = records.applied(&placed);
+        let mut producers: Vec<String> = records
+            .files()
+            .iter()
+            .map(|(_, producer)| producer.clone())
+            .collect();
+        producers.sort();
+        producers.dedup();
+        EvidenceView {
+            files: records
+                .reports()
+                .iter()
+                .zip(applied)
+                .map(|(report, (binding, event))| EvidenceFileView {
+                    report: report.clone(),
+                    placed: PlacedRecords { binding, event },
+                })
+                .collect(),
+            producers,
+            only: request.evidence_only,
+            placed: placed.len(),
+            inherited: in_view
+                .iter()
+                .filter(|session| session.placement == Placement::Inherited)
+                .count(),
+            looked_up: membership.looked_up,
+            lineage_applied: membership.lineage_applied,
+            unresolved: membership.unresolved,
+            conflicts: attribution.conflicts.clone(),
+            disagreements: records.disagreements().to_vec(),
+            parent_conflicts: membership.parent_conflicts,
+        }
+    });
+    if let Some(evidence) = &evidence {
+        if !evidence.unresolved.is_empty() {
+            notes.push(format!(
+                "{} sessions evidence records name are held by no installed store and add nothing",
+                evidence.unresolved.len()
+            ));
+        }
+        if !evidence.conflicts.is_empty() {
+            notes.push(format!(
+                "{} commits a session's recording shows it creating are bound to it by none of the \
+                 records that place it",
+                evidence.conflicts.len()
+            ));
+        }
+        if !evidence.disagreements.is_empty() {
+            notes.push(format!(
+                "records name different commits for {} labels; each label's commits are every \
+                 commit its records name",
+                evidence.disagreements.len()
+            ));
+        }
+    }
 
     Ok(ChangeUsage {
         schema: SCHEMA,
@@ -847,6 +1042,7 @@ pub fn change_usage(
         uncommitted,
         unattributed,
         unselected,
+        labelled,
         totals: builder.totals.finish(),
         sessions: builder.sessions,
         membership: MembershipView {
@@ -864,6 +1060,7 @@ pub fn change_usage(
             placed: gathered.membership.placed.clone(),
             listing_bounded: gathered.membership.listing_bounded,
         },
+        evidence,
         notes,
     })
 }
@@ -997,25 +1194,52 @@ fn merge_groups(
         .collect())
 }
 
+/// What a session's evidence for one commit says about its role: the kinds
+/// of its recording's evidence, and the roles of the records naming it.
+#[derive(Default)]
+struct Acts {
+    kinds: BTreeSet<Kind>,
+    /// Whether records name the commit, and whether each says `reviewer`.
+    records: Vec<bool>,
+}
+
+impl Acts {
+    fn role(&self) -> Role {
+        if !self.records.is_empty() {
+            return if self.records.iter().all(|reviewer| *reviewer) {
+                Role::Reviewer
+            } else {
+                Role::Author
+            };
+        }
+        Role::of(&self.kinds)
+    }
+}
+
 /// Each session's role for each commit its own evidence names.
 struct Roles {
-    own: BTreeMap<SessionKey, BTreeMap<String, BTreeSet<Kind>>>,
+    own: BTreeMap<SessionKey, BTreeMap<String, Acts>>,
     parents: BTreeMap<SessionKey, SessionKey>,
 }
 
 impl Roles {
     fn of(attribution: &RepositoryAttribution) -> Self {
-        let mut own: BTreeMap<SessionKey, BTreeMap<String, BTreeSet<Kind>>> = BTreeMap::new();
+        let mut own: BTreeMap<SessionKey, BTreeMap<String, Acts>> = BTreeMap::new();
         let mut parents = BTreeMap::new();
         for session in &attribution.sessions {
-            let kinds = own.entry(session.session.clone()).or_default();
+            let acts = own.entry(session.session.clone()).or_default();
             for admitted in &session.partition.evidence {
                 for work in &admitted.work {
                     if let Some(sha) = work.sha() {
-                        kinds
-                            .entry(sha.to_owned())
-                            .or_default()
-                            .insert(admitted.kind);
+                        let act = acts.entry(sha.to_owned()).or_default();
+                        match &admitted.record {
+                            Some(record) => {
+                                act.records.push(record.role.as_deref() == Some("reviewer"))
+                            }
+                            None => {
+                                act.kinds.insert(admitted.kind);
+                            }
+                        }
                     }
                 }
             }
@@ -1032,15 +1256,15 @@ impl Roles {
         let mut at = session;
         let mut inherited = basis == Basis::Inherited;
         for _ in 0..=self.parents.len() {
-            let kinds = self.own.get(at).and_then(|kinds| kinds.get(sha));
+            let acts = self.own.get(at).and_then(|acts| acts.get(sha));
             if !inherited {
-                return kinds.map_or(Role::Proximate, Role::of);
+                return acts.map_or(Role::Proximate, Acts::role);
             }
             match self.parents.get(at) {
                 Some(parent) => at = parent,
-                None => return kinds.map_or(Role::Proximate, Role::of),
+                None => return acts.map_or(Role::Proximate, Acts::role),
             }
-            inherited = self.own.get(at).and_then(|kinds| kinds.get(sha)).is_none();
+            inherited = self.own.get(at).and_then(|acts| acts.get(sha)).is_none();
         }
         Role::Proximate
     }
@@ -1273,13 +1497,28 @@ impl RowAcc {
             .add(contribution, prices);
     }
 
-    /// List the evidence `session` admitted for `work`, once per session.
-    fn explain(&mut self, session: &SessionAttribution, work: &Work) {
+    /// List the evidence `session` admitted for `item`, once per session.
+    fn explain(&mut self, session: &SessionAttribution, item: &Item) {
         if !self.explained.insert(session.session.clone()) {
             return;
         }
         for admitted in &session.partition.evidence {
-            if admitted.work.contains(work) {
+            let names = match item {
+                Item::Work { work, label } => {
+                    admitted.work.contains(work)
+                        && admitted
+                            .record
+                            .as_ref()
+                            .is_none_or(|record| record.label == *label)
+                }
+                Item::Labelled(labelled) => {
+                    admitted.work.is_empty()
+                        && admitted.record.as_ref().is_some_and(|record| {
+                            record.label == labelled.label && record.unheld == labelled.commits
+                        })
+                }
+            };
+            if names {
                 self.explain.push(Explained {
                     session: session.session.clone(),
                     evidence: admitted.clone(),
@@ -1306,6 +1545,7 @@ struct TotalsAcc {
     uncommitted: TallyAcc,
     unattributed: TallyAcc,
     unselected: TallyAcc,
+    labelled: TallyAcc,
     sessions: TallyAcc,
     evidence: BTreeMap<(Tier, Basis), TallyAcc>,
 }
@@ -1317,6 +1557,7 @@ impl TotalsAcc {
             uncommitted: self.uncommitted.finish(),
             unattributed: self.unattributed.finish(),
             unselected: self.unselected.finish(),
+            labelled: self.labelled.finish(),
             sessions: self.sessions.finish(),
             evidence: finish_evidence(self.evidence),
         }
@@ -1330,10 +1571,14 @@ struct Builder<'a> {
     chosen: &'a BTreeSet<String>,
     groups: &'a BTreeMap<String, MergeGroup>,
     roles: &'a Roles,
+    /// Rows keep the label of the work a commit's share is part of.
+    labels: bool,
+    records: Option<&'a Records>,
     rows: BTreeMap<RowKey, RowAcc>,
     buckets: BTreeMap<(PathBuf, Option<String>), RowAcc>,
     unattributed: BTreeMap<Reason, TallyAcc>,
     unselected: BTreeMap<String, TallyAcc>,
+    labelled: BTreeMap<Labelled, RowAcc>,
     totals: TotalsAcc,
     sessions: Vec<SessionView>,
 }
@@ -1369,13 +1614,30 @@ impl Builder<'_> {
                     amount,
                 };
                 match &entry.owner {
-                    Owner::Item { work, evidence } => match work {
+                    Owner::Item {
+                        work: item @ Item::Labelled(labelled),
+                        evidence,
+                    } => {
+                        let work = self.labelled.entry(labelled.clone()).or_default();
+                        work.add(&contribution, evidence.tier, evidence.basis, self.prices);
+                        if self.explain {
+                            work.explain(session, item);
+                        }
+                        own.labelled.add(&contribution, self.prices);
+                    }
+                    Owner::Item {
+                        work: item @ Item::Work { work, label },
+                        evidence,
+                    } => match work {
                         Work::Commit { sha } if self.chosen.contains(sha) => {
-                            let key = self.key(session, sha, evidence.tier, evidence.basis);
+                            let mut key = self.key(session, sha, evidence.tier, evidence.basis);
+                            if self.labels {
+                                key.label.clone_from(label);
+                            }
                             let row = self.rows.entry(key).or_default();
                             row.add(&contribution, evidence.tier, evidence.basis, self.prices);
                             if self.explain {
-                                row.explain(session, work);
+                                row.explain(session, item);
                             }
                             self.totals
                                 .evidence
@@ -1398,7 +1660,7 @@ impl Builder<'_> {
                                 .or_default();
                             bucket.add(&contribution, evidence.tier, evidence.basis, self.prices);
                             if self.explain {
-                                bucket.explain(session, work);
+                                bucket.explain(session, item);
                             }
                             own.uncommitted.add(&contribution, self.prices);
                         }
@@ -1417,6 +1679,7 @@ impl Builder<'_> {
         self.totals.uncommitted.merge(&own.uncommitted);
         self.totals.unattributed.merge(&own.unattributed);
         self.totals.unselected.merge(&own.unselected);
+        self.totals.labelled.merge(&own.labelled);
         self.totals.sessions.merge(&own.whole);
         self.sessions.push(SessionView {
             harness: session.session.harness.clone(),
@@ -1424,11 +1687,17 @@ impl Builder<'_> {
             agent: session.agent.clone(),
             parent: session.parent.clone(),
             rules: session.rules.iter().copied().collect(),
+            placement: session.placement,
+            evidence_files: match (session.placement, self.records) {
+                (Placement::Evidence, Some(records)) => records.files_of(&session.session),
+                _ => Vec::new(),
+            },
             whole: own.whole.finish(),
             rows: own.rows.finish(),
             uncommitted: own.uncommitted.finish(),
             unattributed: own.unattributed.finish(),
             unselected: own.unselected.finish(),
+            labelled: own.labelled.finish(),
             notes,
         });
     }
@@ -1465,4 +1734,5 @@ struct SessionAccs {
     uncommitted: TallyAcc,
     unattributed: TallyAcc,
     unselected: TallyAcc,
+    labelled: TallyAcc,
 }

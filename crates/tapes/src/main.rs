@@ -1883,9 +1883,10 @@ enum Command {
         /// not-found or ambiguous and nothing is linked.
         #[arg(long, requires = "family")]
         continuations: bool,
-        /// With --family, read a `tapes-attribution-evidence/1` file, or
-        /// every `*.jsonl` file directly inside a directory, and add the
-        /// sessions its `lineage` records launch from a member. Repeatable.
+        /// With --family, or in a change view, read a
+        /// `tapes-attribution-evidence/1` file, or every `*.jsonl` file
+        /// directly inside a directory. Repeatable. Under --family it adds
+        /// the sessions its `lineage` records launch from a member.
         /// A child is looked up by harness and id in its harness's store,
         /// wherever its recording began, and joins as a `delegate` with link
         /// `evidence`, naming the file, producer, tier and the record's label
@@ -1896,13 +1897,28 @@ enum Command {
         /// session are reported under `evidence.conflicts` and the session
         /// counts once, under its recording's parent or else the first claimed
         /// parent that became a member. A child no installed store holds is
-        /// listed under `evidence.unresolved` and adds nothing. `binding`
-        /// and `event` records are read and counted, and none is used. Nothing
-        /// is read unless named: no default directory, no environment
-        /// variable. A missing path, and a file whose first line is not a
-        /// header of the schema, refuse. Malformed lines are reported with
-        /// their line numbers and a fixed reason, never their text.
-        #[arg(long = "evidence", value_name = "PATH", requires = "family")]
+        /// listed under `evidence.unresolved` and adds nothing; a family
+        /// counts `binding` and `event` records and uses none. In a change
+        /// view a session a `binding` or `event` names is placed by those
+        /// records alone, its work's part shared evenly among the commits
+        /// the repository holds, each row keeping the work's `label`; work
+        /// of which the repository holds no commit is `labelled`, apart and
+        /// out of the rows' total. A named session whose work names a
+        /// selected commit is looked up by id wherever its recording began;
+        /// one no store holds is listed under `evidence.unresolved`. The
+        /// descendants of a session records place inherit from it alone,
+        /// and a `lineage` record makes its child a child of its parent
+        /// where the child's recording names none. `evidence` reports the
+        /// files, producers, records placed by kind, sessions looked up,
+        /// `conflicts` (a session whose recording shows it creating a commit
+        /// no record naming it binds it to; the records still place it) and
+        /// `disagreements` (records naming different commits for one
+        /// label). Nothing is read unless named: no default directory, no
+        /// environment variable. A missing path, and a file whose first line
+        /// is not a header of the schema, refuse. Malformed lines are
+        /// reported with their line numbers and a fixed reason, never their
+        /// text.
+        #[arg(long = "evidence", value_name = "PATH")]
         evidence: Vec<PathBuf>,
         /// Retain a recent suffix of Pi consumption event keys. Default: 200;
         /// range: 1..=10000; serialized key budget: 8 MiB. Omitted identities
@@ -2192,7 +2208,7 @@ enum Command {
         #[arg(long, value_name = "FILE")]
         prices: Option<PathBuf>,
         /// Render the versioned tapes-usage/17 object, tapes-usage-summary/16
-        /// for a selection, tapes-change-usage/2 for a change view, or
+        /// for a selection, tapes-change-usage/3 for a change view, or
         /// tapes-family-usage/3 under --family, as JSON. `session.model_observation` says
         /// whether more than one model and effort was observed (`mixed`) and
         /// whether a gap, partial read or budget kept the split incomplete
@@ -2662,7 +2678,7 @@ fn print_selection_warnings(warnings: &[String]) {
 #[derive(Args, Debug)]
 struct ChangeAsk {
     /// Price the commits these revisions name, as
-    /// tapes-change-usage/2. Repeatable. A change view reads the
+    /// tapes-change-usage/3. Repeatable. A change view reads the
     /// repository holding the current directory, or the one --project
     /// names, read-only through git, and every installed Claude, Codex
     /// and Pi recording active from an hour before the earliest selected
@@ -2678,9 +2694,13 @@ struct ChangeAsk {
     /// evidence tier and basis; the uncommitted buckets per worktree and
     /// branch; unattributed amounts by reason; `unselected`, the shares
     /// the same sessions' evidence gives commits not selected, reported
-    /// apart and out of the rows' total; and totals, in which rows,
-    /// uncommitted, unattributed and unselected add up to the sessions'
-    /// wholes. A change view refuses a session selection other than
+    /// apart and out of the rows' total; `labelled`, work evidence records
+    /// name of which the repository holds no commit, also out of it; and
+    /// totals, in which rows, uncommitted, unattributed, unselected and
+    /// labelled add up to the sessions' wholes. Each session names what
+    /// placed it (`placement`: recording, evidence, inherited). With
+    /// --evidence, the sessions its records name are placed by them alone.
+    /// A change view refuses a session selection other than
     /// `<SESSION> --by commit`, --family, --global, --window, span flags,
     /// --full, --series, --reconcile, --event-keys, allowance rates,
     /// forecasts, listing filters, --read-bytes and supplied inputs; an
@@ -2741,11 +2761,12 @@ struct ChangeAsk {
     )]
     pr: Option<u64>,
     /// List the evidence behind each change-view row and bucket: its
-    /// session, kind (created, edited, worktree, proximity, inspected),
-    /// tier, time or span, the commits it names, and how an observed sha
-    /// resolved (exact, patch-id, digests) with the sha the recording
-    /// named. Evidence carries shas, paths and times, never transcript
-    /// text.
+    /// session, kind (created, edited, worktree, proximity, inspected,
+    /// binding, event), tier, time or span, the commits it names, how an
+    /// observed sha resolved (exact, patch-id, digests) with the sha the
+    /// recording named, and for an evidence record its file, producer,
+    /// label and role. Evidence carries shas, paths and times, never
+    /// transcript text.
     #[arg(long)]
     explain: bool,
     /// The evidence tiers that take part in a change view,
@@ -2757,6 +2778,13 @@ struct ChangeAsk {
     /// tiers that ran.
     #[arg(long, value_enum, value_name = "TIER", value_delimiter = ',')]
     tiers: Vec<TierArg>,
+    /// With --evidence, only the sessions the files' `binding` and `event`
+    /// records name take part in the change view, each placed by its
+    /// records alone and looked up by id, with no listing and none of
+    /// their subagent or launched sessions, so a ledger's export gives the
+    /// ledger's own figure.
+    #[arg(long, requires = "evidence")]
+    evidence_only: bool,
 }
 
 impl ChangeAsk {
@@ -2773,6 +2801,7 @@ impl ChangeAsk {
     fn asked(&self, by: &[ByArg]) -> bool {
         self.selects()
             || self.explain
+            || self.evidence_only
             || !self.tiers.is_empty()
             || by.iter().any(|by| by.change_only())
     }
@@ -2828,6 +2857,7 @@ fn usage_change(
     refused: &[(&str, bool)],
     window: Option<WindowBounds>,
     prices: Option<&agent_tapes_core::pricing::PriceTable>,
+    evidence: &[PathBuf],
     json: bool,
 ) -> Result<()> {
     use agent_tapes_core::change_usage::{change_usage, ChangeSelection, Request};
@@ -2961,6 +2991,13 @@ fn usage_change(
             change.tiers.iter().copied().map(Into::into),
         )
     };
+    let evidence = if evidence.is_empty() {
+        None
+    } else {
+        Some(agent_tapes_core::attribution_evidence::read_paths(
+            evidence,
+        )?)
+    };
     let usage = change_usage(
         &query.input.backends()?,
         &repository,
@@ -2970,6 +3007,8 @@ fn usage_change(
             tiers,
             explain: change.explain,
             prices,
+            evidence: evidence.as_deref(),
+            evidence_only: change.evidence_only,
         },
     )?;
     if json {
@@ -3818,7 +3857,16 @@ fn dispatch(cli: Cli) -> Result<()> {
                     ("--reconcile", reconcile),
                     ("--event-keys", event_keys.is_some()),
                 ];
-                return usage_change(&query, &read, &by, *change, &refused, window, prices, json);
+                return usage_change(
+                    &query, &read, &by, *change, &refused, window, prices, &evidence, json,
+                );
+            }
+            if !evidence.is_empty() && !family {
+                return Err(anyhow!(
+                    "--evidence names evidence for --family, or for a change view (--commit, \
+                     --range, --branch, --commits-from, `<SESSION> --by commit` or `--window \
+                     FROM..TO --by commit`)"
+                ));
             }
             if !by.is_empty() && query.single().is_some() {
                 return Err(anyhow!(
@@ -7029,7 +7077,11 @@ fn render_change_usage(usage: &agent_tapes_core::change_usage::ChangeUsage) -> S
             match dimension {
                 Dimension::Commit => {
                     line.push(row.key.commit.as_deref().map(short).unwrap_or_default());
-                    line.push(row.subject.clone().unwrap_or_default());
+                    let subject = row.subject.clone().unwrap_or_default();
+                    line.push(match &row.key.label {
+                        Some(label) => format!("{subject} [work {label}]"),
+                        None => subject,
+                    });
                 }
                 Dimension::Merge => line.push(match &row.key.merge {
                     Some(MergeGroup::Merge { sha, subject }) => {
@@ -7151,15 +7203,41 @@ fn render_change_usage(usage: &agent_tapes_core::change_usage::ChangeUsage) -> S
             ));
         }
     }
+    if !usage.labelled.is_empty() {
+        out.push_str(
+            "Labelled work, which evidence records name and of which the repository holds no \
+             commit, out of the total:\n",
+        );
+        for work in &usage.labelled {
+            let name = match (&work.work.label, work.work.commits.as_slice()) {
+                (Some(label), _) => label.clone(),
+                (None, commits) => commits
+                    .iter()
+                    .map(|sha| short(sha))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            };
+            out.push_str(&format!("  {name}: {}\n", summary(&work.tally)));
+            for explained in &work.explain {
+                out.push_str(&render_explained(explained));
+            }
+        }
+    }
     out.push_str(&format!(
-        "Sessions' wholes, which the total, uncommitted, unattributed and unselected add up to: \
-         {}\n",
+        "Sessions' wholes, which the total, uncommitted, unattributed, unselected and labelled \
+         work add up to: {}\n",
         summary(&usage.totals.sessions)
     ));
-    out.push_str("SESSION\tAGENT\tWHOLE REQUESTS\tIN THE TOTAL\n");
+    out.push_str("SESSION\tAGENT\tWHOLE REQUESTS\tIN THE TOTAL\tPLACED BY\n");
     for session in &usage.sessions {
+        let placed = match session.placement {
+            agent_tapes_core::change_attribution::Placement::Evidence => {
+                format!("evidence {}", session.evidence_files.join(", "))
+            }
+            placement => serde_kebab(&placement),
+        };
         out.push_str(&format!(
-            "{}:{}\t{}\t{}\t{}\n",
+            "{}:{}\t{}\t{}\t{}\t{placed}\n",
             session.harness,
             session.id,
             session.agent,
@@ -7170,10 +7248,94 @@ fn render_change_usage(usage: &agent_tapes_core::change_usage::ChangeUsage) -> S
             out.push_str(&format!("  note: {note}\n"));
         }
     }
+    if let Some(evidence) = &usage.evidence {
+        render_change_evidence(&mut out, evidence);
+    }
     for note in &usage.notes {
         out.push_str(&format!("Note: {note}\n"));
     }
     out
+}
+
+/// The evidence files a change view read and what their records did.
+fn render_change_evidence(
+    out: &mut String,
+    evidence: &agent_tapes_core::change_usage::EvidenceView,
+) {
+    out.push_str(&format!(
+        "Evidence{}: {} files from {}; {} sessions placed by records, {} by inheriting from one, \
+         {} looked up by id, {} unresolved, {} conflicts, {} disagreements\n",
+        if evidence.only { " only" } else { "" },
+        evidence.files.len(),
+        evidence.producers.join(", "),
+        evidence.placed,
+        evidence.inherited,
+        evidence.looked_up,
+        evidence.unresolved.len(),
+        evidence.conflicts.len(),
+        evidence.disagreements.len()
+    ));
+    for file in &evidence.files {
+        let report = &file.report;
+        let mut line = format!(
+            "  {} ({}): bindings {} placed of {}, events {} placed of {}, lineage {}",
+            report.path,
+            report.producer,
+            file.placed.binding,
+            report.binding.used,
+            file.placed.event,
+            report.event.used,
+            report.lineage.used
+        );
+        if !report.malformed.is_empty() {
+            line.push_str(&format!(", {} malformed", report.malformed.len()));
+        }
+        if let Some(truncated) = &report.truncated {
+            line.push_str(&format!(", read stopped at line {}", truncated.line));
+        }
+        out.push_str(&line);
+        out.push('\n');
+    }
+    for unresolved in &evidence.unresolved {
+        out.push_str(&format!(
+            "  unresolved {}:{} ({}), named by {}\n",
+            unresolved.session.harness,
+            unresolved.session.id,
+            serde_kebab(&unresolved.reason),
+            unresolved.files.join(", ")
+        ));
+    }
+    for conflict in &evidence.conflicts {
+        out.push_str(&format!(
+            "  conflict: {}:{} created {}, which no record in {} binds it to\n",
+            conflict.session.harness,
+            conflict.session.id,
+            conflict.commit.chars().take(10).collect::<String>(),
+            conflict.files.join(", ")
+        ));
+    }
+    for disagreement in &evidence.disagreements {
+        let sets: Vec<String> = disagreement
+            .sets
+            .iter()
+            .map(|set| {
+                format!(
+                    "{} in {}",
+                    set.commits
+                        .iter()
+                        .map(|sha| sha.chars().take(10).collect::<String>())
+                        .collect::<Vec<_>>()
+                        .join("+"),
+                    set.files.join(", ")
+                )
+            })
+            .collect();
+        out.push_str(&format!(
+            "  disagreement on {}: {}\n",
+            disagreement.label,
+            sets.join("; ")
+        ));
+    }
 }
 
 fn render_explained(explained: &agent_tapes_core::change_usage::Explained) -> String {
@@ -7204,12 +7366,41 @@ fn render_explained(explained: &agent_tapes_core::change_usage::Explained) -> St
             }
         })
         .collect();
-    text.push_str(&format!(" naming {}", named.join(", ")));
+    if !named.is_empty() {
+        text.push_str(&format!(" naming {}", named.join(", ")));
+    }
+    if let Some(record) = evidence
+        .record
+        .as_ref()
+        .filter(|record| !record.unheld.is_empty())
+    {
+        let unheld: Vec<String> = record
+            .unheld
+            .iter()
+            .map(|sha| sha.chars().take(10).collect())
+            .collect();
+        text.push_str(&format!(
+            " and, outside the repository, {}",
+            unheld.join(", ")
+        ));
+    }
     if let Some(via) = evidence.via {
         text.push_str(&format!(" via {}", serde_kebab(&via)));
     }
     if let Some(observed) = &evidence.observed {
         text.push_str(&format!(" (recorded as {observed})"));
+    }
+    if let Some(record) = &evidence.record {
+        if record.whole_session {
+            text.push_str(" for the whole session");
+        }
+        if let Some(label) = &record.label {
+            text.push_str(&format!(" work {label}"));
+        }
+        if let Some(role) = &record.role {
+            text.push_str(&format!(" role {role}"));
+        }
+        text.push_str(&format!(" from {} ({})", record.file, record.producer));
     }
     text.push('\n');
     text

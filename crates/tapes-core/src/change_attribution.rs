@@ -61,6 +61,18 @@
 //! The partition of a session runs over every commit its evidence admits, so
 //! a commit's amount never depends on which commits a view selects.
 //!
+//! A session an evidence record names (a `binding` or an `event` of
+//! [`crate::attribution_evidence`]) is placed by those records alone, with
+//! none of its recording's evidence: a binding with a span is interval
+//! evidence for its work, one without covers the whole session, its untimed
+//! requests included, and an event is point evidence. Bound records take
+//! tier `bound`, declared ones `matched`. A record's work is one item,
+//! named by its label, or by its commits where it has none: its part is
+//! shared evenly among the commits the repository holds, each keeping the
+//! label, and work of which the repository holds no commit stands apart as
+//! [`Item::Labelled`]. The descendants of a session placed by records are
+//! placed only by inheriting from it.
+//!
 //! Amounts count each request once. A Claude recording's recorded total
 //! counts its subagents' requests, which are members with amounts of their
 //! own, so the part of the total no request explains is measured against
@@ -80,11 +92,12 @@ use crate::attribution::{
 };
 use crate::span::Instant;
 
+pub mod evidence;
 mod gather;
 mod repository;
 
 pub use gather::{
-    attribute, attribute_within, gather, Gathered, Member, MemberRule, Membership,
+    attribute, attribute_with, attribute_within, gather, Gathered, Member, MemberRule, Membership,
     RepositoryAttribution,
 };
 pub use repository::{normalize_remote, Repository};
@@ -233,12 +246,63 @@ impl Work {
     }
 }
 
-/// What the engine divides among: one item, or the commits one piece of
-/// evidence names together, which share evenly what it places.
+/// What a part of a session is given to.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Item {
+    /// A commit or a place's uncommitted work. A commit's part of work an
+    /// evidence record names keeps the record's label.
+    Work {
+        work: Work,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        label: Option<String>,
+    },
+    /// Work evidence records name of which the repository holds no commit.
+    Labelled(Labelled),
+}
+
+impl Item {
+    fn work(work: Work) -> Self {
+        Self::Work { work, label: None }
+    }
+
+    /// The commit's sha, for a commit.
+    pub fn sha(&self) -> Option<&str> {
+        match self {
+            Self::Work { work, .. } => work.sha(),
+            Self::Labelled(_) => None,
+        }
+    }
+}
+
+/// Work evidence records name of which the repository holds no commit: its
+/// label, or, for work without one, the commits it names.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+pub struct Labelled {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub commits: Vec<String>,
+}
+
+/// One piece of work evidence records name: its label where it has one, the
+/// commits the repository holds, and those it does not. Its identity is
+/// its label, and otherwise its commits.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct DeclaredWork {
+    pub label: Option<String>,
+    pub held: Vec<String>,
+    pub unheld: Vec<String>,
+}
+
+/// What the engine divides among: one item, the commits one piece of
+/// evidence names together, which share evenly what it places, or the work
+/// an evidence record names.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum Key {
     One(Work),
     Several(Vec<String>),
+    Declared(DeclaredWork),
 }
 
 impl Key {
@@ -267,6 +331,10 @@ pub enum Kind {
     Proximity,
     /// An inspection named the commit.
     Inspected,
+    /// An evidence file's `binding` record.
+    Binding,
+    /// An evidence file's `event` record.
+    Event,
 }
 
 /// How an observed sha came to name a commit.
@@ -297,6 +365,55 @@ pub struct Admitted {
     /// The sha the recording named, where it differs from the commit's.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub observed: Option<String>,
+    /// The evidence record it is, for a binding or an event.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub record: Option<RecordSource>,
+}
+
+/// Where an evidence record came from, and what it names beyond the
+/// repository's commits.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+pub struct RecordSource {
+    /// The file as the caller named it.
+    pub file: String,
+    pub producer: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    /// The commits the record's work names that the repository does not
+    /// hold.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub unheld: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+    /// A binding without a span: it covers the whole session.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub whole_session: bool,
+}
+
+/// What evidence records state about one session, which places it alone.
+#[derive(Clone, Debug, Default)]
+pub struct Declared {
+    pub bindings: Vec<DeclaredBinding>,
+    pub events: Vec<DeclaredEvent>,
+}
+
+/// A binding: its work served over `span`, `[from, to)`, or over the whole
+/// session where it has none.
+#[derive(Clone, Debug)]
+pub struct DeclaredBinding {
+    pub work: DeclaredWork,
+    pub tier: Tier,
+    pub span: Option<(Instant, Instant)>,
+    pub source: RecordSource,
+}
+
+/// An event: the session acted for its work at `at`.
+#[derive(Clone, Debug)]
+pub struct DeclaredEvent {
+    pub work: DeclaredWork,
+    pub tier: Tier,
+    pub at: Instant,
+    pub source: RecordSource,
 }
 
 /// One commit, as the partition weighs it.
@@ -474,6 +591,9 @@ pub struct SessionEvidence {
     /// requests is: a child's requests near a commit are not its own
     /// evidence for it.
     pub inherits: bool,
+    /// What evidence records state about the session, which then places it
+    /// alone.
+    pub declared: Option<Declared>,
 }
 
 impl SessionEvidence {
@@ -560,7 +680,7 @@ pub struct Entry {
     pub piece: Option<usize>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub split: Vec<Split>,
-    pub owner: Owner<Work>,
+    pub owner: Owner<Item>,
 }
 
 /// A session divided: its pieces, each part's owner, and the evidence that
@@ -782,6 +902,7 @@ fn inputs(evidence: &SessionEvidence, facts: &Facts, params: &Params) -> Inputs 
                 work: sorted_commits(shas),
                 via: Some(via),
                 observed: observed.first().cloned(),
+                record: None,
             });
         }
     }
@@ -819,6 +940,7 @@ fn inputs(evidence: &SessionEvidence, facts: &Facts, params: &Params) -> Inputs 
             work: sorted_commits(shas),
             via: None,
             observed: None,
+            record: None,
         });
     }
 
@@ -865,6 +987,7 @@ fn inputs(evidence: &SessionEvidence, facts: &Facts, params: &Params) -> Inputs 
                 work: vec![Work::commit(commit.sha.clone())],
                 via: None,
                 observed: None,
+                record: None,
             });
         }
     }
@@ -1032,12 +1155,181 @@ fn push_span(inputs: &mut Inputs, work: Work, from: Instant, to: Option<Instant>
         work: vec![work],
         via: None,
         observed: None,
+        record: None,
     });
 }
 
-/// Divide one session by its own evidence.
+/// The engine's inputs from what evidence records state about a session,
+/// and the work its bindings without a span give the whole session.
+fn declared_inputs(
+    declared: &Declared,
+    evidence: &SessionEvidence,
+    params: &Params,
+) -> (Inputs, Vec<DeclaredWork>) {
+    let mut inputs = Inputs {
+        spans: Vec::new(),
+        events: Vec::new(),
+        cues: Vec::new(),
+        admitted: Vec::new(),
+    };
+    let first = evidence.timed().first().copied();
+    let mut whole: Vec<DeclaredWork> = Vec::new();
+    let tiers = params.tiers;
+    let commits = |work: &DeclaredWork| -> Vec<Work> {
+        work.held.iter().cloned().map(Work::commit).collect()
+    };
+    for binding in declared
+        .bindings
+        .iter()
+        .filter(|binding| tiers.contains(binding.tier))
+    {
+        let (from, to) = match binding.span {
+            Some((from, to)) => (Some(from), Some(to)),
+            None => {
+                whole.push(binding.work.clone());
+                (first, None)
+            }
+        };
+        if let Some(from) = from {
+            inputs.spans.push(Span {
+                work: Key::Declared(binding.work.clone()),
+                run: None,
+                from,
+                to,
+                tier: binding.tier,
+            });
+        }
+        inputs.admitted.push(Admitted {
+            kind: Kind::Binding,
+            tier: binding.tier,
+            at: from.unwrap_or_default(),
+            to,
+            work: commits(&binding.work),
+            via: None,
+            observed: None,
+            record: Some(binding.source.clone()),
+        });
+    }
+    for event in declared
+        .events
+        .iter()
+        .filter(|event| tiers.contains(event.tier))
+    {
+        inputs.events.push(Event {
+            at: event.at,
+            work: Key::Declared(event.work.clone()),
+            tier: event.tier,
+        });
+        inputs.admitted.push(Admitted {
+            kind: Kind::Event,
+            tier: event.tier,
+            at: event.at,
+            to: None,
+            work: commits(&event.work),
+            via: None,
+            observed: None,
+            record: Some(event.source.clone()),
+        });
+    }
+    whole.sort();
+    whole.dedup();
+    (inputs, whole)
+}
+
+/// The entries of one owner's part: a piece of work evidence records name
+/// shares it evenly among the commits the repository holds, each keeping
+/// the work's label, and stands as labelled work where it holds none.
+fn push_owned(
+    entries: &mut Vec<Entry>,
+    piece: Option<usize>,
+    split: Vec<Split>,
+    owner: Owner<Key>,
+) {
+    match owner {
+        Owner::Unattributed(reason) => entries.push(Entry {
+            piece,
+            split,
+            owner: Owner::Unattributed(reason),
+        }),
+        Owner::Item {
+            work: Key::One(work),
+            evidence,
+        } => entries.push(Entry {
+            piece,
+            split,
+            owner: Owner::Item {
+                work: Item::work(work),
+                evidence,
+            },
+        }),
+        Owner::Item {
+            work: Key::Several(shas),
+            evidence,
+        } => {
+            let shares = shas.len();
+            for (index, sha) in shas.into_iter().enumerate() {
+                let mut split = split.clone();
+                split.push(Split { index, shares });
+                entries.push(Entry {
+                    piece,
+                    split,
+                    owner: Owner::Item {
+                        work: Item::work(Work::commit(sha)),
+                        evidence: Evidence {
+                            tier: evidence.tier,
+                            basis: Basis::Even,
+                        },
+                    },
+                });
+            }
+        }
+        Owner::Item {
+            work: Key::Declared(work),
+            evidence,
+        } => {
+            if work.held.is_empty() {
+                entries.push(Entry {
+                    piece,
+                    split,
+                    owner: Owner::Item {
+                        work: Item::Labelled(Labelled {
+                            label: work.label,
+                            commits: work.unheld,
+                        }),
+                        evidence,
+                    },
+                });
+                return;
+            }
+            let shares = work.held.len();
+            for (index, sha) in work.held.into_iter().enumerate() {
+                let mut split = split.clone();
+                if shares > 1 {
+                    split.push(Split { index, shares });
+                }
+                entries.push(Entry {
+                    piece,
+                    split,
+                    owner: Owner::Item {
+                        work: Item::Work {
+                            work: Work::commit(sha),
+                            label: work.label.clone(),
+                        },
+                        evidence,
+                    },
+                });
+            }
+        }
+    }
+}
+
+/// Divide one session by its own evidence, or by what evidence records
+/// state about it where they state anything.
 pub fn partition(evidence: &SessionEvidence, facts: &Facts, params: &Params) -> Partition {
-    let inputs = inputs(evidence, facts, params);
+    let (inputs, whole) = match &evidence.declared {
+        Some(declared) => declared_inputs(declared, evidence, params),
+        None => (inputs(evidence, facts, params), Vec::new()),
+    };
     let plan = Plan::with_cues(
         &inputs.spans,
         &inputs.events,
@@ -1093,6 +1385,41 @@ pub fn partition(evidence: &SessionEvidence, facts: &Facts, params: &Params) -> 
     };
     let mut entries: Vec<Entry> = Vec::new();
     for (piece, owner) in parts {
+        // The requests no time places are the whole session's work's.
+        if piece == EnginePiece::Remainder && !whole.is_empty() {
+            let tier = |work: &DeclaredWork| {
+                evidence
+                    .declared
+                    .iter()
+                    .flat_map(|declared| &declared.bindings)
+                    .filter(|binding| binding.span.is_none() && binding.work == *work)
+                    .map(|binding| binding.tier)
+                    .min()
+                    .unwrap_or(Tier::Matched)
+            };
+            let shares = whole.len();
+            for (index, work) in whole.iter().enumerate() {
+                let split = if shares > 1 {
+                    vec![Split { index, shares }]
+                } else {
+                    Vec::new()
+                };
+                let evidence = Evidence {
+                    tier: tier(work),
+                    basis: if shares > 1 { Basis::Even } else { Basis::Span },
+                };
+                push_owned(
+                    &mut entries,
+                    None,
+                    split,
+                    Owner::Item {
+                        work: Key::Declared(work.clone()),
+                        evidence,
+                    },
+                );
+            }
+            continue;
+        }
         let (piece, split) = match piece {
             EnginePiece::Segment(index) => (Some(piece_of(false, index)), Vec::new()),
             EnginePiece::Window(index) => (Some(piece_of(true, index)), Vec::new()),
@@ -1106,44 +1433,14 @@ pub fn partition(evidence: &SessionEvidence, facts: &Facts, params: &Params) -> 
             ),
             EnginePiece::Remainder => (None, Vec::new()),
         };
-        match owner {
-            Owner::Unattributed(reason) => entries.push(Entry {
-                piece,
-                split,
-                owner: Owner::Unattributed(reason),
-            }),
-            Owner::Item {
-                work: Key::One(work),
-                evidence,
-            } => entries.push(Entry {
-                piece,
-                split,
-                owner: Owner::Item { work, evidence },
-            }),
-            Owner::Item {
-                work: Key::Several(shas),
-                evidence,
-            } => {
-                let shares = shas.len();
-                for (index, sha) in shas.into_iter().enumerate() {
-                    let mut split = split.clone();
-                    split.push(Split { index, shares });
-                    entries.push(Entry {
-                        piece,
-                        split,
-                        owner: Owner::Item {
-                            work: Work::commit(sha),
-                            evidence: Evidence {
-                                tier: evidence.tier,
-                                basis: Basis::Even,
-                            },
-                        },
-                    });
-                }
-            }
-        }
+        push_owned(&mut entries, piece, split, owner);
     }
-    let entries = cut_elsewhere(&mut pieces, entries, &evidence.elsewhere());
+    // Records place a session alone: where it worked is none of theirs.
+    let entries = if evidence.declared.is_some() {
+        entries
+    } else {
+        cut_elsewhere(&mut pieces, entries, &evidence.elsewhere())
+    };
     let mut admitted = inputs.admitted;
     admitted.sort_by(|a, b| {
         (a.at, a.kind, &a.work, a.tier, a.to).cmp(&(b.at, b.kind, &b.work, b.tier, b.to))
@@ -1594,6 +1891,19 @@ pub struct Amounts {
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Share {
     pub work: Work,
+    /// The label of the work an evidence record names that the part is a
+    /// commit's share of.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    pub evidence: Evidence,
+    pub amount: Amount,
+}
+
+/// One part of a session given to work evidence records name of which the
+/// repository holds no commit, by one tier and basis.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct LabelledShare {
+    pub work: Labelled,
     pub evidence: Evidence,
     pub amount: Amount,
 }
@@ -1605,10 +1915,25 @@ pub struct SessionKey {
     pub id: String,
 }
 
+/// What placed a session's consumption.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Placement {
+    /// Its recording's evidence, and its parent's allocation for the rest.
+    #[default]
+    Recording,
+    /// Evidence records that name it, alone.
+    Evidence,
+    /// Its parent's allocation alone: an ancestor is placed by evidence
+    /// records.
+    Inherited,
+}
+
 /// One session's consumption, divided.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct SessionAttribution {
     pub session: SessionKey,
+    pub placement: Placement,
     /// The session whose allocation this one inherits where its own evidence
     /// places nothing.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1664,21 +1989,54 @@ impl SessionAttribution {
         )
     }
 
-    /// Every owner's share, by owner and then evidence, strongest first.
+    /// Every share of a commit or a place's uncommitted work, by owner and
+    /// then evidence, strongest first.
     pub fn shares(&self) -> Vec<Share> {
         let Some(amounts) = self.entry_amounts() else {
             return Vec::new();
         };
-        let mut held: BTreeMap<(Work, Evidence), Amount> = BTreeMap::new();
+        let mut held: BTreeMap<(Work, Option<String>, Evidence), Amount> = BTreeMap::new();
         for (entry, amount) in self.partition.entries.iter().zip(amounts) {
-            if let Owner::Item { work, evidence } = &entry.owner {
+            if let Owner::Item {
+                work: Item::Work { work, label },
+                evidence,
+            } = &entry.owner
+            {
+                held.entry((work.clone(), label.clone(), *evidence))
+                    .or_default()
+                    .add(&amount);
+            }
+        }
+        held.into_iter()
+            .map(|((work, label, evidence), amount)| Share {
+                work,
+                label,
+                evidence,
+                amount,
+            })
+            .collect()
+    }
+
+    /// Every share of work evidence records name of which the repository
+    /// holds no commit, by work and then evidence.
+    pub fn labelled(&self) -> Vec<LabelledShare> {
+        let Some(amounts) = self.entry_amounts() else {
+            return Vec::new();
+        };
+        let mut held: BTreeMap<(Labelled, Evidence), Amount> = BTreeMap::new();
+        for (entry, amount) in self.partition.entries.iter().zip(amounts) {
+            if let Owner::Item {
+                work: Item::Labelled(work),
+                evidence,
+            } = &entry.owner
+            {
                 held.entry((work.clone(), *evidence))
                     .or_default()
                     .add(&amount);
             }
         }
         held.into_iter()
-            .map(|((work, evidence), amount)| Share {
+            .map(|((work, evidence), amount)| LabelledShare {
                 work,
                 evidence,
                 amount,
@@ -1717,7 +2075,8 @@ impl SessionAttribution {
     }
 }
 
-/// A session's shares as a view selects them.
+/// A session's shares as a view selects them. Work of which the repository
+/// holds no commit is [`SessionAttribution::labelled`].
 #[derive(Clone, Debug, Default, PartialEq, Serialize)]
 pub struct Selection {
     pub selected: Vec<Share>,

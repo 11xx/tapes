@@ -1377,7 +1377,8 @@ PROBE BEFORE EXPORTING
   and used by kind, malformed lines by line number and fixed reason, unknown
   kinds, duplicates, any truncation) with what its records did: `adopted`,
   `agreed`, `conflicting`, `unresolved` and `not_applied`. A family counts
-  `binding` and `event` records and uses none.
+  `binding` and `event` records and uses none; a change view places sessions
+  by them.
   Each member's figure is the one `usage --full` reports for its recording.
   A Claude recording whose accounting is a recorded total counts its
   subagents' requests, so those subagent recordings are listed with their
@@ -1639,7 +1640,9 @@ PRICE A CHANGE
   tapes usage --pr 123                      A GitHub pull request, found through `gh`, by how it was merged.
   tapes usage <id> --by commit              One session divided across the repository's commits.
   tapes usage --window FROM..TO --by commit  What a window consumed, by commit.
-  tapes usage --range A..B --prices FILE --json  tapes-change-usage/2, with list-price estimates.
+  tapes usage --range A..B --prices FILE --json  tapes-change-usage/3, with list-price estimates.
+  tapes usage --range A..B --evidence FILE  Sessions an evidence file names, placed by its records.
+  tapes usage --commits-from LIST --evidence FILE --evidence-only  Only the sessions the file names.
 
   A change view answers what a set of commits cost from the recordings and
   the repository alone; it needs no ledger, hook or configuration. Run it
@@ -1681,7 +1684,8 @@ PRICE A CHANGE
   or `elsewhere`, time in a directory outside the repository. Unselected holds
   what the same sessions spent on commits the view did not select; it is
   reported apart and kept out of the change's total. Per session and in the
-  totals, rows, uncommitted, unattributed and unselected add up to the whole,
+  totals, rows, uncommitted, unattributed, unselected and labelled work
+  (below) add up to the whole,
   and a recorded total no request explains stays apart under `unexplained`.
   Each request counts once, though a Claude lead's recorded total also counts
   its subagents' requests, and cache writes keep their 5-minute and 1-hour
@@ -1737,6 +1741,33 @@ PRICE A CHANGE
   request's commits: `git log --format=%H BASE..HEAD > commits.txt`, then
   `tapes usage --commits-from commits.txt`. The listed commits keep their
   own windows.
+
+  Recordings alone give an estimate. A launcher, a ledger or a person who
+  knows what a session worked on can make the figure exact with an evidence
+  file (DECLARE WHO LAUNCHED WHOM): `--evidence PATH`, a file or a directory
+  of them, repeatable. A session a `binding` or `event` record names is
+  placed by those records alone, never by its recording's evidence, at tier
+  `bound` for a bound record and `matched` for a declared one; a binding
+  without a span takes the whole session. A record's work shares its part
+  evenly among the commits of it the repository holds, and each such row
+  keeps the work's label, so selecting one commit of a two-commit change
+  takes half of it. Work of which the repository holds no commit, or that
+  names only a label, is reported as `labelled` work, apart and out of the
+  total like unselected commits. A named session whose work names a selected
+  commit is looked up by harness and id wherever its recording began; one no
+  installed store holds is listed unresolved and adds nothing. Its subagents
+  and the sessions it launched inherit from it alone, and a `lineage` record
+  makes its child a child of its parent where the child's recording names
+  none. Recording evidence still places every session no record names.
+  The role of a session placed by records is `reviewer` where its records
+  say `reviewer`, and `author` otherwise. `evidence` reports the files and
+  producers, the bindings and events that placed a session in the view,
+  sessions looked up and unresolved, conflicts (a session whose recording
+  shows it creating a commit no record naming it binds it to; the records
+  still place it) and labels whose records disagree on their commits.
+  --evidence-only keeps only the sessions the records name, each placed by
+  its records alone, with no listing and no subagent or launched session, so
+  a ledger's export reproduces the ledger's own figure.
 
 EXPORT, THEN INGEST PROGRESSIVELY
   tapes export <id|--latest> [--bundle <dir>]
@@ -2067,6 +2098,9 @@ DECLARE WHO LAUNCHED WHOM
   2. A lineage record in an evidence file, for a launcher that cannot change
      the prompt, or that declares after the fact. Name the file, or a
      directory of them, with `usage SESSION --family --evidence PATH`.
+  The same file declares what work a session did: its `binding` and `event`
+  records place a session's consumption in a change view (`usage --range
+  A..B --evidence PATH`, PRICE A CHANGE).
   An evidence file is tapes-attribution-evidence/1: UTF-8 JSON Lines, one
   object per line, blank lines ignored. The first line is the header:
       {"schema":"tapes-attribution-evidence/1","producer":"nightly-tool/1.2.0","written_at":"2026-01-10T09:00:00Z"}
@@ -2112,6 +2146,7 @@ DECLARE WHO LAUNCHED WHOM
     stretches (45 minutes idle ends one): requests up to an event in a
     stretch serve that event's work, those after the stretch's last event
     serve the same work, and a stretch with no event serves none.
+  These are the rules a change view divides every session by.
   One piece of work is named by its `label` when it has one, and otherwise
   by its commit set. Records naming one label name the same commits; records
   that disagree are reported, never silently merged, and the label's

@@ -16,6 +16,8 @@
 //!
 //! A member's subagent recordings join it, and a session whose recording
 //! names a member as its launcher or spawner inherits from that member.
+//! Evidence files bring in the sessions their records name, as
+//! [`super::evidence`] says.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -23,10 +25,12 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 use serde::Serialize;
 
+use super::evidence::{Conflict, Records};
 use super::repository::Repository;
 use super::{
-    partition, Amount, Amounts, Counts, EditInput, Facts, Location, Mention, Params, Partition,
-    Piece, SeenCommit, SessionAttribution, SessionEvidence, SessionKey,
+    inputs, partition, Amount, Amounts, Counts, EditInput, Facts, Kind, Location, Mention, Params,
+    Partition, Piece, Placement, SeenCommit, SessionAttribution, SessionEvidence, SessionKey,
+    Tiers,
 };
 use crate::backend::{Backend, StreamOptions, StreamedTranscript};
 use crate::commit_observations::CommitObservation;
@@ -54,10 +58,12 @@ pub enum MemberRule {
     Placed,
     /// It is a member's subagent recording.
     Child,
+    /// An evidence record names it.
+    Evidence,
 }
 
 /// A recording read for its evidence.
-pub(crate) struct SessionRead {
+pub(super) struct SessionRead {
     session: Session,
     read: StreamedTranscript,
     observations: Vec<CommitObservation>,
@@ -77,6 +83,16 @@ pub struct Member {
 }
 
 impl Member {
+    pub(super) fn new(read: SessionRead, backend: usize, rules: BTreeSet<MemberRule>) -> Self {
+        Self {
+            session: read.session.clone(),
+            backend,
+            rules,
+            parent: None,
+            read,
+        }
+    }
+
     pub fn key(&self) -> SessionKey {
         key_of(&self.session)
     }
@@ -225,29 +241,40 @@ pub fn gather(
     }
     membership.placed = placed.into_iter().collect();
 
-    let mut members: Vec<Member> = candidates
+    let members: Vec<Member> = candidates
         .into_iter()
         .zip(rules)
         .filter(|(_, rules)| !rules.is_empty())
-        .map(|((backend, read), rules)| Member {
-            session: read.session.clone(),
-            backend,
-            rules,
-            parent: None,
-            read,
-        })
+        .map(|((backend, read), rules)| Member::new(read, backend, rules))
         .collect();
 
     // A launcher or spawner named by a member's recording.
+    let mut gathered = Gathered {
+        members,
+        membership,
+    };
     {
-        let mut sessions: Vec<(usize, &mut Session)> = members
+        let mut sessions: Vec<(usize, &mut Session)> = gathered
+            .members
             .iter_mut()
             .map(|member| (member.backend, &mut member.session))
             .collect();
         crate::family::declare_parents(backends, &mut sessions);
     }
+    assign_parents(&mut gathered.members);
+    let every: Vec<usize> = (0..gathered.members.len()).collect();
+    add_children(backends, &mut gathered, &every);
+    Ok(gathered)
+}
+
+/// Give each member that is no subagent recording the member its recording
+/// names as launcher or spawner, where that one is a member.
+pub(super) fn assign_parents(members: &mut [Member]) {
     let keys: BTreeSet<SessionKey> = members.iter().map(Member::key).collect();
-    for member in &mut members {
+    for member in members
+        .iter_mut()
+        .filter(|member| !member.rules.contains(&MemberRule::Child))
+    {
         if let Some((harness, id, evidence)) = window::parent_in_harness(&member.session) {
             let parent = SessionKey { harness, id };
             if evidence != ParentEvidence::ForkOrigin && keys.contains(&parent) {
@@ -255,16 +282,25 @@ pub fn gather(
             }
         }
     }
+}
 
-    // Subagent recordings.
+/// Add the subagent recordings of the members at `positions`.
+pub(super) fn add_children(
+    backends: &[Box<dyn Backend>],
+    gathered: &mut Gathered,
+    positions: &[usize],
+) {
     let mut children: Vec<Member> = Vec::new();
-    for member in &members {
+    for member in positions
+        .iter()
+        .map(|position| &gathered.members[*position])
+    {
         let (found, failures) = backends[member.backend].window_children(&member.session);
         for failure in failures {
-            membership.unreadable.push((member.key(), failure));
+            gathered.membership.unreadable.push((member.key(), failure));
         }
         for child in found {
-            membership.read += 1;
+            gathered.membership.read += 1;
             match read_session(backends[member.backend].as_ref(), &child) {
                 Ok(read) => children.push(Member {
                     session: child,
@@ -273,17 +309,14 @@ pub fn gather(
                     parent: Some(member.key()),
                     read,
                 }),
-                Err(error) => membership
+                Err(error) => gathered
+                    .membership
                     .unreadable
                     .push((key_of(&child), format!("{error:#}"))),
             }
         }
     }
-    members.extend(children);
-    Ok(Gathered {
-        members,
-        membership,
-    })
+    gathered.members.extend(children);
 }
 
 /// The repository's attribution of what its members consumed.
@@ -295,6 +328,10 @@ pub struct RepositoryAttribution {
     /// More commits met the members' interval than a read keeps.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub commits_truncated: bool,
+    /// Sessions evidence records place whose recordings show them creating
+    /// a commit no record naming them binds them to.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub conflicts: Vec<Conflict>,
 }
 
 /// Divide every member's consumption among the repository's commits.
@@ -317,6 +354,19 @@ pub fn attribute_within(
     params: &Params,
     within: Option<Piece>,
 ) -> Result<RepositoryAttribution> {
+    attribute_with(backends, repository, gathered, params, within, None)
+}
+
+/// As [`attribute_within`], with a session `records` names placed by those
+/// records alone, and its descendants placed only by inheriting from it.
+pub fn attribute_with(
+    backends: &[Box<dyn Backend>],
+    repository: &Repository,
+    gathered: &Gathered,
+    params: &Params,
+    within: Option<Piece>,
+    records: Option<&Records>,
+) -> Result<RepositoryAttribution> {
     let stamps: Vec<Instant> = gathered
         .members
         .iter()
@@ -327,6 +377,7 @@ pub fn attribute_within(
             sessions: Vec::new(),
             commits: Vec::new(),
             commits_truncated: false,
+            conflicts: Vec::new(),
         });
     };
     let universe = repository.universe(*first, *last, params)?;
@@ -362,11 +413,50 @@ pub fn attribute_within(
         arrivals,
     };
 
+    let named = |key: &SessionKey| records.is_some_and(|records| records.names(key));
+    let parents: BTreeMap<SessionKey, SessionKey> = gathered
+        .members
+        .iter()
+        .filter_map(|member| Some((member.key(), member.parent.clone()?)))
+        .collect();
+    // Whether an ancestor of the session is placed by records.
+    let under_records = |key: &SessionKey| {
+        let mut at = key;
+        for _ in 0..=parents.len() {
+            match parents.get(at) {
+                Some(parent) if named(parent) => return true,
+                Some(parent) => at = parent,
+                None => return false,
+            }
+        }
+        false
+    };
     let mut evidences: Vec<(SessionKey, SessionEvidence)> = Vec::new();
+    let mut placements: BTreeMap<SessionKey, Placement> = BTreeMap::new();
+    let mut conflicts: Vec<Conflict> = Vec::new();
     for member in &gathered.members {
+        let key = member.key();
         let mut evidence = evidence(&member.read, repository, &universe, params)?;
         evidence.inherits = member.parent.is_some();
-        evidences.push((member.key(), evidence));
+        let placement = match records {
+            Some(records) if records.names(&key) => {
+                conflicts.extend(unbound_creations(&evidence, &facts, params, records, &key));
+                evidence.declared = records.declared(&key);
+                Placement::Evidence
+            }
+            _ if under_records(&key) => {
+                evidence = SessionEvidence {
+                    requests: evidence.requests,
+                    starts: evidence.starts,
+                    inherits: true,
+                    ..SessionEvidence::default()
+                };
+                Placement::Inherited
+            }
+            _ => Placement::Recording,
+        };
+        placements.insert(key.clone(), placement);
+        evidences.push((key, evidence));
     }
     let mut partitions = divide(gathered, &evidences, &facts, params);
     let mut placed_by_every_tier = None;
@@ -458,6 +548,7 @@ pub fn attribute_within(
                     placed.get(&key).cloned().unwrap_or_default()
                 });
         sessions.push(SessionAttribution {
+            placement: placements.get(&key).copied().unwrap_or_default(),
             session: key,
             parent: member.parent.clone(),
             agent,
@@ -480,7 +571,42 @@ pub fn attribute_within(
             .map(|commit| commit.sha.clone())
             .collect(),
         commits_truncated: universe.set.commits_truncated,
+        conflicts,
     })
+}
+
+/// The commits a session's recording shows it creating, as bound evidence,
+/// that no record naming it binds it to.
+fn unbound_creations(
+    evidence: &SessionEvidence,
+    facts: &Facts,
+    params: &Params,
+    records: &Records,
+    key: &SessionKey,
+) -> Vec<Conflict> {
+    let every = Params {
+        tiers: Tiers::all(),
+        ..*params
+    };
+    let bound = records.commits_of(key);
+    let created: BTreeSet<String> = inputs(evidence, facts, &every)
+        .admitted
+        .into_iter()
+        .filter(|admitted| {
+            admitted.kind == Kind::Created && admitted.tier == crate::attribution::Tier::Bound
+        })
+        .flat_map(|admitted| admitted.work)
+        .filter_map(|work| work.sha().map(str::to_owned))
+        .collect();
+    created
+        .into_iter()
+        .filter(|sha| !bound.contains(sha))
+        .map(|commit| Conflict {
+            session: key.clone(),
+            commit,
+            files: records.files_of(key),
+        })
+        .collect()
 }
 
 /// Every member divided by its own evidence, and then each child given its
@@ -769,7 +895,7 @@ fn amount(figure: &Session, placement: Option<&SpanPlacement>) -> Amount {
 /// Read a recording once for its evidence: the request timeline and
 /// working stretches, its locations, the commits its results name, and the
 /// directories its tool calls name.
-fn read_session(backend: &dyn Backend, session: &Session) -> Result<SessionRead> {
+pub(super) fn read_session(backend: &dyn Backend, session: &Session) -> Result<SessionRead> {
     #[derive(Default)]
     struct Collect {
         observations: Vec<CommitObservation>,
@@ -904,6 +1030,7 @@ fn evidence(
         mentions: read.mentions.clone(),
         edits: read.edits.clone(),
         inherits: false,
+        declared: None,
     })
 }
 
