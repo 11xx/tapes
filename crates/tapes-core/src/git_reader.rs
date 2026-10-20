@@ -24,6 +24,7 @@
 //! A rename is one changed path, the new one, with the old one named in
 //! `previous_path`; a pure rename has no digests, because it changed no line.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -138,6 +139,47 @@ pub struct CommitSet {
     pub commits_truncated: bool,
     /// The commit metadata read hit the byte cap, so later commits are absent.
     pub metadata_truncated: bool,
+}
+
+/// The commits a selector named, without their changes.
+#[derive(Debug, Clone, Serialize)]
+pub struct Summaries {
+    /// Ordered as [`CommitSet::commits`] is.
+    pub commits: Vec<CommitSummary>,
+    pub default_branch: Option<DefaultBranch>,
+    pub commits_truncated: bool,
+    pub metadata_truncated: bool,
+}
+
+/// One commit's identity, times and subject.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CommitSummary {
+    pub sha: String,
+    pub parents: Vec<String>,
+    pub author_time: DateTime<Utc>,
+    pub committer_time: DateTime<Utc>,
+    pub subject: String,
+    pub merge: bool,
+}
+
+impl From<Metadata> for CommitSummary {
+    fn from(metadata: Metadata) -> Self {
+        Self {
+            merge: metadata.parents.len() > 1,
+            sha: metadata.sha,
+            parents: metadata.parents,
+            author_time: metadata.author_time,
+            committer_time: metadata.committer_time,
+            subject: metadata.subject,
+        }
+    }
+}
+
+/// The shas a selector names, before their metadata is read.
+struct Listed {
+    shas: Vec<String>,
+    default_branch: Option<DefaultBranch>,
+    truncated: bool,
 }
 
 /// One commit, its identities and its changes.
@@ -384,6 +426,41 @@ impl GitReader {
     /// The commits a selector names, with their changes. An unknown revision
     /// refuses with git's own message.
     pub fn commits(&self, selector: &Selector) -> Result<CommitSet> {
+        let listed = self.list(selector)?;
+        let (metadata, metadata_truncated) = self.metadata(&listed.shas)?;
+        let commits = metadata
+            .into_iter()
+            .map(|metadata| self.with_changes(metadata))
+            .collect::<Result<Vec<_>>>()?;
+        Ok(CommitSet {
+            commits,
+            default_branch: listed.default_branch,
+            commits_truncated: listed.truncated,
+            metadata_truncated,
+        })
+    }
+
+    /// The commits a selector names, as [`GitReader::commits`] lists them,
+    /// without reading their changes.
+    pub fn summaries(&self, selector: &Selector) -> Result<Summaries> {
+        let listed = self.list(selector)?;
+        let (metadata, metadata_truncated) = self.metadata(&listed.shas)?;
+        Ok(Summaries {
+            commits: metadata.into_iter().map(CommitSummary::from).collect(),
+            default_branch: listed.default_branch,
+            commits_truncated: listed.truncated,
+            metadata_truncated,
+        })
+    }
+
+    /// Identity, times and subject of each of `shas`, in order, without
+    /// their changes.
+    pub fn describe(&self, shas: &[String]) -> Result<Vec<CommitSummary>> {
+        let (metadata, _) = self.metadata(shas)?;
+        Ok(metadata.into_iter().map(CommitSummary::from).collect())
+    }
+
+    fn list(&self, selector: &Selector) -> Result<Listed> {
         let mut default_branch = None;
         let mut listing: Vec<String> = vec!["rev-list".into(), "--topo-order".into()];
         let walk: Vec<String> = match selector {
@@ -441,16 +518,10 @@ impl GitReader {
                 shas.drain(..surplus);
             }
         }
-        let (metadata, metadata_truncated) = self.metadata(&shas)?;
-        let commits = metadata
-            .into_iter()
-            .map(|metadata| self.with_changes(metadata))
-            .collect::<Result<Vec<_>>>()?;
-        Ok(CommitSet {
-            commits,
+        Ok(Listed {
+            shas,
             default_branch,
-            commits_truncated,
-            metadata_truncated,
+            truncated: commits_truncated,
         })
     }
 
@@ -747,6 +818,137 @@ impl GitReader {
             });
         }
         Ok(merged)
+    }
+
+    /// What the merges any branch, tag or remote branch reaches say they
+    /// merged from `branch`, as [`GitReader::merged_branches`] reads a merge
+    /// subject, over the whole history.
+    pub fn merges_naming(&self, branch: &str) -> Result<Vec<MergedBranch>> {
+        require_revisions([branch])?;
+        let grep = format!("--grep={branch}");
+        let output = self.run_lenient(&[
+            "log",
+            "--branches",
+            "--tags",
+            "--remotes",
+            "--merges",
+            "--no-notes",
+            "--fixed-strings",
+            &grep,
+            "-z",
+            "--format=%H%x1f%P%x1f%s",
+        ])?;
+        if !output.success {
+            return Ok(Vec::new());
+        }
+        let mut merged = Vec::new();
+        for record in text(&output.bytes).split('\0') {
+            let mut fields = record.trim_start_matches('\n').splitn(3, '\u{1f}');
+            let (Some(sha), Some(parents), Some(subject)) =
+                (fields.next(), fields.next(), fields.next())
+            else {
+                continue;
+            };
+            let parents: Vec<&str> = parents.split_whitespace().collect();
+            let [first, second] = parents[..] else {
+                continue;
+            };
+            if merged_branch_name(subject).as_deref() != Some(branch) {
+                continue;
+            }
+            let listed = self.run(
+                &[
+                    "rev-list".to_owned(),
+                    format!("--max-count={}", self.limits.commits),
+                    "--end-of-options".to_owned(),
+                    format!("{first}..{second}"),
+                ],
+                None,
+            )?;
+            merged.push(MergedBranch {
+                merge: sha.to_owned(),
+                branch: branch.to_owned(),
+                commits: text(&listed.bytes).lines().map(str::to_owned).collect(),
+            });
+        }
+        Ok(merged)
+    }
+
+    /// Whether a local branch of that name exists.
+    pub fn has_branch(&self, branch: &str) -> Result<bool> {
+        if require_revisions([branch]).is_err() {
+            return Ok(false);
+        }
+        self.commit_exists(&format!("refs/heads/{branch}"))
+    }
+
+    /// The directory of the working tree holding the reader's directory, or
+    /// `None` when no repository holds it.
+    pub fn toplevel(&self) -> Result<Option<PathBuf>> {
+        let output = self.run_lenient(&["rev-parse", "--show-toplevel"])?;
+        Ok(output
+            .success
+            .then(|| PathBuf::from(text(&output.bytes).trim()))
+            .filter(|path| !path.as_os_str().is_empty()))
+    }
+
+    /// The first-parent mainline merge or commit that brought each of
+    /// `shas` to `mainline`, a revision naming the mainline's tip: a commit
+    /// on the first-parent history is its own, and any other commit belongs
+    /// to the oldest mainline merge whose second parents reach it and whose
+    /// first parent does not. Mainline commits committed before `since` are
+    /// not walked, and a commit no walked mainline commit brought is absent.
+    pub fn mainline_arrivals(
+        &self,
+        mainline: &str,
+        shas: &BTreeSet<String>,
+        since: DateTime<Utc>,
+    ) -> Result<BTreeMap<String, String>> {
+        let listed = self.run(
+            &[
+                "rev-list".to_owned(),
+                "--first-parent".to_owned(),
+                "--parents".to_owned(),
+                "--reverse".to_owned(),
+                format!("--since=@{}", since.timestamp()),
+                "--end-of-options".to_owned(),
+                mainline.to_owned(),
+            ],
+            None,
+        )?;
+        let mut arrived: BTreeMap<String, String> = BTreeMap::new();
+        for line in text(&listed.bytes).lines() {
+            if arrived.len() == shas.len() {
+                break;
+            }
+            let mut fields = line.split_whitespace();
+            let Some(commit) = fields.next() else {
+                continue;
+            };
+            if shas.contains(commit) {
+                arrived
+                    .entry(commit.to_owned())
+                    .or_insert(commit.to_owned());
+            }
+            if fields.count() < 2 {
+                continue;
+            }
+            let brought = self.run(
+                &[
+                    "rev-list".to_owned(),
+                    format!("--max-count={}", self.limits.commits),
+                    "--end-of-options".to_owned(),
+                    format!("{commit}^1..{commit}"),
+                ],
+                None,
+            )?;
+            for sha in text(&brought.bytes).lines() {
+                if shas.contains(sha) {
+                    arrived.entry(sha.to_owned()).or_insert(commit.to_owned());
+                }
+            }
+        }
+        Ok(arrived)
     }
 
     /// Which of `names`, full or abbreviated hexadecimal shas, name a commit
