@@ -24,7 +24,7 @@ use chrono::{DateTime, SubsecRound, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::pricing::{
-    BillingKind, CategoryPrices, LongContext, ModelPrice, PriceTable, PromptCategory,
+    self, BillingKind, CategoryPrices, LongContext, ModelPrice, PriceTable, PromptCategory,
 };
 
 /// The schema of the record of each fetch.
@@ -486,7 +486,8 @@ const CACHE_WRITE_1H_KEY: &str = "cache_creation_input_token_cost_above_1hr";
 
 /// LiteLLM's JSON: its chat models without a provider prefix or a tiered
 /// `_above_` price, whose tiers tapes cannot read and whose base rate alone
-/// would underprice them, other than the ids in `official`.
+/// would underprice them, other than the ids in `official` and their dated
+/// forms.
 pub fn parse_litellm(text: &str, official: &BTreeSet<String>) -> Result<Vec<Fetched>> {
     let entries: serde_json::Map<String, serde_json::Value> =
         serde_json::from_str(text).context("LiteLLM's prices are not a JSON object")?;
@@ -497,6 +498,7 @@ pub fn parse_litellm(text: &str, official: &BTreeSet<String>) -> Result<Vec<Fetc
         };
         if id.contains('/')
             || official.contains(&id)
+            || pricing::undated(&id).is_some_and(|undated| official.contains(undated))
             || fields.get("mode").and_then(|mode| mode.as_str()) != Some("chat")
             || fields
                 .keys()

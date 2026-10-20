@@ -661,7 +661,7 @@ impl PriceTable {
 }
 
 /// `id` without a trailing `-YYYYMMDD`, when it has one.
-fn undated(id: &str) -> Option<&str> {
+pub fn undated(id: &str) -> Option<&str> {
     let (undated, date) = id.rsplit_once('-')?;
     (date.len() == 8 && date.bytes().all(|byte| byte.is_ascii_digit()) && !undated.is_empty())
         .then_some(undated)

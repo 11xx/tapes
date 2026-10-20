@@ -336,3 +336,16 @@ fn a_changed_header_fails_its_source_keeps_its_rows_and_the_others_update() {
     assert_eq!(kept.fetched_at, Some(at(1)), "its last success is kept");
     assert_eq!(record.sources["openai"].fetched_at, Some(at(10)));
 }
+
+#[test]
+fn litellm_never_prices_a_dated_form_of_an_official_id() {
+    // Claim: LiteLLM's `claude-sonnet-4-5-20250929` is skipped when an
+    // official source priced `claude-sonnet-4-5`, so the dated id falls back
+    // to the official row and follows its price changes. Rejects a LiteLLM
+    // row shadowing the official one for the dated id.
+    let official: BTreeSet<String> = ["claude-sonnet-4-5".to_owned()].into();
+    let rows = parse_litellm(&source("litellm.json"), &official).unwrap();
+    assert!(rows
+        .iter()
+        .all(|row| row.id != "claude-sonnet-4-5-20250929"));
+}

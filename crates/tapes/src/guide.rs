@@ -1679,7 +1679,8 @@ KEEP A PRICE TABLE
   reads. OpenAI's 30m and 12h cache writes have no tapes category and are
   left unpriced, and those rows' source says so. LiteLLM gives bare chat
   model ids whose prices have no `_above_` tier, never an id an official
-  page priced.
+  page priced nor a dated form (`-YYYYMMDD`) of one, which the official row
+  prices instead.
 
   Any table, not only this one, answers a recorded id ending in `-YYYYMMDD`
   that no row names with the row named by the id without that date, so
