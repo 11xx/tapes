@@ -1702,7 +1702,9 @@ KEEP A PRICE TABLE
   replica answering a `--remote` read runs offline, so it never refreshes
   either. Concurrent commands refresh once: a refresh holds a lock on
   `prices.lock` beside the table, a command that finds it held skips its
-  refresh silently, and the holder decides again once it has the lock. It
+  refresh silently when a data table exists and prices with it, or, when
+  none does, waits for the holder, bounded by its time limits, and prices
+  with the table it wrote; whoever takes the lock decides again first. It
   records the attempt before fetching, so a refresh that dies midway still
   waits its hour. The refresh gives each source 5 seconds to connect and
   10 to finish. It prints nothing when it succeeds. When a source fails it

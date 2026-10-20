@@ -264,19 +264,71 @@ fn commands_that_never_price_do_not_refresh() {
 
 #[test]
 fn a_refresh_another_process_holds_the_lock_for_is_skipped_silently() {
-    // Claim: while another process holds `prices.lock`, a due refresh is
-    // skipped without a write or a warning, and once the lock is released
-    // the next command refreshes. Rejects two processes fetching at once and
-    // the later one overwriting the earlier one's table and record.
+    // Claim: while another process holds `prices.lock` and a data table
+    // exists, a due refresh is skipped without a write or a warning, and
+    // once the lock is released the next command refreshes. Rejects two
+    // processes fetching at once and the later one overwriting the earlier
+    // one's table and record.
     let store = Store::new();
     fs::create_dir_all(store.path("data/tapes")).unwrap();
+    let table = "schema = \"tapes-price-table/1\"\ncurrency = \"USD\"\n";
+    fs::write(store.table(), table).unwrap();
     let lock = fs::File::create(store.path("data/tapes/prices.lock")).unwrap();
     lock.lock().unwrap();
     let held = store.usage(&[], &sources(), &[]);
-    assert!(!store.table().exists());
+    assert_eq!(fs::read_to_string(store.table()).unwrap(), table);
     assert!(!store.record().exists());
     assert!(String::from_utf8_lossy(&held.stderr).is_empty());
     lock.unlock().unwrap();
     store.usage(&[], &sources(), &[]);
-    assert!(store.table().is_file());
+    assert!(store.record().is_file());
+    assert_ne!(fs::read_to_string(store.table()).unwrap(), table);
+}
+
+#[test]
+fn without_a_table_a_command_waits_for_the_refresh_another_process_holds() {
+    // Claim: with no data table, a command that finds `prices.lock` held
+    // waits for its holder, decides again, and prices with the table the
+    // holder wrote without fetching itself. Rejects skipping the refresh and
+    // answering with no estimate on a fresh install.
+    let written = Store::new();
+    written.usage(&[], &sources(), &[]);
+    let store = Store::new();
+    fs::create_dir_all(store.path("data/tapes")).unwrap();
+    let lock = fs::File::create(store.path("data/tapes/prices.lock")).unwrap();
+    lock.lock().unwrap();
+    let child = Command::new(env!("CARGO_BIN_EXE_tapes"))
+        .env_remove("TAPES_PRICES")
+        .env_remove("TAPES_OFFLINE")
+        .env_remove("PI_SESSION_FILE")
+        .env("HOME", store.path("home"))
+        .env("XDG_CONFIG_HOME", store.path("config"))
+        .env("XDG_DATA_HOME", store.path("data"))
+        .env("TAPES_PRICES_FROM", sources())
+        .args([
+            "usage",
+            SESSION,
+            "--json",
+            "--native-store",
+            "claude",
+            "--native-root",
+        ])
+        .arg(store.0.path())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    fs::copy(written.table(), store.table()).unwrap();
+    let record = fs::read(written.record()).unwrap();
+    fs::write(store.record(), &record).unwrap();
+    lock.unlock().unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(answer(&output)["list_price_estimate"]["amount"].is_number());
+    assert_eq!(fs::read(store.record()).unwrap(), record);
 }
