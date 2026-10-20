@@ -1667,7 +1667,9 @@ KEEP A PRICE TABLE
   (platform.openai.com/docs/pricing.md), and LiteLLM's community-maintained
   model_prices_and_context_window.json for models neither page prices. It
   keeps a tapes-price-table/2 table at `$XDG_DATA_HOME/tapes/prices.toml`
-  (`~/.local/share/tapes/prices.toml` when that is unset) and, beside it,
+  (`~/.local/share/tapes/prices.toml` when that is unset), which carries
+  no plan rules: plans come from the built-in rules and a /3 table the
+  user writes. Beside it, it keeps
   `prices-fetch.json` (tapes-price-fetch/1): the attempt's time and, per
   source, its URL, whether it succeeded, the error, and the time and model
   count of its last success. `--from DIR` reads `anthropic.md`, `openai.md`
