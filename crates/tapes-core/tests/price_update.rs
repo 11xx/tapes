@@ -413,3 +413,44 @@ fn a_fetch_record_that_is_a_fifo_or_oversized_reads_as_none_without_waiting() {
         .expect("reading a FIFO record returns without a writer");
     assert_eq!(read, None);
 }
+
+#[test]
+fn a_copy_that_is_not_a_regular_file_fails_its_source_at_once() {
+    // Claim: a `--from` copy that is a symlink to /dev/zero fails its source
+    // with an error naming the path, and the update returns. Rejects reading
+    // the copy until its end, which never comes.
+    let data = tempfile::tempdir().unwrap();
+    let copies = copied_sources();
+    let litellm = copies.path().join("litellm.json");
+    fs::remove_file(&litellm).unwrap();
+    std::os::unix::fs::symlink("/dev/zero", &litellm).unwrap();
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let (directory, from) = (data.path().to_owned(), copies.path().to_owned());
+    std::thread::spawn(move || {
+        let _ = sender.send(
+            price_update::update(
+                &directory,
+                Some(&from),
+                price_update::FetchLimits::UPDATE,
+                at(1),
+            )
+            .map_err(|error| format!("{error:#}")),
+        );
+    });
+    let report = receiver
+        .recv_timeout(std::time::Duration::from_secs(10))
+        .expect("the update returns")
+        .unwrap();
+    let source = report
+        .sources
+        .iter()
+        .find(|source| source.name == "litellm")
+        .unwrap();
+    assert!(!source.ok);
+    let error = source.error.as_deref().unwrap();
+    assert!(
+        error.contains("litellm.json") && error.contains("not a regular file"),
+        "{error}"
+    );
+    assert!(report.sources.iter().filter(|source| source.ok).count() == 2);
+}

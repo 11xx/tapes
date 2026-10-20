@@ -802,12 +802,7 @@ fn read_source(source: &Source, from: Option<&Path>, limits: FetchLimits) -> Res
     match from {
         Some(directory) => {
             let path = directory.join(source.file);
-            let file = std::fs::File::open(&path)
-                .with_context(|| format!("cannot open {}", path.display()))?;
-            let (bytes, truncated) = crate::pull_request::read_bounded(file, SOURCE_BYTES)?;
-            if truncated {
-                bail!("{} is larger than {SOURCE_BYTES} bytes", path.display());
-            }
+            let bytes = pricing::read_regular_file(&path, SOURCE_BYTES)?;
             String::from_utf8(bytes).with_context(|| format!("{} is not UTF-8", path.display()))
         }
         None => fetch(source.url, limits),
