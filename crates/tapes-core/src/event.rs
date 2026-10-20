@@ -11,12 +11,13 @@ use crate::commit_observations::{
     CommandFacts, CommitCall, CommitCounts, EventCommits, ResultScan,
 };
 use crate::content::{self, ArtifactReference, ContentCoverage, ContentInventory, ContentPart};
+use crate::edit_observations::{EditCounts, EditFacts, EditScan, EventEdits};
 use crate::model::{
     BoundedText, ByteSpan, ReadEvidence, RecordRef, Session, SourceBound, TerminalObservation,
     TextTailEvidence, Transcript, Truncation, Turn,
 };
 
-pub const EVENTS_SCHEMA: &str = "tapes-events/15";
+pub const EVENTS_SCHEMA: &str = "tapes-events/16";
 const PREVIEW_CHARS: usize = 200;
 pub const MAX_INVOCATION_TEXT_CHARS: usize = 64 * 1024;
 pub const MAX_INVOCATIONS: usize = 32;
@@ -201,6 +202,9 @@ pub struct ToolEvent {
     /// The commit lines of a result's whole text, taken while it was in hand.
     #[serde(skip)]
     pub(crate) commit_scan: Option<ResultScan>,
+    /// What a result's record says about the edits its call made.
+    #[serde(skip)]
+    pub(crate) edit_scan: Option<EditScan>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub completed_ts: Option<DateTime<Utc>>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -370,6 +374,9 @@ pub struct EventRecord {
     /// The commits a result shows its call made or inspected.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub commits: Option<EventCommits>,
+    /// The file edits a result shows its call made.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub edits: Option<EventEdits>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
@@ -396,6 +403,10 @@ pub struct EventTranscript {
     /// a cap dropped some.
     #[serde(skip_serializing_if = "CommitCounts::is_empty")]
     pub commits: CommitCounts,
+    /// What the file edits cost against their caps and what was set aside,
+    /// present only when something was.
+    #[serde(skip_serializing_if = "EditCounts::is_empty")]
+    pub edits: EditCounts,
     pub truncated: bool,
     #[serde(skip_serializing_if = "truncation_is_empty")]
     pub truncation: Truncation,
@@ -593,6 +604,8 @@ struct EventsTail<'a> {
     content: Option<&'a ContentInventory>,
     #[serde(skip_serializing_if = "CommitCounts::is_empty")]
     commits: &'a CommitCounts,
+    #[serde(skip_serializing_if = "EditCounts::is_empty")]
+    edits: &'a EditCounts,
     truncated: bool,
     #[serde(skip_serializing_if = "truncation_is_empty")]
     truncation: &'a Truncation,
@@ -609,6 +622,7 @@ impl<'a> EventsTail<'a> {
             text_tail: events.text_tail.as_ref(),
             content: events.content.as_ref(),
             commits: &events.commits,
+            edits: &events.edits,
             truncated: events.truncated,
             truncation: &events.truncation,
             notes: &events.notes,
@@ -646,6 +660,7 @@ pub fn project_with(transcript: Transcript, tail: usize, options: EventOptions) 
         .collect::<anyhow::Result<Vec<_>>>()
         .expect("records replayed from one vector match their observation");
     let commits = pairing.commit_counts();
+    let edits = pairing.edit_counts();
 
     let returned_turns = total_turns.min(tail);
     let first_ordinal = total_turns.saturating_sub(returned_turns);
@@ -676,6 +691,7 @@ pub fn project_with(transcript: Transcript, tail: usize, options: EventOptions) 
         text_tail: transcript.text_tail,
         content: content::inventory(&transcript.turns),
         commits,
+        edits,
         truncated: !truncation.is_empty(),
         truncation,
         notes: transcript.notes,
@@ -718,6 +734,7 @@ pub fn turn_records(turn: &Turn) -> impl Iterator<Item = EventRecord> {
             duration_ms: None,
             incomplete: None,
             commits: None,
+            edits: None,
         }
     });
     let result = call
@@ -790,6 +807,8 @@ pub struct PairIndex {
     results: HashMap<usize, ResultFacts>,
     calls: usize,
     replay: Replay,
+    /// Call ids whose file changes the harness recorded itself.
+    runtime_edits: HashSet<String>,
 }
 
 /// The second pairing pass: each record handed to [`Pairing::emit`] leaves
@@ -804,6 +823,8 @@ pub struct Pairing {
     replay: Replay,
     counts: PairCounts,
     commits: CommitCounts,
+    edits: EditCounts,
+    runtime_edits: HashSet<String>,
 }
 
 struct ObservedCall {
@@ -816,6 +837,9 @@ struct EmittedCall {
     result: Option<PairRef>,
     /// What the call's command text says about commits, when it says anything.
     commands: Option<CommandFacts>,
+    /// The tool the call named, and what its arguments say about edits.
+    tool: Option<String>,
+    edit_facts: Option<EditFacts>,
 }
 
 /// What an answered call takes from its result.
@@ -868,6 +892,14 @@ impl PairIndex {
                 self.calls += 1;
             }
             EventKind::ToolResult => {
+                if record
+                    .event
+                    .edit_scan
+                    .as_ref()
+                    .is_some_and(EditScan::is_runtime)
+                {
+                    self.runtime_edits.insert(call_id.clone());
+                }
                 let Some(call) = pop_open(&mut self.open, call_id) else {
                     return;
                 };
@@ -900,6 +932,8 @@ impl PairIndex {
             replay: Replay::default(),
             counts: PairCounts::default(),
             commits: CommitCounts::default(),
+            edits: EditCounts::default(),
+            runtime_edits: self.runtime_edits,
         }
     }
 }
@@ -943,10 +977,18 @@ impl Pairing {
                     .as_ref()
                     .and_then(Bounded::complete_text)
                     .and_then(|text| CommandFacts::of_call(record.event.name.as_deref(), text));
+                let edit_facts = record
+                    .event
+                    .arguments
+                    .as_ref()
+                    .and_then(Bounded::complete_text)
+                    .and_then(|text| EditFacts::of_call(record.event.name.as_deref(), text));
                 self.open.entry(call_id).or_default().push(EmittedCall {
                     reference: reference(&record),
                     result: expected,
                     commands,
+                    tool: record.event.name.clone(),
+                    edit_facts,
                 });
             }
             EventKind::ToolResult => match pop_open(&mut self.open, &call_id) {
@@ -974,6 +1016,30 @@ impl Pairing {
                             self.commits.admit(&mut commits);
                             commits
                         });
+                    // A patch call whose change the harness also recorded as a
+                    // runtime item is reported once, from the runtime item.
+                    record.edits = record
+                        .event
+                        .edit_scan
+                        .as_ref()
+                        .and_then(|scan| {
+                            let superseded = !scan.is_runtime()
+                                && self
+                                    .runtime_edits
+                                    .contains(&call_ref.call_id.clone().unwrap_or_default());
+                            EditFacts::observe(
+                                call.edit_facts.as_ref(),
+                                call.tool.as_deref(),
+                                scan,
+                                superseded,
+                                &call_ref,
+                                record.ts,
+                            )
+                        })
+                        .map(|mut edits| {
+                            self.edits.admit(&mut edits);
+                            edits
+                        });
                     record.pair = Some(call.reference);
                     self.counts.complete += 1;
                 }
@@ -989,6 +1055,11 @@ impl Pairing {
     /// What the commit observations emitted so far cost against their caps.
     pub fn commit_counts(&self) -> CommitCounts {
         self.commits
+    }
+
+    /// What the file edits emitted so far cost against their caps.
+    pub fn edit_counts(&self) -> EditCounts {
+        self.edits
     }
 
     /// Close the emitting pass. The counts are those of the emitted records:
@@ -2325,6 +2396,7 @@ mod tests {
             read: None,
             returned_read: None,
             commit_scan: None,
+            edit_scan: None,
             completed_ts: None,
             invocations: Vec::new(),
             artifact_references: Vec::new(),
@@ -2449,6 +2521,7 @@ mod tests {
             read: None,
             returned_read: None,
             commit_scan: None,
+            edit_scan: None,
             completed_ts: None,
             invocations: Vec::new(),
             artifact_references: Vec::new(),

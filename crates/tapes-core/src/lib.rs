@@ -30,6 +30,7 @@ pub mod commit_observations;
 pub mod consumption_union;
 pub mod content;
 pub mod counters;
+pub mod edit_observations;
 pub mod endings;
 pub mod event;
 pub mod evidence;
@@ -1587,6 +1588,7 @@ pub fn events_full_for_session(
         sink.session(&session)?;
     }
     let commits = pairing.commit_counts();
+    let edits = pairing.edit_counts();
     pairing.finish()?;
     let transcript = read.transcript(
         session,
@@ -1604,6 +1606,7 @@ pub fn events_full_for_session(
             text_tail: transcript.text_tail,
             content: content.into_option(),
             commits,
+            edits,
             truncated: transcript.truncated,
             truncation: transcript.truncation,
             notes: transcript.notes,
@@ -1645,6 +1648,42 @@ pub fn session_commits(
     Ok(commit_observations::SessionCommits {
         observations: sink.0,
         counts: streamed.events.commits,
+    })
+}
+
+/// The file edits a session made, from a whole read of its recording: the
+/// observations of every result, in recording order, under the per-session
+/// caps, with what the caps and the shell calls set aside. Harnesses whose
+/// recordings `events --full` cannot stream (OpenCode) refuse.
+pub fn session_edits(
+    backend: &dyn Backend,
+    session: &Session,
+) -> Result<edit_observations::SessionEdits> {
+    #[derive(Default)]
+    struct Collect(Vec<edit_observations::EditObservation>);
+    impl EventSink for Collect {
+        fn session(&mut self, _: &Session) -> Result<()> {
+            Ok(())
+        }
+        fn record(&mut self, record: event::EventRecord) -> Result<()> {
+            if let Some(edits) = record.edits {
+                self.0.extend(edits.observations);
+            }
+            Ok(())
+        }
+    }
+    let mut sink = Collect::default();
+    let streamed = events_full_for_session(
+        backend,
+        session,
+        usize::MAX,
+        &event::EventFilter::default(),
+        event::EventOptions::default(),
+        &mut sink,
+    )?;
+    Ok(edit_observations::SessionEdits {
+        observations: sink.0,
+        counts: streamed.events.edits,
     })
 }
 

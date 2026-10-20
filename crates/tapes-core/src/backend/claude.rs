@@ -3897,6 +3897,9 @@ fn claude_tool_event(block: &Value, subtype: &str, structured: Option<&Value>) -
                 })
             })
             .flatten(),
+        edit_scan: (!call).then(|| {
+            crate::edit_observations::EditScan::claude(structured, block["is_error"].as_bool())
+        }),
         completed_ts: None,
         invocations: if call {
             crate::event::invocations_from_tool(

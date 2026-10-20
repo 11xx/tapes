@@ -3249,6 +3249,15 @@ fn codex_tool_event(payload: &Value, subtype: &str) -> ToolEvent {
         commit_scan: (!call)
             .then(|| codex_commit_scan(&payload["output"]))
             .flatten(),
+        edit_scan: (!call).then(|| {
+            // Only the head of a result states how it ended.
+            let output = &payload["output"];
+            let head = output
+                .as_str()
+                .or_else(|| output[0]["text"].as_str())
+                .unwrap_or_default();
+            crate::edit_observations::EditScan::codex_text(head)
+        }),
         completed_ts: None,
         invocations: if call {
             crate::event::invocations_from_tool(
@@ -3364,6 +3373,15 @@ fn codex_runtime_tool_event(item: &Value, completed: bool, completed_only: bool)
                 &item["stdout"],
                 item["exit_code"].as_i64().map(|code| code == 0),
             )
+        }),
+        edit_scan: completed.then(|| {
+            if item["type"] == "FileChange" {
+                crate::edit_observations::EditScan::codex_file_change(item)
+            } else {
+                crate::edit_observations::EditScan::outcome_only(
+                    crate::commit_observations::Outcome::from_exit(item["exit_code"].as_i64()),
+                )
+            }
         }),
         commit_scan: completed
             .then(|| {

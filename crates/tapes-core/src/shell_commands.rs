@@ -25,7 +25,6 @@ pub(crate) struct Command {
     pub(crate) after: Sep,
     pub(crate) words: Vec<String>,
     /// The files the command redirects its output into.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) redirects: Vec<String>,
 }
 

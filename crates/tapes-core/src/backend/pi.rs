@@ -2202,6 +2202,7 @@ fn pi_call_event(block: &Value) -> ToolEvent {
         read: crate::event::direct_read(block["name"].as_str(), &block["arguments"]),
         returned_read: None,
         commit_scan: None,
+        edit_scan: None,
         completed_ts: None,
         invocations: crate::event::invocations_from_tool(
             block["name"].as_str(),
@@ -2233,6 +2234,7 @@ fn pi_result_event(message: &Value) -> ToolEvent {
             &message["content"],
             crate::commit_observations::Outcome::from_error_flag(message["isError"].as_bool()),
         ),
+        edit_scan: Some(crate::edit_observations::EditScan::pi(message)),
         completed_ts: None,
         invocations: Vec::new(),
         artifact_references: crate::event::artifact_references(&message["content"]),

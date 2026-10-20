@@ -360,7 +360,7 @@ READ A RECORDING ON ANOTHER MACHINE
 PROBE BEFORE EXPORTING
   tapes show <id> --tail 40      A window, costing no bundle.
   tapes show <id> --turn-chars 2000  Cap each turn’s readable text, naming omitted characters.
-  tapes show <id> --json         tapes-session/23 turns, typed context events, locations, and bounded read, graph, artifact, terminal, and recorded launch evidence.
+  tapes show <id> --json         tapes-session/24 turns, typed context events, locations, and bounded read, graph, artifact, terminal, and recorded launch evidence.
   tapes show <id> --exchange     Operator and assistant turns only, timestamps and ordinals kept; the name for --only operator,assistant.
   tapes show <id> --only operator --origin person  Operator turns with recorded person origin.
   tapes show <id> --omit tool    Every turn but tool calls and results; --only and --omit take kind labels, and export takes both.
@@ -479,7 +479,7 @@ PROBE BEFORE EXPORTING
   human output is one line per turn. A selected session that cannot be read
   fails the command.
 
-  events <id> projects harness-neutral tool records as tapes-events/15.
+  events <id> projects harness-neutral tool records as tapes-events/16.
   --tool (alias --name) matches the recorded tool name exactly. --command
   matches a case-insensitive substring of a shell call's recorded command
   field (command or cmd), or the serialized input for other tools. Matching
@@ -487,7 +487,7 @@ PROBE BEFORE EXPORTING
   paired results and recorded exit status remain attached to selected calls,
   including results whose recordings omit the tool name.
   events --here or --global accepts the session filters and limits of stats.
-  Selection JSON uses tapes-events-selection/3: each sessions row contains
+  Selection JSON uses tapes-events-selection/4: each sessions row contains
   session, count of matching calls, partial, truncation, and a nested events
   object. --count omits that object, including for one named session. Zero
   matches still produce a row. Partial counts describe only the read window;
@@ -546,6 +546,46 @@ PROBE BEFORE EXPORTING
   omitted, truncated_calls} when a cap dropped any.
   Library consumers read `EventRecord::commits`, or `session_commits` for a
   whole session's observations in recording order.
+  File-changing results carry `edits`, the files their call changed, as
+  digests of the lines. An observation is {at, path, op, added, removed,
+  truncated?, source: {tool, shape}, call}. `added` and `removed` are line
+  digests, the git reader's `line_digest`: the first eight bytes of the
+  SHA-256 of the line without trailing whitespace, as a big-endian unsigned
+  integer, so an edit's lines compare with a commit's added and removed lines
+  directly. A blank line or one of punctuation alone has no digest, and no
+  line text is kept. `op` is `edit` (part of an existing file), `write` (a
+  file's whole content, or a patch's added file), `delete`, or for a shell
+  call `shell`, `shell-create` and `shell-delete`. `source.shape` says which
+  record gave the lines: `structured-patch` (the hunks Claude records with
+  Edit and Write results), `old-new` (the call's old and new text, diffed
+  here by dropping their common beginning and end), `content` (a written
+  file's lines), `unified-diff` (Pi's `details.patch` and Codex's
+  `FileChange` record), `apply-patch` (the `*** Begin Patch` text of an
+  `apply_patch` call that succeeded, read only when no `FileChange` record
+  holds the same call), `bash-edit-diff` (Claude's `toolUseResult.bashEditDiff`
+  for a shell call). Where a result carries hunks they win over the call's
+  text. A failed call reports nothing. Claude `MultiEdit` and `NotebookEdit`
+  are read from their documented input; no recording on the machine that
+  verified this holds either, so those two shapes are unverified. Claude
+  records `bashEditDiff` for any file change a shell call caused, so the
+  command classifies it: a call that runs a git command that moves the working
+  tree (merge, pull, checkout, switch, rebase, reset, restore, stash,
+  cherry-pick, am, revert) is no authored edit, and the result says
+  `tree_movement` {files, more_files, added_lines, removed_lines} in its
+  place; every other shell call's hunks are shell edits, formatters and
+  scripts included. Claude lists at most five files; `more_files` counts the
+  rest, and `shared` repeats the recording's own flag. A shell call that
+  writes files with no recorded hunks (`sed -i`, `perl -i`, `tee`, `patch`,
+  `git apply`, or a redirection into a source or document file outside
+  scratch directories) is `unrecognized` on its result: it is counted, never
+  parsed. A result holds at most 32 edits and says `truncated` when it saw
+  more; an edit keeps at most 1024 digests on each side and says `truncated`;
+  a read keeps its first 2048 edits and 262144 digests, keeping an edit past
+  the digest budget without digests. The events object states `edits` {kept,
+  omitted, digests_omitted, truncated_calls, tree_movements,
+  tree_movement_files, unrecognized}, each member absent at zero, when any
+  but `kept` is nonzero. Library consumers read `EventRecord::edits`, or
+  `session_edits` for a whole session's edits in recording order.
   Each record
   names its source turn with turn_ordinal, the same coordinate show prints;
   ordinal retains that turn coordinate, including for call/result pairs. Pairing is

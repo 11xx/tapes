@@ -2951,6 +2951,7 @@ fn opencode_tool_event(part: &Value) -> ToolEvent {
             status.as_deref().map(|status| status == "completed"),
         )),
         commit_scan: None,
+        edit_scan: None,
         completed_ts: epoch_millis(&part["time"]["completed"]),
         invocations: crate::event::invocations_from_tool(
             part["name"].as_str().or_else(|| part["tool"].as_str()),

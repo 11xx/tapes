@@ -276,7 +276,7 @@ fn the_session_json_carries_locations_and_omits_absent_fields() {
     let session = backend.locate(CODEX).unwrap().unwrap();
     let transcript: Transcript = backend.transcript(&session, usize::MAX).unwrap();
     let value = serde_json::to_value(&transcript).unwrap();
-    assert_eq!(value["schema"], "tapes-session/23");
+    assert_eq!(value["schema"], "tapes-session/24");
     let locations = &value["locations"];
     assert_eq!(locations["coverage"], "whole");
     assert!(locations.get("omitted").is_none());

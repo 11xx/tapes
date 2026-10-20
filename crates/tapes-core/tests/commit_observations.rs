@@ -462,7 +462,7 @@ fn the_events_json_carries_observations_on_the_result_only() {
     let events = backend.events(&session, usize::MAX).unwrap();
     let value = serde_json::to_value(&events).unwrap();
     assert_eq!(value["schema"], EVENTS_SCHEMA);
-    assert_eq!(EVENTS_SCHEMA, "tapes-events/15");
+    assert_eq!(EVENTS_SCHEMA, "tapes-events/16");
     let records = value["events"].as_array().unwrap();
     let call = records
         .iter()
