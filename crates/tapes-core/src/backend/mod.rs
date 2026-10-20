@@ -51,6 +51,11 @@ const HEAD_PROBE_MAX_BYTES: u64 = 1024 * 1024;
 /// is skipped to its end and reported as a gap, so one runaway line cannot
 /// hold the file in memory.
 pub const FULL_RECORD_BYTES: u64 = 64 * 1024 * 1024;
+/// The shortest recording a whole read decodes ahead of handing its records
+/// over, its lines decoded at once; a shorter one is not worth the threads.
+const DECODE_AHEAD_BYTES: u64 = 32 * 1024 * 1024;
+/// The bytes of lines a read decoding ahead holds at once.
+const DECODE_BATCH_BYTES: usize = 8 * 1024 * 1024;
 
 /// How much older than a listing's `since` a recording file's modification
 /// time may be before the listing skips the file unparsed. A harness appends
@@ -490,9 +495,9 @@ pub trait Backend {
     }
 
     /// Read the whole recording in order, handing each normalized turn to
-    /// `turn` as it is produced, so memory follows one record rather than the
-    /// file. The default refuses: a backend without a streamed reader must not
-    /// answer with a bounded one.
+    /// `turn` as it is produced, so memory follows one record, or one batch of
+    /// a large recording, rather than the file. The default refuses: a backend
+    /// without a streamed reader must not answer with a bounded one.
     ///
     /// `replay` is an earlier read of the same session. Given one, the read
     /// covers exactly the source that read observed and hands over the same
@@ -2129,24 +2134,57 @@ pub(crate) struct ReadPin<'a> {
     prefix_sha256: Option<&'a [u8; 32]>,
 }
 
+/// The most blocks a [`DigestReader`] holds for its hashing thread.
+const DIGEST_QUEUE: usize = 64;
+
+/// A reader that hashes what it reads on a thread of its own, so the hash
+/// costs the read no time.
 struct DigestReader<R> {
     inner: R,
-    digest: Sha256,
+    blocks: Option<std::sync::mpsc::SyncSender<Vec<u8>>>,
+    hasher: Option<std::thread::JoinHandle<Sha256>>,
 }
 
 impl<R> DigestReader<R> {
     fn new(inner: R) -> Self {
+        let (blocks, received) = std::sync::mpsc::sync_channel::<Vec<u8>>(DIGEST_QUEUE);
+        let hasher = std::thread::spawn(move || {
+            let mut digest = Sha256::new();
+            for block in received {
+                digest.update(&block);
+            }
+            digest
+        });
         Self {
             inner,
-            digest: Sha256::new(),
+            blocks: Some(blocks),
+            hasher: Some(hasher),
         }
+    }
+
+    /// The SHA-256 of every byte read.
+    fn finish(&mut self) -> [u8; 32] {
+        drop(self.blocks.take());
+        self.hasher
+            .take()
+            .expect("a digest is finished once")
+            .join()
+            .expect("the hashing thread does not panic")
+            .finalize()
+            .into()
     }
 }
 
 impl<R: Read> Read for DigestReader<R> {
     fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
         let read = self.inner.read(buffer)?;
-        self.digest.update(&buffer[..read]);
+        if read > 0 {
+            self.blocks
+                .as_ref()
+                .expect("a finished digest reads nothing more")
+                .send(buffer[..read].to_vec())
+                .map_err(std::io::Error::other)?;
+        }
         Ok(read)
     }
 }
@@ -2194,10 +2232,17 @@ pub(crate) fn replay_pin(replay: Option<&StreamedTranscript>) -> Result<Option<R
 pub(crate) fn stream_jsonl_matching(
     path: &Path,
     pin: Option<ReadPin<'_>>,
-    wanted: impl FnMut(&[u8]) -> bool,
+    mut wanted: impl FnMut(&[u8]) -> bool,
     record: impl FnMut(&Value, ByteSpan, &str) -> Result<bool>,
 ) -> Result<StreamedJsonl> {
-    stream_jsonl_wanting(path, FULL_RECORD_BYTES, pin, wanted, record, |_| {})
+    stream_jsonl_wanting(
+        path,
+        FULL_RECORD_BYTES,
+        pin,
+        Some(&mut wanted),
+        record,
+        |_| {},
+    )
 }
 
 fn stream_jsonl_within(
@@ -2207,14 +2252,27 @@ fn stream_jsonl_within(
     record: impl FnMut(&Value, ByteSpan, &str) -> Result<bool>,
     gap: impl FnMut(&ReadGap),
 ) -> Result<StreamedJsonl> {
-    stream_jsonl_wanting(path, record_bytes, pin, |_| true, record, gap)
+    stream_jsonl_wanting(path, record_bytes, pin, None, record, gap)
 }
 
+/// A line of a batch: its span in the source, and where its bytes lie in
+/// the batch, or none for a record too long to keep.
+struct BatchLine {
+    span: ByteSpan,
+    bytes: Option<std::ops::Range<usize>>,
+}
+
+/// Whether a line's raw bytes are worth decoding.
+type Wanted<'a> = &'a mut dyn FnMut(&[u8]) -> bool;
+
+/// As [`stream_jsonl_matching`], `wanted` absent meaning every line. A
+/// recording of at least [`DECODE_AHEAD_BYTES`] whose every line is wanted
+/// is read in batches of [`DECODE_BATCH_BYTES`].
 fn stream_jsonl_wanting(
     path: &Path,
     record_bytes: u64,
     pin: Option<ReadPin<'_>>,
-    mut wanted: impl FnMut(&[u8]) -> bool,
+    wanted: Option<Wanted<'_>>,
     mut record: impl FnMut(&Value, ByteSpan, &str) -> Result<bool>,
     mut gap: impl FnMut(&ReadGap),
 ) -> Result<StreamedJsonl> {
@@ -2247,35 +2305,126 @@ fn stream_jsonl_wanting(
         gaps: Vec::new(),
         last: None,
     };
-    let mut line = Vec::new();
+    let batch_bytes = if wanted.is_none() && source_length >= DECODE_AHEAD_BYTES {
+        DECODE_BATCH_BYTES
+    } else {
+        0
+    };
+    let decoded = stream_lines(
+        &mut reader,
+        record_bytes,
+        batch_bytes,
+        wanted,
+        &mut record,
+        &mut gap,
+        &mut streamed,
+    )?;
+    crate::counters::decoded(decoded);
+    streamed.prefix_sha256 = reader.get_mut().get_mut().finish();
+    if let Some(expected) = pin.and_then(|pin| pin.prefix_sha256) {
+        if expected != &streamed.prefix_sha256 {
+            return Err(SourceChanged("recording source changed between pinned reads").into());
+        }
+    }
+    let after = reader.get_ref().get_ref().inner.metadata()?;
+    if after.dev() != metadata.dev() || after.ino() != metadata.ino() || after.len() < source_length
+    {
+        return Err(
+            SourceChanged("recording source was replaced or shortened during the read").into(),
+        );
+    }
+    Ok(streamed)
+}
+
+/// Hand each record of `reader` to `record` in order, and each gap to `gap`,
+/// keeping both in `streamed`; the bytes decoded come back. With
+/// `batch_bytes` past zero, lines are read that many bytes at a time and,
+/// every line being wanted, a batch's lines are decoded at once before
+/// `record` takes them. An error a later line's read meets surfaces only
+/// after every earlier record was taken, as it does read line by line.
+fn stream_lines(
+    reader: &mut impl BufRead,
+    record_bytes: u64,
+    batch_bytes: usize,
+    mut wanted: Option<Wanted<'_>>,
+    record: &mut impl FnMut(&Value, ByteSpan, &str) -> Result<bool>,
+    gap: &mut impl FnMut(&ReadGap),
+    streamed: &mut StreamedJsonl,
+) -> Result<u64> {
+    let ahead = wanted.is_none() && batch_bytes > 0;
+    let mut batch = Vec::new();
+    let mut lines: Vec<BatchLine> = Vec::new();
     let mut offset = 0;
     let mut decoded = 0;
     loop {
-        line.clear();
-        let read = (&mut reader)
-            .take(record_bytes + 1)
-            .read_until(b'\n', &mut line)? as u64;
-        if read == 0 {
-            break;
-        }
-        let mut span = ByteSpan {
-            start: offset,
-            end: offset + read,
-        };
-        if read > record_bytes && line.last() != Some(&b'\n') {
-            span.end += skip_line(&mut reader)?;
-            streamed.skipped += 1;
-            let read_gap = ReadGap {
-                span,
-                reason: "oversized-record".to_owned(),
+        batch.clear();
+        lines.clear();
+        let mut failure = None;
+        loop {
+            let start = batch.len();
+            let read = match reader.take(record_bytes + 1).read_until(b'\n', &mut batch) {
+                Ok(read) => read as u64,
+                Err(error) => {
+                    failure = Some(anyhow::Error::from(error));
+                    break;
+                }
             };
-            gap(&read_gap);
-            streamed.gaps.push(read_gap);
+            if read == 0 {
+                break;
+            }
+            let mut span = ByteSpan {
+                start: offset,
+                end: offset + read,
+            };
+            let bytes = if read > record_bytes && batch.last() != Some(&b'\n') {
+                batch.truncate(start);
+                match skip_line(reader) {
+                    Ok(skipped) => span.end += skipped,
+                    Err(error) => {
+                        failure = Some(error);
+                        break;
+                    }
+                }
+                None
+            } else {
+                Some(start..batch.len())
+            };
+            lines.push(BatchLine { span, bytes });
+            offset = span.end;
+            if batch.len() >= batch_bytes {
+                break;
+            }
+        }
+        let mut values: Vec<Option<serde_json::Result<Value>>> = if ahead {
+            crate::parallel::map(&lines, |line| {
+                let content = line_content(&batch, line.bytes.clone()?);
+                (!content.iter().all(u8::is_ascii_whitespace))
+                    .then(|| serde_json::from_slice::<Value>(content))
+            })
         } else {
-            let content = line[..].strip_suffix(b"\n").unwrap_or(&line[..]);
-            if wanted(content) && !content.iter().all(u8::is_ascii_whitespace) {
+            Vec::new()
+        };
+        for (at, line) in lines.iter().enumerate() {
+            let span = line.span;
+            let Some(bytes) = line.bytes.clone() else {
+                streamed.skipped += 1;
+                let read_gap = ReadGap {
+                    span,
+                    reason: "oversized-record".to_owned(),
+                };
+                gap(&read_gap);
+                streamed.gaps.push(read_gap);
+                continue;
+            };
+            let content = line_content(&batch, bytes);
+            let accepted = wanted.as_mut().is_none_or(|wanted| wanted(content));
+            if accepted && !content.iter().all(u8::is_ascii_whitespace) {
                 decoded += content.len() as u64;
-                match serde_json::from_slice::<Value>(content) {
+                let value = values
+                    .get_mut(at)
+                    .and_then(Option::take)
+                    .unwrap_or_else(|| serde_json::from_slice::<Value>(content));
+                match value {
                     Ok(value) => {
                         let produced = record(&value, span, &streamed.revision)?;
                         streamed.last = Some((value, produced));
@@ -2292,28 +2441,24 @@ fn stream_jsonl_wanting(
                 }
             }
         }
-        offset = span.end;
-        // A long record grows the line buffer; give that memory back rather
-        // than carry the largest record's size through the rest of the file.
-        if line.capacity() as u64 > HEAD_PROBE_MAX_BYTES {
-            line = Vec::new();
+        if let Some(error) = failure {
+            return Err(error);
+        }
+        if lines.is_empty() {
+            return Ok(decoded);
+        }
+        // A long record grows the batch; give that memory back rather than
+        // carry the largest record's size through the rest of the file.
+        if batch.capacity() as u64 > HEAD_PROBE_MAX_BYTES.max(2 * batch_bytes as u64) {
+            batch = Vec::new();
         }
     }
-    crate::counters::decoded(decoded);
-    streamed.prefix_sha256 = reader.get_ref().get_ref().digest.clone().finalize().into();
-    if let Some(expected) = pin.and_then(|pin| pin.prefix_sha256) {
-        if expected != &streamed.prefix_sha256 {
-            return Err(SourceChanged("recording source changed between pinned reads").into());
-        }
-    }
-    let after = reader.get_ref().get_ref().inner.metadata()?;
-    if after.dev() != metadata.dev() || after.ino() != metadata.ino() || after.len() < source_length
-    {
-        return Err(
-            SourceChanged("recording source was replaced or shortened during the read").into(),
-        );
-    }
-    Ok(streamed)
+}
+
+/// A batch line's bytes without its newline.
+fn line_content(batch: &[u8], bytes: std::ops::Range<usize>) -> &[u8] {
+    let line = &batch[bytes];
+    line.strip_suffix(b"\n").unwrap_or(line)
 }
 
 /// Consume through the next newline, or to the end, returning the bytes
@@ -3290,6 +3435,106 @@ mod tests {
             [("malformed-record", 8, 17), ("oversized-record", 17, 93)]
         );
         assert!(read.last.is_some_and(|(_, produced)| produced));
+    }
+
+    /// Lines read and decoded a batch at a time reach `record` and `gap`
+    /// exactly as lines read one at a time do: the same records, spans and
+    /// gaps in the same order, and a read or record error after the same
+    /// records, wherever in a batch the error falls.
+    #[test]
+    fn a_batched_read_takes_the_records_a_line_by_line_read_takes() {
+        /// Bytes that fail to read from `fail_at` on.
+        struct Failing {
+            bytes: Vec<u8>,
+            at: usize,
+            fail_at: Option<usize>,
+        }
+        impl Read for Failing {
+            fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+                let end = self.fail_at.unwrap_or(self.bytes.len());
+                if self.at == end && self.fail_at.is_some() {
+                    return Err(std::io::Error::other("device gone"));
+                }
+                let read = buffer.len().min(end - self.at);
+                buffer[..read].copy_from_slice(&self.bytes[self.at..self.at + read]);
+                self.at += read;
+                Ok(read)
+            }
+        }
+        #[derive(Debug, PartialEq)]
+        struct Taken {
+            records: Vec<(String, ByteSpan)>,
+            gaps: Vec<ReadGap>,
+            skipped: usize,
+            last: Option<(Value, bool)>,
+            outcome: std::result::Result<u64, String>,
+        }
+        let read = |bytes: &[u8], fail_at, refuse: Option<u64>, batch_bytes| {
+            let mut reader = BufReader::with_capacity(
+                16,
+                Failing {
+                    bytes: bytes.to_vec(),
+                    at: 0,
+                    fail_at,
+                },
+            );
+            let mut streamed = StreamedJsonl {
+                source_length: bytes.len() as u64,
+                revision: "fixture".to_owned(),
+                prefix_sha256: [0; 32],
+                skipped: 0,
+                gaps: Vec::new(),
+                last: None,
+            };
+            let mut records = Vec::new();
+            let mut gaps = Vec::new();
+            let outcome = stream_lines(
+                &mut reader,
+                32,
+                batch_bytes,
+                None,
+                &mut |value: &Value, span, _: &str| {
+                    if refuse.is_some() && value["n"].as_u64() == refuse {
+                        anyhow::bail!("record {} refused", value["n"]);
+                    }
+                    records.push((value.to_string(), span));
+                    Ok(value["n"].is_u64())
+                },
+                &mut |gap: &ReadGap| gaps.push(gap.clone()),
+                &mut streamed,
+            )
+            .map_err(|error| error.to_string());
+            assert_eq!(gaps, streamed.gaps);
+            Taken {
+                records,
+                gaps,
+                skipped: streamed.skipped,
+                last: streamed.last,
+                outcome,
+            }
+        };
+        let long = format!("{{\"text\":\"{}\"}}", "x".repeat(40));
+        let bytes = format!(
+            "{{\"n\":1}}\nnot json\n{long}\n\n  \n{{\"n\":2}}\n{{\"k\":\"v\"}}\n{{\"n\":3}}\n{long}"
+        )
+        .into_bytes();
+        let fail_points = (0..=bytes.len()).map(Some).chain([None]);
+        for fail_at in fail_points {
+            for refuse in [None, Some(2)] {
+                let expected = read(&bytes, fail_at, refuse, 0);
+                for batch_bytes in [1, 9, 40, 1 << 20] {
+                    assert_eq!(
+                        read(&bytes, fail_at, refuse, batch_bytes),
+                        expected,
+                        "batches of {batch_bytes} bytes, failing at {fail_at:?}, refusing {refuse:?}"
+                    );
+                }
+            }
+        }
+        let whole = read(&bytes, None, None, 1 << 20);
+        assert_eq!(whole.records.len(), 4);
+        assert_eq!(whole.skipped, 3);
+        assert!(whole.outcome.is_ok());
     }
 
     /// A replay pinned to an earlier pass reads the bytes that pass read and

@@ -171,11 +171,12 @@ FIND IT
   failed stage and diagnostic in unsearched.
 
   --search <text> --full streams each selected recording through its whole
-  reader, with memory following one record. Metadata, scope, harness, launch,
-  and activity filters apply before reading. --limit bounds sessions read
-  globally; full_search.selection_truncated reports candidates withheld or
-  an incomplete candidate scan. --search-matches <N> caps matching turn
-  coordinates per session (default 100); matches_truncated reports overflow.
+  reader, with memory following one record, or one 8 MiB batch of records in a
+  recording of 32 MiB or more. Metadata, scope, harness, launch, and activity
+  filters apply before reading. --limit bounds sessions read globally;
+  full_search.selection_truncated reports candidates withheld or an incomplete
+  candidate scan. --search-matches <N> caps matching turn coordinates per
+  session (default 100); matches_truncated reports overflow.
   full_search.coverage includes nonmatches and states whole_recording_read,
   which requires no gaps, skipped records, trailing record, or source bounds.
   Ordinals are zero-based across the whole normalized recording. OpenCode uses
