@@ -1165,22 +1165,48 @@ fn carried(disjoint: &DisjointTokens, table: &PriceTable) -> EstimateSum {
     sum
 }
 
-/// Price one model share: by its row as [`price_share`] does when the row
-/// prices every token of a category at one rate, and request by request
-/// when its rows carry terms priced by the request.
-fn price_model(
-    disjoint: &DisjointTokens,
-    id: &str,
-    variant: Option<&str>,
-    table: &PriceTable,
-    terms: &RequestTerms<'_>,
-    sole: bool,
-) -> EstimateSum {
-    let rows = table.rows(id).collect::<Vec<_>>();
-    match rows.as_slice() {
-        [] => price_share(disjoint, None, table),
-        [row] if row.is_plain() => price_share(disjoint, Some(row), table),
-        rows => price_with_terms(disjoint, id, variant, rows, table, terms, sole),
+/// One model's share of a figure, as an estimate reads it: the share's
+/// disjoint categories with the reasons each carries, the model that served
+/// it, and what its rows' terms priced by the request read.
+pub struct PricedShare<'a> {
+    pub disjoint: &'a DisjointTokens,
+    pub model: &'a str,
+    pub variant: Option<&'a str>,
+    /// Whether the model served the whole figure, so a request no model is
+    /// named for is its too.
+    pub sole: bool,
+    /// The figure's terms. The share's requests are those `terms.requests`
+    /// holds for `model` and `variant`.
+    pub terms: RequestTerms<'a>,
+}
+
+impl PricedShare<'_> {
+    /// Price the share under `table`, as [`PricedFigure::estimate`] prices
+    /// each share of a figure; the sum finishes to the estimate a share of a
+    /// usage answer shows. A model whose one row prices every token of a
+    /// category at one rate is priced as [`price_share`] prices it, a model
+    /// the table lacks is `unlisted-model`, and a model whose rows carry
+    /// terms priced by the request is priced request by request over the
+    /// share's requests and between every rate it could pay for the rest.
+    /// Each category keeps the reasons the share gives it. A category the
+    /// share holds no amount for is a `missing-counter` only where the share
+    /// gives it no reason, so a category the share left `undetermined` stays
+    /// so.
+    pub fn estimate(&self, table: &PriceTable) -> EstimateSum {
+        let rows = table.rows(self.model).collect::<Vec<_>>();
+        match rows.as_slice() {
+            [] => price_share(self.disjoint, None, table),
+            [row] if row.is_plain() => price_share(self.disjoint, Some(row), table),
+            rows => price_with_terms(
+                self.disjoint,
+                self.model,
+                self.variant,
+                rows,
+                table,
+                &self.terms,
+                self.sole,
+            ),
+        }
     }
 }
 
@@ -1456,7 +1482,9 @@ fn cost(tokens: &RequestTokens, prices: &CategoryPrices) -> Cost {
 
 /// Price one model's disjoint categories by `row`, or qualify them all
 /// `unlisted-model` where the table has no row. A category the share
-/// measured incompletely keeps its reasons.
+/// measured incompletely keeps its reasons. `row` prices every token of a
+/// category at one rate; [`PricedShare::estimate`] prices a share by
+/// whichever rows its model has.
 pub fn price_share(
     disjoint: &DisjointTokens,
     row: Option<&ModelPrice>,
@@ -1603,14 +1631,14 @@ impl PricedFigure<'_> {
             .iter()
             .map(|model| {
                 share_disjoint(model).map(|disjoint| {
-                    price_model(
-                        &disjoint,
-                        &model.model,
-                        model.variant.as_deref(),
-                        table,
-                        &self.terms,
-                        false,
-                    )
+                    PricedShare {
+                        disjoint: &disjoint,
+                        model: &model.model,
+                        variant: model.variant.as_deref(),
+                        sole: false,
+                        terms: self.terms,
+                    }
+                    .estimate(table)
                 })
             })
             .collect::<Vec<_>>();
@@ -1640,7 +1668,14 @@ impl PricedFigure<'_> {
             .filter(|sole| shares.iter().all(|model| model.model == *sole))
             .filter(|_| !unattributed);
         let whole = if let Some(sole) = sole {
-            let mut sum = price_model(disjoint, sole, None, table, &self.terms, true);
+            let mut sum = PricedShare {
+                disjoint,
+                model: sole,
+                variant: None,
+                sole: true,
+                terms: self.terms,
+            }
+            .estimate(table);
             if self
                 .observation
                 .is_some_and(|status| status.attribution_uncertain)
@@ -1804,7 +1839,14 @@ pub fn unexplained_sums(
                 ..CacheWrites::default()
             };
             let disjoint = DisjointTokens::from_native(&entry.tokens, convention, Some(&writes));
-            price_model(&disjoint, &entry.model, None, table, &terms, false)
+            PricedShare {
+                disjoint: &disjoint,
+                model: &entry.model,
+                variant: None,
+                sole: false,
+                terms,
+            }
+            .estimate(table)
         })
         .collect()
 }

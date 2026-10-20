@@ -737,7 +737,11 @@ PROBE BEFORE EXPORTING
   writes its own requests explain at the TTLs they recorded, wherever those
   writes are no more than the share's, and what the share holds beyond them
   as ttl-unrecorded. Each model of `unexplained` is priced by its own row,
-  its cache writes at no recorded TTL. Pi consumption is split by
+  its cache writes at no recorded TTL. Library consumers price one model
+  share they hold as disjoint categories with `PricedShare::estimate`,
+  exactly as a figure prices that share: each category keeps the reasons
+  the share gives it, and one it holds no amount for is missing-counter
+  only where it gives none. Pi consumption is split by
   the model each event names. On the active branch alone it is priced as
   the session figure is, share by share where every event names a model;
   with events on other branches it is priced by that split, and usage no
