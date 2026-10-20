@@ -9,10 +9,16 @@
 //!   member as its fork origin;
 //! - every session whose first prompt opens with a `tapes-parent` marker
 //!   naming a member, in any harness, recursively;
+//! - every session a lineage record of an evidence file the caller names
+//!   launches from a member, resolved by id in its harness's store, whenever
+//!   the session's own recording names no parent;
 //! - on request, the session a continued Claude session carried over from,
 //!   together with that session's family.
 //!
-//! Descent comes from what recordings state. A candidate for a launch marker
+//! Descent comes from what recordings state, and from the evidence files a
+//! caller names for what recordings leave silent: a recording that names a
+//! parent places its session, whatever a file says. Disagreement is reported
+//! as a conflict, and a session counts once. A candidate for a launch marker
 //! is searched by time alone: a launched session's first activity lies inside
 //! its launcher's recorded interval, in any project, so the search lists
 //! every session active since the family opened and reads the opening of only
@@ -35,6 +41,7 @@ use chrono::{DateTime, Utc};
 use serde::Serialize;
 use serde_json::Value;
 
+use crate::attribution_evidence::EvidenceFile;
 use crate::backend::{open_regular_file, session_file_path, Backend, StreamOptions};
 use crate::model::{AccountingBasis, Session};
 use crate::pricing::PriceTable;
@@ -43,7 +50,15 @@ use crate::usage::{self, AccountingPartition, GroupBy, GroupKey, UsageTally};
 use crate::window::{self, ParentEvidence};
 use crate::{ListFilters, ListSort, Selection};
 
-pub const FAMILY_SCHEMA: &str = "tapes-family-usage/1";
+mod evidence;
+
+use evidence::EvidenceRun;
+pub use evidence::{
+    ClaimSource, Conflict, EvidenceFileUse, EvidenceLink, EvidenceUse, ParentClaim,
+    UnresolvedChild, UnresolvedReason,
+};
+
+pub const FAMILY_SCHEMA: &str = "tapes-family-usage/2";
 
 /// The most sessions a family holds; a search that finds more stops and says
 /// so.
@@ -94,6 +109,9 @@ pub enum Link {
     ForkOrigin,
     /// A `tapes-parent` marker opening the first prompt.
     LaunchMarker,
+    /// A lineage record of an evidence file the caller named, for a session
+    /// whose recording names no parent.
+    Evidence,
 }
 
 /// A session by its harness and native id.
@@ -124,6 +142,9 @@ pub struct FamilySession {
     pub link: Link,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parent: Option<SessionKey>,
+    /// The lineage record that links a member whose `link` is `evidence`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub evidence: Option<EvidenceLink>,
     /// Requests this recording holds that an earlier member's recording holds
     /// under the same request id, left out of its figure.
     #[serde(skip_serializing_if = "is_zero")]
@@ -267,6 +288,10 @@ pub struct FamilyUsage {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub priced_across_bases: Option<PricedAcrossBases>,
     pub search: FamilySearch,
+    /// What the evidence files the caller named contributed; absent when none
+    /// was named.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub evidence: Option<EvidenceUse>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub continuations: Vec<Continuation>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -336,6 +361,7 @@ struct Member {
     role: Role,
     link: Link,
     parent: Option<SessionKey>,
+    evidence: Option<EvidenceLink>,
 }
 
 #[derive(Default)]
@@ -374,6 +400,17 @@ pub fn family_usage_with_backends(
     selection: Selection<'_>,
     options: FamilyOptions<'_>,
 ) -> Result<FamilyUsage> {
+    family_usage_with_evidence(backends, selection, options, None)
+}
+
+/// Measure the family of the session `selection` names, adding the sessions
+/// the evidence files launch from a member.
+pub fn family_usage_with_evidence(
+    backends: &[Box<dyn Backend>],
+    selection: Selection<'_>,
+    options: FamilyOptions<'_>,
+    evidence: Option<&[EvidenceFile]>,
+) -> Result<FamilyUsage> {
     let resolved = selection.resolve(backends)?;
     let root = SessionKey::of(&resolved.session);
     let mut roster = Roster::default();
@@ -383,12 +420,14 @@ pub fn family_usage_with_backends(
         role: Role::Lead,
         link: Link::Root,
         parent: None,
+        evidence: None,
     });
     let mut continuations = Vec::new();
     if options.continuations {
         follow_continuations(backends, &mut roster, &mut continuations);
     }
-    let search = expand(backends, &mut roster);
+    let mut lineage = evidence.map(EvidenceRun::new);
+    let search = expand(backends, &mut roster, lineage.as_mut());
     let measured = measure(backends, &roster, options.prices);
     Ok(FamilyUsage {
         schema: FAMILY_SCHEMA,
@@ -400,6 +439,7 @@ pub fn family_usage_with_backends(
         priced_across_bases: priced_across_bases(&measured.partitions),
         partitions: measured.partitions,
         search,
+        evidence: lineage.map(|run| run.finish(&roster)),
         continuations,
         withheld: measured.withheld,
     })
@@ -410,7 +450,11 @@ pub fn family_usage_with_backends(
 /// Add the members the recordings name: subagent recordings of every member,
 /// and the sessions the time-windowed search finds naming a member as their
 /// parent, until no new member appears.
-fn expand(backends: &[Box<dyn Backend>], roster: &mut Roster) -> FamilySearch {
+fn expand(
+    backends: &[Box<dyn Backend>],
+    roster: &mut Roster,
+    mut lineage: Option<&mut EvidenceRun<'_>>,
+) -> FamilySearch {
     let mut search = FamilySearch::default();
     let mut unenumerated = 0;
     let mut subagents_read = 0;
@@ -432,6 +476,7 @@ fn expand(backends: &[Box<dyn Backend>], roster: &mut Roster) -> FamilySearch {
                     role: Role::Subagent,
                     link: Link::SubagentRecording,
                     parent: Some(parent.clone()),
+                    evidence: None,
                 });
             }
         }
@@ -539,8 +584,17 @@ fn expand(backends: &[Box<dyn Backend>], roster: &mut Roster) -> FamilySearch {
         let mut grew = false;
         for candidate in &pool {
             if let Some((harness, id, evidence)) = window::parent_in_harness(&candidate.session) {
-                grew |= adopt(roster, candidate, &SessionKey { harness, id }, evidence);
+                grew |= adopt(
+                    roster,
+                    &candidate.session,
+                    candidate.backend,
+                    &SessionKey { harness, id },
+                    evidence,
+                );
             }
+        }
+        if let Some(run) = lineage.as_deref_mut() {
+            grew |= run.adopt(backends, roster);
         }
         if roster.members.len() >= MAX_MEMBERS {
             search
@@ -594,26 +648,33 @@ fn began_inside(candidate: &Session, intervals: &[Interval]) -> bool {
 /// Join `candidate` to the family when `parent` is a member.
 fn adopt(
     roster: &mut Roster,
-    candidate: &Candidate,
+    session: &Session,
+    backend: usize,
     parent: &SessionKey,
     evidence: ParentEvidence,
 ) -> bool {
     if !roster.contains(parent) || roster.members.len() >= MAX_MEMBERS {
         return false;
     }
-    let (role, link) = match evidence {
+    let (role, link) = placed_by(evidence);
+    roster.add(Member {
+        session: session.clone(),
+        backend,
+        role,
+        link,
+        parent: Some(parent.clone()),
+        evidence: None,
+    })
+}
+
+/// What a recording that names a parent makes its session.
+fn placed_by(evidence: ParentEvidence) -> (Role, Link) {
+    match evidence {
         ParentEvidence::Subagent => (Role::Subagent, Link::SubagentRecording),
         ParentEvidence::Spawn => (Role::Subagent, Link::Spawn),
         ParentEvidence::ForkOrigin => (Role::Fork, Link::ForkOrigin),
         ParentEvidence::DeclaredLaunchParent => (Role::Delegate, Link::LaunchMarker),
-    };
-    roster.add(Member {
-        session: candidate.session.clone(),
-        backend: candidate.backend,
-        role,
-        link,
-        parent: Some(parent.clone()),
-    })
+    }
 }
 
 /// Declare, for the candidates at `positions`, the origins their stores
@@ -707,6 +768,7 @@ fn follow_continuations(
             role: Role::Lead,
             link: Link::Continuation,
             parent: Some(key),
+            evidence: None,
         });
         if !added {
             return;
@@ -1188,6 +1250,7 @@ fn measure(
                 agent: agent_label(&taken.figure),
                 link: member.link,
                 parent: member.parent.clone(),
+                evidence: member.evidence.clone(),
                 shared_requests: taken.shared,
                 counted_in_parent_total: taken.in_parent_total,
                 started_at: member.session.started_at,
