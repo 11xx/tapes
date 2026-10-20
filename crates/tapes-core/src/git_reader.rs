@@ -24,17 +24,25 @@
 //! A rename is one changed path, the new one, with the old one named in
 //! `previous_path`; a pure rename has no digests, because it changed no line.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::ffi::{OsStr, OsString};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::thread;
 
 use anyhow::{anyhow, bail, Context, Result};
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
+
+/// How many `diff-tree` reads the diffs of a commit set are shared among.
+const DIFF_SHARDS: usize = 64;
+
+/// The threads a read ahead of its reader takes.
+const READ_AHEAD_WORKERS: usize = 4;
 
 /// Bytes of a failed command's stderr kept as its message.
 const MAX_STDERR_BYTES: usize = 4 * 1024;
@@ -363,6 +371,39 @@ pub struct GitReader {
     directory: PathBuf,
     environment: Vec<(OsString, OsString)>,
     limits: Limits,
+    ahead: Arc<ReadAhead>,
+}
+
+/// Changes read before any read asked for them, by sha, each kept until the
+/// first read that wants it takes it. A commit's changes are fixed by the
+/// commit, the command and the limits, so one taken is the one a read would
+/// make.
+#[derive(Default)]
+struct ReadAhead(Mutex<HashMap<String, Changes>>);
+
+impl std::fmt::Debug for ReadAhead {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("ReadAhead")
+    }
+}
+
+impl ReadAhead {
+    fn put(&self, changes: HashMap<String, Changes>) {
+        self.0
+            .lock()
+            .expect("no reader panicked holding the read-ahead")
+            .extend(changes);
+    }
+
+    fn take(&self, shas: &[String]) -> HashMap<String, Changes> {
+        let mut ahead = self
+            .0
+            .lock()
+            .expect("no reader panicked holding the read-ahead");
+        shas.iter()
+            .filter_map(|sha| Some((sha.clone(), ahead.remove(sha)?)))
+            .collect()
+    }
 }
 
 impl GitReader {
@@ -392,11 +433,13 @@ impl GitReader {
             directory: directory.to_owned(),
             environment: Vec::new(),
             limits: Limits::default(),
+            ahead: Arc::default(),
         }))
     }
 
     pub fn with_limits(mut self, limits: Limits) -> Self {
         self.limits = limits;
+        self.ahead = Arc::default();
         self
     }
 
@@ -404,6 +447,7 @@ impl GitReader {
     /// `GIT_CONFIG_GLOBAL`.
     pub fn with_env(mut self, key: impl Into<OsString>, value: impl Into<OsString>) -> Self {
         self.environment.push((key.into(), value.into()));
+        self.ahead = Arc::default();
         self
     }
 
@@ -449,10 +493,7 @@ impl GitReader {
     pub fn commits(&self, selector: &Selector) -> Result<CommitSet> {
         let listed = self.list(selector)?;
         let (metadata, metadata_truncated) = self.metadata(&listed.shas)?;
-        let commits = metadata
-            .into_iter()
-            .map(|metadata| self.with_changes(metadata))
-            .collect::<Result<Vec<_>>>()?;
+        let commits = self.with_changes(metadata)?;
         Ok(CommitSet {
             commits,
             default_branch: listed.default_branch,
@@ -561,72 +602,196 @@ impl GitReader {
             .into_iter()
             .next()
             .ok_or_else(|| anyhow!("git returned no metadata for {sha}"))?;
-        self.with_changes(metadata)
+        Ok(self
+            .with_changes(vec![metadata])?
+            .pop()
+            .expect("one commit was read"))
     }
 
     /// Match a sha a session saw against a set: by sha, else by the change it
     /// carries while the object still exists, else not at all.
     pub fn resolve(&self, set: &CommitSet, observed: &str) -> Result<Resolution> {
-        let observed = observed.trim().to_ascii_lowercase();
-        let is_hash = (4..=64).contains(&observed.len())
-            && observed.bytes().all(|byte| byte.is_ascii_hexdigit());
-        if !is_hash {
-            return Ok(Resolution::Unresolved {
-                reason: Unresolved::Missing,
-            });
+        Ok(self
+            .resolve_all(set, &[observed])?
+            .pop()
+            .expect("one sha was resolved"))
+    }
+
+    /// [`GitReader::resolve`] for each of `observed`, in order, with one read
+    /// of each kind for them all.
+    pub fn resolve_all(&self, set: &CommitSet, observed: &[&str]) -> Result<Vec<Resolution>> {
+        let missing = Resolution::Unresolved {
+            reason: Unresolved::Missing,
+        };
+        let mut resolutions: Vec<Option<Resolution>> = vec![None; observed.len()];
+        let mut probed: Vec<(usize, String)> = Vec::new();
+        for (at, observed) in observed.iter().enumerate() {
+            let observed = observed.trim().to_ascii_lowercase();
+            let is_hash = (4..=64).contains(&observed.len())
+                && observed.bytes().all(|byte| byte.is_ascii_hexdigit());
+            if !is_hash {
+                resolutions[at] = Some(missing.clone());
+                continue;
+            }
+            if observed.len() >= 7 {
+                if let Some(commit) = set
+                    .commits
+                    .iter()
+                    .find(|commit| commit.sha.starts_with(&observed))
+                {
+                    resolutions[at] = Some(Resolution::Exact {
+                        sha: commit.sha.clone(),
+                    });
+                    continue;
+                }
+            }
+            probed.push((at, observed));
         }
-        let member = |sha: &str| set.commits.iter().find(|commit| commit.sha == sha);
-        if observed.len() >= 7 {
-            if let Some(commit) = set
+        let names: Vec<&str> = probed.iter().map(|(_, name)| name.as_str()).collect();
+        let found = self.commit_names(&names)?;
+        let mut outside: Vec<(usize, String)> = Vec::new();
+        for ((at, _), sha) in probed.into_iter().zip(found) {
+            let Some(sha) = sha else {
+                resolutions[at] = Some(missing.clone());
+                continue;
+            };
+            match set.commits.iter().find(|commit| commit.sha == sha) {
+                Some(commit) => {
+                    resolutions[at] = Some(Resolution::Exact {
+                        sha: commit.sha.clone(),
+                    });
+                }
+                None => outside.push((at, sha)),
+            }
+        }
+        let shas: Vec<String> = outside.iter().map(|(_, sha)| sha.clone()).collect();
+        let changed = self.changed(&shas)?;
+        // A commit no patch id places is one a caller may read next for its
+        // lines, so its changes are kept for that read.
+        let mut unplaced = HashMap::new();
+        for ((at, _), commit) in outside.into_iter().zip(changed) {
+            let Some(commit) = commit else {
+                resolutions[at] = Some(missing.clone());
+                continue;
+            };
+            let Some(patch_id) = commit.patch_id.clone() else {
+                unplaced.insert(commit.sha.clone(), Changes::of(&commit));
+                resolutions[at] = Some(Resolution::Unresolved {
+                    reason: Unresolved::NoPatchId,
+                });
+                continue;
+            };
+            let candidates: Vec<String> = set
                 .commits
                 .iter()
-                .find(|commit| commit.sha.starts_with(&observed))
-            {
-                return Ok(Resolution::Exact {
-                    sha: commit.sha.clone(),
-                });
-            }
-        }
-        let probe = format!("{observed}^{{commit}}");
-        let found = self.run_lenient(&["rev-parse", "--verify", "--quiet", &probe])?;
-        if !found.success {
-            return Ok(Resolution::Unresolved {
-                reason: Unresolved::Missing,
+                .filter(|commit| commit.patch_id.as_deref() == Some(patch_id.as_str()))
+                .map(|commit| commit.sha.clone())
+                .collect();
+            resolutions[at] = Some(if candidates.is_empty() {
+                unplaced.insert(commit.sha.clone(), Changes::of(&commit));
+                Resolution::Unresolved {
+                    reason: Unresolved::NoEquivalent,
+                }
+            } else {
+                Resolution::PatchEquivalent {
+                    patch_id,
+                    candidates,
+                }
             });
         }
-        let sha = text(&found.bytes).trim().to_owned();
-        if let Some(commit) = member(&sha) {
-            return Ok(Resolution::Exact {
-                sha: commit.sha.clone(),
-            });
-        }
-        let (metadata, _) = self.metadata(std::slice::from_ref(&sha))?;
-        let Some(metadata) = metadata.into_iter().next() else {
-            return Ok(Resolution::Unresolved {
-                reason: Unresolved::Missing,
-            });
-        };
-        let Some(patch_id) = self.with_changes(metadata)?.patch_id else {
-            return Ok(Resolution::Unresolved {
-                reason: Unresolved::NoPatchId,
-            });
-        };
-        let candidates: Vec<String> = set
-            .commits
-            .iter()
-            .filter(|commit| commit.patch_id.as_deref() == Some(patch_id.as_str()))
-            .map(|commit| commit.sha.clone())
-            .collect();
-        Ok(if candidates.is_empty() {
-            Resolution::Unresolved {
-                reason: Unresolved::NoEquivalent,
-            }
-        } else {
-            Resolution::PatchEquivalent {
-                patch_id,
-                candidates,
-            }
+        self.ahead.put(unplaced);
+        Ok(resolutions
+            .into_iter()
+            .map(|resolution| resolution.expect("every sha was resolved"))
+            .collect())
+    }
+
+    /// [`GitReader::commit`] for each of `revisions`, in order: `None` where
+    /// that refuses, as for a revision that names no commit. A failure in
+    /// reading them together is met by reading each alone, so it refuses
+    /// only the revisions it concerns.
+    pub fn commits_named(&self, revisions: &[&str]) -> Vec<Option<Commit>> {
+        self.commits_named_together(revisions).unwrap_or_else(|_| {
+            revisions
+                .iter()
+                .map(|revision| self.commit(revision).ok())
+                .collect()
         })
+    }
+
+    fn commits_named_together(&self, revisions: &[&str]) -> Result<Vec<Option<Commit>>> {
+        let named: Vec<usize> = (0..revisions.len())
+            .filter(|at| require_revisions([revisions[*at]]).is_ok())
+            .collect();
+        let names: Vec<&str> = named.iter().map(|at| revisions[*at]).collect();
+        let found = self.commit_names(&names)?;
+        let shas: Vec<String> = found.iter().flatten().cloned().collect();
+        let mut changed = self.changed(&shas)?.into_iter();
+        let mut commits: Vec<Option<Commit>> = vec![None; revisions.len()];
+        for (at, sha) in named.into_iter().zip(found) {
+            if sha.is_some() {
+                commits[at] = changed.next().flatten();
+            }
+        }
+        Ok(commits)
+    }
+
+    /// The commit each of `names` names, as `rev-parse --verify` peels
+    /// `<name>^{commit}`: `None` for a name that names none, is ambiguous, or
+    /// cannot stand on one line.
+    fn commit_names(&self, names: &[&str]) -> Result<Vec<Option<String>>> {
+        let asked: Vec<usize> = (0..names.len())
+            .filter(|at| !names[*at].contains(['\n', '\r']))
+            .collect();
+        let mut found: Vec<Option<String>> = vec![None; names.len()];
+        if asked.is_empty() {
+            return Ok(found);
+        }
+        let mut input = String::new();
+        for at in &asked {
+            input.push_str(names[*at]);
+            input.push_str("^{commit}\n");
+        }
+        let output = self.run(
+            &[
+                "cat-file".to_owned(),
+                "--batch-check=%(objectname)".to_owned(),
+            ],
+            Some(input.into_bytes()),
+        )?;
+        for (at, line) in asked.into_iter().zip(text(&output.bytes).lines()) {
+            let is_name =
+                matches!(line.len(), 40 | 64) && line.bytes().all(|byte| byte.is_ascii_hexdigit());
+            if is_name {
+                found[at] = Some(line.to_owned());
+            }
+        }
+        Ok(found)
+    }
+
+    /// Each of `shas`, a commit, in order, with its changes: `None` where git
+    /// gives no metadata for it.
+    fn changed(&self, shas: &[String]) -> Result<Vec<Option<Commit>>> {
+        let unique: Vec<String> = shas
+            .iter()
+            .cloned()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        let (mut metadata, truncated) = self.metadata(&unique)?;
+        if truncated {
+            // The cap cut the list; each commit is read alone instead.
+            metadata = Vec::new();
+            for sha in &unique {
+                metadata.extend(self.metadata(std::slice::from_ref(sha))?.0);
+            }
+        }
+        let commits: std::collections::HashMap<String, Commit> = self
+            .with_changes(metadata)?
+            .into_iter()
+            .map(|commit| (commit.sha.clone(), commit))
+            .collect();
+        Ok(shas.iter().map(|sha| commits.get(sha).cloned()).collect())
     }
 
     /// The commits the repository's branches, tags, remote branches and
@@ -637,6 +802,47 @@ impl GitReader {
     /// References a tool keeps for itself outside those namespaces are not
     /// walked.
     pub fn commits_between(&self, from: DateTime<Utc>, to: DateTime<Utc>) -> Result<CommitSet> {
+        let Some((kept, commits_truncated, metadata_truncated)) = self.met_between(from, to)?
+        else {
+            return Ok(CommitSet {
+                commits: Vec::new(),
+                default_branch: None,
+                commits_truncated: false,
+                metadata_truncated: false,
+            });
+        };
+        let commits = self.with_changes(kept)?;
+        Ok(CommitSet {
+            commits,
+            default_branch: None,
+            commits_truncated,
+            metadata_truncated,
+        })
+    }
+
+    /// Read the changes of the commits [`GitReader::commits_between`] would
+    /// hold for `[from, to]` ahead of it, for whichever read wants them
+    /// first. Once `stop` is set no further share of them is begun, the rest
+    /// left to that read. What fails here is left to that read to meet. A
+    /// clone of this reader shares what it reads ahead; a reader given other
+    /// limits or another environment does not.
+    pub fn read_ahead_between(&self, from: DateTime<Utc>, to: DateTime<Utc>, stop: &AtomicBool) {
+        let Ok(Some((kept, _, _))) = self.met_between(from, to) else {
+            return;
+        };
+        if let Ok(changes) = self.read_changes(&changing(&kept), Some(stop)) {
+            self.ahead.put(changes);
+        }
+    }
+
+    /// The metadata of the commits [`GitReader::commits_between`] holds,
+    /// with whether the commit cap and the metadata cap cut it; `None` for a
+    /// repository with no commit.
+    fn met_between(
+        &self,
+        from: DateTime<Utc>,
+        to: DateTime<Utc>,
+    ) -> Result<Option<(Vec<Metadata>, bool, bool)>> {
         let since = (from - chrono::Duration::days(1)).timestamp();
         let listing: Vec<String> = [
             "rev-list",
@@ -657,12 +863,7 @@ impl GitReader {
         )?;
         // A repository with no commit has no `HEAD` to walk.
         if !listed.success && !listed.truncated {
-            return Ok(CommitSet {
-                commits: Vec::new(),
-                default_branch: None,
-                commits_truncated: false,
-                metadata_truncated: false,
-            });
+            return Ok(None);
         }
         let shas: Vec<String> = text(&listed.bytes)
             .lines()
@@ -682,16 +883,7 @@ impl GitReader {
             let surplus = kept.len() - self.limits.commits;
             kept.drain(..surplus);
         }
-        let commits = kept
-            .into_iter()
-            .map(|metadata| self.with_changes(metadata))
-            .collect::<Result<Vec<_>>>()?;
-        Ok(CommitSet {
-            commits,
-            default_branch: None,
-            commits_truncated,
-            metadata_truncated,
-        })
+        Ok(Some((kept, commits_truncated, metadata_truncated)))
     }
 
     /// The live worktrees, the main one first: each one's directory and the
@@ -1075,56 +1267,237 @@ impl GitReader {
         Ok((metadata, output.truncated))
     }
 
-    fn with_changes(&self, metadata: Metadata) -> Result<Commit> {
-        let merge = metadata.parents.len() > 1;
-        let mut changes = Changes::default();
-        if !merge {
-            let output = self.run_capped(
-                &[
-                    "diff-tree",
-                    "-p",
-                    "--raw",
-                    "-M",
-                    "-r",
-                    "--root",
-                    "--no-ext-diff",
-                    "--no-textconv",
-                    "--no-color",
-                    "--end-of-options",
-                    &metadata.sha,
-                ],
-                None,
-            )?;
-            output.require_success()?;
-            changes = parse_diff(&output.bytes, output.truncated, &self.limits);
-            if !output.truncated && !changes.paths.is_empty() {
-                changes.patch_id = self.patch_id(&output.bytes)?;
-            }
-        }
-        Ok(Commit {
-            sha: metadata.sha,
-            parents: metadata.parents,
-            author_time: metadata.author_time,
-            committer_time: metadata.committer_time,
-            subject: metadata.subject,
-            trailers: metadata.trailers,
-            merge,
-            paths: changes.paths,
-            patch_id: changes.patch_id,
-            diff_truncated: changes.diff_truncated,
-            digests_truncated: changes.digests_truncated,
-        })
+    /// Each commit with its changes. A few `diff-tree` reads share the
+    /// diffs, each cut at the byte cap as a read of that commit alone would
+    /// cut it, and a `patch-id` beside each reads its whole diffs.
+    fn with_changes(&self, metadata: Vec<Metadata>) -> Result<Vec<Commit>> {
+        let changing = changing(&metadata);
+        let mut changes = self.ahead.take(&changing);
+        let unread: Vec<String> = changing
+            .into_iter()
+            .filter(|sha| !changes.contains_key(sha))
+            .collect();
+        changes.extend(self.read_changes(&unread, None)?);
+        Ok(metadata
+            .into_iter()
+            .map(|metadata| {
+                let merge = metadata.parents.len() > 1;
+                let changes = changes.get(&metadata.sha).cloned().unwrap_or_default();
+                Commit {
+                    sha: metadata.sha,
+                    parents: metadata.parents,
+                    author_time: metadata.author_time,
+                    committer_time: metadata.committer_time,
+                    subject: metadata.subject,
+                    trailers: metadata.trailers,
+                    merge,
+                    paths: changes.paths,
+                    patch_id: changes.patch_id,
+                    diff_truncated: changes.diff_truncated,
+                    digests_truncated: changes.digests_truncated,
+                }
+            })
+            .collect())
     }
 
-    fn patch_id(&self, diff: &[u8]) -> Result<Option<String>> {
-        let output = self.run(
-            &["patch-id".to_owned(), "--stable".to_owned()],
-            Some(diff.to_vec()),
-        )?;
-        Ok(text(&output.bytes)
-            .split_whitespace()
-            .next()
-            .map(str::to_owned))
+    /// The changes of `shas`, shared among a few `diff-tree` reads on
+    /// several threads. Once `stop` is set no further share is begun, and
+    /// the shas of those not begun are absent.
+    fn read_changes(
+        &self,
+        shas: &[String],
+        stop: Option<&AtomicBool>,
+    ) -> Result<HashMap<String, Changes>> {
+        // Shards small enough that every core has several to take, each
+        // striding the set: large commits come in runs, and a shard holding a
+        // run would finish long after the rest.
+        let count = shas.len().min(DIFF_SHARDS);
+        let shards: Vec<Vec<String>> = (0..count)
+            .map(|first| shas.iter().skip(first).step_by(count).cloned().collect())
+            .collect();
+        // A read ahead leaves most of the processor to the reads it is
+        // ahead of.
+        let workers = if stop.is_some() {
+            READ_AHEAD_WORKERS
+        } else {
+            crate::parallel::MAX_WORKERS
+        };
+        let read = crate::parallel::map_on(workers, &shards, |shard| {
+            if stop.is_some_and(|stop| stop.load(Ordering::Relaxed)) {
+                return Ok(None);
+            }
+            self.shard_changes(shard).map(Some)
+        });
+        let mut changes = HashMap::new();
+        for (shard, read) in shards.into_iter().zip(read) {
+            if let Some(read) = read? {
+                changes.extend(shard.into_iter().zip(read));
+            }
+        }
+        Ok(changes)
+    }
+
+    /// The changes of each of `shas`, non-merge commits, in order. A diff
+    /// that passes the byte cap is cut there, and the commits after it are
+    /// read by a new `diff-tree`, so no commit costs more than the cap.
+    fn shard_changes(&self, shas: &[String]) -> Result<Vec<Changes>> {
+        let shas: Vec<&str> = shas.iter().map(String::as_str).collect();
+        let mut changes: Vec<Changes> = Vec::with_capacity(shas.len());
+        while changes.len() < shas.len() {
+            changes.extend(self.changes_batch(&shas[changes.len()..])?);
+        }
+        Ok(changes)
+    }
+
+    /// The changes of `shas` up to and including the first whose diff passes
+    /// the byte cap, or of them all. `diff-tree --stdin` heads each commit's
+    /// diff with its sha, as a read of that commit alone does, and leaves out
+    /// a commit with no diff. Each whole diff goes on to `patch-id --stable`
+    /// once it is read, so one diff at a time is held.
+    fn changes_batch(&self, shas: &[&str]) -> Result<Vec<Changes>> {
+        use std::io::BufRead as _;
+        let mut input = shas.join("\n");
+        input.push('\n');
+        let mut diff_tree = self
+            .command(&[
+                "diff-tree",
+                "--stdin",
+                "-p",
+                "--raw",
+                "-M",
+                "-r",
+                "--root",
+                "--no-ext-diff",
+                "--no-textconv",
+                "--no-color",
+            ])
+            .stdin(Stdio::piped())
+            .spawn()
+            .context("failed to run git")?;
+        let mut pipe = diff_tree.stdin.take().expect("piped stdin is present");
+        // A cut-off read closes the pipe early; the write error is moot.
+        let writer = thread::spawn(move || {
+            let _ = pipe.write_all(input.as_bytes());
+        });
+        let diff_errors = self.drain_stderr(&mut diff_tree);
+        let mut patch_id = self
+            .command(&["patch-id", "--stable"])
+            .stdin(Stdio::piped())
+            .spawn()
+            .context("failed to run git")?;
+        let mut patches = patch_id.stdin.take().expect("piped stdin is present");
+        let mut ids = patch_id.stdout.take().expect("piped stdout is present");
+        let cap = self.limits.output_bytes;
+        let id_reader = thread::spawn(move || {
+            let mut bytes = Vec::new();
+            let read = ids.by_ref().take(cap as u64).read_to_end(&mut bytes);
+            read.map(|_| bytes)
+        });
+        let id_errors = self.drain_stderr(&mut patch_id);
+
+        let positions: std::collections::HashMap<&str, usize> = shas
+            .iter()
+            .enumerate()
+            .map(|(at, sha)| (*sha, at))
+            .collect();
+        let mut changes: Vec<Changes> = Vec::new();
+        // The diff being read, of the commit after the last in `changes`.
+        let mut diff: Option<Vec<u8>> = None;
+        let mut patched = Ok(());
+        let mut finish = |changes: &mut Vec<Changes>, diff: Vec<u8>| {
+            let read = parse_diff(&diff, false, &self.limits);
+            if !read.paths.is_empty() && patched.is_ok() {
+                patched = patches.write_all(&diff);
+            }
+            changes.push(read);
+        };
+        let mut reader =
+            std::io::BufReader::new(diff_tree.stdout.take().expect("piped stdout is present"));
+        let mut line = Vec::new();
+        let mut cut = false;
+        let read = loop {
+            line.clear();
+            // A line longer than the cap passes it whatever diff holds it.
+            match reader
+                .by_ref()
+                .take(cap as u64 + 2)
+                .read_until(b'\n', &mut line)
+            {
+                Ok(0) => break Ok(()),
+                Ok(_) => {}
+                Err(error) => break Err(error),
+            }
+            let pending = changes.len() + usize::from(diff.is_some());
+            let header = line
+                .strip_suffix(b"\n")
+                .and_then(|name| std::str::from_utf8(name).ok())
+                .and_then(|name| positions.get(name).copied())
+                .filter(|at| *at >= pending);
+            if let Some(at) = header {
+                if let Some(diff) = diff.take() {
+                    finish(&mut changes, diff);
+                }
+                // The commits between changed nothing.
+                changes.resize_with(at, Changes::default);
+                diff = Some(Vec::new());
+            }
+            let Some(bytes) = diff.as_mut() else {
+                continue;
+            };
+            bytes.extend_from_slice(&line);
+            if bytes.len() > cap {
+                bytes.truncate(cap);
+                changes.push(parse_diff(bytes, true, &self.limits));
+                diff = None;
+                cut = true;
+                break Ok(());
+            }
+        };
+        if let Some(diff) = diff.take() {
+            finish(&mut changes, diff);
+        }
+        drop(patches);
+        if cut || read.is_err() {
+            let _ = diff_tree.kill();
+        }
+        let status = diff_tree.wait().context("failed to wait for git")?;
+        let _ = writer.join();
+        let ids_status = patch_id.wait().context("failed to wait for git")?;
+        let ids = id_reader.join().expect("patch-id reader panicked");
+        let diff_errors = diff_errors.join().unwrap_or_default();
+        let id_errors = id_errors.join().unwrap_or_default();
+        read.context("failed to read git output")?;
+        if !cut {
+            Output {
+                bytes: Vec::new(),
+                truncated: false,
+                success: status.success(),
+                stderr: text(&diff_errors).trim().to_owned(),
+            }
+            .require_success()?;
+            changes.resize_with(shas.len(), Changes::default);
+        }
+        patched.context("failed to write to git patch-id")?;
+        Output {
+            bytes: Vec::new(),
+            truncated: false,
+            success: ids_status.success(),
+            stderr: text(&id_errors).trim().to_owned(),
+        }
+        .require_success()?;
+        let ids = ids.context("failed to read git output")?;
+        let ids: std::collections::HashMap<String, String> = text(&ids)
+            .lines()
+            .filter_map(|line| {
+                let mut fields = line.split_whitespace();
+                let patch_id = fields.next()?.to_owned();
+                Some((fields.next()?.to_owned(), patch_id))
+            })
+            .collect();
+        for (sha, changes) in shas.iter().zip(&mut changes) {
+            changes.patch_id = ids.get(*sha).cloned();
+        }
+        Ok(changes)
     }
 
     /// Run `git` and fail with its message unless it succeeds. A cut-off read
@@ -1144,17 +1517,9 @@ impl GitReader {
         Ok(output)
     }
 
-    fn run_lenient(&self, args: &[&str]) -> Result<Output> {
-        let output = self.run_capped(args, None)?;
-        if output.truncated {
-            bail!("git {} output exceeded the byte cap", args[0]);
-        }
-        Ok(output)
-    }
-
-    /// Run `git`, reading its stdout up to the byte cap and killing it when
-    /// the cap is passed.
-    fn run_capped(&self, args: &[&str], stdin: Option<Vec<u8>>) -> Result<Output> {
+    /// `git` in the repository, with piped output and no input: read-only,
+    /// unpaged, and blind to an enclosing repository's environment.
+    fn command(&self, args: &[&str]) -> Command {
         let mut command = Command::new(&self.program);
         command
             .arg("-C")
@@ -1168,23 +1533,16 @@ impl GitReader {
             .env_remove("GIT_WORK_TREE")
             .env_remove("GIT_INDEX_FILE")
             .envs(self.environment.iter().map(|(k, v)| (k, v)))
-            .stdin(if stdin.is_some() {
-                Stdio::piped()
-            } else {
-                Stdio::null()
-            })
+            .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        let mut child = command.spawn().context("failed to run git")?;
-        let writer = stdin.map(|bytes| {
-            let mut pipe = child.stdin.take().expect("piped stdin is present");
-            // A cut-off read closes the pipe early; the write error is moot.
-            thread::spawn(move || {
-                let _ = pipe.write_all(&bytes);
-            })
-        });
+        command
+    }
+
+    /// Read a child's stderr on its own thread, keeping its first bytes.
+    fn drain_stderr(&self, child: &mut std::process::Child) -> thread::JoinHandle<Vec<u8>> {
         let mut stderr = child.stderr.take().expect("piped stderr is present");
-        let diagnostics = thread::spawn(move || {
+        thread::spawn(move || {
             let mut kept = Vec::new();
             let mut buffer = [0_u8; 4096];
             while let Ok(count) = stderr.read(&mut buffer) {
@@ -1195,7 +1553,35 @@ impl GitReader {
                 kept.extend_from_slice(&buffer[..room]);
             }
             kept
+        })
+    }
+
+    fn run_lenient(&self, args: &[&str]) -> Result<Output> {
+        let output = self.run_capped(args, None)?;
+        if output.truncated {
+            bail!("git {} output exceeded the byte cap", args[0]);
+        }
+        Ok(output)
+    }
+
+    /// Run `git`, reading its stdout up to the byte cap and killing it when
+    /// the cap is passed.
+    fn run_capped(&self, args: &[&str], stdin: Option<Vec<u8>>) -> Result<Output> {
+        let mut command = self.command(args);
+        command.stdin(if stdin.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
         });
+        let mut child = command.spawn().context("failed to run git")?;
+        let writer = stdin.map(|bytes| {
+            let mut pipe = child.stdin.take().expect("piped stdin is present");
+            // A cut-off read closes the pipe early; the write error is moot.
+            thread::spawn(move || {
+                let _ = pipe.write_all(&bytes);
+            })
+        });
+        let diagnostics = self.drain_stderr(&mut child);
         let cap = self.limits.output_bytes;
         let mut bytes = Vec::new();
         let read = child
@@ -1307,12 +1693,34 @@ fn parse_trailers(block: &str) -> Trailers {
     trailers
 }
 
-#[derive(Default)]
+/// The shas of the commits whose changes are read, each once, in order: a
+/// merge has none of its own.
+fn changing(metadata: &[Metadata]) -> Vec<String> {
+    let mut seen = BTreeSet::new();
+    metadata
+        .iter()
+        .filter(|metadata| metadata.parents.len() <= 1 && seen.insert(&metadata.sha))
+        .map(|metadata| metadata.sha.clone())
+        .collect()
+}
+
+#[derive(Clone, Default)]
 struct Changes {
     paths: Vec<ChangedPath>,
     patch_id: Option<String>,
     diff_truncated: bool,
     digests_truncated: bool,
+}
+
+impl Changes {
+    fn of(commit: &Commit) -> Self {
+        Self {
+            paths: commit.paths.clone(),
+            patch_id: commit.patch_id.clone(),
+            diff_truncated: commit.diff_truncated,
+            digests_truncated: commit.digests_truncated,
+        }
+    }
 }
 
 /// Read `git diff-tree -p --raw -M` output: the raw entries name the paths,

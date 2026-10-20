@@ -5,13 +5,17 @@
 use std::cell::Cell;
 use std::ffi::OsStr;
 use std::fs;
+use std::io::Write;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::sync::atomic::AtomicBool;
 
 use agent_tapes_core::git_reader::{
     line_digest, ChangeStatus, ChangedPath, Commit, CommitSet, ContentKind, DefaultBranchSource,
     GitReader, Limits, Resolution, Role, Selector, Unresolved,
 };
+use chrono::{DateTime, Utc};
 use tempfile::TempDir;
 
 /// A synthetic repository whose git sees no user or system configuration.
@@ -508,6 +512,149 @@ fn output_past_the_byte_cap_is_cut_and_reported() {
     let set = tiny.commits(&Selector::parse("main~2..main")).unwrap();
     assert!(set.metadata_truncated);
     assert!(set.commits.len() < 2);
+}
+
+/// Git's own `patch-id --stable` of one commit's diff, read alone.
+fn own_patch_id(repo: &Repo, sha: &str) -> Option<String> {
+    let diff = repo
+        .command()
+        .args(["diff-tree", "-p", "-M", "-r", "--root", sha])
+        .output()
+        .unwrap();
+    assert!(diff.status.success());
+    let mut patch_id = repo
+        .command()
+        .args(["patch-id", "--stable"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    patch_id
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(&diff.stdout)
+        .unwrap();
+    let output = patch_id.wait_with_output().unwrap();
+    String::from_utf8(output.stdout)
+        .unwrap()
+        .split_whitespace()
+        .next()
+        .map(str::to_owned)
+}
+
+#[test]
+fn a_set_reads_each_commit_as_a_read_of_that_commit_alone_does() {
+    // Rejects: a set whose commits differ from the same commits read one at
+    // a time: changes lost after a diff cut at the cap, changes shifted past
+    // an empty commit, and patch ids that are not git's own.
+    let repo = Repo::new();
+    let base = repo.change("f0.txt", "base\n", "base");
+    let big: String = (0..6_000).map(|n| format!("line number {n}\n")).collect();
+    for n in 1..=100 {
+        match n % 10 {
+            3 => repo.write(&format!("big{n}.txt"), &big),
+            6 => {}
+            9 => fs::rename(
+                repo.dir().join(format!("f{}.txt", n - 1)),
+                repo.dir().join(format!("moved{n}.txt")),
+            )
+            .unwrap(),
+            _ => repo.write(&format!("f{n}.txt"), &format!("line {n}\n")),
+        }
+        repo.commit(&format!("commit {n}"));
+    }
+
+    let reader = repo.reader().with_limits(Limits {
+        output_bytes: 64 * 1024,
+        ..Limits::default()
+    });
+    let set = reader
+        .commits(&Selector::parse(&format!("{base}..main")))
+        .unwrap();
+    assert!(!set.metadata_truncated && !set.commits_truncated);
+    assert_eq!(set.commits.len(), 100);
+    for commit in &set.commits {
+        assert_eq!(commit, &reader.commit(&commit.sha).unwrap());
+        if !commit.diff_truncated {
+            assert_eq!(commit.patch_id, own_patch_id(&repo, &commit.sha));
+        }
+    }
+    let cut = set.commits.iter().filter(|commit| commit.diff_truncated);
+    assert_eq!(cut.count(), 10, "each large diff passes the cap");
+    let empty = set.commits.iter().filter(|commit| commit.paths.is_empty());
+    assert_eq!(empty.count(), 10, "each empty commit changes nothing");
+}
+
+#[test]
+fn a_read_ahead_spares_the_later_read_its_diffs_under_the_same_limits() {
+    // Rejects: a later read that diffs again what was read ahead of it, one
+    // that differs from a read with nothing read ahead, a stopped read ahead
+    // that still diffs, and changes read under one cap handed to a reader
+    // under another.
+    let repo = Repo::new();
+    repo.change("f", "base\n", "base");
+    let body: String = (0..400).map(|n| format!("line number {n}\n")).collect();
+    repo.change("big.txt", &body, "a large file");
+    repo.change("small.txt", "tiny line\n", "a small file");
+    let from = DateTime::<Utc>::from_timestamp(1_700_000_000, 0).unwrap();
+    let to = from + chrono::Duration::days(1);
+
+    let log = repo.root.path().join("git-commands.log");
+    let program = repo.root.path().join("git-logged");
+    fs::write(
+        &program,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nexec git \"$@\"\n",
+            log.display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&program, fs::Permissions::from_mode(0o755)).unwrap();
+    let diffs = || {
+        fs::read_to_string(&log)
+            .unwrap_or_default()
+            .lines()
+            .filter(|line| line.contains("diff-tree"))
+            .count()
+    };
+    let reader = GitReader::with_program(program.as_os_str(), &repo.dir())
+        .unwrap()
+        .expect("git is installed")
+        .with_env("GIT_CONFIG_GLOBAL", repo.config())
+        .with_env("GIT_CONFIG_NOSYSTEM", "1");
+    let alone = repo.reader().commits_between(from, to).unwrap().commits;
+    assert_eq!(alone.len(), 3);
+
+    reader.read_ahead_between(from, to, &AtomicBool::new(true));
+    assert_eq!(diffs(), 0, "a stopped read ahead begins no diff");
+
+    reader.read_ahead_between(from, to, &AtomicBool::new(false));
+    let ahead = diffs();
+    assert!(ahead > 0);
+    assert_eq!(reader.commits_between(from, to).unwrap().commits, alone);
+    assert_eq!(diffs(), ahead, "the read takes what was read ahead");
+
+    let capped = Limits {
+        output_bytes: 1_500,
+        ..Limits::default()
+    };
+    reader.read_ahead_between(from, to, &AtomicBool::new(false));
+    let cut = reader
+        .clone()
+        .with_limits(capped)
+        .commits_between(from, to)
+        .unwrap();
+    assert!(!cut.metadata_truncated);
+    assert!(cut.commits.iter().any(|commit| commit.diff_truncated));
+    assert_eq!(
+        cut.commits,
+        repo.reader()
+            .with_limits(capped)
+            .commits_between(from, to)
+            .unwrap()
+            .commits
+    );
 }
 
 #[test]

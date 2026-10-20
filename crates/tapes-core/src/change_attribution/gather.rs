@@ -431,6 +431,13 @@ pub fn attribute_with(
         }
         false
     };
+    let observed: Vec<&str> = gathered
+        .members
+        .iter()
+        .flat_map(|member| member.read.observations.iter())
+        .map(|seen| seen.sha.as_str())
+        .collect();
+    repository.resolve_all(&universe, &observed, params)?;
     let mut evidences: Vec<(SessionKey, SessionEvidence)> = Vec::new();
     let mut placements: BTreeMap<SessionKey, Placement> = BTreeMap::new();
     let mut conflicts: Vec<Conflict> = Vec::new();

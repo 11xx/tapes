@@ -192,65 +192,85 @@ impl Repository {
         observed: &str,
         params: &Params,
     ) -> Result<Option<(String, Via)>> {
-        if let Some(known) = self.resolved.borrow().get(observed) {
-            return Ok(known.clone());
-        }
-        let resolved = match self.reader.resolve(&universe.set, observed)? {
-            Resolution::Exact { sha } => Some((sha, Via::Exact)),
-            Resolution::PatchEquivalent { candidates, .. } => {
-                candidates.last().map(|sha| (sha.clone(), Via::PatchId))
-            }
-            Resolution::Unresolved { reason } => match reason {
-                crate::git_reader::Unresolved::Missing => None,
-                _ => self.by_digests(universe, observed, params)?,
-            },
-        };
-        self.resolved
-            .borrow_mut()
-            .insert(observed.to_owned(), resolved.clone());
-        Ok(resolved)
+        self.resolve_all(universe, &[observed], params)?;
+        Ok(self.resolved.borrow()[observed].clone())
     }
 
-    fn by_digests(
+    /// Resolve each of `observed` as [`Repository::resolve`] does, with one
+    /// read of each kind for them all; later lookups take what it found.
+    pub(crate) fn resolve_all(
         &self,
         universe: &Universe,
-        observed: &str,
+        observed: &[&str],
         params: &Params,
-    ) -> Result<Option<(String, Via)>> {
-        let Ok(commit) = self.reader.commit(observed) else {
-            return Ok(None);
-        };
-        let added: BTreeSet<u64> = commit
-            .paths
+    ) -> Result<()> {
+        let mut fresh: Vec<&str> = observed
             .iter()
-            .flat_map(|path| path.added.iter().copied())
+            .copied()
+            .filter(|observed| !self.resolved.borrow().contains_key(*observed))
             .collect();
-        if added.len() < params.edit_lines {
-            return Ok(None);
+        fresh.sort_unstable();
+        fresh.dedup();
+        let resolutions = self.reader.resolve_all(&universe.set, &fresh)?;
+        let mut settled: Vec<(&str, Option<(String, Via)>)> = Vec::new();
+        let mut unmatched: Vec<&str> = Vec::new();
+        for (observed, resolution) in fresh.into_iter().zip(resolutions) {
+            match resolution {
+                Resolution::Exact { sha } => settled.push((observed, Some((sha, Via::Exact)))),
+                Resolution::PatchEquivalent { candidates, .. } => settled.push((
+                    observed,
+                    candidates.last().map(|sha| (sha.clone(), Via::PatchId)),
+                )),
+                Resolution::Unresolved {
+                    reason: crate::git_reader::Unresolved::Missing,
+                } => settled.push((observed, None)),
+                Resolution::Unresolved { .. } => unmatched.push(observed),
+            }
         }
-        let best = universe
-            .facts
-            .iter()
-            .filter(|candidate| candidate.sha != commit.sha && !candidate.merge)
-            .map(|candidate| {
-                let shared = candidate
-                    .added
-                    .iter()
-                    .filter(|digest| added.contains(digest))
-                    .count();
-                (shared, candidate)
-            })
-            .filter(|(shared, _)| *shared as f64 >= params.edit_overlap * added.len() as f64)
-            .max_by_key(|(shared, candidate)| {
-                (*shared, candidate.committer, candidate.sha.clone())
-            });
-        Ok(best.map(|(_, candidate)| (candidate.sha.clone(), Via::Digests)))
+        let commits = self.reader.commits_named(&unmatched);
+        for (observed, commit) in unmatched.into_iter().zip(commits) {
+            let resolved = commit.and_then(|commit| by_digests(universe, &commit, params));
+            settled.push((observed, resolved));
+        }
+        let mut resolved = self.resolved.borrow_mut();
+        for (observed, resolution) in settled {
+            resolved.insert(observed.to_owned(), resolution);
+        }
+        Ok(())
     }
 
     /// Which of `names` name a commit the repository holds.
     pub(crate) fn names_commits(&self, names: &BTreeSet<String>) -> Result<BTreeSet<String>> {
         self.reader.existing_commits(names)
     }
+}
+
+/// The commit of `universe` that adds at least [`Params::edit_overlap`] of
+/// the lines `commit` adds, the newest of several.
+fn by_digests(universe: &Universe, commit: &Commit, params: &Params) -> Option<(String, Via)> {
+    let added: BTreeSet<u64> = commit
+        .paths
+        .iter()
+        .flat_map(|path| path.added.iter().copied())
+        .collect();
+    if added.len() < params.edit_lines {
+        return None;
+    }
+    let best = universe
+        .facts
+        .iter()
+        .filter(|candidate| candidate.sha != commit.sha && !candidate.merge)
+        .map(|candidate| {
+            let shared = candidate
+                .added
+                .iter()
+                .filter(|digest| added.contains(digest))
+                .count();
+            (shared, candidate)
+        })
+        .filter(|(shared, _)| *shared as f64 >= params.edit_overlap * added.len() as f64)
+        .max_by_key(|(shared, candidate)| (*shared, candidate.committer, candidate.sha.clone()));
+    best.map(|(_, candidate)| (candidate.sha.clone(), Via::Digests))
 }
 
 fn facts_of(commit: &Commit, lifetime: Option<(Instant, Instant)>) -> CommitFacts {
