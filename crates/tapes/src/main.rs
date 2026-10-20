@@ -594,8 +594,10 @@ struct PriceArgs {
     /// shorter time limits when the fetched table is absent or no source
     /// succeeded in 24 hours, at most once an hour. A source that fails is
     /// one stderr warning, `prices refreshed, except …` or `prices not
-    /// refreshed (…)`, and never fails the command. A replica answering a
-    /// --remote read runs offline, so it never refreshes either.
+    /// refreshed (…)`, and never fails the command. Only a command that
+    /// prices refreshes: `stats` over a selection, and `usage --forecast` and
+    /// --allowance-rates, never do. A replica answering a --remote read runs
+    /// offline, so it never refreshes either.
     #[arg(long)]
     offline: bool,
 }
@@ -605,6 +607,18 @@ impl PriceArgs {
     fn table(&self) -> Result<Option<agent_tapes_core::pricing::PriceTable>> {
         price_table(self.prices.as_deref(), self.offline)
     }
+
+    /// Refuse a named table that cannot be read, for a path that prices
+    /// nothing, without refreshing the fetched table.
+    fn validate(&self) -> Result<()> {
+        validate_price_table(self.prices.as_deref())
+    }
+}
+
+/// Refuse a table `named` or `TAPES_PRICES` names that cannot be read. The
+/// fetched table is not refreshed.
+fn validate_price_table(named: Option<&Path>) -> Result<()> {
+    agent_tapes_core::pricing::lookup(named).map(|_| ())
 }
 
 /// The price table `named` or the environment selects, after refreshing the
@@ -2246,7 +2260,8 @@ enum Command {
         /// time limits when the fetched table is absent or no source
         /// succeeded in 24 hours, at most once an hour. A source that fails
         /// is one stderr warning, `prices refreshed, except …` or `prices
-        /// not refreshed (…)`, and never fails the command.
+        /// not refreshed (…)`, and never fails the command. --forecast and
+        /// --allowance-rates price nothing and never refresh.
         #[arg(long)]
         offline: bool,
         /// Render the versioned tapes-usage/17 object, tapes-usage-summary/16
@@ -3811,10 +3826,8 @@ fn dispatch(cli: Cli) -> Result<()> {
             };
             let latest_warnings = query.latest_warnings(&single_backends)?;
             print_selection_warnings(&latest_warnings);
-            // A selection's summary carries no cost to price, but a table the
-            // caller named that cannot be read still refuses.
-            let prices = prices.table()?;
             if let Some(one) = query.single() {
+                let prices = prices.table()?;
                 let prices = prices.as_ref();
                 let stats = if full {
                     agent_tapes_core::stats_full_priced_with_backends(
@@ -3840,6 +3853,9 @@ fn dispatch(cli: Cli) -> Result<()> {
                     print!("{}", render_stats(&stats));
                 }
             } else {
+                // A selection's summary carries no cost to price, but a table the
+                // caller named that cannot be read still refuses.
+                prices.validate()?;
                 if !query.has_set_selection() {
                     return Err(anyhow!("stats needs a session ID, --latest, or an explicit selection such as --here"));
                 }
@@ -3903,7 +3919,17 @@ fn dispatch(cli: Cli) -> Result<()> {
             json,
         } => {
             query.validate_input()?;
-            let prices = price_table(prices.as_deref(), offline)?;
+            // A forecast and allowance rates over a selection price nothing,
+            // but a table the caller named that cannot be read still refuses.
+            let unpriced = !change.asked(&by)
+                && query.single().is_none()
+                && (forecast.is_some() || allowance_rates);
+            let prices = if unpriced {
+                validate_price_table(prices.as_deref())?;
+                None
+            } else {
+                price_table(prices.as_deref(), offline)?
+            };
             let prices = prices.as_ref();
             read.refuse_supplied(&query.input)?;
             if change.asked(&by) {

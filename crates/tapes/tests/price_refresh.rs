@@ -46,6 +46,24 @@ impl Store {
         self.path("data/tapes/prices-fetch.json")
     }
 
+    /// `tapes` with `arguments` over this store, refreshing from `from`,
+    /// whatever its exit status.
+    fn tapes(&self, arguments: &[&str], from: &Path) -> Output {
+        Command::new(env!("CARGO_BIN_EXE_tapes"))
+            .env_remove("TAPES_PRICES")
+            .env_remove("TAPES_OFFLINE")
+            .env_remove("PI_SESSION_FILE")
+            .env("HOME", self.path("home"))
+            .env("XDG_CONFIG_HOME", self.path("config"))
+            .env("XDG_DATA_HOME", self.path("data"))
+            .env("TAPES_PRICES_FROM", from)
+            .args(arguments)
+            .args(["--json", "--native-store", "claude", "--native-root"])
+            .arg(self.0.path())
+            .output()
+            .unwrap()
+    }
+
     fn usage(&self, arguments: &[&str], from: &Path, environment: &[(&str, &str)]) -> Output {
         let mut command = Command::new(env!("CARGO_BIN_EXE_tapes"));
         command
@@ -192,4 +210,54 @@ fn a_partial_refresh_names_only_the_source_that_failed() {
         "{stderr}"
     );
     assert!(answer(&output)["list_price_estimate"]["amount"].is_number());
+}
+
+#[test]
+fn commands_that_never_price_do_not_refresh() {
+    // Claim: `stats` over a selection, and `usage --allowance-rates` and
+    // `usage --forecast` over one, price nothing, so a due refresh writes no
+    // table there, whether or not the command then finds an answer; `usage`
+    // of one session still refreshes. Rejects a network
+    // fetch and a data-directory write for a command that never prices.
+    let store = Store::new();
+    let mut refreshed = Vec::new();
+    for arguments in [
+        &["stats", "--global"][..],
+        &[
+            "usage",
+            "--global",
+            "--harness",
+            "claude",
+            "--allowance-rates",
+            "--since",
+            "2020-01-01",
+        ],
+        &[
+            "usage",
+            "--global",
+            "--harness",
+            "claude",
+            "--forecast",
+            "claude-haiku-5-5=1",
+            "--since",
+            "2020-01-01",
+        ],
+    ] {
+        let output = store.tapes(arguments, &sources());
+        assert!(
+            output.status.success() || arguments.contains(&"--forecast"),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        if store.path("data").exists() {
+            refreshed.push(arguments.join(" "));
+            fs::remove_dir_all(store.path("data")).unwrap();
+        }
+    }
+    assert!(refreshed.is_empty(), "{refreshed:?} refreshed");
+    assert!(store
+        .tapes(&["usage", SESSION], &sources())
+        .status
+        .success());
+    assert!(store.table().is_file());
 }

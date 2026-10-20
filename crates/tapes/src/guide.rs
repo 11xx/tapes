@@ -1693,17 +1693,20 @@ KEEP A PRICE TABLE
   nor `TAPES_PRICES` naming a table and outside `--remote`, first runs the
   same update when the data table is absent or no source succeeded in the
   last 24 hours, and the last attempt is over an hour old or unrecorded:
-  so about once a day, and at most hourly while fetches fail. A replica
-  answering a `--remote` read runs offline, so it never refreshes either.
-  It records the attempt before fetching, so commands started together
-  fetch once. The refresh gives each source 5 seconds to connect and 10 to
-  finish. It prints nothing when it succeeds. When a source fails it
-  prints one line: `warning: prices refreshed, except <source>: <error>;
-  …` when another source succeeded, else `warning: prices not refreshed
-  (<source>: <error>; …); using the table fetched <date>` (or `no fetched
-  table`). The command goes on, its exit status unchanged. `--offline` on
-  any command that prices, or `TAPES_OFFLINE=1`, skips the refresh; the
-  table already fetched still prices.
+  so about once a day, and at most hourly while fetches fail. Only a
+  command that prices refreshes: `stats` over a selection, and `usage
+  --forecast` and `--allowance-rates`, price nothing and never do, though
+  a table `--prices` names that cannot be read still refuses them. A
+  replica answering a `--remote` read runs offline, so it never refreshes
+  either. It records the attempt before fetching, so commands started
+  together fetch once. The refresh gives each source 5 seconds to connect
+  and 10 to finish. It prints nothing when it succeeds. When a source
+  fails it prints one line: `warning: prices refreshed, except <source>:
+  <error>; …` when another source succeeded, else `warning: prices not
+  refreshed (<source>: <error>; …); using the table fetched <date>` (or
+  `no fetched table`). The command goes on, its exit status unchanged.
+  `--offline` on any command that prices, or `TAPES_OFFLINE=1`, skips the
+  refresh; the table already fetched still prices.
 
   The pages show only current prices, so the table keeps history as
   validity windows. A fetched price equal to the row in effect, from the
