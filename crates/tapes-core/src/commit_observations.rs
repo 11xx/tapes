@@ -88,6 +88,15 @@ pub struct EventCommits {
     pub created_unnamed: bool,
 }
 
+/// Every commit observation of one session, in recording order, with what the
+/// caps dropped.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct SessionCommits {
+    pub observations: Vec<CommitObservation>,
+    #[serde(skip_serializing_if = "CommitCounts::is_empty")]
+    pub counts: CommitCounts,
+}
+
 /// What a whole read's observations cost against the per-session cap.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
 pub struct CommitCounts {

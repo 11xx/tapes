@@ -389,6 +389,30 @@ fn pi_reports_the_commits_its_bash_calls_made_and_inspected() {
 }
 
 #[test]
+fn the_library_reports_a_session_s_observations_in_recording_order() {
+    let backend = ClaudeBackend::new(fixtures("claude"));
+    let session = backend
+        .locate("c4000000-0000-4000-8000-000000000001")
+        .unwrap()
+        .unwrap();
+    let all = agent_tapes_core::session_commits(&backend, &session).unwrap();
+    let events = backend.events(&session, usize::MAX).unwrap();
+    let from_events = events
+        .events
+        .iter()
+        .filter_map(|record| record.commits.as_ref())
+        .flat_map(|commits| commits.observations.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(all.observations, from_events);
+    assert!(all.observations.len() > 20);
+    assert_eq!(all.counts, events.commits);
+    assert!(all
+        .observations
+        .windows(2)
+        .all(|pair| pair[0].call.ordinal <= pair[1].call.ordinal));
+}
+
+#[test]
 fn a_failed_commit_and_the_shas_a_result_merely_prints_yield_nothing() {
     for (backend, id) in [
         (

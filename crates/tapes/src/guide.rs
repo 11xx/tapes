@@ -544,7 +544,8 @@ PROBE BEFORE EXPORTING
   most 32 observations and says `truncated` when it saw more; a read holds at
   most 1024, the first, and the events object states `commits` {kept,
   omitted, truncated_calls} when a cap dropped any.
-  Library consumers read `EventRecord::commits`.
+  Library consumers read `EventRecord::commits`, or `session_commits` for a
+  whole session's observations in recording order.
   Each record
   names its source turn with turn_ordinal, the same coordinate show prints;
   ordinal retains that turn coordinate, including for call/result pairs. Pairing is

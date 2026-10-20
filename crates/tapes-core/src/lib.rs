@@ -1611,6 +1611,42 @@ pub fn events_full_for_session(
     })
 }
 
+/// The commits a session made or inspected, from a whole read of its
+/// recording: the observations of every result, in recording order, under the
+/// per-session cap. Harnesses whose recordings `events --full` cannot stream
+/// (OpenCode) refuse.
+pub fn session_commits(
+    backend: &dyn Backend,
+    session: &Session,
+) -> Result<commit_observations::SessionCommits> {
+    #[derive(Default)]
+    struct Collect(Vec<commit_observations::CommitObservation>);
+    impl EventSink for Collect {
+        fn session(&mut self, _: &Session) -> Result<()> {
+            Ok(())
+        }
+        fn record(&mut self, record: event::EventRecord) -> Result<()> {
+            if let Some(commits) = record.commits {
+                self.0.extend(commits.observations);
+            }
+            Ok(())
+        }
+    }
+    let mut sink = Collect::default();
+    let streamed = events_full_for_session(
+        backend,
+        session,
+        usize::MAX,
+        &event::EventFilter::default(),
+        event::EventOptions::default(),
+        &mut sink,
+    )?;
+    Ok(commit_observations::SessionCommits {
+        observations: sink.0,
+        counts: streamed.events.commits,
+    })
+}
+
 /// Keep the recording's first user turn that yields a derived title, the one
 /// turn a whole session's title hint needs from the turns streamed past.
 fn keep_title_turn(title: &mut Option<model::Turn>, turn: &model::Turn) {
