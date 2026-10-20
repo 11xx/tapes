@@ -1322,7 +1322,7 @@ impl GitReader {
         } else {
             crate::parallel::MAX_WORKERS
         };
-        let read = crate::parallel::map_on(workers, &shards, |shard| {
+        let read = crate::parallel::map_waiting(workers, &shards, |shard| {
             if stop.is_some_and(|stop| stop.load(Ordering::Relaxed)) {
                 return Ok(None);
             }
