@@ -86,17 +86,75 @@ pub fn from_environment() -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
-/// Whether the fetched table is due a refresh at `now`: it is absent, or no
-/// source of `record` succeeded within [`FRESH_FOR`]; and the last attempt
-/// is more than [`RETRY_AFTER`] old, or none is recorded.
+/// Whether the fetched table is due a refresh, and why.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(tag = "state", rename_all = "kebab-case")]
+pub enum RefreshDecision {
+    /// Due: there is no table.
+    Absent,
+    /// Due: no source has ever succeeded.
+    NeverSucceeded,
+    /// Due: no source has succeeded since `succeeded_at`, over
+    /// [`FRESH_FOR`] ago.
+    StaleSince { succeeded_at: DateTime<Utc> },
+    /// Not due: a source succeeded at `succeeded_at`, within [`FRESH_FOR`].
+    FreshAt { succeeded_at: DateTime<Utc> },
+    /// Not due: the table is absent or stale, but the last attempt, at
+    /// `attempted_at`, is within [`RETRY_AFTER`].
+    WaitingSince { attempted_at: DateTime<Utc> },
+}
+
+impl RefreshDecision {
+    /// The decision at `now`: fresh when the table exists and a source of
+    /// `record` succeeded within [`FRESH_FOR`]; else waiting when the last
+    /// attempt is within [`RETRY_AFTER`]; else due, for the reason found.
+    pub fn at(record: Option<&FetchRecord>, table_exists: bool, now: DateTime<Utc>) -> Self {
+        let success = record.and_then(FetchRecord::last_success);
+        if let Some(at) = success.filter(|at| table_exists && now - *at < FRESH_FOR) {
+            return Self::FreshAt { succeeded_at: at };
+        }
+        if let Some(record) = record.filter(|record| now - record.attempted_at <= RETRY_AFTER) {
+            return Self::WaitingSince {
+                attempted_at: record.attempted_at,
+            };
+        }
+        match success {
+            _ if !table_exists => Self::Absent,
+            Some(at) => Self::StaleSince { succeeded_at: at },
+            None => Self::NeverSucceeded,
+        }
+    }
+
+    pub fn due(&self) -> bool {
+        matches!(
+            self,
+            Self::Absent | Self::NeverSucceeded | Self::StaleSince { .. }
+        )
+    }
+
+    /// The decision in words.
+    pub fn reason(&self) -> String {
+        match self {
+            Self::Absent => "the data table is absent".to_owned(),
+            Self::NeverSucceeded => "no source has succeeded".to_owned(),
+            Self::StaleSince { succeeded_at } => format!(
+                "no source has succeeded since {}",
+                succeeded_at.to_rfc3339()
+            ),
+            Self::FreshAt { succeeded_at } => {
+                format!("a source succeeded at {}", succeeded_at.to_rfc3339())
+            }
+            Self::WaitingSince { attempted_at } => format!(
+                "the last attempt, at {}, is under an hour old",
+                attempted_at.to_rfc3339()
+            ),
+        }
+    }
+}
+
+/// Whether [`RefreshDecision::at`] finds the fetched table due a refresh.
 pub fn refresh_due(record: Option<&FetchRecord>, table_exists: bool, now: DateTime<Utc>) -> bool {
-    let fresh = table_exists
-        && record.is_some_and(|record| {
-            record
-                .last_success()
-                .is_some_and(|success| now - success < FRESH_FOR)
-        });
-    !fresh && record.is_none_or(|record| now - record.attempted_at > RETRY_AFTER)
+    RefreshDecision::at(record, table_exists, now).due()
 }
 
 /// One place prices are read from.

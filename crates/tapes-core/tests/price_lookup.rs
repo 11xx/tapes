@@ -5,7 +5,9 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use agent_tapes_core::price_update::{refresh_due, FetchRecord, SourceRecord, FETCH_SCHEMA};
+use agent_tapes_core::price_update::{
+    refresh_due, FetchRecord, RefreshDecision, SourceRecord, FETCH_SCHEMA,
+};
 use agent_tapes_core::pricing::{lookup_defaults, PriceLookup, PriceOrigin, PriceTable};
 use chrono::{DateTime, Duration, TimeZone, Utc};
 
@@ -161,4 +163,16 @@ fn a_refresh_is_due_only_past_a_day_of_no_success_and_an_hour_of_no_attempt() {
     assert!(refresh_due(Some(&waited), true, now()));
     assert!(refresh_due(None, false, now()));
     assert!(refresh_due(Some(&fresh), false, now()));
+    assert!(matches!(
+        RefreshDecision::at(Some(&retried), true, now()),
+        RefreshDecision::WaitingSince { .. }
+    ));
+    assert!(matches!(
+        RefreshDecision::at(Some(&waited), true, now()),
+        RefreshDecision::StaleSince { .. }
+    ));
+    assert_eq!(
+        RefreshDecision::at(None, false, now()),
+        RefreshDecision::Absent
+    );
 }

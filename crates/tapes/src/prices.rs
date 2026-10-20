@@ -4,7 +4,7 @@
 use std::path::{Path, PathBuf};
 
 use agent_tapes_core::price_update::{
-    self, FetchLimits, FetchRecord, UpdateReport, FETCH_FILE, TABLE_FILE,
+    self, FetchLimits, FetchRecord, RefreshDecision, UpdateReport, FETCH_FILE, TABLE_FILE,
 };
 use agent_tapes_core::pricing::{self, CategoryPrices, ModelPrice, PriceLookup, PriceTable};
 use anyhow::{anyhow, bail, Result};
@@ -214,6 +214,8 @@ struct Refresh {
     offline: bool,
     /// `TAPES_PRICES` names a table, so no command refreshes.
     named_by_environment: bool,
+    /// The data table's own decision, whatever the two above say.
+    decision: RefreshDecision,
     last_success: Option<DateTime<Utc>>,
     last_attempt: Option<DateTime<Utc>>,
     reason: String,
@@ -273,40 +275,21 @@ fn usage_table() -> UsageTable {
 fn refresh(record: Option<&FetchRecord>, exists: bool, now: DateTime<Utc>) -> Refresh {
     let offline = offline(false);
     let named_by_environment = pricing::environment_table_path().is_some();
-    let due = !offline && !named_by_environment && price_update::refresh_due(record, exists, now);
-    let last_success = record.and_then(FetchRecord::last_success);
-    let last_attempt = record.map(|record| record.attempted_at);
+    let decision = RefreshDecision::at(record, exists, now);
     let reason = if offline {
-        "TAPES_OFFLINE=1 is set".to_owned()
+        format!("TAPES_OFFLINE=1 is set; {}", decision.reason())
     } else if named_by_environment {
-        "TAPES_PRICES names the table".to_owned()
-    } else if !exists {
-        "the data table is absent".to_owned()
+        format!("TAPES_PRICES names the table; {}", decision.reason())
     } else {
-        match last_success {
-            Some(at) if now - at < price_update::FRESH_FOR => {
-                format!("a source succeeded at {}", at.to_rfc3339())
-            }
-            Some(at) => format!("no source has succeeded since {}", at.to_rfc3339()),
-            None => "no source has succeeded".to_owned(),
-        }
-    };
-    let stale = last_success.is_none_or(|at| now - at >= price_update::FRESH_FOR) || !exists;
-    let reason = match last_attempt {
-        Some(at) if stale && !due && !offline && !named_by_environment => {
-            format!(
-                "{reason}; attempted at {}, under an hour ago",
-                at.to_rfc3339()
-            )
-        }
-        _ => reason,
+        decision.reason()
     };
     Refresh {
-        due,
+        due: !offline && !named_by_environment && decision.due(),
         offline,
         named_by_environment,
-        last_success,
-        last_attempt,
+        decision,
+        last_success: record.and_then(FetchRecord::last_success),
+        last_attempt: record.map(|record| record.attempted_at),
         reason,
     }
 }
