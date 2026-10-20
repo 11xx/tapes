@@ -1108,14 +1108,12 @@ impl Billing {
             };
         };
         let terms = match (shown.terms, &shown.plan) {
-            (BillingTerms::Subscription, _) => "a subscription",
-            (BillingTerms::Api, _) => "per-token billing",
-            (BillingTerms::Unestablished, Some(_)) => "a plan",
+            (BillingTerms::Subscription, None) => "a subscription".to_owned(),
+            (BillingTerms::Subscription, Some(plan)) => format!("a subscription, plan `{plan}`"),
+            (BillingTerms::Api, None) => "per-token billing".to_owned(),
+            (BillingTerms::Api, Some(plan)) => format!("per-token billing, plan `{plan}`"),
+            (BillingTerms::Unestablished, Some(plan)) => format!("plan `{plan}`"),
             (BillingTerms::Unestablished, None) => return shown,
-        };
-        let terms = match &shown.plan {
-            Some(plan) => format!("{terms}, plan `{plan}`"),
-            None => terms.to_owned(),
         };
         Self {
             terms: BillingTerms::Unestablished,

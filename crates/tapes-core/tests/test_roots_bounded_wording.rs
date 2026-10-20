@@ -147,9 +147,10 @@ fn pi_user(id: &str, parent: &str, text: &str) -> Value {
                        "timestamp": 1_791_000_000_000_u64}})
 }
 
-/// A pi recording past the bounded read whose one token-carrying event, in
-/// the read's tail, is a request through an API other than the ChatGPT
-/// sign-in's, so neither the window nor the whole recording names a billing.
+/// A pi recording past the bounded read whose token-carrying events, in the
+/// read's tail, are a request through an API other than the ChatGPT
+/// sign-in's and a compaction, which names no provider, so neither the
+/// window nor the whole recording names a billing.
 fn pi_session(store: &Store) {
     let mut lines = vec![
         json!({"type": "session", "version": 3, "id": PI_ID,
@@ -174,6 +175,12 @@ fn pi_session(store: &Store) {
                     "model": "gpt-6-fixture", "usage": pi_usage(100_000, 200_000, 1_000),
                     "stopReason": "stop", "timestamp": 1_791_000_000_000_u64,
                     "responseId": "resp_assistant-1"}}),
+    );
+    lines.push(
+        json!({"type": "compaction", "id": "compaction-1", "parentId": "assistant-1",
+        "timestamp": "2026-10-19T10:35:00.000Z", "summary": "Summary.",
+        "firstKeptEntryId": "assistant-1", "tokensBefore": 300_000, "details": {},
+        "usage": pi_usage(5_000, 0, 500), "fromHook": false}),
     );
     store.write(
         &format!("--fixtures-project--/2026-10-19T10-00-00-000Z_{PI_ID}.jsonl"),
