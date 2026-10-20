@@ -5,9 +5,8 @@
 //! session's work at a place after its last commit there is *uncommitted*,
 //! per worktree and branch, and what no evidence places is *unattributed*,
 //! each part with its [`Reason`]. A session's time in a directory that exists
-//! outside the repository is unattributed as [`Reason::Elsewhere`]: its
-//! requests there are no proximity evidence, and no working-stretch estimate
-//! reaches into it.
+//! outside the repository is unattributed as [`Reason::Elsewhere`]: no
+//! working-stretch estimate reaches into it.
 //!
 //! Evidence is tiered by what establishes it:
 //!
@@ -20,7 +19,8 @@
 //!   it; and a worktree span, the session's stay in a worktree or on a branch
 //!   whose commits are known.
 //! - **estimated**: a request within [`Params::proximity`] of the commit's
-//!   author time; and a revision an inspection names.
+//!   author time, made while the session was at one of the repository's
+//!   places; and a revision an inspection names.
 //!
 //! A sha that names the commit only through its added lines drops a tier.
 //! Evidence for a commit is admitted only inside the commit's window, from
@@ -723,14 +723,23 @@ fn inputs(evidence: &SessionEvidence, facts: &Facts, params: &Params) -> Inputs 
     worktree_spans(evidence, facts, &index, params, &mut inputs);
 
     // Requests near a commit's author time.
-    let elsewhere = evidence.elsewhere();
+    // Only a request the session made inside the repository is near a
+    // commit in any sense that matters.
+    let inside: Vec<Piece> = stays(evidence, facts, params)
+        .into_iter()
+        .filter(|stay| stay.place.is_some())
+        .map(|stay| Piece {
+            from: stay.from,
+            to: stay.to,
+        })
+        .collect();
     let timed: Vec<Instant> = if evidence.inherits {
         Vec::new()
     } else {
         evidence
             .timed()
             .into_iter()
-            .filter(|at| !elsewhere.iter().any(|piece| piece.holds(*at)))
+            .filter(|at| inside.iter().any(|piece| piece.holds(*at)))
             .collect()
     };
     for commit in facts.commits.iter().filter(|commit| !commit.merge) {

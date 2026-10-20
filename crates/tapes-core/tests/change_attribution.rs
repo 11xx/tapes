@@ -732,6 +732,7 @@ const LONG: &str = "c1a00000-0000-4000-8000-000000000009";
 const ON_MAIN: &str = "c1a00000-0000-4000-8000-00000000000a";
 const INTEGRATOR: &str = "c1a00000-0000-4000-8000-00000000000b";
 const VISITOR: &str = "c1a00000-0000-4000-8000-00000000000c";
+const UNPLACED: &str = "c1a00000-0000-4000-8000-00000000000d";
 
 /// An interactive session in the main checkout: on `feat-a` it edits and
 /// commits c1 at 10:08 and talks on; at 10:12 it switches to `feat-b`, where
@@ -1055,6 +1056,45 @@ fn visitor(sandbox: &Sandbox) -> Names {
     claude.reply(at("10:20:00"));
     claude.write(sandbox, &other);
     names(&[("v1", &v1)])
+}
+
+/// A Claude session outside the repository whose first requests, at 09:00,
+/// lie before more places than a read keeps: where it was then is unknown.
+/// w0 is committed at 09:15 by no session; at 10:30 the session inspects w1
+/// in the repository from outside it, too briefly to count as being there.
+fn unplaced(sandbox: &Sandbox) -> Names {
+    let repo = sandbox.repo();
+    let other = sandbox.dir("other");
+    for side in ["a", "b"] {
+        fs::create_dir_all(other.join(side)).unwrap();
+    }
+    let w0 = sandbox.commit(&repo, at("09:15:00"), "w.rs", &refs(&lines("chi")), "w0");
+    let w1 = sandbox.commit(&repo, at("10:20:00"), "w.rs", &refs(&lines("psi")), "w1");
+
+    let mut claude = Claude::lead(UNPLACED, &other, "main");
+    claude.step_into(&other, None);
+    claude.prompt(at("09:00:00"));
+    claude.reply(at("09:00:10"));
+    claude.reply(at("09:00:20"));
+    let mut when = at("09:01:00");
+    for turn in 0..1100 {
+        let side = if turn % 2 == 0 { "a" } else { "b" };
+        claude.step_into(&other.join(side), None);
+        claude.prompt(when);
+        when += Duration::seconds(1);
+    }
+    claude.step_into(&other, None);
+    claude.bash(
+        at("10:30:00"),
+        &format!("git -C {} show {}", repo.display(), short(&w1)),
+        &format!("commit {w1}\nAuthor: Fixture Author <author@example.invalid>\n\n    w1\n"),
+    );
+    claude.step_into(&other.join("a"), None);
+    for time in ["10:31:00", "10:32:00", "10:33:00", "10:34:00", "10:35:00"] {
+        claude.reply(at(time));
+    }
+    claude.write(sandbox, &other);
+    names(&[("w0", &w0), ("w1", &w1)])
 }
 
 /// A pi session in a live worktree on `lane-u` commits u1 at 16:05 and works
@@ -1473,6 +1513,35 @@ fn work_outside_the_repository_is_elsewhere() {
         requests(session, &names),
         expect(&[("v1", 2), ("unattributed elsewhere", 5)])
     );
+}
+
+/// Claim: a request is proximity evidence only while the session is known
+/// to be at one of the repository's places; where a read cannot say where
+/// the session was, nearness to a commit places nothing. Rejects proximity
+/// from requests whose place is unknown, which gives w0 a session that
+/// never worked on it.
+#[test]
+fn proximity_needs_the_session_inside_the_repository() {
+    let sandbox = Sandbox::new();
+    let names = unplaced(&sandbox);
+    let attribution = sandbox.day();
+    let session = session(&attribution, UNPLACED);
+    assert!(
+        !session
+            .partition
+            .evidence
+            .iter()
+            .any(|admitted| admitted.kind == Kind::Proximity),
+        "{:?}",
+        session.partition.evidence
+    );
+    let held = requests(session, &names);
+    assert!(!held.contains_key("w0"), "{held:?}");
+    assert!(session
+        .partition
+        .evidence
+        .iter()
+        .any(|admitted| admitted.kind == Kind::Inspected));
 }
 
 /// The amount each commit holds across every session.
