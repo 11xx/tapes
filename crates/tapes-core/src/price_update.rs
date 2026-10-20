@@ -9,10 +9,12 @@
 //! which then contributes nothing and leaves its earlier rows as they were.
 //!
 //! The vendors' pages show only current prices, so the table keeps history
-//! as validity windows. A fetched price equal to the row in effect keeps
-//! that row; a different one closes the row at the update instant and opens
+//! as validity windows. A fetched price equal to the row in effect, from
+//! the same source, keeps that row; a different one closes the row at the update instant and opens
 //! a new one there; a new id gets a row open backwards, so it also prices
-//! earlier sessions. Rows are never dropped.
+//! earlier sessions. Rows are never dropped. An official price also
+//! prices every stored dated form of its id, so a row another source wrote
+//! for a dated id does not outlive it.
 //!
 //! Usage pricing reads this table beneath the user's config table (see
 //! [`crate::pricing::lookup`]). A command that prices refreshes it first
@@ -699,6 +701,7 @@ pub fn merge(
             Some(position)
                 if rows[position].per_million == fresh.per_million
                     && rows[position].long_context == fresh.long_context
+                    && rows[position].source == fresh.source
                     && rows[position].time_of_day.is_empty() =>
             {
                 changes.unchanged += 1;
@@ -890,6 +893,23 @@ pub fn fetch(url: &str, limits: FetchLimits) -> Result<String> {
     String::from_utf8(stdout).with_context(|| format!("{url} is not UTF-8"))
 }
 
+/// An entry for each id of `dated` that is a dated form of an id `fetched`
+/// prices, at that price, so the official price supersedes a row another
+/// source wrote for the dated id.
+fn dated_forms(fetched: &[Fetched], dated: &[String]) -> Vec<Fetched> {
+    dated
+        .iter()
+        .filter_map(|id| {
+            let undated = pricing::undated(id)?;
+            let official = fetched.iter().find(|price| price.id == undated)?;
+            Some(Fetched {
+                id: id.clone(),
+                ..official.clone()
+            })
+        })
+        .collect()
+}
+
 /// Write `contents` to `path` through a temporary file in its directory.
 fn write_atomically(path: &Path, contents: &[u8]) -> Result<()> {
     let directory = path.parent().expect("a data file has a directory");
@@ -959,6 +979,20 @@ pub fn update(
         });
         parsed.push((source, result));
     }
+    let dated: Vec<String> = rows
+        .iter()
+        .map(|row| row.id.clone())
+        .filter(|id| pricing::undated(id).is_some())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
+    for (source, result) in &mut parsed {
+        if let Ok(fetched) = result {
+            counts.insert(source.name, fetched.len());
+            fetched.extend(dated_forms(fetched, &dated));
+        }
+    }
     let official: BTreeSet<String> = parsed
         .iter()
         .filter_map(|(_, result)| result.as_ref().ok())
@@ -987,6 +1021,7 @@ pub fn update(
             Ok(fetched) => {
                 let (merged, changes) = merge(&rows, &fetched, now);
                 rows = merged;
+                let models = counts.get(source.name).copied().unwrap_or(fetched.len());
                 record.sources.insert(
                     source.name.to_owned(),
                     SourceRecord {
@@ -994,7 +1029,7 @@ pub fn update(
                         ok: true,
                         fetched_at: Some(now),
                         error: None,
-                        models: fetched.len(),
+                        models,
                     },
                 );
                 SourceOutcome {
@@ -1002,7 +1037,7 @@ pub fn update(
                     url: source.url.to_owned(),
                     ok: true,
                     error: None,
-                    models: fetched.len(),
+                    models,
                     changes,
                 }
             }

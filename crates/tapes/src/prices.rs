@@ -23,14 +23,15 @@ pub enum PricesCommand {
     /// `curl` and update the table at `$XDG_DATA_HOME/tapes/prices.toml`
     /// (`~/.local/share/tapes/prices.toml` when that is unset), a
     /// tapes-price-table/2 file. History is kept as validity windows: a price
-    /// equal to the row in effect keeps it; a changed price closes that row
-    /// now and opens a new one; a new id's row has no start, so it also
-    /// prices earlier sessions. Rows are never dropped. A source that fails
-    /// to fetch or parse contributes nothing and keeps its earlier rows; the
-    /// others still update, each outcome is reported, and the command exits
-    /// non-zero. `prices-fetch.json` beside the table (tapes-price-fetch/1)
-    /// records the attempt and each source's last success. OpenAI's 30m and
-    /// 12h cache writes have no tapes category and are left unpriced.
+    /// equal to the row in effect, from the same source, keeps it; a changed
+    /// price or source closes that row now and opens a new one; a new id's
+    /// row has no start, so it also prices earlier sessions. Rows are never
+    /// dropped. A source that fails to fetch or parse contributes nothing and
+    /// keeps its earlier rows; the others still update, each outcome is
+    /// reported, and the command exits non-zero. `prices-fetch.json` beside
+    /// the table (tapes-price-fetch/1) records the attempt and each source's
+    /// last success. OpenAI's 30m and 12h cache writes have no tapes category
+    /// and are left unpriced.
     Update {
         /// Read `anthropic.md`, `openai.md` and `litellm.json` from DIR
         /// instead of fetching; a missing file fails that source. Without

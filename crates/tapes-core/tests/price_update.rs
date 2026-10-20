@@ -532,3 +532,44 @@ fn an_update_that_would_outgrow_the_read_limit_writes_nothing() {
     assert_eq!(fs::read_to_string(&table).unwrap(), text);
     assert!(!data.path().join("prices-fetch.json").exists());
 }
+
+#[test]
+fn an_official_price_supersedes_a_fallback_row_for_its_dated_form() {
+    // Claim: once Anthropic prices `claude-sonnet-4-5`, the row in effect for
+    // `claude-sonnet-4-5-20250929` carries Anthropic's price and source, and
+    // the earlier LiteLLM row stays as history. Rejects the LiteLLM row an
+    // update wrote while Anthropic's page failed pricing the dated id forever.
+    let data = tempfile::tempdir().unwrap();
+    let copies = copied_sources();
+    let litellm = copies.path().join("litellm.json");
+    let text = fs::read_to_string(&litellm).unwrap();
+    fs::write(
+        &litellm,
+        text.replacen(
+            "\"input_cost_per_token\": 3e-06,",
+            "\"input_cost_per_token\": 2.5e-06,",
+            1,
+        ),
+    )
+    .unwrap();
+    let anthropic = copies.path().join("anthropic.md");
+    let kept = fs::read(&anthropic).unwrap();
+    fs::remove_file(&anthropic).unwrap();
+    let limits = price_update::FetchLimits::UPDATE;
+    price_update::update(data.path(), Some(copies.path()), limits, at(1)).unwrap();
+    fs::write(&anthropic, kept).unwrap();
+    price_update::update(data.path(), Some(copies.path()), limits, at(2)).unwrap();
+    let table = PriceTable::read(&data.path().join("prices.toml")).unwrap();
+    let dated = "claude-sonnet-4-5-20250929";
+    let rows: Vec<_> = table.rows(dated).filter(|row| row.id == dated).collect();
+    let current = rows
+        .iter()
+        .find(|row| row.effective_until.is_none())
+        .unwrap();
+    assert_eq!(current.source, ANTHROPIC.url);
+    assert_eq!(current.per_million.uncached_input, Some(3.0));
+    assert_eq!(current.effective_from, Some(at(2)));
+    assert!(rows
+        .iter()
+        .any(|row| row.source == "LiteLLM" && row.effective_until == Some(at(2))));
+}

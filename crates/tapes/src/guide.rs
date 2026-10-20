@@ -1703,13 +1703,14 @@ KEEP A PRICE TABLE
   already fetched still prices.
 
   The pages show only current prices, so the table keeps history as
-  validity windows. A fetched price equal to the row in effect keeps that
-  row; a different one closes it at the update instant (`effective_until`)
-  and opens a new row there (`effective_from`), so last month's sessions
-  keep last month's price; an id seen for the first time gets a row with no
-  start, which also prices earlier sessions. Rows are never dropped, and an
-  id a fetch no longer lists keeps its rows. Each row records the date it
-  was read (`effective`) and its source: the page's URL, or LiteLLM.
+  validity windows. A fetched price equal to the row in effect, from the
+  same source, keeps that row; a different one closes it at the update
+  instant (`effective_until`) and opens a new row there
+  (`effective_from`), so last month's sessions keep last month's price; an
+  id seen for the first time gets a row with no start, which also prices
+  earlier sessions. Rows are never dropped, and an id a fetch no longer
+  lists keeps its rows. Each row records the date it was read
+  (`effective`) and its source: the page's URL, or LiteLLM.
 
   Each source fails closed. A page whose table no longer has the shape
   tapes reads (a changed header, an unparseable price, a parenthetical it
@@ -1719,17 +1720,20 @@ KEEP A PRICE TABLE
   still update, every outcome is reported, and the command exits non-zero.
   `--json` reports the outcomes as tapes-prices-update/1.
 
-  Anthropic's `## Model pricing` table gives every category; a model priced
-  in two rows, for prompts up to and over a size, gets one row whose
-  long-context term starts above that size, counting uncached input, cache
-  reads and cache writes. OpenAI's `### Standard pricing data` tables give
-  uncached input, cache reads and output; long-context columns give a term
-  above the size the page states (272K), counting uncached input and cache
-  reads. OpenAI's 30m and 12h cache writes have no tapes category and are
-  left unpriced, and those rows' source says so. LiteLLM gives bare chat
-  model ids whose prices have no `_above_` tier, never an id an official
-  page priced nor a dated form (`-YYYYMMDD`) of one, which the official row
-  prices instead.
+  Anthropic's `## Model pricing` table gives every category; a model
+  priced in two rows, for prompts up to and over a size, gets one row
+  whose long-context term starts above that size, counting uncached input,
+  cache reads and cache writes. OpenAI's `### Standard pricing data`
+  tables give uncached input, cache reads and output; long-context columns
+  give a term above the size the page states (272K), counting uncached
+  input and cache reads. OpenAI's 30m and 12h cache writes have no tapes
+  category and are left unpriced, and those rows' source says so. LiteLLM
+  gives bare chat model ids whose prices have no `_above_` tier, never an
+  id an official page priced nor a dated form (`-YYYYMMDD`) of one, which
+  the official row prices instead. When an official page prices an id,
+  every dated form of it the table holds takes that price and source too,
+  so a LiteLLM row written while the page failed does not outlive the
+  official price.
 
   Any table, not only this one, answers a recorded id ending in `-YYYYMMDD`
   that no row names with the row named by the id without that date, so
