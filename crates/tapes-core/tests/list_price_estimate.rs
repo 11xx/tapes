@@ -411,8 +411,8 @@ fn an_invalid_table_refuses_naming_the_entry() {
 }
 
 /// Claim: the lookup takes the named table, then `TAPES_PRICES`, then the
-/// default location; a named or environment table that is missing or
-/// invalid refuses, an invalid default table is reported without refusing,
+/// config and data tables; a named or environment table that is missing or
+/// invalid refuses, an invalid config table is reported without refusing,
 /// and no table is absence. Rejects falling through from a broken explicit
 /// table to another one.
 #[test]
@@ -425,13 +425,14 @@ fn the_lookup_refuses_an_explicit_table_and_reports_a_default_one() {
     );
     let bad = scratch.write("bad.toml", "schema = \"tapes-price-table/1\"\n");
     std::env::set_var("XDG_CONFIG_HOME", scratch.0.join("config"));
+    std::env::set_var("XDG_DATA_HOME", scratch.0.join("data"));
     std::env::remove_var(pricing::PRICES_ENV);
     assert!(matches!(
-        pricing::lookup(None).unwrap(),
+        pricing::lookup(None).unwrap().found,
         PriceLookup::Absent
     ));
     assert!(matches!(
-        pricing::lookup(Some(&good)).unwrap(),
+        pricing::lookup(Some(&good)).unwrap().found,
         PriceLookup::Loaded(loaded) if loaded.origin == pricing::PriceOrigin::Named
     ));
     assert!(pricing::lookup(Some(&bad)).is_err());
@@ -440,16 +441,17 @@ fn the_lookup_refuses_an_explicit_table_and_reports_a_default_one() {
     assert!(pricing::lookup(None).is_err());
     std::env::set_var(pricing::PRICES_ENV, &good);
     assert!(matches!(
-        pricing::lookup(None).unwrap(),
+        pricing::lookup(None).unwrap().found,
         PriceLookup::Loaded(loaded) if loaded.origin == pricing::PriceOrigin::Environment
     ));
     std::env::remove_var(pricing::PRICES_ENV);
     scratch.write("config/tapes/prices.toml", "schema = 1\n");
     assert!(matches!(
-        pricing::lookup(None).unwrap(),
-        PriceLookup::DefaultInvalid { .. }
+        pricing::lookup(None).unwrap().found,
+        PriceLookup::ConfigInvalid { .. }
     ));
     std::env::remove_var("XDG_CONFIG_HOME");
+    std::env::remove_var("XDG_DATA_HOME");
 }
 
 /// Claim: span figures are priced like whole ones, so the runs of a resumed

@@ -303,7 +303,13 @@ fn a_changed_header_fails_its_source_keeps_its_rows_and_the_others_update() {
     // failure stopping every source.
     let copy = copied_sources();
     let data = tempfile::tempdir().unwrap();
-    let first = price_update::update(data.path(), Some(copy.path()), at(1)).unwrap();
+    let first = price_update::update(
+        data.path(),
+        Some(copy.path()),
+        price_update::FetchLimits::UPDATE,
+        at(1),
+    )
+    .unwrap();
     assert!(!first.failed(), "{:?}", first.sources);
 
     let page = fs::read_to_string(copy.path().join("anthropic.md")).unwrap();
@@ -318,7 +324,13 @@ fn a_changed_header_fails_its_source_keeps_its_rows_and_the_others_update() {
         openai.replace("| o3 | $2.00 |", "| o3 | $1.00 |"),
     )
     .unwrap();
-    let second = price_update::update(data.path(), Some(copy.path()), at(10)).unwrap();
+    let second = price_update::update(
+        data.path(),
+        Some(copy.path()),
+        price_update::FetchLimits::UPDATE,
+        at(10),
+    )
+    .unwrap();
     assert!(second.failed());
     let anthropic = &second.sources[0];
     assert_eq!(anthropic.name, "anthropic");

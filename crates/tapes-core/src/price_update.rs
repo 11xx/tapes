@@ -13,6 +13,10 @@
 //! that row; a different one closes the row at the update instant and opens
 //! a new one there; a new id gets a row open backwards, so it also prices
 //! earlier sessions. Rows are never dropped.
+//!
+//! Usage pricing reads this table beneath the user's config table (see
+//! [`crate::pricing::lookup`]). A command that prices refreshes it first
+//! when [`refresh_due`] holds, under [`FetchLimits::REFRESH`].
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -41,8 +45,59 @@ pub const LITELLM_SOURCE: &str = "LiteLLM";
 const SOURCE_BYTES: u64 = 16 * 1024 * 1024;
 /// Bytes of `curl`'s own error kept to name what failed.
 const ERROR_BYTES: u64 = 2 * 1024;
-/// How long `curl` may run, beyond its own `--max-time`, before it is killed.
-const TIMEOUT: Duration = Duration::from_secs(45);
+/// The environment variable naming a directory of copies every update
+/// reads in place of fetching, when it is given no other.
+pub const FROM_ENV: &str = "TAPES_PRICES_FROM";
+/// How long a fetched table stays fresh after a source last succeeded.
+pub const FRESH_FOR: chrono::TimeDelta = chrono::TimeDelta::hours(24);
+/// How long after an attempt a stale table waits before the next one.
+pub const RETRY_AFTER: chrono::TimeDelta = chrono::TimeDelta::hours(1);
+
+/// How long one source's fetch may take.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FetchLimits {
+    /// `curl --connect-timeout`, when it is given one.
+    pub connect: Option<Duration>,
+    /// `curl --max-time`.
+    pub transfer: Duration,
+    /// How long `curl` may run before it is killed.
+    pub kill: Duration,
+}
+
+impl FetchLimits {
+    /// The limits of `tapes prices update`.
+    pub const UPDATE: Self = Self {
+        connect: None,
+        transfer: Duration::from_secs(30),
+        kill: Duration::from_secs(45),
+    };
+    /// The limits of the refresh a pricing command runs before it prices.
+    pub const REFRESH: Self = Self {
+        connect: Some(Duration::from_secs(5)),
+        transfer: Duration::from_secs(10),
+        kill: Duration::from_secs(15),
+    };
+}
+
+/// The directory of copies `TAPES_PRICES_FROM` names, when it names one.
+pub fn from_environment() -> Option<PathBuf> {
+    std::env::var_os(FROM_ENV)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+}
+
+/// Whether the fetched table is due a refresh at `now`: it is absent, or no
+/// source of `record` succeeded within [`FRESH_FOR`]; and the last attempt
+/// is more than [`RETRY_AFTER`] old, or none is recorded.
+pub fn refresh_due(record: Option<&FetchRecord>, table_exists: bool, now: DateTime<Utc>) -> bool {
+    let fresh = table_exists
+        && record.is_some_and(|record| {
+            record
+                .last_success()
+                .is_some_and(|success| now - success < FRESH_FOR)
+        });
+    !fresh && record.is_none_or(|record| now - record.attempted_at > RETRY_AFTER)
+}
 
 /// One place prices are read from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -643,6 +698,14 @@ impl FetchRecord {
             .ok()
             .filter(|record| record.schema == FETCH_SCHEMA)
     }
+
+    /// When any source last succeeded.
+    pub fn last_success(&self) -> Option<DateTime<Utc>> {
+        self.sources
+            .values()
+            .filter_map(|source| source.fetched_at)
+            .max()
+    }
 }
 
 /// How one source fared in an update.
@@ -674,7 +737,7 @@ impl UpdateReport {
 }
 
 /// Read one source, from `from` when given, else over the network.
-fn read_source(source: &Source, from: Option<&Path>) -> Result<String> {
+fn read_source(source: &Source, from: Option<&Path>, limits: FetchLimits) -> Result<String> {
     match from {
         Some(directory) => {
             let path = directory.join(source.file);
@@ -686,13 +749,24 @@ fn read_source(source: &Source, from: Option<&Path>) -> Result<String> {
             }
             String::from_utf8(bytes).with_context(|| format!("{} is not UTF-8", path.display()))
         }
-        None => fetch(source.url),
+        None => fetch(source.url, limits),
     }
 }
 
-/// Fetch `url` with `curl`, over HTTPS only, bounded in time and size.
-pub fn fetch(url: &str) -> Result<String> {
+/// Fetch `url` with `curl`, over HTTPS only, bounded by `limits` and in
+/// size.
+pub fn fetch(url: &str, limits: FetchLimits) -> Result<String> {
+    let connect: Vec<String> = limits
+        .connect
+        .map(|connect| {
+            vec![
+                "--connect-timeout".to_owned(),
+                connect.as_secs().to_string(),
+            ]
+        })
+        .unwrap_or_default();
     let mut child = match Command::new("curl")
+        .args(&connect)
         .args([
             "--proto",
             "=https",
@@ -703,7 +777,7 @@ pub fn fetch(url: &str) -> Result<String> {
             "--silent",
             "--show-error",
             "--max-time",
-            "30",
+            &limits.transfer.as_secs().to_string(),
             "--max-filesize",
             &SOURCE_BYTES.to_string(),
             url,
@@ -729,12 +803,12 @@ pub fn fetch(url: &str) -> Result<String> {
         if let Some(status) = child.try_wait()? {
             break status;
         }
-        if started.elapsed() > TIMEOUT {
+        if started.elapsed() > limits.kill {
             let _ = child.kill();
             let _ = child.wait();
             bail!(
                 "curl gave no answer for {url} in {} seconds",
-                TIMEOUT.as_secs()
+                limits.kill.as_secs()
             );
         }
         std::thread::sleep(Duration::from_millis(20));
@@ -771,10 +845,15 @@ fn write_atomically(path: &Path, contents: &[u8]) -> Result<()> {
 }
 
 /// Update the table in `directory` from every source, read from `from`
-/// when given. A source that fails contributes nothing; the others still
-/// update. An existing table that cannot be read refuses the whole update,
-/// so nothing it holds is lost.
-pub fn update(directory: &Path, from: Option<&Path>, now: DateTime<Utc>) -> Result<UpdateReport> {
+/// when given, else fetched within `limits`. A source that fails
+/// contributes nothing; the others still update. An existing table that
+/// cannot be read refuses the whole update, so nothing it holds is lost.
+pub fn update(
+    directory: &Path,
+    from: Option<&Path>,
+    limits: FetchLimits,
+    now: DateTime<Utc>,
+) -> Result<UpdateReport> {
     let now = now.trunc_subsecs(0);
     let table_path = directory.join(TABLE_FILE);
     let record_path = directory.join(FETCH_FILE);
@@ -787,7 +866,7 @@ pub fn update(directory: &Path, from: Option<&Path>, now: DateTime<Utc>) -> Resu
     let previous = FetchRecord::read(&record_path);
     let mut parsed: Vec<(Source, Result<Vec<Fetched>>)> = Vec::new();
     for source in [ANTHROPIC, OPENAI] {
-        let result = read_source(&source, from).and_then(|text| match source.name {
+        let result = read_source(&source, from, limits).and_then(|text| match source.name {
             "anthropic" => parse_anthropic(&text, source.url),
             _ => parse_openai(&text, source.url),
         });
@@ -804,7 +883,8 @@ pub fn update(directory: &Path, from: Option<&Path>, now: DateTime<Utc>) -> Resu
                 .map(|row| row.id.clone()),
         )
         .collect();
-    let litellm = read_source(&LITELLM, from).and_then(|text| parse_litellm(&text, &official));
+    let litellm =
+        read_source(&LITELLM, from, limits).and_then(|text| parse_litellm(&text, &official));
     parsed.push((LITELLM, litellm));
     let mut outcomes = Vec::new();
     let mut record = FetchRecord {

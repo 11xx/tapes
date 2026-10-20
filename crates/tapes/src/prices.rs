@@ -3,14 +3,19 @@
 
 use std::path::{Path, PathBuf};
 
-use agent_tapes_core::price_update::{self, FetchRecord, UpdateReport, FETCH_FILE, TABLE_FILE};
+use agent_tapes_core::price_update::{
+    self, FetchLimits, FetchRecord, UpdateReport, FETCH_FILE, TABLE_FILE,
+};
 use agent_tapes_core::pricing::{self, CategoryPrices, ModelPrice, PriceLookup, PriceTable};
 use anyhow::{anyhow, bail, Result};
 use chrono::{DateTime, Utc};
 use clap::Subcommand;
 use serde::Serialize;
 
-pub const SHOW_SCHEMA: &str = "tapes-prices-show/1";
+pub const SHOW_SCHEMA: &str = "tapes-prices-show/2";
+/// The environment variable that, set to `1`, keeps pricing commands from
+/// refreshing the fetched table.
+pub const OFFLINE_ENV: &str = "TAPES_OFFLINE";
 
 #[derive(Subcommand)]
 pub enum PricesCommand {
@@ -28,19 +33,23 @@ pub enum PricesCommand {
     /// 12h cache writes have no tapes category and are left unpriced.
     Update {
         /// Read `anthropic.md`, `openai.md` and `litellm.json` from DIR
-        /// instead of fetching; a missing file fails that source.
+        /// instead of fetching; a missing file fails that source. Without
+        /// it, the directory TAPES_PRICES_FROM names, if any.
         #[arg(long, value_name = "DIR")]
         from: Option<PathBuf>,
         /// Print the outcome as JSON, tapes-prices-update/1.
         #[arg(long)]
         json: bool,
     },
-    /// Show which table usage pricing reads and how it was chosen, the data
-    /// table's path, each source's last fetch, and per model its rates in
-    /// effect now, any long-context term, and its source. With MODEL, every
-    /// row naming it — by id, alias, or as a dated id `-YYYYMMDD` whose
-    /// undated id a row names — with its validity window. JSON is
-    /// tapes-prices-show/1.
+    /// Show which table usage pricing reads and how it was chosen —
+    /// `named`, `environment`, `config`, `data`, `config+data`, `absent`,
+    /// `config-invalid` or `invalid` — with any table it set aside, the
+    /// config and data tables' paths, each source's last fetch, whether a
+    /// pricing command would refresh the data table now and why, and per
+    /// model its rates in effect now, any long-context term, and its source.
+    /// With MODEL, every row naming it — by id, alias, or as a dated id
+    /// `-YYYYMMDD` whose undated id a row names — with its validity window.
+    /// Rows are the data table's. JSON is tapes-prices-show/2.
     Show {
         /// A model id as a harness records it.
         model: Option<String>,
@@ -63,8 +72,70 @@ fn data_directory() -> Result<PathBuf> {
     })
 }
 
+/// Whether `--offline` or `TAPES_OFFLINE=1` keeps a command from refreshing.
+pub fn offline(flag: bool) -> bool {
+    flag || std::env::var_os(OFFLINE_ENV).is_some_and(|value| value == "1")
+}
+
+/// Refresh the data table before a command prices with it: when neither
+/// `named` nor `TAPES_PRICES` names a table, the command is not offline, and
+/// [`price_update::refresh_due`] holds. Never fails; a refresh that does is
+/// one stderr warning.
+pub fn refresh_before_pricing(named: Option<&Path>, offline_flag: bool) {
+    if named.is_some() || pricing::environment_table_path().is_some() || offline(offline_flag) {
+        return;
+    }
+    let Some(directory) = price_update::data_directory() else {
+        return;
+    };
+    let now = Utc::now();
+    let record = FetchRecord::read(&directory.join(FETCH_FILE));
+    if !price_update::refresh_due(record.as_ref(), directory.join(TABLE_FILE).exists(), now) {
+        return;
+    }
+    let from = price_update::from_environment();
+    let failures: Vec<String> =
+        match price_update::update(&directory, from.as_deref(), FetchLimits::REFRESH, now) {
+            Ok(report) => report
+                .sources
+                .iter()
+                .filter(|source| !source.ok)
+                .map(|source| {
+                    format!(
+                        "{}: {}",
+                        source.name,
+                        source.error.as_deref().unwrap_or_default()
+                    )
+                })
+                .collect(),
+            Err(error) => vec![format!("{error:#}")],
+        };
+    if failures.is_empty() {
+        return;
+    }
+    let fetched = FetchRecord::read(&directory.join(FETCH_FILE))
+        .and_then(|record| record.last_success())
+        .filter(|_| directory.join(TABLE_FILE).exists());
+    eprintln!(
+        "warning: prices not refreshed ({}); {}",
+        failures.join("; ").replace('\n', " "),
+        fetched.map_or("no fetched table".to_owned(), |at| format!(
+            "using the table fetched {}",
+            at.date_naive()
+        ))
+    );
+}
+
 fn update(from: Option<&Path>, json: bool) -> Result<()> {
-    let report = price_update::update(&data_directory()?, from, Utc::now())?;
+    let from = from
+        .map(Path::to_path_buf)
+        .or_else(price_update::from_environment);
+    let report = price_update::update(
+        &data_directory()?,
+        from.as_deref(),
+        FetchLimits::UPDATE,
+        Utc::now(),
+    )?;
     if json {
         println!("{}", serde_json::to_string(&report)?);
     } else {
@@ -108,13 +179,23 @@ fn render_update(report: &UpdateReport) -> String {
 /// The table usage pricing reads.
 #[derive(Serialize)]
 struct UsageTable {
-    /// `named`, `environment`, `default`, `absent`, `default-invalid` or
-    /// `invalid`.
+    /// `named`, `environment`, `config`, `data`, `config+data`, `absent`,
+    /// `config-invalid` or `invalid`.
     chosen_by: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    path: Option<PathBuf>,
+    /// The files the table was read from.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    paths: Vec<PathBuf>,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
+    /// Each table the lookup set aside, and why.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    warnings: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct ConfigTable {
+    path: Option<PathBuf>,
+    exists: bool,
 }
 
 #[derive(Serialize)]
@@ -125,12 +206,27 @@ struct DataTable {
     error: Option<String>,
 }
 
+/// Whether a pricing command would refresh the data table now, and why.
+#[derive(Serialize)]
+struct Refresh {
+    due: bool,
+    /// `TAPES_OFFLINE=1` is set, so no command refreshes.
+    offline: bool,
+    /// `TAPES_PRICES` names a table, so no command refreshes.
+    named_by_environment: bool,
+    last_success: Option<DateTime<Utc>>,
+    last_attempt: Option<DateTime<Utc>>,
+    reason: String,
+}
+
 #[derive(Serialize)]
 struct Shown {
     schema: &'static str,
     usage_table: UsageTable,
+    config_table: ConfigTable,
     data_table: DataTable,
     fetch: Option<FetchRecord>,
+    refresh: Refresh,
     #[serde(skip_serializing_if = "Option::is_none")]
     model: Option<String>,
     /// With a model, every row naming it; else each id's row in effect now.
@@ -139,29 +235,79 @@ struct Shown {
 
 fn usage_table() -> UsageTable {
     match pricing::lookup(None) {
-        Ok(PriceLookup::Loaded(loaded)) => UsageTable {
-            chosen_by: serde_json::to_value(loaded.origin)
-                .ok()
-                .and_then(|origin| origin.as_str().map(str::to_owned))
-                .unwrap_or_default(),
-            path: Some(loaded.path),
-            error: None,
-        },
-        Ok(PriceLookup::Absent) => UsageTable {
-            chosen_by: "absent".to_owned(),
-            path: None,
-            error: None,
-        },
-        Ok(PriceLookup::DefaultInvalid { path, error }) => UsageTable {
-            chosen_by: "default-invalid".to_owned(),
-            path: Some(path),
-            error: Some(error),
-        },
+        Ok(lookup) => {
+            let warnings = lookup.warnings;
+            match lookup.found {
+                PriceLookup::Loaded(loaded) => UsageTable {
+                    chosen_by: serde_json::to_value(loaded.origin)
+                        .ok()
+                        .and_then(|origin| origin.as_str().map(str::to_owned))
+                        .unwrap_or_default(),
+                    paths: loaded.paths,
+                    error: None,
+                    warnings,
+                },
+                PriceLookup::Absent => UsageTable {
+                    chosen_by: "absent".to_owned(),
+                    paths: Vec::new(),
+                    error: None,
+                    warnings,
+                },
+                PriceLookup::ConfigInvalid { path, error } => UsageTable {
+                    chosen_by: "config-invalid".to_owned(),
+                    paths: vec![path],
+                    error: Some(error),
+                    warnings,
+                },
+            }
+        }
         Err(error) => UsageTable {
             chosen_by: "invalid".to_owned(),
-            path: None,
+            paths: Vec::new(),
             error: Some(format!("{error:#}")),
+            warnings: Vec::new(),
         },
+    }
+}
+
+fn refresh(record: Option<&FetchRecord>, exists: bool, now: DateTime<Utc>) -> Refresh {
+    let offline = offline(false);
+    let named_by_environment = pricing::environment_table_path().is_some();
+    let due = !offline && !named_by_environment && price_update::refresh_due(record, exists, now);
+    let last_success = record.and_then(FetchRecord::last_success);
+    let last_attempt = record.map(|record| record.attempted_at);
+    let reason = if offline {
+        "TAPES_OFFLINE=1 is set".to_owned()
+    } else if named_by_environment {
+        "TAPES_PRICES names the table".to_owned()
+    } else if !exists {
+        "the data table is absent".to_owned()
+    } else {
+        match last_success {
+            Some(at) if now - at < price_update::FRESH_FOR => {
+                format!("a source succeeded at {}", at.to_rfc3339())
+            }
+            Some(at) => format!("no source has succeeded since {}", at.to_rfc3339()),
+            None => "no source has succeeded".to_owned(),
+        }
+    };
+    let stale = last_success.is_none_or(|at| now - at >= price_update::FRESH_FOR) || !exists;
+    let reason = match last_attempt {
+        Some(at) if stale && !due && !offline && !named_by_environment => {
+            format!(
+                "{reason}; attempted at {}, under an hour ago",
+                at.to_rfc3339()
+            )
+        }
+        _ => reason,
+    };
+    Refresh {
+        due,
+        offline,
+        named_by_environment,
+        last_success,
+        last_attempt,
+        reason,
     }
 }
 
@@ -193,15 +339,22 @@ fn show(model: Option<&str>, json: bool) -> Result<()> {
             .collect(),
         (None, _) => Vec::new(),
     };
+    let fetch = FetchRecord::read(&directory.join(FETCH_FILE));
+    let config = pricing::default_table_path();
     let shown = Shown {
         schema: SHOW_SCHEMA,
         usage_table: usage_table(),
+        config_table: ConfigTable {
+            exists: config.as_ref().is_some_and(|path| path.exists()),
+            path: config,
+        },
+        refresh: refresh(fetch.as_ref(), exists, now),
         data_table: DataTable {
             path,
             exists,
             error,
         },
-        fetch: FetchRecord::read(&directory.join(FETCH_FILE)),
+        fetch,
         model: model.map(str::to_owned),
         models,
     };
@@ -255,21 +408,37 @@ fn long_context(row: &ModelPrice) -> String {
 fn render_show(shown: &Shown) -> String {
     let usage = &shown.usage_table;
     let mut text = format!("Usage pricing reads: {}", usage.chosen_by);
-    if let Some(path) = &usage.path {
+    for path in &usage.paths {
         text.push_str(&format!(" {}", path.display()));
     }
     if let Some(error) = &usage.error {
         text.push_str(&format!(" ({error})"));
     }
     text.push('\n');
+    for warning in &usage.warnings {
+        text.push_str(&format!("  set aside: {warning}\n"));
+    }
+    text.push_str(&format!(
+        "Config table: {}\n",
+        match (&shown.config_table.path, shown.config_table.exists) {
+            (Some(path), true) => path.display().to_string(),
+            (Some(path), false) => format!("{} (absent)", path.display()),
+            (None, _) => "none (neither XDG_CONFIG_HOME nor HOME is set)".to_owned(),
+        }
+    ));
     text.push_str(&format!(
         "Data table: {}{}\n",
         shown.data_table.path.display(),
         match (&shown.data_table.error, shown.data_table.exists) {
             (Some(error), _) => format!(" (unreadable: {error})"),
-            (None, false) => " (absent; run `tapes prices update`)".to_owned(),
+            (None, false) => " (absent)".to_owned(),
             (None, true) => String::new(),
         }
+    ));
+    text.push_str(&format!(
+        "Refresh: {} ({})\n",
+        if shown.refresh.due { "due" } else { "not due" },
+        shown.refresh.reason
     ));
     match &shown.fetch {
         Some(record) => {

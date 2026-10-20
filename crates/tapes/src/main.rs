@@ -575,34 +575,54 @@ struct PriceArgs {
     /// Price each figure this command reports a harness cost for with this
     /// tapes-price-table/1, /2 or /3 file, adding `list_price_estimate` beside
     /// that cost, never in its place, exactly as `usage --prices` prices it.
-    /// Without the flag the table is the file TAPES_PRICES names, then
-    /// $XDG_CONFIG_HOME/tapes/prices.toml (or ~/.config/tapes/prices.toml);
-    /// with none, no estimate is given. A table named here or by
-    /// TAPES_PRICES that is missing or invalid refuses; an invalid default
-    /// table is reported on stderr and leaves the estimate absent. A
-    /// replica's answer under --remote is not priced.
+    /// Without the flag the table is the file TAPES_PRICES names, else the
+    /// config table $XDG_CONFIG_HOME/tapes/prices.toml (or
+    /// ~/.config/tapes/prices.toml) merged over the fetched table
+    /// $XDG_DATA_HOME/tapes/prices.toml (or ~/.local/share/tapes/prices.toml):
+    /// a config row prices its id and aliases, and fetched rows price the
+    /// rest; with none, no estimate is given. A table named here or by
+    /// TAPES_PRICES is used alone, and refuses when missing or invalid; an
+    /// invalid config table is reported on stderr and leaves the estimate
+    /// absent; an invalid fetched table, or one in another currency than the
+    /// config table, is reported and left out. A replica's answer under
+    /// --remote is not priced.
     #[arg(long, value_name = "FILE")]
     prices: Option<PathBuf>,
+    /// Do not refresh the fetched price table before pricing, as
+    /// TAPES_OFFLINE=1 does. Without it, a command that prices with neither
+    /// --prices nor TAPES_PRICES first runs `tapes prices update` under
+    /// shorter time limits when the fetched table is absent or no source
+    /// succeeded in 24 hours, at most once an hour; a failed refresh is one
+    /// stderr warning and never fails the command.
+    #[arg(long)]
+    offline: bool,
 }
 
 impl PriceArgs {
     /// The table to price with, as `usage` finds it.
     fn table(&self) -> Result<Option<agent_tapes_core::pricing::PriceTable>> {
-        price_table(self.prices.as_deref())
+        price_table(self.prices.as_deref(), self.offline)
     }
 }
 
-/// The price table `named` or the environment selects, warning about an
-/// invalid default table, which leaves estimates absent.
-fn price_table(named: Option<&Path>) -> Result<Option<agent_tapes_core::pricing::PriceTable>> {
-    let prices = agent_tapes_core::pricing::lookup(named)?;
-    if let PriceLookup::DefaultInvalid { path, error } = &prices {
+/// The price table `named` or the environment selects, after refreshing the
+/// fetched table when it is due, warning about each table set aside.
+fn price_table(
+    named: Option<&Path>,
+    offline: bool,
+) -> Result<Option<agent_tapes_core::pricing::PriceTable>> {
+    prices::refresh_before_pricing(named, offline);
+    let lookup = agent_tapes_core::pricing::lookup(named)?;
+    for warning in &lookup.warnings {
+        eprintln!("warning: {warning}");
+    }
+    if let PriceLookup::ConfigInvalid { path, error } = &lookup.found {
         eprintln!(
-            "warning: the default price table {} is not used, so no list-price estimate is given: {error}",
+            "warning: the config price table {} is not used, so no list-price estimate is given: {error}",
             path.display()
         );
     }
-    Ok(prices.table().cloned())
+    Ok(lookup.found.table().cloned())
 }
 
 #[derive(Args, Clone, Copy, Debug, Default)]
@@ -1678,9 +1698,9 @@ enum Command {
     /// split, the price-relevant dimensions its requests recorded. --from,
     /// --to and --requests answer one span of that session in the same shape
     /// with a `span` object; spans and the remainder no span holds add up to
-    /// the whole session within one accounting basis. --prices, TAPES_PRICES
-    /// or the default price table add a `list_price_estimate` beside each
-    /// harness-written cost, priced from the caller's table. --window and
+    /// the whole session within one accounting basis. --prices, TAPES_PRICES,
+    /// or the config table merged over the fetched one add a
+    /// `list_price_estimate` beside each harness-written cost. --window and
     /// --quota-window answer a selection's consumption inside a window of
     /// time, each session contributing its own span inside it. A scope or
     /// listing filter instead answers the whole selection as
@@ -2181,12 +2201,18 @@ enum Command {
         /// base and surcharged rates with billing-unestablished. A request no
         /// row is in effect for, or usage of no known time a row may not
         /// cover, is outside-validity. Without the flag the table is the file
-        /// TAPES_PRICES names, then $XDG_CONFIG_HOME/tapes/prices.toml (or
-        /// ~/.config/tapes/prices.toml). A table named here or by
-        /// TAPES_PRICES that is missing or invalid refuses; an invalid default
-        /// table is reported on stderr and leaves the estimate absent, as no
-        /// table does. tapes ships no prices; `tapes prices update` fetches
-        /// a table from the vendors' pages. Each served model's
+        /// TAPES_PRICES names, else the config table
+        /// $XDG_CONFIG_HOME/tapes/prices.toml (or ~/.config/tapes/prices.toml)
+        /// merged over the fetched table $XDG_DATA_HOME/tapes/prices.toml (or
+        /// ~/.local/share/tapes/prices.toml): a config row prices its id and
+        /// aliases, and fetched rows price the rest. A table named here or by
+        /// TAPES_PRICES is used alone, and refuses when missing or invalid; an
+        /// invalid config table is reported on stderr and leaves the estimate
+        /// absent, as no table does; an invalid fetched table, or one in
+        /// another currency than the config table, is reported and left out.
+        /// tapes ships no prices; `tapes prices update` fetches a table from
+        /// the vendors' pages, and a pricing command refreshes it first unless
+        /// --offline. Each served model's
         /// share is priced by its own row; a figure that names one model is
         /// that model's share whole, and one that names several, or whose
         /// uncertain attribution leaves part of it out of its model shares,
@@ -2211,6 +2237,14 @@ enum Command {
         /// identity-unestablished, exact-union).
         #[arg(long, value_name = "FILE")]
         prices: Option<PathBuf>,
+        /// Do not refresh the fetched price table before pricing, as
+        /// TAPES_OFFLINE=1 does. Without it, and with neither --prices nor
+        /// TAPES_PRICES, usage first runs `tapes prices update` under shorter
+        /// time limits when the fetched table is absent or no source
+        /// succeeded in 24 hours, at most once an hour; a failed refresh is
+        /// one stderr warning and never fails the command.
+        #[arg(long)]
+        offline: bool,
         /// Render the versioned tapes-usage/17 object, tapes-usage-summary/16
         /// for a selection, tapes-change-usage/4 for a change view, or
         /// tapes-family-usage/3 under --family, as JSON. `session.model_observation` says
@@ -3854,6 +3888,7 @@ fn dispatch(cli: Cli) -> Result<()> {
             to,
             requests,
             prices,
+            offline,
             window,
             quota_window,
             quota,
@@ -3864,7 +3899,7 @@ fn dispatch(cli: Cli) -> Result<()> {
             json,
         } => {
             query.validate_input()?;
-            let prices = price_table(prices.as_deref())?;
+            let prices = price_table(prices.as_deref(), offline)?;
             let prices = prices.as_ref();
             read.refuse_supplied(&query.input)?;
             if change.asked(&by) {

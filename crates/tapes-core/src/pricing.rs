@@ -1,8 +1,10 @@
 //! List-price estimates from a price table. tapes ships no prices: a table
-//! is the caller's, or one `tapes prices update` fetched from the vendors'
-//! published pages (see [`crate::price_update`]). A price table file names,
-//! per model, what a million
-//! tokens of each disjoint category cost, and an estimate prices a figure's
+//! is the caller's, or one fetched from the vendors' published pages (see
+//! [`crate::price_update`]). [`lookup`] takes a named table or the one
+//! `TAPES_PRICES` names alone, else the user's config table merged over the
+//! fetched data table, a config row winning every id and alias it names.
+//! A price table file names, per model, what a million tokens of each
+//! disjoint category cost, and an estimate prices a figure's
 //! disjoint categories by the row of the model that served them. An
 //! estimate sits beside any cost a harness wrote and never replaces it.
 //! What it cannot price — a model the table lacks, usage no model is known
@@ -678,6 +680,53 @@ impl PriceTable {
         Self::parse(&text).with_context(|| format!("in the price table {}", path.display()))
     }
 
+    /// This table's rows with every row of `fetched` whose id and aliases
+    /// none of this table's rows names, by id or alias. This table's plan
+    /// rules apply; the schema is the later of the two.
+    pub fn over(self, fetched: Self) -> Self {
+        let named: BTreeSet<&str> = self
+            .models
+            .iter()
+            .flat_map(|row| std::iter::once(&row.id).chain(&row.aliases))
+            .map(String::as_str)
+            .collect();
+        let kept: Vec<ModelPrice> = fetched
+            .models
+            .into_iter()
+            .filter(|row| {
+                std::iter::once(&row.id)
+                    .chain(&row.aliases)
+                    .all(|name| !named.contains(name.as_str()))
+            })
+            .collect();
+        let schemas = [
+            PRICE_TABLE_SCHEMA,
+            PRICE_TABLE_SCHEMA_V2,
+            PRICE_TABLE_SCHEMA_V3,
+        ];
+        let rank = |schema: &str| schemas.iter().position(|known| *known == schema);
+        let schema = if rank(fetched.schema) > rank(self.schema) {
+            fetched.schema
+        } else {
+            self.schema
+        };
+        let mut models = self.models;
+        models.extend(kept);
+        let mut index: HashMap<String, Vec<usize>> = HashMap::new();
+        for (position, row) in models.iter().enumerate() {
+            for name in std::iter::once(&row.id).chain(&row.aliases) {
+                index.entry(name.clone()).or_default().push(position);
+            }
+        }
+        Self {
+            currency: self.currency,
+            models,
+            schema,
+            plans: self.plans,
+            index,
+        }
+    }
+
     /// The billing whose long-context terms `plan` pays: the table's rule
     /// for it, else the built-in one, else none.
     pub fn plan_billing(&self, plan: &str) -> Option<BillingKind> {
@@ -1159,25 +1208,30 @@ pub enum PriceOrigin {
     Named,
     /// Named by `TAPES_PRICES`.
     Environment,
-    /// The default location under the user's configuration directory.
-    Default,
+    /// The user's table under the configuration directory alone.
+    Config,
+    /// The fetched table under the data directory alone.
+    Data,
+    /// The user's table merged over the fetched one.
+    #[serde(rename = "config+data")]
+    ConfigData,
 }
 
-/// A table the lookup found.
+/// A table the lookup found, and the files it was read from.
 #[derive(Clone, Debug)]
 pub struct LoadedPrices {
     pub table: PriceTable,
-    pub path: PathBuf,
+    pub paths: Vec<PathBuf>,
     pub origin: PriceOrigin,
 }
 
-/// What the lookup found: a table, none at all, or a default table that
+/// What the lookup found: a table, none at all, or a config table that
 /// could not be used, which leaves estimates absent.
 #[derive(Debug)]
 pub enum PriceLookup {
     Loaded(LoadedPrices),
     Absent,
-    DefaultInvalid { path: PathBuf, error: String },
+    ConfigInvalid { path: PathBuf, error: String },
 }
 
 impl PriceLookup {
@@ -1189,7 +1243,15 @@ impl PriceLookup {
     }
 }
 
-/// The default table location: `$XDG_CONFIG_HOME/tapes/prices.toml`, or
+/// What the lookup found, and what it set aside on the way, one warning
+/// each.
+#[derive(Debug)]
+pub struct Lookup {
+    pub found: PriceLookup,
+    pub warnings: Vec<String>,
+}
+
+/// The config table location: `$XDG_CONFIG_HOME/tapes/prices.toml`, or
 /// `~/.config/tapes/prices.toml` when that variable is unset or empty.
 pub fn default_table_path() -> Option<PathBuf> {
     let configured = std::env::var_os("XDG_CONFIG_HOME")
@@ -1205,39 +1267,115 @@ pub fn default_table_path() -> Option<PathBuf> {
         .map(|directory| directory.join("tapes").join("prices.toml"))
 }
 
-/// Find the price table: `named` (the caller's `--prices`), then the file
-/// `TAPES_PRICES` names, then the default location. A named or environment
-/// table that is missing or invalid refuses; a default table that is invalid
-/// is reported and leaves estimates absent; no table at all is absence.
-pub fn lookup(named: Option<&Path>) -> Result<PriceLookup> {
-    let environment = std::env::var_os(PRICES_ENV)
+/// The fetched table `tapes prices update` keeps:
+/// `$XDG_DATA_HOME/tapes/prices.toml`, or `~/.local/share/tapes/prices.toml`.
+pub fn data_table_path() -> Option<PathBuf> {
+    crate::price_update::data_directory()
+        .map(|directory| directory.join(crate::price_update::TABLE_FILE))
+}
+
+/// The table `TAPES_PRICES` names, when it names one.
+pub fn environment_table_path() -> Option<PathBuf> {
+    std::env::var_os(PRICES_ENV)
         .filter(|value| !value.is_empty())
-        .map(PathBuf::from);
+        .map(PathBuf::from)
+}
+
+/// Find the price table: `named` (the caller's `--prices`), then the file
+/// `TAPES_PRICES` names, each used alone; else the config table merged over
+/// the data table, as [`lookup_defaults`] finds them. A named or
+/// environment table that is missing or invalid refuses.
+pub fn lookup(named: Option<&Path>) -> Result<Lookup> {
     let explicit = named
         .map(|path| (path.to_path_buf(), PriceOrigin::Named))
-        .or_else(|| environment.map(|path| (path, PriceOrigin::Environment)));
+        .or_else(|| environment_table_path().map(|path| (path, PriceOrigin::Environment)));
     if let Some((path, origin)) = explicit {
         let table = PriceTable::read(&path)?;
-        return Ok(PriceLookup::Loaded(LoadedPrices {
-            table,
-            path,
-            origin,
-        }));
+        return Ok(Lookup {
+            found: PriceLookup::Loaded(LoadedPrices {
+                table,
+                paths: vec![path],
+                origin,
+            }),
+            warnings: Vec::new(),
+        });
     }
-    let Some(path) = default_table_path().filter(|path| path.exists()) else {
-        return Ok(PriceLookup::Absent);
+    Ok(lookup_defaults(
+        default_table_path().as_deref(),
+        data_table_path().as_deref(),
+    ))
+}
+
+/// The config table at `config` merged over the data table at `data`, by
+/// [`PriceTable::over`]; either alone when the other is absent. An invalid
+/// config table leaves estimates absent. An invalid data table, or one in
+/// another currency than the config table, is set aside with a warning.
+pub fn lookup_defaults(config: Option<&Path>, data: Option<&Path>) -> Lookup {
+    let mut warnings = Vec::new();
+    let config = config.filter(|path| path.exists());
+    let config_table = match config.map(|path| (path, PriceTable::read(path))) {
+        Some((path, Err(error))) => {
+            return Lookup {
+                found: PriceLookup::ConfigInvalid {
+                    path: path.to_path_buf(),
+                    error: format!("{error:#}"),
+                },
+                warnings,
+            }
+        }
+        Some((path, Ok(table))) => Some((path.to_path_buf(), table)),
+        None => None,
     };
-    Ok(match PriceTable::read(&path) {
-        Ok(table) => PriceLookup::Loaded(LoadedPrices {
-            table,
-            path,
-            origin: PriceOrigin::Default,
+    let data_table = match data
+        .filter(|path| path.exists())
+        .map(|path| (path, PriceTable::read(path)))
+    {
+        Some((path, Err(error))) => {
+            warnings.push(format!(
+                "the fetched price table {} is not used: {error:#}",
+                path.display()
+            ));
+            None
+        }
+        Some((path, Ok(table))) => Some((path.to_path_buf(), table)),
+        None => None,
+    };
+    let loaded = match (config_table, data_table) {
+        (Some((config, table)), Some((data, fetched))) if table.currency != fetched.currency => {
+            warnings.push(format!(
+                "the config price table {} is in {} and the fetched table {} in {}, so only the config table is used",
+                config.display(),
+                table.currency,
+                data.display(),
+                fetched.currency
+            ));
+            Some(LoadedPrices {
+                table,
+                paths: vec![config],
+                origin: PriceOrigin::Config,
+            })
+        }
+        (Some((config, table)), Some((data, fetched))) => Some(LoadedPrices {
+            table: table.over(fetched),
+            paths: vec![config, data],
+            origin: PriceOrigin::ConfigData,
         }),
-        Err(error) => PriceLookup::DefaultInvalid {
-            path,
-            error: format!("{error:#}"),
-        },
-    })
+        (Some((config, table)), None) => Some(LoadedPrices {
+            table,
+            paths: vec![config],
+            origin: PriceOrigin::Config,
+        }),
+        (None, Some((data, table))) => Some(LoadedPrices {
+            table,
+            paths: vec![data],
+            origin: PriceOrigin::Data,
+        }),
+        (None, None) => None,
+    };
+    Lookup {
+        found: loaded.map_or(PriceLookup::Absent, PriceLookup::Loaded),
+        warnings,
+    }
 }
 
 /// A model an estimate priced, as its table row names it.

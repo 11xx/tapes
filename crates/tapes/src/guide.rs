@@ -732,21 +732,28 @@ PROBE BEFORE EXPORTING
   100,000 requests or hands over more than 1,000,000 timed turns withholds
   both whole, with its reason, rather than keep part of them.
   Money beyond what a harness wrote comes from a price table: tapes ships no
-  prices, so the table is the caller's, or one `tapes prices update` fetched
-  (see KEEP A PRICE TABLE). Every command that reports a session's
+  prices, so the table is the caller's, or the one tapes fetches from the
+  vendors' pages and keeps fresh (see KEEP A PRICE TABLE). Every command that reports a session's
   cost prices it the same way and puts `list_price_estimate` beside it:
   `usage`, `list --json` and `show --json` (on each session), `stats` and
   `brief` (in `usage`), and the per-session figures of a summary's overlap
   groups. Text adds the estimate, labelled as one, only where it prints a
   cost: `usage`, the `stats` usage block, and a summary's session figures.
   A replica's answer under `--remote` is not priced. `--prices FILE` reads
-  a table, else the
-  file `TAPES_PRICES` names, else `$XDG_CONFIG_HOME/tapes/prices.toml`
-  (`~/.config/tapes/prices.toml` when that is unset). A table named by the
-  flag or the variable that is missing or invalid refuses the command; an
-  invalid default table is reported once on stderr and the estimate is
-  absent, as it is with no table. Install a table by writing it to the
-  default path or pointing `TAPES_PRICES` at it. The format is TOML,
+  a table, else the file `TAPES_PRICES` names, each used alone; else the
+  config table `$XDG_CONFIG_HOME/tapes/prices.toml`
+  (`~/.config/tapes/prices.toml`) merged over the fetched data table
+  `$XDG_DATA_HOME/tapes/prices.toml` (`~/.local/share/tapes/prices.toml`).
+  The merge keeps every config row, and every data row whose id and
+  aliases no config row names by id or alias, so a config row overrides
+  one model and the fetched rows price the rest; the config table's plan
+  rules apply. A table named by the flag or the variable that is missing
+  or invalid refuses the command; an invalid config table is reported once
+  on stderr and the estimate is absent, as it is with no table; an invalid
+  data table, or one in another currency than the config table, is
+  reported and left out. Override a price by writing it to the config
+  path, or price with a table of your own alone through `TAPES_PRICES`.
+  The format is TOML,
   tapes-price-table/1:
 
       schema = "tapes-price-table/1"
@@ -1659,6 +1666,7 @@ PROBE BEFORE EXPORTING
 KEEP A PRICE TABLE
   tapes prices update                  Fetch the vendors' prices into the data table.
   tapes prices update --from DIR       Read copies of the sources instead of fetching.
+  tapes usage <id> --offline           Price without refreshing the data table first.
   tapes prices show                    Which table usage reads, the fetch times, each model's rates now.
   tapes prices show MODEL --json       Every row naming MODEL, with its validity window.
 
@@ -1674,8 +1682,22 @@ KEEP A PRICE TABLE
   source, its URL, whether it succeeded, the error, and the time and model
   count of its last success. `--from DIR` reads `anthropic.md`, `openai.md`
   and `litellm.json` from DIR instead, for an offline machine; a file
-  missing there fails that source. Both files are replaced whole, through
+  missing there fails that source. Without `--from`, `TAPES_PRICES_FROM=DIR`
+  does the same, for every update. Both files are replaced whole, through
   a temporary file and a rename.
+
+  No one needs to run it. A command that prices, with neither `--prices`
+  nor `TAPES_PRICES` naming a table and outside `--remote`, first runs the
+  same update when the data table is absent or no source succeeded in the
+  last 24 hours, and the last attempt is over an hour old or unrecorded:
+  so about once a day, and at most hourly while fetches fail. That refresh
+  gives each source 5 seconds to connect and 10 to finish. It prints
+  nothing when it succeeds; when a source fails it prints one line,
+  `warning: prices not refreshed (<source>: <error>; …); using the table
+  fetched <date>` (or `no fetched table`), and the command goes on, its
+  exit status unchanged. `--offline` on any command that prices, or
+  `TAPES_OFFLINE=1`, skips the refresh; the table already fetched still
+  prices.
 
   The pages show only current prices, so the table keeps history as
   validity windows. A fetched price equal to the row in effect keeps that
@@ -1711,9 +1733,11 @@ KEEP A PRICE TABLE
   `claude-sonnet-4-5-20250929` is priced by a `claude-sonnet-4-5` row.
 
   `prices show` names the table usage pricing reads and how it was chosen
-  (`--prices`, `TAPES_PRICES`, the default path, or none) next to the data
-  table, which usage reads only when named that way. JSON is
-  tapes-prices-show/1.
+  (`named`, `environment`, `config`, `data`, `config+data`, or `absent`),
+  any table the lookup set aside and why, the config and data tables'
+  paths, and whether a refresh is due now and why: the last success, the
+  last attempt, or `TAPES_OFFLINE`. Its rows are the data table's. JSON is
+  tapes-prices-show/2.
 
 PRICE A CHANGE
   tapes usage --range main~5..main          What the last five commits cost, by commit, agent and role.

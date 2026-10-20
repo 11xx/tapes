@@ -61,11 +61,13 @@ impl Store {
 
     fn usage(&self, arguments: &[&str], environment: &[(&str, &Path)]) -> Output {
         let mut command = Command::new(env!("CARGO_BIN_EXE_tapes"));
+        command.env("TAPES_OFFLINE", "1");
         command
             .env_remove("PI_SESSION_FILE")
             .env_remove("TAPES_PRICES")
             .env("HOME", self.0.join("home"))
             .env("XDG_CONFIG_HOME", self.0.join("config"))
+            .env("XDG_DATA_HOME", self.0.join("data"))
             .arg("usage")
             .args(arguments)
             .args(["--native-store", "claude", "--native-root"])
@@ -148,12 +150,12 @@ fn a_named_table_that_cannot_be_used_refuses() {
         .contains("models[0] (id `a`): the output price must be a finite number of at least zero"));
 }
 
-/// Claim: an invalid default table warns once on stderr and leaves the
+/// Claim: an invalid config table warns once on stderr and leaves the
 /// estimate absent, a valid one prices the answer, and no table leaves the
-/// estimate absent without a warning. Rejects a refusal over a default table,
+/// estimate absent without a warning. Rejects a refusal over a config table,
 /// a silent failure, or a zero estimate.
 #[test]
-fn the_default_table_warns_or_prices_and_its_absence_is_silent() {
+fn the_config_table_warns_or_prices_and_its_absence_is_silent() {
     let store = Store::new();
     let (absent, stderr) = store.json(&[SESSION], &[]);
     assert!(absent.get("list_price_estimate").is_none());
@@ -166,7 +168,7 @@ fn the_default_table_warns_or_prices_and_its_absence_is_silent() {
     let (invalid, stderr) = store.json(&[SESSION], &[]);
     assert!(invalid.get("list_price_estimate").is_none());
     assert_eq!(
-        stderr.matches("warning: the default price table").count(),
+        stderr.matches("warning: the config price table").count(),
         1,
         "{stderr}"
     );

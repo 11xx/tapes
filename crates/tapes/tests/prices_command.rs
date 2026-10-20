@@ -13,6 +13,7 @@ fn sources() -> PathBuf {
 
 fn tapes(home: &Path, arguments: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_tapes"))
+        .env("TAPES_OFFLINE", "1")
         .env_remove("TAPES_PRICES")
         .env("HOME", home.join("home"))
         .env("XDG_CONFIG_HOME", home.join("config"))
@@ -70,8 +71,14 @@ fn update_from_a_directory_writes_the_table_and_show_reads_it_back() {
         String::from_utf8_lossy(&show.stderr)
     );
     let shown: Value = serde_json::from_slice(&show.stdout).unwrap();
-    assert_eq!(shown["schema"], "tapes-prices-show/1");
-    assert_eq!(shown["usage_table"]["chosen_by"], "absent");
+    assert_eq!(shown["schema"], "tapes-prices-show/2");
+    assert_eq!(shown["usage_table"]["chosen_by"], "data");
+    assert!(shown["config_table"]["path"]
+        .as_str()
+        .unwrap()
+        .ends_with("config/tapes/prices.toml"));
+    assert_eq!(shown["refresh"]["due"], false);
+    assert_eq!(shown["refresh"]["offline"], true);
     let models = shown["models"].as_array().unwrap();
     assert_eq!(models.len(), 1);
     assert_eq!(models[0]["id"], "claude-haiku-5-5");
