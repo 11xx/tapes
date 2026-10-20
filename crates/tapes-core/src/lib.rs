@@ -1198,15 +1198,11 @@ fn explain_by_family(backend: &dyn Backend, session: &Session, view: &mut usage:
     for child in &children {
         let read = backend
             .stream_transcript(child, None, &mut |_| Ok(()))
-            .and_then(|read| backend.stream_spans(child, &read, &[]));
+            .and_then(|read| backend.stream_session(child, &read));
         match read {
-            Ok(spans) => match spans
-                .whole
-                .usage_detail
-                .and_then(|detail| detail.timed_requests)
-            {
+            Ok(whole) => match whole.usage_detail.and_then(|detail| detail.timed_requests) {
                 Some(timed) => requests.extend(timed),
-                None if spans.whole.tokens.is_some() => {
+                None if whole.tokens.is_some() => {
                     failures.push(format!("{}: requests past the family bound", child.id));
                 }
                 None => {}

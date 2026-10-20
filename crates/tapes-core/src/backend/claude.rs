@@ -712,8 +712,12 @@ impl Backend for ClaudeBackend {
         let domain = format!("file:{}", path.display());
         let mut unmapped = UnmappedTally::default();
         // The session's accounting folds from the same records as the turns,
-        // as `stream_session` would replay them.
+        // as `stream_session` would replay them; a subagent recording keeps
+        // its requests in time for its parent's family read.
         let mut records = ClaudeRecords::default();
+        if session.id.contains("::") {
+            records.requests = RequestTokens::timed();
+        }
         // Its requests are counted as a span read places them.
         let mut requests = ClaudeRequests::default();
         let mut placer = Placer::new(&[]).keeping(options.timeline);
