@@ -6,8 +6,10 @@
 //! A view selects commits by revision, range, branch or list, or asks for
 //! one session's partition or a window's consumption across every commit.
 //! The sessions in a commit view are those holding a share of a selected
-//! commit, or that would hold one if every evidence tier took part. Each of them is divided over every commit its evidence admits, so
-//! a commit's amount does not depend on what else was selected; the shares
+//! commit, or that would hold one if every evidence tier took part. Each of
+//! them is divided over every commit its evidence admits, so what a session
+//! gives a commit does not depend on what else was selected, though a wider
+//! selection reads the sessions of a wider interval; the shares
 //! its evidence gives commits the view did not select are reported apart as
 //! `unselected` and left out of the rows' total. A session's rows, its
 //! uncommitted buckets, its unattributed parts and its unselected shares add

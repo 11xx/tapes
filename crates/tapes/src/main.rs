@@ -2662,11 +2662,12 @@ struct ChangeAsk {
     /// tapes-change-usage/1. Repeatable. A change view reads the
     /// repository holding the current directory, or the one --project
     /// names, read-only through git, and every installed Claude, Codex
-    /// and Pi recording active from an hour before a selected commit's
-    /// earlier time to half an hour after its later one; an OpenCode
-    /// session takes part through its directory and time alone. Each
-    /// session is divided over every commit its evidence admits, so a
-    /// commit's amount does not depend on what else is selected. The
+    /// and Pi recording active from an hour before the earliest selected
+    /// commit to half an hour after the latest; an OpenCode session takes
+    /// part through its directory and time alone. Each session is divided
+    /// over every commit its evidence admits, so what a session gives a
+    /// commit does not depend on what else is selected, though a wider
+    /// selection reads the sessions of a wider interval. The
     /// answer has rows per commit, agent (`harness:model#effort`) and
     /// role (`author`, `reviewer`, `proximate`), each with requests,
     /// native tokens by harness and model, disjoint categories, the part

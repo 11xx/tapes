@@ -1641,21 +1641,23 @@ PRICE A CHANGE
   read-only through git, and the Claude, Codex and Pi recordings active from
   an hour before the earliest selected commit to half an hour after the
   latest; an OpenCode session takes part through its directory and time
-  alone. A session active outside that interval is not read, so its
-  inspection of a selected commit hours later is not counted.
+  alone.
 
   Each session is divided over every commit its evidence names, not only the
-  selected ones, so a commit's amount does not change with what else is
-  selected. The evidence comes in three tiers. A session that created a
-  commit is bound to it. An edit whose added lines the commit adds, or a stay
-  in the commit's worktree or on its branch, is matched. A request near the
-  commit's author time, or a command that names the revision (`git show`,
-  `git diff`), is estimated. Each amount names its tier and its basis: span,
-  event-window, working-stretch, inherited, even or following. A subagent is
-  placed by its own evidence first, and inherits its parent's allocation for
-  the rest. A parent a recording names, by a recorded launch or a
-  `tapes-parent:` marker, makes the launched session a child in the same way
-  when both are read (DECLARE WHO LAUNCHED WHOM).
+  selected ones, so what a session gives a commit does not change with what
+  else is selected. A session active outside the interval is not read, so its
+  inspection of a selected commit hours later is not counted, and a wider
+  selection, reading a wider interval, can bring such a session in. The
+  evidence comes in three tiers. A session that created a commit is bound to
+  it. An edit whose added lines the commit adds, or a stay in the commit's
+  worktree or on its branch, is matched. A request near the commit's author
+  time, or a command that names the revision (`git show`, `git diff`), is
+  estimated. Each amount names its tier and its basis: span, event-window,
+  working-stretch, inherited, even or following. A subagent is placed by its
+  own evidence first, and inherits its parent's allocation for the rest. A
+  parent a recording names, by a recorded launch or a `tapes-parent:` marker,
+  makes the launched session a child in the same way when both are read
+  (DECLARE WHO LAUNCHED WHOM).
 
   Rows are grouped by --by: commit, merge, agent (`harness:model#effort`),
   role, tier and session, commit, agent and role unless told otherwise.
