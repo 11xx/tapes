@@ -31,7 +31,7 @@ pub enum PricesCommand {
         /// instead of fetching; a missing file fails that source.
         #[arg(long, value_name = "DIR")]
         from: Option<PathBuf>,
-        /// Print the outcome as JSON.
+        /// Print the outcome as JSON, tapes-prices-update/1.
         #[arg(long)]
         json: bool,
     },

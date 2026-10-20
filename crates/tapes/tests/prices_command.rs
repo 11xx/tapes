@@ -28,7 +28,7 @@ fn update_from_a_directory_writes_the_table_and_show_reads_it_back() {
     // prices-fetch.json under $XDG_DATA_HOME/tapes without the network, and
     // `prices show MODEL --json` answers that model's row, a dated id by its
     // undated row. Rejects a table written elsewhere, one show cannot read,
-    // and a dated id going unanswered.
+    // and a dated id going unanswered; the update's JSON names its schema.
     let root = tempfile::tempdir().unwrap();
     let from = sources();
     let update = tapes(
@@ -47,6 +47,7 @@ fn update_from_a_directory_writes_the_table_and_show_reads_it_back() {
         String::from_utf8_lossy(&update.stderr)
     );
     let report: Value = serde_json::from_slice(&update.stdout).unwrap();
+    assert_eq!(report["schema"], "tapes-prices-update/1");
     assert!(report["sources"]
         .as_array()
         .unwrap()

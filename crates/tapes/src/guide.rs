@@ -1669,6 +1669,7 @@ KEEP A PRICE TABLE
   long-context sentence, or one model priced two ways) fails that source:
   it contributes nothing and keeps its earlier rows, the other sources
   still update, every outcome is reported, and the command exits non-zero.
+  `--json` reports the outcomes as tapes-prices-update/1.
 
   Anthropic's `## Model pricing` table gives every category; a model priced
   in two rows, for prompts up to and over a size, gets one row whose

@@ -27,6 +27,8 @@ use crate::pricing::{
     self, BillingKind, CategoryPrices, LongContext, ModelPrice, PriceTable, PromptCategory,
 };
 
+/// The schema of `tapes prices update --json`.
+pub const UPDATE_SCHEMA: &str = "tapes-prices-update/1";
 /// The schema of the record of each fetch.
 pub const FETCH_SCHEMA: &str = "tapes-price-fetch/1";
 /// The table's file name in the data directory.
@@ -658,6 +660,7 @@ pub struct SourceOutcome {
 /// What `tapes prices update` did.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct UpdateReport {
+    pub schema: &'static str,
     pub table: PathBuf,
     pub record: PathBuf,
     pub attempted_at: DateTime<Utc>,
@@ -867,6 +870,7 @@ pub fn update(directory: &Path, from: Option<&Path>, now: DateTime<Utc>) -> Resu
     json.push(b'\n');
     write_atomically(&record_path, &json)?;
     Ok(UpdateReport {
+        schema: UPDATE_SCHEMA,
         table: table_path,
         record: record_path,
         attempted_at: now,
