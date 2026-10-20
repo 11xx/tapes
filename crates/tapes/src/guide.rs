@@ -150,7 +150,11 @@ FIND IT
   per-harness limit. --sort newest|oldest orders by that clock and decides
   which sessions the limit keeps: the newest of each harness, or the oldest,
   which inspects every candidate the scan reaches as --search does. Ties use
-  session id ascending, then harness ascending.
+  session id ascending, then harness ascending. A Claude, Codex or Pi
+  recording file last modified more than a day before --since is not opened:
+  recordings are only appended to, so it holds no later activity, and the day
+  absorbs clock skew and coarse file times. Such a file raises no
+  unreadable-recording note, and the sessions listed are the same.
 
   --search <text> matches case-insensitively against normalized turns in each
   bounded read. --search-turns <N> selects the last N turns (default 32);

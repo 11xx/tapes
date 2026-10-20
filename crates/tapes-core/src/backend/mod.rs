@@ -52,6 +52,15 @@ const HEAD_PROBE_MAX_BYTES: u64 = 1024 * 1024;
 /// hold the file in memory.
 pub const FULL_RECORD_BYTES: u64 = 64 * 1024 * 1024;
 
+/// How much older than a listing's `since` a recording file's modification
+/// time may be before the listing skips the file unparsed. A harness appends
+/// to a recording and stamps each record with the clock that stamps the file,
+/// so a file last written before `since` holds no record at or after it. The
+/// slack absorbs clock skew between a writer and the filesystem and the
+/// coarse timestamps of some filesystems; a day exceeds both by orders of
+/// magnitude while keeping the skip effective for any interval of days.
+pub(crate) const MODIFIED_SLACK: chrono::Duration = chrono::Duration::days(1);
+
 /// Accumulates only counters the source actually wrote. A zero is retained as
 /// a present value, while a missing field remains absent in the result. Each
 /// `add` is one counted event: it records, per counter, whether the event
@@ -300,6 +309,18 @@ impl<'a> Query<'a> {
             || self.directory.is_some()
             || self.since.is_some()
             || self.until.is_some()
+    }
+
+    /// Whether a recording file is too old to hold activity at or after
+    /// `since`, judged from its modification time alone. A file whose time
+    /// cannot be read is never ruled out.
+    pub(crate) fn predates_since(&self, path: &Path) -> bool {
+        let Some(since) = self.since else {
+            return false;
+        };
+        fs::metadata(path)
+            .and_then(|metadata| metadata.modified())
+            .is_ok_and(|modified| DateTime::<Utc>::from(modified) < since - MODIFIED_SLACK)
     }
 
     pub(crate) fn matches(&self, session: &Session) -> bool {
@@ -2642,6 +2663,7 @@ fn list_files_with_search(
     let candidates = files
         .into_iter()
         .take(candidate_count)
+        .filter(|path| !query.predates_since(path))
         .filter(|path| {
             query
                 .scope
@@ -2756,6 +2778,9 @@ fn list_files_inner(
             return listing;
         }
         listing.scanned += 1;
+        if query.predates_since(&path) {
+            continue;
+        }
         if let Some(scope) = query.scope {
             if probe(&path).is_some_and(|directory| !scope.contains(&directory)) {
                 continue;

@@ -963,7 +963,10 @@ struct SessionQueryArgs {
     directory: Option<String>,
     /// Keep sessions whose newest recorded activity, `last_activity_at`,
     /// is at or after this timestamp. RFC 3339 timestamps with an offset
-    /// and bare YYYY-MM-DD dates are accepted.
+    /// and bare YYYY-MM-DD dates are accepted. A Claude, Codex or Pi
+    /// recording file last modified more than a day before it is not
+    /// opened, since a recording is only appended to; such a file raises
+    /// no unreadable-recording note.
     #[arg(
         long,
         value_name = "TIMESTAMP",
