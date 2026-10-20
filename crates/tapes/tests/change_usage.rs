@@ -634,7 +634,8 @@ fn branch_reads_live_then_merged_else_refuses() {
 
 /// Claim: one session's reverse view, `<SESSION> --by commit`, gives each
 /// commit what a range view over the same commits gives that session, a
-/// lead's recorded total included. Rejects a reverse view divided
+/// lead's recorded total included, and a window holding a session's whole
+/// activity, `--window FROM..TO --by commit`, gives it the same rows. Rejects a reverse view divided
 /// differently from the commit view, such as one read as a window over the
 /// session's activity, which loses the part of a recorded total no request
 /// explains.
@@ -668,6 +669,30 @@ fn a_session_view_matches_the_range_view() {
             Figure::of(&session(&range, id)["whole"]),
             "{id}"
         );
+    }
+
+    // A window holding the whole of a delegate's activity gives it the
+    // rows the range view does.
+    let window = json(
+        &change,
+        &[
+            "--window",
+            "2026-01-12T08:55:00Z..2026-01-12T09:28:00Z",
+            "--by",
+            "commit,session",
+        ],
+    );
+    let range = json(&change, &["--range", &merged_a, "--by", "commit,session"]);
+    for sha in [change.sha("a1"), change.sha("a2")] {
+        let windowed = row_for(&window, sha, DELEGATE_A).expect("the window view holds the row");
+        let same = row_for(&range, sha, DELEGATE_A).unwrap();
+        assert_eq!(
+            Figure::of(windowed),
+            Figure::of(same),
+            "{}",
+            change.name(sha)
+        );
+        assert_eq!(windowed["evidence"], same["evidence"]);
     }
 }
 
