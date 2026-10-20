@@ -92,7 +92,7 @@ impl fmt::Display for DiscoveryError {
             }
             Self::Transient { coordinate, cause } => write!(
                 f,
-                "{coordinate}: store busy after {} attempts, a transient failure a later read may not meet ({cause})",
+                "{coordinate}: store busy after {} attempts; the failure is transient, and a later read may succeed ({cause})",
                 crate::transient::ATTEMPTS
             ),
             Self::IdentityMismatch {

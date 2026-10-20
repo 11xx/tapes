@@ -19,7 +19,7 @@ impl std::fmt::Display for TransientFailure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "{} busy after {ATTEMPTS} attempts, a transient failure a later read may not meet ({})",
+            "{} busy after {ATTEMPTS} attempts; the failure is transient, and a later read may succeed ({})",
             self.source, self.cause
         )
     }
