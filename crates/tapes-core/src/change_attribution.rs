@@ -31,7 +31,9 @@
 //! together as one union, and each share names the tier and basis that
 //! placed it. Evidence of a tier left out takes no part, so the others place
 //! what they alone would; what only the left-out tiers would place is
-//! unattributed as [`Reason::TiersNotAsked`]. Worktree spans are interval evidence. Creations and edits are point
+//! unattributed as [`Reason::TiersNotAsked`].
+//!
+//! Worktree spans are interval evidence. Creations and edits are point
 //! evidence: an item's events span it from the first to the last, and cut the
 //! working stretches no span covers. Estimated evidence only cuts working
 //! stretches; it spans nothing. One piece of evidence naming several commits

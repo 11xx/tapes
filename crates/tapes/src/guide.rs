@@ -380,6 +380,8 @@ PROBE BEFORE EXPORTING
   tapes usage --global --quota-window current --harness codex  The same over the running quota window.
   tapes usage --global --allowance-rates --harness codex --since DATE --by model,variant  Allowance per lane.
   tapes usage --global --forecast MODEL#VARIANT=LANES --harness codex  Window percent and time left for a planned mix.
+  tapes usage --range A..B       What a change's commits cost, by commit, agent and role (PRICE A CHANGE).
+  tapes usage <id> --by commit   One session divided across its repository's commits.
   tapes endings --here --json    What each session of a project ends on.
 
   show returns the last 100 turns unless --tail says otherwise, and marks the
@@ -1576,7 +1578,9 @@ PROBE BEFORE EXPORTING
 
   Given a scope or a listing filter instead of a session, usage answers that
   whole selection as tapes-usage-summary/16, using the flags list and export
-  take and grouping by --by (harness and model unless told otherwise). It sums
+  take and grouping by --by (harness and model unless told otherwise). A
+  commit selector, or --by commit, merge, agent, role or tier, asks for a
+  change view instead (PRICE A CHANGE). It sums
   the counters the listing already carries, so nothing is re-read. Read
   counted before a sum: it says how many of a group's sessions recorded that
   counter, and a counter none recorded is absent rather than zero. coverage
@@ -1621,6 +1625,72 @@ PROBE BEFORE EXPORTING
   of a long edit sequence. Start fresh when the session never reached a
   decision worth keeping, when its approach was already failing, or when
   redoing the task is faster than reconstructing it.
+
+PRICE A CHANGE
+  tapes usage --range main~5..main          What the last five commits cost, by commit, agent and role.
+  tapes usage --branch feat-x --by merge    A branch's commits, live or merged and deleted, by the merge that landed them.
+  tapes usage --commit SHA --explain        One commit, with the evidence behind each row.
+  git log --format=%H -5 | tapes usage --commits-from -  The commits a list names, one per line.
+  tapes usage <id> --by commit              One session divided across the repository's commits.
+  tapes usage --window FROM..TO --by commit  What a window consumed, by commit.
+  tapes usage --range A..B --prices FILE --json  tapes-change-usage/1, with list-price estimates.
+
+  A change view answers what a set of commits cost from the recordings and
+  the repository alone; it needs no ledger, hook or configuration. Run it
+  inside the repository, or name one with --project. It reads the repository
+  read-only through git, and the Claude, Codex and Pi recordings active from
+  an hour before the earliest selected commit to half an hour after the
+  latest; an OpenCode session takes part through its directory and time
+  alone. A session active outside that interval is not read, so its
+  inspection of a selected commit hours later is not counted.
+
+  Each session is divided over every commit its evidence names, not only the
+  selected ones, so a commit's amount does not change with what else is
+  selected. The evidence comes in three tiers. A session that created a
+  commit is bound to it. An edit whose added lines the commit adds, or a stay
+  in the commit's worktree or on its branch, is matched. A request near the
+  commit's author time, or a command that names the revision (`git show`,
+  `git diff`), is estimated. Each amount names its tier and its basis: span,
+  event-window, working-stretch, inherited, even or following. A subagent is
+  placed by its own evidence first, and inherits its parent's allocation for
+  the rest. A parent a recording names, by a recorded launch or a
+  `tapes-parent:` marker, makes the launched session a child in the same way
+  when both are read (DECLARE WHO LAUNCHED WHOM).
+
+  Rows are grouped by --by: commit, merge, agent (`harness:model#effort`),
+  role, tier and session, commit, agent and role unless told otherwise.
+  `merge` is the first-parent merge on the default branch that brought the
+  commit; a commit made on that branch, as a fast-forward leaves it, is its
+  own group. A role comes from the session's own evidence for the commit:
+  `author` when it created the commit, made an edit the commit holds, or
+  worked in its worktree; `reviewer` when it only inspected the commit;
+  `proximate` when only time places it near. An inherited share takes its
+  parent's role.
+
+  Around the rows stand the other places a session's consumption went. The
+  uncommitted buckets hold work after a session's last commit at a worktree
+  and branch. Unattributed parts carry a reason, such as `before first item`
+  or `elsewhere`, time in a directory outside the repository. Unselected holds
+  what the same sessions spent on commits the view did not select; it is
+  reported apart and kept out of the change's total. Per session and in the
+  totals, rows, uncommitted, unattributed and unselected add up to the whole,
+  and a recorded total no request explains stays apart under `unexplained`.
+  Each request counts once, though a Claude lead's recorded total also counts
+  its subagents' requests, and cache writes keep their 5-minute and 1-hour
+  split, so --prices charges each at its own rate.
+
+  --tiers bound,matched,estimated names the tiers that take part, all three
+  by default. The named tiers place consumption together; what only the
+  left-out tiers would place is unattributed as `tiers not asked`, naming
+  them, so `--tiers bound` shows how much of a change rests on the strongest
+  evidence alone.
+
+  Select commits with --commit (repeatable), --range A..B, --branch NAME (a
+  live branch against the default branch, otherwise the merges whose
+  subjects name it) or --commits-from FILE|-. A branch that is neither, a
+  revision git does not know and an empty selection refuse, as do --family,
+  --global and a session or window beside a selector. --explain lists each
+  row's evidence: shas, paths and times, never transcript text.
 
 EXPORT, THEN INGEST PROGRESSIVELY
   tapes export <id|--latest> [--bundle <dir>]
