@@ -52,14 +52,17 @@ impl Repository {
             .iter()
             .filter_map(|url| normalize_remote(url))
             .collect();
-        let default_branch = reader.default_branch()?.map(|branch| {
-            match branch.name.split_once('/') {
-                Some((_, name)) if branch.source == crate::git_reader::DefaultBranchSource::OriginHead => {
-                    name.to_owned()
-                }
-                _ => branch.name,
-            }
-        });
+        let default_branch =
+            reader
+                .default_branch()?
+                .map(|branch| match branch.name.split_once('/') {
+                    Some((_, name))
+                        if branch.source == crate::git_reader::DefaultBranchSource::OriginHead =>
+                    {
+                        name.to_owned()
+                    }
+                    _ => branch.name,
+                });
         Ok(Some(Self {
             reader,
             scope,
@@ -79,9 +82,7 @@ impl Repository {
     /// exists, as git places it; `None` for one that is gone, which nothing
     /// left on disk can place.
     pub fn holds(&self, directory: &Path) -> Option<bool> {
-        directory
-            .exists()
-            .then(|| self.scope.contains(directory))
+        directory.exists().then(|| self.scope.contains(directory))
     }
 
     /// Whether a remote URL a recording names is one of the repository's.
@@ -206,7 +207,9 @@ impl Repository {
                 (shared, candidate)
             })
             .filter(|(shared, _)| *shared as f64 >= params.edit_overlap * added.len() as f64)
-            .max_by_key(|(shared, candidate)| (*shared, candidate.committer, candidate.sha.clone()));
+            .max_by_key(|(shared, candidate)| {
+                (*shared, candidate.committer, candidate.sha.clone())
+            });
         Ok(best.map(|(_, candidate)| (candidate.sha.clone(), Via::Digests)))
     }
 

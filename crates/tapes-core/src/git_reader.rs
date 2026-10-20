@@ -286,7 +286,11 @@ fn merged_branch_name(subject: &str) -> Option<String> {
     let rest = subject.strip_prefix("Merge pull request #")?;
     let (_, from) = rest.split_once(" from ")?;
     let name = from.split_whitespace().next()?;
-    Some(name.split_once('/').map_or(name, |(_, branch)| branch).to_owned())
+    Some(
+        name.split_once('/')
+            .map_or(name, |(_, branch)| branch)
+            .to_owned(),
+    )
 }
 
 /// A bounded, read-only view of one repository.
