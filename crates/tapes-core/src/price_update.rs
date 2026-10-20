@@ -809,21 +809,19 @@ fn read_source(source: &Source, from: Option<&Path>, limits: FetchLimits) -> Res
     }
 }
 
-/// Fetch `url` with `curl`, over HTTPS only, bounded by `limits` and in
-/// size.
-pub fn fetch(url: &str, limits: FetchLimits) -> Result<String> {
-    let connect: Vec<String> = limits
-        .connect
-        .map(|connect| {
-            vec![
-                "--connect-timeout".to_owned(),
-                connect.as_secs().to_string(),
-            ]
-        })
-        .unwrap_or_default();
-    let mut child = match Command::new("curl")
-        .args(&connect)
-        .args([
+/// `curl`'s arguments to fetch `url` within `limits`: no curlrc, which
+/// could redirect the output, add a proxy or loosen TLS and the protocols,
+/// and HTTPS only, redirects included.
+pub fn curl_arguments(url: &str, limits: FetchLimits) -> Vec<String> {
+    let mut arguments: Vec<String> = vec!["--disable".to_owned()];
+    if let Some(connect) = limits.connect {
+        arguments.extend([
+            "--connect-timeout".to_owned(),
+            connect.as_secs().to_string(),
+        ]);
+    }
+    arguments.extend(
+        [
             "--proto",
             "=https",
             "--proto-redir",
@@ -837,7 +835,17 @@ pub fn fetch(url: &str, limits: FetchLimits) -> Result<String> {
             "--max-filesize",
             &SOURCE_BYTES.to_string(),
             url,
-        ])
+        ]
+        .map(str::to_owned),
+    );
+    arguments
+}
+
+/// Fetch `url` with `curl`, as [`curl_arguments`] runs it, bounded in time
+/// and size.
+pub fn fetch(url: &str, limits: FetchLimits) -> Result<String> {
+    let mut child = match Command::new("curl")
+        .args(curl_arguments(url, limits))
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

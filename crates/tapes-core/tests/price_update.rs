@@ -454,3 +454,24 @@ fn a_copy_that_is_not_a_regular_file_fails_its_source_at_once() {
     );
     assert!(report.sources.iter().filter(|source| source.ok).count() == 2);
 }
+
+#[test]
+fn curl_reads_no_curlrc_and_fetches_over_https_only() {
+    // Claim: curl runs with `--disable` first, so no curlrc redirects the
+    // output, adds a proxy or loosens TLS, and keeps HTTPS-only protocols
+    // for the request and its redirects. Rejects a curlrc taking effect, as
+    // it does when `--disable` is absent or not first.
+    for limits in [
+        price_update::FetchLimits::UPDATE,
+        price_update::FetchLimits::REFRESH,
+    ] {
+        let arguments = price_update::curl_arguments(ANTHROPIC.url, limits);
+        assert_eq!(arguments[0], "--disable", "{arguments:?}");
+        let joined = arguments.join(" ");
+        assert!(
+            joined.contains("--proto =https --proto-redir =https"),
+            "{joined}"
+        );
+        assert_eq!(arguments.last().map(String::as_str), Some(ANTHROPIC.url));
+    }
+}
