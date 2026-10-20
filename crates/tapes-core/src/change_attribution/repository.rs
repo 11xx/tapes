@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 
 use super::{CommitFacts, Params, Via};
-use crate::git_reader::{CommitSet, DefaultBranchSource, GitReader, Resolution, Worktree};
+use crate::git_reader::{Commit, CommitSet, DefaultBranchSource, GitReader, Resolution, Worktree};
 use crate::scope::Scope;
 use crate::span::Instant;
 
@@ -25,6 +25,7 @@ pub struct Repository {
     /// The local name of the branch work is measured against.
     pub default_branch: Option<String>,
     resolved: RefCell<HashMap<String, Option<(String, Via)>>>,
+    lifetimes: RefCell<BTreeMap<String, (Instant, Instant)>>,
 }
 
 /// The commits evidence may name, as a set and as the partition weighs
@@ -73,6 +74,7 @@ impl Repository {
             remotes,
             default_branch,
             resolved: RefCell::new(HashMap::new()),
+            lifetimes: RefCell::new(BTreeMap::new()),
         })
     }
 
@@ -92,30 +94,47 @@ impl Repository {
         normalize_remote(url).is_some_and(|url| self.remotes.contains(&url))
     }
 
+    /// Admit evidence for each of `shas` over `[from, to]`, a pull
+    /// request's lifetime, besides its own window: the commits stand for
+    /// work a squash or rebase made under a new sha, which happened before
+    /// they were committed.
+    pub fn widen(&self, shas: &[String], from: Instant, to: Instant) {
+        let mut lifetimes = self.lifetimes.borrow_mut();
+        for sha in shas {
+            lifetimes.insert(sha.clone(), (from, to));
+        }
+    }
+
     /// The commits whose windows meet `[from, to]`.
     pub(crate) fn universe(&self, from: Instant, to: Instant, params: &Params) -> Result<Universe> {
-        let set = self
+        let mut set = self
             .reader
             .commits_between(from - params.lookahead, to + params.lookback)?;
+        // A widened commit may lie outside the walk: its window reaches
+        // back over the lifetime.
+        let lifetimes = self.lifetimes.borrow().clone();
+        for (sha, lifetime) in &lifetimes {
+            if set.commits.iter().any(|commit| commit.sha == *sha) {
+                continue;
+            }
+            let Ok(commit) = self.reader.commit(sha) else {
+                continue;
+            };
+            let facts = facts_of(&commit, Some(*lifetime));
+            let (low, high) = facts.window(params);
+            if low <= to && high >= from {
+                let at = set
+                    .commits
+                    .iter()
+                    .position(|held| held.committer_time > commit.committer_time)
+                    .unwrap_or(set.commits.len());
+                set.commits.insert(at, commit);
+            }
+        }
         let facts = set
             .commits
             .iter()
-            .map(|commit| {
-                let mut added: Vec<u64> = commit
-                    .paths
-                    .iter()
-                    .flat_map(|path| path.added.iter().copied())
-                    .collect();
-                added.sort_unstable();
-                added.dedup();
-                CommitFacts {
-                    sha: commit.sha.clone(),
-                    author: commit.author_time,
-                    committer: commit.committer_time,
-                    merge: commit.merge,
-                    added,
-                }
-            })
+            .map(|commit| facts_of(commit, lifetimes.get(&commit.sha).copied()))
             .collect();
         Ok(Universe { set, facts })
     }
@@ -234,6 +253,24 @@ impl Repository {
     /// Which of `names` name a commit the repository holds.
     pub(crate) fn names_commits(&self, names: &BTreeSet<String>) -> Result<BTreeSet<String>> {
         self.reader.existing_commits(names)
+    }
+}
+
+fn facts_of(commit: &Commit, lifetime: Option<(Instant, Instant)>) -> CommitFacts {
+    let mut added: Vec<u64> = commit
+        .paths
+        .iter()
+        .flat_map(|path| path.added.iter().copied())
+        .collect();
+    added.sort_unstable();
+    added.dedup();
+    CommitFacts {
+        sha: commit.sha.clone(),
+        author: commit.author_time,
+        committer: commit.committer_time,
+        merge: commit.merge,
+        added,
+        lifetime,
     }
 }
 

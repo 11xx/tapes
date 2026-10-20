@@ -25,7 +25,10 @@
 //! A sha that names the commit only through its added lines drops a tier.
 //! Evidence for a commit is admitted only inside the commit's window, from
 //! [`Params::lookback`] before the earlier of its author and committer times
-//! to [`Params::lookahead`] after the later.
+//! to [`Params::lookahead`] after the later. A commit that stands for a
+//! pull request's work under a new sha, a squash or a rebase, also admits
+//! evidence over the pull request's lifetime, widened the same way; the
+//! repository names such commits ([`Repository::widen`]).
 //!
 //! The tiers [`Params::tiers`] names, every tier by default, take part
 //! together as one union, and each share names the tier and basis that
@@ -305,15 +308,29 @@ pub struct CommitFacts {
     pub merge: bool,
     /// Line digests of the lines it adds, sorted, each once.
     pub added: Vec<u64>,
+    /// The span of a pull request's life whose work the commit holds, a
+    /// squash or rebase having made it under a new sha: its evidence is
+    /// also admitted over that span.
+    pub lifetime: Option<(Instant, Instant)>,
 }
 
 impl CommitFacts {
-    /// The interval inside which evidence for the commit is admitted.
+    /// The interval inside which evidence for the commit is admitted: from
+    /// [`Params::lookback`] before the earlier of its author and committer
+    /// times to [`Params::lookahead`] after the later, and over its
+    /// lifetime widened the same way.
     pub fn window(&self, params: &Params) -> (Instant, Instant) {
-        (
+        let own = (
             self.author.min(self.committer) - params.lookback,
             self.author.max(self.committer) + params.lookahead,
-        )
+        );
+        match self.lifetime {
+            Some((from, to)) => (
+                own.0.min(from - params.lookback),
+                own.1.max(to + params.lookahead),
+            ),
+            None => own,
+        }
     }
 
     fn admits(&self, at: Instant, params: &Params) -> bool {
