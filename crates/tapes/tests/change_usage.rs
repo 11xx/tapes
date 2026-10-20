@@ -595,33 +595,42 @@ fn branch_reads_live_then_merged_else_refuses() {
 }
 
 /// Claim: one session's reverse view, `<SESSION> --by commit`, gives each
-/// commit what a range view over the same commits gives that session.
-/// Rejects a reverse view divided differently from the commit view.
+/// commit what a range view over the same commits gives that session, a
+/// lead's recorded total included. Rejects a reverse view divided
+/// differently from the commit view, such as one read as a window over the
+/// session's activity, which loses the part of a recorded total no request
+/// explains.
 #[test]
 fn a_session_view_matches_the_range_view() {
     let change = change();
-    let reverse = json(&change, &[DELEGATE_A, "--by", "commit"]);
-    let range = json(
-        &change,
-        &[
-            "--range",
-            &format!("{}..{}", change.sha("base"), change.sha("Ma")),
-            "--by",
-            "commit,session",
-        ],
-    );
-    let rows = items(&reverse, "rows");
-    assert_eq!(rows.len(), 2, "{}", reverse["rows"]);
-    for row in &rows {
-        let sha = row["key"]["commit"].as_str().unwrap();
-        let same = row_for(&range, sha, DELEGATE_A).expect("the range view holds the row");
-        assert_eq!(Figure::of(row), Figure::of(same), "{}", change.name(sha));
-        assert_eq!(row["evidence"], same["evidence"]);
+    let merged_a = format!("{}..{}", change.sha("base"), change.sha("Ma"));
+    for (id, selection, commits) in [
+        (DELEGATE_A, ["--range", merged_a.as_str()], 2),
+        (LEAD, ["--commit", change.sha("d1")], 1),
+    ] {
+        let reverse = json(&change, &[id, "--by", "commit"]);
+        let mut args = selection.to_vec();
+        args.extend(["--by", "commit,session"]);
+        let range = json(&change, &args);
+        let rows = items(&reverse, "rows");
+        assert_eq!(rows.len(), commits, "{id}: {}", reverse["rows"]);
+        for row in &rows {
+            let sha = row["key"]["commit"].as_str().unwrap();
+            let same = row_for(&range, sha, id).expect("the range view holds the row");
+            assert_eq!(
+                Figure::of(row),
+                Figure::of(same),
+                "{id} {}",
+                change.name(sha)
+            );
+            assert_eq!(row["evidence"], same["evidence"]);
+        }
+        assert_eq!(
+            Figure::of(&session(&reverse, id)["whole"]),
+            Figure::of(&session(&range, id)["whole"]),
+            "{id}"
+        );
     }
-    assert_eq!(
-        Figure::of(&session(&reverse, DELEGATE_A)["whole"]),
-        Figure::of(&session(&range, DELEGATE_A)["whole"])
-    );
 }
 
 /// Claim: every session's rows, uncommitted buckets, unattributed parts and
