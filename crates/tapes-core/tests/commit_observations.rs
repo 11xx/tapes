@@ -264,6 +264,28 @@ fn expected(claude: bool) -> BTreeMap<String, Reported> {
             ..Reported::default()
         },
     );
+    // A range that ends at HEAD lists the commits made first; a git command
+    // chained with other tools is still read.
+    add(
+        "range-head",
+        one(seen(
+            true,
+            "d4d4d4d",
+            ChainedOutput,
+            Some("feat: ranged"),
+            None,
+        )),
+    );
+    add(
+        "other-tool",
+        one(seen(
+            true,
+            "e5e5e5e",
+            ChainedOutput,
+            Some("fix: chained with another tool"),
+            None,
+        )),
+    );
     // A printer of one commit names the newest of two; the other is unnamed.
     add(
         "two-short",
