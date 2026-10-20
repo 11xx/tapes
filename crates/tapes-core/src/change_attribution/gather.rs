@@ -32,6 +32,7 @@ use crate::backend::{Backend, StreamOptions, StreamedTranscript};
 use crate::commit_observations::CommitObservation;
 use crate::event::{EventFilter, EventKind, EventOptions, EventRecord};
 use crate::model::Session;
+use crate::shell_commands;
 use crate::span::{Instant, SpanPlacement};
 use crate::window::{self, ParentEvidence};
 use crate::{EventSink, ListFilters, ListSort};
@@ -348,7 +349,8 @@ pub fn attribute(
 
     let mut partitions: BTreeMap<SessionKey, Partition> = BTreeMap::new();
     for member in &gathered.members {
-        let evidence = evidence(&member.read, repository, &universe, params)?;
+        let mut evidence = evidence(&member.read, repository, &universe, params)?;
+        evidence.inherits = member.parent.is_some();
         partitions.insert(member.key(), partition(&evidence, &facts, params));
     }
     // Parents before children: a child inherits its parent's allocation,
@@ -391,14 +393,15 @@ pub fn attribute(
         let mut notes = Vec::new();
         if !partition.stretches {
             notes.push(
-                "the read kept no request timeline, so no working stretch was estimated"
-                    .to_owned(),
+                "the read kept no request timeline, so no working stretch was estimated".to_owned(),
             );
         }
         let amounts = match read_amounts(backends[member.backend].as_ref(), member, &partition) {
             Ok(amounts) => Some(amounts),
             Err(error) => {
-                notes.push(format!("the recording could not be read in pieces: {error:#}"));
+                notes.push(format!(
+                    "the recording could not be read in pieces: {error:#}"
+                ));
                 None
             }
         };
@@ -412,14 +415,22 @@ pub fn attribute(
     }
     Ok(RepositoryAttribution {
         sessions,
-        commits: universe.facts.iter().map(|commit| commit.sha.clone()).collect(),
+        commits: universe
+            .facts
+            .iter()
+            .map(|commit| commit.sha.clone())
+            .collect(),
         commits_truncated: universe.set.commits_truncated,
     })
 }
 
 /// The partition's pieces, read from the recording in one pass.
 fn read_amounts(backend: &dyn Backend, member: &Member, partition: &Partition) -> Result<Amounts> {
-    let bounds: Vec<_> = partition.pieces.iter().map(|piece| piece.bounds()).collect();
+    let bounds: Vec<_> = partition
+        .pieces
+        .iter()
+        .map(|piece| piece.bounds())
+        .collect();
     let figures = backend
         .stream_spans(&member.read.session, &member.read.read, &bounds)?
         .billed_as_whole();
@@ -473,7 +484,11 @@ fn amount(figure: &Session, placement: Option<&SpanPlacement>) -> Amount {
                     .model
                     .as_ref()
                     .map_or_else(String::new, |model| model.id.clone());
-                amount.models.entry(model).or_default().add(&Counts::of(tokens));
+                amount
+                    .models
+                    .entry(model)
+                    .or_default()
+                    .add(&Counts::of(tokens));
             }
         }
     }
@@ -506,14 +521,27 @@ fn read_session(backend: &dyn Backend, session: &Session) -> Result<SessionRead>
         }
         fn record(&mut self, record: EventRecord) -> Result<()> {
             if let Some(commits) = &record.commits {
-                self.observations.extend(commits.observations.iter().cloned());
+                self.observations
+                    .extend(commits.observations.iter().cloned());
+            }
+            if let Some(edits) = &record.edits {
+                for edit in &edits.observations {
+                    if let Some(at) = edit.at {
+                        self.edits.push(EditInput {
+                            at,
+                            path: PathBuf::from(&edit.path),
+                            added: edit.added.clone(),
+                        });
+                    }
+                }
             }
             if record.event.kind == EventKind::ToolCall {
                 if let (Some(at), Some(arguments)) = (record.ts, &record.event.arguments) {
                     let text = arguments
                         .complete_text()
                         .unwrap_or(arguments.preview.as_str());
-                    for path in named_directories(text) {
+                    let shell = shell_commands::is_shell_tool(record.event.name.as_deref());
+                    for path in named_directories(text, shell) {
                         self.mentions.push(Mention { at, path });
                     }
                 }
@@ -606,50 +634,50 @@ fn evidence(
         commits,
         mentions: read.mentions.clone(),
         edits: read.edits.clone(),
+        inherits: false,
     })
 }
 
 /// The absolute paths a tool call's argument text names as a directory to
 /// work in or a file to write: the values of `workdir`, `cwd`, `file_path`,
-/// `notebook_path` and `path` members, and the operands of `cd` and
-/// `git -C` in a command. The argument text may be JSON or a script that
-/// embeds JSON; members are read wherever they appear.
-fn named_directories(text: &str) -> Vec<PathBuf> {
+/// `notebook_path` and `path` members, wherever they appear in JSON or in a
+/// script that embeds JSON, and for a shell tool the operands of `cd` and
+/// `git -C` in its commands.
+fn named_directories(text: &str, shell: bool) -> Vec<PathBuf> {
     let mut found: Vec<PathBuf> = Vec::new();
     for key in ["workdir", "cwd", "file_path", "notebook_path", "path"] {
         let quoted = format!("\"{key}\"");
         let mut rest = text;
         while let Some(at) = rest.find(&quoted) {
             rest = &rest[at + quoted.len()..];
-            let value = rest.trim_start_matches([' ', '\\']);
-            let Some(value) = value.strip_prefix(':') else {
+            let Some(value) = rest.trim_start().strip_prefix(':') else {
                 continue;
             };
-            let value = value.trim_start_matches([' ', '\\']);
-            let Some(value) = value.strip_prefix('"') else {
+            let Some(value) = value.trim_start().strip_prefix('"') else {
                 continue;
             };
-            let end = value.find(['"', '\\']).unwrap_or(value.len());
-            let path = &value[..end];
+            let path = &value[..value.find(['"', '\\']).unwrap_or(value.len())];
             if path.starts_with('/') {
                 found.push(PathBuf::from(path));
             }
         }
     }
-    let words: Vec<&str> = text
-        .split(|c: char| c.is_whitespace() || matches!(c, ';' | '&' | '|' | '(' | ')'))
-        .filter(|word| !word.is_empty())
-        .collect();
-    for pair in words.windows(2) {
-        let operand = pair[1].trim_matches(['"', '\'', '\\']);
-        if pair[0] == "cd" && operand.starts_with('/') {
-            found.push(PathBuf::from(operand));
-        }
-    }
-    for triple in words.windows(3) {
-        let operand = triple[2].trim_matches(['"', '\'', '\\']);
-        if triple[0] == "git" && triple[1] == "-C" && operand.starts_with('/') {
-            found.push(PathBuf::from(operand));
+    if shell {
+        for command in shell_commands::commands(text) {
+            let words: Vec<&str> = command.words.iter().map(String::as_str).collect();
+            match words.as_slice() {
+                ["cd", directory, ..] if directory.starts_with('/') => {
+                    found.push(PathBuf::from(directory));
+                }
+                [program, rest @ ..] if shell_commands::basename(program) == "git" => {
+                    for pair in rest.windows(2) {
+                        if pair[0] == "-C" && pair[1].starts_with('/') {
+                            found.push(PathBuf::from(pair[1]));
+                        }
+                    }
+                }
+                _ => {}
+            }
         }
     }
     found.sort();
@@ -666,7 +694,7 @@ mod tests {
     fn named_directories_reads_members_and_shell_operands() {
         let text = r#"const r = await tools.exec_command({"cmd":"bash -lc 'cd /w/one && git -C /w/two status'","workdir":"/w/three"});"#;
         assert_eq!(
-            named_directories(text),
+            named_directories(text, true),
             vec![
                 PathBuf::from("/w/one"),
                 PathBuf::from("/w/three"),
@@ -674,7 +702,10 @@ mod tests {
             ]
         );
         let edit = r#"{"file_path":"/w/four/src/lib.rs","old_string":"a","new_string":"b"}"#;
-        assert_eq!(named_directories(edit), vec![PathBuf::from("/w/four/src/lib.rs")]);
-        assert!(named_directories(r#"{"path":"relative/file"}"#).is_empty());
+        assert_eq!(
+            named_directories(edit, false),
+            vec![PathBuf::from("/w/four/src/lib.rs")]
+        );
+        assert!(named_directories(r#"{"path":"relative/file"}"#, false).is_empty());
     }
 }

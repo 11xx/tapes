@@ -11,8 +11,10 @@
 //! - **bound**: the session created the commit. Its recording names the sha,
 //!   and the sha is the commit or carries its stable patch id.
 //! - **matched**: an edit whose added lines the commit adds, for at least
-//!   [`Params::edit_overlap`] of them over at least [`Params::edit_lines`];
-//!   and a worktree span, the session's stay in a worktree or on a branch
+//!   [`Params::edit_overlap`] of them over at least [`Params::edit_lines`],
+//!   made no later than [`Params::edit_authoring`] after the commit's
+//!   committer time, since a later edit applied the commit rather than wrote
+//!   it; and a worktree span, the session's stay in a worktree or on a branch
 //!   whose commits are known.
 //! - **estimated**: a request within [`Params::proximity`] of the commit's
 //!   author time; and a revision an inspection names.
@@ -38,8 +40,10 @@
 //! branch, or a merge whose subject names the branch.
 //!
 //! A segment several items cover is split evenly among them. A child session
-//! is first placed by its own evidence; what that leaves unplaced inherits
-//! its parent's allocation at the same time, with basis `inherited`.
+//! is first placed by its own evidence, its request times excepted: they are
+//! its parent's, so a child has no proximity evidence. What its own evidence
+//! leaves unplaced inherits its parent's allocation at the same time, with
+//! basis `inherited`.
 //!
 //! The partition of a session runs over every commit its evidence admits, so
 //! a commit's amount never depends on which commits a view selects.
@@ -78,6 +82,10 @@ pub struct Params {
     pub edit_overlap: f64,
     /// The fewest distinct added lines an edit must have to match.
     pub edit_lines: usize,
+    /// How long after a commit's committer time an edit may still be
+    /// evidence of writing it; a later edit applied the commit. `None`
+    /// admits an edit anywhere in the commit's window.
+    pub edit_authoring: Option<Duration>,
     /// How close to a commit's author time a request must lie.
     pub proximity: Duration,
     /// The least share of a session's timed requests a stay a tool argument
@@ -93,6 +101,7 @@ impl Default for Params {
             idle: Duration::minutes(45),
             edit_overlap: 0.5,
             edit_lines: 2,
+            edit_authoring: Some(Duration::minutes(5)),
             proximity: Duration::minutes(30),
             presence_share: 0.25,
         }
@@ -347,6 +356,10 @@ pub struct SessionEvidence {
     pub commits: Vec<SeenCommit>,
     pub mentions: Vec<Mention>,
     pub edits: Vec<EditInput>,
+    /// The session inherits from a parent, whose evidence the time of its
+    /// requests is: a child's requests near a commit are not its own
+    /// evidence for it.
+    pub inherits: bool,
 }
 
 impl SessionEvidence {
@@ -583,7 +596,10 @@ fn inputs(evidence: &SessionEvidence, facts: &Facts, params: &Params) -> Inputs 
     // Creations and inspections, one piece of evidence per call.
     let mut calls: BTreeMap<(usize, bool), Vec<&SeenCommit>> = BTreeMap::new();
     for seen in &evidence.commits {
-        calls.entry((seen.call, seen.created)).or_default().push(seen);
+        calls
+            .entry((seen.call, seen.created))
+            .or_default()
+            .push(seen);
     }
     for ((_, created), seen) in &calls {
         let mut by_tier: BTreeMap<Tier, (Instant, Vec<String>, Via, Vec<String>)> = BTreeMap::new();
@@ -591,11 +607,14 @@ fn inputs(evidence: &SessionEvidence, facts: &Facts, params: &Params) -> Inputs 
             let (Some(at), Some((sha, via))) = (one.at, &one.resolved) else {
                 continue;
             };
-            let Some(commit) = index.commit(sha).filter(|commit| commit.admits(at, params))
-            else {
+            let Some(commit) = index.commit(sha).filter(|commit| commit.admits(at, params)) else {
                 continue;
             };
-            let base = if *created { Tier::Bound } else { Tier::Estimated };
+            let base = if *created {
+                Tier::Bound
+            } else {
+                Tier::Estimated
+            };
             let tier = weaken(base, *via);
             let entry = by_tier
                 .entry(tier)
@@ -640,6 +659,11 @@ fn inputs(evidence: &SessionEvidence, facts: &Facts, params: &Params) -> Inputs 
             .adding(&edit.added, params.edit_overlap)
             .into_iter()
             .filter(|commit| commit.admits(edit.at, params))
+            .filter(|commit| {
+                params
+                    .edit_authoring
+                    .is_none_or(|tolerance| edit.at <= commit.committer + tolerance)
+            })
             .map(|commit| commit.sha.clone())
             .collect();
         let Some(work) = Key::commits(shas.clone()) else {
@@ -665,7 +689,11 @@ fn inputs(evidence: &SessionEvidence, facts: &Facts, params: &Params) -> Inputs 
     worktree_spans(evidence, facts, &index, params, &mut inputs);
 
     // Requests near a commit's author time.
-    let timed = evidence.timed();
+    let timed = if evidence.inherits {
+        Vec::new()
+    } else {
+        evidence.timed()
+    };
     for commit in facts.commits.iter().filter(|commit| !commit.merge) {
         let at = commit.author;
         let start = timed.partition_point(|request| *request < at - params.proximity);
@@ -1146,7 +1174,10 @@ impl Amount {
             self.models.entry(model.clone()).or_default().add(counts);
         }
         for (model, counts) in &other.unexplained {
-            self.unexplained.entry(model.clone()).or_default().add(counts);
+            self.unexplained
+                .entry(model.clone())
+                .or_default()
+                .add(counts);
         }
     }
 
