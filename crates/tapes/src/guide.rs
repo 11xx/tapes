@@ -1691,8 +1691,10 @@ KEEP A PRICE TABLE
   nor `TAPES_PRICES` naming a table and outside `--remote`, first runs the
   same update when the data table is absent or no source succeeded in the
   last 24 hours, and the last attempt is over an hour old or unrecorded:
-  so about once a day, and at most hourly while fetches fail. That refresh
-  gives each source 5 seconds to connect and 10 to finish. It prints
+  so about once a day, and at most hourly while fetches fail. It records
+  the attempt before fetching, so commands started together fetch once.
+  The refresh gives each source 5 seconds to connect and 10 to finish. It
+  prints
   nothing when it succeeds; when a source fails it prints one line,
   `warning: prices not refreshed (<source>: <error>; …); using the table
   fetched <date>` (or `no fetched table`), and the command goes on, its

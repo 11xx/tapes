@@ -902,6 +902,24 @@ fn write_atomically(path: &Path, contents: &[u8]) -> Result<()> {
     })
 }
 
+/// Record an attempt at `now` in `directory`'s fetch record before
+/// fetching, keeping each source's last success, so a command starting
+/// meanwhile sees the attempt and does not fetch too.
+pub fn claim_attempt(directory: &Path, now: DateTime<Utc>) -> Result<()> {
+    let path = directory.join(FETCH_FILE);
+    let record = FetchRecord {
+        attempted_at: now.trunc_subsecs(0),
+        ..FetchRecord::read(&path).unwrap_or(FetchRecord {
+            schema: FETCH_SCHEMA.to_owned(),
+            attempted_at: now,
+            sources: BTreeMap::new(),
+        })
+    };
+    let mut json = serde_json::to_vec_pretty(&record)?;
+    json.push(b'\n');
+    write_atomically(&path, &json)
+}
+
 /// Update the table in `directory` from every source, read from `from`
 /// when given, else fetched within `limits`. A source that fails
 /// contributes nothing; the others still update. An existing table that

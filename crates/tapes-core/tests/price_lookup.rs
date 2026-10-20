@@ -176,3 +176,21 @@ fn a_refresh_is_due_only_past_a_day_of_no_success_and_an_hour_of_no_attempt() {
         RefreshDecision::Absent
     );
 }
+
+#[test]
+fn a_claimed_attempt_holds_off_a_concurrent_refresh_and_keeps_successes() {
+    // Claim: claiming an attempt before fetching writes the record with the
+    // new attempt and every source's last success, so a command starting
+    // meanwhile finds no refresh due. Rejects concurrent commands each
+    // fetching, and a claim that forgets when a source last succeeded.
+    let data = tempfile::tempdir().unwrap();
+    let path = data.path().join(agent_tapes_core::price_update::FETCH_FILE);
+    let stale = record(Duration::hours(30), Duration::hours(30));
+    fs::write(&path, serde_json::to_vec(&stale).unwrap()).unwrap();
+    assert!(refresh_due(Some(&stale), true, now()));
+    agent_tapes_core::price_update::claim_attempt(data.path(), now()).unwrap();
+    let claimed = FetchRecord::read(&path).unwrap();
+    assert_eq!(claimed.attempted_at, now());
+    assert_eq!(claimed.sources, stale.sources);
+    assert!(!refresh_due(Some(&claimed), true, now()));
+}

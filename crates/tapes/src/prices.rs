@@ -93,6 +93,10 @@ pub fn refresh_before_pricing(named: Option<&Path>, offline_flag: bool) {
     if !price_update::refresh_due(record.as_ref(), directory.join(TABLE_FILE).exists(), now) {
         return;
     }
+    if let Err(error) = price_update::claim_attempt(&directory, now) {
+        eprintln!("warning: prices not refreshed ({error:#})");
+        return;
+    }
     let from = price_update::from_environment();
     let failures: Vec<String> =
         match price_update::update(&directory, from.as_deref(), FetchLimits::REFRESH, now) {
