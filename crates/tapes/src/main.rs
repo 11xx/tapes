@@ -97,9 +97,59 @@ enum ByArg {
     Session,
     Launch,
     Parent,
+    Commit,
+    Merge,
+    Agent,
+    Role,
+    Tier,
+}
+
+impl ByArg {
+    /// The dimension of a change view this names, if it names one.
+    fn change(self) -> Option<agent_tapes_core::change_usage::Dimension> {
+        use agent_tapes_core::change_usage::Dimension;
+        match self {
+            Self::Commit => Some(Dimension::Commit),
+            Self::Merge => Some(Dimension::Merge),
+            Self::Agent => Some(Dimension::Agent),
+            Self::Role => Some(Dimension::Role),
+            Self::Tier => Some(Dimension::Tier),
+            Self::Session => Some(Dimension::Session),
+            Self::Harness
+            | Self::Model
+            | Self::Variant
+            | Self::Directory
+            | Self::Launch
+            | Self::Parent => None,
+        }
+    }
+
+    /// Whether only a change view groups by it.
+    fn change_only(self) -> bool {
+        self.change().is_some() && self != Self::Session
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+enum TierArg {
+    Bound,
+    Matched,
+    Estimated,
+}
+
+impl From<TierArg> for agent_tapes_core::attribution::Tier {
+    fn from(tier: TierArg) -> Self {
+        match tier {
+            TierArg::Bound => Self::Bound,
+            TierArg::Matched => Self::Matched,
+            TierArg::Estimated => Self::Estimated,
+        }
+    }
 }
 
 impl From<ByArg> for GroupBy {
+    /// A summary's dimension; a change view's own dimensions refuse before
+    /// a summary is grouped.
     fn from(by: ByArg) -> Self {
         match by {
             ByArg::Harness => Self::Harness,
@@ -109,6 +159,9 @@ impl From<ByArg> for GroupBy {
             ByArg::Session => Self::Session,
             ByArg::Launch => Self::Launch,
             ByArg::Parent => Self::Parent,
+            ByArg::Commit | ByArg::Merge | ByArg::Agent | ByArg::Role | ByArg::Tier => {
+                unreachable!("a change view's dimension never groups a summary")
+            }
         }
     }
 }
@@ -1716,14 +1769,15 @@ enum Command {
         /// an id in different harnesses are different groups, and the table
         /// writes a session or root id more than one harness holds as
         /// `<harness>:<id>`. A launched session is never an
-        /// overlap group with its launcher.
-        #[arg(
-            long,
-            value_enum,
-            value_name = "DIMENSION",
-            value_delimiter = ',',
-            conflicts_with_all = ["session", "latest", "title", "occurrence"]
-        )]
+        /// overlap group with its launcher. A change view groups its rows by
+        /// `commit`, `merge`, `agent`, `role`, `tier` and `session` alone
+        /// [default: commit,agent,role]; `merge` keys a commit by the
+        /// first-parent merge of the default branch that brought it, or by
+        /// itself where it lies on that history, as a fast-forward leaves it.
+        /// `<SESSION> --by commit` divides one session across the
+        /// repository's commits, and `--window FROM..TO --by commit` a
+        /// window's consumption; a summary refuses the change dimensions.
+        #[arg(long, value_enum, value_name = "DIMENSION", value_delimiter = ',')]
         by: Vec<ByArg>,
         /// Stream one session's whole recording instead of its bounded tail:
         /// turns are counted as they stream, and tokens, cost, context window,
@@ -2082,6 +2136,8 @@ enum Command {
         /// them].
         #[arg(long, value_name = "N", requires = "forecast", value_parser = clap::value_parser!(u64).range(1..))]
         concurrency: Option<u64>,
+        #[command(flatten)]
+        change: Box<ChangeAsk>,
         /// Price the answer with this tapes-price-table/1 or /2 file (the
         /// guide gives both formats): each figure gains `list_price_estimate`
         /// beside any cost its harness wrote, never in its place. A /2 row may
@@ -2133,7 +2189,8 @@ enum Command {
         #[arg(long, value_name = "FILE")]
         prices: Option<PathBuf>,
         /// Render the versioned tapes-usage/17 object, tapes-usage-summary/16
-        /// for a selection, or tapes-family-usage/2 under --family, as JSON. `session.model_observation` says
+        /// for a selection, tapes-change-usage/1 for a change view, or
+        /// tapes-family-usage/2 under --family, as JSON. `session.model_observation` says
         /// whether more than one model and effort was observed (`mixed`) and
         /// whether a gap, partial read or budget kept the split incomplete
         /// (`attribution_uncertain`); the session model is then only the latest
@@ -2595,6 +2652,279 @@ fn print_history_pin(reads: &[agent_tapes_core::model::ReadEvidence]) {
 fn print_selection_warnings(warnings: &[String]) {
     for warning in warnings {
         eprintln!("Warning: {warning}.");
+    }
+}
+
+/// What a change view was asked for on the command line.
+#[derive(Args, Debug)]
+struct ChangeAsk {
+    /// Price the commits these revisions name, as
+    /// tapes-change-usage/1. Repeatable. A change view reads the
+    /// repository holding the current directory, or the one --project
+    /// names, read-only through git, and every installed Claude, Codex
+    /// and Pi recording active from an hour before a selected commit's
+    /// earlier time to half an hour after its later one; an OpenCode
+    /// session takes part through its directory and time alone. Each
+    /// session is divided over every commit its evidence admits, so a
+    /// commit's amount does not depend on what else is selected. The
+    /// answer has rows per commit, agent (`harness:model#effort`) and
+    /// role (`author`, `reviewer`, `proximate`), each with requests,
+    /// native tokens by harness and model, disjoint categories, the part
+    /// of a recorded total no request explains, and the same amounts by
+    /// evidence tier and basis; the uncommitted buckets per worktree and
+    /// branch; unattributed amounts by reason; `unselected`, the shares
+    /// the same sessions' evidence gives commits not selected, reported
+    /// apart and out of the rows' total; and totals, in which rows,
+    /// uncommitted, unattributed and unselected add up to the sessions'
+    /// wholes. A change view refuses a session selection other than
+    /// `<SESSION> --by commit`, --family, --global, --window, span flags,
+    /// --full, --series, --reconcile, --event-keys, allowance rates,
+    /// forecasts, listing filters, --read-bytes and supplied inputs; an
+    /// unknown revision refuses with git's message, and an empty
+    /// selection refuses.
+    #[arg(long = "commit", value_name = "REV", conflicts_with_all = ["range", "branch", "commits_from"])]
+    commit: Vec<String>,
+    /// Price the commits of a range, `A..B` or `A...B` as `git log` reads
+    /// them, as --commit does.
+    #[arg(long, value_name = "A..B", conflicts_with_all = ["branch", "commits_from"])]
+    range: Option<String>,
+    /// Price a branch's commits, as --commit does: a live branch's
+    /// commits the default branch lacks, or, for a branch with none, the
+    /// commits each merge whose subject names it (`Merge branch 'name'`,
+    /// `Merge remote-tracking branch 'origin/name'`, `Merge pull request
+    /// #n from owner/name`) brought from its second parent. A branch that
+    /// is neither refuses, naming --range and --commits-from.
+    #[arg(long, value_name = "NAME", conflicts_with = "commits_from")]
+    branch: Option<String>,
+    /// Price the commits a file lists, or standard input for `-`, as
+    /// --commit does: one revision per line, blank lines and lines
+    /// starting with `#` ignored.
+    #[arg(long, value_name = "FILE|-")]
+    commits_from: Option<String>,
+    /// List the evidence behind each change-view row and bucket: its
+    /// session, kind (created, edited, worktree, proximity, inspected),
+    /// tier, time or span, the commits it names, and how an observed sha
+    /// resolved (exact, patch-id, digests) with the sha the recording
+    /// named. Evidence carries shas, paths and times, never transcript
+    /// text.
+    #[arg(long)]
+    explain: bool,
+    /// The evidence tiers that take part in a change view,
+    /// comma-separated from `bound`, `matched` and `estimated` [default:
+    /// all three]. The named tiers take part together, never as a
+    /// cascade, so a tier alone places what it alone would; what only
+    /// the left-out tiers would place is unattributed as `tiers not
+    /// asked`, naming them under `excluded_tiers`. `tiers` names the
+    /// tiers that ran.
+    #[arg(long, value_enum, value_name = "TIER", value_delimiter = ',')]
+    tiers: Vec<TierArg>,
+}
+
+impl ChangeAsk {
+    fn selects(&self) -> bool {
+        !self.commit.is_empty()
+            || self.range.is_some()
+            || self.branch.is_some()
+            || self.commits_from.is_some()
+    }
+
+    /// Whether the arguments ask for a change view: a change selector, a
+    /// change view's own flag, or a dimension only a change view groups by.
+    fn asked(&self, by: &[ByArg]) -> bool {
+        self.selects()
+            || self.explain
+            || !self.tiers.is_empty()
+            || by.iter().any(|by| by.change_only())
+    }
+
+    fn selection(
+        &self,
+    ) -> Result<Option<agent_tapes_core::change_usage::ChangeSelection<'static>>> {
+        use agent_tapes_core::change_usage::ChangeSelection;
+        if !self.commit.is_empty() {
+            return Ok(Some(ChangeSelection::Commits(self.commit.clone())));
+        }
+        if let Some(range) = &self.range {
+            return Ok(Some(ChangeSelection::Range(range.clone())));
+        }
+        if let Some(branch) = &self.branch {
+            return Ok(Some(ChangeSelection::Branch(branch.clone())));
+        }
+        let Some(source) = &self.commits_from else {
+            return Ok(None);
+        };
+        let text = if source == "-" {
+            let mut text = String::new();
+            std::io::Read::read_to_string(&mut std::io::stdin(), &mut text).map_err(|error| {
+                anyhow!("--commits-from - could not read standard input: {error}")
+            })?;
+            text
+        } else {
+            std::fs::read_to_string(source)
+                .map_err(|error| anyhow!("--commits-from {source} could not be read: {error}"))?
+        };
+        let revisions = text
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty() && !line.starts_with('#'))
+            .map(str::to_owned)
+            .collect();
+        let source = if source == "-" {
+            "standard input".to_owned()
+        } else {
+            source.clone()
+        };
+        Ok(Some(ChangeSelection::List { source, revisions }))
+    }
+}
+
+/// Answer a change view, refusing what does not combine with one.
+#[allow(clippy::too_many_arguments)]
+fn usage_change(
+    query: &SessionQueryArgs,
+    read: &ReadArgs,
+    by: &[ByArg],
+    change: ChangeAsk,
+    refused: &[(&str, bool)],
+    window: Option<WindowBounds>,
+    prices: Option<&agent_tapes_core::pricing::PriceTable>,
+    json: bool,
+) -> Result<()> {
+    use agent_tapes_core::change_usage::{change_usage, ChangeSelection, Request};
+    let mut dimensions = Vec::new();
+    for by in by {
+        let Some(dimension) = by.change() else {
+            return Err(anyhow!(
+                "--by {} groups a summary of sessions; a change view groups its rows by commit, \
+                 merge, agent, role, tier and session",
+                serde_kebab(
+                    &by.to_possible_value()
+                        .map(|value| value.get_name().to_owned())
+                )
+            ));
+        };
+        if !dimensions.contains(&dimension) {
+            dimensions.push(dimension);
+        }
+    }
+    for (flag, present) in refused {
+        if *present {
+            return Err(anyhow!(
+                "{flag} does not combine with a change view, which divides consumption among \
+                 commits; drop {flag}, or drop the change view's flags"
+            ));
+        }
+    }
+    if query.scope.global {
+        return Err(anyhow!(
+            "a change view reads one repository: the one holding the current directory, or the \
+             one --project <PATH> names; --global refuses it"
+        ));
+    }
+    if query.input.supplied() {
+        return Err(anyhow!(
+            "a change view reads installed recordings whole; a supplied input refuses it"
+        ));
+    }
+    if read.read_bytes.is_some() {
+        return Err(anyhow!(
+            "a change view reads recordings whole; --read-bytes refuses it"
+        ));
+    }
+    for (flag, present) in [
+        ("--harness", query.harness.is_some()),
+        ("--limit", query.limit.is_some()),
+        ("--model", query.model.is_some()),
+        ("--launch", query.launch.is_some()),
+        ("--directory", query.directory.is_some()),
+        ("--since", query.since.is_some()),
+        ("--until", query.until.is_some()),
+        ("--sort", query.sort.is_some()),
+        ("--search", query.search.is_some()),
+    ] {
+        if present {
+            return Err(anyhow!(
+                "a change view reads every session whose activity meets its commits' evidence \
+                 windows; {flag} filters a listing and refuses it"
+            ));
+        }
+    }
+    let selection = match (change.selection()?, query.single(), window) {
+        (Some(selection), None, None) => selection,
+        (Some(_), Some(_), _) => {
+            return Err(anyhow!(
+                "--commit, --range, --branch and --commits-from select commits, and a session \
+                 selection does not combine with them; `<SESSION> --by commit` divides one \
+                 session across the repository's commits"
+            ))
+        }
+        (Some(_), None, Some(_)) => {
+            return Err(anyhow!(
+                "--window does not combine with --commit, --range, --branch or --commits-from; \
+                 `--window FROM..TO --by commit` divides a window's consumption across commits"
+            ))
+        }
+        (None, Some(one), None) => ChangeSelection::Session(one),
+        (None, None, Some(window)) => {
+            let from = window.from.ok_or_else(|| {
+                anyhow!("a change view of a window needs its start: --window FROM..[TO]")
+            })?;
+            ChangeSelection::Window {
+                from,
+                to: window.to,
+            }
+        }
+        (None, Some(_), Some(_)) => {
+            return Err(anyhow!(
+                "--window answers a selection of sessions; it does not combine with a session id"
+            ))
+        }
+        (None, None, None) => {
+            return Err(anyhow!(
+                "a change view needs commits (--commit, --range, --branch or --commits-from), a \
+                 session (`<SESSION> --by commit`) or a window (`--window FROM..TO --by commit`)"
+            ))
+        }
+    };
+    let directory = match &query.scope.project {
+        Some(project) => project.clone(),
+        None => std::env::current_dir()?,
+    };
+    let reader = agent_tapes_core::git_reader::GitReader::at(&directory)?.ok_or_else(|| {
+        anyhow!("git is not installed; a change view reads its repository through git")
+    })?;
+    if reader.toplevel()?.is_none() {
+        return Err(anyhow!(
+            "{} is not inside a Git repository: run the change view inside one, or name one with \
+             --project <PATH>",
+            directory.display()
+        ));
+    }
+    let repository =
+        agent_tapes_core::change_attribution::Repository::with_reader(reader, &directory)?;
+    let tiers = if change.tiers.is_empty() {
+        agent_tapes_core::change_attribution::Tiers::all()
+    } else {
+        agent_tapes_core::change_attribution::Tiers::of(
+            change.tiers.iter().copied().map(Into::into),
+        )
+    };
+    let usage = change_usage(
+        &query.input.backends()?,
+        &repository,
+        Request {
+            selection,
+            by: dimensions,
+            tiers,
+            explain: change.explain,
+            prices,
+        },
+    )?;
+    if json {
+        print_json(&usage, &query.input)
+    } else {
+        print!("{}", render_change_usage(&usage));
+        Ok(())
     }
 }
 
@@ -3415,12 +3745,35 @@ fn dispatch(cli: Cli) -> Result<()> {
             allowance_rates,
             forecast,
             concurrency,
+            change,
             json,
         } => {
             query.validate_input()?;
             let prices = price_table(prices.as_deref())?;
             let prices = prices.as_ref();
             read.refuse_supplied(&query.input)?;
+            if change.asked(&by) {
+                let refused = [
+                    ("--family", family),
+                    ("--quota-window", quota_window.is_some()),
+                    ("--allowance-rates", allowance_rates),
+                    ("--forecast", forecast.is_some()),
+                    ("--from", from.is_some()),
+                    ("--to", to.is_some()),
+                    ("--requests", requests.is_some()),
+                    ("--full", full),
+                    ("--series", series.is_some()),
+                    ("--reconcile", reconcile),
+                    ("--event-keys", event_keys.is_some()),
+                ];
+                return usage_change(&query, &read, &by, *change, &refused, window, prices, json);
+            }
+            if !by.is_empty() && query.single().is_some() {
+                return Err(anyhow!(
+                    "--by groups a selection of sessions, and one session is not grouped; \
+                     `<SESSION> --by commit` divides one session across a repository's commits"
+                ));
+            }
             let span = requests
                 .or((from.is_some() || to.is_some()).then_some(SpanBounds::Time { from, to }));
             if span.is_some() {
@@ -6477,6 +6830,286 @@ fn render_usage_summary(summary: &UsageSummary, by: &[GroupBy]) -> String {
 
 /// A family: its agent rows, one row per session, its totals per accounting
 /// basis, and what the search for launched sessions covered.
+fn render_change_usage(usage: &agent_tapes_core::change_usage::ChangeUsage) -> String {
+    use agent_tapes_core::change_usage::{Asked, Dimension, MergeGroup, Tally};
+    let short = |sha: &str| sha.chars().take(10).collect::<String>();
+    let priced = usage.totals.sessions.list_price_estimate.is_some();
+    let price = |estimate: Option<&ListPriceEstimate>| {
+        let Some(estimate) = estimate else {
+            return "-".to_owned();
+        };
+        let amount = match (estimate.amount, estimate.at_least, estimate.at_most) {
+            (Some(amount), _, _) => format!("{amount:.4} {}", estimate.currency),
+            (None, Some(low), Some(high)) => format!("{low:.4}-{high:.4} {}", estimate.currency),
+            _ => "-".to_owned(),
+        };
+        match estimate_incomplete(estimate) {
+            Some(incomplete) => format!("{amount} [{incomplete}]"),
+            None => amount,
+        }
+    };
+    let tokens = |tally: &Tally| {
+        tally
+            .disjoint
+            .as_ref()
+            .and_then(|disjoint| disjoint.total)
+            .map_or_else(|| "-".to_owned(), |total| total.to_string())
+    };
+    let cells = |tally: &Tally| {
+        let mut cells = vec![tally.requests.to_string(), tokens(tally)];
+        if priced {
+            cells.push(price(tally.list_price_estimate.as_ref()));
+        }
+        cells
+    };
+    let summary = |tally: &Tally| {
+        let mut text = format!(
+            "requests {}, disjoint tokens {}",
+            tally.requests,
+            tokens(tally)
+        );
+        if priced {
+            text.push_str(&format!(
+                ", list-price estimate {}",
+                price(tally.list_price_estimate.as_ref())
+            ));
+        }
+        text
+    };
+    let asked = match &usage.selection {
+        Asked::Commits { revisions } => format!("commits {}", revisions.join(", ")),
+        Asked::Range { range } => format!("range {range}"),
+        Asked::Branch {
+            branch, resolved, ..
+        } => format!("branch {branch} ({})", serde_kebab(resolved)),
+        Asked::CommitsFrom { source, revisions } => {
+            format!("{revisions} revisions from {source}")
+        }
+        Asked::Session { session } => format!("session {}:{}", session.harness, session.id),
+        Asked::Window { from, to } => format!(
+            "window {}..{}",
+            human_timestamp(*from),
+            human_timestamp(*to)
+        ),
+    };
+    let tiers: Vec<String> = usage.tiers.iter().map(serde_kebab).collect();
+    let mut out = format!(
+        "Change usage of {asked} in {}: {} commits, {} sessions, tiers {}\n",
+        usage.repository.root.display(),
+        usage.commits.len(),
+        usage.sessions.len(),
+        tiers.join(", ")
+    );
+    let mut header: Vec<&str> = Vec::new();
+    for dimension in &usage.by {
+        match dimension {
+            Dimension::Commit => header.extend(["COMMIT", "SUBJECT"]),
+            Dimension::Merge => header.push("MERGE"),
+            Dimension::Agent => header.push("AGENT"),
+            Dimension::Role => header.push("ROLE"),
+            Dimension::Tier => header.push("TIER"),
+            Dimension::Session => header.push("SESSION"),
+        }
+    }
+    header.extend(["REQUESTS", "DISJOINT TOKENS"]);
+    if priced {
+        header.push("LIST-PRICE ESTIMATE");
+    }
+    header.push("EVIDENCE (TIER/BASIS REQUESTS)");
+    out.push_str(&header.join("\t"));
+    out.push('\n');
+    for row in &usage.rows {
+        let mut line = Vec::new();
+        for dimension in &usage.by {
+            match dimension {
+                Dimension::Commit => {
+                    line.push(row.key.commit.as_deref().map(short).unwrap_or_default());
+                    line.push(row.subject.clone().unwrap_or_default());
+                }
+                Dimension::Merge => line.push(match &row.key.merge {
+                    Some(MergeGroup::Merge { sha, subject }) => {
+                        format!("{} {subject}", short(sha))
+                    }
+                    Some(MergeGroup::Mainline { sha, .. }) => {
+                        format!("{} (on the mainline)", short(sha))
+                    }
+                    Some(MergeGroup::Unmerged) | None => "unmerged".to_owned(),
+                }),
+                Dimension::Agent => line.push(row.key.agent.clone().unwrap_or_default()),
+                Dimension::Role => line.push(
+                    row.key
+                        .role
+                        .map(|role| role.as_str().to_owned())
+                        .unwrap_or_default(),
+                ),
+                Dimension::Tier => line.push(
+                    row.key
+                        .tier
+                        .map(|tier| tier.as_str().to_owned())
+                        .unwrap_or_default(),
+                ),
+                Dimension::Session => line.push(
+                    row.key
+                        .session
+                        .as_ref()
+                        .map(|session| format!("{}:{}", session.harness, session.id))
+                        .unwrap_or_default(),
+                ),
+            }
+        }
+        line.extend(cells(&row.tally));
+        line.push(
+            row.evidence
+                .iter()
+                .map(|evidence| {
+                    format!(
+                        "{}/{} {}",
+                        evidence.tier.as_str(),
+                        evidence.basis.as_str(),
+                        evidence.tally.requests
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(", "),
+        );
+        out.push_str(&line.join("\t"));
+        out.push('\n');
+        for explained in &row.explain {
+            out.push_str(&render_explained(explained));
+        }
+    }
+    out.push_str(&format!("Total: {}\n", summary(&usage.totals.rows)));
+    if !usage.totals.rows.unexplained.is_empty() {
+        let parts: Vec<String> = usage
+            .totals
+            .rows
+            .unexplained
+            .iter()
+            .map(|model| {
+                let tokens = &model.tokens;
+                format!(
+                    "{}:{} input {}, output {}, cache read {}, cache write {}",
+                    model.harness,
+                    model.model,
+                    tokens.input.unwrap_or(0),
+                    tokens.output.unwrap_or(0),
+                    tokens.cache_read.unwrap_or(0),
+                    tokens.cache_write.unwrap_or(0)
+                )
+            })
+            .collect();
+        out.push_str(&format!(
+            "Unexplained parts of recorded totals, apart from the tokens above: {}\n",
+            parts.join("; ")
+        ));
+    }
+    if !usage.uncommitted.is_empty() {
+        out.push_str("Uncommitted, work after a session's last commit at a place:\n");
+        for bucket in &usage.uncommitted {
+            let place = match &bucket.branch {
+                Some(branch) => format!("{} ({branch})", bucket.worktree.display()),
+                None => bucket.worktree.display().to_string(),
+            };
+            out.push_str(&format!("  {place}: {}\n", summary(&bucket.tally)));
+            for explained in &bucket.explain {
+                out.push_str(&render_explained(explained));
+            }
+        }
+    }
+    if !usage.unattributed.is_empty() {
+        out.push_str("Unattributed:\n");
+        for part in &usage.unattributed {
+            let reason = if part.excluded_tiers.is_empty() {
+                part.reason.as_str().to_owned()
+            } else {
+                let excluded: Vec<&str> = part
+                    .excluded_tiers
+                    .iter()
+                    .map(|tier| tier.as_str())
+                    .collect();
+                format!("{} ({})", part.reason.as_str(), excluded.join(", "))
+            };
+            out.push_str(&format!("  {reason}: {}\n", summary(&part.tally)));
+        }
+    }
+    if !usage.unselected.is_empty() {
+        out.push_str(
+            "Unselected commits, the same sessions' shares of commits not selected, out of the \
+             total:\n",
+        );
+        for commit in &usage.unselected {
+            out.push_str(&format!(
+                "  {} {}: {}\n",
+                short(&commit.commit),
+                commit.subject.as_deref().unwrap_or_default(),
+                summary(&commit.tally)
+            ));
+        }
+    }
+    out.push_str(&format!(
+        "Sessions' wholes, which the total, uncommitted, unattributed and unselected add up to: \
+         {}\n",
+        summary(&usage.totals.sessions)
+    ));
+    out.push_str("SESSION\tAGENT\tWHOLE REQUESTS\tIN THE TOTAL\n");
+    for session in &usage.sessions {
+        out.push_str(&format!(
+            "{}:{}\t{}\t{}\t{}\n",
+            session.harness,
+            session.id,
+            session.agent,
+            session.whole.requests,
+            session.rows.requests
+        ));
+        for note in &session.notes {
+            out.push_str(&format!("  note: {note}\n"));
+        }
+    }
+    for note in &usage.notes {
+        out.push_str(&format!("Note: {note}\n"));
+    }
+    out
+}
+
+fn render_explained(explained: &agent_tapes_core::change_usage::Explained) -> String {
+    let evidence = &explained.evidence;
+    let at = human_timestamp(evidence.at);
+    let mut text = format!(
+        "  evidence {}:{} {} {} at {at}",
+        explained.session.harness,
+        explained.session.id,
+        serde_kebab(&evidence.kind),
+        evidence.tier.as_str()
+    );
+    if let Some(to) = evidence.to {
+        text.push_str(&format!(" to {}", human_timestamp(to)));
+    }
+    let named: Vec<String> = evidence
+        .work
+        .iter()
+        .map(|work| match work {
+            agent_tapes_core::change_attribution::Work::Commit { sha } => {
+                sha.chars().take(10).collect()
+            }
+            agent_tapes_core::change_attribution::Work::Uncommitted { worktree, branch } => {
+                match branch {
+                    Some(branch) => format!("uncommitted {} ({branch})", worktree.display()),
+                    None => format!("uncommitted {}", worktree.display()),
+                }
+            }
+        })
+        .collect();
+    text.push_str(&format!(" naming {}", named.join(", ")));
+    if let Some(via) = evidence.via {
+        text.push_str(&format!(" via {}", serde_kebab(&via)));
+    }
+    if let Some(observed) = &evidence.observed {
+        text.push_str(&format!(" (recorded as {observed})"));
+    }
+    text.push('\n');
+    text
+}
+
 fn render_family(family: &agent_tapes_core::family::FamilyUsage) -> String {
     let priced = family
         .agents
