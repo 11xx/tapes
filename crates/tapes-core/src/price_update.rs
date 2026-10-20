@@ -10,11 +10,11 @@
 //!
 //! The vendors' pages show only current prices, so the table keeps history
 //! as validity windows. A fetched price equal to the row in effect, from
-//! the same source, keeps that row; a different one closes the row at the update instant and opens
-//! a new one there; a new id gets a row open backwards, so it also prices
-//! earlier sessions. Rows are never dropped. An official price also
-//! prices every stored dated form of its id, so a row another source wrote
-//! for a dated id does not outlive it.
+//! the same source, keeps that row; a different one closes the row at the
+//! update instant and opens a new one there; a new id gets a row open
+//! backwards, so it also prices earlier sessions. Rows are never dropped.
+//! An official price also prices every stored dated form of its id, so a
+//! row another source wrote for a dated id does not outlive it.
 //!
 //! Usage pricing reads this table beneath the user's config table (see
 //! [`crate::pricing::lookup`]). A command that prices refreshes it first
