@@ -57,7 +57,7 @@ use crate::pull_request::{PullRequestSelection, PullRequestView};
 use crate::span::Instant;
 use crate::usage::DisjointSum;
 
-pub const SCHEMA: &str = "tapes-change-usage/3";
+pub const SCHEMA: &str = "tapes-change-usage/4";
 
 /// What a change view's rows are grouped by.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]

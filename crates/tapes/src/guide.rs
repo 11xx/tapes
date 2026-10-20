@@ -1700,7 +1700,7 @@ PRICE A CHANGE
   tapes usage --pr 123                      A GitHub pull request, found through `gh`, by how it was merged.
   tapes usage <id> --by commit              One session divided across the repository's commits.
   tapes usage --window FROM..TO --by commit  What a window consumed, by commit.
-  tapes usage --range A..B --prices FILE --json  tapes-change-usage/3, with list-price estimates.
+  tapes usage --range A..B --prices FILE --json  tapes-change-usage/4, with list-price estimates.
   tapes usage --range A..B --evidence FILE  Sessions an evidence file names, placed by its records.
   tapes usage --commits-from LIST --evidence FILE --evidence-only  Only the sessions the file names.
 

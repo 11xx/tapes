@@ -280,6 +280,7 @@ fn answer(output: Output) -> Value {
 fn json(change: &Change, args: &[&str]) -> Value {
     let mut args = args.to_vec();
     args.push("--json");
+    args.push("--detail");
     answer(tapes(change, &args))
 }
 
@@ -408,7 +409,7 @@ fn every_selector_gives_a_commit_the_same_rows() {
         answer(tapes_in(
             &change,
             &change.sandbox.repo(),
-            &["--commits-from", "-", "--json"],
+            &["--commits-from", "-", "--json", "--detail"],
             Some(&format!("{a1}\n{a2}\n")),
         )),
         json(

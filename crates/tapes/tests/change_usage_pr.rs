@@ -161,6 +161,7 @@ impl Scene {
     fn json(&self, args: &[&str]) -> Value {
         let mut args = args.to_vec();
         args.push("--json");
+        args.push("--detail");
         let output = self.tapes(&args);
         assert!(
             output.status.success(),
@@ -537,7 +538,7 @@ fn a_squash_merged_pull_request_prices_the_squash_commit_from_its_branch_edits()
     }
 
     let view = scene.json(&["--pr", "7"]);
-    assert_eq!(view["schema"], "tapes-change-usage/3");
+    assert_eq!(view["schema"], "tapes-change-usage/4");
     assert_eq!(scene.selected(&view), ["S"]);
     let priced = scene.requests(&view);
     assert!(

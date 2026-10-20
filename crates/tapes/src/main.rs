@@ -2210,7 +2210,7 @@ enum Command {
         #[arg(long, value_name = "FILE")]
         prices: Option<PathBuf>,
         /// Render the versioned tapes-usage/17 object, tapes-usage-summary/16
-        /// for a selection, tapes-change-usage/3 for a change view, or
+        /// for a selection, tapes-change-usage/4 for a change view, or
         /// tapes-family-usage/3 under --family, as JSON. `session.model_observation` says
         /// whether more than one model and effort was observed (`mixed`) and
         /// whether a gap, partial read or budget kept the split incomplete
@@ -2686,7 +2686,7 @@ fn print_selection_warnings(warnings: &[String]) {
 #[derive(Args, Debug)]
 struct ChangeAsk {
     /// Price the commits these revisions name, as
-    /// tapes-change-usage/3. Repeatable. A change view reads the
+    /// tapes-change-usage/4. Repeatable. A change view reads the
     /// repository holding the current directory, or the one --project
     /// names, read-only through git, and every installed Claude, Codex
     /// and Pi recording active from an hour before the earliest selected
@@ -2778,6 +2778,16 @@ struct ChangeAsk {
     /// transcript text.
     #[arg(long)]
     explain: bool,
+    /// Show everything a change view holds, in text and in --json: each
+    /// unselected commit, the evidence behind each row, every dimension
+    /// column with full subjects, the tier list, uncommitted work by
+    /// place, unattributed work by reason, labelled work, the sessions and
+    /// the evidence files. Without it a change view shows the selected
+    /// rows, their total, one line for what lies outside the selection and
+    /// one for all sessions, figures that still add up. Other usage views
+    /// ignore it.
+    #[arg(long)]
+    detail: bool,
     /// The evidence tiers that take part in a change view,
     /// comma-separated from `bound`, `matched` and `estimated` [default:
     /// all three]. The named tiers take part together, never as a
@@ -3021,9 +3031,9 @@ fn usage_change(
         },
     )?;
     if json {
-        print_json(&usage, &query.input)
+        print_json(&change_usage_json(&usage, change.detail)?, &query.input)
     } else {
-        print!("{}", render_change_usage(&usage));
+        print!("{}", render_change_usage(&usage, change.detail));
         Ok(())
     }
 }
@@ -6938,32 +6948,160 @@ fn render_usage_summary(summary: &UsageSummary, by: &[GroupBy]) -> String {
     out
 }
 
-/// A family: its agent rows, one row per session, its totals per accounting
-/// basis, and what the search for launched sessions covered.
-fn render_change_usage(usage: &agent_tapes_core::change_usage::ChangeUsage) -> String {
+/// A change view's JSON: the core's answer, with `detail` saying whether the
+/// per-row evidence, the unselected list, the sessions and the evidence
+/// files are present. Without detail those keys are left out; every other
+/// figure, `totals.unselected` among them, is kept.
+fn change_usage_json(
+    usage: &agent_tapes_core::change_usage::ChangeUsage,
+    detail: bool,
+) -> Result<serde_json::Value> {
+    let mut value = serde_json::to_value(usage)?;
+    let serde_json::Value::Object(object) = &mut value else {
+        return Ok(value);
+    };
+    object.insert("detail".to_owned(), serde_json::Value::Bool(detail));
+    if detail {
+        return Ok(value);
+    }
+    for key in ["unselected", "sessions", "evidence"] {
+        object.remove(key);
+    }
+    for list in ["rows", "uncommitted", "labelled"] {
+        if let Some(serde_json::Value::Array(items)) = object.get_mut(list) {
+            for item in items {
+                if let serde_json::Value::Object(item) = item {
+                    item.remove("evidence");
+                }
+            }
+        }
+    }
+    if let Some(serde_json::Value::Object(totals)) = object.get_mut("totals") {
+        totals.remove("evidence");
+    }
+    Ok(value)
+}
+
+/// Token counts at a glance: exact below a thousand, then one decimal of
+/// `K`, `M` or `B`, a value that rounds up to a thousand of a unit taking
+/// the next one.
+fn compact_tokens(tokens: u64) -> String {
+    if tokens < 1_000 {
+        return tokens.to_string();
+    }
+    let units = [(1_000u128, 'K'), (1_000_000, 'M'), (1_000_000_000, 'B')];
+    let tokens = u128::from(tokens);
+    let mut index = 0;
+    loop {
+        let (unit, suffix) = units[index];
+        let tenths = (tokens * 10 + unit / 2) / unit;
+        if tenths >= 10_000 && index + 1 < units.len() {
+            index += 1;
+            continue;
+        }
+        return format!("{}.{}{suffix}", tenths / 10, tenths % 10);
+    }
+}
+
+/// A list-price estimate as money: `$12.41` in USD, `12.41 EUR` otherwise,
+/// a bound as `low–high`, with the reasons an incomplete estimate gives.
+fn compact_price(estimate: &ListPriceEstimate) -> (String, Option<String>) {
+    let money = |amount: f64| {
+        let figure = if amount > 0.0 && amount < 0.01 {
+            "<".to_owned()
+        } else {
+            String::new()
+        };
+        let value = if figure.is_empty() {
+            format!("{amount:.2}")
+        } else {
+            "0.01".to_owned()
+        };
+        if estimate.currency == "USD" {
+            format!("{figure}${value}")
+        } else {
+            format!("{figure}{value} {}", estimate.currency)
+        }
+    };
+    let text = match (estimate.amount, estimate.at_least, estimate.at_most) {
+        (Some(amount), _, _) => money(amount),
+        (None, Some(low), Some(high)) if estimate.currency == "USD" => {
+            format!("{}–{}", money(low), money(high))
+        }
+        (None, Some(low), Some(high)) => {
+            format!("{low:.2}–{high:.2} {}", estimate.currency)
+        }
+        _ => "-".to_owned(),
+    };
+    match estimate_incomplete(estimate) {
+        Some(incomplete) => (format!("{text}*"), Some(incomplete)),
+        None => (text, None),
+    }
+}
+
+/// Rows as columns two spaces apart, text left-aligned and the columns
+/// `right` names right-aligned.
+fn aligned(indent: &str, rows: &[Vec<String>], right: &[bool]) -> Vec<String> {
+    let columns = rows.iter().map(Vec::len).max().unwrap_or(0);
+    let widths: Vec<usize> = (0..columns)
+        .map(|column| {
+            rows.iter()
+                .filter_map(|row| row.get(column))
+                .map(|cell| cell.chars().count())
+                .max()
+                .unwrap_or(0)
+        })
+        .collect();
+    rows.iter()
+        .map(|row| {
+            let cells: Vec<String> = row
+                .iter()
+                .enumerate()
+                .map(|(column, cell)| {
+                    if right.get(column).copied().unwrap_or(false) {
+                        format!("{cell:>width$}", width = widths[column])
+                    } else {
+                        format!("{cell:<width$}", width = widths[column])
+                    }
+                })
+                .collect();
+            format!("{indent}{}", cells.join("  "))
+                .trim_end()
+                .to_owned()
+        })
+        .collect()
+}
+
+/// A change view: its selected rows and their total, with what lies
+/// outside the selection and the sessions' wholes as one line each, or,
+/// with `detail`, every part the view holds.
+fn render_change_usage(
+    usage: &agent_tapes_core::change_usage::ChangeUsage,
+    detail: bool,
+) -> String {
     use agent_tapes_core::change_usage::{Asked, Dimension, MergeGroup, Tally};
+    use std::cell::RefCell;
     let short = |sha: &str| sha.chars().take(10).collect::<String>();
     let priced = usage.totals.sessions.list_price_estimate.is_some();
+    let incomplete: RefCell<Vec<String>> = RefCell::new(Vec::new());
     let price = |estimate: Option<&ListPriceEstimate>| {
         let Some(estimate) = estimate else {
             return "-".to_owned();
         };
-        let amount = match (estimate.amount, estimate.at_least, estimate.at_most) {
-            (Some(amount), _, _) => format!("{amount:.4} {}", estimate.currency),
-            (None, Some(low), Some(high)) => format!("{low:.4}-{high:.4} {}", estimate.currency),
-            _ => "-".to_owned(),
-        };
-        match estimate_incomplete(estimate) {
-            Some(incomplete) => format!("{amount} [{incomplete}]"),
-            None => amount,
+        let (text, reasons) = compact_price(estimate);
+        if let Some(reasons) = reasons {
+            let mut incomplete = incomplete.borrow_mut();
+            if !incomplete.contains(&reasons) {
+                incomplete.push(reasons);
+            }
         }
+        text
     };
-    let tokens = |tally: &Tally| {
-        tally
-            .disjoint
-            .as_ref()
-            .and_then(|disjoint| disjoint.total)
-            .map_or_else(|| "-".to_owned(), |total| total.to_string())
+    let total_tokens = |tally: &Tally| tally.disjoint.as_ref().and_then(|disjoint| disjoint.total);
+    let tokens = |tally: &Tally| match total_tokens(tally) {
+        None => "-".to_owned(),
+        Some(total) if detail => total.to_string(),
+        Some(total) => compact_tokens(total),
     };
     let cells = |tally: &Tally| {
         let mut cells = vec![tally.requests.to_string(), tokens(tally)];
@@ -6972,20 +7110,8 @@ fn render_change_usage(usage: &agent_tapes_core::change_usage::ChangeUsage) -> S
         }
         cells
     };
-    let summary = |tally: &Tally| {
-        let mut text = format!(
-            "requests {}, disjoint tokens {}",
-            tally.requests,
-            tokens(tally)
-        );
-        if priced {
-            text.push_str(&format!(
-                ", list-price estimate {}",
-                price(tally.list_price_estimate.as_ref())
-            ));
-        }
-        text
-    };
+    let figures = ["REQUESTS", "TOKENS", "LIST PRICE"];
+    let figure_count = if priced { 3 } else { 2 };
     let asked = match &usage.selection {
         Asked::Commits { revisions } => format!("commits {}", revisions.join(", ")),
         Asked::Range { range } => format!("range {range}"),
@@ -7008,14 +7134,17 @@ fn render_change_usage(usage: &agent_tapes_core::change_usage::ChangeUsage) -> S
             human_timestamp(*to)
         ),
     };
-    let tiers: Vec<String> = usage.tiers.iter().map(serde_kebab).collect();
     let mut out = format!(
-        "Change usage of {asked} in {}: {} commits, {} sessions, tiers {}\n",
+        "Change usage of {asked} in {}: {} commits, {} sessions",
         usage.repository.root.display(),
         usage.commits.len(),
         usage.sessions.len(),
-        tiers.join(", ")
     );
+    if detail {
+        let tiers: Vec<String> = usage.tiers.iter().map(serde_kebab).collect();
+        out.push_str(&format!(", tiers {}", tiers.join(", ")));
+    }
+    out.push('\n');
     if let Asked::PullRequest(pr) = &usage.selection {
         out.push_str(&format!(
             "Pull request #{} {:?}: {}, method {} ({})\n  base {}, head {}; created {}",
@@ -7063,208 +7192,415 @@ fn render_change_usage(usage: &agent_tapes_core::change_usage::ChangeUsage) -> S
             ));
         }
     }
-    let mut header: Vec<&str> = Vec::new();
+    let subject = |row: &agent_tapes_core::change_usage::Row| {
+        let subject = row.subject.clone().unwrap_or_default();
+        let suffix = row
+            .key
+            .label
+            .as_ref()
+            .map(|label| format!(" [work {label}]"))
+            .unwrap_or_default();
+        if detail {
+            return format!("{subject}{suffix}");
+        }
+        let budget = 50usize.saturating_sub(suffix.chars().count());
+        if subject.chars().count() > budget {
+            let cut: String = subject.chars().take(budget.saturating_sub(1)).collect();
+            format!("{cut}…{suffix}")
+        } else {
+            format!("{subject}{suffix}")
+        }
+    };
+    let value = |row: &agent_tapes_core::change_usage::Row, dimension: &Dimension| match dimension {
+        Dimension::Commit => row.key.commit.as_deref().map(short).unwrap_or_default(),
+        Dimension::Merge => match &row.key.merge {
+            Some(MergeGroup::Merge { sha, subject }) => format!("{} {subject}", short(sha)),
+            Some(MergeGroup::Mainline { sha, .. }) => format!("{} (on the mainline)", short(sha)),
+            Some(MergeGroup::Unmerged) | None => "unmerged".to_owned(),
+        },
+        Dimension::Agent => row.key.agent.clone().unwrap_or_default(),
+        Dimension::Role => row
+            .key
+            .role
+            .map(|role| role.as_str().to_owned())
+            .unwrap_or_default(),
+        Dimension::Tier => row
+            .key
+            .tier
+            .map(|tier| tier.as_str().to_owned())
+            .unwrap_or_default(),
+        Dimension::Session => row
+            .key
+            .session
+            .as_ref()
+            .map(|session| format!("{}:{}", session.harness, session.id))
+            .unwrap_or_default(),
+    };
+    let mut shown: Vec<&Dimension> = Vec::new();
     for dimension in &usage.by {
-        match dimension {
-            Dimension::Commit => header.extend(["COMMIT", "SUBJECT"]),
-            Dimension::Merge => header.push("MERGE"),
-            Dimension::Agent => header.push("AGENT"),
-            Dimension::Role => header.push("ROLE"),
-            Dimension::Tier => header.push("TIER"),
-            Dimension::Session => header.push("SESSION"),
+        let constant = matches!(
+            dimension,
+            Dimension::Agent | Dimension::Role | Dimension::Tier
+        ) && !usage.rows.is_empty()
+            && usage
+                .rows
+                .iter()
+                .all(|row| value(row, dimension) == value(&usage.rows[0], dimension));
+        if constant && !detail {
+            let name = match dimension {
+                Dimension::Agent => "Agent",
+                Dimension::Role => "Role",
+                _ => "Tier",
+            };
+            out.push_str(&format!("{name}: {}\n", value(&usage.rows[0], dimension)));
+        } else {
+            shown.push(dimension);
         }
     }
-    header.extend(["REQUESTS", "DISJOINT TOKENS"]);
-    if priced {
-        header.push("LIST-PRICE ESTIMATE");
+    let mut header: Vec<String> = Vec::new();
+    let mut right: Vec<bool> = Vec::new();
+    for dimension in &shown {
+        let names: &[&str] = match dimension {
+            Dimension::Commit => &["COMMIT", "SUBJECT"],
+            Dimension::Merge => &["MERGE"],
+            Dimension::Agent => &["AGENT"],
+            Dimension::Role => &["ROLE"],
+            Dimension::Tier => &["TIER"],
+            Dimension::Session => &["SESSION"],
+        };
+        header.extend(names.iter().map(|name| (*name).to_owned()));
+        right.extend(names.iter().map(|_| false));
     }
-    header.push("EVIDENCE (TIER/BASIS REQUESTS)");
-    out.push_str(&header.join("\t"));
-    out.push('\n');
+    let leading = header.len();
+    header.extend(
+        figures[..figure_count]
+            .iter()
+            .map(|name| (*name).to_owned()),
+    );
+    right.extend(std::iter::repeat_n(true, figure_count));
+    if detail {
+        header.push("EVIDENCE (TIER/BASIS REQUESTS)".to_owned());
+        right.push(false);
+    }
+    let evidence_cell = |evidence: &[agent_tapes_core::change_usage::EvidenceTally]| {
+        evidence
+            .iter()
+            .map(|evidence| {
+                format!(
+                    "{}/{} {}",
+                    evidence.tier.as_str(),
+                    evidence.basis.as_str(),
+                    evidence.tally.requests
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let mut table = vec![header];
     for row in &usage.rows {
         let mut line = Vec::new();
-        for dimension in &usage.by {
-            match dimension {
-                Dimension::Commit => {
-                    line.push(row.key.commit.as_deref().map(short).unwrap_or_default());
-                    let subject = row.subject.clone().unwrap_or_default();
-                    line.push(match &row.key.label {
-                        Some(label) => format!("{subject} [work {label}]"),
-                        None => subject,
-                    });
-                }
-                Dimension::Merge => line.push(match &row.key.merge {
-                    Some(MergeGroup::Merge { sha, subject }) => {
-                        format!("{} {subject}", short(sha))
-                    }
-                    Some(MergeGroup::Mainline { sha, .. }) => {
-                        format!("{} (on the mainline)", short(sha))
-                    }
-                    Some(MergeGroup::Unmerged) | None => "unmerged".to_owned(),
-                }),
-                Dimension::Agent => line.push(row.key.agent.clone().unwrap_or_default()),
-                Dimension::Role => line.push(
-                    row.key
-                        .role
-                        .map(|role| role.as_str().to_owned())
-                        .unwrap_or_default(),
-                ),
-                Dimension::Tier => line.push(
-                    row.key
-                        .tier
-                        .map(|tier| tier.as_str().to_owned())
-                        .unwrap_or_default(),
-                ),
-                Dimension::Session => line.push(
-                    row.key
-                        .session
-                        .as_ref()
-                        .map(|session| format!("{}:{}", session.harness, session.id))
-                        .unwrap_or_default(),
-                ),
+        for dimension in &shown {
+            if let Dimension::Commit = dimension {
+                line.push(value(row, dimension));
+                line.push(subject(row));
+            } else {
+                line.push(value(row, dimension));
             }
         }
         line.extend(cells(&row.tally));
-        line.push(
-            row.evidence
-                .iter()
-                .map(|evidence| {
-                    format!(
-                        "{}/{} {}",
-                        evidence.tier.as_str(),
-                        evidence.basis.as_str(),
-                        evidence.tally.requests
-                    )
-                })
-                .collect::<Vec<_>>()
-                .join(", "),
-        );
-        out.push_str(&line.join("\t"));
+        if detail {
+            line.push(evidence_cell(&row.evidence));
+        }
+        table.push(line);
+    }
+    let mut total = vec!["Total".to_owned()];
+    total.extend(std::iter::repeat_n(
+        String::new(),
+        leading.saturating_sub(1),
+    ));
+    total.extend(cells(&usage.totals.rows));
+    if detail {
+        total.push(evidence_cell(&usage.totals.evidence));
+    }
+    table.push(total);
+    let lines = aligned("", &table, &right);
+    out.push_str(&lines[0]);
+    out.push('\n');
+    for (row, line) in usage.rows.iter().zip(&lines[1..]) {
+        out.push_str(line);
         out.push('\n');
         for explained in &row.explain {
             out.push_str(&render_explained(explained));
         }
     }
-    out.push_str(&format!("Total: {}\n", summary(&usage.totals.rows)));
-    if !usage.totals.rows.unexplained.is_empty() {
-        let parts: Vec<String> = usage
-            .totals
-            .rows
-            .unexplained
-            .iter()
-            .map(|model| {
-                let tokens = &model.tokens;
-                format!(
-                    "{}:{} input {}, output {}, cache read {}, cache write {}",
-                    model.harness,
-                    model.model,
-                    tokens.input.unwrap_or(0),
-                    tokens.output.unwrap_or(0),
-                    tokens.cache_read.unwrap_or(0),
-                    tokens.cache_write.unwrap_or(0)
-                )
-            })
-            .collect();
-        out.push_str(&format!(
-            "Unexplained parts of recorded totals, apart from the tokens above: {}\n",
-            parts.join("; ")
-        ));
-    }
-    if !usage.uncommitted.is_empty() {
-        out.push_str("Uncommitted, work after a session's last commit at a place:\n");
-        for bucket in &usage.uncommitted {
-            let place = match &bucket.branch {
-                Some(branch) => format!("{} ({branch})", bucket.worktree.display()),
-                None => bucket.worktree.display().to_string(),
-            };
-            out.push_str(&format!("  {place}: {}\n", summary(&bucket.tally)));
-            for explained in &bucket.explain {
-                out.push_str(&render_explained(explained));
-            }
-        }
-    }
-    if !usage.unattributed.is_empty() {
-        out.push_str("Unattributed:\n");
-        for part in &usage.unattributed {
-            let reason = if part.excluded_tiers.is_empty() {
-                part.reason.as_str().to_owned()
-            } else {
-                let excluded: Vec<&str> = part
-                    .excluded_tiers
-                    .iter()
-                    .map(|tier| tier.as_str())
-                    .collect();
-                format!("{} ({})", part.reason.as_str(), excluded.join(", "))
-            };
-            out.push_str(&format!("  {reason}: {}\n", summary(&part.tally)));
-        }
-    }
-    if !usage.unselected.is_empty() {
-        out.push_str(
-            "Unselected commits, the same sessions' shares of commits not selected, out of the \
-             total:\n",
-        );
-        for commit in &usage.unselected {
-            out.push_str(&format!(
-                "  {} {}: {}\n",
-                short(&commit.commit),
-                commit.subject.as_deref().unwrap_or_default(),
-                summary(&commit.tally)
+    out.push_str(&lines[lines.len() - 1]);
+    out.push('\n');
+    let sessions_line = {
+        let tally = &usage.totals.sessions;
+        let mut text = match usage.sessions.len() {
+            1 => format!("All 1 session: {} tokens", tokens(tally)),
+            count => format!("All {count} sessions: {} tokens", tokens(tally)),
+        };
+        if priced {
+            text.push_str(&format!(
+                ", {} at API list price",
+                price(tally.list_price_estimate.as_ref())
             ));
         }
-    }
-    if !usage.labelled.is_empty() {
-        out.push_str(
-            "Labelled work, which evidence records name and of which the repository holds no \
-             commit, out of the total:\n",
-        );
-        for work in &usage.labelled {
-            let name = match (&work.work.label, work.work.commits.as_slice()) {
-                (Some(label), _) => label.clone(),
-                (None, commits) => commits
-                    .iter()
-                    .map(|sha| short(sha))
-                    .collect::<Vec<_>>()
-                    .join(", "),
-            };
-            out.push_str(&format!("  {name}: {}\n", summary(&work.tally)));
-            for explained in &work.explain {
-                out.push_str(&render_explained(explained));
-            }
-        }
-    }
-    out.push_str(&format!(
-        "Sessions' wholes, which the total, uncommitted, unattributed, unselected and labelled \
-         work add up to: {}\n",
-        summary(&usage.totals.sessions)
-    ));
-    out.push_str("SESSION\tAGENT\tWHOLE REQUESTS\tIN THE TOTAL\tPLACED BY\n");
-    for session in &usage.sessions {
-        let placed = match session.placement {
-            agent_tapes_core::change_attribution::Placement::Evidence => {
-                format!("evidence {}", session.evidence_files.join(", "))
-            }
-            placement => serde_kebab(&placement),
-        };
+        text
+    };
+    if detail {
+        render_change_parts(&mut out, usage, &cells, &figures[..figure_count]);
+        let tally = &usage.totals.sessions;
         out.push_str(&format!(
-            "{}:{}\t{}\t{}\t{}\t{placed}\n",
-            session.harness,
-            session.id,
-            session.agent,
-            session.whole.requests,
-            session.rows.requests
+            "All sessions: {} requests, {}\n",
+            tally.requests,
+            sessions_line
+                .split_once(": ")
+                .map_or("", |(_, figures)| figures)
         ));
-        for note in &session.notes {
-            out.push_str(&format!("  note: {note}\n"));
+        let mut table = vec![vec![
+            "SESSION".to_owned(),
+            "AGENT".to_owned(),
+            "WHOLE REQUESTS".to_owned(),
+            "IN THE TOTAL".to_owned(),
+            "PLACED BY".to_owned(),
+        ]];
+        for session in &usage.sessions {
+            let placed = match session.placement {
+                agent_tapes_core::change_attribution::Placement::Evidence => {
+                    format!("evidence {}", session.evidence_files.join(", "))
+                }
+                placement => serde_kebab(&placement),
+            };
+            table.push(vec![
+                format!("{}:{}", session.harness, session.id),
+                session.agent.clone(),
+                session.whole.requests.to_string(),
+                session.rows.requests.to_string(),
+                placed,
+            ]);
         }
+        let lines = aligned("  ", &table, &[false, false, true, true, false]);
+        out.push_str(&lines[0]);
+        out.push('\n');
+        for (session, line) in usage.sessions.iter().zip(&lines[1..]) {
+            out.push_str(line);
+            out.push('\n');
+            for note in &session.notes {
+                out.push_str(&format!("    note: {note}\n"));
+            }
+        }
+        if let Some(evidence) = &usage.evidence {
+            render_change_evidence(&mut out, evidence);
+        }
+    } else {
+        let mut outside = Vec::new();
+        let unselected = match usage.unselected.len() {
+            1 => "1 unselected commit".to_owned(),
+            count => format!("{count} unselected commits"),
+        };
+        for (name, tally) in [
+            ("uncommitted", &usage.totals.uncommitted),
+            (unselected.as_str(), &usage.totals.unselected),
+            ("unattributed", &usage.totals.unattributed),
+            ("labelled work", &usage.totals.labelled),
+        ] {
+            if tally.requests == 0 && total_tokens(tally).unwrap_or(0) == 0 {
+                continue;
+            }
+            let mut part = format!("{name} {}", tokens(tally));
+            if priced {
+                part.push_str(&format!(" ({})", price(tally.list_price_estimate.as_ref())));
+            }
+            outside.push(part);
+        }
+        if outside.is_empty() {
+            outside.push("none".to_owned());
+        }
+        out.push_str(&format!("Outside the selection: {}\n", outside.join(", ")));
+        out.push_str(&sessions_line);
+        out.push('\n');
     }
-    if let Some(evidence) = &usage.evidence {
-        render_change_evidence(&mut out, evidence);
+    for reasons in incomplete.borrow().iter() {
+        out.push_str(&format!("* incomplete: {reasons}\n"));
     }
     for note in &usage.notes {
         out.push_str(&format!("Note: {note}\n"));
     }
+    if !detail {
+        let mut left = Vec::new();
+        if !usage.unselected.is_empty() {
+            left.push("each unselected commit");
+        }
+        if usage.rows.iter().any(|row| !row.evidence.is_empty()) {
+            left.push("the evidence behind each row");
+        }
+        if !usage.uncommitted.is_empty() {
+            left.push("the uncommitted places");
+        }
+        if !usage.unattributed.is_empty() {
+            left.push("the unattributed reasons");
+        }
+        if !usage.labelled.is_empty() {
+            left.push("each labelled work");
+        }
+        if !usage.totals.rows.unexplained.is_empty() {
+            left.push("the unexplained parts");
+        }
+        if !usage.sessions.is_empty() {
+            left.push("the sessions");
+        }
+        if usage.evidence.is_some() {
+            left.push("the evidence files");
+        }
+        if let Some((last, rest)) = left.split_last() {
+            let named = if rest.is_empty() {
+                (*last).to_owned()
+            } else {
+                format!("{} and {last}", rest.join(", "))
+            };
+            out.push_str(&format!("--detail adds {named}.\n"));
+        }
+    }
+    if !priced {
+        out.push_str("No price table; tapes prices update fetches one.\n");
+    }
     out
+}
+
+/// A detailed change view's parts apart from its rows: unexplained parts
+/// of recorded totals, uncommitted work by place, unattributed work by
+/// reason, the unselected commits and labelled work.
+fn render_change_parts(
+    out: &mut String,
+    usage: &agent_tapes_core::change_usage::ChangeUsage,
+    cells: &dyn Fn(&agent_tapes_core::change_usage::Tally) -> Vec<String>,
+    figures: &[&str],
+) {
+    let short = |sha: &str| sha.chars().take(10).collect::<String>();
+    let section =
+        |out: &mut String,
+         label: &str,
+         parts: Vec<(String, &agent_tapes_core::change_usage::Tally, Vec<String>)>| {
+            if parts.is_empty() {
+                return;
+            }
+            out.push_str(label);
+            out.push('\n');
+            let mut table = vec![std::iter::once(String::new())
+                .chain(figures.iter().map(|name| (*name).to_owned()))
+                .collect::<Vec<_>>()];
+            let mut right = vec![false];
+            right.extend(figures.iter().map(|_| true));
+            for (name, tally, _) in &parts {
+                table.push(std::iter::once(name.clone()).chain(cells(tally)).collect());
+            }
+            let lines = aligned("  ", &table, &right);
+            out.push_str(&lines[0]);
+            out.push('\n');
+            for ((_, _, explain), line) in parts.iter().zip(&lines[1..]) {
+                out.push_str(line);
+                out.push('\n');
+                for explained in explain {
+                    out.push_str(explained);
+                }
+            }
+        };
+    if !usage.totals.rows.unexplained.is_empty() {
+        out.push_str("Unexplained parts of recorded totals, apart from the tokens above:\n");
+        for model in &usage.totals.rows.unexplained {
+            let tokens = &model.tokens;
+            out.push_str(&format!(
+                "  {}:{} input {}, output {}, cache read {}, cache write {}\n",
+                model.harness,
+                model.model,
+                tokens.input.unwrap_or(0),
+                tokens.output.unwrap_or(0),
+                tokens.cache_read.unwrap_or(0),
+                tokens.cache_write.unwrap_or(0)
+            ));
+        }
+    }
+    let explained = |explain: &[agent_tapes_core::change_usage::Explained]| {
+        explain.iter().map(render_explained).collect::<Vec<_>>()
+    };
+    section(
+        out,
+        "Uncommitted (after each session's last commit):",
+        usage
+            .uncommitted
+            .iter()
+            .map(|bucket| {
+                let place = match &bucket.branch {
+                    Some(branch) => format!("{} ({branch})", bucket.worktree.display()),
+                    None => bucket.worktree.display().to_string(),
+                };
+                (place, &bucket.tally, explained(&bucket.explain))
+            })
+            .collect(),
+    );
+    section(
+        out,
+        "Unattributed:",
+        usage
+            .unattributed
+            .iter()
+            .map(|part| {
+                let reason = if part.excluded_tiers.is_empty() {
+                    part.reason.as_str().to_owned()
+                } else {
+                    let excluded: Vec<&str> = part
+                        .excluded_tiers
+                        .iter()
+                        .map(|tier| tier.as_str())
+                        .collect();
+                    format!("{} ({})", part.reason.as_str(), excluded.join(", "))
+                };
+                (reason, &part.tally, Vec::new())
+            })
+            .collect(),
+    );
+    section(
+        out,
+        "Unselected commits (these sessions' shares of other commits):",
+        usage
+            .unselected
+            .iter()
+            .map(|commit| {
+                (
+                    format!(
+                        "{} {}",
+                        short(&commit.commit),
+                        commit.subject.as_deref().unwrap_or_default()
+                    )
+                    .trim_end()
+                    .to_owned(),
+                    &commit.tally,
+                    Vec::new(),
+                )
+            })
+            .collect(),
+    );
+    section(
+        out,
+        "Labelled work (named by evidence, no commit in the repository):",
+        usage
+            .labelled
+            .iter()
+            .map(|work| {
+                let name = match (&work.work.label, work.work.commits.as_slice()) {
+                    (Some(label), _) => label.clone(),
+                    (None, commits) => commits
+                        .iter()
+                        .map(|sha| short(sha))
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                };
+                (name, &work.tally, explained(&work.explain))
+            })
+            .collect(),
+    );
 }
 
 /// The evidence files a change view read and what their records did.

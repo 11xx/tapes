@@ -60,6 +60,7 @@ fn tapes(sandbox: &Sandbox, args: &[&str]) -> Output {
 fn json_of(sandbox: &Sandbox, args: &[&str]) -> Value {
     let mut args = args.to_vec();
     args.push("--json");
+    args.push("--detail");
     let output = tapes(sandbox, &args);
     assert!(
         output.status.success(),
@@ -274,8 +275,10 @@ fn a_creation_no_record_binds_is_a_conflict() {
     assert_eq!(conflicts[0]["commit"], x2.as_str());
     assert_eq!(conflicts[0]["files"], json!([file.to_str().unwrap()]));
     assert_eq!(view["evidence"]["placed"], 1);
-    let text =
-        String::from_utf8(tapes(&sandbox, &[&args[..], &["--explain"]].concat()).stdout).unwrap();
+    let text = String::from_utf8(
+        tapes(&sandbox, &[&args[..], &["--explain", "--detail"]].concat()).stdout,
+    )
+    .unwrap();
     assert!(text.contains(&format!("created {}", &x2[..10])), "{text}");
     assert!(
         text.contains("from ") && text.contains("(fixture-producer/1.0.0)"),
@@ -933,13 +936,13 @@ fn event_records_are_read_and_validated() {
 
 /// Claim: without --evidence a change view carries no evidence section,
 /// places every session by its recording and holds no labelled work, under
-/// tapes-change-usage/3. Rejects evidence output, or placement, leaking
+/// tapes-change-usage/4. Rejects evidence output, or placement, leaking
 /// into a view that named no file.
 #[test]
 fn without_evidence_the_view_is_the_recordings_alone() {
     let (sandbox, x1, x2) = two_commit_session();
     let view = json_of(&sandbox, &commits(&[&x1, &x2]));
-    assert_eq!(view["schema"], "tapes-change-usage/3");
+    assert_eq!(view["schema"], "tapes-change-usage/4");
     assert!(view.get("evidence").is_none());
     assert_eq!(view["labelled"], json!([]));
     for session in view["sessions"].as_array().unwrap() {
