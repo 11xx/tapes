@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 
 use super::{CommitFacts, Params, Via};
-use crate::git_reader::{CommitSet, GitReader, Resolution, Worktree};
+use crate::git_reader::{CommitSet, DefaultBranchSource, GitReader, Resolution, Worktree};
 use crate::scope::Scope;
 use crate::span::Instant;
 
@@ -38,9 +38,14 @@ impl Repository {
     /// The repository holding `directory`, `None` when `git` is not
     /// installed.
     pub fn open(directory: &Path) -> Result<Option<Self>> {
-        let Some(reader) = GitReader::at(directory)? else {
-            return Ok(None);
-        };
+        match GitReader::at(directory)? {
+            Some(reader) => Self::with_reader(reader, directory).map(Some),
+            None => Ok(None),
+        }
+    }
+
+    /// The repository holding `directory`, read through `reader`.
+    pub fn with_reader(reader: GitReader, directory: &Path) -> Result<Self> {
         let worktrees = reader.worktrees()?;
         let root = worktrees
             .first()
@@ -52,18 +57,15 @@ impl Repository {
             .iter()
             .filter_map(|url| normalize_remote(url))
             .collect();
-        let default_branch =
-            reader
-                .default_branch()?
-                .map(|branch| match branch.name.split_once('/') {
-                    Some((_, name))
-                        if branch.source == crate::git_reader::DefaultBranchSource::OriginHead =>
-                    {
-                        name.to_owned()
-                    }
-                    _ => branch.name,
-                });
-        Ok(Some(Self {
+        // A remote's head names the branch as `<remote>/<name>`.
+        let default_branch = reader.default_branch()?.map(|branch| {
+            let remote = branch.source == DefaultBranchSource::OriginHead;
+            match branch.name.split_once('/') {
+                Some((_, name)) if remote => name.to_owned(),
+                _ => branch.name,
+            }
+        });
+        Ok(Self {
             reader,
             scope,
             root,
@@ -71,7 +73,7 @@ impl Repository {
             remotes,
             default_branch,
             resolved: RefCell::new(HashMap::new()),
-        }))
+        })
     }
 
     pub fn reader(&self) -> &GitReader {
