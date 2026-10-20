@@ -1855,9 +1855,11 @@ fn claude_names_the_dimensions_a_request_or_a_recorded_total_did_not_record() {
 
     let recorded = usage_value(&backend, CLAUDE_DIMENSIONS_SESSION);
     assert_eq!(recorded["accounting"]["basis"], "recorded-total");
+    // The requests' TTLs split the writes they explain; the 100 the total
+    // holds beyond them join the request that recorded no TTL.
     assert_eq!(
         recorded["disjoint"]["cache_write"],
-        serde_json::json!({ "ttl_unrecorded": 500 })
+        serde_json::json!({ "ephemeral_5m": 150, "ephemeral_1h": 210, "ttl_unrecorded": 140 })
     );
     assert_eq!(
         recorded["disjoint"]["missing"],
@@ -5757,7 +5759,7 @@ fn codex_modern_usage_records_choose_the_modern_basis_and_keep_native_rows() {
     )
     .unwrap();
 
-    assert_eq!(view.schema, "tapes-usage/16");
+    assert_eq!(view.schema, "tapes-usage/17");
     assert_eq!(
         view.tokens.as_ref().and_then(|tokens| tokens.input),
         Some(60)

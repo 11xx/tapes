@@ -173,7 +173,7 @@ fn each_command_carries_the_estimate_with_a_table() {
     );
     assert_eq!(
         store.json(&["usage", "--global"], true)["schema"],
-        "tapes-usage-summary/15"
+        "tapes-usage-summary/16"
     );
 }
 

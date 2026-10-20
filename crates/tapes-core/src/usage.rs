@@ -26,8 +26,9 @@ use crate::overlap::{CopyEvidence, Disjointness, Overlap, RelatedSessions, Usage
 use crate::pricing::{EstimateSum, ListPriceEstimate, PriceTable, PricedFigure};
 use crate::span::{RequestTimeline, SpanPlacement, SpanSessions, SPANS_SCHEMA};
 use crate::stretch::{Stretch, StretchFold};
+use crate::unexplained::Unexplained;
 
-pub const USAGE_SCHEMA: &str = "tapes-usage/16";
+pub const USAGE_SCHEMA: &str = "tapes-usage/17";
 
 /// Recorded usage facts and measurement notes kept beside the session's
 /// normalized counters. A source fact that was not recorded remains absent.
@@ -43,6 +44,14 @@ pub struct UsageDetail {
     pub durations_ms: Option<Durations>,
     /// The session's counters split by the model that spent them.
     pub by_model: Option<Vec<ModelUsage>>,
+    /// The part of a recorded total that the requests do not explain, per
+    /// model, kept apart from every figure summed from requests.
+    pub unexplained: Option<Unexplained>,
+    /// The recorded totals a whole read reached, with the requests written
+    /// between them, so the unexplained part can be placed in time.
+    pub recorded_chain: Option<crate::unexplained::RecordedChain>,
+    /// A child recording's requests in time, for its parent's family read.
+    pub timed_requests: Option<Vec<crate::unexplained::TimedRequest>>,
     /// Request-observation attribution kept separate from the session's
     /// cumulative recorded total.
     pub attribution: Option<UsageAttribution>,
@@ -96,6 +105,9 @@ impl UsageDetail {
             && self.rate_limits.is_none()
             && self.durations_ms.is_none()
             && self.by_model.is_none()
+            && self.unexplained.is_none()
+            && self.recorded_chain.is_none()
+            && self.timed_requests.is_none()
             && self.attribution.is_none()
             && self.cache_write_by_ttl.is_none()
             && self.requests.is_none()
@@ -885,6 +897,9 @@ pub struct UsageView {
     pub durations_ms: Option<Durations>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub by_model: Option<Vec<ModelUsage>>,
+    /// The part of a recorded total its requests do not explain, per model.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unexplained: Option<Unexplained>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub attribution: Option<UsageAttribution>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1111,6 +1126,7 @@ fn project(session: &Session, turns: TurnTally, facts: ReadFacts) -> UsageView {
         rate_limits: detail.rate_limits,
         durations_ms: detail.durations_ms,
         by_model: detail.by_model,
+        unexplained: detail.unexplained,
         attribution: detail.attribution,
         requests: detail.requests,
         request_failures: detail.request_failures,
@@ -1520,6 +1536,10 @@ pub struct UsageTally {
     /// the recordings relate. Absent for a single session.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub overlap: Option<UsageOverlap>,
+    /// The sessions' parts of their recorded totals that no request
+    /// explains, per model, added apart from `tokens` and `disjoint`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unexplained: Option<Unexplained>,
 }
 
 /// Why a summary withholds the list-price estimate of its sessions.
@@ -1836,6 +1856,11 @@ struct Tally {
     /// Some sessions were added by an exact union of their events, which
     /// carries no model evidence to price by.
     unioned: bool,
+    /// Each added session's part of its recorded total that no request
+    /// explains.
+    unexplained: Vec<Unexplained>,
+    /// The token conventions those parts count in.
+    unexplained_conventions: std::collections::BTreeSet<Option<TokenConvention>>,
 }
 
 impl Tally {
@@ -1856,6 +1881,15 @@ impl Tally {
 
     fn add(&mut self, session: &Session) {
         self.add_facts(session);
+        if let Some(unexplained) = session
+            .usage_detail
+            .as_ref()
+            .and_then(|detail| detail.unexplained.as_ref())
+        {
+            self.unexplained.push(unexplained.clone());
+            self.unexplained_conventions
+                .insert(TokenConvention::of(session.harness()));
+        }
         self.measurement_completeness
             .merge(&session.selected_measurement_completeness());
         for (counter, coverage) in session
@@ -2020,6 +2054,7 @@ impl Tally {
                 .estimate
                 .filter(|_| !self.unioned)
                 .and_then(EstimateSum::finish),
+            unexplained: Unexplained::sum(&self.unexplained),
         }
     }
 }
@@ -2676,8 +2711,24 @@ fn summarize(
             bucket.exact().is_some(),
         );
     }
+    // The parts no request explains are priced model by model where they
+    // count tokens in one convention.
+    let convention = match tally.unexplained_conventions.iter().collect::<Vec<_>>()[..] {
+        [Some(convention)] => Some(*convention),
+        _ => None,
+    };
     let mut tally = tally.finish();
     domains.apply(&mut tally);
+    if let (Some(table), Some(convention), Some(unexplained)) =
+        (prices, convention, tally.unexplained.as_mut())
+    {
+        crate::pricing::price_unexplained(
+            unexplained,
+            convention,
+            table,
+            crate::pricing::RequestTerms::default(),
+        );
+    }
     tally
 }
 

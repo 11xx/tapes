@@ -333,6 +333,10 @@ pub struct WindowShare {
     /// The share's consumption in disjoint categories.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub disjoint: Option<crate::model::DisjointTokens>,
+    /// The part of the session's recorded total that no request of its
+    /// family explains, as far as it falls inside the window.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unexplained: Option<crate::unexplained::Unexplained>,
     /// The allowance the share spent, one entry per pool window.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub allowance: Vec<crate::allowance::Allowance>,

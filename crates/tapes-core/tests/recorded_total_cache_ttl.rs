@@ -1,7 +1,7 @@
 //! A Claude recorded total takes its cache-write TTL split from the
-//! recording's requests wherever their split sums exactly to the total's
-//! cache writes, for the figure and for each model share; where the requests
-//! fall short of the total, its writes stay without a recorded TTL.
+//! recording's requests for the writes they explain, for the figure and for
+//! each model share; what the total holds beyond its requests' writes stays
+//! without a recorded TTL.
 
 use std::fs;
 use std::path::PathBuf;
@@ -201,13 +201,13 @@ fn a_recorded_total_the_requests_split_exactly_is_priced_exactly() {
 }
 
 /// Claim: a recorded total of 4000 cache writes, of which the requests
-/// account for 3000, keeps all 4000 `ttl_unrecorded` and is priced from
-/// $0.030825 (every write at the 5-minute rate) to $0.045825 (every write at
-/// the 1-hour rate), naming ttl-unrecorded. Rejects a split the requests do
-/// not reconcile with: taking their 400/2600 split as the total's, or
-/// assigning the 1000 writes they leave out a TTL.
+/// account for 3000, splits those 3000 by the requests' 400/2600 and keeps
+/// the 1000 they leave out `ttl_unrecorded`, priced from $0.040575 (those
+/// 1000 at the 5-minute rate) to $0.044325 (at the 1-hour rate), naming
+/// ttl-unrecorded. Rejects all 4000 writes priced as a range, and the 1000
+/// writes no request explains given a TTL.
 #[test]
-fn a_recorded_total_the_requests_fall_short_of_stays_a_range() {
+fn a_recorded_total_the_requests_fall_short_of_prices_only_the_shortfall_as_a_range() {
     let store = recording(json!({"claude-opus-5-5": model_usage(15, 4000, 4000, 150, 15)}));
     for figure in priced(&store) {
         assert_eq!(
@@ -215,8 +215,8 @@ fn a_recorded_total_the_requests_fall_short_of_stays_a_range() {
             "{figure:#}"
         );
         let estimate = &figure["list_price_estimate"];
-        assert!(close(&estimate["at_least"], 0.030_825), "{estimate:#}");
-        assert!(close(&estimate["at_most"], 0.045_825), "{estimate:#}");
+        assert!(close(&estimate["at_least"], 0.040_575), "{estimate:#}");
+        assert!(close(&estimate["at_most"], 0.044_325), "{estimate:#}");
         assert_eq!(
             reasons(estimate, "cache_write"),
             ["ttl-unrecorded"],
@@ -226,7 +226,7 @@ fn a_recorded_total_the_requests_fall_short_of_stays_a_range() {
     let [_, whole, _] = priced(&store);
     assert_eq!(
         whole["disjoint"]["cache_write"],
-        json!({"ttl_unrecorded": 4000}),
+        json!({"ephemeral_5m": 400, "ephemeral_1h": 2600, "ttl_unrecorded": 1000}),
         "{whole:#}"
     );
 }
@@ -234,10 +234,10 @@ fn a_recorded_total_the_requests_fall_short_of_stays_a_range() {
 /// Claim: in a recorded total over Opus and Haiku, where the Opus requests
 /// split the Opus share's 3000 writes exactly and Haiku left no requests,
 /// the Opus share is priced exactly at $0.034325 and the Haiku share's 500
-/// writes stay a range, $0.000825 to $0.0012; the figure, whose 3500 writes
-/// the requests do not reconcile with, is the shares' sum and keeps its
-/// writes `ttl_unrecorded`. Rejects an Opus share priced as a range, and a
-/// figure that takes the Opus requests' split for writes Haiku made.
+/// writes stay a range, $0.000825 to $0.0012; the figure is the shares' sum
+/// and splits its 3500 writes as the shares do, the Haiku writes
+/// `ttl_unrecorded`. Rejects an Opus share priced as a range, and a figure
+/// that takes the Opus requests' split for writes Haiku made.
 #[test]
 fn each_model_share_takes_the_split_its_own_requests_reconcile_with() {
     let store = recording(json!({
@@ -265,7 +265,7 @@ fn each_model_share_takes_the_split_its_own_requests_reconcile_with() {
     assert!(close(&estimate["at_most"], 0.035_525), "{estimate:#}");
     assert_eq!(
         whole["disjoint"]["cache_write"],
-        json!({"ttl_unrecorded": 3500}),
+        json!({"ephemeral_5m": 400, "ephemeral_1h": 2600, "ttl_unrecorded": 500}),
         "{whole:#}"
     );
 }

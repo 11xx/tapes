@@ -242,10 +242,24 @@ impl ClaudeBackend {
                 placeholders: requests.placeholders,
                 uses: requests.uses,
                 billing: super::bounded_billing(requests.billing, read.truncated),
+                // A bounded read's requests do not cover its totals.
+                chain: requests.chain.filter(|_| !read.truncated),
+                timed: requests.timed,
             },
             basis,
             tokens.as_ref(),
         );
+        let usage_detail = match usage_detail {
+            Some(mut detail) if read.truncated && basis == AccountingBasis::RecordedTotal => {
+                detail.accounting_notes.push(
+                    "The read is bounded, so its requests do not show what part of the recorded \
+                     total they explain; --full names the part no request explains."
+                        .to_owned(),
+                );
+                Some(detail)
+            }
+            detail => detail,
+        };
 
         let mut session = Session {
             id: native_id.to_owned(),
@@ -844,8 +858,11 @@ impl Backend for ClaudeBackend {
 
     /// A Claude request is placed by the timestamp of its first record, and
     /// every later record of the same request id joins it. A cost-state is
-    /// the running total of one process, so no span can hold it: every
-    /// figure, the whole included, sums requests.
+    /// a running total, so no span can hold it: every figure, the whole
+    /// included, sums requests, and each carries apart the share of what the
+    /// newest total holds beyond its requests that the totals' intervals
+    /// place in it. A subagent recording keeps its requests in time for its
+    /// parent's family read.
     fn stream_spans(
         &self,
         session: &Session,
@@ -858,8 +875,12 @@ impl Backend for ClaudeBackend {
             .map(|_| ClaudeRecords::default())
             .collect::<Vec<_>>();
         let mut records = ClaudeRecords::default();
+        if session.id.contains("::") {
+            records.requests = RequestTokens::timed();
+        }
         let mut requests = ClaudeRequests::default();
         let mut cost_states = 0usize;
+        let mut newest_cost_state = None;
         let mut last_end = 0;
         let mut identity = RecordIdentity::of(session);
         stream_jsonl(&path, Some(read.pin()?), |value, span, _| {
@@ -873,6 +894,8 @@ impl Backend for ClaudeBackend {
             last_end = span.end;
             if value["type"] == "cost-state" {
                 cost_states += 1;
+                records.requests.add(value);
+                newest_cost_state = Some(value.clone());
                 return Ok(false);
             }
             records.observe(value);
@@ -892,7 +915,7 @@ impl Backend for ClaudeBackend {
         }
         let mut whole = session.clone();
         records.apply(&mut whole);
-        let figures = figures
+        let mut figures = figures
             .into_iter()
             .map(|records| {
                 let mut figure = session.clone();
@@ -900,13 +923,34 @@ impl Backend for ClaudeBackend {
                 crate::span::keep_identity(&mut figure, &whole);
                 figure
             })
-            .collect();
+            .collect::<Vec<_>>();
+        // A total below the request sum is set aside, as a whole read sets
+        // it aside, and explains nothing.
+        let placed = covering_cost_state(newest_cost_state.as_ref(), whole.tokens.as_ref())
+            .and_then(|_| whole.usage_detail.as_ref()?.recorded_chain.as_ref())
+            .and_then(|chain| chain.accrual(None).place(spans));
+        if let Some(placed) = placed {
+            for (figure, unexplained) in figures
+                .iter_mut()
+                .zip(placed.spans.into_iter().chain([placed.remainder]))
+            {
+                figure
+                    .usage_detail
+                    .get_or_insert_with(Default::default)
+                    .unexplained = Some(unexplained);
+            }
+            whole
+                .usage_detail
+                .get_or_insert_with(Default::default)
+                .unexplained = Some(placed.whole);
+        }
         let notes = match cost_states {
             0 => Vec::new(),
             count => vec![format!(
                 "{count} recorded totals (cost-state) each cover one run up to where it was \
-                 written, not a span; they are withheld, and every figure here sums the \
-                 recording's requests."
+                 written, not a span; they are withheld, every figure here sums the \
+                 recording's requests, and `unexplained` places what the newest total holds \
+                 beyond them."
             )],
         };
         Ok(SpanSessions::assemble(
@@ -1281,6 +1325,8 @@ impl ClaudeRecords {
                 placeholders: requests.placeholders,
                 uses: requests.uses,
                 billing: requests.billing,
+                chain: requests.chain,
+                timed: requests.timed,
             },
             basis,
             tokens.as_ref(),
@@ -1549,6 +1595,23 @@ struct RequestFacts {
     placeholders: usize,
     uses: crate::pricing::RequestUses,
     billing: Option<crate::pricing::Billing>,
+    /// The recorded totals and the requests between them, from a read that
+    /// reached every record.
+    chain: Option<crate::unexplained::RecordedChain>,
+    timed: Option<Vec<crate::unexplained::TimedRequest>>,
+}
+
+/// `split` with what it leaves of `recorded` cache writes as written at no
+/// recorded TTL, or none where it holds more than `recorded`.
+fn split_within(split: CacheWrites, recorded: Option<u64>) -> Option<CacheWrites> {
+    let recorded = recorded?;
+    let known = split.total();
+    let left = recorded.checked_sub(known)?;
+    let mut split = split;
+    if left > 0 {
+        split.ttl_unrecorded = Some(split.ttl_unrecorded.unwrap_or(0) + left);
+    }
+    Some(split)
 }
 
 /// Selected accounting detail, with a set-aside cumulative state kept
@@ -1573,6 +1636,8 @@ fn claude_usage_detail(
         placeholders,
         uses,
         billing,
+        chain,
+        timed,
     } = facts;
     let mut detail = if basis == AccountingBasis::RecordedTotal {
         cost_state.map(cost_state_detail).unwrap_or_default()
@@ -1599,20 +1664,47 @@ fn claude_usage_detail(
             detail.recorded_total = Some(recorded);
         }
         detail.by_model = by_model;
+        detail.cache_write_by_ttl = requests.as_ref().map(|requests| requests.cache_write);
     } else {
+        // The requests a total covers split the cache writes they explain by
+        // their recorded TTLs; what the total holds beyond them is written
+        // at no recorded TTL.
+        let covered = chain
+            .as_ref()
+            .map(crate::unexplained::RecordedChain::covered);
+        let mut session_split = detail.by_model.as_ref().map(|_| CacheWrites::default());
         for model in detail.by_model.iter_mut().flatten() {
-            model.cache_write_by_ttl = by_model
-                .iter()
-                .flatten()
-                .filter(|share| share.model == model.model)
-                .filter_map(|share| share.cache_write_by_ttl)
-                .reduce(|mut sum, writes| {
-                    sum.add(&writes);
-                    sum
-                });
+            let split = match &covered {
+                Some(covered) => covered.get(&model.model).map(|spent| spent.writes),
+                None => by_model
+                    .iter()
+                    .flatten()
+                    .filter(|share| share.model == model.model)
+                    .filter_map(|share| share.cache_write_by_ttl)
+                    .reduce(|mut sum, writes| {
+                        sum.add(&writes);
+                        sum
+                    }),
+            };
+            let recorded = model.tokens.as_ref().and_then(|tokens| tokens.cache_write);
+            model.cache_write_by_ttl = split.and_then(|split| split_within(split, recorded));
+            if let Some(sum) = &mut session_split {
+                match (model.cache_write_by_ttl, recorded) {
+                    (Some(split), _) => sum.add(&split),
+                    (None, Some(recorded)) => sum.add(&CacheWrites {
+                        ttl_unrecorded: Some(recorded),
+                        ..CacheWrites::default()
+                    }),
+                    (None, None) => {}
+                }
+            }
         }
+        detail.cache_write_by_ttl =
+            session_split.or_else(|| requests.as_ref().map(|requests| requests.cache_write));
+        detail.unexplained = chain.as_ref().and_then(|chain| chain.accrual(None).whole());
     }
-    detail.cache_write_by_ttl = requests.as_ref().map(|requests| requests.cache_write);
+    detail.recorded_chain = chain;
+    detail.timed_requests = timed;
     match placeholders {
         0 => {}
         count if selected_tokens.is_none() && !counted_requests && failures == 0 => {
@@ -1750,6 +1842,22 @@ fn cost_state_totals(value: &Value) -> TokenTotals {
     totals
 }
 
+/// A cost-state's counters per model, as a chain mark holds them.
+fn cost_state_counts(value: &Value) -> BTreeMap<String, crate::unexplained::Counts> {
+    value["modelUsage"]
+        .as_object()
+        .map(|models| {
+            models
+                .iter()
+                .filter_map(|(model, usage)| {
+                    let tokens = model_usage_tokens(usage)?;
+                    Some((model.clone(), crate::unexplained::Counts::of(&tokens)))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 fn claude_request_tokens(values: &[Value]) -> RequestUsage {
     let mut requests = RequestTokens::default();
     for value in values {
@@ -1782,6 +1890,11 @@ struct RequestTokens {
     /// Requests without a request id, kept for pricing as they are read.
     unkeyed_uses: crate::pricing::RequestUses,
     billing: ClaudeBilling,
+    /// The recorded totals and the requests written between them.
+    chain: crate::unexplained::ChainBuilder,
+    /// Each request in time, kept only for a child recording, whose parent's
+    /// family read places them against its totals.
+    timed: Option<Vec<crate::unexplained::TimedRequest>>,
 }
 
 /// The OAuth beta Claude Code sends on every request of a subscription
@@ -1841,6 +1954,8 @@ struct RequestWitness {
     tokens: Tokens,
     /// When the request's first record was written.
     at: Option<chrono::DateTime<chrono::Utc>>,
+    /// How many recorded totals preceded the request's first record.
+    epoch: usize,
     /// The model the request's first record names.
     model: Option<Model>,
     dimensions: RequestDimensions,
@@ -1855,12 +1970,14 @@ impl RequestWitness {
     fn new(
         tokens: Tokens,
         at: Option<chrono::DateTime<chrono::Utc>>,
+        epoch: usize,
         model: Option<Model>,
         dimensions: RequestDimensions,
     ) -> Self {
         let mut witness = Self {
             tokens,
             at,
+            epoch,
             model,
             dimensions,
             ttl_witnesses: BTreeMap::new(),
@@ -2039,20 +2156,71 @@ struct RequestUsage {
     /// request.
     uses: crate::pricing::RequestUses,
     billing: Option<crate::pricing::Billing>,
+    /// The recorded totals the read reached, with the requests between them.
+    chain: Option<crate::unexplained::RecordedChain>,
+    /// Each request in time, where the read kept them.
+    timed: Option<Vec<crate::unexplained::TimedRequest>>,
 }
 
 impl RequestTokens {
-    fn finish(self) -> RequestUsage {
+    /// A fold that keeps each request in time, as a child recording's
+    /// family read needs.
+    fn timed() -> Self {
+        Self {
+            timed: Some(Vec::new()),
+            ..Self::default()
+        }
+    }
+
+    /// Keep one request in time, while the bound allows: past it the read
+    /// keeps none.
+    fn keep_timed(&mut self, request: crate::unexplained::TimedRequest) {
+        if let Some(timed) = &mut self.timed {
+            if timed.len() < crate::unexplained::MAX_FAMILY_REQUESTS {
+                timed.push(request);
+            } else {
+                self.timed = None;
+            }
+        }
+    }
+
+    fn finish(mut self) -> RequestUsage {
         let mut totals = self.unkeyed;
         let mut by_model = self.unkeyed_by_model;
         let mut dimensions = self.dimensions;
         let mut uses = self.unkeyed_uses;
         let convention = crate::model::TokenConvention::of("claude");
-        for witness in self.requests.into_values() {
+        let mut chain = self.chain;
+        let mut timed = self.timed.take();
+        for (request_id, witness) in self.requests {
             let model = witness.model.clone();
             let at = witness.at;
+            let epoch = witness.epoch;
             let (tokens, request_dimensions) = witness.finish();
             let request_writes = request_dimensions.cache_write;
+            if let Some(model) = &model {
+                let counts = crate::unexplained::Counts::of(&tokens);
+                chain.explain(
+                    epoch,
+                    &model.id,
+                    crate::unexplained::Spent {
+                        counts,
+                        writes: request_writes,
+                    },
+                );
+                if let Some(kept) = &mut timed {
+                    if kept.len() < crate::unexplained::MAX_FAMILY_REQUESTS {
+                        kept.push(crate::unexplained::TimedRequest {
+                            id: Some(request_id),
+                            at,
+                            model: model.id.clone(),
+                            counts,
+                        });
+                    } else {
+                        timed = None;
+                    }
+                }
+            }
             match convention {
                 Some(convention) => {
                     let disjoint = crate::model::DisjointTokens::from_native(
@@ -2116,10 +2284,18 @@ impl RequestTokens {
             dimensions: (dimensions.requests > 0).then_some(dimensions),
             uses,
             billing: self.billing.finish(),
+            chain: chain.finish(),
+            timed,
         }
     }
 
     fn add(&mut self, value: &Value) {
+        self.chain.stamp(timestamp(&value["timestamp"]));
+        if value["type"] == "cost-state" {
+            self.chain
+                .mark(value["startTime"].as_i64(), cost_state_counts(value));
+            return;
+        }
         self.billing.observe(value);
         if claude_unread_usage(value) {
             self.unrecognized_usage += 1;
@@ -2176,6 +2352,7 @@ impl RequestTokens {
                         RequestWitness::new(
                             tokens,
                             timestamp(&value["timestamp"]),
+                            self.chain.epoch(),
                             claude_model(value),
                             dimensions,
                         ),
@@ -2207,6 +2384,22 @@ impl RequestTokens {
                     tokens.cache_write,
                 );
                 if let Some(model) = claude_model(value) {
+                    let counts = crate::unexplained::Counts::of(&tokens);
+                    let epoch = self.chain.epoch();
+                    self.chain.explain(
+                        epoch,
+                        &model.id,
+                        crate::unexplained::Spent {
+                            counts,
+                            writes: dimensions.cache_write,
+                        },
+                    );
+                    self.keep_timed(crate::unexplained::TimedRequest {
+                        id: None,
+                        at: timestamp(&value["timestamp"]),
+                        model: model.id.clone(),
+                        counts,
+                    });
                     let (share, requests, writes) = self
                         .unkeyed_by_model
                         .entry((model.id, model.variant))

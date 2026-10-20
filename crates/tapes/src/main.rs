@@ -30,6 +30,7 @@ use agent_tapes_core::stats::{
     TurnKindCounts, UsageStats, Warning,
 };
 use agent_tapes_core::stats_summary::SessionRead;
+use agent_tapes_core::unexplained::{ExplainedBy, Placement, Unexplained, UnexplainedModel};
 use agent_tapes_core::usage::{
     Consumption, ConsumptionEventKeys, ConsumptionEventMeasurement, ConsumptionKeyOptions,
     DisjointSum, Durations, GroupBy, GroupKey, ModelUsage, ObservationClassification, RateLimits,
@@ -1585,7 +1586,7 @@ enum Command {
         json: bool,
     },
     /// Where quota went. A session named by id or reached with --latest
-    /// answers that session as tapes-usage/16: its recorded tokens, cost, and
+    /// answers that session as tapes-usage/17: its recorded tokens, cost, and
     /// turn counts, plus whatever else its harness recorded — a context
     /// window, a provider quota window, wall-clock durations, a per-model
     /// split, the price-relevant dimensions its requests recorded. --from,
@@ -1597,7 +1598,7 @@ enum Command {
     /// --quota-window answer a selection's consumption inside a window of
     /// time, each session contributing its own span inside it. A scope or
     /// listing filter instead answers the whole selection as
-    /// tapes-usage-summary/15, grouped by --by and summing each counter over
+    /// tapes-usage-summary/16, grouped by --by and summing each counter over
     /// the sessions that recorded it. Native tokens follow each harness's own
     /// convention and add only within it; the disjoint categories (uncached
     /// input, cache read, cache write by TTL, output) add across harnesses.
@@ -1744,7 +1745,8 @@ enum Command {
         /// withhold differences. Child requests are ordered by time against
         /// the total's timestamp or, for a cost-state, which writes none, the
         /// newest parent record written before it; untimed or later child
-        /// observations cannot contradict an earlier total.
+        /// observations cannot contradict an earlier total. `unexplained`
+        /// is measured against the family's requests.
         /// Each source names the revision, length and SHA-256 of its bytes.
         /// A source that could not be used carries `error` and an
         /// unenumerated family a note, each a session id and a fixed reason
@@ -1793,7 +1795,14 @@ enum Command {
         /// counter restarted, while `usage --full` keeps the recorded total.
         /// A Claude cost-state or an OpenCode session
         /// total covers more than any span, so their spans sum requests and
-        /// the recorded total is withheld with a note. A pi span keeps the
+        /// the recorded total is withheld with a note. A Claude span carries
+        /// apart its share of the part of the newest total no request
+        /// explains (`unexplained`): each cost-state's increase falls between
+        /// the newest timestamped records before it and before the previous
+        /// one, held whole by a span holding that interval (`bounded`) and
+        /// prorated by duration where the span cuts it (`estimated`, with its
+        /// basis); an increase no record bounds, or any for a --requests
+        /// span, stays with the remainder and is named `unplaced`. A pi span keeps the
         /// active-branch counters and the retained-branch `consumption`
         /// apart. A request
         /// without a usable timestamp is held by the remainder, and a record
@@ -1849,7 +1858,10 @@ enum Command {
         /// activity since it, under the other filters, --search over its own turns included,
         /// and beyond --limit. Shares sum to the window's figures under
         /// the summary's partitions and withholding, and a request a span
-        /// cannot place qualifies its share as a span does. Related sessions
+        /// cannot place qualifies its share as a span does. A Claude parent's
+        /// share places the part of its recorded total its family's requests
+        /// do not explain as a span places it (`unexplained`), and groups and
+        /// the total add those parts apart from their tokens. Related sessions
         /// are never added by an exact union. `window` names the edges, how
         /// they were established
         /// (`requested`, `recorded`, `inferred`), and each session's share,
@@ -2027,7 +2039,7 @@ enum Command {
         /// identity-unestablished, exact-union).
         #[arg(long, value_name = "FILE")]
         prices: Option<PathBuf>,
-        /// Render the versioned tapes-usage/16 object, or tapes-usage-summary/15
+        /// Render the versioned tapes-usage/17 object, or tapes-usage-summary/16
         /// for a selection, as JSON. `session.model_observation` says
         /// whether more than one model and effort was observed (`mixed`) and
         /// whether a gap, partial read or budget kept the split incomplete
@@ -2043,9 +2055,16 @@ enum Command {
         /// Compatible observations retain a dimension when a later record
         /// omits it. TTL splits must match the selected cache-write count;
         /// conflicting values are withheld and counted under `conflicting`.
-        /// A Claude cost-state total, and each model's share of it, takes
-        /// its requests' TTL split only where that split sums exactly to its
-        /// cache writes; otherwise its writes are `ttl_unrecorded`.
+        /// A Claude cost-state total, and each model's share of it, splits
+        /// the cache writes its requests explain by the TTLs they recorded,
+        /// wherever those writes are no more than its own, and holds the rest
+        /// `ttl_unrecorded`. `unexplained`, beside `by_model`, names per model
+        /// the part of the total its requests do not explain, kept apart from
+        /// every figure summed from requests: `explained_by` is
+        /// `session-requests`, or `family-requests` under --reconcile and in a
+        /// window read, where subagent requests explain it too; a span or
+        /// window figure adds its `placement`, `unplaced` and
+        /// `unplaced_reasons`, and a summary adds its shares' parts.
         /// At most 16 TTL-count witnesses are held per request, with excess
         /// observations counted under `omitted_values`.
         /// A newest Claude cost-state below its request sum is set aside:
@@ -4858,6 +4877,9 @@ fn render_usage(usage: &UsageView) -> String {
     for model in usage.by_model.iter().flatten() {
         out.push_str(&render_model_usage(model));
     }
+    if let Some(unexplained) = &usage.unexplained {
+        out.push_str(&render_unexplained("", unexplained));
+    }
     if let Some(attribution) = &usage.attribution {
         out.push_str(&render_attribution(attribution));
     }
@@ -5688,6 +5710,59 @@ fn render_durations(durations: &Durations) -> String {
     .join(", ")
 }
 
+/// The part of a recorded total that no request explains, model by model,
+/// how a span or window placed it, and what it could not place.
+fn render_unexplained(prefix: &str, unexplained: &Unexplained) -> String {
+    let whose = match unexplained.explained_by {
+        Some(ExplainedBy::SessionRequests) => "the session's requests",
+        Some(ExplainedBy::FamilyRequests) => "the requests of the session and its subagents",
+        None => "the sessions' requests",
+    };
+    let entry = |model: &UnexplainedModel| {
+        let estimate = model
+            .list_price_estimate
+            .as_ref()
+            .map_or_else(String::new, |estimate| {
+                format!("; {}", render_estimate(estimate))
+            });
+        format!(
+            "model {}: {}{estimate}",
+            model.model,
+            render_tokens(&model.tokens)
+        )
+    };
+    let mut out = String::new();
+    for model in &unexplained.by_model {
+        out.push_str(&format!(
+            "{prefix}recorded total not explained by {whose}: {}\n",
+            entry(model)
+        ));
+    }
+    match unexplained.placement {
+        Some(Placement::Bounded) if !unexplained.by_model.is_empty() => out.push_str(&format!(
+            "{prefix}unexplained placement: bounded, each recorded total's interval held whole\n"
+        )),
+        Some(Placement::Estimated { basis, .. }) => out.push_str(&format!(
+            "{prefix}unexplained placement: estimated, an interval between recorded totals \
+             prorated by the time held ({basis})\n"
+        )),
+        _ => {}
+    }
+    let reasons = unexplained
+        .unplaced_reasons
+        .iter()
+        .map(serde_kebab)
+        .collect::<Vec<_>>()
+        .join(", ");
+    for model in &unexplained.unplaced {
+        out.push_str(&format!(
+            "{prefix}unexplained and not placed ({reasons}), held by the remainder: {}\n",
+            entry(model)
+        ));
+    }
+    out
+}
+
 fn render_model_usage(model: &ModelUsage) -> String {
     let mut rendered = format!(
         "model {}{}:",
@@ -6208,6 +6283,9 @@ fn render_usage_summary(summary: &UsageSummary, by: &[GroupBy]) -> String {
     }
     if let Some(estimate) = &summary.totals.list_price_estimate {
         out.push_str(&format!("Total {}", render_estimate_lines("", estimate)));
+    }
+    if let Some(unexplained) = &summary.totals.unexplained {
+        out.push_str(&render_unexplained("Total ", unexplained));
     }
     if !summary.totals.list_price_withheld.is_empty() {
         out.push_str(&format!(

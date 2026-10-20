@@ -511,7 +511,7 @@ PROBE BEFORE EXPORTING
   Claude, Codex, or Pi recording twice, pairing past the read bound and
   writing each event as it pairs, with the same filters and counts.
 
-  usage answers where a session's quota went as tapes-usage/16: its recorded
+  usage answers where a session's quota went as tapes-usage/17: its recorded
   launch mode when known, tokens, cost, accounting, turns, and any by-model attribution the source can
   support — Claude's recorded cost-state or, for a request sum, the model
   each request names; Codex's request observations; or pi's per-message
@@ -535,6 +535,19 @@ PROBE BEFORE EXPORTING
   cover the session; recorded totals keep their epoch coverage. Pi's active
   accounting stays `read-window` when an unreadable record cuts its branch
   or follows its last entry.
+  A Claude cost-state can count usage none of the recording's requests
+  shows: a model no request names, or a model's tokens beyond its requests'.
+  `unexplained`, beside `by_model`, names that part per model with its
+  tokens: the newest total less the requests it covers, those first written
+  in its run before it, a run restarting where a total's `startTime`
+  changes or a counter falls. It never joins a figure summed from requests,
+  and the session's own figure stays the recorded total. `explained_by`
+  says whose requests measure it: `session-requests`, the recording's own,
+  or `family-requests`, its subagent recordings' too, each request once by
+  id and set against the totals by its time, as `--reconcile` and a window
+  read measure it. A read that leaves part of the recording unread names no
+  unexplained part, and notes that --full does. Text prints a `recorded
+  total not explained by ...` line per model.
   `usage <id> --from <RFC3339> --to <RFC3339>` answers one span of one
   session, the half-open `[from, to)` with either bound open, and
   `--requests FIRST..LAST` the session's counted requests 1-based and
@@ -562,14 +575,25 @@ PROBE BEFORE EXPORTING
   after a restart, covers only the requests since it. A Claude cost-state is the running total of one run and an OpenCode session total
   counts requests no message records, so no span divides either: their
   spans, and the whole they add up to, sum requests, and the recorded total is
-  withheld with a note. A pi span keeps the active-branch counters and the
+  withheld with a note. A Claude figure carries apart the share of the
+  newest total's `unexplained` part its span holds. Cost-states write no
+  timestamp, so each one's increase is bounded by the newest timestamped
+  record before the previous total and the newest before itself: a span
+  holding that interval whole holds the increase whole (`placement.status:
+  bounded`), one cutting it holds the share of its duration it covers
+  (`estimated`, with `basis: cost-state-interval-prorated-by-time`), and
+  what no span holds is the remainder's, so spans that share no time and the
+  remainder add up to the whole's. An increase no timestamped record
+  bounds, and every increase for a `--requests` span, which places nothing
+  in time, stays with the remainder and is named under the span's
+  `unplaced`, with `unplaced_reasons` `unbounded` or `ordinal-span`. A pi span keeps the active-branch counters and the
   retained-branch `consumption` apart, each conserving. A request with no
   usable timestamp is held by the remainder and qualifies every span it may
   belong to `unestablished-scope`; an unreadable record, a failed attempt or
   unrecognized usage the read cannot place for or against a span is counted
   under `unplaced` and qualifies it `unreadable-record`, `stopped-attempt` or
   `unrecognized-usage`, so a span the read could not cover is never complete.
-  The library answers several spans in one pass, as tapes-usage-spans/5: a
+  The library answers several spans in one pass, as tapes-usage-spans/6: a
   figure per span, the `remainder`, and the `whole` in the spans' basis. A
   whole-recording read asked for its timeline also carries, without another
   pass, the request timeline the spans count (every counted request with its
@@ -706,9 +730,11 @@ PROBE BEFORE EXPORTING
   each reason its figure carries that describes the read rather than one
   model's events (unreadable-record, unrecognized-usage, read-window,
   since-reset, unestablished-scope, incomplete-attribution), so a
-  share-by-share estimate carries it too, and a share prices its cache
-  writes at the TTLs its own requests recorded wherever those writes sum
-  exactly to the share's. Pi consumption is split by
+  share-by-share estimate carries it too, and a share prices the cache
+  writes its own requests explain at the TTLs they recorded, wherever those
+  writes are no more than the share's, and what the share holds beyond them
+  as ttl-unrecorded. Each model of `unexplained` is priced by its own row,
+  its cache writes at no recorded TTL. Pi consumption is split by
   the model each event names. On the active branch alone it is priced as
   the session figure is, share by share where every event names a model;
   with events on other branches it is priced by that split, and usage no
@@ -739,6 +765,11 @@ PROBE BEFORE EXPORTING
   summed under the summary's partitions, withholding and overlap rules, so the
   window total is the sum of its shares within one accounting basis, and a
   request a span cannot place qualifies its share as it qualifies a span.
+  A Claude parent's share carries `unexplained` placed as a span places
+  it and measured against its family, since its subagents' requests are
+  shares of their own; each group and the total add their shares' parts
+  per model under `unexplained`, apart from `tokens` and `disjoint`, priced
+  by each model's row when a table is given.
   Related sessions are never added by an exact union, since event keys cover
   whole recordings. `window` names the edges,
   how they were established (`requested`, `recorded`, `inferred`), the
@@ -1034,9 +1065,10 @@ PROBE BEFORE EXPORTING
   cell reads `withheld [<categories: reasons>]`. Coverage lines are labelled
   `active` for a pi session's active branch and `session` otherwise.
   A Claude request sum keeps the TTL split. A cost-state total merges it,
-  so its writes take the split its requests recorded, for the figure and for
-  each model's share, only where that split sums exactly to the total's cache
-  writes; otherwise they are ttl_unrecorded. requests
+  so the writes its requests explain take the split they recorded, for the
+  figure and for each model's share, wherever those writes are no more than
+  the total's, and what the total holds beyond them is ttl_unrecorded;
+  writes past the total's leave all of it ttl_unrecorded. requests
   tallies what the read's deduplicated Claude requests recorded beside their
   tokens — cache writes by TTL, service tier, speed, inference geo, web
   search and fetch counts — and counts under missing each request that did
@@ -1125,6 +1157,7 @@ PROBE BEFORE EXPORTING
   `usage SESSION --reconcile` is Claude-only. It reads the parent and every
   subagent recording whole and retains the newest cost-state's counters and
   dollar facts, including per-model estimates, under their own accounting.
+  Its `unexplained` is measured against the family's requests.
   Request IDs deduplicate across a validated native family: children under
   the parent's subagents directory must positively witness its native session
   identity and name no agent but their own. Such children share the parent's
@@ -1323,7 +1356,7 @@ PROBE BEFORE EXPORTING
   its own first activity and not the parent's launch.
 
   Given a scope or a listing filter instead of a session, usage answers that
-  whole selection as tapes-usage-summary/15, using the flags list and export
+  whole selection as tapes-usage-summary/16, using the flags list and export
   take and grouping by --by (harness and model unless told otherwise). It sums
   the counters the listing already carries, so nothing is re-read. Read
   counted before a sum: it says how many of a group's sessions recorded that

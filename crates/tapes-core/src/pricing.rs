@@ -1718,6 +1718,9 @@ pub fn price_view(view: &mut crate::usage::UsageView, table: &PriceTable) {
         model.list_price_estimate = priced;
     }
     let convention = view.disjoint.as_ref().map(|disjoint| disjoint.convention);
+    if let (Some(unexplained), Some(convention)) = (view.unexplained.as_mut(), convention) {
+        price_unexplained(unexplained, convention, table, terms);
+    }
     if let (Some(consumption), Some(convention)) = (view.consumption.as_mut(), convention) {
         let disjoint = consumption.tokens.as_ref().map(|tokens| {
             DisjointTokens::from_native(tokens, convention, None)
@@ -1759,6 +1762,31 @@ pub fn price_view(view: &mut crate::usage::UsageView, table: &PriceTable) {
         }
         .estimate(table);
         consumption.list_price_estimate = estimate.whole.and_then(EstimateSum::finish);
+    }
+}
+
+/// Price each model's part of a recorded total that no request explains by
+/// the model's own row. No request of it is known, so its cache writes are
+/// priced at no recorded TTL and terms priced by the request bound it
+/// between every rate it could pay.
+pub fn price_unexplained(
+    unexplained: &mut crate::unexplained::Unexplained,
+    convention: TokenConvention,
+    table: &PriceTable,
+    terms: RequestTerms<'_>,
+) {
+    let terms = RequestTerms {
+        requests: None,
+        ..terms
+    };
+    for entry in unexplained.entries_mut() {
+        let writes = CacheWrites {
+            ttl_unrecorded: entry.tokens.cache_write,
+            ..CacheWrites::default()
+        };
+        let disjoint = DisjointTokens::from_native(&entry.tokens, convention, Some(&writes));
+        entry.list_price_estimate =
+            price_model(&disjoint, &entry.model, None, table, &terms, false).finish();
     }
 }
 

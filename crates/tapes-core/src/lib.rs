@@ -55,13 +55,14 @@ pub mod stretch;
 mod test_support;
 pub mod timeline;
 pub mod title;
+pub mod unexplained;
 pub mod usage;
 pub mod window;
 pub mod workset;
 
 pub const LIST_SCHEMA: &str = "tapes-list/11";
 pub const EXPORT_MANIFEST_SCHEMA: &str = "tapes-export-manifest/7";
-pub const USAGE_SUMMARY_SCHEMA: &str = "tapes-usage-summary/15";
+pub const USAGE_SUMMARY_SCHEMA: &str = "tapes-usage-summary/16";
 /// Number of normalized turns a `list --search` query inspects per session.
 /// Keeping this fixed makes the listing's cost predictable for callers.
 pub const LIST_SEARCH_TAIL: usize = 32;
@@ -1141,6 +1142,7 @@ pub fn usage_with_options_with_backends(
         if options.reconcile {
             view.reconciliation =
                 Some(backend.usage_reconciliation_after(&resolved.session, &read)?);
+            explain_by_family(backend.as_ref(), &session, &mut view);
         }
         view.consumption_event_keys = options
             .event_keys
@@ -1166,6 +1168,7 @@ pub fn usage_with_options_with_backends(
         view.series = observations.map(|observations| observations.series);
         if options.reconcile {
             view.reconciliation = Some(backend.usage_reconciliation(&transcript.session)?);
+            explain_by_family(backend.as_ref(), &transcript.session, &mut view);
         }
         view.consumption_event_keys = options
             .event_keys
@@ -1174,6 +1177,54 @@ pub fn usage_with_options_with_backends(
             })
             .transpose()?;
         Ok(view)
+    }
+}
+
+/// Measure the part of `session`'s recorded total that no request explains
+/// against its whole family: its own requests and every child recording's,
+/// each child read whole. A child that cannot be read leaves the family's
+/// requests unknown, so the part is withheld with a note.
+fn explain_by_family(backend: &dyn Backend, session: &Session, view: &mut usage::UsageView) {
+    let Some(chain) = session
+        .usage_detail
+        .as_ref()
+        .filter(|detail| detail.unexplained.is_some())
+        .and_then(|detail| detail.recorded_chain.as_ref())
+    else {
+        return;
+    };
+    let (children, mut failures) = backend.window_children(session);
+    let mut requests = Vec::new();
+    for child in &children {
+        let read = backend
+            .stream_transcript(child, None, &mut |_| Ok(()))
+            .and_then(|read| backend.stream_spans(child, &read, &[]));
+        match read {
+            Ok(spans) => match spans
+                .whole
+                .usage_detail
+                .and_then(|detail| detail.timed_requests)
+            {
+                Some(timed) => requests.extend(timed),
+                None if spans.whole.tokens.is_some() => {
+                    failures.push(format!("{}: requests past the family bound", child.id));
+                }
+                None => {}
+            },
+            Err(error) => failures.push(format!("{}: {error:#}", child.id)),
+        }
+    }
+    if failures.is_empty() && requests.len() <= unexplained::MAX_FAMILY_REQUESTS {
+        view.unexplained = chain.accrual(Some(&requests)).whole();
+    } else {
+        view.unexplained = None;
+        view.notes.push(format!(
+            "The part of the recorded total no request explains is withheld: the requests of \
+             {} child recordings are not all known, unreadable or past the family bound of \
+             {} requests.",
+            failures.len().max(1),
+            unexplained::MAX_FAMILY_REQUESTS
+        ));
     }
 }
 
@@ -2368,6 +2419,10 @@ fn read_window_keeping(
             unreadable.extend(failures);
             children
         });
+        // A parent's recorded total counts its children's requests, which
+        // the window holds as shares of their own, so the part of it no
+        // request explains is measured against the whole family.
+        let mut family = Family::default();
         for member in std::iter::once(session.clone()).chain(children) {
             let read = backend
                 .stream_transcript(&member, None, &mut |_| Ok(()))
@@ -2377,11 +2432,20 @@ fn read_window_keeping(
                 Ok(spans) => spans,
                 Err(error) => {
                     unreadable.push(format!("{} ({}): {error:#}", member.id, member.harness()));
+                    if member.id != session.id {
+                        family.unreadable();
+                    }
                     continue;
                 }
             };
+            family.observe(member.id == session.id, &spans);
             let (figure, placement) = spans.spans.remove(0);
-            if placement.requests == 0 && placement.unplaced == 0 {
+            let unexplained_inside = figure
+                .usage_detail
+                .as_ref()
+                .and_then(|detail| detail.unexplained.as_ref())
+                .is_some_and(|unexplained| !unexplained.by_model.is_empty());
+            if placement.requests == 0 && placement.unplaced == 0 && !unexplained_inside {
                 // A parent reached only through its children was not listed,
                 // so neither it nor a child of it that places nothing is an
                 // empty session of the window.
@@ -2408,11 +2472,19 @@ fn read_window_keeping(
                 first: placement.first,
                 last: placement.last,
                 disjoint: figure.disjoint_tokens(),
+                unexplained: figure
+                    .usage_detail
+                    .as_ref()
+                    .and_then(|detail| detail.unexplained.clone()),
                 allowance: Vec::new(),
                 allowance_absent: None,
             });
+            if member.id == session.id {
+                family.parent = Some(figures.len());
+            }
             figures.push(figure);
         }
+        family.explain(bounds.span(), &mut figures, &mut shares);
     }
     let (relations, resolved) = if uses_parents {
         session_relations(backends, parents)
@@ -2459,6 +2531,83 @@ fn read_window_keeping(
         left_out_by_limit,
         listing_bound_reached,
     })
+}
+
+/// A window member's family: the parent's recorded totals, the figure and
+/// share it took, and its children's requests in time.
+#[derive(Default)]
+struct Family {
+    chain: Option<unexplained::RecordedChain>,
+    /// Where the parent's figure and share sit, once it took one.
+    parent: Option<usize>,
+    requests: Vec<unexplained::TimedRequest>,
+    children: bool,
+    /// A child whose requests are not all known: one that could not be
+    /// read, or whose requests passed the bound.
+    incomplete: bool,
+}
+
+impl Family {
+    /// Keep what `spans` of one member adds: a parent's chain, where its
+    /// span read places an unexplained part, and a child's requests while
+    /// the parent's chain needs them.
+    fn observe(&mut self, parent: bool, spans: &span::SpanSessions) {
+        let detail = spans.whole.usage_detail.as_ref();
+        if parent {
+            if detail.is_some_and(|detail| detail.unexplained.is_some()) {
+                self.chain = detail.and_then(|detail| detail.recorded_chain.clone());
+            }
+            return;
+        }
+        self.children = true;
+        if self.chain.is_none() || self.incomplete {
+            return;
+        }
+        match detail.and_then(|detail| detail.timed_requests.as_ref()) {
+            Some(requests)
+                if self.requests.len() + requests.len() <= unexplained::MAX_FAMILY_REQUESTS =>
+            {
+                self.requests.extend(requests.iter().cloned());
+            }
+            Some(_) => self.incomplete = true,
+            None if spans.whole.tokens.is_some() => self.incomplete = true,
+            None => {}
+        }
+    }
+
+    /// A child the window could not read.
+    fn unreadable(&mut self) {
+        self.children = true;
+        self.incomplete = true;
+    }
+
+    /// Measure the parent's share against its family's requests. Its
+    /// children's requests only add to what explains its total, so a parent
+    /// that took no share holds none of the family's measure either. A
+    /// family whose requests are not all known withholds the parent's part:
+    /// its children's shares may hold what it would count again.
+    fn explain(
+        self,
+        bounds: span::SpanBounds,
+        figures: &mut [Session],
+        shares: &mut [window::WindowShare],
+    ) {
+        let (Some(chain), true) = (self.chain, self.children) else {
+            return;
+        };
+        let Some(position) = self.parent else {
+            return;
+        };
+        let placed = (!self.incomplete)
+            .then(|| chain.accrual(Some(&self.requests)).place(&[bounds]))
+            .flatten()
+            .and_then(|mut placed| placed.spans.pop());
+        figures[position]
+            .usage_detail
+            .get_or_insert_with(Default::default)
+            .unexplained = placed.clone();
+        shares[position].unexplained = placed;
+    }
 }
 
 /// The window `ask` names, summed: each session's share inside it grouped by

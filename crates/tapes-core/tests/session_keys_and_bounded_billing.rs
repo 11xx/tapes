@@ -169,7 +169,7 @@ fn session_groups(summary: &Value) -> BTreeMap<(String, String), (u64, u64)> {
 /// Claim: grouping by session keys each group by the session's harness and
 /// id, as `session` and `session_harness`, in a summary and in a window read,
 /// so a Claude session and a Codex session sharing an id are two groups of
-/// one session each, under tapes-usage-summary/15. Rejects a group keyed by
+/// one session each, under tapes-usage-summary/16. Rejects a group keyed by
 /// the bare id that sums the two sessions' tokens as one.
 #[test]
 fn sessions_sharing_an_id_across_harnesses_are_separate_groups() {
@@ -187,7 +187,7 @@ fn sessions_sharing_an_id_across_harnesses_are_separate_groups() {
     )
     .unwrap();
     assert_eq!(session_groups(&summary), expected, "{summary:#}");
-    assert_eq!(summary["schema"], "tapes-usage-summary/15", "{summary:#}");
+    assert_eq!(summary["schema"], "tapes-usage-summary/16", "{summary:#}");
 
     let windowed = serde_json::to_value(
         usage_window_with_backends(
