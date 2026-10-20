@@ -329,8 +329,9 @@ pub fn attribute(
                 .filter_map(|location| location.branch),
         );
     }
-    let branch_commits =
-        repository.branch_commits(&branches, *first - params.lookahead - params.lookback)?;
+    let since = *first - params.lookahead - params.lookback;
+    let branch_commits = repository.branch_commits(&branches, since)?;
+    let arrivals = repository.arrivals(&branches, since)?;
     let facts = Facts {
         commits: universe.facts.clone(),
         places: repository
@@ -345,6 +346,7 @@ pub fn attribute(
             .filter_map(|worktree| Some((worktree.path.clone(), worktree.branch.clone()?)))
             .collect(),
         branch_commits,
+        arrivals,
     };
 
     let mut partitions: BTreeMap<SessionKey, Partition> = BTreeMap::new();

@@ -724,6 +724,7 @@ const SQUASHED: &str = "c1a00000-0000-4000-8000-000000000006";
 const AMENDED: &str = "c1a00000-0000-4000-8000-000000000007";
 const LINGERING: &str = "c1a00000-0000-4000-8000-000000000008";
 const LONG: &str = "c1a00000-0000-4000-8000-000000000009";
+const ON_MAIN: &str = "c1a00000-0000-4000-8000-00000000000a";
 
 /// An interactive session in the main checkout: on `feat-a` it edits and
 /// commits c1 at 10:08 and talks on; at 10:12 it switches to `feat-b`, where
@@ -967,6 +968,26 @@ fn amended(sandbox: &Sandbox) -> Names {
     claude.reply(at("15:12:00"));
     claude.write(sandbox, &wt_r);
     names(&[("r1", &landed)])
+}
+
+/// An interactive session in the main checkout commits m1 on `main` at
+/// 10:10 and talks on; at 10:20 another commit, n, lands on `main`.
+fn on_main(sandbox: &Sandbox) -> Names {
+    let repo = sandbox.repo();
+    let m1 = sandbox.commit(&repo, at("10:10:00"), "m.rs", &refs(&lines("sigma")), "m1");
+    let n = sandbox.commit(&repo, at("10:20:00"), "n.rs", &refs(&lines("tau")), "n");
+
+    let mut claude = Claude::lead(ON_MAIN, &repo, "main");
+    claude.prompt(at("10:00:00"));
+    claude.reply(at("10:00:05"));
+    claude.reply(at("10:05:00"));
+    claude.commit(at("10:10:00"), &m1, "committed", "m1");
+    claude.reply(at("10:12:00"));
+    claude.reply(at("10:15:00"));
+    claude.reply(at("10:25:00"));
+    claude.reply(at("10:30:00"));
+    claude.write(sandbox, &repo);
+    names(&[("m1", &m1), ("n", &n)])
 }
 
 /// A pi session in a live worktree on `lane-u` commits u1 at 16:05 and works
@@ -1322,6 +1343,26 @@ fn work_after_the_last_commit_is_uncommitted() {
         .unwrap()
         .rules;
     assert!(rules.contains(&MemberRule::Location), "{rules:?}");
+}
+
+/// Claim: a session's uncommitted work on a branch ends when the branch's
+/// next commit arrives, the default branch included, though no commit on
+/// the default branch divides a stay. Rejects an uncommitted bucket that
+/// runs to the end of the stay.
+#[test]
+fn uncommitted_work_ends_when_the_branch_moves_on() {
+    let sandbox = Sandbox::new();
+    let names = on_main(&sandbox);
+    let attribution = sandbox.day();
+    let session = session(&attribution, ON_MAIN);
+    assert_eq!(
+        requests(session, &names),
+        expect(&[("m1", 3), ("uncommitted main", 2), ("n", 2)])
+    );
+    assert_eq!(
+        labels(session, &names)["n"],
+        BTreeSet::from([(Tier::Estimated, Basis::WorkingStretch)])
+    );
 }
 
 /// The amount each commit holds across every session.

@@ -667,6 +667,35 @@ impl GitReader {
         ))
     }
 
+    /// The commits a live branch's first-parent history holds that were
+    /// committed at or after `since`, newest first, or `None` when no local
+    /// branch has that name.
+    pub fn first_parent_commits(
+        &self,
+        branch: &str,
+        since: DateTime<Utc>,
+    ) -> Result<Option<Vec<String>>> {
+        if require_revisions([branch]).is_err()
+            || !self.commit_exists(&format!("refs/heads/{branch}"))?
+        {
+            return Ok(None);
+        }
+        let listed = self.run(
+            &[
+                "rev-list".to_owned(),
+                "--first-parent".to_owned(),
+                format!("--max-count={}", self.limits.commits),
+                format!("--since=@{}", since.timestamp()),
+                "--end-of-options".to_owned(),
+                format!("refs/heads/{branch}"),
+            ],
+            None,
+        )?;
+        Ok(Some(
+            text(&listed.bytes).lines().map(str::to_owned).collect(),
+        ))
+    }
+
     /// What the merge commits committed at or after `since` say they merged:
     /// for each merge whose subject is one git or a forge writes by default
     /// (`Merge branch 'name'`, `Merge remote-tracking branch 'origin/name'`,

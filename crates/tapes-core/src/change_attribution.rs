@@ -34,10 +34,12 @@
 //! A worktree span is divided by the commits known at its place, in order:
 //! requests up to a commit's creation serve that commit, and those after the
 //! session's last commit there serve the place's uncommitted bucket until the
-//! stay ends. A stay with no commit inside it serves the place's next known
-//! commit. A commit is known at a place when the session created it there,
-//! or when the repository's history names it on the place's branch: a live
-//! branch, or a merge whose subject names the branch.
+//! stay ends or the branch's next commit arrives. A stay with no commit
+//! inside it serves the place's next known commit. A commit is known at a
+//! place when the session created it there, or when the repository's history
+//! names it on the place's branch: a live branch, or a merge whose subject
+//! names the branch. No commit is known on the default branch; its commits
+//! only end uncommitted work.
 //!
 //! A segment several items cover is split evenly among them. A child session
 //! is first placed by its own evidence, its request times excepted: they are
@@ -242,6 +244,9 @@ pub struct Facts {
     pub worktree_branches: BTreeMap<PathBuf, String>,
     /// The commits the repository's history names on each branch.
     pub branch_commits: BTreeMap<String, BTreeSet<String>>,
+    /// The commits each live branch's first-parent history received, the
+    /// default branch included.
+    pub arrivals: BTreeMap<String, BTreeSet<String>>,
 }
 
 impl Facts {
@@ -820,13 +825,28 @@ fn worktree_spans(
             .rfind(|made| cursor.is_some_and(|cursor| made.at < cursor));
         if let Some(made) = last_own {
             let from = cursor.or(stay.from);
-            let nonempty = from.zip(stay.to).is_none_or(|(from, to)| from < to);
+            // The branch's next commit ends the uncommitted work.
+            let arrived = branch
+                .as_ref()
+                .and_then(|branch| facts.arrivals.get(branch))
+                .into_iter()
+                .flatten()
+                .filter_map(|sha| index.commit(sha))
+                .filter(|commit| !own.iter().any(|made| made.sha == commit.sha))
+                .map(|commit| commit.committer)
+                .filter(|at| from.is_none_or(|from| *at > from))
+                .min();
+            let to = match (stay.to, arrived) {
+                (Some(to), Some(arrived)) => Some(to.min(arrived)),
+                (to, arrived) => to.or(arrived),
+            };
+            let nonempty = from.zip(to).is_none_or(|(from, to)| from < to);
             if let (Some(from), true) = (from, nonempty) {
                 let work = Work::Uncommitted {
                     worktree: place.clone(),
                     branch: branch.clone().or_else(|| made.branch.clone()),
                 };
-                push_span(inputs, work, from, stay.to);
+                push_span(inputs, work, from, to);
             }
         } else if let Some(to) = stay.to {
             let next = known

@@ -149,6 +149,22 @@ impl Repository {
         Ok(known)
     }
 
+    /// The commits each of `branches` received on its first-parent history
+    /// at or after `since`, the default branch included.
+    pub(crate) fn arrivals(
+        &self,
+        branches: &BTreeSet<String>,
+        since: Instant,
+    ) -> Result<BTreeMap<String, BTreeSet<String>>> {
+        let mut arrived = BTreeMap::new();
+        for branch in branches {
+            if let Some(commits) = self.reader.first_parent_commits(branch, since)? {
+                arrived.insert(branch.clone(), commits.into_iter().collect());
+            }
+        }
+        Ok(arrived)
+    }
+
     /// The commit of `universe` an observed sha names: the commit itself, or
     /// a commit with its stable patch id while the observed object exists,
     /// or else the commit that adds at least [`Params::edit_overlap`] of the
