@@ -693,6 +693,8 @@ pub fn fetch(url: &str) -> Result<String> {
         .args([
             "--proto",
             "=https",
+            "--proto-redir",
+            "=https",
             "--fail",
             "--location",
             "--silent",
