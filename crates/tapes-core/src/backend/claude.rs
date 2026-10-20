@@ -715,7 +715,7 @@ impl Backend for ClaudeBackend {
                     path,
                     replay_pin(replay)?,
                     |line| {
-                        launch = merge_launch(launch, line_entrypoint(line));
+                        launch = scan_launch(launch, line);
                         false
                     },
                     |_, _, _| Ok(false),
@@ -1017,7 +1017,7 @@ impl Backend for ClaudeBackend {
             &path,
             replay_pin(replay)?,
             |line| {
-                launch = merge_launch(launch, line_entrypoint(line));
+                launch = scan_launch(launch, line);
                 false
             },
             |_, _, _| Ok(false),
@@ -1375,6 +1375,16 @@ impl ClaudeRecords {
 /// recur in the fork.
 fn observe_copies(copies: &mut CopyEvidence, value: &Value) {
     copies.observe_record(value["requestId"].as_str(), value["uuid"].as_str());
+}
+
+/// The launch `launch` and a recording line give together. An interactive
+/// launch is final, since no line can change it, so the lines after it go
+/// undecoded.
+fn scan_launch(launch: Option<Launch>, line: &[u8]) -> Option<Launch> {
+    if launch == Some(Launch::Interactive) {
+        return launch;
+    }
+    merge_launch(launch, line_entrypoint(line))
 }
 
 /// What [`claude_entrypoint`] reads from a record, taken from its line
