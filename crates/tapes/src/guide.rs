@@ -153,9 +153,8 @@ FIND IT
   session id ascending, then harness ascending. A Claude, Codex or Pi
   recording file last modified more than a day before --since is skipped
   without being parsed: recordings are only appended to, so it holds no later
-  activity, and the day
-  absorbs clock skew and coarse file times. Such a file raises no
-  unreadable-recording note, and the sessions listed are the same.
+  activity, and the day absorbs clock skew and coarse file times. Such a file
+  raises no unreadable-recording note, and the sessions listed are the same.
 
   --search <text> matches case-insensitively against normalized turns in each
   bounded read. --search-turns <N> selects the last N turns (default 32);
