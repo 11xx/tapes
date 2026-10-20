@@ -27,8 +27,11 @@
 //! [`Params::lookback`] before the earlier of its author and committer times
 //! to [`Params::lookahead`] after the later.
 //!
-//! Every tier takes part, and each share names the tier and basis that placed
-//! it. Worktree spans are interval evidence. Creations and edits are point
+//! The tiers [`Params::tiers`] names, every tier by default, take part
+//! together as one union, and each share names the tier and basis that
+//! placed it. Evidence of a tier left out takes no part, so the others place
+//! what they alone would; what only the left-out tiers would place is
+//! unattributed as [`Reason::TiersNotAsked`]. Worktree spans are interval evidence. Creations and edits are point
 //! evidence: an item's events span it from the first to the last, and cut the
 //! working stretches no span covers. Estimated evidence only cuts working
 //! stretches; it spans nothing. One piece of evidence naming several commits
@@ -105,6 +108,78 @@ pub struct Params {
     /// The least share of a session's timed requests a stay a tool argument
     /// names must hold to count as presence.
     pub presence_share: f64,
+    /// The tiers whose evidence takes part.
+    pub tiers: Tiers,
+}
+
+/// A set of evidence tiers. Every tier in it takes part together, as one
+/// union, never as a cascade.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub struct Tiers {
+    pub bound: bool,
+    pub matched: bool,
+    pub estimated: bool,
+}
+
+impl Default for Tiers {
+    fn default() -> Self {
+        Self::all()
+    }
+}
+
+impl Tiers {
+    pub fn all() -> Self {
+        Self {
+            bound: true,
+            matched: true,
+            estimated: true,
+        }
+    }
+
+    /// The tiers named, none of the others.
+    pub fn of(tiers: impl IntoIterator<Item = Tier>) -> Self {
+        let mut set = Self {
+            bound: false,
+            matched: false,
+            estimated: false,
+        };
+        for tier in tiers {
+            match tier {
+                Tier::Bound => set.bound = true,
+                Tier::Matched => set.matched = true,
+                Tier::Estimated => set.estimated = true,
+            }
+        }
+        set
+    }
+
+    pub fn contains(&self, tier: Tier) -> bool {
+        match tier {
+            Tier::Bound => self.bound,
+            Tier::Matched => self.matched,
+            Tier::Estimated => self.estimated,
+        }
+    }
+
+    pub fn is_all(&self) -> bool {
+        *self == Self::all()
+    }
+
+    /// The tiers in the set, strongest first.
+    pub fn named(&self) -> Vec<Tier> {
+        [Tier::Bound, Tier::Matched, Tier::Estimated]
+            .into_iter()
+            .filter(|tier| self.contains(*tier))
+            .collect()
+    }
+
+    /// The tiers outside the set, strongest first.
+    pub fn excluded(&self) -> Vec<Tier> {
+        [Tier::Bound, Tier::Matched, Tier::Estimated]
+            .into_iter()
+            .filter(|tier| !self.contains(*tier))
+            .collect()
+    }
 }
 
 impl Default for Params {
@@ -118,6 +193,7 @@ impl Default for Params {
             edit_authoring: Some(Duration::minutes(1)),
             proximity: Duration::minutes(30),
             presence_share: 0.25,
+            tiers: Tiers::all(),
         }
     }
 }
@@ -773,6 +849,14 @@ fn inputs(evidence: &SessionEvidence, facts: &Facts, params: &Params) -> Inputs 
             });
         }
     }
+    // Evidence of a tier not asked for takes no part.
+    let tiers = params.tiers;
+    inputs.spans.retain(|span| tiers.contains(span.tier));
+    inputs.events.retain(|event| tiers.contains(event.tier));
+    inputs.cues.retain(|cue| tiers.contains(cue.tier));
+    inputs
+        .admitted
+        .retain(|admitted| tiers.contains(admitted.tier));
     inputs
 }
 
@@ -1131,6 +1215,62 @@ impl Partition {
         self.pieces = pieces;
     }
 
+    /// Give what this partition leaves unattributed in time and `full`, the
+    /// same session divided with every tier, gives an item to
+    /// [`Reason::TiersNotAsked`]: only the tiers left out would place it.
+    pub fn name_tiers_not_asked(&mut self, full: &Partition) {
+        let owned: Vec<Piece> = full
+            .entries
+            .iter()
+            .filter(|entry| matches!(entry.owner, Owner::Item { .. }))
+            .filter_map(|entry| entry.piece.map(|piece| full.pieces[piece]))
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        let mut pieces = self.pieces.clone();
+        let mut entries = Vec::new();
+        for entry in std::mem::take(&mut self.entries) {
+            let (Some(at), Owner::Unattributed(reason)) = (entry.piece, &entry.owner) else {
+                entries.push(entry);
+                continue;
+            };
+            if *reason == Reason::Elsewhere {
+                entries.push(entry);
+                continue;
+            }
+            let own = self.pieces[at];
+            let mut covered: Vec<Piece> =
+                owned.iter().filter_map(|piece| own.meet(piece)).collect();
+            if covered.is_empty() {
+                entries.push(entry);
+                continue;
+            }
+            let mut place = |piece: Piece| match pieces.iter().position(|held| *held == piece) {
+                Some(position) => position,
+                None => {
+                    pieces.push(piece);
+                    pieces.len() - 1
+                }
+            };
+            for piece in covered.clone() {
+                entries.push(Entry {
+                    piece: Some(place(piece)),
+                    split: entry.split.clone(),
+                    owner: Owner::Unattributed(Reason::TiersNotAsked),
+                });
+            }
+            for piece in uncovered(own, &mut covered) {
+                entries.push(Entry {
+                    piece: Some(place(piece)),
+                    split: entry.split.clone(),
+                    owner: Owner::Unattributed(*reason),
+                });
+            }
+        }
+        self.pieces = pieces;
+        self.entries = entries;
+    }
+
     /// Give what this partition leaves unattributed in time to whatever
     /// `parent` gives the same time, with basis `inherited`; what the parent
     /// leaves unattributed there stays unattributed.
@@ -1466,6 +1606,10 @@ pub struct SessionAttribution {
     /// The billing its whole recording establishes.
     #[serde(skip)]
     pub billing: Option<crate::pricing::Billing>,
+    /// The native counters its whole recording measures; a counter it
+    /// leaves absent is unmeasured in every share, never zero.
+    #[serde(skip)]
+    pub measured: Option<crate::model::Tokens>,
     pub partition: Partition,
     /// What the read took, absent where the session could not be read in
     /// pieces.

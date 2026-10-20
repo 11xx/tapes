@@ -362,41 +362,23 @@ pub fn attribute_within(
         arrivals,
     };
 
-    let mut partitions: BTreeMap<SessionKey, Partition> = BTreeMap::new();
+    let mut evidences: Vec<(SessionKey, SessionEvidence)> = Vec::new();
     for member in &gathered.members {
         let mut evidence = evidence(&member.read, repository, &universe, params)?;
         evidence.inherits = member.parent.is_some();
-        partitions.insert(member.key(), partition(&evidence, &facts, params));
+        evidences.push((member.key(), evidence));
     }
-    // Parents before children: a child inherits its parent's allocation,
-    // inheritance included.
-    let parents: BTreeMap<SessionKey, SessionKey> = gathered
-        .members
-        .iter()
-        .filter_map(|member| Some((member.key(), member.parent.clone()?)))
-        .collect();
-    let depth = |key: &SessionKey| {
-        let mut depth = 0;
-        let mut at = key;
-        while let Some(parent) = parents.get(at) {
-            depth += 1;
-            at = parent;
-            if depth > parents.len() {
-                break;
-            }
-        }
-        depth
-    };
-    let mut order: Vec<&SessionKey> = parents.keys().collect();
-    order.sort_by_key(|key| depth(key));
-    for child in order {
-        let parent = &parents[child];
-        if parent == child {
-            continue;
-        }
-        if let Some(parent) = partitions.get(parent).cloned() {
-            if let Some(partition) = partitions.get_mut(child) {
-                partition.inherit(&parent);
+    let mut partitions = divide(gathered, &evidences, &facts, params);
+    // What only the tiers left out would place is named for them.
+    if !params.tiers.is_all() {
+        let every = Params {
+            tiers: super::Tiers::all(),
+            ..*params
+        };
+        let full = divide(gathered, &evidences, &facts, &every);
+        for (key, partition) in &mut partitions {
+            if let Some(full) = full.get(key) {
+                partition.name_tiers_not_asked(full);
             }
         }
     }
@@ -437,17 +419,18 @@ pub fn attribute_within(
                     .to_owned(),
             );
         }
-        let (amounts, billing, agent) = match reads[index].as_ref() {
+        let (amounts, billing, measured, agent) = match reads[index].as_ref() {
             Ok(read) => (
                 Some(read.amounts.clone()),
                 read.billing.clone(),
+                read.counters.clone(),
                 read.agent.clone(),
             ),
             Err(error) => {
                 notes.push(format!(
                     "the recording could not be read in pieces: {error}"
                 ));
-                (None, None, agent_label(&member.session))
+                (None, None, None, agent_label(&member.session))
             }
         };
         sessions.push(SessionAttribution {
@@ -458,6 +441,7 @@ pub fn attribute_within(
             started_at: member.session.started_at,
             last_activity_at: member.session.last_activity_at,
             billing,
+            measured,
             partition,
             amounts,
             notes,
@@ -474,6 +458,52 @@ pub fn attribute_within(
     })
 }
 
+/// Every member divided by its own evidence, and then each child given its
+/// parent's allocation where its own evidence places nothing, parents
+/// before children, so inheritance carries down a chain.
+fn divide(
+    gathered: &Gathered,
+    evidences: &[(SessionKey, SessionEvidence)],
+    facts: &Facts,
+    params: &Params,
+) -> BTreeMap<SessionKey, Partition> {
+    let mut partitions: BTreeMap<SessionKey, Partition> = evidences
+        .iter()
+        .map(|(key, evidence)| (key.clone(), partition(evidence, facts, params)))
+        .collect();
+    let parents: BTreeMap<SessionKey, SessionKey> = gathered
+        .members
+        .iter()
+        .filter_map(|member| Some((member.key(), member.parent.clone()?)))
+        .collect();
+    let depth = |key: &SessionKey| {
+        let mut depth = 0;
+        let mut at = key;
+        while let Some(parent) = parents.get(at) {
+            depth += 1;
+            at = parent;
+            if depth > parents.len() {
+                break;
+            }
+        }
+        depth
+    };
+    let mut order: Vec<&SessionKey> = parents.keys().collect();
+    order.sort_by_key(|key| depth(key));
+    for child in order {
+        let parent = &parents[child];
+        if parent == child {
+            continue;
+        }
+        if let Some(parent) = partitions.get(parent).cloned() {
+            if let Some(partition) = partitions.get_mut(child) {
+                partition.inherit(&parent);
+            }
+        }
+    }
+    partitions
+}
+
 /// What one member's read took: its amounts, the bounds they were read
 /// over, and what its family's measure of a recorded total needs.
 struct Read {
@@ -484,6 +514,7 @@ struct Read {
     /// A subagent recording's requests in time, for its parent's total.
     timed: Option<Vec<crate::unexplained::TimedRequest>>,
     measured: bool,
+    counters: Option<crate::model::Tokens>,
     billing: Option<crate::pricing::Billing>,
     agent: String,
 }
@@ -619,6 +650,7 @@ fn read_amounts(
     let timed = detail.and_then(|detail| detail.timed_requests.clone());
     let billing = detail.and_then(|detail| detail.billing.clone());
     let measured = figures.whole.tokens.is_some();
+    let counters = figures.whole.tokens.clone();
     let agent = agent_label(&figures.whole);
     let whole = match within {
         Some(_) => {
@@ -642,6 +674,7 @@ fn read_amounts(
         chain,
         timed,
         measured,
+        counters,
         billing,
         agent,
     })

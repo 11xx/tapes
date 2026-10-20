@@ -104,6 +104,9 @@ pub enum Reason {
     /// The session was working where no item can be: a caller's judgment,
     /// never the engine's.
     Elsewhere,
+    /// Only evidence of tiers the caller did not ask for would place it: a
+    /// caller's judgment, never the engine's.
+    TiersNotAsked,
 }
 
 impl Reason {
@@ -117,6 +120,7 @@ impl Reason {
             Self::RecordedTotalNotSplittable => "recorded total not splittable",
             Self::UnselectedItem => "unselected item",
             Self::Elsewhere => "elsewhere",
+            Self::TiersNotAsked => "tiers not asked",
         }
     }
 }

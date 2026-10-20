@@ -1675,7 +1675,7 @@ impl DisjointSum {
     }
 
     /// Add `disjoint`, one harness's categories, without counting a session.
-    fn add_disjoint(&mut self, harness: &str, disjoint: &DisjointTokens) {
+    pub(crate) fn add_disjoint(&mut self, harness: &str, disjoint: &DisjointTokens) {
         self.conventions
             .insert(harness.to_owned(), disjoint.convention);
         for (total, value) in [
@@ -1707,7 +1707,7 @@ impl DisjointSum {
         }
     }
 
-    fn finish(mut self) -> Option<Self> {
+    pub(crate) fn finish(mut self) -> Option<Self> {
         if self.sessions == 0 {
             return None;
         }
