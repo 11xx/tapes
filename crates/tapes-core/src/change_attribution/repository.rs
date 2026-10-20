@@ -94,15 +94,12 @@ impl Repository {
         normalize_remote(url).is_some_and(|url| self.remotes.contains(&url))
     }
 
-    /// Admit evidence for each of `shas` over `[from, to]`, a pull
-    /// request's lifetime, besides its own window: the commits stand for
-    /// work a squash or rebase made under a new sha, which happened before
-    /// they were committed.
-    pub fn widen(&self, shas: &[String], from: Instant, to: Instant) {
-        let mut lifetimes = self.lifetimes.borrow_mut();
-        for sha in shas {
-            lifetimes.insert(sha.clone(), (from, to));
-        }
+    /// Admit evidence for each commit over its `(from, to)` lifetime, a
+    /// pull request's, besides its own window: the commits stand for work
+    /// a squash or rebase made again under new shas, after it happened.
+    /// This replaces any lifetimes set before.
+    pub fn set_lifetimes(&self, lifetimes: BTreeMap<String, (Instant, Instant)>) {
+        *self.lifetimes.borrow_mut() = lifetimes;
     }
 
     /// The commits whose windows meet `[from, to]`.

@@ -25,7 +25,7 @@
 //! A squash or rebase makes the pull request's work again under new shas,
 //! after the work happened. Those commits therefore admit evidence over the
 //! pull request's lifetime, from its creation to its merge, besides their
-//! own windows (see [`crate::change_attribution::Repository::widen`]).
+//! own windows (see [`crate::change_attribution::Repository::set_lifetimes`]).
 
 use std::collections::BTreeSet;
 use std::io::Read;

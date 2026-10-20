@@ -28,7 +28,7 @@
 //! to [`Params::lookahead`] after the later. A commit that stands for a
 //! pull request's work under a new sha, a squash or a rebase, also admits
 //! evidence over the pull request's lifetime, widened the same way; the
-//! repository names such commits ([`Repository::widen`]).
+//! repository names such commits ([`Repository::set_lifetimes`]).
 //!
 //! The tiers [`Params::tiers`] names, every tier by default, take part
 //! together as one union, and each share names the tier and basis that

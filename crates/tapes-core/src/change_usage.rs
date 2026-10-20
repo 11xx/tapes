@@ -423,6 +423,18 @@ pub fn change_usage(
         ..Params::default()
     };
     let reader = repository.reader();
+    // Only a pull request's squashed or rebased commits admit evidence
+    // beyond their own windows.
+    repository.set_lifetimes(match &request.selection {
+        ChangeSelection::PullRequest(pr) => pr.lifetime.map_or_else(BTreeMap::new, |lifetime| {
+            pr.view
+                .widened
+                .iter()
+                .map(|sha| (sha.clone(), lifetime))
+                .collect()
+        }),
+        _ => BTreeMap::new(),
+    });
     let mut notes = Vec::new();
     // The selected commits, and the interval whose sessions hold their
     // evidence.
@@ -505,17 +517,12 @@ pub fn change_usage(
                 None,
             )
         }
-        ChangeSelection::PullRequest(pr) => {
-            if let Some((from, to)) = pr.lifetime {
-                repository.widen(&pr.view.widened, from, to);
-            }
-            (
-                Asked::PullRequest(pr.view.clone()),
-                Some(pr.commits.clone()),
-                None,
-                None,
-            )
-        }
+        ChangeSelection::PullRequest(pr) => (
+            Asked::PullRequest(pr.view.clone()),
+            Some(pr.commits.clone()),
+            None,
+            None,
+        ),
         ChangeSelection::Session(selection) => {
             let resolved = selection.resolve(backends)?;
             let key = SessionKey {
