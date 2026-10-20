@@ -1694,13 +1694,13 @@ KEEP A PRICE TABLE
   so about once a day, and at most hourly while fetches fail. It records
   the attempt before fetching, so commands started together fetch once.
   The refresh gives each source 5 seconds to connect and 10 to finish. It
-  prints
-  nothing when it succeeds; when a source fails it prints one line,
-  `warning: prices not refreshed (<source>: <error>; …); using the table
-  fetched <date>` (or `no fetched table`), and the command goes on, its
-  exit status unchanged. `--offline` on any command that prices, or
-  `TAPES_OFFLINE=1`, skips the refresh; the table already fetched still
-  prices.
+  prints nothing when it succeeds. When a source fails it prints one
+  line: `warning: prices refreshed, except <source>: <error>; …` when
+  another source succeeded, else `warning: prices not refreshed (<source>:
+  <error>; …); using the table fetched <date>` (or `no fetched table`).
+  The command goes on, its exit status unchanged. `--offline` on any
+  command that prices, or `TAPES_OFFLINE=1`, skips the refresh; the table
+  already fetched still prices.
 
   The pages show only current prices, so the table keeps history as
   validity windows. A fetched price equal to the row in effect keeps that

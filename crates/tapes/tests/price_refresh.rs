@@ -173,3 +173,23 @@ fn a_failing_refresh_warns_once_and_the_command_succeeds() {
         "{stderr}"
     );
 }
+
+#[test]
+fn a_partial_refresh_names_only_the_source_that_failed() {
+    // Claim: when some sources refresh and one fails, the one warning says
+    // the prices were refreshed except that source, and the session is
+    // priced. Rejects saying nothing was refreshed when most of it was.
+    let store = Store::new();
+    let partial = tempfile::tempdir().unwrap();
+    for name in ["anthropic.md", "litellm.json"] {
+        fs::copy(sources().join(name), partial.path().join(name)).unwrap();
+    }
+    let output = store.usage(&[], partial.path(), &[]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(stderr.lines().count(), 1, "{stderr}");
+    assert!(
+        stderr.starts_with("warning: prices refreshed, except openai: "),
+        "{stderr}"
+    );
+    assert!(answer(&output)["list_price_estimate"]["amount"].is_number());
+}

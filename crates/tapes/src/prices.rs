@@ -79,8 +79,8 @@ pub fn offline(flag: bool) -> bool {
 
 /// Refresh the data table before a command prices with it: when neither
 /// `named` nor `TAPES_PRICES` names a table, the command is not offline, and
-/// [`price_update::refresh_due`] holds. Never fails; a refresh that does is
-/// one stderr warning.
+/// [`price_update::refresh_due`] holds. Never fails; a refresh in which a
+/// source fails is one stderr warning, naming what was not refreshed.
 pub fn refresh_before_pricing(named: Option<&Path>, offline_flag: bool) {
     if named.is_some() || pricing::environment_table_path().is_some() || offline(offline_flag) {
         return;
@@ -98,31 +98,38 @@ pub fn refresh_before_pricing(named: Option<&Path>, offline_flag: bool) {
         return;
     }
     let from = price_update::from_environment();
-    let failures: Vec<String> =
+    let (failures, refreshed): (Vec<String>, bool) =
         match price_update::update(&directory, from.as_deref(), FetchLimits::REFRESH, now) {
-            Ok(report) => report
-                .sources
-                .iter()
-                .filter(|source| !source.ok)
-                .map(|source| {
-                    format!(
-                        "{}: {}",
-                        source.name,
-                        source.error.as_deref().unwrap_or_default()
-                    )
-                })
-                .collect(),
-            Err(error) => vec![format!("{error:#}")],
+            Ok(report) => (
+                report
+                    .sources
+                    .iter()
+                    .filter(|source| !source.ok)
+                    .map(|source| {
+                        format!(
+                            "{}: {}",
+                            source.name,
+                            source.error.as_deref().unwrap_or_default()
+                        )
+                    })
+                    .collect(),
+                report.sources.iter().any(|source| source.ok),
+            ),
+            Err(error) => (vec![format!("{error:#}")], false),
         };
     if failures.is_empty() {
+        return;
+    }
+    let failures = failures.join("; ").replace('\n', " ");
+    if refreshed {
+        eprintln!("warning: prices refreshed, except {failures}");
         return;
     }
     let fetched = FetchRecord::read(&directory.join(FETCH_FILE))
         .and_then(|record| record.last_success())
         .filter(|_| directory.join(TABLE_FILE).exists());
     eprintln!(
-        "warning: prices not refreshed ({}); {}",
-        failures.join("; ").replace('\n', " "),
+        "warning: prices not refreshed ({failures}); {}",
         fetched.map_or("no fetched table".to_owned(), |at| format!(
             "using the table fetched {}",
             at.date_naive()

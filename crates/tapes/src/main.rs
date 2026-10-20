@@ -592,8 +592,9 @@ struct PriceArgs {
     /// TAPES_OFFLINE=1 does. Without it, a command that prices with neither
     /// --prices nor TAPES_PRICES first runs `tapes prices update` under
     /// shorter time limits when the fetched table is absent or no source
-    /// succeeded in 24 hours, at most once an hour; a failed refresh is one
-    /// stderr warning and never fails the command.
+    /// succeeded in 24 hours, at most once an hour. A source that fails is
+    /// one stderr warning, `prices refreshed, except …` or `prices not
+    /// refreshed (…)`, and never fails the command.
     #[arg(long)]
     offline: bool,
 }
@@ -2241,8 +2242,9 @@ enum Command {
         /// TAPES_OFFLINE=1 does. Without it, and with neither --prices nor
         /// TAPES_PRICES, usage first runs `tapes prices update` under shorter
         /// time limits when the fetched table is absent or no source
-        /// succeeded in 24 hours, at most once an hour; a failed refresh is
-        /// one stderr warning and never fails the command.
+        /// succeeded in 24 hours, at most once an hour. A source that fails
+        /// is one stderr warning, `prices refreshed, except …` or `prices
+        /// not refreshed (…)`, and never fails the command.
         #[arg(long)]
         offline: bool,
         /// Render the versioned tapes-usage/17 object, tapes-usage-summary/16
