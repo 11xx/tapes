@@ -291,10 +291,35 @@ fn without_a_table_a_command_waits_for_the_refresh_another_process_holds() {
     // waits for its holder, decides again, and prices with the table the
     // holder wrote without fetching itself. Rejects skipping the refresh and
     // answering with no estimate on a fresh install.
+    waits_for_the_holder(false);
+}
+
+#[test]
+fn without_a_table_a_command_waits_for_a_holder_that_recorded_its_attempt() {
+    // Claim: with no data table, a command that starts after the holder
+    // recorded its attempt still waits for it and prices with its table.
+    // Rejects reading the recorded attempt as "not due" and answering with
+    // no estimate while the holder is fetching.
+    waits_for_the_holder(true);
+}
+
+/// Run `usage` with no data table while the test holds `prices.lock`,
+/// having first recorded the holder's attempt when `claimed`. Then write the
+/// holder's table and record and release the lock, and check that `usage`
+/// priced with that table and fetched nothing itself.
+fn waits_for_the_holder(claimed: bool) {
     let written = Store::new();
     written.usage(&[], &sources(), &[]);
     let store = Store::new();
     fs::create_dir_all(store.path("data/tapes")).unwrap();
+    if claimed {
+        let attempt = serde_json::json!({
+            "schema": "tapes-price-fetch/1",
+            "attempted_at": Utc::now().to_rfc3339(),
+            "sources": {},
+        });
+        fs::write(store.record(), serde_json::to_vec(&attempt).unwrap()).unwrap();
+    }
     let lock = fs::File::create(store.path("data/tapes/prices.lock")).unwrap();
     lock.lock().unwrap();
     let child = Command::new(env!("CARGO_BIN_EXE_tapes"))

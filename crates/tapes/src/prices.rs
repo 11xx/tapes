@@ -86,8 +86,9 @@ pub fn offline(flag: bool) -> bool {
 /// `named` nor `TAPES_PRICES` names a table, the command is not offline, and
 /// [`price_update::refresh_due`] holds. A refresh another process is
 /// running skips this one silently when a data table exists, and is waited
-/// for when none does. Never fails; a refresh in which a
-/// source fails is one stderr warning, naming what was not refreshed.
+/// for when none does, even after it recorded its attempt. Never fails; a
+/// refresh in which a source fails is one stderr warning, naming what was
+/// not refreshed.
 pub fn refresh_before_pricing(named: Option<&Path>, offline_flag: bool) {
     if named.is_some() || pricing::environment_table_path().is_some() || offline(offline_flag) {
         return;
@@ -103,7 +104,12 @@ pub fn refresh_before_pricing(named: Option<&Path>, offline_flag: bool) {
             Utc::now(),
         )
     };
-    if !due() {
+    // With a table to price with, a refresh that is not due, or that another
+    // process holds, is skipped. Without one, this command waits for any
+    // refresh running, whose recorded attempt makes it look not due, and
+    // prices with the table it writes.
+    let table_exists = directory.join(TABLE_FILE).exists();
+    if table_exists && !due() {
         return;
     }
     let lock = match price_update::lock_file(&directory) {
@@ -113,9 +119,7 @@ pub fn refresh_before_pricing(named: Option<&Path>, offline_flag: bool) {
             return;
         }
     };
-    // With a table to price with, a refresh another process holds is
-    // skipped; without one, this command waits for that refresh's table.
-    let locked = if directory.join(TABLE_FILE).exists() {
+    let locked = if table_exists {
         match lock.try_lock() {
             Ok(()) => Ok(()),
             Err(std::fs::TryLockError::WouldBlock) => return,
