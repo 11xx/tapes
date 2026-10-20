@@ -7051,6 +7051,22 @@ fn counted(count: usize, noun: &str) -> String {
     }
 }
 
+/// Blanks each row's leading cells that repeat the row above, from the
+/// first column up to the first that differs.
+fn blank_repeated_leads(rows: &mut [Vec<String>], leading: usize) {
+    let mut previous: Vec<String> = Vec::new();
+    for row in rows {
+        let current: Vec<String> = row.iter().take(leading).cloned().collect();
+        for (cell, above) in row.iter_mut().zip(&previous).take(leading) {
+            if cell != above {
+                break;
+            }
+            cell.clear();
+        }
+        previous = current;
+    }
+}
+
 /// Rows as columns two spaces apart, text left-aligned and the columns
 /// `right` names right-aligned.
 fn aligned(indent: &str, rows: &[Vec<String>], right: &[bool]) -> Vec<String> {
@@ -7325,6 +7341,7 @@ fn render_change_usage(
         }
         table.push(line);
     }
+    blank_repeated_leads(&mut table[1..], leading);
     let mut total = vec!["Total".to_owned()];
     total.extend(std::iter::repeat_n(
         String::new(),

@@ -972,3 +972,36 @@ fn the_detailed_text_lists_each_unselected_commit() {
         );
     }
 }
+
+// Claim: in a table of several rows per commit, each commit's sha and
+// subject print once, on its first row, in both text modes and with
+// --explain lines between the rows. Rejects a sha and subject repeated on
+// every session row of one commit.
+#[test]
+fn a_commits_rows_name_it_once() {
+    let change = change();
+    let args = ["--commit", change.sha("d1"), "--by", "commit,session"];
+    let view = json(&change, &args);
+    assert!(items(&view, "rows").len() > 1, "{}", view["rows"]);
+    let sha = &change.sha("d1")[..10];
+    for extra in [
+        &[][..],
+        &["--detail"],
+        &["--explain"],
+        &["--detail", "--explain"],
+    ] {
+        let text = String::from_utf8(tapes(&change, &[&args[..], extra].concat()).stdout).unwrap();
+        let naming: Vec<&str> = text
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("evidence "))
+            .filter(|line| !line.starts_with("Change usage of "))
+            .filter(|line| line.contains(sha))
+            .collect();
+        assert_eq!(naming.len(), 1, "{extra:?}: {text}");
+        let session_rows = text
+            .lines()
+            .filter(|line| line.trim_start().starts_with("claude:") && !line.contains(sha))
+            .count();
+        assert!(session_rows > 0, "{extra:?}: {text}");
+    }
+}
