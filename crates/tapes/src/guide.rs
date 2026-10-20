@@ -1706,7 +1706,8 @@ KEEP A PRICE TABLE
   refresh silently when a data table exists and prices with it, or, when
   none does, waits for the holder for at most as long as a refresh can
   take, 45 seconds, and prices with the table it wrote, or, past that,
-  warns and prices nothing; whoever takes the lock decides again first. It
+  warns and prices without a fetched table, so with the config table alone
+  when there is one; whoever takes the lock decides again first. It
   records the attempt before fetching, so a refresh that dies midway still
   waits its hour. The refresh gives each source 5 seconds to connect and
   10 to finish. It prints nothing when it succeeds. When a source fails it
