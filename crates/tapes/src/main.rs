@@ -2682,8 +2682,9 @@ struct ChangeAsk {
     /// repository holding the current directory, or the one --project
     /// names, read-only through git, and every installed Claude, Codex
     /// and Pi recording active from an hour before the earliest selected
-    /// commit to half an hour after the latest; an OpenCode session takes
-    /// part through its directory and time alone. Each session is divided
+    /// commit to half an hour after the latest; an OpenCode session
+    /// refuses the repeated whole read a change view makes, so it is listed
+    /// under `membership.unreadable` and takes no part. Each session is divided
     /// over every commit its evidence admits, so what a session gives a
     /// commit does not depend on what else is selected, though a wider
     /// selection reads the sessions of a wider interval. The

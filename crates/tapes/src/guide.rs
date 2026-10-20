@@ -1648,24 +1648,30 @@ PRICE A CHANGE
   inside the repository, or name one with --project. It reads the repository
   read-only through git, and the Claude, Codex and Pi recordings active from
   an hour before the earliest selected commit to half an hour after the
-  latest; an OpenCode session takes part through its directory and time
-  alone.
+  latest. A change view reads each session whole more than once, which an
+  OpenCode session refuses, so OpenCode sessions are listed under
+  `membership.unreadable` and take no part.
 
   Each session is divided over every commit its evidence names, not only the
   selected ones, so what a session gives a commit does not change with what
   else is selected. A session active outside the interval is not read, so its
   inspection of a selected commit hours later is not counted, and a wider
-  selection, reading a wider interval, can bring such a session in. The
-  evidence comes in three tiers. A session that created a commit is bound to
-  it. An edit whose added lines the commit adds, or a stay in the commit's
-  worktree or on its branch, is matched. A request near the commit's author
-  time, or a command that names the revision (`git show`, `git diff`), is
-  estimated. Each amount names its tier and its basis: span, event-window,
-  working-stretch, inherited, even or following. A subagent is placed by its
-  own evidence first, and inherits its parent's allocation for the rest. A
-  parent a recording names, by a recorded launch or a `tapes-parent:` marker,
-  makes the launched session a child in the same way when both are read
-  (DECLARE WHO LAUNCHED WHOM).
+  selection, reading a wider interval, can bring such a session in. A session
+  whose directory no longer exists belongs to the repository only through
+  another member that placed that directory, by a commit or a remote, so it
+  is a member only when that member's interval is read too. The evidence
+  comes in three tiers. A session that created a commit is bound to it.
+  Bound means the session made the commit, not that it did the commit's
+  work: a merge, a cherry-pick, a revert or a resumed rebase of another
+  session's work creates commits too. An edit whose added lines the commit
+  adds, or a stay in the commit's worktree or on its branch, is matched. A
+  request near the commit's author time, or a command that names the
+  revision (`git show`, `git diff`), is estimated. Each amount names its tier
+  and its basis: span, event-window, working-stretch, inherited, even or
+  following. A subagent is placed by its own evidence first, and inherits its
+  parent's allocation for the rest. A parent a recording names, by a recorded
+  launch or a `tapes-parent:` marker, makes the launched session a child in
+  the same way when both are read (DECLARE WHO LAUNCHED WHOM).
 
   Rows are grouped by --by: commit, merge, agent (`harness:model#effort`),
   role, tier and session, commit, agent and role unless told otherwise.
@@ -1679,12 +1685,17 @@ PRICE A CHANGE
 
   Around the rows stand the other places a session's consumption went. The
   uncommitted buckets hold work after a session's last commit at a worktree
-  and branch. Unattributed parts carry a reason, such as `before first item`
-  or `elsewhere`, time in a directory outside the repository. Unselected holds
-  what the same sessions spent on commits the view did not select; it is
-  reported apart and kept out of the change's total. Per session and in the
-  totals, rows, uncommitted, unattributed, unselected and labelled work
-  (below) add up to the whole,
+  and branch, such as a delegate's checks and report once it has committed.
+  Unattributed parts carry a reason, such as `before first item` or
+  `elsewhere`, time in a directory outside the repository: a session that
+  steers the repository from another directory, without naming the
+  repository's paths in `cd`, `git -C` or the paths its tools touch, leaves
+  that time `elsewhere`. Both weigh most on interactive and orchestrating
+  sessions; a session an evidence file names is placed by its records alone,
+  with neither (below). Unselected holds what the same sessions spent on
+  commits the view did not select; it is reported apart and kept out of the
+  change's total. Per session and in the totals, rows, uncommitted,
+  unattributed, unselected and labelled work (below) add up to the whole,
   and a recorded total no request explains stays apart under `unexplained`.
   Each request counts once, though a Claude lead's recorded total also counts
   its subagents' requests, and cache writes keep their 5-minute and 1-hour
@@ -1693,8 +1704,9 @@ PRICE A CHANGE
   --tiers bound,matched,estimated names the tiers that take part, all three
   by default. The named tiers place consumption together; what only the
   left-out tiers would place is unattributed as `tiers not asked`, naming
-  them, so `--tiers bound` shows how much of a change rests on the strongest
-  evidence alone.
+  them, so `--tiers bound` shows how much of a change rests on bound evidence
+  alone: the commits sessions created, and the records an evidence file
+  binds.
 
   Select commits with --commit (repeatable), --range A..B, --branch NAME (a
   live branch against the default branch, otherwise the merges whose subjects
