@@ -63,6 +63,7 @@ impl Stores {
 
     fn command(&self, args: &[&str], generation: &str) -> Command {
         let mut command = Command::new(env!("CARGO_BIN_EXE_tapes"));
+        command.env_remove("T3CODE_HOME");
         command.env("TAPES_OFFLINE", "1");
         command
             .args(args)
@@ -297,6 +298,7 @@ fn native_store_conflicts_refuse_before_reading_or_remote_transport() {
         ],
     ] {
         let output = Command::new(env!("CARGO_BIN_EXE_tapes"))
+            .env_remove("T3CODE_HOME")
             .env("TAPES_OFFLINE", "1")
             .args(&args)
             .output()

@@ -50,6 +50,7 @@ impl Store {
     /// whatever its exit status.
     fn tapes(&self, arguments: &[&str], from: &Path) -> Output {
         Command::new(env!("CARGO_BIN_EXE_tapes"))
+            .env_remove("T3CODE_HOME")
             .env_remove("TAPES_PRICES")
             .env_remove("TAPES_OFFLINE")
             .env_remove("PI_SESSION_FILE")
@@ -66,6 +67,7 @@ impl Store {
 
     fn usage(&self, arguments: &[&str], from: &Path, environment: &[(&str, &str)]) -> Output {
         let mut command = Command::new(env!("CARGO_BIN_EXE_tapes"));
+        command.env_remove("T3CODE_HOME");
         command
             .env_remove("TAPES_PRICES")
             .env_remove("TAPES_OFFLINE")
@@ -323,6 +325,7 @@ fn waits_for_the_holder(claimed: bool) {
     let lock = fs::File::create(store.path("data/tapes/prices.lock")).unwrap();
     lock.lock().unwrap();
     let child = Command::new(env!("CARGO_BIN_EXE_tapes"))
+        .env_remove("T3CODE_HOME")
         .env_remove("TAPES_PRICES")
         .env_remove("TAPES_OFFLINE")
         .env_remove("PI_SESSION_FILE")

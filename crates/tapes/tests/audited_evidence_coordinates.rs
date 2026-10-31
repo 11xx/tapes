@@ -37,6 +37,7 @@ impl Drop for TemporaryDirectory {
 
 fn run(root: &Path, args: &[String]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_tapes"))
+        .env_remove("T3CODE_HOME")
         .env("TAPES_OFFLINE", "1")
         .args(args)
         .env("HOME", root.join("home"))

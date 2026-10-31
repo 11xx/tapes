@@ -56,6 +56,7 @@ impl Store {
 
     fn run(&self, arguments: &[&str], priced: bool) -> Output {
         let mut command = Command::new(env!("CARGO_BIN_EXE_tapes"));
+        command.env_remove("T3CODE_HOME");
         command.env("TAPES_OFFLINE", "1");
         command
             .env_remove("PI_SESSION_FILE")
@@ -228,6 +229,7 @@ fn a_named_table_that_cannot_be_read_refuses_each_command() {
         &["brief", SESSION][..],
     ] {
         let output = Command::new(env!("CARGO_BIN_EXE_tapes"))
+            .env_remove("T3CODE_HOME")
             .env("TAPES_OFFLINE", "1")
             .env_remove("TAPES_PRICES")
             .env("HOME", store.0.join("home"))

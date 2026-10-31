@@ -40,6 +40,7 @@ impl Store {
 
     fn usage(&self, arguments: &[&str]) -> Output {
         Command::new(env!("CARGO_BIN_EXE_tapes"))
+            .env_remove("T3CODE_HOME")
             .env("TAPES_OFFLINE", "1")
             .env_remove("PI_SESSION_FILE")
             .arg("usage")

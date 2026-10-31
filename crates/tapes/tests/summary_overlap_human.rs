@@ -56,6 +56,7 @@ impl Home {
 
     fn summary(&self) -> String {
         let output = Command::new(env!("CARGO_BIN_EXE_tapes"))
+            .env_remove("T3CODE_HOME")
             .env("TAPES_OFFLINE", "1")
             .args([
                 "usage",

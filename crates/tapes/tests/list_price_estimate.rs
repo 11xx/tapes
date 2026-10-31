@@ -61,6 +61,7 @@ impl Store {
 
     fn usage(&self, arguments: &[&str], environment: &[(&str, &Path)]) -> Output {
         let mut command = Command::new(env!("CARGO_BIN_EXE_tapes"));
+        command.env_remove("T3CODE_HOME");
         command.env("TAPES_OFFLINE", "1");
         command
             .env_remove("PI_SESSION_FILE")

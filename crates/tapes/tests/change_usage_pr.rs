@@ -137,6 +137,7 @@ impl Scene {
     fn tapes_on(&self, path: &str, args: &[&str]) -> Output {
         let sandbox = &self.sandbox;
         Command::new(env!("CARGO_BIN_EXE_tapes"))
+            .env_remove("T3CODE_HOME")
             .env("TAPES_OFFLINE", "1")
             .current_dir(sandbox.repo())
             .env_clear()

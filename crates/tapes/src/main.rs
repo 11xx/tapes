@@ -5,6 +5,7 @@ mod liveness;
 mod prices;
 mod remote;
 mod self_token;
+mod t3_reference;
 
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
@@ -739,6 +740,7 @@ fn turn_kind_parser() -> impl clap::builder::TypedValueParser<Value = TurnKind> 
 /// replaced with the caller's own id before the selector is read.
 trait SelfSelectable {
     fn ids_mut(&mut self) -> (&mut Option<String>, &mut Vec<String>);
+    fn harness_mut(&mut self) -> &mut Option<String>;
     fn input_supplied(&self) -> bool;
     fn input(&self) -> &InputArgs;
 }
@@ -777,9 +779,30 @@ fn apply_self(selector: &mut dyn SelfSelectable, remote: Option<&str>) -> Result
     Ok(())
 }
 
+/// Replace T3 Code references in a selector with the native sessions they
+/// name. A replica resolves a reference against its own store.
+fn apply_t3(selector: &mut dyn SelfSelectable, remote: Option<&str>) -> Result<()> {
+    let origin = if remote.is_some() {
+        t3_reference::Origin::Remote
+    } else if selector.input_supplied() || selector.input().native() {
+        t3_reference::Origin::Supplied
+    } else {
+        t3_reference::Origin::Installed
+    };
+    let mut harness = selector.harness_mut().take();
+    let (session, exclude) = selector.ids_mut();
+    let rewritten = t3_reference::rewrite(session, exclude, &mut harness, origin);
+    *selector.harness_mut() = harness;
+    rewritten
+}
+
 impl SelfSelectable for SelectionArgs {
     fn ids_mut(&mut self) -> (&mut Option<String>, &mut Vec<String>) {
         (&mut self.session, &mut self.exclude)
+    }
+
+    fn harness_mut(&mut self) -> &mut Option<String> {
+        &mut self.harness
     }
 
     fn input_supplied(&self) -> bool {
@@ -794,6 +817,10 @@ impl SelfSelectable for SelectionArgs {
 impl SelfSelectable for SessionQueryArgs {
     fn ids_mut(&mut self) -> (&mut Option<String>, &mut Vec<String>) {
         (&mut self.session, &mut self.exclude)
+    }
+
+    fn harness_mut(&mut self) -> &mut Option<String> {
+        &mut self.harness
     }
 
     fn input_supplied(&self) -> bool {
@@ -852,7 +879,8 @@ fn id_selection<'a>(id: &'a str, harness: Option<&'a str>) -> Selection<'a> {
 #[derive(Args)]
 struct SelectionArgs {
     /// Session identifier, full or a prefix whose bounded native discovery proves unique, or `self` for the
-    /// session the caller runs in, as its harness's exported variable names it.
+    /// session the caller runs in, as its harness's exported variable names it,
+    /// or a T3 Code thread link or thread id for the native session it runs on.
     /// Identity mismatches refuse prefix fallback; a correct exact match wins
     /// even after another candidate's read failure. The filename/header rule
     /// also applies to Pi's explicit recording file. Recording reads accept only
@@ -878,6 +906,7 @@ struct SelectionArgs {
     latest: bool,
     /// Pass over this session when taking the latest. Repeatable. An agent
     /// asking from inside its own session passes `self` here.
+    /// A T3 Code thread link or thread id names its native session.
     #[arg(long, requires = "latest")]
     exclude: Vec<String>,
     /// Restrict ID, prefix, title, or latest lookup to one harness.
@@ -951,7 +980,8 @@ impl SelectionArgs {
 #[group(multiple = true)]
 struct SessionQueryArgs {
     /// Session identifier, full or a prefix whose bounded native discovery proves unique, or `self` for the
-    /// session the caller runs in, as its harness's exported variable names it.
+    /// session the caller runs in, as its harness's exported variable names it,
+    /// or a T3 Code thread link or thread id for the native session it runs on.
     /// Identity mismatches refuse prefix fallback; a correct exact match wins
     /// even after another candidate's read failure. The filename/header rule
     /// also applies to Pi's explicit recording file. Recording reads accept only
@@ -974,6 +1004,7 @@ struct SessionQueryArgs {
     latest: bool,
     /// Pass over this session when taking the latest. Repeatable. An agent
     /// asking from inside its own session passes `self` here.
+    /// A T3 Code thread link or thread id names its native session.
     #[arg(long, requires = "latest")]
     exclude: Vec<String>,
     /// Restrict ID, prefix, title, latest, or set selection to one harness.
@@ -1191,7 +1222,8 @@ enum Command {
     Capture {
         #[command(flatten)]
         input: InputArgs,
-        /// Exact session id, an unambiguous prefix, or `self`.
+        /// Exact session id, an unambiguous prefix, `self`, or a T3 Code thread
+        /// link or thread id.
         /// Identity mismatches refuse prefix fallback; a correct exact match wins
         /// even after another candidate's read failure. The filename/header rule
         /// also applies to Pi's explicit recording file. Recording reads accept only
@@ -1218,7 +1250,8 @@ enum Command {
     /// a recording's opening and in its retained tail; a recording whose tail
     /// names another session is reported unavailable, never listed under the
     /// opening's identity. Uncertain prefilters defer to normalization and its
-    /// diagnostics.
+    /// diagnostics. Installed sessions a T3 Code thread runs on carry a `t3`
+    /// object in JSON, and the T3 title in TITLE when no title is recorded.
     List {
         /// Restrict results to one harness.
         #[arg(long)]
@@ -1302,6 +1335,12 @@ enum Command {
         /// as an empty listing.
         #[arg(long, value_name = "SSH-DESTINATION", conflicts_with = "input")]
         remote: Option<String>,
+        /// Only sessions a T3 Code thread of the installed store maps to,
+        /// before --limit and with every other filter. Fails without a
+        /// readable T3 store. Forwarded under --remote, where the replica
+        /// answers from its own store.
+        #[arg(long)]
+        t3: bool,
     },
     /// Show one session. The session carries a source descriptor and optional
     /// activity timestamps. Claude compaction boundaries are notices with typed
@@ -3107,6 +3146,7 @@ fn dispatch(cli: Cli) -> Result<()> {
     let remote = command.remote_destination().map(str::to_owned);
     if let Some(selector) = command.selector_mut() {
         apply_self(selector, remote.as_deref())?;
+        apply_t3(selector, remote.as_deref())?;
     }
     match command {
         Command::Capture {
@@ -3116,6 +3156,7 @@ fn dispatch(cli: Cli) -> Result<()> {
             input,
         } => {
             input.validate_collection()?;
+            let mut harness = harness;
             reject_installed_selection(&input, harness.as_deref(), &ScopeArgs::default())?;
             let backends = input.backends()?;
             let session = if session == self_token::TOKEN {
@@ -3125,6 +3166,14 @@ fn dispatch(cli: Cli) -> Result<()> {
             } else {
                 session
             };
+            let origin = if input.supplied() || input.native() {
+                t3_reference::Origin::Supplied
+            } else {
+                t3_reference::Origin::Installed
+            };
+            let mut session = Some(session);
+            t3_reference::rewrite(&mut session, &mut Vec::new(), &mut harness, origin)?;
+            let session = session.expect("the rewrite keeps the session argument");
             let report = agent_tapes_core::capture_with_backends(
                 &backends,
                 id_selection(&session, harness.as_deref()),
@@ -3156,8 +3205,14 @@ fn dispatch(cli: Cli) -> Result<()> {
             json,
             prices,
             remote,
+            t3,
         } => {
             input.validate_bulk()?;
+            if t3 && (input.supplied() || input.native()) {
+                return Err(anyhow!(
+                    "--t3 selects threads of the installed T3 store and nothing from a supplied input or --native-store"
+                ));
+            }
             reject_installed_selection(&input, harness.as_deref(), &scope)?;
             if since
                 .zip(until)
@@ -3188,6 +3243,7 @@ fn dispatch(cli: Cli) -> Result<()> {
                     search_turns,
                     full,
                     search_matches,
+                    t3,
                 });
                 let result = remote_list(destination, &args);
                 let (result, failure) = match result {
@@ -3217,6 +3273,12 @@ fn dispatch(cli: Cli) -> Result<()> {
                     "Searching a bounded window of normalized turns in each candidate session before applying --limit."
                 );
             }
+            let t3_index = if input.supplied() || input.native() {
+                t3_reference::ListingIndex::default()
+            } else {
+                t3_reference::ListingIndex::load(t3)?
+            };
+            let t3_ids = t3.then(|| t3_index.native_ids());
             let filters = agent_tapes_core::ListFilters {
                 model: model.as_deref(),
                 launch: launch.map(Into::into),
@@ -3225,7 +3287,7 @@ fn dispatch(cli: Cli) -> Result<()> {
                 until,
                 search: search.as_deref(),
                 search_turns: Some(search_turns),
-                native_ids: None,
+                native_ids: t3_ids.as_ref(),
             };
             let result = if full {
                 let selected_scope = if input.supplied() {
@@ -3267,6 +3329,7 @@ fn dispatch(cli: Cli) -> Result<()> {
                 result
             };
             let mut result = result;
+            t3_index.annotate(&mut result, t3);
             if let Some(table) = prices.table()? {
                 for session in &mut result.sessions {
                     session.price(&table);
@@ -4608,6 +4671,7 @@ struct RemoteListQuery<'a> {
     search_turns: usize,
     full: bool,
     search_matches: usize,
+    t3: bool,
 }
 
 fn remote_list_args(query: &RemoteListQuery<'_>) -> Vec<OsString> {
@@ -4623,6 +4687,7 @@ fn remote_list_args(query: &RemoteListQuery<'_>) -> Vec<OsString> {
     args.value_if("--until", query.until.map(timestamp_arg));
     args.value("--sort", sort_label(query.sort));
     args.value_if("--search", query.search.as_deref());
+    args.flag_if("--t3", query.t3);
     if query.full {
         args.raw("--full");
         args.value("--search-matches", query.search_matches.to_string());
