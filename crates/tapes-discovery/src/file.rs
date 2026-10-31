@@ -1041,6 +1041,11 @@ const CODEX_LINEAGE_FIELDS: [&str; 3] = ["parent_thread_id", "agent_path", "agen
 /// The native identity the opening's complete records name, and, for a
 /// Codex rollout whose `session_meta` names a parent, the header's
 /// `CODEX_LINEAGE_FIELDS`, so a lineage join reads no header again.
+///
+/// A forked Codex rollout copies its origin's history, `session_meta`
+/// included. A later record whose id is the `forked_from_id` of a record
+/// already accepted here is that copy: it claims no identity and supplies no
+/// lineage. Any other differing id is a conflict.
 fn native_identity(
     harness: Harness,
     opening: &Opening,
@@ -1057,6 +1062,7 @@ fn native_identity(
     };
     let mut found: Option<String> = None;
     let mut lineage = None;
+    let mut origins: Vec<String> = Vec::new();
     for line in complete.split(|byte| *byte == b'\n') {
         if line.is_empty() {
             continue;
@@ -1072,26 +1078,26 @@ fn native_identity(
             )?),
             Harness::Codex if value.get("type").and_then(Value::as_str) == Some("session_meta") => {
                 let payload = value.get("payload");
-                if lineage.is_none() {
-                    lineage = payload
-                        .filter(|payload| payload["parent_thread_id"].is_string())
-                        .map(|payload| {
-                            CODEX_LINEAGE_FIELDS
-                                .iter()
-                                .filter_map(|field| {
-                                    let value =
-                                        payload.get(*field).filter(|value| value.is_string());
-                                    value.map(|value| ((*field).to_owned(), value.clone()))
-                                })
-                                .collect::<serde_json::Map<_, _>>()
-                                .into()
-                        });
-                }
-                Some(identity_string(
+                let identity = identity_string(
                     payload.and_then(|payload| payload.get("id")),
                     "Codex session_meta id",
                     path,
-                )?)
+                )?;
+                let inherited = found.as_ref().is_some_and(|own| own != &identity)
+                    && origins.contains(&identity);
+                if let Some(origin) = payload
+                    .and_then(|payload| payload.get("forked_from_id"))
+                    .and_then(Value::as_str)
+                {
+                    origins.push(origin.to_owned());
+                }
+                if inherited {
+                    continue;
+                }
+                if lineage.is_none() {
+                    lineage = payload.and_then(codex_lineage);
+                }
+                Some(identity)
             }
             Harness::Pi if value.get("type").and_then(Value::as_str) == Some("session") => {
                 Some(identity_string(value.get("id"), "Pi session id", path)?)
@@ -1109,6 +1115,20 @@ fn native_identity(
         }
     }
     Ok((found, lineage))
+}
+
+/// The `CODEX_LINEAGE_FIELDS` of a `session_meta` payload that names a parent.
+fn codex_lineage(payload: &Value) -> Option<Value> {
+    payload["parent_thread_id"].is_string().then(|| {
+        CODEX_LINEAGE_FIELDS
+            .iter()
+            .filter_map(|field| {
+                let value = payload.get(*field).filter(|value| value.is_string());
+                value.map(|value| ((*field).to_owned(), value.clone()))
+            })
+            .collect::<serde_json::Map<_, _>>()
+            .into()
+    })
 }
 
 fn identity_string(
@@ -1243,6 +1263,110 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    const FORK: &str = "72000000-0000-7000-8000-000000000001";
+    const ORIGIN: &str = "72000000-0000-7000-8000-000000000002";
+    const ANCESTOR: &str = "72000000-0000-7000-8000-000000000003";
+
+    fn session_meta(payload: Value) -> String {
+        format!(
+            "{}\n",
+            serde_json::json!({"type": "session_meta", "payload": payload})
+        )
+    }
+
+    /// A Codex store holding one rollout named for the fork's own id.
+    fn fork_store(temp: &Temp, body: &str) -> NativeStore {
+        let root = temp.path().join("codex");
+        write(
+            &root,
+            &format!("2026/03/04/rollout-2026-03-04T05-06-07-{FORK}.jsonl"),
+            body,
+        );
+        NativeStore::codex(root)
+    }
+
+    /// Claim: a fork carrying its origin's `session_meta` resolves by its own
+    /// id from its header. Rejects the copy reading as a conflicting identity.
+    #[test]
+    fn a_fork_resolves_by_its_own_id_past_its_origins_session_meta() {
+        let temp = Temp::new();
+        let body = session_meta(serde_json::json!({"id": FORK, "forked_from_id": ORIGIN}))
+            + &session_meta(serde_json::json!({"id": ORIGIN}));
+        let session = fork_store(&temp, &body)
+            .locate_exact(FORK)
+            .unwrap()
+            .unwrap();
+        assert_eq!(session.id(), FORK);
+        assert_eq!(session.identity_basis(), Some(IdentityBasis::Header));
+    }
+
+    /// Claim: a later `session_meta` naming anything but a fork origin is a
+    /// conflict. Rejects ignoring every later `session_meta`.
+    #[test]
+    fn a_session_meta_that_is_no_fork_origin_still_conflicts() {
+        let temp = Temp::new();
+        let body = session_meta(serde_json::json!({"id": FORK, "forked_from_id": ORIGIN}))
+            + &session_meta(serde_json::json!({"id": ANCESTOR}));
+        let error = fork_store(&temp, &body).locate_exact(FORK).unwrap_err();
+        assert!(matches!(
+            error,
+            DiscoveryError::InvalidMetadata {
+                reason: "conflicting native identity fields",
+                ..
+            }
+        ));
+    }
+
+    /// Claim: a fork of a fork resolves through the chain of inherited records.
+    /// Rejects accepting only the direct origin.
+    #[test]
+    fn a_fork_of_a_fork_resolves_through_its_ancestry() {
+        let temp = Temp::new();
+        let body = session_meta(serde_json::json!({"id": FORK, "forked_from_id": ORIGIN}))
+            + &session_meta(serde_json::json!({"id": ORIGIN, "forked_from_id": ANCESTOR}))
+            + &session_meta(serde_json::json!({"id": ANCESTOR}));
+        let session = fork_store(&temp, &body)
+            .locate_exact(FORK)
+            .unwrap()
+            .unwrap();
+        assert_eq!(session.id(), FORK);
+    }
+
+    /// The identity and lineage a rollout's opening states.
+    fn opening_facts(temp: &Temp, body: &str) -> (Option<String>, Option<Value>) {
+        let path = temp
+            .path()
+            .join(format!("rollout-2026-03-04T05-06-07-{FORK}.jsonl"));
+        fs::write(&path, body).unwrap();
+        let mut file = File::open(&path).unwrap();
+        let opening = opening(&mut file, body.len() as u64).unwrap();
+        native_identity(Harness::Codex, &opening, &path).unwrap()
+    }
+
+    /// Claim: the first `session_meta` is the identity even when it declares
+    /// its own id as its origin. Rejects consulting origins before an identity
+    /// is established, which would leave the rollout with none.
+    #[test]
+    fn the_first_session_meta_is_the_identity_whatever_it_declares() {
+        let temp = Temp::new();
+        let body = session_meta(serde_json::json!({"id": ORIGIN, "forked_from_id": ORIGIN}));
+        let (identity, _) = opening_facts(&temp, &body);
+        assert_eq!(identity.as_deref(), Some(ORIGIN));
+    }
+
+    /// Claim: an inherited record supplies no lineage. Rejects a parentless
+    /// fork adopting the parent its origin names, which would join it as a
+    /// child of a session that never spawned it.
+    #[test]
+    fn an_inherited_session_meta_supplies_no_lineage() {
+        let temp = Temp::new();
+        let body = session_meta(serde_json::json!({"id": FORK, "forked_from_id": ORIGIN}))
+            + &session_meta(serde_json::json!({"id": ORIGIN, "parent_thread_id": ANCESTOR}));
+        let (identity, lineage) = opening_facts(&temp, &body);
+        assert_eq!(identity.as_deref(), Some(FORK));
+        assert_eq!(lineage, None);
     }
 
     #[test]
