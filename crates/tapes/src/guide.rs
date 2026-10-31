@@ -360,11 +360,11 @@ T3 CODE THREADS
   is recorded. The index covers the newest 10000 threads and says so when more
   exist; a session two threads ran belongs to the newer one.
 
-  The store is T3CODE_HOME, or ~/.t3, read read-only through the sqlite3
-  program. Without a store a listing is unchanged and a bare id passes through;
-  a store that cannot be read warns on a bare id and adds an unavailable entry
-  to a listing. A link and list --t3 fail instead, and each failure names the
-  thread and what it needs:
+  The store lives under T3CODE_HOME, or ~/.t3, and the sqlite3 program reads
+  it read-only. Without a store a listing is unchanged and a bare id passes
+  through; a store that cannot be read warns on a bare id and adds an
+  unavailable entry to a listing. A link and list --t3 fail instead, and each
+  failure names the thread and what it needs:
     another environment    the thread is on the machine serving that environment
     not in the T3 store    this store holds no such thread
     no T3 store            set T3CODE_HOME, or read on the machine that has one

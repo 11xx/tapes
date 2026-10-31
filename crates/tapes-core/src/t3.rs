@@ -586,7 +586,7 @@ pub fn sql_literal(value: &str) -> Result<String> {
 mod tests {
     use super::*;
 
-    const ENV: &str = "657fc503-0000-4000-8000-000000000000";
+    const ENV: &str = "11111111-2222-4333-8444-555555555555";
 
     fn link(environment: Option<&str>, thread: &str) -> T3Link {
         T3Link {
@@ -674,7 +674,7 @@ mod tests {
     /// bare-id lookup, so it can never fail as a malformed link.
     #[test]
     fn anything_else_is_not_a_link() {
-        for argument in ["self", "338193b3", "thread:a%3Ab", "<id>", "http"] {
+        for argument in ["self", "0a1b2c3d", "thread:a%3Ab", "<id>", "http"] {
             assert_eq!(parse_link(argument).unwrap(), None, "{argument}");
         }
     }
