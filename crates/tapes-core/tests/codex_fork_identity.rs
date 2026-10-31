@@ -16,7 +16,7 @@ const STRANGER: &str = "71000000-0000-7000-8000-000000000003";
 
 fn own_meta() -> Value {
     json!({"timestamp": "2026-03-04T05:06:07Z", "type": "session_meta", "payload": {
-        "id": OWN, "session_id": OWN, "timestamp": "2026-03-04T05:06:07Z",
+        "id": OWN, "session_id": ORIGIN, "timestamp": "2026-03-04T05:06:07Z",
         "forked_from_id": ORIGIN, "parent_thread_id": ORIGIN,
         "source": {"subagent": {"thread_spawn": {"parent_thread_id": ORIGIN, "depth": 1}}},
         "thread_source": "subagent", "agent_path": "/root/worker",
