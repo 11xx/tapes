@@ -283,6 +283,7 @@ impl ClaudeBackend {
             occurrence: None,
             usage_detail,
             list_price_estimate: None,
+            t3: None,
         };
         let mut copies = CopyEvidence::default();
         for value in opening.iter().chain(&read.values) {
@@ -1089,6 +1090,7 @@ impl Backend for ClaudeBackend {
             occurrence: None,
             usage_detail: None,
             list_price_estimate: None,
+            t3: None,
         };
         if !read.gaps.is_empty() {
             records.selections.interrupt();

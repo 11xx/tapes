@@ -209,6 +209,7 @@ impl PiBackend {
             occurrence: None,
             usage_detail: None,
             list_price_estimate: None,
+            t3: None,
         };
         apply_recording_usage(&mut session, &recording, &active, rooted);
         // pi rewinds by appending a new branch, so the first user message in

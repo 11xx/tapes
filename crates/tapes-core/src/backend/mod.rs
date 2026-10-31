@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::os::unix::fs::MetadataExt;
@@ -248,6 +248,10 @@ pub struct Query<'a> {
     /// an id. A file backend applies it to the identities a walk reads from
     /// filenames and headers, so a candidate it rules out is never parsed.
     pub id_prefix: Option<String>,
+    /// The native identities a session must be one of, when restricted to a
+    /// known set. Applied like `id_prefix`, before a candidate is parsed and
+    /// before `limit`.
+    pub native_ids: Option<&'a HashSet<String>>,
 }
 
 /// Metadata predicates applied before a listing's result limit.
@@ -258,6 +262,7 @@ pub struct QueryFilters<'a> {
     pub directory: Option<&'a str>,
     pub since: Option<DateTime<Utc>>,
     pub until: Option<DateTime<Utc>>,
+    pub native_ids: Option<&'a HashSet<String>>,
 }
 
 impl<'a> Query<'a> {
@@ -273,16 +278,18 @@ impl<'a> Query<'a> {
             until: None,
             sort: crate::ListSort::Newest,
             id_prefix: None,
+            native_ids: None,
         }
     }
 
-    pub fn unscoped_with_filters(limit: usize, filters: QueryFilters<'_>) -> Self {
+    pub fn unscoped_with_filters(limit: usize, filters: QueryFilters<'a>) -> Self {
         Self {
             model: filters.model.map(str::to_lowercase),
             launch: filters.launch,
             directory: filters.directory.map(str::to_lowercase),
             since: filters.since,
             until: filters.until,
+            native_ids: filters.native_ids,
             ..Self::unscoped(limit)
         }
     }
@@ -291,7 +298,7 @@ impl<'a> Query<'a> {
         scope: Option<&'a Scope>,
         limit: usize,
         ceiling: usize,
-        filters: QueryFilters<'_>,
+        filters: QueryFilters<'a>,
     ) -> Self {
         Self {
             scope,
@@ -304,11 +311,13 @@ impl<'a> Query<'a> {
             until: filters.until,
             sort: crate::ListSort::Newest,
             id_prefix: None,
+            native_ids: filters.native_ids,
         }
     }
 
     pub(crate) fn has_filters(&self) -> bool {
         self.id_prefix.is_some()
+            || self.native_ids.is_some()
             || self.model.is_some()
             || self.launch.is_some()
             || self.directory.is_some()
@@ -328,11 +337,16 @@ impl<'a> Query<'a> {
             .is_ok_and(|modified| DateTime::<Utc>::from(modified) < since - MODIFIED_SLACK)
     }
 
-    pub(crate) fn matches(&self, session: &Session) -> bool {
-        let id_matches = self
-            .id_prefix
+    /// Whether a native identity survives `id_prefix` and `native_ids`.
+    fn admits_id(&self, id: &str) -> bool {
+        self.id_prefix
             .as_deref()
-            .is_none_or(|prefix| session.id.starts_with(prefix));
+            .is_none_or(|prefix| id.starts_with(prefix))
+            && self.native_ids.is_none_or(|ids| ids.contains(id))
+    }
+
+    pub(crate) fn matches(&self, session: &Session) -> bool {
+        let id_matches = self.admits_id(&session.id);
         let model_matches = self.model.as_ref().is_none_or(|needle| {
             session
                 .model
@@ -1011,11 +1025,7 @@ pub(crate) fn list_discovered_files(
     let mut files = Vec::with_capacity(page.records.len());
     let mut no_path = Vec::new();
     for native in page.records {
-        if !query
-            .id_prefix
-            .as_deref()
-            .is_none_or(|prefix| native.id().starts_with(prefix))
-        {
+        if !query.admits_id(native.id()) {
             continue;
         }
         let Some(path) = native.locator().map(Path::to_path_buf) else {
@@ -1085,11 +1095,7 @@ pub(crate) fn list_discovered_files_with_search(
     let mut files = Vec::with_capacity(page.records.len());
     let mut no_path = Vec::new();
     for native in page.records {
-        if !query
-            .id_prefix
-            .as_deref()
-            .is_none_or(|prefix| native.id().starts_with(prefix))
-        {
+        if !query.admits_id(native.id()) {
             continue;
         }
         let Some(path) = native.locator().map(Path::to_path_buf) else {

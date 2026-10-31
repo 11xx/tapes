@@ -221,6 +221,7 @@ impl CodexBackend {
             occurrence: None,
             usage_detail: facts.usage_detail,
             list_price_estimate: None,
+            t3: None,
         };
         let forked_from: Vec<String> = opening
             .iter()

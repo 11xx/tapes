@@ -99,6 +99,35 @@ pub struct Session {
     /// cost its harness wrote and never in its place. Present only on an
     /// answer that was priced.
     pub list_price_estimate: Option<crate::pricing::ListPriceEstimate>,
+    /// The T3 Code thread this recording runs under, on an installed listing
+    /// whose T3 store maps the session to one.
+    pub t3: Option<T3Thread>,
+}
+
+/// The T3 Code thread a native session runs under. `link` is the app form of
+/// its address, which every session argument accepts.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct T3Thread {
+    pub thread_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub environment_id: Option<String>,
+    pub title: String,
+    pub link: String,
+}
+
+impl T3Thread {
+    pub fn new(thread_id: String, environment_id: Option<String>, title: String) -> Self {
+        let link = match &environment_id {
+            Some(environment) => format!("t3-thread://v2/{environment}/{thread_id}"),
+            None => format!("t3-thread://v1/{thread_id}"),
+        };
+        Self {
+            thread_id,
+            environment_id,
+            title,
+            link,
+        }
+    }
 }
 
 /// The session wire carries pricing evidence independently of harness-shaped
@@ -154,6 +183,8 @@ struct SessionWire {
     measurement_completeness: crate::measurement::MeasurementCompleteness,
     #[serde(default, skip_serializing_if = "Option::is_none", skip_deserializing)]
     list_price_estimate: Option<crate::pricing::ListPriceEstimate>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    t3: Option<T3Thread>,
 }
 impl From<SessionWire> for Session {
     fn from(wire: SessionWire) -> Self {
@@ -186,6 +217,7 @@ impl From<SessionWire> for Session {
             }
             .into_option(),
             list_price_estimate: wire.list_price_estimate,
+            t3: wire.t3,
         };
         let coverage = session.cost_coverage();
         session.cost = session.estimated_cost();
@@ -230,6 +262,7 @@ impl From<Session> for SessionWire {
             measurement_incomplete: detail.measurement_incomplete,
             measurement_completeness,
             list_price_estimate: session.list_price_estimate,
+            t3: session.t3,
         }
     }
 }
@@ -1858,6 +1891,11 @@ pub fn speaker(role: &Role, kind: TurnKind) -> String {
 
 /// Render a title without making a derived hint look like harness metadata.
 pub fn human_title(session: &Session) -> String {
+    if let (None, Some(thread)) = (&session.title, &session.t3) {
+        if !thread.title.is_empty() {
+            return thread.title.clone();
+        }
+    }
     match (&session.title, &session.derived_title) {
         (Some(title), _) => title.clone(),
         (None, Some(title)) => format!("~{title}"),
@@ -2409,6 +2447,7 @@ mod tests {
             occurrence: None,
             usage_detail: None,
             list_price_estimate: None,
+            t3: None,
         }
     }
 

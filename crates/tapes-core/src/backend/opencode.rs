@@ -582,7 +582,7 @@ impl OpenCodeBackend {
 
 /// One attempt at a store read: its answer, or what the store said when it
 /// was busy.
-enum Attempt<T = Vec<u8>> {
+pub(crate) enum Attempt<T = Vec<u8>> {
     Answered(T),
     Busy(String),
 }
@@ -592,7 +592,7 @@ const MAX_STDERR_BYTES: usize = 4 * 1024;
 
 /// Drain a child's stderr on its own thread, keeping its first bytes, so the
 /// child never blocks on a full pipe while its stdout is read.
-fn bounded_stderr(mut stderr: std::process::ChildStderr) -> thread::JoinHandle<Vec<u8>> {
+pub(crate) fn bounded_stderr(mut stderr: std::process::ChildStderr) -> thread::JoinHandle<Vec<u8>> {
     thread::spawn(move || {
         let mut kept = Vec::new();
         let _ = (&mut stderr)
@@ -609,7 +609,7 @@ const STDERR_GRACE: Duration = Duration::from_secs(1);
 
 /// The stderr [`bounded_stderr`] kept, once it reaches its end within
 /// [`STDERR_GRACE`]; nothing otherwise.
-fn finished_stderr(reader: thread::JoinHandle<Vec<u8>>) -> Vec<u8> {
+pub(crate) fn finished_stderr(reader: thread::JoinHandle<Vec<u8>>) -> Vec<u8> {
     let deadline = Instant::now() + STDERR_GRACE;
     while !reader.is_finished() {
         if Instant::now() >= deadline {
@@ -622,7 +622,10 @@ fn finished_stderr(reader: thread::JoinHandle<Vec<u8>>) -> Vec<u8> {
 
 /// Run `attempt` until it answers, fails for good, or the store has stayed
 /// busy through every bounded attempt, which fails as [`TransientFailure`].
-fn retry_transient<T>(source: &str, mut attempt: impl FnMut() -> Result<Attempt<T>>) -> Result<T> {
+pub(crate) fn retry_transient<T>(
+    source: &str,
+    mut attempt: impl FnMut() -> Result<Attempt<T>>,
+) -> Result<T> {
     let attempts = agent_tapes_discovery::transient::ATTEMPTS;
     let mut made = 0;
     loop {
@@ -1192,7 +1195,7 @@ impl OpenCodeBackend {
     }
 }
 
-fn program_available(program: &OsStr) -> bool {
+pub(crate) fn program_available(program: &OsStr) -> bool {
     Path::new(program).is_file()
         || std::env::var_os("PATH").is_some_and(|path| {
             std::env::split_paths(&path).any(|directory| directory.join(program).is_file())
@@ -2384,6 +2387,7 @@ fn parse_database_session(value: &Value) -> Result<Session> {
         }
         .into_option(),
         list_price_estimate: None,
+        t3: None,
     })
 }
 
@@ -2464,6 +2468,7 @@ fn parse_session(value: &Value) -> Result<Session> {
         }
         .into_option(),
         list_price_estimate: None,
+        t3: None,
     })
 }
 

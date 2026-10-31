@@ -1144,6 +1144,7 @@ impl SessionQueryArgs {
                 until: self.until,
                 search: self.search.as_deref(),
                 search_turns: None,
+                native_ids: None,
             },
             sort: self.sort.unwrap_or(SortArg::Newest).into(),
         }
@@ -3224,6 +3225,7 @@ fn dispatch(cli: Cli) -> Result<()> {
                 until,
                 search: search.as_deref(),
                 search_turns: Some(search_turns),
+                native_ids: None,
             };
             let result = if full {
                 let selected_scope = if input.supplied() {
@@ -4372,6 +4374,7 @@ fn dispatch(cli: Cli) -> Result<()> {
                     until,
                     search: search.as_deref(),
                     search_turns: None,
+                    native_ids: None,
                 },
                 sort: sort.into(),
             };
@@ -9686,6 +9689,7 @@ mod tests {
                 occurrence: None,
                 usage_detail: None,
                 list_price_estimate: None,
+                t3: None,
             },
             turns: vec![Turn {
                 origin: None,

@@ -807,6 +807,7 @@ mod tests {
                 occurrence: None,
                 usage_detail: None,
                 list_price_estimate: None,
+                t3: None,
             },
             turns: vec![
                 Turn {

@@ -64,6 +64,7 @@ pub mod span;
 pub mod stats;
 pub mod stats_summary;
 pub mod stretch;
+pub mod t3;
 #[cfg(test)]
 mod test_support;
 pub mod timeline;
@@ -137,6 +138,8 @@ pub struct ListFilters<'a> {
     pub until: Option<DateTime<Utc>>,
     pub search: Option<&'a str>,
     pub search_turns: Option<usize>,
+    /// Admit only these native session ids, before the per-harness limit.
+    pub native_ids: Option<&'a HashSet<String>>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -555,6 +558,7 @@ pub(crate) fn list_scoped(
             directory: filters.directory,
             since: filters.since,
             until: filters.until,
+            native_ids: filters.native_ids,
         },
     );
     query.sort = sort;
@@ -2465,6 +2469,7 @@ fn read_window_keeping(
                 directory: selection.filters.directory,
                 since: None,
                 until: selection.filters.until,
+                native_ids: selection.filters.native_ids,
             },
         );
         for (origin, backend) in backends.iter().enumerate().filter(|(_, backend)| {

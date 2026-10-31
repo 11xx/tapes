@@ -4058,6 +4058,7 @@ fn resolver_session(id: &str) -> Session {
         occurrence: None,
         usage_detail: None,
         list_price_estimate: None,
+        t3: None,
     }
 }
 
