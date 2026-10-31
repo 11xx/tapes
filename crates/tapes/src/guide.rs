@@ -338,6 +338,43 @@ READ A SUPPLIED EXPORT
   associated reports retain bounded bodies and citation spans as artifacts,
   including when their backing conversation is unresolved.
 
+T3 CODE THREADS
+  tapes show 'http://<host>:3773/<environment-id>/<thread-id>' --tail 20
+  tapes list --t3 --global --limit 10
+
+  T3 Code is a host: each of its threads runs on a provider whose own store
+  holds the recording. To tapes a thread is a name for that native session, so
+  wherever a session id or --exclude is accepted, a thread reference reads
+  exactly what the native id reads. Accepted forms: a web link
+  http(s)://<origin>/<environment>/<thread>, with any ?query or #hash; the app
+  links t3-thread://v2/<environment>/<thread> and t3-thread://v1/<thread>, also
+  inside <...>; and a bare argument exactly equal to a thread id. stderr
+  reports the rewrite: Note: T3 thread <id> "<title>" is <harness> session
+  <native-id>, adding the thread's other native sessions and whether T3 marks
+  it deleted.
+
+  list --t3 keeps only sessions a thread maps to, before --limit and with every
+  other filter. An installed listing's session carries a JSON t3 object
+  (thread_id, environment_id when known, title, and link, an app link any
+  session argument accepts), and TITLE falls back to the T3 title when no title
+  is recorded. The index covers the newest 10000 threads and says so when more
+  exist; a session two threads ran belongs to the newer one.
+
+  The store is T3CODE_HOME, or ~/.t3, read read-only through the sqlite3
+  program. Without a store a listing is unchanged and a bare id passes through;
+  a store that cannot be read warns on a bare id and adds an unavailable entry
+  to a listing. A link and list --t3 fail instead, and each failure names the
+  thread and what it needs:
+    another environment    the thread is on the machine serving that environment
+    not in the T3 store    this store holds no such thread
+    no T3 store            set T3CODE_HOME, or read on the machine that has one
+    sqlite3 not available  install it to read the store
+    no native session yet  the thread's run has not started
+    runs on <driver>       tapes has no backend for that provider
+    Claude subagent        run the printed tapes child <parent> --reference <agent>
+  --remote leaves a reference for the replica's own store. --input and
+  --native-store refuse a link and --t3, and do not look a bare id up.
+
 READ A RECORDING ON ANOTHER MACHINE
   tapes list --remote <ssh-destination>
   tapes show --latest --remote <ssh-destination> --tail 40
