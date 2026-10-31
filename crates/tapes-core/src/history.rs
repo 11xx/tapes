@@ -314,8 +314,9 @@ pub(crate) fn read_file(
         .with_context(|| format!("open {}", path.display()))?;
     let metadata = file.metadata()?;
     let opening = crate::backend::head_jsonl_from(&mut file, metadata.len())?;
+    let mut identity = crate::backend::NativeIdentity::new(harness, &session.id);
     for value in &opening.values {
-        crate::backend::validate_native_identity(value, harness, &session.id)?;
+        identity.check(value)?;
     }
     let current = StrictCursor::at_end(session, path, &metadata);
     let mut cached_tail = None;
@@ -464,7 +465,7 @@ pub(crate) fn read_file(
         Cursor::Pinned(pin) => pin.launch,
     };
     for value in &values {
-        crate::backend::validate_native_identity(value, harness, &session.id)?;
+        identity.check(value)?;
     }
     let (mut turns, models) = normalize(&values, &spans, &revision);
     for (ordinal, turn) in turns.iter_mut().enumerate() {

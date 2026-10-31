@@ -140,12 +140,16 @@ impl CodexBackend {
         let opening = recording.opening();
         let read = &recording.tail;
         let mut identity_seen = false;
+        let mut identity = super::NativeIdentity::new("codex", native.id());
         for (in_opening, value) in opening
             .iter()
             .map(|value| (true, value))
             .chain(read.values.iter().map(|value| (false, value)))
             .filter(|(_, value)| value["type"] == "session_meta")
         {
+            if identity.inherited(value) {
+                continue;
+            }
             identity_seen |= in_opening;
             let id = value["payload"]["id"].as_str().ok_or_else(|| {
                 anyhow!("{} has an invalid session_meta identity", path.display())
@@ -165,13 +169,13 @@ impl CodexBackend {
         }
         let directory = opening
             .iter()
-            .find_map(codex_cwd)
+            .find_map(|value| codex_own_cwd(value, native.id()))
             .map(PathBuf::from)
             .or_else(|| {
                 read.values
                     .iter()
                     .rev()
-                    .find_map(codex_cwd)
+                    .find_map(|value| codex_own_cwd(value, native.id()))
                     .map(PathBuf::from)
             });
         let launch = opening.first().and_then(codex_launch);
@@ -191,6 +195,7 @@ impl CodexBackend {
             .find(|value| value["type"] == "session_meta")
             .and_then(|value| value["payload"]["model_provider"].as_str())
             .map(str::to_owned);
+        records.observer.own_meta_seen = true;
         records.observe_read(&read.values, &read.spans, &read.gaps, &read.source_revision);
         let facts = records.finish();
 
@@ -390,7 +395,7 @@ impl Backend for CodexBackend {
         let mut listing = list_discovered_files(
             (store, &self.catalog),
             query,
-            |native, path| head_directory(path, native, codex_cwd),
+            |native, path| head_directory(path, native, |value| codex_own_cwd(value, native.id())),
             |native, path| {
                 self.parse(native, path, ParsedTurns::TitleOnly)
                     .map(|(session, _, _)| session)
@@ -413,7 +418,7 @@ impl Backend for CodexBackend {
             needle,
             tail,
             self.read_bytes,
-            |native, path| head_directory(path, native, codex_cwd),
+            |native, path| head_directory(path, native, |value| codex_own_cwd(value, native.id())),
             |native, path| {
                 self.parse(native, path, ParsedTurns::All)
                     .map(|(session, turns, read)| ParsedFile {
@@ -467,7 +472,9 @@ impl Backend for CodexBackend {
         }
         let mut locations = crate::locations::LocationStream::default();
         for value in &recording.tail.values {
-            observe_codex_place(&mut locations, value);
+            if !inherited_meta(value, &transcript.session.id) {
+                observe_codex_place(&mut locations, value);
+            }
         }
         transcript.locations = Some(locations.finish(!recording.tail.truncated));
         Ok(transcript)
@@ -501,20 +508,24 @@ impl Backend for CodexBackend {
             Placer::new(&[]).keeping(options.timeline),
             CodexSpans::default(),
         ));
+        let mut identity = super::NativeIdentity::new("codex", &session.id);
         let read = stream_jsonl_with_gaps(
             path,
             replay_pin(replay)?,
             |value, span, revision| {
-                super::validate_native_identity(value, "codex", &session.id)?;
+                identity.check(value)?;
                 let mut records = records.borrow_mut();
                 records.observe(value, Some(span), revision);
                 let (placer, figures) = &mut *counted.borrow_mut();
                 figures.place_record(&mut records, value, placer);
                 drop(records);
-                if value["type"] == "session_meta" {
+                let inherited = inherited_meta(value, &session.id);
+                if value["type"] == "session_meta" && !inherited {
                     launch = codex_launch(value);
                 }
-                observe_codex_place(&mut locations, value);
+                if !inherited {
+                    observe_codex_place(&mut locations, value);
+                }
                 if let Some(observed) = codex_terminal(value) {
                     terminal = Some(observed);
                 }
@@ -593,11 +604,12 @@ impl Backend for CodexBackend {
         let path = super::session_file_path(session)
             .ok_or_else(|| anyhow!("codex session {} has no file locator", session.id))?;
         let records = std::cell::RefCell::new(CodexRecords::new(path, false));
+        let mut identity = super::NativeIdentity::new("codex", &session.id);
         let streamed = stream_jsonl_with_gaps(
             path,
             Some(read.pin()?),
             |value, span, revision| {
-                super::validate_native_identity(value, "codex", &session.id)?;
+                identity.check(value)?;
                 records.borrow_mut().observe(value, Some(span), revision);
                 Ok(false)
             },
@@ -630,8 +642,9 @@ impl Backend for CodexBackend {
         let mut account = None::<String>;
         let mut previous = None::<Tokens>;
         let mut records = CodexRecords::placing_outside(path);
+        let mut identity = super::NativeIdentity::new("codex", &session.id);
         stream_jsonl(path, None, |value, _, revision| {
-            super::validate_native_identity(value, "codex", &session.id)?;
+            identity.check(value)?;
             records.observe(value, None, revision);
             for request in records.take_outside() {
                 match outside_use(&request) {
@@ -639,7 +652,10 @@ impl Backend for CodexBackend {
                     None => timeline.untimed += 1,
                 }
             }
-            if value["type"] == "session_meta" && account.is_none() {
+            if value["type"] == "session_meta"
+                && account.is_none()
+                && !inherited_meta(value, &session.id)
+            {
                 account = value["payload"]["creator_account_id"]
                     .as_str()
                     .filter(|id| !id.is_empty())
@@ -736,11 +752,12 @@ impl Backend for CodexBackend {
             Placer::new(spans),
             CodexSpans::default(),
         ));
+        let mut identity = super::NativeIdentity::new("codex", &session.id);
         let streamed = stream_jsonl_with_gaps(
             path,
             Some(read.pin()?),
             |value, span, revision| {
-                super::validate_native_identity(value, "codex", &session.id)?;
+                identity.check(value)?;
                 let (records, placer, figures) = &mut *state.borrow_mut();
                 records.observe(value, Some(span), revision);
                 figures.place_record(records, value, placer);
@@ -793,6 +810,7 @@ impl Backend for CodexBackend {
                     anyhow!("the full usage read has no prefix integrity evidence")
                 })?;
                 let records = std::cell::RefCell::new(records);
+                let mut identity = super::NativeIdentity::new("codex", &session.id);
                 stream_jsonl_with_gaps(
                     path,
                     Some(ReadPin {
@@ -804,7 +822,7 @@ impl Backend for CodexBackend {
                         prefix_sha256: Some(prefix_sha256),
                     }),
                     |value, span, revision| {
-                        super::validate_native_identity(value, "codex", &session.id)?;
+                        identity.check(value)?;
                         records.borrow_mut().observe(value, Some(span), revision);
                         Ok(false)
                     },
@@ -879,8 +897,9 @@ impl CodexBackend {
     ) -> Result<Lineage> {
         let mut header = None;
         let mut agents = SpawnedAgents::default();
+        let mut identity = super::NativeIdentity::new("codex", &session.id);
         let read = stream_jsonl(&path, None, |value, _, _| {
-            super::validate_native_identity(value, "codex", &session.id)?;
+            identity.check(value)?;
             if header.is_none() && value["type"] == "session_meta" {
                 header = Some(value["payload"].clone());
             }
@@ -1032,6 +1051,17 @@ fn codex_cwd(value: &Value) -> Option<&str> {
         Some("session_meta") | Some("turn_context") => value["payload"]["cwd"].as_str(),
         _ => None,
     }
+}
+
+/// Whether `value`, already through the identity check for session `id`, is a
+/// `session_meta` a fork copied from its origin. Its facts are the origin's.
+fn inherited_meta(value: &Value, id: &str) -> bool {
+    value["type"] == "session_meta" && value["payload"]["id"].as_str() != Some(id)
+}
+
+/// [`codex_cwd`], without the directory of an inherited `session_meta`.
+fn codex_own_cwd<'a>(value: &'a Value, id: &str) -> Option<&'a str> {
+    codex_cwd(value).filter(|_| !inherited_meta(value, id))
 }
 
 /// `session_meta` names the starting directory with the repository state it
@@ -1477,8 +1507,11 @@ struct CodexUsageObserver {
     unrecognized_usage: usize,
     activity: ActivityRange,
     series: Option<SeriesBuffer>,
-    /// The model provider `session_meta` names.
+    /// The model provider the rollout's own `session_meta`, its first, names.
     provider: Option<String>,
+    /// Whether that `session_meta` has gone by; a later one may be a fork's
+    /// copy of its origin's.
+    own_meta_seen: bool,
     /// Set by a `rate_limits` window reporting a used percent: the quota of
     /// a ChatGPT plan, with the plan's name where it was recorded.
     plan_quota: Option<Option<String>>,
@@ -1553,6 +1586,7 @@ impl CodexUsageObserver {
             activity: ActivityRange::default(),
             series: series_limit.map(SeriesBuffer::new),
             provider: None,
+            own_meta_seen: false,
             plan_quota: None,
         }
     }
@@ -1578,7 +1612,8 @@ impl CodexUsageObserver {
 
     fn observe(&mut self, value: &Value, span: Option<ByteSpan>, revision: &str) {
         self.activity.observe(value);
-        if value["type"] == "session_meta" && self.provider.is_none() {
+        if value["type"] == "session_meta" && !self.own_meta_seen {
+            self.own_meta_seen = true;
             self.provider = value["payload"]["model_provider"]
                 .as_str()
                 .map(str::to_owned);

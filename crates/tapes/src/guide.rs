@@ -217,6 +217,11 @@ FIND IT
   exact filename candidate is inspected until a correct match is found.
   The filename/header rule also applies to Pi's explicit recording file;
   a correct directory recording takes precedence over its mismatch.
+  A forked Codex rollout copies its origin's history, `session_meta` included.
+  Its first `session_meta` is its identity; a later one naming the
+  `forked_from_id` of a record already accepted, a fork of a fork included, is
+  inherited history and supplies no identity, launch, directory, provider or
+  lineage. Any other differing id is an identity mismatch.
   An identity mismatch remains a failure
   when candidate enumeration finds only prefix matches. A prefix is accepted only when
   bounded candidate coverage proves it unique; an ambiguous prefix lists its

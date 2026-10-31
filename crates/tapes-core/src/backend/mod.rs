@@ -1537,10 +1537,66 @@ pub(crate) fn validate_native_identity(
     Ok(false)
 }
 
+/// How many fork origins one recording's identity check remembers. A deeper
+/// chain's next copied `session_meta` is a conflict, which keeps the check's
+/// memory bounded on a recording of any size.
+const MAX_FORK_ORIGINS: usize = 64;
+
+/// The identity check across one recording's records in file order.
+///
+/// A forked Codex rollout copies its origin's history, `session_meta`
+/// included. The first `session_meta` is the rollout's identity; a later one
+/// whose id is the `forked_from_id` of a record already accepted is inherited
+/// fork history. It claims no identity. Any other differing id is a conflict.
+pub(crate) struct NativeIdentity<'a> {
+    harness: &'a str,
+    expected: &'a str,
+    origins: Vec<String>,
+}
+
+impl<'a> NativeIdentity<'a> {
+    pub(crate) fn new(harness: &'a str, expected: &'a str) -> Self {
+        Self {
+            harness,
+            expected,
+            origins: Vec::new(),
+        }
+    }
+
+    /// Whether `value` is an inherited `session_meta`, noting the origin it or
+    /// any other `session_meta` declares for the records after it.
+    pub(crate) fn inherited(&mut self, value: &Value) -> bool {
+        if self.harness != "codex" || value["type"] != "session_meta" {
+            return false;
+        }
+        let payload = &value["payload"];
+        let inherited = payload["id"]
+            .as_str()
+            .is_some_and(|id| id != self.expected && self.origins.iter().any(|known| known == id));
+        if let Some(origin) = payload["forked_from_id"].as_str() {
+            if self.origins.len() < MAX_FORK_ORIGINS
+                && !self.origins.iter().any(|known| known == origin)
+            {
+                self.origins.push(origin.to_owned());
+            }
+        }
+        inherited
+    }
+
+    /// [`validate_native_identity`] for the next record in file order.
+    pub(crate) fn check(&mut self, value: &Value) -> Result<bool> {
+        if self.inherited(value) {
+            return Ok(false);
+        }
+        validate_native_identity(value, self.harness, self.expected)
+    }
+}
+
 fn validate_discovered_identity(values: &[Value], native: &NativeSession) -> Result<()> {
     let mut identified = false;
+    let mut identity = NativeIdentity::new(native.harness().as_str(), native.id());
     for value in values {
-        identified |= validate_native_identity(value, native.harness().as_str(), native.id())?;
+        identified |= identity.check(value)?;
     }
     if native.identity_basis() == Some(agent_tapes_discovery::IdentityBasis::Header) && !identified
     {
@@ -1554,8 +1610,9 @@ pub(crate) fn validate_recording_identity(
     harness: &str,
     expected: &str,
 ) -> Result<()> {
+    let mut identity = NativeIdentity::new(harness, expected);
     for value in recording.opening().iter().chain(&recording.tail.values) {
-        validate_native_identity(value, harness, expected)?;
+        identity.check(value)?;
     }
     Ok(())
 }
@@ -1688,6 +1745,7 @@ pub(crate) fn first_prompt_in_file(
     let mut reader = BufReader::new(file.take(FIRST_PROMPT_BYTES));
     let mut line = Vec::new();
     let mut consumed = 0;
+    let mut identity = NativeIdentity::new(harness, expected);
     loop {
         line.clear();
         let read = reader.read_until(b'\n', &mut line)? as u64;
@@ -1701,7 +1759,7 @@ pub(crate) fn first_prompt_in_file(
         let Ok(value) = serde_json::from_slice::<Value>(&line) else {
             continue;
         };
-        validate_native_identity(&value, harness, expected)?;
+        identity.check(&value)?;
         if prompt(&value).is_some_and(|text| is_prompt(&text)) {
             return Ok(Some(value));
         }
