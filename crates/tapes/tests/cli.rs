@@ -1644,7 +1644,9 @@ fn process_state(pid: u32) -> Option<char> {
     stat[end_of_command + 2..].chars().next()
 }
 
-fn assert_process_gone(pid_file: &Path) {
+/// The authority must be reaped by Tapes. A descendant need only have exited:
+/// its adopter may retain the zombie until the surrounding command finishes.
+fn assert_process_exited(pid_file: &Path, require_reaped: bool) {
     let pid: u32 = fs::read_to_string(pid_file)
         .unwrap_or_else(|error| panic!("read {}: {error}", pid_file.display()))
         .trim()
@@ -1654,6 +1656,7 @@ fn assert_process_gone(pid_file: &Path) {
     loop {
         match process_state(pid) {
             None => return,
+            Some('Z') if !require_reaped => return,
             Some(state) if Instant::now() >= deadline => {
                 panic!(
                     "pid {pid} from {} remains in state {state}",
@@ -4832,8 +4835,8 @@ fn liveness_times_out_stalled_authority() {
     let value: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert!(session(&value, "00000000-0000-0000-0000-000000000001")["live"].is_null());
     assert_eq!(fs::read_to_string(calls).unwrap().lines().count(), 1);
-    assert_process_gone(&parent_pid);
-    assert_process_gone(&child_pid);
+    assert_process_exited(&parent_pid, true);
+    assert_process_exited(&child_pid, false);
 }
 
 #[test]
@@ -4860,8 +4863,8 @@ fn liveness_reaps_exited_authority_with_inherited_pipe() {
     let value: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert!(session(&value, "00000000-0000-0000-0000-000000000001")["live"].is_null());
     assert_eq!(fs::read_to_string(calls).unwrap().lines().count(), 1);
-    assert_process_gone(&parent_pid);
-    assert_process_gone(&child_pid);
+    assert_process_exited(&parent_pid, true);
+    assert_process_exited(&child_pid, false);
 }
 
 #[test]
@@ -12528,7 +12531,7 @@ fn a_remote_answer_is_bounded_in_bytes_and_wall_clock() {
     let error = String::from_utf8_lossy(&output.stderr);
     assert!(error.contains("no answer within 200ms"), "{error}");
     assert!(error.contains("TAPES_REMOTE_DEADLINE_MS"), "{error}");
-    assert_process_gone(&pid_file);
+    assert_process_exited(&pid_file, true);
 }
 
 /// The transport hands the remote shell one quoted command, so an argument
