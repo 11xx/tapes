@@ -28,11 +28,23 @@ PAGE ONE RECORDING
 
   tapes-recording-page/1 has flat items with start/end, kind, role, text, ts,
   native/request IDs, recorded model/effort and origin, full tool fields and
-  native content. parent_id is the preceding conversation-tree entry;
-  message_id is the containing message. Store positions verbatim across
+  native content. Item identity is start; native_id names a record/entry and
+  can be shared by its parts. message_id groups Claude assistant message.id or
+  user UUID, Codex message payload.id (absent on reasoning/tools), Pi entry ID,
+  or OpenCode message ID. parent_id links Claude/Pi tree entries; OpenCode
+  links the containing message to its parent message, usually the user prompt;
+  Codex omits it. Store positions verbatim across
   processes. --after starts at the gap; --before ends there. Keep end to follow
   appends, start for older items. A Claude child is a separate --reference
   recording labelled parent::agent, with its parent linked.
+
+  Tool fields are name, status, title, metadata, caller, arguments and output.
+  Search arguments carry the query/action. OpenCode title/metadata, Pi details
+  as metadata and Claude caller share the native content allocation in Rust.
+  Status is running, completed, failed, never-finished or unknown; native words
+  remain in content. Calls without an outcome are running; results without an
+  error are completed. OpenCode text/reasoning also exposes item status.
+  Native content is complete and always present.
 
   --bytes counts native content once plus serialized item metadata, through a
   counting writer. Normalized text and tool projections share the payload
@@ -41,8 +53,11 @@ PAGE ONE RECORDING
   skip to end. --read-bytes caps source scanning: default 8MiB, maximum 64MiB.
   stop names the item/output/scan/source boundary. File reads add a <=1MiB
   identity header and one verification reread. Positions bind the inode and
-  preceding record digest; internal positions also bind their record. Anchor
-  records consume scan budget. Partial final lines wait for their newline.
+  preceding newline and last min(record length,4KiB) bytes of that record;
+  internal positions also bind their whole record. Anchors consume scan budget.
+  Partial final lines wait for their newline. stop pending means wait for a
+  source change on files and databases alike: pending_bytes describes a file
+  suffix, pending names a database part.
   Untouched history is not pinned; a captured copy preserves it through edits.
 
   Claude records decode independently. Codex messages page by native content
@@ -52,9 +67,10 @@ PAGE ONE RECORDING
 
   OpenCode database parts page by time_created,id. Only text parts are prose;
   step/patch parts are unknown. Unfinished assistant text/reasoning and tools
-  in pending/running state stop the stream before that part. stop is pending
-  and pending names the part. Tail ends below it; no position binds unfinished
-  content. Completed parts follow once; changed completed parts refuse.
+  in pending/running state stop the stream only in the newest message, when it
+  has neither a completion time nor an error. Tail ends below that frontier.
+  Older unfinished parts publish as recorded with never-finished status; later
+  turns remain visible. Published parts follow once; changed parts refuse.
   Each part is bounded by min(--read-bytes,4MiB), under an 8MiB transport cap.
   A tail uses at most three SQLite processes, a positioned page four, excluding
   discovery: capture/verify batches plus constant metadata/cursor queries.
@@ -64,9 +80,15 @@ PAGE ONE RECORDING
 
   Refusals are public library values. CLI JSON uses tapes-recording-error/1,
   refusal.kind and a nonzero exit for oversized, scan-budget, changed,
-  replaced, unsupported and invalid-position cases. Rust Kind/Stop/Refusal
-  are non-exhaustive. JSON readers retain unknown kinds as non-prose and stop
-  on unfamiliar stop/refusal values without advancing or assuming completion.
+  replaced, unsupported, invalid-position, invalid-input and unavailable cases.
+  Scan-budget gives needed when a sufficient budget is known. Deleted files
+  are replaced; internal truncation is changed. Busy/unreadable stores are
+  unavailable; busy reads retain retryable exit 75. Rust Kind/Stop/Refusal are
+  non-exhaustive; JSON Kind/Stop decode unfamiliar values as Unknown. Retain
+  unknown kinds as non-prose. With an unfamiliar stop, consume returned items
+  and save boundaries; continue if the requested boundary advanced, otherwise
+  wait for a source change. Only end means caught up. Never spin on an unchanged
+  boundary; an unfamiliar refusal needs an explicit recovery policy.
   Validate kinds, positions and budgets before discovering a session.
 
 SELECT A MATERIALIZED NATIVE STORE

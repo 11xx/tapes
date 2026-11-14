@@ -3,7 +3,7 @@
 //! Positions are gaps: `forwards(page.start)` includes the page's first item,
 //! `before(page.start)` excludes it. Keep `page.end` to follow appends. Positions
 //! contain no transcript text and survive process restarts and append-only growth.
-//! File positions validate the inode and preceding record digest; internal
+//! File positions validate the inode and preceding record tail digest; internal
 //! record positions also validate their record. Edits elsewhere are not pinned.
 //! Use a captured recording when the whole history must remain immutable.
 //!
@@ -38,6 +38,7 @@ pub const PAGE_SCHEMA: &str = "tapes-recording-page/1";
 /// bytes once. Preceding-record anchors consume the same source scan budget.
 pub const MAX_SCAN_BYTES: usize = 64 * 1024 * 1024;
 const BLOCK: usize = 8192;
+const ANCHOR_BYTES: u64 = 4096;
 const MAX_POSITION_BYTES: usize = 4096;
 
 /// Consumers retain a wildcard arm when matching item kinds.
@@ -60,13 +61,25 @@ pub enum Kind {
     Control,
     Ambient,
     Notice,
+    #[serde(other)]
     Unknown,
 }
 
 impl std::str::FromStr for Kind {
     type Err = anyhow::Error;
     fn from_str(value: &str) -> Result<Self> {
-        serde_json::from_value(Value::String(value.to_owned())).context("invalid recording kind")
+        Ok(match value {
+            "user" => Self::User,
+            "assistant" => Self::Assistant,
+            "reasoning" => Self::Reasoning,
+            "tool-call" => Self::ToolCall,
+            "tool-result" => Self::ToolResult,
+            "control" => Self::Control,
+            "ambient" => Self::Ambient,
+            "notice" => Self::Notice,
+            "unknown" => Self::Unknown,
+            _ => bail!("invalid recording kind: {value}"),
+        })
     }
 }
 
@@ -163,7 +176,7 @@ pub enum Direction<'a> {
 }
 
 mod item;
-pub use item::{Item, Payload, Tool};
+pub use item::{Item, Payload, Status, Tool};
 
 /// Structured reader refusals, also serialized by the CLI JSON error response.
 #[non_exhaustive]
@@ -177,6 +190,9 @@ pub enum Refusal {
     },
     ScanBudget {
         limit: usize,
+        /// Sufficient scan budget when the native record's size is known.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        needed: Option<usize>,
     },
     Changed {
         reason: String,
@@ -190,6 +206,12 @@ pub enum Refusal {
     InvalidPosition {
         reason: String,
     },
+    InvalidInput {
+        reason: String,
+    },
+    Unavailable {
+        reason: String,
+    },
 }
 impl std::fmt::Display for Refusal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -198,15 +220,30 @@ impl std::fmt::Display for Refusal {
                 f,
                 "item requires {needed} budget bytes; content was not clipped"
             ),
-            Self::ScanBudget { limit } => write!(f, "scan budget exhausted at {limit} bytes"),
+            Self::ScanBudget { limit, needed } => {
+                write!(f, "scan budget exhausted at {limit} bytes")?;
+                if let Some(needed) = needed {
+                    write!(f, "; requires {needed} bytes")?;
+                }
+                Ok(())
+            }
             Self::Changed { reason } => write!(f, "positioned content changed: {reason}"),
             Self::Replaced { reason } => write!(f, "recording replaced or truncated: {reason}"),
             Self::Unsupported { store } => write!(f, "recording positions unsupported for {store}"),
             Self::InvalidPosition { reason } => write!(f, "invalid recording position: {reason}"),
+            Self::InvalidInput { reason } => write!(f, "invalid recording input: {reason}"),
+            Self::Unavailable { reason } => write!(f, "recording unavailable: {reason}"),
         }
     }
 }
 impl std::error::Error for Refusal {}
+fn unavailable(error: anyhow::Error) -> anyhow::Error {
+    if error.downcast_ref::<Refusal>().is_some() {
+        return error;
+    }
+    let reason = error.to_string();
+    error.context(Refusal::Unavailable { reason })
+}
 fn changed(reason: &str) -> anyhow::Error {
     Refusal::Changed {
         reason: reason.to_owned(),
@@ -224,11 +261,11 @@ fn replaced(reason: &str) -> anyhow::Error {
 /// ```compile_fail
 /// use agent_tapes_core::recording::Stop;
 /// fn closed(stop: Stop) { match stop {
-/// Stop::End | Stop::Items | Stop::Bytes | Stop::ScanBytes | Stop::Pending => ()
+/// Stop::End | Stop::Items | Stop::Bytes | Stop::ScanBytes | Stop::Pending | Stop::Unknown => ()
 /// } }
 /// ```
 #[non_exhaustive]
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Stop {
     End,
@@ -236,6 +273,8 @@ pub enum Stop {
     Bytes,
     ScanBytes,
     Pending,
+    #[serde(other)]
+    Unknown,
 }
 
 #[derive(Debug, Serialize)]
@@ -257,6 +296,7 @@ pub struct Page {
     pub malformed_records: usize,
     /// Bytes after the newest newline are deferred until a later read.
     pub pending_bytes: u64,
+    /// Native pending part ID for database pages; files use pending_bytes.
     pub pending: Option<String>,
     pub notes: Vec<String>,
 }
@@ -281,7 +321,17 @@ impl Recording {
     /// Resolve using discovery's bounded identity opening, without reading a
     /// normalized transcript. Retain this descriptor for subsequent pages.
     pub fn resolve(stores: &[NativeStore], query: &str) -> Result<Self> {
-        let native = Discovery::new(stores.iter().cloned()).resolve(query)?;
+        let native = Discovery::new(stores.iter().cloned())
+            .resolve(query)
+            .map_err(|error| match error {
+                agent_tapes_discovery::ResolveError::InvalidQuery
+                | agent_tapes_discovery::ResolveError::Ambiguous { .. } => {
+                    anyhow::Error::new(error).context(Refusal::InvalidInput {
+                        reason: "invalid or ambiguous recording query".to_owned(),
+                    })
+                }
+                _ => unavailable(error.into()),
+            })?;
         Self::from_native(&native, stores)
     }
     pub fn from_native(native: &NativeSession, stores: &[NativeStore]) -> Result<Self> {
@@ -355,14 +405,20 @@ impl Recording {
         self.page(Direction::Forwards(position), limits)
     }
     pub fn page(&self, direction: Direction<'_>, limits: &Limits) -> Result<Page> {
-        limits.validate()?;
-        if self.harness == "opencode" {
-            return crate::backend::opencode::OpenCodeBackend::from_store(
-                self.store.clone().context("missing OpenCode store")?,
-            )
-            .recording_page(&self.id, direction, limits);
-        }
-        file_page(self, direction, limits)
+        limits.validate().map_err(|error| {
+            let reason = error.to_string();
+            error.context(Refusal::InvalidInput { reason })
+        })?;
+        (|| {
+            if self.harness == "opencode" {
+                return crate::backend::opencode::OpenCodeBackend::from_store(
+                    self.store.clone().context("missing OpenCode store")?,
+                )
+                .recording_page(&self.id, direction, limits);
+            }
+            file_page(self, direction, limits)
+        })()
+        .map_err(unavailable)
     }
 }
 
@@ -395,7 +451,13 @@ struct Window {
 
 impl Window {
     fn new(path: &Path, recording: &Recording, budget: usize) -> Result<Self> {
-        let file = crate::backend::open_regular_file(path)?;
+        let file = crate::backend::open_regular_file(path).map_err(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                replaced("recording file disappeared")
+            } else {
+                error.into()
+            }
+        })?;
         let metadata = file.metadata()?;
         let source = digest(
             format!(
@@ -429,7 +491,11 @@ impl Window {
         if offset < self.lo || offset >= self.hi() {
             let remaining = self.budget.saturating_sub(self.data.len());
             if remaining == 0 {
-                return Err(Refusal::ScanBudget { limit: self.budget }.into());
+                return Err(Refusal::ScanBudget {
+                    limit: self.budget,
+                    needed: None,
+                }
+                .into());
             }
             let (lo, hi) = if offset < self.lo {
                 (self.lo.saturating_sub(BLOCK.min(remaining) as u64), self.lo)
@@ -491,7 +557,8 @@ impl Window {
                 return Err(changed("position is not a record boundary"));
             }
             let mut start = offset - 1;
-            while start > 0 && self.byte(start - 1)? != b'\n' {
+            let lower = offset.saturating_sub(ANCHOR_BYTES);
+            while start > lower && self.byte(start - 1)? != b'\n' {
                 start -= 1;
             }
             let from = (start - self.lo) as usize;
@@ -532,7 +599,7 @@ impl Window {
             ));
         }
         if cursor.anchor != self.anchor(cursor.offset)? {
-            return Err(changed("preceding record digest differs"));
+            return Err(changed("preceding record tail digest differs"));
         }
         ensure!(
             cursor.offset == 0 || self.byte(cursor.offset - 1)? == b'\n',
@@ -541,7 +608,7 @@ impl Window {
         if cursor.part > 0 {
             let (_, line) = self
                 .line_at(cursor.offset)?
-                .context("recording truncated at internal position")?;
+                .ok_or_else(|| changed("recording truncated at internal position"))?;
             if cursor.record.as_deref() != Some(&digest(&line)) {
                 return Err(changed("record digest differs"));
             }
@@ -550,7 +617,13 @@ impl Window {
     }
     fn verify(&mut self, path: &Path) -> Result<()> {
         let after = self.file.metadata()?;
-        let named = std::fs::metadata(path)?;
+        let named = std::fs::metadata(path).map_err(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                replaced("recording file disappeared during read")
+            } else {
+                error.into()
+            }
+        })?;
         if named.dev() != self.metadata.dev()
             || named.ino() != self.metadata.ino()
             || after.len() < self.metadata.len()
@@ -807,6 +880,9 @@ fn file_page(recording: &Recording, direction: Direction<'_>, limits: &Limits) -
         "pi" => vec!["Physical tree log, including abandoned branches; parent_id links entries. Active-branch selection requires a whole-recording ancestry pass.".to_owned()],
         _ => Vec::new(),
     };
+    if pending_bytes > 0 && matches!(stop, Stop::End) {
+        stop = Stop::Pending;
+    }
     Ok(Page {
         schema: PAGE_SCHEMA,
         recording: recording.child.as_ref().map_or_else(
@@ -931,10 +1007,14 @@ impl Fragment<'_> {
     fn materialize(&self, start: Position, end: Position, harness: &str) -> Result<Option<Item>> {
         let content: Arc<Value> = Arc::new(serde_json::from_str(self.content.get())?);
         let meta = metadata(self.envelope)?;
-        let message_id = if harness == "codex" {
-            meta["payload"]["id"].as_str()
-        } else {
-            meta["message"]["id"].as_str()
+        let message_id = match harness {
+            "claude" if meta["type"] == "user" => meta["uuid"].as_str(),
+            "claude" => meta["message"]["id"].as_str(),
+            "codex" if meta["type"] == "response_item" && meta["payload"]["type"] == "message" => {
+                meta["payload"]["id"].as_str()
+            }
+            "pi" => meta["id"].as_str(),
+            _ => None,
         }
         .map(str::to_owned);
         let mut item = if matches!(self.kind, Kind::ToolCall | Kind::ToolResult) {
@@ -965,6 +1045,7 @@ impl Fragment<'_> {
                 origin: None,
                 call_id,
                 tool: Some(tool),
+                status: None,
                 parent_id: None,
                 message_id: None,
                 representation: None,

@@ -64,8 +64,23 @@ request IDs, recorded model/effort and origin, complete `tool` fields, native
 `content`, and parent/message links. Store opaque gap positions verbatim across
 processes. `--after` includes the item at the gap; `--before` excludes it. Keep
 `end` to follow appends. Claude children use `parent::agent`, page separately
-with `--reference`, and link their parent. `parent_id` names the preceding
-conversation-tree entry; `message_id` names the containing message.
+with `--reference`, and link their parent. An item's identity is its `start`;
+`native_id` identifies its native record/entry and can be shared by many parts.
+`message_id` groups parts of one native message: Claude assistant `message.id`
+or user record UUID, Codex message `payload.id` (absent on reasoning/tools), Pi
+entry ID, OpenCode message ID. `parent_id` links Claude/Pi tree entries; on
+OpenCode it links the containing message to its parent message (usually the
+user prompt). Codex omits it.
+
+`tool` exposes `name`, `status`, `title`, `metadata`, `caller`, `arguments` and
+`output` without harness-specific paths. Codex search arguments include the
+search action/query; OpenCode title/metadata, Pi result details as metadata,
+and Claude caller are retained. These payload fields share the native content
+allocation in Rust. Status is `running`, `completed`, `failed`,
+`never-finished` or `unknown`; native words remain in `content`. A call without
+a recorded outcome is running; a result without an error is completed.
+OpenCode text/reasoning also has item `status` when recorded. Missing fields
+stay absent or null; complete native `content` is always present.
 
 `--bytes` charges native `content` once plus serialized item metadata, measured
 with a counting writer. Normalized text and tool argument/output projections
@@ -76,19 +91,25 @@ skip it. `--read-bytes` bounds source scanning (default 8MiB, maximum 64MiB).
 A filter fills the item budget until a source, output or scan bound stops it.
 `stop` names the boundary; `start`/`end` retain progress. File reads add a bounded
 identity header (at most 1MiB) and verify the source window once. Positions bind
-the inode and the whole preceding record's digest; internal gaps also bind their
-record. Anchor records consume scan budget. Incomplete final lines wait for a
-newline. Positions do not pin untouched history.
+the inode, the preceding newline and the digest of the preceding record's last
+min(record length, 4KiB) bytes; internal gaps also bind their whole record.
+Anchors consume scan budget. Incomplete final lines wait for a newline.
+`stop: "pending"` means wait for a source change on both files and databases;
+`pending_bytes` describes a file suffix and `pending` names a database part.
+Positions do not pin untouched history.
 
 Claude normalizes each record independently. Codex messages page by content
 part; runtime tool mirrors remain separate occurrences labelled `runtime`.
 Pi pages the physical tree log, including abandoned branches, with `parent_id`;
 its active branch needs a whole-recording ancestry pass. OpenCode's stable
 database pages parts by `time_created,id`. Only `text` parts are prose;
-step/patch metadata is `unknown`. The first unfinished assistant text/reasoning
-or pending/running tool stops the stream (`stop: pending`, `pending` names the
-part). Tail pages end below that frontier. Positions bind completed parts, so
-ordinary completion can be followed once. A changed completed part refuses.
+step/patch metadata is `unknown`. An unfinished assistant text/reasoning or
+pending/running tool stops the stream only while its message is the newest
+message and has neither completion time nor error. Tail pages end below that
+frontier. Older unfinished parts are published as recorded with
+`never-finished` status, so abandoned turns cannot hide resumed turns.
+Positions bind published parts; ordinary completion can be followed once.
+A changed published part refuses.
 
 An OpenCode native part is bounded by the smaller of `--read-bytes` and 4MiB;
 the transport cap is 8MiB. Each page captures one batch and verifies it in one
@@ -102,12 +123,19 @@ In `agent-tapes-core`, `recording::Recording::resolve` uses discovery's bounded
 identity openings. `from_native` reuses a discovery result; `from_session`
 reuses a file session. `tail`, `before` and `forwards` take
 `Limits { items, bytes, scan_bytes, kinds }`. Public `Refusal` values identify
-oversized items, scan exhaustion, changed content, replaced recordings and
-unsupported stores. CLI JSON errors use `tapes-recording-error/1` with the same
+oversized items, scan exhaustion (with `needed` when the sufficient budget is
+known), changed content, replaced recordings, unsupported stores, invalid
+input/positions and unavailable stores. A deleted retained file is replaced;
+an internal truncated record is changed. Busy/unreadable stores are unavailable;
+busy reads retain exit 75 for retry. CLI JSON errors use `tapes-recording-error/1` with the same
 `refusal.kind` values and a nonzero exit. `Kind`, `Stop` and `Refusal` are
-non-exhaustive. JSON readers treat unknown kinds as non-prose, retain their
-native content, and stop on an unknown stop/refusal rather than assuming
-completion or advancing a cursor. Readers retain no global state and never
+non-exhaustive. Rust JSON readers deserialize unfamiliar kinds/stops to
+`Unknown`. JSON readers retain unknown kinds as non-prose. An unknown stop
+still permits consuming the returned items and saving its boundaries: continue
+in the requested direction if that boundary advanced; otherwise wait for a
+source change. Only known `end` means caught up; never spin on an unchanged
+boundary. An unknown refusal requires an explicit recovery policy. Readers
+retain no global state and never
 write to a recording or store.
 
 ## Look across sessions

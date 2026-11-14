@@ -1,15 +1,15 @@
 //! Snapshot batches over complete native database parts. The first unfinished
-//! part is the ordered stream's frontier. SQLite scans/sorts the session under
-//! its native indexes; response and process counts are bounded independently.
+//! part in the newest live message is the ordered stream's frontier. SQLite
+//! scans/sorts under native indexes; response and process counts are bounded.
 use super::*;
 use crate::recording::{
-    digest, Cursor, Direction, Item, Kind, Limits, Page, Parent, Position, Refusal, Stop, Tool,
-    PAGE_SCHEMA,
+    digest, Cursor, Direction, Item, Kind, Limits, Page, Parent, Position, Refusal, Status, Stop,
+    Tool, PAGE_SCHEMA,
 };
 use std::sync::Arc;
 
 const PART_BYTES: usize = MAX_COMMAND_BYTES as usize / 2;
-const PENDING: &str = "((json_extract(p.data,'$.type') IN ('text','reasoning') AND json_extract(m.data,'$.role')='assistant' AND coalesce(json_type(p.data,'$.time.end'),'null') NOT IN ('integer','real')) OR (json_extract(p.data,'$.type')='tool' AND coalesce(json_extract(p.data,'$.state.status'),'') NOT IN ('completed','error')))";
+const UNFINISHED: &str = "((json_extract(p.data,'$.type') IN ('text','reasoning') AND json_extract(m.data,'$.role')='assistant' AND coalesce(json_type(p.data,'$.time.end'),'null') NOT IN ('integer','real')) OR (json_extract(p.data,'$.type')='tool' AND coalesce(json_extract(p.data,'$.state.status'),'') NOT IN ('completed','error')))";
 
 impl OpenCodeBackend {
     pub(crate) fn recording_page(
@@ -109,8 +109,9 @@ impl OpenCodeBackend {
             .saturating_add(1)
             .min(limits.scan_bytes / 32 + 1);
         let filter = kind_filter(limits);
+        let pending_rule = format!("{UNFINISHED} AND m.id=(SELECT id FROM message WHERE session_id=p.session_id ORDER BY time_created DESC,id DESC LIMIT 1) AND coalesce(json_type(m.data,'$.time.completed'),'null')='null' AND coalesce(json_type(m.data,'$.error'),'null')='null'");
         let query = format!(
-            "WITH pending AS (SELECT p.id,p.time_created FROM part p JOIN message m ON m.id=p.message_id AND m.session_id=p.session_id WHERE p.session_id={sql_id} AND {PENDING} ORDER BY p.time_created,p.id LIMIT 1), \
+            "WITH pending AS (SELECT p.id,p.time_created FROM part p JOIN message m ON m.id=p.message_id AND m.session_id=p.session_id WHERE p.session_id={sql_id} AND {pending_rule} ORDER BY p.time_created,p.id LIMIT 1), \
              selected AS (SELECT {} AS wire, length(CAST(p.data AS BLOB))+length(p.id)+length(p.message_id)+512 AS cost, p.time_created AS t, p.id AS k FROM part p JOIN message m ON m.id=p.message_id AND m.session_id=p.session_id \
              WHERE p.session_id={sql_id} AND typeof(p.time_created)='integer' AND p.time_created>=0 AND typeof(p.id)='text'{past} AND (NOT EXISTS(SELECT 1 FROM pending) OR p.time_created<(SELECT time_created FROM pending) OR (p.time_created=(SELECT time_created FROM pending) AND p.id<(SELECT id FROM pending))){filter} \
              ORDER BY p.time_created {order},p.id {order} LIMIT {rows_limit}), \
@@ -260,7 +261,7 @@ impl OpenCodeBackend {
         if backwards {
             items.reverse();
         }
-        Ok(Page { schema: PAGE_SCHEMA, recording: id.to_owned(), harness: "opencode".to_owned(), parents, items, start, end, stop, item_bytes, bytes_read, records_read: observed.len(), malformed_records:0, pending_bytes:0, pending, notes:vec!["Complete parts in time_created,id order. Unfinished parts stop the stream. A page captures one batch and verifies it in one query; optional parent/fork and cursor validation add constant query costs. SQLite scans/sorts the session under its native indexes; bytes_read measures SQL responses.".to_owned()] })
+        Ok(Page { schema: PAGE_SCHEMA, recording: id.to_owned(), harness: "opencode".to_owned(), parents, items, start, end, stop, item_bytes, bytes_read, records_read: observed.len(), malformed_records:0, pending_bytes:0, pending, notes:vec!["Complete parts in time_created,id order. Unfinished parts in the newest message without completion/error stop the stream; older incomplete parts have never-finished status. A page captures one batch and verifies it in one query; optional parent/fork and cursor validation add constant query costs. SQLite scans/sorts the session under its native indexes; bytes_read measures SQL responses.".to_owned()] })
     }
     fn recording_query(&self, sql: &str, bytes: &mut usize) -> Result<Vec<Value>> {
         let text = self.database_text(sql)?;
@@ -270,12 +271,16 @@ impl OpenCodeBackend {
 }
 fn source_bound(row: &Value, bound: usize) -> Result<()> {
     if row["bytes"].as_u64().unwrap_or(0) > bound as u64 {
-        return Err(Refusal::ScanBudget { limit: bound }.into());
+        return Err(Refusal::ScanBudget {
+            limit: bound,
+            needed: row["bytes"].as_u64().and_then(|n| usize::try_from(n).ok()),
+        }
+        .into());
     }
     Ok(())
 }
 fn part_row(bound: usize) -> String {
-    format!("json_object('id',p.id,'time_created',p.time_created,'message_id',p.message_id,'parent_id',json_extract(m.data,'$.parentID'),'role',json_extract(m.data,'$.role'),'model',json_extract(m.data,'$.modelID'),'variant',json_extract(m.data,'$.variant'),'bytes',length(CAST(p.data AS BLOB)),'data',CASE WHEN length(CAST(p.data AS BLOB))<={bound} AND json_valid(p.data) THEN json(p.data) END)")
+    format!("json_object('id',p.id,'time_created',p.time_created,'message_id',p.message_id,'parent_id',json_extract(m.data,'$.parentID'),'role',json_extract(m.data,'$.role'),'model',json_extract(m.data,'$.modelID'),'variant',json_extract(m.data,'$.variant'),'unfinished',{UNFINISHED},'bytes',length(CAST(p.data AS BLOB)),'data',CASE WHEN length(CAST(p.data AS BLOB))<={bound} AND json_valid(p.data) THEN json(p.data) END)")
 }
 fn kind_filter(limits: &Limits) -> String {
     if limits.kinds.is_empty() {
@@ -331,7 +336,10 @@ fn database_items(row: &Value, point: &Cursor) -> Result<Vec<Item>> {
         let mut after = point.clone();
         after.part = index + 1;
         let (tool, call_id) = if matches!(kind, Kind::ToolCall | Kind::ToolResult) {
-            let (t, c) = Tool::native(&content, "opencode", kind);
+            let (mut t, c) = Tool::native(&content, "opencode", kind);
+            if row["unfinished"] == 1 {
+                t.status = Some(Status::NeverFinished);
+            }
             (Some(t), c)
         } else {
             (None, None)
@@ -366,6 +374,15 @@ fn database_items(row: &Value, point: &Cursor) -> Result<Vec<Item>> {
             origin: None,
             call_id,
             tool,
+            status: if matches!(kind, Kind::Assistant | Kind::Reasoning) {
+                Some(if row["unfinished"] == 1 {
+                    Status::NeverFinished
+                } else {
+                    Status::Completed
+                })
+            } else {
+                None
+            },
             parent_id: row["parent_id"].as_str().map(str::to_owned),
             message_id: row["message_id"].as_str().map(str::to_owned),
             representation: None,

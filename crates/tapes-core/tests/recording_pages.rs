@@ -282,6 +282,7 @@ fn incomplete_append_is_deferred_even_when_it_is_valid_json_without_a_newline() 
         );
         assert_eq!(deferred.end, page.end);
         assert_eq!(deferred.pending_bytes, value.len() as u64);
+        assert!(matches!(deferred.stop, Stop::Pending));
         file.write_all(b"\n").unwrap();
         assert_eq!(
             texts(
@@ -630,6 +631,7 @@ fn database_prose_excludes_step_and_patch_rows_and_kinds_agree() {
 #[test]
 fn database_follow_defers_streaming_text_and_running_tools_until_complete() {
     let db = Database::new(1);
+    db.sql("UPDATE message SET data=json_remove(data,'$.time.completed');");
     db.sql(&Database::insert(
         1,
         &json!({"type":"text","text":"Hel","time":{"start":1}}),
@@ -660,6 +662,7 @@ fn database_follow_defers_streaming_text_and_running_tools_until_complete() {
         .is_empty());
     // The rule holds before the first completed part as well.
     let empty = Database::new(0);
+    empty.sql("UPDATE message SET data=json_remove(data,'$.time.completed');");
     empty.sql(&Database::insert(
         0,
         &json!({"type":"text","text":"partial","time":{"start":0}}),
@@ -1057,4 +1060,381 @@ fn database_batches_keep_sqlite_process_count_independent_of_item_count() {
         "fixture lacks the real schema's sort cost: {plan}"
     );
     println!("REAL_INDEX_PLAN {plan}");
+}
+
+// A crashed turn cannot conceal resumed turns. Only the newest, live message
+// may hold the stream; completed/errored messages release incomplete parts too.
+#[test]
+fn database_abandoned_parts_release_later_turns_with_never_finished_status() {
+    let db = Database::new(0);
+    db.sql("UPDATE message SET data='{\"role\":\"user\"}' WHERE id='msg_fixture'; INSERT INTO message VALUES('msg_a','ses_fixture',2,2,'{\"role\":\"assistant\",\"time\":{\"created\":2}}');");
+    db.sql(&Database::insert(
+        0,
+        &json!({"type":"text","text":"question"}),
+    ));
+    db.sql(&Database::insert(
+        1,
+        &json!({"type":"reasoning","text":"half a thought","time":{"start":1}}),
+    ));
+    db.sql(&Database::insert(2,&json!({"type":"tool","tool":"bash","callID":"abandoned","state":{"status":"running","input":{}}})));
+    db.sql("UPDATE part SET message_id='msg_a' WHERE id IN ('p000001','p000002');");
+    let tail = db.reader().tail(&limits(20)).unwrap();
+    assert_eq!(texts(&tail), ["question"]);
+    assert!(matches!(tail.stop, Stop::Pending));
+    db.sql("INSERT INTO message VALUES('msg_user2','ses_fixture',50,50,'{\"role\":\"user\"}'); INSERT INTO message VALUES('msg_b','ses_fixture',51,51,'{\"role\":\"assistant\",\"time\":{\"completed\":52}}');");
+    db.sql(&Database::insert(
+        10,
+        &json!({"type":"text","text":"second question"}),
+    ));
+    db.sql(&Database::insert(
+        11,
+        &json!({"type":"text","text":"second answer"}),
+    ));
+    db.sql("UPDATE part SET message_id='msg_user2' WHERE id='p000010'; UPDATE part SET message_id='msg_b' WHERE id='p000011';");
+    let resumed = db.reader().forwards(&tail.end, &limits(20)).unwrap();
+    assert_eq!(
+        texts(&resumed),
+        ["half a thought", "", "", "second question", "second answer"]
+    );
+    let wire = serde_json::to_value(&resumed).unwrap();
+    assert_eq!(wire["items"][0]["status"], "never-finished");
+    for i in [1, 2] {
+        assert_eq!(wire["items"][i]["tool"]["status"], "never-finished");
+    }
+    assert!(matches!(resumed.stop, Stop::End));
+    assert_eq!(db.reader().tail(&limits(20)).unwrap().items.len(), 6);
+    for terminal in [json!({"completed":2}), json!({"error":{"name":"Aborted"}})] {
+        let fresh = Database::new(0);
+        let data = if terminal.get("completed").is_some() {
+            json!({"role":"assistant","time":terminal})
+        } else {
+            json!({"role":"assistant","error":terminal["error"]})
+        };
+        fresh.sql(&format!("UPDATE message SET data='{}';", data));
+        fresh.sql(&Database::insert(
+            0,
+            &json!({"type":"reasoning","text":"retained","time":{"start":0}}),
+        ));
+        let page = fresh.reader().tail(&limits(10)).unwrap();
+        assert_eq!(texts(&page), ["retained"]);
+        assert_eq!(
+            serde_json::to_value(&page.items[0]).unwrap()["status"],
+            "never-finished"
+        );
+    }
+}
+
+// Message grouping is harness-independent, including mixed user/tool-result
+// records. Reasoning and tool records with their own IDs are not Codex messages.
+#[test]
+fn message_ids_group_parts_of_native_messages_on_every_backend() {
+    for harness in ["claude", "codex", "pi"] {
+        let f = Fixture::new(harness, 0);
+        let text =
+            |t: &str| json!({"type":if harness=="codex" {"output_text"}else{"text"},"text":t});
+        let mut a = f.message(1, "a");
+        if harness == "codex" {
+            a["payload"]["content"] = json!([text("a"), text("b")]);
+        } else {
+            a["message"]["content"] = json!([text("a"), text("b")]);
+        }
+        if harness == "claude" {
+            a["message"]["id"] = json!("api-message");
+        }
+        f.append(&a);
+        let assistant = f.reader().tail(&limits(10)).unwrap();
+        let expected = if harness == "claude" {
+            "api-message"
+        } else {
+            "m1"
+        };
+        assert_eq!(assistant.items.len(), 2);
+        assert!(
+            assistant
+                .items
+                .iter()
+                .all(|i| i.message_id.as_deref() == Some(expected)),
+            "{harness} assistant grouping"
+        );
+        assert_ne!(assistant.items[0].start, assistant.items[1].start);
+        assert_eq!(assistant.items[0].native_id, assistant.items[1].native_id);
+        let mut user = f.message(2, "u");
+        match harness {
+            "codex" => {
+                user["payload"]["role"] = json!("user");
+                user["payload"]["content"] = json!([text("u"), text("v")]);
+            }
+            _ => {
+                user["type"] = json!(if harness == "claude" {
+                    "user"
+                } else {
+                    "message"
+                });
+                user["message"]["role"] = json!("user");
+                user["message"]["content"] = json!([text("u"), text("v")]);
+            }
+        }
+        if harness == "claude" {
+            user["message"]["content"][1] =
+                json!({"type":"tool_result","tool_use_id":"c","content":"result"});
+        }
+        f.append(&user);
+        let page = f.reader().forwards(&assistant.end, &limits(10)).unwrap();
+        assert_eq!(page.items.len(), 2);
+        assert!(
+            page.items
+                .iter()
+                .all(|i| i.message_id.as_deref() == Some("m2")),
+            "{harness} user grouping"
+        );
+        if harness == "codex" {
+            f.append(&json!({"type":"response_item","payload":{"type":"reasoning","id":"rs_fixture","summary":[{"type":"summary_text","text":"thinking"}]}}));
+            let mut tool = f.tool(false);
+            tool["payload"]["id"] = json!("ctc_fixture");
+            f.append(&tool);
+            assert!(f
+                .reader()
+                .forwards(&page.end, &limits(10))
+                .unwrap()
+                .items
+                .iter()
+                .all(|i| i.message_id.is_none()));
+        }
+    }
+    let db = Database::new(2);
+    db.sql(&Database::insert(2,&json!({"type":"tool","tool":"bash","callID":"c","state":{"status":"completed","input":{},"output":"done"}})));
+    let page = db.reader().tail(&limits(10)).unwrap();
+    assert_eq!(page.items.len(), 4);
+    assert!(page
+        .items
+        .iter()
+        .all(|i| i.message_id.as_deref() == Some("msg_fixture")));
+}
+
+// An idle poll after a large result costs an anchor, not a whole-record read.
+// /proc rchar measures actual process reads independently of Page.bytes_read.
+#[test]
+fn kernel_read_counts_bound_idle_follow_after_large_records() {
+    if !PathBuf::from("/proc/self/io").exists() {
+        return;
+    }
+    if std::env::var_os("TAPES_ANCHOR_IO_CHILD").is_none() {
+        let out = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "kernel_read_counts_bound_idle_follow_after_large_records",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env("TAPES_ANCHOR_IO_CHILD", "1")
+            .output()
+            .unwrap();
+        print!("{}", String::from_utf8_lossy(&out.stdout));
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        return;
+    }
+    let counter = || {
+        fs::read_to_string("/proc/self/io")
+            .unwrap()
+            .lines()
+            .find_map(|l| l.strip_prefix("rchar: ").map(|n| n.parse::<u64>().unwrap()))
+            .unwrap()
+    };
+    let f = Fixture::new("claude", 1);
+    let mut tool = f.tool(true);
+    tool["message"]["content"][0]["content"] = json!("R".repeat(6 * 1024 * 1024));
+    f.append(&tool);
+    let prose = Limits {
+        kinds: vec![Kind::User, Kind::Assistant],
+        ..limits(40)
+    };
+    let r = f.reader();
+    let tail = r.tail(&prose).unwrap();
+    let initial = counter();
+    let idle = r.forwards(&tail.end, &prose).unwrap();
+    let idle_bytes = counter() - initial;
+    assert!(idle.items.is_empty());
+    println!(
+        "KERNEL_IDLE_BYTES {idle_bytes} reported={}",
+        idle.bytes_read
+    );
+    assert!(
+        idle_bytes < 32_000,
+        "idle poll reread large preceding record: {idle_bytes}"
+    );
+    tool["message"]["content"][0]["content"] = json!("V".repeat(3 * 1024 * 1024));
+    f.append(&tool);
+    f.append(&f.message(9, "after"));
+    let initial = counter();
+    let followed = r.forwards(&tail.end, &prose).unwrap();
+    let follow_bytes = counter() - initial;
+    println!(
+        "KERNEL_FOLLOW_BYTES {follow_bytes} reported={}",
+        followed.bytes_read
+    );
+    assert_eq!(texts(&followed), ["after"]);
+    assert!(
+        follow_bytes < 7 * 1024 * 1024,
+        "follow reread preceding record"
+    );
+}
+
+// Source failures remain machine-readable; disappearance differs from a
+// truncated record at an internal part gap. Known oversize scans give a hint.
+#[test]
+fn page_failures_are_typed_and_known_scan_budget_has_needed_size() {
+    let f = Fixture::new("claude", 1);
+    let r = f.reader();
+    fs::remove_file(&f.path).unwrap();
+    let error = r.tail(&limits(1)).unwrap_err();
+    assert!(
+        matches!(
+            error.downcast_ref::<Refusal>(),
+            Some(Refusal::Replaced { .. })
+        ),
+        "{error:?}"
+    );
+    let f = Fixture::new("claude", 0);
+    let mut message = f.message(1, "a");
+    message["message"]["content"] =
+        json!([{"type":"text","text":"a"},{"type":"text","text":"longer text"}]);
+    f.append(&message);
+    let r = f.reader();
+    let tail = r.tail(&limits(1)).unwrap();
+    OpenOptions::new()
+        .write(true)
+        .open(&f.path)
+        .unwrap()
+        .set_len(fs::metadata(&f.path).unwrap().len() - 10)
+        .unwrap();
+    let error = r.forwards(&tail.start, &limits(1)).unwrap_err();
+    assert!(
+        matches!(
+            error.downcast_ref::<Refusal>(),
+            Some(Refusal::Changed { .. })
+        ),
+        "{error:?}"
+    );
+    let db = Database::new(1);
+    db.sql(&Database::insert(
+        1,
+        &json!({"type":"text","text":"x".repeat(2000)}),
+    ));
+    let error = db
+        .reader()
+        .tail(&Limits {
+            scan_bytes: 1000,
+            ..limits(1)
+        })
+        .unwrap_err();
+    let wire = serde_json::to_value(error.downcast_ref::<Refusal>().unwrap()).unwrap();
+    assert_eq!(wire["kind"], "scan-budget");
+    assert!(wire["needed"].as_u64().unwrap() > 2000);
+    let enough = db
+        .reader()
+        .tail(&Limits {
+            scan_bytes: wire["needed"].as_u64().unwrap() as usize,
+            ..limits(1)
+        })
+        .unwrap();
+    assert_eq!(enough.items[0].text.len(), 2000);
+    let r = db.reader();
+    db.sql("DROP TABLE part;");
+    let error = r.tail(&limits(1)).unwrap_err();
+    assert!(
+        matches!(
+            error.downcast_ref::<Refusal>(),
+            Some(Refusal::Unavailable { .. })
+        ),
+        "{error:?}"
+    );
+}
+
+// Tools views can show shared status, labels, metadata, caller and search
+// arguments without consulting backend-specific native JSON paths.
+#[test]
+fn normalized_tools_expose_shared_status_and_view_fields() {
+    for harness in ["claude", "codex", "pi"] {
+        let f = Fixture::new(harness, 0);
+        f.append(&f.tool(false));
+        let call = f.reader().tail(&limits(1)).unwrap();
+        assert_eq!(
+            serde_json::to_value(&call.items[0]).unwrap()["tool"]["status"],
+            "running"
+        );
+        let mut result = f.tool(true);
+        match harness {
+            "claude" => result["message"]["content"][0]["is_error"] = json!(true),
+            "pi" => {
+                result["message"]["isError"] = json!(true);
+                result["message"]["details"] = json!({"exitCode":1});
+            }
+            _ => result["payload"]["status"] = json!("failed"),
+        }
+        f.append(&result);
+        let failed = f.reader().tail(&limits(1)).unwrap();
+        assert_eq!(
+            serde_json::to_value(&failed.items[0]).unwrap()["tool"]["status"],
+            "failed",
+            "{harness}"
+        );
+        if harness == "pi" {
+            assert_eq!(
+                serde_json::to_value(&failed.items[0]).unwrap()["tool"]["metadata"]["exitCode"],
+                1
+            );
+        }
+        let mut completed = f.tool(true);
+        if harness == "codex" {
+            completed["payload"]["status"] = json!("completed");
+        }
+        f.append(&completed);
+        assert_eq!(
+            serde_json::to_value(&f.reader().tail(&limits(1)).unwrap().items[0]).unwrap()["tool"]
+                ["status"],
+            "completed"
+        );
+    }
+    let f = Fixture::new("codex", 0);
+    f.append(&json!({"type":"response_item","payload":{"type":"web_search_call","id":"search","status":"completed","action":{"type":"search","query":"fixture query","queries":["fixture query"]}}}));
+    let item = &f.reader().tail(&limits(1)).unwrap().items[0];
+    let wire = serde_json::to_value(item).unwrap();
+    assert_eq!(wire["tool"]["arguments"]["query"], "fixture query");
+    assert_eq!(wire["tool"]["status"], "completed");
+    let f = Fixture::new("claude", 0);
+    let mut call = f.tool(false);
+    call["message"]["content"][0]["caller"] = json!({"type":"direct"});
+    f.append(&call);
+    assert_eq!(
+        serde_json::to_value(&f.reader().tail(&limits(1)).unwrap().items[0]).unwrap()["tool"]
+            ["caller"]["type"],
+        "direct"
+    );
+    let db = Database::new(0);
+    db.sql(&Database::insert(0,&json!({"type":"tool","tool":"bash","callID":"c","state":{"status":"error","title":"Fixture tool","metadata":{"exit":1},"input":{},"error":"failed"}})));
+    let page = db.reader().tail(&limits(2)).unwrap();
+    let wire = serde_json::to_value(&page.items[0]).unwrap();
+    assert_eq!(wire["tool"]["status"], "failed");
+    assert_eq!(wire["tool"]["title"], "Fixture tool");
+    assert_eq!(wire["tool"]["metadata"]["exit"], 1);
+    assert_eq!(wire["content"]["state"]["status"], "error");
+    assert!(page.items[0].budget_bytes().unwrap() < 2000);
+}
+
+// New JSON kinds are retained as unknown, while a typo in a filter is invalid.
+#[test]
+fn json_readers_accept_future_kinds_and_stops_without_accepting_filter_typos() {
+    assert_eq!(
+        serde_json::from_str::<Kind>("\"future-kind\"").unwrap(),
+        Kind::Unknown
+    );
+    assert!("future-kind".parse::<Kind>().is_err());
+    assert!(matches!(
+        serde_json::from_str::<Stop>("\"future-stop\"").unwrap(),
+        Stop::Unknown
+    ));
 }

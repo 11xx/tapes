@@ -14419,3 +14419,62 @@ fn locate_reports_outcomes_and_refuses_only_an_unreadable_input() {
     );
     assert_eq!(output.status.code(), Some(1), "{output:?}");
 }
+
+/// Busy database reads retain their retryable exit and a JSON unavailable kind.
+#[test]
+fn read_json_busy_database_is_unavailable_and_retryable() {
+    let binaries = sqlite3_binaries();
+    if binaries.is_empty() {
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let _program = opencode_program(root.path(), "opencode");
+    let id = "ses_busy_recording_fixture";
+    create_opencode_store(&root.path().join("home"));
+    create_opencode_database(root.path(), id, "");
+    use_sqlite3(root.path(), &binaries[0]);
+    let database = root.path().join("home/.local/share/opencode/opencode.db");
+    struct Lock(std::process::Child);
+    impl Drop for Lock {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let mut lock = Lock(
+        Command::new(&binaries[0])
+            .arg(&database)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    lock.0
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(b"BEGIN EXCLUSIVE;\nSELECT 'ready';\n")
+        .unwrap();
+    let mut ready = String::new();
+    std::io::BufRead::read_line(
+        &mut std::io::BufReader::new(lock.0.stdout.take().unwrap()),
+        &mut ready,
+    )
+    .unwrap();
+    assert_eq!(ready.trim(), "ready");
+    let output = tapes()
+        .args(["read", id, "--harness", "opencode", "--json"])
+        .env("HOME", root.path().join("home"))
+        .env("PATH", root.path())
+        .env_remove("XDG_DATA_HOME")
+        .output()
+        .unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some(75),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let error: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(error["refusal"]["kind"], "unavailable");
+}

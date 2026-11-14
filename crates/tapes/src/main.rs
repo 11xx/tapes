@@ -1435,8 +1435,13 @@ enum Command {
     /// Default: tail. Positions are gaps: --after starts at that gap, --before
     /// ends there. Keep end to follow appends; keep start to load older items.
     /// Claude is record-local; Codex retains runtime mirrors; Pi includes all
-    /// branches. OpenCode requires the stable database and rejects changed parts.
-    /// Supplied exports and remote reads have no recording positions.
+    /// branches. Item identity is start; native_id is a record/entry ID shared
+    /// by its parts. message_id groups native messages. parent_id links Claude/Pi
+    /// entries or OpenCode parent messages; Codex omits it. Complete native
+    /// content is always present. Tool status uses running/completed/failed/
+    /// never-finished/unknown; title/metadata/caller and search arguments are
+    /// normalized fields. OpenCode requires the stable database and rejects
+    /// changed parts. Supplied exports and remote reads have no positions.
     Read {
         /// Native session ID or unambiguous prefix. Resolve once, then retain
         /// the returned positions. Discovery uses bounded identity openings.
@@ -1452,7 +1457,7 @@ enum Command {
         /// Read a Claude child separately, qualified by this parent session.
         #[arg(long)]
         reference: Option<String>,
-        #[arg(long, conflicts_with = "after")]
+        #[arg(long)]
         before: Option<String>,
         #[arg(long)]
         after: Option<String>,
@@ -1467,10 +1472,17 @@ enum Command {
         /// Source scan budget (1B..64MiB); independent of output bytes.
         /// A scan stop can underfill filtered pages: resume from start/end.
         /// Files also read a <=1MiB identity header, reread the source window
-        /// for verification, and hash preceding-record anchors within the scan
-        /// budget. OpenCode parts are bounded by min(read-bytes,4MiB), under its
-        /// 8MiB transport. Unfinished parts are pending; completed parts follow
-        /// once. SQLite session scan/sort work is not bounded by response bytes.
+        /// for verification, and hash at most the preceding record's last 4KiB
+        /// plus its newline. OpenCode parts are bounded by min(read-bytes,4MiB),
+        /// under its 8MiB transport. Only unfinished parts in the newest message
+        /// without completion/error are pending; older ones are never-finished.
+        /// stop=pending means wait for a source change on either backend:
+        /// pending_bytes describes file suffixes, pending names database parts.
+        /// SQLite session scan/sort work is not bounded by response bytes.
+        /// Refusals include changed/replaced, unavailable and scan-budget
+        /// (needed when known); busy stores retain exit 75. JSON direction
+        /// conflicts use tapes-recording-error/1. Unknown stops permit consuming
+        /// items and saving bounds: continue on progress, otherwise wait.
         #[arg(long, default_value_t = ByteSize::new(8 * 1024 * 1024))]
         read_bytes: ByteSize,
         /// Wanted item kinds, comma-separated; empty selects every kind.
@@ -3556,6 +3568,9 @@ fn dispatch(cli: Cli) -> Result<()> {
             use agent_tapes_core::recording::{self, Direction, Limits, Position, Recording};
             use agent_tapes_core::NativeStore;
             let result = (|| -> Result<recording::Page> {
+                if before.is_some() && after.is_some() {
+                    return Err(anyhow!("--before conflicts with --after"));
+                }
                 let before = before.as_deref().map(Position::parse).transpose()?;
                 let after = after.as_deref().map(Position::parse).transpose()?;
                 let direction = match (&before, &after) {

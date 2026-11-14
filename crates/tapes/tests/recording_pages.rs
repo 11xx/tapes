@@ -157,10 +157,43 @@ fn read_validates_before_discovery_and_serializes_typed_refusals() {
             .unwrap()
             .is_empty()
     );
-    // Both option names are rejected before dispatch, independently of stores.
+    // Conflicting directions have the same JSON error surface as other inputs.
     let both = Command::new(binary)
-        .args(["read", "absent", "--before", "x", "--after", "y"])
+        .args(["read", "absent", "--before", "x", "--after", "y", "--json"])
         .output()
         .unwrap();
     assert!(!both.status.success());
+    let conflict: Value = serde_json::from_slice(&both.stdout).unwrap();
+    assert_eq!(conflict["refusal"]["kind"], "invalid-input");
+    assert!(conflict["refusal"]["reason"]
+        .as_str()
+        .unwrap()
+        .contains("conflicts"));
+}
+
+// An unreadable selected store is unavailable, distinct from a malformed input.
+#[cfg(unix)]
+#[test]
+fn read_json_names_unavailable_stores() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = tempfile::tempdir().unwrap();
+    let id = "00000000-0000-0000-0000-000000000001";
+    let file = root.path().join(format!("{id}.jsonl"));
+    fs::write(&file,format!("{}\n",json!({"type":"assistant","sessionId":id,"message":{"role":"assistant","content":[{"type":"text","text":"fixture"}]}}))).unwrap();
+    fs::set_permissions(&file, fs::Permissions::from_mode(0)).unwrap();
+    if fs::File::open(&file).is_ok() {
+        eprintln!("skipped: current user bypasses mode 000");
+        return;
+    }
+    let out = Command::new(env!("CARGO_BIN_EXE_tapes"))
+        .args(["read", id, "--native-store", "claude", "--native-root"])
+        .arg(root.path())
+        .arg("--native-file")
+        .arg(&file)
+        .arg("--json")
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    let error: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(error["refusal"]["kind"], "unavailable");
 }

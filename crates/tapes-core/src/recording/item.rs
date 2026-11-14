@@ -3,7 +3,7 @@ use std::ops::Deref;
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
-use serde::{ser::SerializeMap, Serialize, Serializer};
+use serde::{ser::SerializeMap, Deserialize, Serialize, Serializer};
 use serde_json::Value;
 
 use super::{Kind, Position};
@@ -40,11 +40,45 @@ impl Serialize for Payload {
     }
 }
 
-/// Complete normalized tool arguments and results.
+/// Normalized execution state; native status words remain in content.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Status {
+    Running,
+    Completed,
+    Failed,
+    NeverFinished,
+    #[serde(other)]
+    Unknown,
+}
+impl Status {
+    fn native(word: Option<&str>, failed: bool, kind: Kind) -> Self {
+        if failed {
+            return Self::Failed;
+        }
+        match word {
+            Some("completed" | "success") => Self::Completed,
+            Some("error" | "failed" | "interrupted" | "cancelled") => Self::Failed,
+            Some("pending" | "running" | "in_progress") => Self::Running,
+            Some(_) => Self::Unknown,
+            None if kind == Kind::ToolResult => Self::Completed,
+            None => Self::Running,
+        }
+    }
+}
+
+/// Complete normalized tool arguments, results and view metadata.
 #[derive(Clone, Debug, Serialize)]
 pub struct Tool {
     pub name: Option<String>,
-    pub status: Option<String>,
+    pub status: Option<Status>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<Payload>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<Payload>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub caller: Option<Payload>,
     pub arguments: Option<Payload>,
     pub output: Option<Payload>,
 }
@@ -61,14 +95,14 @@ impl Tool {
         let (name, status, call_id, arguments, output) = match harness {
             "claude" => (
                 string(content, &["name"]),
-                (content["is_error"] == true).then(|| "error".to_owned()),
+                None,
                 string(content, &["id", "tool_use_id"]),
                 Payload::field(content, &["/input"]),
                 Payload::field(content, &["/content"]),
             ),
             "pi" => (
                 string(content, &["name", "toolName"]),
-                (content["isError"] == true).then(|| "error".to_owned()),
+                None,
                 string(content, &["id", "toolCallId"]),
                 Payload::field(content, &["/arguments"]),
                 Payload::field(content, &["/content"]),
@@ -104,7 +138,7 @@ impl Tool {
                 }),
                 string(content, &["status"]),
                 string(content, &["call_id", "id"]),
-                Payload::field(content, &["/arguments", "/input"]),
+                Payload::field(content, &["/arguments", "/input", "/action"]),
                 Payload::field(content, &["/output"]),
             ),
             _ => (None, None, None, None, None),
@@ -122,10 +156,28 @@ impl Tool {
         } else {
             arguments
         };
+        let status = Some(Status::native(
+            status.as_deref(),
+            content["is_error"] == true || content["isError"] == true,
+            kind,
+        ));
+        let (title, metadata, caller) = match harness {
+            "opencode" => (
+                Payload::field(content, &["/state/title"]),
+                Payload::field(content, &["/state/metadata"]),
+                None,
+            ),
+            "pi" => (None, Payload::field(content, &["/details"]), None),
+            "claude" => (None, None, Payload::field(content, &["/caller"])),
+            _ => (None, None, None),
+        };
         (
             Self {
                 name,
                 status,
+                title,
+                metadata,
+                caller,
                 arguments,
                 output,
             },
@@ -136,6 +188,7 @@ impl Tool {
 
 #[derive(Clone, Debug, Serialize)]
 pub struct Item {
+    /// Stable item identity within this recording.
     pub start: Position,
     pub end: Position,
     pub kind: Kind,
@@ -144,6 +197,7 @@ pub struct Item {
     pub text: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ts: Option<DateTime<Utc>>,
+    /// Native record/entry ID, shared by its parts; not an item identity.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub native_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -156,14 +210,21 @@ pub struct Item {
     pub call_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool: Option<Tool>,
-    /// Previous entry in the recorded conversation tree.
+    /// Recorded text/reasoning completion state, when the source supplies it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<Status>,
+    /// Claude/Pi: previous native tree entry. OpenCode: the message's parent
+    /// message (usually the user prompt). Codex does not record this link.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parent_id: Option<String>,
-    /// Native identity of the message containing this part.
+    /// Shared containing-message ID: Claude assistant message.id/user UUID,
+    /// Codex message payload.id (not reasoning/tools), Pi entry ID, OpenCode
+    /// message ID.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub representation: Option<String>,
+    /// Complete native part, always retained.
     pub content: Arc<Value>,
 }
 impl Item {
@@ -187,6 +248,7 @@ impl Item {
             origin: turn.origin,
             call_id: None,
             tool: None,
+            status: None,
             parent_id: None,
             message_id: None,
             representation: None,
@@ -194,7 +256,7 @@ impl Item {
         }
     }
     /// Count native content once plus serialized metadata. Normalized text and
-    /// tool argument/output projections share that payload budget. The page
+    /// tool field projections share that payload budget. The page
     /// envelope and duplicate projections in wire JSON are additional bytes.
     pub fn budget_bytes(&self) -> anyhow::Result<usize> {
         let mut writer = Count(0);
@@ -245,11 +307,14 @@ impl Serialize for Budget<'_> {
         if let Some(origin) = &i.origin {
             map.serialize_entry("origin", origin)?;
         }
+        if let Some(status) = &i.status {
+            map.serialize_entry("status", status)?;
+        }
         if let Some(tool) = &i.tool {
             #[derive(Serialize)]
             struct Header<'a> {
                 name: &'a Option<String>,
-                status: &'a Option<String>,
+                status: &'a Option<Status>,
             }
             map.serialize_entry(
                 "tool",
