@@ -180,7 +180,7 @@ fn read_json_names_unavailable_stores() {
     let id = "00000000-0000-0000-0000-000000000001";
     let file = root.path().join(format!("{id}.jsonl"));
     fs::write(&file,format!("{}\n",json!({"type":"assistant","sessionId":id,"message":{"role":"assistant","content":[{"type":"text","text":"fixture"}]}}))).unwrap();
-    fs::set_permissions(&file, fs::Permissions::from_mode(0)).unwrap();
+    fs::set_permissions(&file, fs::Permissions::from_mode(0o0)).unwrap();
     if fs::File::open(&file).is_ok() {
         eprintln!("skipped: current user bypasses mode 000");
         return;
