@@ -58,40 +58,57 @@ tapes read <id> --before '<start>' --kind user,assistant --json
 tapes read <id> --after '<end>' --kind user,assistant --json
 ```
 
-`tapes-recording-page/1` carries typed items, complete native content and tool
-arguments/results, native IDs and timestamps, and opaque `start`/`end` gap
-positions. Store positions verbatim across processes. `--after` includes the
-item at the gap; `--before` excludes it. Keep `end` to follow appends. Claude
-children are separate recordings selected with `--reference <child>`; parent
-and fork links accompany pages.
+`tapes-recording-page/1` carries flat typed items: `start`, `end`, `kind`,
+`role`, complete normalized `text` for messages/reasoning, `ts`, native and
+request IDs, recorded model/effort and origin, complete `tool` fields, native
+`content`, and parent/message links. Store opaque gap positions verbatim across
+processes. `--after` includes the item at the gap; `--before` excludes it. Keep
+`end` to follow appends. Claude children use `parent::agent`, page separately
+with `--reference`, and link their parent. `parent_id` names the preceding
+conversation-tree entry; `message_id` names the containing message.
 
-`--bytes` bounds the sum of serialized items; the response envelope is extra.
-An oversized item refuses without clipping. `--read-bytes` bounds source
-scanning (default 8MiB, maximum 64MiB), independently of output size. A filter
-fills the item budget unless source, output or scan bounds stop it; `stop`
-names which, and `start`/`end` retain progress. File reads also inspect a
-bounded identity header (at most 1MiB), verify the source window once, and
-read 64-byte position anchors. Incomplete final lines wait for their newline.
-Positions check local source evidence; they do not pin untouched history.
+`--bytes` charges native `content` once plus serialized item metadata, measured
+with a counting writer. Normalized text and tool argument/output projections
+share that payload budget; their duplicate wire representations and the page
+envelope are additional bytes. An oversized first item refuses without clipping
+and supplies `needed`, `start` and `end`, so a caller can enlarge the budget or
+skip it. `--read-bytes` bounds source scanning (default 8MiB, maximum 64MiB).
+A filter fills the item budget until a source, output or scan bound stops it.
+`stop` names the boundary; `start`/`end` retain progress. File reads add a bounded
+identity header (at most 1MiB) and verify the source window once. Positions bind
+the inode and the whole preceding record's digest; internal gaps also bind their
+record. Anchor records consume scan budget. Incomplete final lines wait for a
+newline. Positions do not pin untouched history.
 
-Claude normalizes each record independently. Codex runtime tool mirrors remain
-separate occurrences labelled `runtime`. Pi pages the physical tree log,
-including abandoned branches, and exposes `parent_id`; its active branch needs
-a whole-recording ancestry pass. OpenCode's stable database pages native parts
-by `time_created,id` without the transcript reader's text/tool/message caps.
-A changed positioned part refuses and requires reopening at the tail. Its
-transport limits one native part to 4MiB; SQL response bytes are measured, but
-SQLite's internal scan/sort work depends on its indexes. The OpenCode API and
-supplied JSON/ZIP exports have no supported recording positions.
+Claude normalizes each record independently. Codex messages page by content
+part; runtime tool mirrors remain separate occurrences labelled `runtime`.
+Pi pages the physical tree log, including abandoned branches, with `parent_id`;
+its active branch needs a whole-recording ancestry pass. OpenCode's stable
+database pages parts by `time_created,id`. Only `text` parts are prose;
+step/patch metadata is `unknown`. The first unfinished assistant text/reasoning
+or pending/running tool stops the stream (`stop: pending`, `pending` names the
+part). Tail pages end below that frontier. Positions bind completed parts, so
+ordinary completion can be followed once. A changed completed part refuses.
 
-In `agent-tapes-core`, `recording::Recording::resolve` selects a native
-recording using discovery's bounded identity openings. `from_native` reuses
-an existing discovery result; `from_session` reuses a resolved file session.
-`tail`, `before` and `forwards` take `Limits { items, bytes, scan_bytes, kinds }`
-and return `Page`. `Item::tool` holds complete normalized tool fields;
-`Item::content` holds the native part, including fields whose normalized
-content descriptors apply preview bounds. Readers retain no global state and
-never write to a recording or store.
+An OpenCode native part is bounded by the smaller of `--read-bytes` and 4MiB;
+the transport cap is 8MiB. Each page captures one batch and verifies it in one
+query: at most three SQLite processes for a tail and four for a positioned
+read, excluding discovery. The native part indexes are on `session_id` and
+`message_id,id`; SQLite scans/sorts a session for ordered pages. Response bytes
+are bounded, while database engine work scales with the session. The OpenCode
+API and supplied JSON/ZIP exports have no supported recording positions.
+
+In `agent-tapes-core`, `recording::Recording::resolve` uses discovery's bounded
+identity openings. `from_native` reuses a discovery result; `from_session`
+reuses a file session. `tail`, `before` and `forwards` take
+`Limits { items, bytes, scan_bytes, kinds }`. Public `Refusal` values identify
+oversized items, scan exhaustion, changed content, replaced recordings and
+unsupported stores. CLI JSON errors use `tapes-recording-error/1` with the same
+`refusal.kind` values and a nonzero exit. `Kind`, `Stop` and `Refusal` are
+non-exhaustive. JSON readers treat unknown kinds as non-prose, retain their
+native content, and stop on an unknown stop/refusal rather than assuming
+completion or advancing a cursor. Readers retain no global state and never
+write to a recording or store.
 
 ## Look across sessions
 

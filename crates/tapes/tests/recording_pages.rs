@@ -17,11 +17,16 @@ fn read_positions_cross_processes_and_follow_growth() {
         };
         let file = root.path().join(filename);
         let message = |n| {
+            let parts = if harness == "codex" {
+                json!([{"type":"output_text","text":format!("message-{n}-a")},{"type":"output_text","text":format!("message-{n}-b")}])
+            } else {
+                json!([{"type":"text","text":format!("message-{n}-a")},{"type":"thinking","thinking":"private"},{"type":"text","text":format!("message-{n}-b")}])
+            };
             match harness {
-            "claude" => json!({"type":"assistant","sessionId":id,"uuid":format!("m{n}"),"message":{"role":"assistant","content":[{"type":"text","text":format!("message-{n}")}]}}),
-            "codex" => json!({"type":"response_item","payload":{"type":"message","id":format!("m{n}"),"role":"assistant","content":[{"type":"output_text","text":format!("message-{n}")}]}}),
-            _ => json!({"type":"message","id":format!("m{n}"),"message":{"role":"assistant","content":[{"type":"text","text":format!("message-{n}")}]}}),
-        }.to_string()
+                "claude"=>json!({"type":"assistant","sessionId":id,"uuid":format!("m{n}"),"message":{"role":"assistant","content":parts}}),
+                "codex"=>json!({"type":"response_item","payload":{"type":"message","id":format!("m{n}"),"role":"assistant","content":parts}}),
+                _=>json!({"type":"message","id":format!("m{n}"),"message":{"role":"assistant","content":parts}}),
+            }.to_string()
         };
         let header = match harness {
             "codex" => format!("{}\n", json!({"type":"session_meta","payload":{"id":id}})),
@@ -42,7 +47,7 @@ fn read_positions_cross_processes_and_follow_growth() {
                 .arg(root.path())
                 .arg("--native-file")
                 .arg(&file)
-                .args(["--items", "2", "--json"])
+                .args(["--items", "3", "--kind", "assistant", "--json"])
                 .args(extra)
                 .output()
                 .unwrap();
@@ -56,7 +61,7 @@ fn read_positions_cross_processes_and_follow_growth() {
         let tail = read(&[]);
         assert_eq!(tail["schema"], "tapes-recording-page/1");
         let before = read(&["--before", tail["start"].as_str().unwrap()]);
-        assert_eq!(before["items"][0]["turn"]["text"], "message-4");
+        assert_eq!(before["items"][0]["text"], "message-5-a");
         writeln!(
             OpenOptions::new().append(true).open(&file).unwrap(),
             "{}",
@@ -66,8 +71,9 @@ fn read_positions_cross_processes_and_follow_growth() {
         let again = read(&["--after", tail["start"].as_str().unwrap()]);
         assert_eq!(again["items"], tail["items"]);
         let appended = read(&["--after", tail["end"].as_str().unwrap()]);
-        assert_eq!(appended["items"][0]["turn"]["text"], "message-8");
+        assert_eq!(appended["items"][0]["text"], "message-8-a");
         let older_forward = read(&["--after", before["start"].as_str().unwrap()]);
         assert_eq!(older_forward["items"], before["items"]);
     }
 }
+

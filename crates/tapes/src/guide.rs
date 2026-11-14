@@ -26,32 +26,48 @@ PAGE ONE RECORDING
   tapes read <id> --before '<start>' --kind user,assistant --json
   tapes read <id> --after '<end>' --kind user,assistant --json
 
-  A recording page is tapes-recording-page/1: typed items, native IDs and
-  timestamps, complete native parts and tool fields, parent/fork links, and
-  opaque start/end gap positions. Store positions verbatim across processes.
-  --after starts at the gap; --before ends there. Keep end to follow appends,
-  start to load older items. A Claude child is its own --reference recording.
+  tapes-recording-page/1 has flat items with start/end, kind, role, text, ts,
+  native/request IDs, recorded model/effort and origin, full tool fields and
+  native content. parent_id is the preceding conversation-tree entry;
+  message_id is the containing message. Store positions verbatim across
+  processes. --after starts at the gap; --before ends there. Keep end to follow
+  appends, start for older items. A Claude child is a separate --reference
+  recording labelled parent::agent, with its parent linked.
 
-  --bytes caps serialized items, excluding the response envelope. Oversized
-  items refuse without clipping. --read-bytes caps source scanning, separately
-  from output: default 8MiB, maximum 64MiB. A filter fills the item budget until
-  output, source or scan bounds stop it; stop names which. Resume at start/end
-  after a scan stop. File reads add a <=1MiB identity opening, one verification
-  reread of the scanned window, and 64-byte position anchors. Partial final
-  lines wait for their newline. Positions validate local evidence, not an
-  untouched prefix; a captured copy preserves history through rewrites.
+  --bytes counts native content once plus serialized item metadata, through a
+  counting writer. Normalized text and tool projections share the payload
+  budget; duplicate wire representations and the page envelope are additional.
+  Oversized items refuse with needed, start and end: enlarge the budget or
+  skip to end. --read-bytes caps source scanning: default 8MiB, maximum 64MiB.
+  stop names the item/output/scan/source boundary. File reads add a <=1MiB
+  identity header and one verification reread. Positions bind the inode and
+  preceding record digest; internal positions also bind their record. Anchor
+  records consume scan budget. Partial final lines wait for their newline.
+  Untouched history is not pinned; a captured copy preserves it through edits.
 
-  Claude records decode independently. Codex runtime tool mirrors remain
-  distinct recorded occurrences labelled runtime. Pi exposes its physical tree
-  log, abandoned branches included, with parent_id; an active-branch projection
-  requires an ancestry pass over the recording. OpenCode database parts page
-  by time_created,id, with caller budgets instead of transcript field/count
-  caps. A changed positioned part refuses: reopen at the tail to refresh it.
-  Its 8MiB transport caps native parts at 4MiB. bytes_read counts SQL response
-  bytes; SQLite internal scan/sort costs depend on its indexes. OpenCode API
-  messages and supplied JSON/ZIP exports have no supported recording positions.
-  Discovering an ID/prefix has its own bounded opening/catalog cost; retaining
-  the library Recording descriptor avoids repeating discovery between pages.
+  Claude records decode independently. Codex messages page by native content
+  part; runtime mirrors remain distinct occurrences labelled runtime. Pi
+  exposes its physical tree log, abandoned branches included, with parent_id;
+  active-branch selection needs a whole-recording ancestry pass.
+
+  OpenCode database parts page by time_created,id. Only text parts are prose;
+  step/patch parts are unknown. Unfinished assistant text/reasoning and tools
+  in pending/running state stop the stream before that part. stop is pending
+  and pending names the part. Tail ends below it; no position binds unfinished
+  content. Completed parts follow once; changed completed parts refuse.
+  Each part is bounded by min(--read-bytes,4MiB), under an 8MiB transport cap.
+  A tail uses at most three SQLite processes, a positioned page four, excluding
+  discovery: capture/verify batches plus constant metadata/cursor queries.
+  Native indexes cover session_id and message_id,id. SQLite scans/sorts the
+  session for ordered pages; response bounds do not bound engine work.
+  OpenCode API and supplied JSON/ZIP exports have no recording positions.
+
+  Refusals are public library values. CLI JSON uses tapes-recording-error/1,
+  refusal.kind and a nonzero exit for oversized, scan-budget, changed,
+  replaced, unsupported and invalid-position cases. Rust Kind/Stop/Refusal
+  are non-exhaustive. JSON readers retain unknown kinds as non-prose and stop
+  on unfamiliar stop/refusal values without advancing or assuming completion.
+  Validate kinds, positions and budgets before discovering a session.
 
 SELECT A MATERIALIZED NATIVE STORE
   tapes list --native-store claude --native-root archive/claude --limit 5

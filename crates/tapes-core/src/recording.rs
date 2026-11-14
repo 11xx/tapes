@@ -3,8 +3,8 @@
 //! Positions are gaps: `forwards(page.start)` includes the page's first item,
 //! `before(page.start)` excludes it. Keep `page.end` to follow appends. Positions
 //! contain no transcript text and survive process restarts and append-only growth.
-//! File positions validate the inode and 64 bytes before their offset; internal
-//! record positions also validate that record. Edits elsewhere are not pinned.
+//! File positions validate the inode and preceding record digest; internal
+//! record positions also validate their record. Edits elsewhere are not pinned.
 //! Use a captured recording when the whole history must remain immutable.
 //!
 //! Claude records normalize independently. Codex runtime mirrors remain separate
@@ -12,11 +12,12 @@
 //! abandoned branches, with `parent_id`. Neither view claims the prefix-dependent
 //! canonical projection of `show`. Supplied JSON/ZIP exports are unsupported.
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::fs::{File, Metadata};
 use std::io::{Read, Seek, SeekFrom};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use agent_tapes_discovery::{Discovery, NativeSession, NativeStore};
 use anyhow::{bail, ensure, Context, Result};
@@ -25,7 +26,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{value::RawValue, Value};
 use sha2::{Digest, Sha256};
 
-use crate::model::{Session, Turn, TurnKind};
+use crate::model::{Session, TurnKind};
 
 /// Native stores configured in the environment, for callers selecting a recording.
 pub fn native_stores() -> Vec<NativeStore> {
@@ -34,11 +35,20 @@ pub fn native_stores() -> Vec<NativeStore> {
 
 pub const PAGE_SCHEMA: &str = "tapes-recording-page/1";
 /// Maximum source bytes retained by one file page. Verification rereads these
-/// bytes once; position anchors add at most 128 bytes per returned boundary.
+/// bytes once. Preceding-record anchors consume the same source scan budget.
 pub const MAX_SCAN_BYTES: usize = 64 * 1024 * 1024;
 const BLOCK: usize = 8192;
 const MAX_POSITION_BYTES: usize = 4096;
 
+/// Consumers retain a wildcard arm when matching item kinds.
+/// ```compile_fail
+/// use agent_tapes_core::recording::Kind;
+/// fn closed(kind: Kind) { match kind {
+/// Kind::User | Kind::Assistant | Kind::Reasoning | Kind::ToolCall |
+/// Kind::ToolResult | Kind::Control | Kind::Ambient | Kind::Notice | Kind::Unknown => ()
+/// } }
+/// ```
+#[non_exhaustive]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Kind {
@@ -63,8 +73,9 @@ impl std::str::FromStr for Kind {
 #[derive(Clone, Debug)]
 pub struct Limits {
     pub items: usize,
-    /// Maximum sum of serialized Item sizes. Envelope/positions outside items
-    /// are additional. An individually oversized item refuses, without clipping.
+    /// Native content once plus serialized metadata, measured by a counting
+    /// writer. Normalized text/tool projections share that payload budget;
+    /// duplicate wire projections and the page envelope are additional.
     pub bytes: usize,
     /// Maximum source bytes inspected, independent of the returned item budget.
     /// A filter can reach this before filling a page; resume from the boundary.
@@ -86,7 +97,7 @@ impl Default for Limits {
 }
 
 impl Limits {
-    pub(crate) fn validate(&self) -> Result<()> {
+    pub fn validate(&self) -> Result<()> {
         ensure!(
             self.items > 0 && self.bytes > 0,
             "item and byte budgets must be positive"
@@ -111,10 +122,6 @@ impl Position {
         &self.0
     }
     pub fn parse(value: &str) -> Result<Self> {
-        ensure!(
-            value.len() <= MAX_POSITION_BYTES,
-            "oversized recording position"
-        );
         let position = Self(value.to_owned());
         let _: Cursor = position.decode()?;
         Ok(position)
@@ -123,6 +130,14 @@ impl Position {
         Ok(Self(URL_SAFE_NO_PAD.encode(serde_json::to_vec(cursor)?)))
     }
     pub(crate) fn decode(&self) -> Result<Cursor> {
+        self.decode_checked().map_err(|error| {
+            Refusal::InvalidPosition {
+                reason: error.to_string(),
+            }
+            .into()
+        })
+    }
+    fn decode_checked(&self) -> Result<Cursor> {
         ensure!(
             self.0.len() <= MAX_POSITION_BYTES,
             "oversized recording position"
@@ -147,88 +162,72 @@ pub enum Direction<'a> {
     Forwards(&'a Position),
 }
 
-/// Complete tool fields, independent of legacy event preview limits.
-#[derive(Clone, Debug, Serialize)]
-pub struct Tool {
-    pub name: Option<String>,
-    pub call_id: Option<String>,
-    pub status: Option<String>,
-    pub arguments: Option<Value>,
-    pub output: Option<Value>,
-}
+mod item;
+pub use item::{Item, Payload, Tool};
 
-pub(crate) fn complete_tool(
-    turn: &Turn,
-    content: &Value,
-    harness: &str,
-    kind: Kind,
-) -> Option<Tool> {
-    let event = turn.tool.as_ref()?;
-    let field = |object: &Value, keys: &[&str]| {
-        keys.iter()
-            .find_map(|key| object.get(*key).filter(|v| !v.is_null()).cloned())
-    };
-    let (arguments, output) = match harness {
-        "claude" => (field(content, &["input"]), field(content, &["content"])),
-        "pi" => (field(content, &["arguments"]), field(content, &["content"])),
-        "opencode" => (
-            field(&content["state"], &["input"]),
-            field(
-                &content["state"],
-                if event.status.as_deref() == Some("error") {
-                    &["error", "output", "content"]
-                } else {
-                    &["content", "output", "error"]
-                },
+/// Structured reader refusals, also serialized by the CLI JSON error response.
+#[non_exhaustive]
+#[derive(Clone, Debug, Serialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum Refusal {
+    Oversized {
+        needed: usize,
+        start: Position,
+        end: Position,
+    },
+    ScanBudget {
+        limit: usize,
+    },
+    Changed {
+        reason: String,
+    },
+    Replaced {
+        reason: String,
+    },
+    Unsupported {
+        store: String,
+    },
+    InvalidPosition {
+        reason: String,
+    },
+}
+impl std::fmt::Display for Refusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Oversized { needed, .. } => write!(
+                f,
+                "item requires {needed} budget bytes; content was not clipped"
             ),
-        ),
-        "codex" if content.get("item").is_some() => (
-            Some(content["item"].clone()),
-            (kind == Kind::ToolResult).then(|| content["item"].clone()),
-        ),
-        "codex" => {
-            let args = field(content, &["arguments", "input"]);
-            let args = if content["type"] == "function_call" {
-                args.map(|arg| {
-                    arg.as_str()
-                        .and_then(|s| serde_json::from_str(s).ok())
-                        .unwrap_or(arg)
-                })
-            } else {
-                args
-            };
-            (args, field(content, &["output"]))
+            Self::ScanBudget { limit } => write!(f, "scan budget exhausted at {limit} bytes"),
+            Self::Changed { reason } => write!(f, "positioned content changed: {reason}"),
+            Self::Replaced { reason } => write!(f, "recording replaced or truncated: {reason}"),
+            Self::Unsupported { store } => write!(f, "recording positions unsupported for {store}"),
+            Self::InvalidPosition { reason } => write!(f, "invalid recording position: {reason}"),
         }
-        _ => (None, None),
-    };
-    Some(Tool {
-        name: event.name.clone(),
-        call_id: event.call_id.clone(),
-        status: event.status.clone(),
-        arguments,
-        output,
-    })
+    }
+}
+impl std::error::Error for Refusal {}
+fn changed(reason: &str) -> anyhow::Error {
+    Refusal::Changed {
+        reason: reason.to_owned(),
+    }
+    .into()
+}
+fn replaced(reason: &str) -> anyhow::Error {
+    Refusal::Replaced {
+        reason: reason.to_owned(),
+    }
+    .into()
 }
 
-#[derive(Clone, Debug, Serialize)]
-pub struct Item {
-    pub position: Position,
-    pub end: Position,
-    pub kind: Kind,
-    pub turn: Turn,
-    /// Complete native content of this part, including tool arguments/results.
-    /// Normalized descriptor and tool-preview bounds do not clip this field.
-    pub content: Value,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub call_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tool: Option<Tool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub parent_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub representation: Option<String>,
-}
-
+/// Consumers retain a wildcard arm when matching page stops.
+/// ```compile_fail
+/// use agent_tapes_core::recording::Stop;
+/// fn closed(stop: Stop) { match stop {
+/// Stop::End | Stop::Items | Stop::Bytes | Stop::ScanBytes | Stop::Pending => ()
+/// } }
+/// ```
+#[non_exhaustive]
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Stop {
@@ -236,6 +235,7 @@ pub enum Stop {
     Items,
     Bytes,
     ScanBytes,
+    Pending,
 }
 
 #[derive(Debug, Serialize)]
@@ -257,6 +257,7 @@ pub struct Page {
     pub malformed_records: usize,
     /// Bytes after the newest newline are deferred until a later read.
     pub pending_bytes: u64,
+    pub pending: Option<String>,
     pub notes: Vec<String>,
 }
 
@@ -302,10 +303,12 @@ impl Recording {
     }
     /// Use an already resolved file-backed normalized session without locating it again.
     pub fn from_session(session: &Session) -> Result<Self> {
-        ensure!(
-            matches!(session.harness(), "claude" | "codex" | "pi"),
-            "use native discovery for database recordings; supplied exports cannot be paged"
-        );
+        if !matches!(session.harness(), "claude" | "codex" | "pi") {
+            return Err(Refusal::Unsupported {
+                store: session.harness().to_owned(),
+            }
+            .into());
+        }
         let path =
             crate::backend::session_file_path(session).context("session has no recording file")?;
         Ok(Self {
@@ -387,19 +390,8 @@ struct Window {
     data: VecDeque<u8>,
     budget: usize,
     bytes_read: usize,
+    anchors: HashMap<u64, String>,
 }
-
-#[derive(Debug)]
-struct ScanLimit;
-impl std::fmt::Display for ScanLimit {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "record or unfinished suffix exceeds scan budget; increase scan bytes"
-        )
-    }
-}
-impl std::error::Error for ScanLimit {}
 
 impl Window {
     fn new(path: &Path, recording: &Recording, budget: usize) -> Result<Self> {
@@ -423,6 +415,7 @@ impl Window {
             data: VecDeque::new(),
             budget,
             bytes_read: 0,
+            anchors: HashMap::new(),
         })
     }
     fn hi(&self) -> u64 {
@@ -436,7 +429,7 @@ impl Window {
         if offset < self.lo || offset >= self.hi() {
             let remaining = self.budget.saturating_sub(self.data.len());
             if remaining == 0 {
-                return Err(ScanLimit.into());
+                return Err(Refusal::ScanBudget { limit: self.budget }.into());
             }
             let (lo, hi) = if offset < self.lo {
                 (self.lo.saturating_sub(BLOCK.min(remaining) as u64), self.lo)
@@ -489,12 +482,31 @@ impl Window {
         Ok(None)
     }
     fn anchor(&mut self, offset: u64) -> Result<String> {
-        let lo = offset.saturating_sub(64);
-        let mut bytes = vec![0; (offset - lo) as usize];
-        self.file.seek(SeekFrom::Start(lo))?;
-        self.file.read_exact(&mut bytes)?;
-        self.bytes_read += bytes.len();
-        Ok(digest(&bytes))
+        if let Some(anchor) = self.anchors.get(&offset) {
+            return Ok(anchor.clone());
+        }
+        let mut hash = Sha256::new();
+        if offset > 0 {
+            if self.byte(offset - 1)? != b'\n' {
+                return Err(changed("position is not a record boundary"));
+            }
+            let mut start = offset - 1;
+            while start > 0 && self.byte(start - 1)? != b'\n' {
+                start -= 1;
+            }
+            let from = (start - self.lo) as usize;
+            let to = (offset - self.lo) as usize;
+            let (front, back) = self.data.as_slices();
+            if from < front.len() {
+                hash.update(&front[from..to.min(front.len())]);
+            }
+            if to > front.len() {
+                hash.update(&back[from.saturating_sub(front.len())..to - front.len()]);
+            }
+        }
+        let anchor = format!("{:x}", hash.finalize());
+        self.anchors.insert(offset, anchor.clone());
+        Ok(anchor)
     }
     fn position(&mut self, offset: u64, part: usize, record: Option<&[u8]>) -> Result<Position> {
         Position::encode(&Cursor {
@@ -510,17 +522,18 @@ impl Window {
     }
     fn resume(&mut self, position: &Position) -> Result<Cursor> {
         let cursor = position.decode()?;
-        ensure!(
-            cursor.source == self.source
-                && cursor.device == self.metadata.dev()
-                && cursor.inode == self.metadata.ino()
-                && cursor.offset <= self.metadata.len(),
-            "recording replaced, truncated, or position belongs to another source"
-        );
-        ensure!(
-            cursor.anchor == self.anchor(cursor.offset)?,
-            "recording changed at position"
-        );
+        if cursor.source != self.source
+            || cursor.device != self.metadata.dev()
+            || cursor.inode != self.metadata.ino()
+            || cursor.offset > self.metadata.len()
+        {
+            return Err(replaced(
+                "position belongs to another source or its file changed",
+            ));
+        }
+        if cursor.anchor != self.anchor(cursor.offset)? {
+            return Err(changed("preceding record digest differs"));
+        }
         ensure!(
             cursor.offset == 0 || self.byte(cursor.offset - 1)? == b'\n',
             "position is not a record boundary"
@@ -529,30 +542,28 @@ impl Window {
             let (_, line) = self
                 .line_at(cursor.offset)?
                 .context("recording truncated at internal position")?;
-            ensure!(
-                cursor.record.as_deref() == Some(&digest(&line)),
-                "recording changed inside positioned record"
-            );
+            if cursor.record.as_deref() != Some(&digest(&line)) {
+                return Err(changed("record digest differs"));
+            }
         }
         Ok(cursor)
     }
     fn verify(&mut self, path: &Path) -> Result<()> {
         let after = self.file.metadata()?;
         let named = std::fs::metadata(path)?;
-        ensure!(
-            named.dev() == self.metadata.dev()
-                && named.ino() == self.metadata.ino()
-                && after.len() >= self.metadata.len(),
-            "recording replaced or truncated during read"
-        );
-        if after.len() == self.metadata.len() {
-            ensure!(
-                after.mtime() == self.metadata.mtime()
-                    && after.mtime_nsec() == self.metadata.mtime_nsec()
-                    && after.ctime() == self.metadata.ctime()
-                    && after.ctime_nsec() == self.metadata.ctime_nsec(),
-                "recording rewritten during read"
-            );
+        if named.dev() != self.metadata.dev()
+            || named.ino() != self.metadata.ino()
+            || after.len() < self.metadata.len()
+        {
+            return Err(replaced("source changed during read"));
+        }
+        if after.len() == self.metadata.len()
+            && (after.mtime() != self.metadata.mtime()
+                || after.mtime_nsec() != self.metadata.mtime_nsec()
+                || after.ctime() != self.metadata.ctime()
+                || after.ctime_nsec() != self.metadata.ctime_nsec())
+        {
+            return Err(changed("source rewritten during read"));
         }
         self.file.seek(SeekFrom::Start(self.lo))?;
         let mut buffer = [0; BLOCK];
@@ -560,10 +571,9 @@ impl Window {
         for expected in front.chunks(BLOCK).chain(back.chunks(BLOCK)) {
             self.file.read_exact(&mut buffer[..expected.len()])?;
             self.bytes_read += expected.len();
-            ensure!(
-                expected == &buffer[..expected.len()],
-                "recording rewritten during read"
-            );
+            if expected != &buffer[..expected.len()] {
+                return Err(changed("source rewritten during read"));
+            }
         }
         Ok(())
     }
@@ -667,7 +677,12 @@ fn file_page(recording: &Recording, direction: Direction<'_>, limits: &Limits) -
                 pending_bytes = window.metadata.len() - offset;
                 break;
             }
-            Err(error) if error.downcast_ref::<ScanLimit>().is_some() && records_read > 0 => {
+            Err(error)
+                if matches!(
+                    error.downcast_ref::<Refusal>(),
+                    Some(Refusal::ScanBudget { .. })
+                ) && records_read > 0 =>
+            {
                 stop = Stop::ScanBytes;
                 break;
             }
@@ -701,11 +716,29 @@ fn file_page(recording: &Recording, direction: Direction<'_>, limits: &Limits) -
             if !fragment.might_match(limits) {
                 continue;
             }
-            let before = window.position(lo, index, Some(&line))?;
-            let after = if index + 1 == count {
-                window.position(hi, 0, None)?
-            } else {
-                window.position(lo, index + 1, Some(&line))?
+            let positions = (|| -> Result<_> {
+                let before = window.position(lo, index, Some(&line))?;
+                let after = if index + 1 == count {
+                    window.position(hi, 0, None)?
+                } else {
+                    window.position(lo, index + 1, Some(&line))?
+                };
+                Ok((before, after))
+            })();
+            let (before, after) = match positions {
+                Ok(positions) => positions,
+                Err(error)
+                    if !items.is_empty()
+                        && matches!(
+                            error.downcast_ref::<Refusal>(),
+                            Some(Refusal::ScanBudget { .. })
+                        ) =>
+                {
+                    stop = Stop::ScanBytes;
+                    full = true;
+                    break;
+                }
+                Err(error) => return Err(error),
             };
             let Some(item) = fragment.materialize(before, after, &recording.harness)? else {
                 continue;
@@ -713,9 +746,14 @@ fn file_page(recording: &Recording, direction: Direction<'_>, limits: &Limits) -
             if !limits.wants(item.kind) {
                 continue;
             }
-            let size = serde_json::to_vec(&item)?.len();
+            let size = item.budget_bytes()?;
             if size > limits.bytes && items.is_empty() {
-                bail!("item requires {size} bytes; increase item byte budget ({}); content was not clipped", limits.bytes);
+                return Err(Refusal::Oversized {
+                    needed: size,
+                    start: item.start,
+                    end: item.end,
+                }
+                .into());
             }
             if item_bytes.saturating_add(size) > limits.bytes {
                 stop = Stop::Bytes;
@@ -724,7 +762,7 @@ fn file_page(recording: &Recording, direction: Direction<'_>, limits: &Limits) -
             }
             item_bytes += size;
             if backwards {
-                start = item.position.clone();
+                start = item.start.clone();
             } else {
                 end = item.end.clone();
             }
@@ -740,7 +778,20 @@ fn file_page(recording: &Recording, direction: Direction<'_>, limits: &Limits) -
         }
         offset = if backwards { lo } else { hi };
         part = 0;
-        let boundary = window.position(offset, 0, None)?;
+        let boundary = match window.position(offset, 0, None) {
+            Ok(position) => position,
+            Err(error)
+                if !items.is_empty()
+                    && matches!(
+                        error.downcast_ref::<Refusal>(),
+                        Some(Refusal::ScanBudget { .. })
+                    ) =>
+            {
+                stop = Stop::ScanBytes;
+                break;
+            }
+            Err(error) => return Err(error),
+        };
         if backwards {
             start = boundary;
         } else {
@@ -760,7 +811,7 @@ fn file_page(recording: &Recording, direction: Direction<'_>, limits: &Limits) -
         schema: PAGE_SCHEMA,
         recording: recording.child.as_ref().map_or_else(
             || recording.id.clone(),
-            |child| format!("{}:{child}", recording.id),
+            |child| format!("{}::{child}", recording.id),
         ),
         harness: recording.harness.clone(),
         parents,
@@ -773,6 +824,7 @@ fn file_page(recording: &Recording, direction: Direction<'_>, limits: &Limits) -
         records_read,
         malformed_records,
         pending_bytes,
+        pending: None,
         notes,
     })
 }
@@ -876,73 +928,126 @@ impl Fragment<'_> {
                     .into_iter()
                     .any(|kind| limits.wants(kind))
     }
-    fn materialize(
-        &self,
-        position: Position,
-        end: Position,
-        harness: &str,
-    ) -> Result<Option<Item>> {
-        let content: Value = serde_json::from_str(self.content.get())?;
-        let envelope = if self.block {
-            let outer = object(self.envelope)?;
-            let mut fields = serde_json::Map::new();
-            for (key, raw) in &outer {
-                if *key != "message" && *key != "content" && *key != "toolUseResult" {
-                    fields.insert((*key).to_owned(), serde_json::from_str(raw.get())?);
-                }
-            }
-            if let Some(message) = outer.get("message") {
-                let mut message_fields = serde_json::Map::new();
-                for (key, raw) in object(message)? {
-                    if key != "content" {
-                        message_fields.insert(key.to_owned(), serde_json::from_str(raw.get())?);
-                    }
-                }
-                message_fields.insert("content".to_owned(), serde_json::json!([content]));
-                fields.insert("message".to_owned(), Value::Object(message_fields));
-            } else {
-                fields.insert("content".to_owned(), serde_json::json!([content]));
-            }
-            Value::Object(fields)
+    fn materialize(&self, start: Position, end: Position, harness: &str) -> Result<Option<Item>> {
+        let content: Arc<Value> = Arc::new(serde_json::from_str(self.content.get())?);
+        let meta = metadata(self.envelope)?;
+        let message_id = if harness == "codex" {
+            meta["payload"]["id"].as_str()
         } else {
-            serde_json::from_str(self.envelope.get())?
-        };
-        let turns = match harness {
-            "claude" => crate::backend::claude::parse_turns(&envelope),
-            "codex" => crate::backend::codex::parse_turns(&envelope, true),
-            "pi" => crate::backend::pi::parse_turns(&envelope),
-            _ => bail!("unsupported recording harness"),
-        };
-        let Some(mut turn) = turns.into_iter().next() else {
-            return Ok(None);
-        };
-        // Complete native content is authoritative even when derived descriptors
-        // in Turn apply their own preview bounds.
-        let call_id = turn.tool.as_ref().and_then(|tool| tool.call_id.clone());
-        turn.record_ref = None;
-        if turn.role == crate::model::Role::User {
-            if let Some(kind) = self.message_kind {
-                turn.kind = kind;
-            }
+            meta["message"]["id"].as_str()
         }
-        let kind = if turn.kind == TurnKind::Tool {
-            self.kind
+        .map(str::to_owned);
+        let mut item = if matches!(self.kind, Kind::ToolCall | Kind::ToolResult) {
+            let (tool, call_id) = Tool::native(&content, harness, self.kind);
+            let native_id = match harness {
+                "claude" => meta["uuid"].as_str(),
+                "codex" if self.runtime => content["item"]["id"].as_str(),
+                "codex" => content["id"].as_str(),
+                _ => meta["id"].as_str(),
+            }
+            .map(str::to_owned);
+            Item {
+                start,
+                end,
+                kind: self.kind,
+                role: crate::model::Role::Tool,
+                text: String::new(),
+                ts: crate::backend::timestamp(&meta["timestamp"]),
+                native_id,
+                request_turn_id: meta["payload"]["turn_id"]
+                    .as_str()
+                    .or_else(|| {
+                        meta.pointer("/payload/context/turn_id")
+                            .and_then(Value::as_str)
+                    })
+                    .map(str::to_owned),
+                model: recorded_model(&meta, harness),
+                origin: None,
+                call_id,
+                tool: Some(tool),
+                parent_id: None,
+                message_id: None,
+                representation: None,
+                content,
+            }
         } else {
-            turn_kind(turn.kind)
+            let envelope = if self.block {
+                let mut envelope = meta.clone();
+                if harness == "codex" {
+                    envelope["payload"]["content"] = serde_json::json!([&*content]);
+                } else if envelope["type"] == "custom_message" {
+                    envelope["content"] = serde_json::json!([&*content]);
+                } else {
+                    envelope["message"]["content"] = serde_json::json!([&*content]);
+                }
+                envelope
+            } else {
+                serde_json::from_str(self.envelope.get())?
+            };
+            let turns = match harness {
+                "claude" => crate::backend::claude::parse_turns(&envelope),
+                "codex" => crate::backend::codex::parse_turns(&envelope, true),
+                "pi" => crate::backend::pi::parse_turns(&envelope),
+                _ => bail!("unsupported recording harness"),
+            };
+            let Some(mut turn) = turns.into_iter().next() else {
+                return Ok(None);
+            };
+            if turn.role == crate::model::Role::User {
+                if let Some(kind) = self.message_kind {
+                    turn.kind = kind;
+                }
+            }
+            if turn.model.is_none() {
+                turn.model = recorded_model(&meta, harness);
+            }
+            let kind = turn_kind(turn.kind);
+            Item::from_turn(start, end, kind, turn, content)
         };
-        let tool = complete_tool(&turn, &content, harness, kind);
-        Ok(Some(Item {
-            position,
-            end,
-            kind,
-            turn,
-            content,
-            call_id,
-            tool,
-            parent_id: self.parent_id.clone(),
-            representation: self.runtime.then(|| "runtime".to_owned()),
-        }))
+        item.parent_id = self.parent_id.clone();
+        item.message_id = message_id;
+        item.representation = self.runtime.then(|| "runtime".to_owned());
+        Ok(Some(item))
     }
+}
+
+fn metadata(raw: &RawValue) -> Result<Value> {
+    let mut fields = serde_json::Map::new();
+    for (key, value) in object(raw)? {
+        if matches!(
+            key,
+            "content" | "toolUseResult" | "arguments" | "input" | "output" | "item"
+        ) {
+            continue;
+        }
+        fields.insert(
+            key.to_owned(),
+            if matches!(key, "message" | "payload") {
+                metadata(value)?
+            } else {
+                serde_json::from_str(value.get())?
+            },
+        );
+    }
+    Ok(Value::Object(fields))
+}
+fn recorded_model(meta: &Value, harness: &str) -> Option<crate::model::Model> {
+    let id = meta["message"]["model"].as_str()?;
+    if id == "<synthetic>" {
+        return None;
+    }
+    Some(crate::model::Model {
+        id: id.to_owned(),
+        variant: (harness == "claude")
+            .then(|| {
+                meta["perTurnEffort"]
+                    .as_str()
+                    .or_else(|| meta["effort"].as_str())
+                    .filter(|effort| !effort.is_empty())
+                    .map(str::to_owned)
+            })
+            .flatten(),
+    })
 }
 
 fn fragments<'a>(
@@ -952,6 +1057,9 @@ fn fragments<'a>(
     id: &str,
     origins: &[String],
 ) -> Result<Vec<Fragment<'a>>> {
+    if line.iter().all(u8::is_ascii_whitespace) {
+        return Ok(Vec::new());
+    }
     let raw: &RawValue = serde_json::from_slice(line)?;
     let outer = object(raw)?;
     let typ = string(&outer, "type").unwrap_or_default();
@@ -1057,6 +1165,25 @@ fn fragments<'a>(
             "function_call_output" | "custom_tool_call_output" => Kind::ToolResult,
             _ => return Ok(Vec::new()),
         };
+        if subtype == "message" {
+            if let Some(content) = payload_obj.get("content") {
+                let blocks: Vec<&RawValue> = serde_json::from_str(content.get())?;
+                let message_kind = if kind == Kind::User {
+                    Some(crate::backend::codex::codex_user_kind(
+                        &serde_json::from_str(payload.get())?,
+                    ))
+                } else {
+                    None
+                };
+                let mut fragments = Vec::new();
+                for block in blocks {
+                    let mut fragment = make(kind, block, true, false);
+                    fragment.message_kind = message_kind;
+                    fragments.push(fragment);
+                }
+                return Ok(fragments);
+            }
+        }
         return Ok(vec![make(kind, payload, false, false)]);
     }
     if harness == "claude"
@@ -1167,4 +1294,25 @@ fn fragments<'a>(
         result.push(fragment);
     }
     Ok(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn api_store_refuses_positions_without_starting_a_process() {
+        let r = Recording {
+            id: "fixture".to_owned(),
+            harness: "opencode".to_owned(),
+            path: None,
+            store: Some(NativeStore::opencode_v2("must-not-execute")),
+            child: None,
+        };
+        assert!(matches!(
+            r.tail(&Limits::default())
+                .unwrap_err()
+                .downcast_ref::<Refusal>(),
+            Some(Refusal::Unsupported { .. })
+        ));
+    }
 }

@@ -2896,7 +2896,7 @@ fn codex_trailing_kind(value: &Value) -> Option<&'static str> {
 /// one that adds only a message the harness raised on its own is a notice, and
 /// any other text was addressed to the agent. Each message answers from its
 /// own record, so every read of it gives the same kind.
-fn codex_user_kind(payload: &Value) -> TurnKind {
+pub(crate) fn codex_user_kind(payload: &Value) -> TurnKind {
     let blocks = payload["content"]
         .as_array()
         .into_iter()

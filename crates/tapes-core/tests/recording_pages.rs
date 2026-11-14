@@ -99,7 +99,7 @@ fn limits(items: usize) -> Limits {
     }
 }
 fn texts(page: &agent_tapes_core::recording::Page) -> Vec<String> {
-    page.items.iter().map(|i| i.turn.text.clone()).collect()
+    page.items.iter().map(|i| i.text.clone()).collect()
 }
 
 #[test]
@@ -130,14 +130,32 @@ fn tail_and_before_read_page_bytes_instead_of_the_prefix_per_native_backend() {
 #[test]
 fn directions_meet_after_reopening_and_growth_without_gaps_duplicates_or_changed_positions() {
     for harness in ["claude", "codex", "pi"] {
-        let fixture = Fixture::new(harness, 12);
-        let tail = fixture.reader().tail(&limits(3)).unwrap();
+        let fixture = Fixture::new(harness, 0);
+        for n in 0..6 {
+            let mut row = fixture.message(n, "part-a");
+            let content = if harness == "codex" {
+                &mut row["payload"]["content"]
+            } else {
+                &mut row["message"]["content"]
+            };
+            *content = if harness == "codex" {
+                json!([{"type":"output_text","text":format!("a{n}")},{"type":"output_text","text":format!("b{n}")}])
+            } else {
+                json!([{"type":"text","text":format!("a{n}")},{"type":"thinking","thinking":"private"},{"type":"text","text":format!("b{n}")}])
+            };
+            fixture.append(&row);
+        }
+        let bounded = |items| Limits {
+            kinds: vec![Kind::Assistant],
+            ..limits(items)
+        };
+        let tail = fixture.reader().tail(&bounded(3)).unwrap();
         let cursor = Position::parse(tail.start.as_str()).unwrap();
-        let older = fixture.reader().before(&cursor, &limits(3)).unwrap();
+        let older = fixture.reader().before(&cursor, &bounded(3)).unwrap();
         fixture.append(&fixture.message(12, "appended"));
         let repeat = fixture
             .reader()
-            .forwards(&Position::parse(older.start.as_str()).unwrap(), &limits(6))
+            .forwards(&Position::parse(older.start.as_str()).unwrap(), &bounded(6))
             .unwrap();
         assert_eq!(
             texts(&repeat),
@@ -145,12 +163,12 @@ fn directions_meet_after_reopening_and_growth_without_gaps_duplicates_or_changed
             "directions failed to meet"
         );
         assert_eq!(
-            repeat.items[3].position, tail.items[0].position,
+            repeat.items[3].start, tail.items[0].start,
             "append changed item position"
         );
-        let newer = fixture.reader().forwards(&tail.end, &limits(3)).unwrap();
+        let newer = fixture.reader().forwards(&tail.end, &bounded(3)).unwrap();
         assert_eq!(texts(&newer), ["appended"]);
-        let back = fixture.reader().before(&newer.end, &limits(1)).unwrap();
+        let back = fixture.reader().before(&newer.end, &bounded(1)).unwrap();
         assert_eq!(texts(&newer), texts(&back));
     }
 }
@@ -174,6 +192,14 @@ fn later_results_name_earlier_calls_and_retain_bodies_larger_than_tool_previews(
         let call = fixture.reader().before(&page.start, &limits(1)).unwrap();
         assert_eq!(call.items[0].kind, Kind::ToolCall);
         assert_eq!(call.items[0].call_id, page.items[0].call_id);
+        if harness == "codex" {
+            fixture.append(&json!({"type":"response_item","payload":{"type":"web_search_call","id":"web-fixture","status":"completed","action":{"type":"search","query":"fixture"}}}));
+            let web = fixture.reader().tail(&limits(1)).unwrap();
+            assert_eq!(
+                web.items[0].tool.as_ref().unwrap().name.as_deref(),
+                Some("web_search_call")
+            );
+        }
     }
 }
 
@@ -207,7 +233,7 @@ fn oversized_items_refuse_without_clipping_and_byte_limited_pages_resume() {
     for harness in ["claude", "codex", "pi"] {
         let fixture = Fixture::new(harness, 5);
         let page = fixture.reader().tail(&limits(1)).unwrap();
-        let size = serde_json::to_vec(&page.items[0]).unwrap().len();
+        let size = page.items[0].budget_bytes().unwrap();
         let too_small = Limits {
             bytes: size - 1,
             ..limits(1)
@@ -280,8 +306,8 @@ fn multi_part_records_page_each_part_once_and_keep_internal_positions() {
     let a = fixture.reader().before(&b.start, &limits(1)).unwrap();
     let all = fixture.reader().forwards(&a.start, &limits(3)).unwrap();
     assert_eq!(texts(&all), ["part-a", "part-b", "part-c"]);
-    assert_eq!(all.items[1].position, b.items[0].position);
-    assert_eq!(all.items[2].position, c.items[0].position);
+    assert_eq!(all.items[1].start, b.items[0].start);
+    assert_eq!(all.items[2].start, c.items[0].start);
     let mut user = message;
     user["message"]["role"] = json!("user");
     user["message"]["content"] = json!([{"type":"text","text":"<local-command-stdout>fixture</local-command-stdout>"},{"type":"text","text":"another part"}]);
@@ -311,7 +337,8 @@ impl Database {
             file,
             store,
         };
-        let mut sql = String::from("CREATE TABLE session(id TEXT PRIMARY KEY,title TEXT,directory TEXT,time_created INTEGER,time_updated INTEGER,parent_id TEXT,fork_session_id TEXT,model TEXT,cost REAL,tokens_input INTEGER,tokens_output INTEGER,tokens_reasoning INTEGER,tokens_cache_read INTEGER,tokens_cache_write INTEGER,metadata TEXT); CREATE TABLE message(id TEXT PRIMARY KEY,session_id TEXT,time_created INTEGER,data TEXT); CREATE TABLE part(id TEXT PRIMARY KEY,session_id TEXT,message_id TEXT,time_created INTEGER,data TEXT); CREATE INDEX part_order ON part(session_id,time_created,id); INSERT INTO session(id,title,directory,time_created,time_updated,parent_id,fork_session_id) VALUES('ses_fixture','Fixture','/fixtures',1,1,'ses_parent','ses_fork'); INSERT INTO message VALUES('msg_fixture','ses_fixture',1,'{\"role\":\"assistant\",\"time\":{\"created\":1}}'); BEGIN;\n");
+        let mut sql = include_str!("fixtures/opencode/recording-pages.sql").to_owned();
+        sql.push_str("BEGIN;\n");
         for n in 0..count {
             sql.push_str(&Self::insert(
                 n,
@@ -344,8 +371,14 @@ impl Database {
         );
     }
     fn insert(n: usize, content: &Value) -> String {
+        let mut content = content.clone();
+        if matches!(content["type"].as_str(), Some("text" | "reasoning"))
+            && content.get("time").is_none()
+        {
+            content["time"] = json!({"start": n, "end": n+1});
+        }
         format!(
-            "INSERT INTO part VALUES('p{n:06}','ses_fixture','msg_fixture',{n},'{}');\n",
+            "INSERT INTO part VALUES('p{n:06}','msg_fixture','ses_fixture',{n},{n},'{}');\n",
             content.to_string().replace('\'', "''")
         )
     }
@@ -355,7 +388,7 @@ impl Database {
 }
 
 #[test]
-fn database_keysets_meet_across_growth_and_lift_legacy_message_and_field_caps() {
+fn database_keysets_meet_across_growth_with_complete_message_fields() {
     let small = Database::new(100);
     let small_tail = small.reader().tail(&limits(3)).unwrap();
     let db = Database::new(1200);
@@ -377,15 +410,15 @@ fn database_keysets_meet_across_growth_and_lift_legacy_message_and_field_caps() 
     assert_eq!(texts(&forward), [texts(&older), texts(&tail)].concat());
     let appended = db.reader().forwards(&tail.end, &limits(1)).unwrap();
     assert_eq!(
-        appended.items[0].turn.text.len(),
+        appended.items[0].text.len(),
         20_000,
-        "database text was clipped at legacy 4000 chars"
+        "database text was clipped"
     );
     assert_eq!(
         appended.items[0].content["text"].as_str().unwrap().len(),
         20_000
     );
-    assert_eq!(tail.parents.len(), 2);
+    assert_eq!(tail.parents.len(), 1);
     println!(
         "opencode: tail1200_transport={} before_transport={} append20000_transport={}",
         tail.bytes_read, older.bytes_read, appended.bytes_read
@@ -447,7 +480,7 @@ fn database_filter_skips_large_tools_and_complete_results_keep_call_identity() {
 }
 
 #[test]
-fn existing_backend_fixtures_retain_parent_links_and_report_malformed_records() {
+fn backend_fixtures_retain_parent_links_and_report_malformed_records() {
     let fixtures = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
     let claude = NativeStore::claude_file(fixtures.join("claude/project/session-claude.jsonl"));
     let reader = Recording::resolve(&[claude], "session-claude").unwrap();
@@ -459,10 +492,7 @@ fn existing_backend_fixtures_retain_parent_links_and_report_malformed_records() 
         .tail(&limits(100))
         .unwrap();
     assert!(page.parents.iter().any(|p| p.relation == "forked-from"));
-    assert!(page
-        .items
-        .iter()
-        .any(|i| i.turn.text == "Abandoned branch."));
+    assert!(page.items.iter().any(|i| i.text == "Abandoned branch."));
     assert!(page
         .items
         .iter()
@@ -543,6 +573,7 @@ fn concurrent_chunked_appends_never_publish_partial_items() {
         finish_tx.send(()).unwrap();
         writer.join().unwrap();
         let complete = fixture.reader().forwards(&partial.end, &limits(1)).unwrap();
-        assert_eq!(complete.items[0].turn.text, "é".repeat(500));
+        assert_eq!(complete.items[0].text, "é".repeat(500));
     }
 }
+

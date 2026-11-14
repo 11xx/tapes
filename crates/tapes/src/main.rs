@@ -1458,16 +1458,19 @@ enum Command {
         after: Option<String>,
         #[arg(long, default_value_t = 40)]
         items: usize,
-        /// Sum of serialized item bytes; envelope bytes are additional.
-        /// An individually oversized item refuses without clipping.
+        /// Native content once plus serialized item metadata, counted without
+        /// allocating serialized items. Text/tool projections share that payload
+        /// budget; duplicate wire projections and the envelope are additional.
+        /// Oversized refusals carry needed/start/end in tapes-recording-error/1.
         #[arg(long, default_value_t = ByteSize::new(1024 * 1024))]
         bytes: ByteSize,
         /// Source scan budget (1B..64MiB); independent of output bytes.
         /// A scan stop can underfill filtered pages: resume from start/end.
         /// Files also read a <=1MiB identity header, reread the source window
-        /// for verification, and read 64B position anchors. An oversized record
-        /// requires a larger scan budget. OpenCode parts are limited to 4MiB
-        /// by its 8MiB transport; SQLite internal I/O is not measured/bounded.
+        /// for verification, and hash preceding-record anchors within the scan
+        /// budget. OpenCode parts are bounded by min(read-bytes,4MiB), under its
+        /// 8MiB transport. Unfinished parts are pending; completed parts follow
+        /// once. SQLite session scan/sort work is not bounded by response bytes.
         #[arg(long, default_value_t = ByteSize::new(8 * 1024 * 1024))]
         read_bytes: ByteSize,
         /// Wanted item kinds, comma-separated; empty selects every kind.
@@ -3552,75 +3555,112 @@ fn dispatch(cli: Cli) -> Result<()> {
         } => {
             use agent_tapes_core::recording::{self, Direction, Limits, Position, Recording};
             use agent_tapes_core::NativeStore;
-            let mut harness = harness;
-            let mut session = Some(session);
-            t3_reference::rewrite(
-                &mut session,
-                &mut [],
-                &mut harness,
-                if native_store.is_some() {
-                    t3_reference::Origin::Supplied
-                } else {
-                    t3_reference::Origin::Installed
-                },
-            )?;
-            let mut session = session.expect("read has a required session argument");
-            if session == self_token::TOKEN {
-                let detected = self_token::detect(|name| std::env::var(name).ok())?;
-                if harness
-                    .as_deref()
-                    .is_some_and(|harness| harness != detected.harness)
-                {
-                    return Err(anyhow!("{} conflicts with --harness", detected.report()));
+            let result = (|| -> Result<recording::Page> {
+                let before = before.as_deref().map(Position::parse).transpose()?;
+                let after = after.as_deref().map(Position::parse).transpose()?;
+                let direction = match (&before, &after) {
+                    (Some(p), _) => Direction::Before(p),
+                    (_, Some(p)) => Direction::Forwards(p),
+                    _ => Direction::Tail,
+                };
+                let limits = Limits {
+                    items,
+                    bytes: bytes.get_usize(),
+                    scan_bytes: read_bytes.get_usize(),
+                    kinds: kind
+                        .iter()
+                        .map(|kind| kind.parse())
+                        .collect::<Result<Vec<_>>>()?,
+                };
+                limits.validate()?;
+                let mut harness = harness;
+                let mut session = Some(session);
+                t3_reference::rewrite(
+                    &mut session,
+                    &mut [],
+                    &mut harness,
+                    if native_store.is_some() {
+                        t3_reference::Origin::Supplied
+                    } else {
+                        t3_reference::Origin::Installed
+                    },
+                )?;
+                let mut session = session.expect("read has a required session argument");
+                if session == self_token::TOKEN {
+                    let detected = self_token::detect(|name| std::env::var(name).ok())?;
+                    if harness
+                        .as_deref()
+                        .is_some_and(|harness| harness != detected.harness)
+                    {
+                        return Err(anyhow!("{} conflicts with --harness", detected.report()));
+                    }
+                    eprintln!("Note: {}.", detected.report());
+                    session = detected.id;
+                    harness = Some(detected.harness.to_owned());
                 }
-                eprintln!("Note: {}.", detected.report());
-                session = detected.id;
-                harness = Some(detected.harness.to_owned());
-            }
-            let mut stores = if let Some(name) = native_store {
-                let root =
-                    native_root.ok_or_else(|| anyhow!("--native-store requires --native-root"))?;
-                vec![match (name.as_str(), native_file) {
-                    ("claude", Some(file)) => NativeStore::claude_file(file),
-                    ("codex", Some(file)) => NativeStore::codex_file(file),
-                    ("pi", Some(file)) => NativeStore::pi_file(file),
-                    ("claude", None) => NativeStore::claude(root.join("projects")),
-                    ("codex", None) => NativeStore::codex(root.join("sessions")),
-                    ("pi", None) => NativeStore::pi(root.join("sessions")),
-                    _ => return Err(anyhow!("--native-store must be claude, codex, or pi")),
-                }]
-            } else {
-                recording::native_stores()
+                let mut stores = if let Some(name) = native_store {
+                    let root = native_root
+                        .ok_or_else(|| anyhow!("--native-store requires --native-root"))?;
+                    vec![match (name.as_str(), native_file) {
+                        ("claude", Some(file)) => NativeStore::claude_file(file),
+                        ("codex", Some(file)) => NativeStore::codex_file(file),
+                        ("pi", Some(file)) => NativeStore::pi_file(file),
+                        ("claude", None) => NativeStore::claude(root.join("projects")),
+                        ("codex", None) => NativeStore::codex(root.join("sessions")),
+                        ("pi", None) => NativeStore::pi(root.join("sessions")),
+                        _ => return Err(anyhow!("--native-store must be claude, codex, or pi")),
+                    }]
+                } else {
+                    recording::native_stores()
+                };
+                if let Some(harness) = harness {
+                    stores.retain(|store| store.harness().as_str() == harness);
+                }
+                let mut recording = Recording::resolve(&stores, &session)?;
+                if let Some(reference) = reference {
+                    recording = recording.child(&reference)?;
+                }
+                recording.page(direction, &limits)
+            })();
+            let page = match result {
+                Ok(page) => page,
+                Err(error) => {
+                    if json {
+                        let refusal = error.downcast_ref::<recording::Refusal>().map(serde_json::to_value).transpose()?.unwrap_or_else(|| serde_json::json!({"kind":"invalid-input", "reason":error.to_string()}));
+                        println!(
+                            "{}",
+                            serde_json::json!({"schema":"tapes-recording-error/1", "refusal":refusal})
+                        );
+                    }
+                    return Err(error);
+                }
             };
-            if let Some(harness) = harness {
-                stores.retain(|store| store.harness().as_str() == harness);
-            }
-            let mut recording = Recording::resolve(&stores, &session)?;
-            if let Some(reference) = reference {
-                recording = recording.child(&reference)?;
-            }
-            let before = before.as_deref().map(Position::parse).transpose()?;
-            let after = after.as_deref().map(Position::parse).transpose()?;
-            let direction = match (&before, &after) {
-                (Some(p), _) => Direction::Before(p),
-                (_, Some(p)) => Direction::Forwards(p),
-                _ => Direction::Tail,
-            };
-            let limits = Limits {
-                items,
-                bytes: bytes.get_usize(),
-                scan_bytes: read_bytes.get_usize(),
-                kinds: kind
-                    .iter()
-                    .map(|kind| kind.parse())
-                    .collect::<Result<Vec<_>>>()?,
-            };
-            let page = recording.page(direction, &limits)?;
             if json {
-                println!("{}", serde_json::to_string(&page)?);
+                use std::io::Write as _;
+                let stdout = std::io::stdout();
+                let mut output = stdout.lock();
+                serde_json::to_writer(&mut output, &page)?;
+                writeln!(output)?;
             } else {
                 for item in &page.items {
-                    println!("[{:?}] {}", item.kind, item.turn.text);
+                    if let Some(tool) = &item.tool {
+                        println!(
+                            "[{:?}] {} {}",
+                            item.kind,
+                            tool.name.as_deref().unwrap_or(""),
+                            item.call_id.as_deref().unwrap_or("")
+                        );
+                        let payload = if item.kind == recording::Kind::ToolCall {
+                            &tool.arguments
+                        } else {
+                            &tool.output
+                        };
+                        if let Some(payload) = payload {
+                            println!("{}", **payload);
+                        }
+                    } else {
+                        println!("[{:?}] {}", item.kind, item.text);
+                    }
                 }
                 println!("Start: {}\nEnd: {}", page.start.as_str(), page.end.as_str());
                 println!(
