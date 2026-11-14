@@ -14477,4 +14477,5 @@ fn read_json_busy_database_is_unavailable_and_retryable() {
     );
     let error: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(error["refusal"]["kind"], "unavailable");
+    assert_eq!(error["retryable"], true);
 }

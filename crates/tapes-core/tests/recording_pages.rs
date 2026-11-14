@@ -93,10 +93,7 @@ impl Fixture {
     }
 }
 fn limits(items: usize) -> Limits {
-    Limits {
-        items,
-        ..Limits::default()
-    }
+    Limits::default().with_items(items)
 }
 fn texts(page: &agent_tapes_core::recording::Page) -> Vec<String> {
     page.items.iter().map(|i| i.text.clone()).collect()
@@ -145,10 +142,7 @@ fn directions_meet_after_reopening_and_growth_without_gaps_duplicates_or_changed
             };
             fixture.append(&row);
         }
-        let bounded = |items| Limits {
-            kinds: vec![Kind::Assistant],
-            ..limits(items)
-        };
+        let bounded = |items| limits(items).with_kinds(vec![Kind::Assistant]);
         let tail = fixture.reader().tail(&bounded(3)).unwrap();
         let cursor = Position::parse(tail.start.as_str()).unwrap();
         let older = fixture.reader().before(&cursor, &bounded(3)).unwrap();
@@ -211,10 +205,7 @@ fn kind_filter_fills_pages_across_skipped_tools_in_both_directions() {
             fixture.append(&fixture.tool(true));
             fixture.append(&fixture.message(n, &format!("wanted-{n}")));
         }
-        let options = Limits {
-            kinds: vec![Kind::User, Kind::Assistant],
-            ..limits(4)
-        };
+        let options = limits(4).with_kinds(vec![Kind::User, Kind::Assistant]);
         let tail = fixture.reader().tail(&options).unwrap();
         assert_eq!(
             texts(&tail),
@@ -234,10 +225,7 @@ fn oversized_items_refuse_without_clipping_and_byte_limited_pages_resume() {
         let fixture = Fixture::new(harness, 5);
         let page = fixture.reader().tail(&limits(1)).unwrap();
         let size = page.items[0].budget_bytes().unwrap();
-        let too_small = Limits {
-            bytes: size - 1,
-            ..limits(1)
-        };
+        let too_small = limits(1).with_bytes(size - 1);
         assert!(fixture
             .reader()
             .tail(&too_small)
@@ -246,10 +234,7 @@ fn oversized_items_refuse_without_clipping_and_byte_limited_pages_resume() {
             .contains("content was not clipped"));
         let bounded = fixture
             .reader()
-            .tail(&Limits {
-                bytes: size * 2,
-                ..limits(5)
-            })
+            .tail(&limits(5).with_bytes(size * 2))
             .unwrap();
         assert!(bounded.item_bytes <= size * 2);
         assert!(matches!(bounded.stop, Stop::Bytes));
@@ -433,10 +418,7 @@ fn database_filter_skips_large_tools_and_complete_results_keep_call_identity() {
     db.sql(&Database::insert(3, &json!({"type":"text","text":"last"})));
     let prose = db
         .reader()
-        .tail(&Limits {
-            kinds: vec![Kind::Assistant],
-            ..limits(3)
-        })
+        .tail(&limits(3).with_kinds(vec![Kind::Assistant]))
         .unwrap();
     assert_eq!(texts(&prose), ["db-0", "db-1", "last"]);
     assert!(
@@ -445,10 +427,7 @@ fn database_filter_skips_large_tools_and_complete_results_keep_call_identity() {
     );
     let results = db
         .reader()
-        .tail(&Limits {
-            kinds: vec![Kind::ToolResult],
-            ..limits(1)
-        })
+        .tail(&limits(1).with_kinds(vec![Kind::ToolResult]))
         .unwrap();
     assert_eq!(results.items[0].call_id.as_deref(), Some("call-1"));
     assert_eq!(
@@ -462,11 +441,11 @@ fn database_filter_skips_large_tools_and_complete_results_keep_call_identity() {
     assert_eq!(calls.items[0].kind, Kind::ToolCall);
     let error = db
         .reader()
-        .tail(&Limits {
-            kinds: vec![Kind::ToolResult],
-            bytes: 1000,
-            ..limits(1)
-        })
+        .tail(
+            &limits(1)
+                .with_kinds(vec![Kind::ToolResult])
+                .with_bytes(1000),
+        )
         .unwrap_err();
     assert!(error.to_string().contains("content was not clipped"));
     db.sql(
@@ -593,19 +572,13 @@ fn database_prose_excludes_step_and_patch_rows_and_kinds_agree() {
     db.sql(&Database::insert(6, &json!({"marker":"untyped"})));
     let prose = db
         .reader()
-        .tail(&Limits {
-            kinds: vec![Kind::User, Kind::Assistant],
-            ..limits(3)
-        })
+        .tail(&limits(3).with_kinds(vec![Kind::User, Kind::Assistant]))
         .unwrap();
     assert_eq!(texts(&prose), ["db-0", "db-1", "answer"]);
     let all = db.reader().tail(&limits(10)).unwrap();
     let unknown = db
         .reader()
-        .tail(&Limits {
-            kinds: vec![Kind::Unknown],
-            ..limits(10)
-        })
+        .tail(&limits(10).with_kinds(vec![Kind::Unknown]))
         .unwrap();
     assert_eq!(unknown.items.len(), 4);
     assert_eq!(
@@ -686,13 +659,7 @@ fn database_follow_defers_streaming_text_and_running_tools_until_complete() {
     ));
     let resumed = large
         .reader()
-        .forwards(
-            &saved.end,
-            &Limits {
-                scan_bytes: 40_000,
-                ..limits(1)
-            },
-        )
+        .forwards(&saved.end, &limits(1).with_scan_bytes(40_000))
         .unwrap();
     assert_eq!(
         resumed.items.len(),
@@ -755,10 +722,7 @@ fn codex_message_over_128_parts_returns_every_text_part() {
     fixture.append(&message);
     let page = fixture
         .reader()
-        .tail(&Limits {
-            kinds: vec![Kind::Assistant],
-            ..limits(200)
-        })
+        .tail(&limits(200).with_kinds(vec![Kind::Assistant]))
         .unwrap();
     assert_eq!(
         texts(&page),
@@ -774,10 +738,7 @@ fn typed_refusals_allow_skipping_and_reject_stale_boundaries_and_renames() {
     fixture.append(&fixture.message(3, &"z".repeat(20_000)));
     let error = fixture
         .reader()
-        .tail(&Limits {
-            bytes: 1000,
-            ..limits(1)
-        })
+        .tail(&limits(1).with_bytes(1000))
         .unwrap_err();
     let Refusal::Oversized { needed, start, end } = error.downcast_ref::<Refusal>().unwrap() else {
         panic!("wrong refusal")
@@ -785,13 +746,7 @@ fn typed_refusals_allow_skipping_and_reject_stale_boundaries_and_renames() {
     assert!(*needed > 20_000);
     let item = fixture
         .reader()
-        .forwards(
-            start,
-            &Limits {
-                bytes: *needed,
-                ..limits(1)
-            },
-        )
+        .forwards(start, &limits(1).with_bytes(*needed))
         .unwrap();
     assert_eq!(item.items[0].text.len(), 20_000);
     assert!(fixture
@@ -800,10 +755,7 @@ fn typed_refusals_allow_skipping_and_reject_stale_boundaries_and_renames() {
         .unwrap()
         .items
         .is_empty());
-    let small = Limits {
-        scan_bytes: 10,
-        ..Limits::default()
-    };
+    let small = Limits::default().with_scan_bytes(10);
     assert!(matches!(
         fixture
             .reader()
@@ -880,17 +832,12 @@ fn multipart_filtered_meeting_and_scan_stops_preserve_every_selected_item() {
         let filter = vec![Kind::Assistant];
         let full = fixture
             .reader()
-            .tail(&Limits {
-                kinds: filter.clone(),
-                ..limits(100)
-            })
+            .tail(&limits(100).with_kinds(filter.clone()))
             .unwrap();
-        let options = Limits {
-            items: 100,
-            scan_bytes: 20_000,
-            kinds: filter,
-            ..Limits::default()
-        };
+        let options = Limits::default()
+            .with_items(100)
+            .with_scan_bytes(20_000)
+            .with_kinds(filter);
         let mut at = full.start.clone();
         let mut forward = Vec::new();
         let mut forward_scans = 0;
@@ -925,23 +872,11 @@ fn multipart_filtered_meeting_and_scan_stops_preserve_every_selected_item() {
         for (index, item) in full.items.iter().enumerate() {
             let before = fixture
                 .reader()
-                .before(
-                    &item.start,
-                    &Limits {
-                        kinds: vec![Kind::Assistant],
-                        ..limits(100)
-                    },
-                )
+                .before(&item.start, &limits(100).with_kinds(vec![Kind::Assistant]))
                 .unwrap();
             let after = fixture
                 .reader()
-                .forwards(
-                    &item.start,
-                    &Limits {
-                        kinds: vec![Kind::Assistant],
-                        ..limits(100)
-                    },
-                )
+                .forwards(&item.start, &limits(100).with_kinds(vec![Kind::Assistant]))
                 .unwrap();
             assert_eq!([texts(&before), texts(&after)].concat(), texts(&full));
             assert_eq!(
@@ -1094,15 +1029,15 @@ fn database_abandoned_parts_release_later_turns_with_never_finished_status() {
     let resumed = db.reader().forwards(&tail.end, &limits(20)).unwrap();
     assert_eq!(
         texts(&resumed),
-        ["half a thought", "", "", "second question", "second answer"]
+        ["half a thought", "", "second question", "second answer"]
     );
     let wire = serde_json::to_value(&resumed).unwrap();
     assert_eq!(wire["items"][0]["status"], "never-finished");
-    for i in [1, 2] {
-        assert_eq!(wire["items"][i]["tool"]["status"], "never-finished");
-    }
+    assert_eq!(wire["items"][1]["kind"], "tool-call");
+    assert_eq!(wire["items"][1]["tool"]["status"], "never-finished");
+    assert!(!resumed.items.iter().any(|i| i.kind == Kind::ToolResult));
     assert!(matches!(resumed.stop, Stop::End));
-    assert_eq!(db.reader().tail(&limits(20)).unwrap().items.len(), 6);
+    assert_eq!(db.reader().tail(&limits(20)).unwrap().items.len(), 5);
     for terminal in [json!({"completed":2}), json!({"error":{"name":"Aborted"}})] {
         let fresh = Database::new(0);
         let data = if terminal.get("completed").is_some() {
@@ -1248,10 +1183,7 @@ fn kernel_read_counts_bound_idle_follow_after_large_records() {
     let mut tool = f.tool(true);
     tool["message"]["content"][0]["content"] = json!("R".repeat(6 * 1024 * 1024));
     f.append(&tool);
-    let prose = Limits {
-        kinds: vec![Kind::User, Kind::Assistant],
-        ..limits(40)
-    };
+    let prose = limits(40).with_kinds(vec![Kind::User, Kind::Assistant]);
     let r = f.reader();
     let tail = r.tail(&prose).unwrap();
     let initial = counter();
@@ -1326,20 +1258,14 @@ fn page_failures_are_typed_and_known_scan_budget_has_needed_size() {
     ));
     let error = db
         .reader()
-        .tail(&Limits {
-            scan_bytes: 1000,
-            ..limits(1)
-        })
+        .tail(&limits(1).with_scan_bytes(1000))
         .unwrap_err();
     let wire = serde_json::to_value(error.downcast_ref::<Refusal>().unwrap()).unwrap();
     assert_eq!(wire["kind"], "scan-budget");
     assert!(wire["needed"].as_u64().unwrap() > 2000);
     let enough = db
         .reader()
-        .tail(&Limits {
-            scan_bytes: wire["needed"].as_u64().unwrap() as usize,
-            ..limits(1)
-        })
+        .tail(&limits(1).with_scan_bytes(wire["needed"].as_u64().unwrap() as usize))
         .unwrap();
     assert_eq!(enough.items[0].text.len(), 2000);
     let r = db.reader();
@@ -1364,7 +1290,7 @@ fn normalized_tools_expose_shared_status_and_view_fields() {
         let call = f.reader().tail(&limits(1)).unwrap();
         assert_eq!(
             serde_json::to_value(&call.items[0]).unwrap()["tool"]["status"],
-            "running"
+            Value::Null
         );
         let mut result = f.tool(true);
         match harness {
@@ -1404,7 +1330,7 @@ fn normalized_tools_expose_shared_status_and_view_fields() {
     let item = &f.reader().tail(&limits(1)).unwrap().items[0];
     let wire = serde_json::to_value(item).unwrap();
     assert_eq!(wire["tool"]["arguments"]["query"], "fixture query");
-    assert_eq!(wire["tool"]["status"], "completed");
+    assert_eq!(wire["tool"]["status"], Value::Null);
     let f = Fixture::new("claude", 0);
     let mut call = f.tool(false);
     call["message"]["content"][0]["caller"] = json!({"type":"direct"});
@@ -1437,4 +1363,69 @@ fn json_readers_accept_future_kinds_and_stops_without_accepting_filter_typos() {
         serde_json::from_str::<Stop>("\"future-stop\"").unwrap(),
         Stop::Unknown
     ));
+}
+
+// Answered calls retain only their own recorded state. Joining by call_id
+// gives the result's outcome without declaring the historical call running.
+#[test]
+fn answered_calls_without_execution_state_leave_status_absent() {
+    for harness in ["claude", "codex", "pi"] {
+        let fixture = Fixture::new(harness, 0);
+        let mut call = fixture.tool(false);
+        if harness == "codex" {
+            call["payload"]["status"] = json!("in_progress");
+        }
+        fixture.append(&call);
+        fixture.append(&fixture.tool(true));
+        let page = fixture.reader().tail(&limits(10)).unwrap();
+        assert_eq!(page.items.len(), 2);
+        assert_eq!(page.items[0].kind, Kind::ToolCall);
+        assert!(
+            page.items[0].tool.as_ref().unwrap().status.is_none(),
+            "{harness} call invented state"
+        );
+        assert!(serde_json::to_value(&page.items[0]).unwrap()["tool"]
+            .get("status")
+            .is_none());
+        assert_eq!(page.items[1].kind, Kind::ToolResult);
+        assert_eq!(
+            serde_json::to_value(&page.items[1]).unwrap()["tool"]["status"],
+            "completed"
+        );
+        assert_eq!(page.items[0].call_id, page.items[1].call_id);
+    }
+}
+
+// Only terminal OpenCode parts produce results. A result-only filter skips
+// even a large abandoned call instead of charging its source scan allowance.
+#[test]
+fn database_results_require_a_terminal_part_and_skip_abandoned_calls() {
+    let db = Database::new(0);
+    db.sql(&Database::insert(0,&json!({"type":"tool","tool":"bash","callID":"finished","state":{"status":"completed","input":{},"output":"done"}})));
+    db.sql(&Database::insert(1,&json!({"type":"tool","tool":"bash","callID":"abandoned","state":{"status":"running","input":{"command":"x".repeat(20_000)}}})));
+    let tail = db.reader().tail(&limits(10)).unwrap();
+    assert_eq!(tail.items.len(), 3);
+    assert_eq!(tail.items[0].kind, Kind::ToolCall);
+    assert_eq!(tail.items[1].kind, Kind::ToolResult);
+    assert_eq!(tail.items[0].call_id, tail.items[1].call_id);
+    assert_eq!(
+        serde_json::to_value(&tail.items[0]).unwrap()["tool"]["status"],
+        "completed"
+    );
+    assert_eq!(tail.items[2].kind, Kind::ToolCall);
+    assert_eq!(
+        serde_json::to_value(&tail.items[2]).unwrap()["tool"]["status"],
+        "never-finished"
+    );
+    let results = db
+        .reader()
+        .tail(
+            &limits(10)
+                .with_kinds(vec![Kind::ToolResult])
+                .with_scan_bytes(4096),
+        )
+        .unwrap();
+    assert_eq!(results.items.len(), 1);
+    assert_eq!(results.items[0].call_id.as_deref(), Some("finished"));
+    assert!(results.items.iter().all(|i| i.kind == Kind::ToolResult));
 }

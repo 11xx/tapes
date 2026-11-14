@@ -53,18 +53,18 @@ pub enum Status {
     Unknown,
 }
 impl Status {
-    fn native(word: Option<&str>, failed: bool, kind: Kind) -> Self {
+    fn native(word: Option<&str>, failed: bool, kind: Kind) -> Option<Self> {
         if failed {
-            return Self::Failed;
+            return Some(Self::Failed);
         }
-        match word {
+        Some(match word {
             Some("completed" | "success") => Self::Completed,
             Some("error" | "failed" | "interrupted" | "cancelled") => Self::Failed,
-            Some("pending" | "running" | "in_progress") => Self::Running,
+            Some("running" | "in_progress") => Self::Running,
             Some(_) => Self::Unknown,
             None if kind == Kind::ToolResult => Self::Completed,
-            None => Self::Running,
-        }
+            None => return None,
+        })
     }
 }
 
@@ -72,6 +72,12 @@ impl Status {
 #[derive(Clone, Debug, Serialize)]
 pub struct Tool {
     pub name: Option<String>,
+    /// Calls report execution state only when their own native record carries
+    /// it: OpenCode state or Codex runtime events. Claude/Pi and Codex response
+    /// calls omit it; their result with the same call_id carries the outcome.
+    /// Running always reflects recorded execution state. An abandoned OpenCode
+    /// tool is one never-finished call, without a result item.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub status: Option<Status>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub title: Option<Payload>,
@@ -156,11 +162,18 @@ impl Tool {
         } else {
             arguments
         };
-        let status = Some(Status::native(
-            status.as_deref(),
-            content["is_error"] == true || content["isError"] == true,
-            kind,
-        ));
+        let status = if kind == Kind::ToolCall
+            && harness != "opencode"
+            && !(harness == "codex" && content.get("item").is_some())
+        {
+            None
+        } else {
+            Status::native(
+                status.as_deref(),
+                content["is_error"] == true || content["isError"] == true,
+                kind,
+            )
+        };
         let (title, metadata, caller) = match harness {
             "opencode" => (
                 Payload::field(content, &["/state/title"]),
@@ -314,6 +327,7 @@ impl Serialize for Budget<'_> {
             #[derive(Serialize)]
             struct Header<'a> {
                 name: &'a Option<String>,
+                #[serde(skip_serializing_if = "Option::is_none")]
                 status: &'a Option<Status>,
             }
             map.serialize_entry(
@@ -326,5 +340,27 @@ impl Serialize for Budget<'_> {
         }
         map.serialize_entry("content", &i.content)?;
         map.end()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    // Recorded running state survives normalization; a pending state does not
+    // claim execution has started, and a missing state never invents running.
+    #[test]
+    fn call_status_requires_recorded_execution_state() {
+        let content = Arc::new(
+            json!({"type":"tool","callID":"c","tool":"bash","state":{"status":"running","input":{}}}),
+        );
+        let (tool, _) = Tool::native(&content, "opencode", Kind::ToolCall);
+        assert_eq!(tool.status, Some(Status::Running));
+        assert_ne!(
+            Status::native(Some("pending"), false, Kind::ToolCall),
+            Some(Status::Running)
+        );
+        assert_eq!(Status::native(None, false, Kind::ToolCall), None);
     }
 }

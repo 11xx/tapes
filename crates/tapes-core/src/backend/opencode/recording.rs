@@ -293,7 +293,8 @@ fn kind_filter(limits: &Limits) -> String {
             Kind::Assistant=>"json_extract(p.data,'$.type')='text' AND json_extract(m.data,'$.role')='assistant'",
             Kind::Ambient=>"json_extract(p.data,'$.type')='text' AND json_extract(m.data,'$.role') IN ('system','developer')",
             Kind::Reasoning=>"json_extract(p.data,'$.type')='reasoning'",
-            Kind::ToolCall|Kind::ToolResult=>"json_extract(p.data,'$.type')='tool'",
+            Kind::ToolCall=>"json_extract(p.data,'$.type')='tool'",
+            Kind::ToolResult=>"json_extract(p.data,'$.type')='tool' AND json_extract(p.data,'$.state.status') IN ('completed','error')",
             Kind::Unknown=>"coalesce(json_extract(p.data,'$.type'),'') NOT IN ('text','reasoning','tool')",
             _=>"0",
         });
@@ -315,7 +316,16 @@ fn database_kinds(row: &Value) -> Result<Vec<Kind>> {
             _ => anyhow::bail!("OpenCode message has no recognized role"),
         }],
         Some("reasoning") => vec![Kind::Reasoning],
-        Some("tool") => vec![Kind::ToolCall, Kind::ToolResult],
+        Some("tool") => {
+            if matches!(
+                row["data"]["state"]["status"].as_str(),
+                Some("completed" | "error")
+            ) {
+                vec![Kind::ToolCall, Kind::ToolResult]
+            } else {
+                vec![Kind::ToolCall]
+            }
+        }
         _ => vec![Kind::Unknown],
     })
 }

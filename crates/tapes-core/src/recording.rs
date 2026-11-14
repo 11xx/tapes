@@ -83,6 +83,12 @@ impl std::str::FromStr for Kind {
     }
 }
 
+/// Extendable page options, constructed with Default and the with_* builders.
+/// ```compile_fail
+/// use agent_tapes_core::recording::Limits;
+/// let limits = Limits { items: 1, bytes: 1024, scan_bytes: 8192, kinds: vec![] };
+/// ```
+#[non_exhaustive]
 #[derive(Clone, Debug)]
 pub struct Limits {
     pub items: usize,
@@ -110,6 +116,22 @@ impl Default for Limits {
 }
 
 impl Limits {
+    pub fn with_items(mut self, items: usize) -> Self {
+        self.items = items;
+        self
+    }
+    pub fn with_bytes(mut self, bytes: usize) -> Self {
+        self.bytes = bytes;
+        self
+    }
+    pub fn with_scan_bytes(mut self, scan_bytes: usize) -> Self {
+        self.scan_bytes = scan_bytes;
+        self
+    }
+    pub fn with_kinds(mut self, kinds: Vec<Kind>) -> Self {
+        self.kinds = kinds;
+        self
+    }
     pub fn validate(&self) -> Result<()> {
         ensure!(
             self.items > 0 && self.bytes > 0,
@@ -287,6 +309,8 @@ pub struct Page {
     pub items: Vec<Item>,
     pub start: Position,
     pub end: Position,
+    /// Why this page ended. Followers check pending/pending_bytes for whether
+    /// input is unfinished, even when an item/byte/scan limit ended the page.
     pub stop: Stop,
     pub item_bytes: usize,
     /// Actual file bytes read, including verification and cursor anchors.
@@ -294,9 +318,11 @@ pub struct Page {
     pub bytes_read: usize,
     pub records_read: usize,
     pub malformed_records: usize,
-    /// Bytes after the newest newline are deferred until a later read.
+    /// Bytes after the newest newline. A nonzero value tells a follower to
+    /// wait for a source change after consuming the available page progress.
     pub pending_bytes: u64,
-    /// Native pending part ID for database pages; files use pending_bytes.
+    /// Native pending part ID. Some value tells a follower to wait for a
+    /// source change after consuming progress; files use pending_bytes.
     pub pending: Option<String>,
     pub notes: Vec<String>,
 }

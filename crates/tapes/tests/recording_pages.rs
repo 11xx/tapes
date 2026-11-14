@@ -196,4 +196,5 @@ fn read_json_names_unavailable_stores() {
     assert!(!out.status.success());
     let error: Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(error["refusal"]["kind"], "unavailable");
+    assert_eq!(error["retryable"], false);
 }

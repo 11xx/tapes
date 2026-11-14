@@ -77,8 +77,13 @@ user prompt). Codex omits it.
 search action/query; OpenCode title/metadata, Pi result details as metadata,
 and Claude caller are retained. These payload fields share the native content
 allocation in Rust. Status is `running`, `completed`, `failed`,
-`never-finished` or `unknown`; native words remain in `content`. A call without
-a recorded outcome is running; a result without an error is completed.
+`never-finished` or `unknown`; native words remain in `content`. A call has a
+status only when its own record holds execution state: OpenCode part state or
+Codex runtime events. Claude/Pi calls and Codex response calls omit status;
+the result with the same `call_id` carries the outcome. `running` means the
+record reports running execution. A result without an error is completed.
+OpenCode emits results only for completed/error parts; an abandoned tool is
+one `never-finished` call with no result.
 OpenCode text/reasoning also has item `status` when recorded. Missing fields
 stay absent or null; complete native `content` is always present.
 
@@ -89,13 +94,18 @@ envelope are additional bytes. An oversized first item refuses without clipping
 and supplies `needed`, `start` and `end`, so a caller can enlarge the budget or
 skip it. `--read-bytes` bounds source scanning (default 8MiB, maximum 64MiB).
 A filter fills the item budget until a source, output or scan bound stops it.
-`stop` names the boundary; `start`/`end` retain progress. File reads add a bounded
+`stop` says why this page ended; `start`/`end` retain progress. Followers decide
+whether input is unfinished from `pending` and `pending_bytes`, even when
+`stop` is `items`, `bytes` or `scan-bytes`. File reads add a bounded
 identity header (at most 1MiB) and verify the source window once. Positions bind
 the inode, the preceding newline and the digest of the preceding record's last
 min(record length, 4KiB) bytes; internal gaps also bind their whole record.
 Anchors consume scan budget. Incomplete final lines wait for a newline.
-`stop: "pending"` means wait for a source change on both files and databases;
-`pending_bytes` describes a file suffix and `pending` names a database part.
+A nonzero `pending_bytes` describes an unfinished file suffix; non-null
+`pending` names an unfinished database part. Consume available page progress,
+then wait for a source change at that frontier. `stop: "pending"` is the page
+ending at that frontier; the diagnostic fields remain meaningful with other
+stops too.
 Positions do not pin untouched history.
 
 Claude normalizes each record independently. Codex messages page by content
@@ -122,18 +132,22 @@ API and supplied JSON/ZIP exports have no supported recording positions.
 In `agent-tapes-core`, `recording::Recording::resolve` uses discovery's bounded
 identity openings. `from_native` reuses a discovery result; `from_session`
 reuses a file session. `tail`, `before` and `forwards` take
-`Limits { items, bytes, scan_bytes, kinds }`. Public `Refusal` values identify
+`Limits::default().with_items(n).with_bytes(bytes).with_scan_bytes(scan_bytes)
+.with_kinds(kinds)`. `Limits` is non-exhaustive; use its builders so additional
+options do not require changing callers. Public `Refusal` values identify
 oversized items, scan exhaustion (with `needed` when the sufficient budget is
 known), changed content, replaced recordings, unsupported stores, invalid
 input/positions and unavailable stores. A deleted retained file is replaced;
 an internal truncated record is changed. Busy/unreadable stores are unavailable;
-busy reads retain exit 75 for retry. CLI JSON errors use `tapes-recording-error/1` with the same
-`refusal.kind` values and a nonzero exit. `Kind`, `Stop` and `Refusal` are
+busy reads retain exit 75. CLI JSON errors use `tapes-recording-error/1` with
+the same `refusal.kind` values, a nonzero exit and `retryable`, equal to the
+library's `transient::is_transient(&error)`. Retry only when that boolean is
+true; `unavailable` alone does not imply retrying can help. `Kind`, `Stop` and `Refusal` are
 non-exhaustive. Rust JSON readers deserialize unfamiliar kinds/stops to
 `Unknown`. JSON readers retain unknown kinds as non-prose. An unknown stop
 still permits consuming the returned items and saving its boundaries: continue
 in the requested direction if that boundary advanced; otherwise wait for a
-source change. Only known `end` means caught up; never spin on an unchanged
+source change. Known `end` without pending input means caught up; never spin on an unchanged
 boundary. An unknown refusal requires an explicit recovery policy. Readers
 retain no global state and never
 write to a recording or store.

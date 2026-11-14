@@ -42,8 +42,12 @@ PAGE ONE RECORDING
   Search arguments carry the query/action. OpenCode title/metadata, Pi details
   as metadata and Claude caller share the native content allocation in Rust.
   Status is running, completed, failed, never-finished or unknown; native words
-  remain in content. Calls without an outcome are running; results without an
-  error are completed. OpenCode text/reasoning also exposes item status.
+  remain in content. Calls have status only from their own recorded execution
+  state: OpenCode parts or Codex runtime events. Claude/Pi and Codex response
+  calls omit it; the result with the same call_id carries the outcome. Running
+  means recorded running execution; results without an error are completed.
+  OpenCode emits results only for completed/error parts; abandoned tools are
+  single never-finished calls. OpenCode text/reasoning also exposes item status.
   Native content is complete and always present.
 
   --bytes counts native content once plus serialized item metadata, through a
@@ -51,13 +55,15 @@ PAGE ONE RECORDING
   budget; duplicate wire representations and the page envelope are additional.
   Oversized items refuse with needed, start and end: enlarge the budget or
   skip to end. --read-bytes caps source scanning: default 8MiB, maximum 64MiB.
-  stop names the item/output/scan/source boundary. File reads add a <=1MiB
+  stop says why this page ended. Followers check pending/pending_bytes for
+  unfinished input even with item, byte or scan stops. File reads add a <=1MiB
   identity header and one verification reread. Positions bind the inode and
   preceding newline and last min(record length,4KiB) bytes of that record;
   internal positions also bind their whole record. Anchors consume scan budget.
-  Partial final lines wait for their newline. stop pending means wait for a
-  source change on files and databases alike: pending_bytes describes a file
-  suffix, pending names a database part.
+  Partial final lines wait for their newline. Nonzero pending_bytes names an
+  unfinished file suffix; non-null pending names a database part. Consume page
+  progress, then wait at that frontier for a source change. stop pending means
+  this page ended at that frontier; diagnostics apply with other stops too.
   Untouched history is not pinned; a captured copy preserves it through edits.
 
   Claude records decode independently. Codex messages page by native content
@@ -83,13 +89,17 @@ PAGE ONE RECORDING
   replaced, unsupported, invalid-position, invalid-input and unavailable cases.
   Scan-budget gives needed when a sufficient budget is known. Deleted files
   are replaced; internal truncation is changed. Busy/unreadable stores are
-  unavailable; busy reads retain retryable exit 75. Rust Kind/Stop/Refusal are
+  unavailable; busy reads retain exit 75. Error JSON also carries retryable,
+  equal to the library transient::is_transient(&error). Retry only when true;
+  unavailable alone does not establish retryability. Rust Kind/Stop/Refusal are
   non-exhaustive; JSON Kind/Stop decode unfamiliar values as Unknown. Retain
   unknown kinds as non-prose. With an unfamiliar stop, consume returned items
   and save boundaries; continue if the requested boundary advanced, otherwise
-  wait for a source change. Only end means caught up. Never spin on an unchanged
+  wait for a source change. End without pending input means caught up. Never spin on an unchanged
   boundary; an unfamiliar refusal needs an explicit recovery policy.
   Validate kinds, positions and budgets before discovering a session.
+  Library callers build the non-exhaustive Limits with Default and with_items,
+  with_bytes, with_scan_bytes and with_kinds; additional options preserve callers.
 
 SELECT A MATERIALIZED NATIVE STORE
   tapes list --native-store claude --native-root archive/claude --limit 5

@@ -1439,7 +1439,10 @@ enum Command {
     /// by its parts. message_id groups native messages. parent_id links Claude/Pi
     /// entries or OpenCode parent messages; Codex omits it. Complete native
     /// content is always present. Tool status uses running/completed/failed/
-    /// never-finished/unknown; title/metadata/caller and search arguments are
+    /// never-finished/unknown only from a call's own execution-state record
+    /// (OpenCode or Codex runtime). Claude/Pi and Codex response calls omit it;
+    /// results with the same call_id carry outcomes. Abandoned OpenCode tools
+    /// have one never-finished call and no result. Title/metadata/caller and search arguments are
     /// normalized fields. OpenCode requires the stable database and rejects
     /// changed parts. Supplied exports and remote reads have no positions.
     Read {
@@ -1476,11 +1479,14 @@ enum Command {
         /// plus its newline. OpenCode parts are bounded by min(read-bytes,4MiB),
         /// under its 8MiB transport. Only unfinished parts in the newest message
         /// without completion/error are pending; older ones are never-finished.
-        /// stop=pending means wait for a source change on either backend:
-        /// pending_bytes describes file suffixes, pending names database parts.
+        /// stop says why this page ended. Followers check pending/pending_bytes
+        /// for unfinished input even when an item/byte/scan limit ended the page.
+        /// pending_bytes describes file suffixes; pending names database parts.
         /// SQLite session scan/sort work is not bounded by response bytes.
         /// Refusals include changed/replaced, unavailable and scan-budget
-        /// (needed when known); busy stores retain exit 75. JSON direction
+        /// (needed when known); busy stores retain exit 75. JSON retryable equals
+        /// the library is_transient result; retry only when true, not on the
+        /// unavailable kind alone. JSON direction
         /// conflicts use tapes-recording-error/1. Unknown stops permit consuming
         /// items and saving bounds: continue on progress, otherwise wait.
         #[arg(long, default_value_t = ByteSize::new(8 * 1024 * 1024))]
@@ -3578,15 +3584,15 @@ fn dispatch(cli: Cli) -> Result<()> {
                     (_, Some(p)) => Direction::Forwards(p),
                     _ => Direction::Tail,
                 };
-                let limits = Limits {
-                    items,
-                    bytes: bytes.get_usize(),
-                    scan_bytes: read_bytes.get_usize(),
-                    kinds: kind
-                        .iter()
-                        .map(|kind| kind.parse())
-                        .collect::<Result<Vec<_>>>()?,
-                };
+                let limits = Limits::default()
+                    .with_items(items)
+                    .with_bytes(bytes.get_usize())
+                    .with_scan_bytes(read_bytes.get_usize())
+                    .with_kinds(
+                        kind.iter()
+                            .map(|kind| kind.parse())
+                            .collect::<Result<Vec<_>>>()?,
+                    );
                 limits.validate()?;
                 let mut harness = harness;
                 let mut session = Some(session);
@@ -3644,7 +3650,7 @@ fn dispatch(cli: Cli) -> Result<()> {
                         let refusal = error.downcast_ref::<recording::Refusal>().map(serde_json::to_value).transpose()?.unwrap_or_else(|| serde_json::json!({"kind":"invalid-input", "reason":error.to_string()}));
                         println!(
                             "{}",
-                            serde_json::json!({"schema":"tapes-recording-error/1", "refusal":refusal})
+                            serde_json::json!({"schema":"tapes-recording-error/1", "refusal":refusal, "retryable":agent_tapes_core::transient::is_transient(&error)})
                         );
                     }
                     return Err(error);
