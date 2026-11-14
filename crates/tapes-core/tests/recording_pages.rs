@@ -5,7 +5,7 @@ use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::PathBuf;
 
-use agent_tapes_core::recording::{Kind, Limits, Position, Recording, Stop};
+use agent_tapes_core::recording::{Kind, Limits, Position, Recording, Refusal, Stop};
 use agent_tapes_core::NativeStore;
 use serde_json::{json, Value};
 
@@ -577,3 +577,484 @@ fn concurrent_chunked_appends_never_publish_partial_items() {
     }
 }
 
+// non-text OpenCode parts are unknown; neither the SQL nor the item kind
+// can admit step/patch metadata as prose.
+#[test]
+fn database_prose_excludes_step_and_patch_rows_and_kinds_agree() {
+    let db = Database::new(2);
+    for (n, kind) in [(2, "step-start"), (3, "step-finish"), (4, "patch")] {
+        db.sql(&Database::insert(n, &json!({"type":kind})));
+    }
+    db.sql(&Database::insert(
+        5,
+        &json!({"type":"text","text":"answer"}),
+    ));
+    db.sql(&Database::insert(6, &json!({"marker":"untyped"})));
+    let prose = db
+        .reader()
+        .tail(&Limits {
+            kinds: vec![Kind::User, Kind::Assistant],
+            ..limits(3)
+        })
+        .unwrap();
+    assert_eq!(texts(&prose), ["db-0", "db-1", "answer"]);
+    let all = db.reader().tail(&limits(10)).unwrap();
+    let unknown = db
+        .reader()
+        .tail(&Limits {
+            kinds: vec![Kind::Unknown],
+            ..limits(10)
+        })
+        .unwrap();
+    assert_eq!(unknown.items.len(), 4);
+    assert_eq!(
+        all.items.iter().filter(|i| i.kind == Kind::Unknown).count(),
+        4
+    );
+    assert_eq!(
+        all.items
+            .iter()
+            .filter(|i| i.kind == Kind::Assistant)
+            .count(),
+        3
+    );
+    assert!(all
+        .items
+        .iter()
+        .all(|i| i.parent_id.as_deref() == Some("msg_parent")
+            && i.message_id.as_deref() == Some("msg_fixture")));
+}
+
+// the first incomplete part blocks later parts, including filtered tools.
+// Ordinary completion must follow once, with no cursor on mutable content.
+#[test]
+fn database_follow_defers_streaming_text_and_running_tools_until_complete() {
+    let db = Database::new(1);
+    db.sql(&Database::insert(
+        1,
+        &json!({"type":"text","text":"Hel","time":{"start":1}}),
+    ));
+    db.sql(&Database::insert(2, &json!({"type":"text","text":"later"})));
+    let tail = db.reader().tail(&limits(10)).unwrap();
+    assert_eq!(texts(&tail), ["db-0"]);
+    assert_eq!(tail.pending.as_deref(), Some("p000001"));
+    assert!(matches!(tail.stop, Stop::Pending));
+    db.sql("UPDATE part SET data='{\"type\":\"text\",\"text\":\"Hello\",\"time\":{\"start\":1,\"end\":2}}',time_updated=2 WHERE id='p000001';");
+    let complete = db.reader().forwards(&tail.end, &limits(10)).unwrap();
+    assert_eq!(texts(&complete), ["Hello", "later"]);
+    db.sql(&Database::insert(3,&json!({"type":"tool","callID":"call-live","tool":"bash","state":{"status":"running","input":{"command":"fixture"}}})));
+    let running = db.reader().forwards(&complete.end, &limits(10)).unwrap();
+    assert!(running.items.is_empty());
+    assert_eq!(running.end, complete.end);
+    assert_eq!(running.pending.as_deref(), Some("p000003"));
+    db.sql("UPDATE part SET data='{\"type\":\"tool\",\"callID\":\"call-live\",\"tool\":\"bash\",\"state\":{\"status\":\"completed\",\"input\":{\"command\":\"fixture\"},\"output\":\"done\"}}' WHERE id='p000003';");
+    let tool = db.reader().forwards(&running.end, &limits(10)).unwrap();
+    assert_eq!(tool.items.len(), 2);
+    assert_eq!(tool.items[0].kind, Kind::ToolCall);
+    assert_eq!(tool.items[1].kind, Kind::ToolResult);
+    assert!(db
+        .reader()
+        .forwards(&tool.end, &limits(10))
+        .unwrap()
+        .items
+        .is_empty());
+    // The rule holds before the first completed part as well.
+    let empty = Database::new(0);
+    empty.sql(&Database::insert(
+        0,
+        &json!({"type":"text","text":"partial","time":{"start":0}}),
+    ));
+    let page = empty.reader().tail(&limits(1)).unwrap();
+    assert!(page.items.is_empty());
+    empty.sql("UPDATE part SET data='{\"type\":\"text\",\"text\":\"whole\",\"time\":{\"start\":0,\"end\":1}}' WHERE id='p000000';");
+    assert_eq!(
+        texts(&empty.reader().forwards(&page.end, &limits(1)).unwrap()),
+        ["whole"]
+    );
+    let large = Database::new(0);
+    large.sql(&Database::insert(
+        0,
+        &json!({"type":"text","text":"a".repeat(30_000)}),
+    ));
+    let saved = large.reader().tail(&limits(1)).unwrap();
+    large.sql(&Database::insert(
+        1,
+        &json!({"type":"text","text":"b".repeat(30_000)}),
+    ));
+    let resumed = large
+        .reader()
+        .forwards(
+            &saved.end,
+            &Limits {
+                scan_bytes: 40_000,
+                ..limits(1)
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        resumed.items.len(),
+        1,
+        "completed cursor row consumed the next page's scan budget"
+    );
+    assert_eq!(resumed.items[0].text, "b".repeat(30_000));
+}
+
+// the schema has one flat vocabulary, and the byte budget charges the
+// native payload once instead of charging normalized copies of the same body.
+#[test]
+fn flat_items_expose_fields_once_and_budget_each_native_payload_once() {
+    let fixture = Fixture::new("claude", 1);
+    fixture.append(&fixture.tool(true));
+    let page = fixture.reader().tail(&limits(1)).unwrap();
+    let item = &page.items[0];
+    let json = serde_json::to_value(item).unwrap();
+    for forbidden in ["turn", "position", "parts", "ordinal", "coverage"] {
+        assert!(json.get(forbidden).is_none(), "unexpected {forbidden}");
+    }
+    assert!(json.get("start").is_some());
+    assert!(item.text.is_empty());
+    assert!(
+        item.budget_bytes().unwrap() < 12_000,
+        "payload charged more than once"
+    );
+    assert!(serde_json::to_vec(item).unwrap().len() > 20_000);
+    assert_eq!(
+        item.tool
+            .as_ref()
+            .unwrap()
+            .output
+            .as_ref()
+            .unwrap()
+            .as_str()
+            .unwrap()
+            .len(),
+        10_000
+    );
+    let fixtures = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/claude/project/session-claude.jsonl");
+    let child = Recording::resolve(&[NativeStore::claude_file(fixtures)], "session-claude")
+        .unwrap()
+        .child("fixture")
+        .unwrap()
+        .tail(&limits(1))
+        .unwrap();
+    assert_eq!(child.recording, "session-claude::fixture");
+}
+
+// native message arrays have no implicit 128-part text ceiling.
+#[test]
+fn codex_message_over_128_parts_returns_every_text_part() {
+    let fixture = Fixture::new("codex", 0);
+    let mut message = fixture.message(0, "placeholder");
+    message["payload"]["content"] = json!((0..140)
+        .map(|n| json!({"type":"output_text","text":format!("part-{n}")}))
+        .collect::<Vec<_>>());
+    fixture.append(&message);
+    let page = fixture
+        .reader()
+        .tail(&Limits {
+            kinds: vec![Kind::Assistant],
+            ..limits(200)
+        })
+        .unwrap();
+    assert_eq!(
+        texts(&page),
+        (0..140).map(|n| format!("part-{n}")).collect::<Vec<_>>()
+    );
+}
+
+// callers match public refusal variants, skip an oversized item using
+// its end, and reject a same-inode rewrite even when its last 64 bytes agree.
+#[test]
+fn typed_refusals_allow_skipping_and_reject_stale_boundaries_and_renames() {
+    let fixture = Fixture::new("claude", 2);
+    fixture.append(&fixture.message(3, &"z".repeat(20_000)));
+    let error = fixture
+        .reader()
+        .tail(&Limits {
+            bytes: 1000,
+            ..limits(1)
+        })
+        .unwrap_err();
+    let Refusal::Oversized { needed, start, end } = error.downcast_ref::<Refusal>().unwrap() else {
+        panic!("wrong refusal")
+    };
+    assert!(*needed > 20_000);
+    let item = fixture
+        .reader()
+        .forwards(
+            start,
+            &Limits {
+                bytes: *needed,
+                ..limits(1)
+            },
+        )
+        .unwrap();
+    assert_eq!(item.items[0].text.len(), 20_000);
+    assert!(fixture
+        .reader()
+        .forwards(end, &limits(1))
+        .unwrap()
+        .items
+        .is_empty());
+    let small = Limits {
+        scan_bytes: 10,
+        ..Limits::default()
+    };
+    assert!(matches!(
+        fixture
+            .reader()
+            .tail(&small)
+            .unwrap_err()
+            .downcast_ref::<Refusal>(),
+        Some(Refusal::ScanBudget { .. })
+    ));
+    let original = fs::read_to_string(&fixture.path).unwrap();
+    let tail = fixture.reader().tail(&limits(1)).unwrap();
+    fs::write(
+        &fixture.path,
+        original.replacen("message-1", "MESSAGE-1", 1)
+            + &format!("{}\n", fixture.message(4, "appended")),
+    )
+    .unwrap();
+    assert!(matches!(
+        fixture
+            .reader()
+            .before(&tail.start, &limits(1))
+            .unwrap_err()
+            .downcast_ref::<Refusal>(),
+        Some(Refusal::Changed { .. })
+    ));
+    fs::write(&fixture.path, &original).unwrap();
+    let tail = fixture.reader().tail(&limits(1)).unwrap();
+    let next = fixture.path.with_extension("replacement");
+    fs::write(&next, &original).unwrap();
+    fs::rename(next, &fixture.path).unwrap();
+    assert!(matches!(
+        fixture
+            .reader()
+            .forwards(&tail.end, &limits(1))
+            .unwrap_err()
+            .downcast_ref::<Refusal>(),
+        Some(Refusal::Replaced { .. })
+    ));
+}
+
+// whitespace-only JSONL separators are valid separators, not bad records.
+#[test]
+fn blank_lines_are_not_malformed_records() {
+    let fixture = Fixture::new("claude", 2);
+    OpenOptions::new()
+        .append(true)
+        .open(&fixture.path)
+        .unwrap()
+        .write_all(b"\n \t\r\nnot json\n")
+        .unwrap();
+    let page = fixture.reader().tail(&limits(20)).unwrap();
+    assert_eq!(page.malformed_records, 1);
+}
+
+// Both directions meet at internal gaps under kind filters
+// and scan stops, rather than merely agreeing at single-part file boundaries.
+#[test]
+fn multipart_filtered_meeting_and_scan_stops_preserve_every_selected_item() {
+    for harness in ["claude", "codex", "pi"] {
+        let fixture = Fixture::new(harness, 0);
+        for n in 0..20 {
+            let mut row = fixture.message(n, "a");
+            let content = if harness == "codex" {
+                &mut row["payload"]["content"]
+            } else {
+                &mut row["message"]["content"]
+            };
+            *content = if harness == "codex" {
+                json!([{"type":"output_text","text":format!("a{n} {}","x".repeat(1000))},{"type":"output_text","text":format!("b{n} {}","x".repeat(1000))}])
+            } else {
+                json!([{"type":"text","text":format!("a{n} {}","x".repeat(1000))},{"type":"thinking","thinking":"private"},{"type":"text","text":format!("b{n} {}","x".repeat(1000))}])
+            };
+            fixture.append(&row);
+        }
+        let filter = vec![Kind::Assistant];
+        let full = fixture
+            .reader()
+            .tail(&Limits {
+                kinds: filter.clone(),
+                ..limits(100)
+            })
+            .unwrap();
+        let options = Limits {
+            items: 100,
+            scan_bytes: 20_000,
+            kinds: filter,
+            ..Limits::default()
+        };
+        let mut at = full.start.clone();
+        let mut forward = Vec::new();
+        let mut forward_scans = 0;
+        for _ in 0..100 {
+            let p = fixture.reader().forwards(&at, &options).unwrap();
+            forward.extend(texts(&p));
+            if matches!(p.stop, Stop::End) {
+                break;
+            }
+            forward_scans += usize::from(matches!(p.stop, Stop::ScanBytes));
+            assert_ne!(p.end, at);
+            at = p.end;
+        }
+        assert_eq!(forward, texts(&full));
+        let mut at = full.end.clone();
+        let mut backward = Vec::new();
+        let mut backward_scans = 0;
+        for _ in 0..100 {
+            let p = fixture.reader().before(&at, &options).unwrap();
+            let mut t = texts(&p);
+            t.extend(backward);
+            backward = t;
+            if matches!(p.stop, Stop::End) {
+                break;
+            }
+            backward_scans += usize::from(matches!(p.stop, Stop::ScanBytes));
+            assert_ne!(p.start, at);
+            at = p.start;
+        }
+        assert_eq!(backward, texts(&full));
+        assert!(forward_scans > 0 && backward_scans > 0);
+        for (index, item) in full.items.iter().enumerate() {
+            let before = fixture
+                .reader()
+                .before(
+                    &item.start,
+                    &Limits {
+                        kinds: vec![Kind::Assistant],
+                        ..limits(100)
+                    },
+                )
+                .unwrap();
+            let after = fixture
+                .reader()
+                .forwards(
+                    &item.start,
+                    &Limits {
+                        kinds: vec![Kind::Assistant],
+                        ..limits(100)
+                    },
+                )
+                .unwrap();
+            assert_eq!([texts(&before), texts(&after)].concat(), texts(&full));
+            assert_eq!(
+                texts(&before),
+                texts(&full)[..index],
+                "before ignored an internal gap"
+            );
+            assert_eq!(
+                texts(&after),
+                texts(&full)[index..],
+                "forwards ignored an internal gap"
+            );
+        }
+    }
+}
+
+// Linux accounts bytes read independently of Window.bytes_read. Each child
+// runs this test alone so unrelated tests cannot alter its /proc/self/io delta.
+#[test]
+fn kernel_read_counts_bound_tail_and_before_independently() {
+    if !PathBuf::from("/proc/self/io").exists() {
+        return;
+    }
+    let counter = || {
+        fs::read_to_string("/proc/self/io")
+            .unwrap()
+            .lines()
+            .find_map(|line| {
+                line.strip_prefix("rchar: ")
+                    .map(|n| n.parse::<u64>().unwrap())
+            })
+            .unwrap()
+    };
+    if let Ok(harness) = std::env::var("TAPES_PAGE_IO_CHILD") {
+        let harness = match harness.as_str() {
+            "claude" => "claude",
+            "codex" => "codex",
+            _ => "pi",
+        };
+        let n = std::env::var("TAPES_PAGE_IO_RECORDS")
+            .unwrap()
+            .parse()
+            .unwrap();
+        let fixture = Fixture::new(harness, n);
+        let reader = fixture.reader();
+        let before = counter();
+        let tail = reader.tail(&limits(3)).unwrap();
+        let tail_bytes = counter() - before;
+        let before = counter();
+        let older = reader.before(&tail.start, &limits(3)).unwrap();
+        let older_bytes = counter() - before;
+        println!(
+            "KERNEL_PAGE_BYTES {harness} {n} {tail_bytes} {older_bytes} reported={} {}",
+            tail.bytes_read, older.bytes_read
+        );
+        assert!(
+            tail_bytes < 50_000 && older_bytes < 50_000,
+            "actual source reads scaled with prefix"
+        );
+        return;
+    }
+    for harness in ["claude", "codex", "pi"] {
+        for count in [100, 20_000] {
+            let result = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "kernel_read_counts_bound_tail_and_before_independently",
+                    "--nocapture",
+                    "--test-threads=1",
+                ])
+                .env("TAPES_PAGE_IO_CHILD", harness)
+                .env("TAPES_PAGE_IO_RECORDS", count.to_string())
+                .output()
+                .unwrap();
+            print!("{}", String::from_utf8_lossy(&result.stdout));
+            assert!(
+                result.status.success(),
+                "{}",
+                String::from_utf8_lossy(&result.stderr)
+            );
+        }
+    }
+}
+
+// native indexes may scan/sort the session, but a page must not spawn one
+// query process per item. This wrapper executes the actual SQLite statements.
+#[test]
+fn database_batches_keep_sqlite_process_count_independent_of_item_count() {
+    use std::os::unix::fs::PermissionsExt;
+    let db = Database::new(2000);
+    let count = db._root.path().join("queries");
+    let program = db._root.path().join("opencode-counted");
+    let shell_quote =
+        |p: &std::path::Path| format!("'{}'", p.display().to_string().replace('\'', "'\\''"));
+    fs::write(&program,format!("#!/bin/bash\nprintf '.\\n' >> {}\nexec sqlite3 -readonly -batch -list -header {} \"$4\"\n",shell_quote(&count),shell_quote(&db.file))).unwrap();
+    fs::set_permissions(&program, fs::Permissions::from_mode(0o700)).unwrap();
+    let store = NativeStore::opencode_stable_at(program, db._root.path());
+    let r = Recording::resolve(&[store], "ses_fixture").unwrap();
+    let calls = || fs::read_to_string(&count).unwrap().lines().count();
+    let before = calls();
+    r.tail(&limits(1)).unwrap();
+    let one = calls() - before;
+    let before = calls();
+    let forty = r.tail(&limits(40)).unwrap();
+    let many = calls() - before;
+    let before = calls();
+    r.forwards(&forty.start, &limits(40)).unwrap();
+    let resume = calls() - before;
+    println!("SQLITE_PAGE_PROCESSES one={one} forty={many} resume={resume}");
+    assert_eq!(one, many, "query processes scaled with item count");
+    assert!(many <= 3 && resume <= 4);
+    let plan=std::process::Command::new("sqlite3").arg(&db.file).arg("EXPLAIN QUERY PLAN SELECT id FROM part WHERE session_id='ses_fixture' ORDER BY time_created,id LIMIT 40").output().unwrap();
+    let plan = String::from_utf8(plan.stdout).unwrap();
+    assert!(
+        plan.contains("part_session_idx") && plan.contains("TEMP B-TREE"),
+        "fixture lacks the real schema's sort cost: {plan}"
+    );
+    println!("REAL_INDEX_PLAN {plan}");
+}

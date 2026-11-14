@@ -77,3 +77,90 @@ fn read_positions_cross_processes_and_follow_growth() {
     }
 }
 
+// Invalid reader arguments fail before discovery, and JSON refusals
+// carry machine-readable cases and oversized-item gap coordinates.
+#[test]
+fn read_validates_before_discovery_and_serializes_typed_refusals() {
+    let root = tempfile::tempdir().unwrap();
+    let binary = env!("CARGO_BIN_EXE_tapes");
+    for (flags, reason) in [
+        (vec!["--kind", "typo"], "kind"),
+        (vec!["--before", "bad-position"], "position"),
+        (vec!["--after", "bad-position"], "position"),
+        (vec!["--items", "0"], "positive"),
+        (vec!["--read-bytes", "0"], "scan"),
+    ] {
+        let out = Command::new(binary)
+            .args([
+                "read",
+                "absent",
+                "--native-store",
+                "claude",
+                "--native-root",
+            ])
+            .arg(root.path())
+            .args(["--json"])
+            .args(flags)
+            .output()
+            .unwrap();
+        assert!(!out.status.success());
+        let error: Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(error["schema"], "tapes-recording-error/1");
+        if reason == "position" {
+            assert_eq!(
+                error["refusal"]["kind"], "invalid-position",
+                "discovery obscured position: {error}"
+            );
+        } else {
+            assert!(
+                error["refusal"]["reason"]
+                    .as_str()
+                    .unwrap()
+                    .contains(reason),
+                "discovery obscured {reason}: {error}"
+            );
+        }
+        assert!(!error.to_string().contains("could not be completed"));
+    }
+    let id = "00000000-0000-0000-0000-000000000001";
+    let file = root.path().join(format!("{id}.jsonl"));
+    fs::write(&file,format!("{}\n",json!({"sessionId":id,"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"x".repeat(10_000)}]}}))).unwrap();
+    let args = vec![
+        "read",
+        id,
+        "--native-store",
+        "claude",
+        "--native-root",
+        root.path().to_str().unwrap(),
+        "--native-file",
+        file.to_str().unwrap(),
+        "--json",
+    ];
+    let out = Command::new(binary)
+        .args(&args)
+        .args(["--bytes", "100"])
+        .output()
+        .unwrap();
+    let error: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(error["refusal"]["kind"], "oversized");
+    assert!(error["refusal"]["needed"].as_u64().unwrap() > 10_000);
+    assert!(error["refusal"]["start"].is_string() && error["refusal"]["end"].is_string());
+    let skip = Command::new(binary)
+        .args(&args)
+        .args(["--after", error["refusal"]["end"].as_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(skip.status.success());
+    assert!(
+        serde_json::from_slice::<Value>(&skip.stdout).unwrap()["items"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    // Both option names are rejected before dispatch, independently of stores.
+    let both = Command::new(binary)
+        .args(["read", "absent", "--before", "x", "--after", "y"])
+        .output()
+        .unwrap();
+    assert!(!both.status.success());
+}
