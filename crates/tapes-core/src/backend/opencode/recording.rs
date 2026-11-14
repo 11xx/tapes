@@ -18,7 +18,7 @@ impl OpenCodeBackend {
         direction: Direction<'_>,
         limits: &Limits,
     ) -> Result<Page> {
-        if !self.uses_database() {
+        if !self.uses_database() || limits.bound.is_some() {
             return Err(Refusal::Unsupported {
                 store: self.store.coordinate(),
             }
@@ -27,9 +27,9 @@ impl OpenCodeBackend {
         let source = digest(format!("{}\0{id}", self.store.coordinate()).as_bytes());
         let sql_id = sql_literal(id);
         let mut bytes_read = 0;
-        let backwards = !matches!(direction, Direction::Forwards(_));
+        let backwards = matches!(direction, Direction::Tail | Direction::Before(_));
         let cursor = match direction {
-            Direction::Tail => None,
+            Direction::Head | Direction::Tail => None,
             Direction::Before(p) | Direction::Forwards(p) => Some(p.decode()?),
         };
         let bound = limits.scan_bytes.min(PART_BYTES);

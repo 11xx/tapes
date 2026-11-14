@@ -56,6 +56,9 @@ carries whatever the transcript holds, including anything pasted into it;
 tapes read <id> --items 40 --bytes 1MiB --kind user,assistant --json
 tapes read <id> --before '<start>' --kind user,assistant --json
 tapes read <id> --after '<end>' --kind user,assistant --json
+tapes read <id> --head --kind user,assistant --json
+tapes read <id> --from-offset 0 --bound '<end>' --json
+tapes read <id> --before '<end>' --bound '<start>' --json
 ```
 
 `tapes-recording-page/1` carries flat typed items: `start`, `end`, `kind`,
@@ -71,6 +74,18 @@ or user record UUID, Codex message `payload.id` (absent on reasoning/tools), Pi
 entry ID, OpenCode message ID. `parent_id` links Claude/Pi tree entries; on
 OpenCode it links the containing message to its parent message (usually the
 user prompt). Codex omits it.
+
+`--head` reads forwards from the beginning. File gaps have canonical positions:
+one gap in one recording has one string. `--from-offset` reads forwards from a
+native byte offset: zero or immediately following a committed newline.
+Construction reads an anchor instead of the prefix. Mid-record, unfinished and
+beyond-end offsets refuse with `invalid-coordinate`. `--bound` stops either
+direction at its gap with `stop: "bound"` and an exactly matching page endpoint,
+including when records yield no wanted item. Scanning stays inside the span;
+endpoint validation separately inspects anchors and internal records. Wrong-side
+bounds are `invalid-position`; foreign or replaced file bounds are `replaced`.
+OpenCode supports head and positional paging. Adjacent database part endpoints
+have distinct strings; native record coordinates and bounds are unsupported.
 
 `tool` exposes `name`, `status`, `title`, `metadata`, `caller`, `arguments` and
 `output` without harness-specific paths. Codex search arguments include the
@@ -131,9 +146,12 @@ API and supplied JSON/ZIP exports have no supported recording positions.
 
 In `agent-tapes-core`, `recording::Recording::resolve` uses discovery's bounded
 identity openings. `from_native` reuses a discovery result; `from_session`
-reuses a file session. `tail`, `before` and `forwards` take
+reuses a file session. `head`, `tail`, `before` and `forwards` take
 `Limits::default().with_items(n).with_bytes(bytes).with_scan_bytes(scan_bytes)
-.with_kinds(kinds)`. `Limits` is non-exhaustive; use its builders so additional
+.with_kinds(kinds)`. File spans use `.with_bound(position)`;
+`position_from_native(NativeCoordinate::ByteOffset(offset))` constructs their
+endpoints. `NativeCoordinate::RecordId` is reserved for native record stores and
+is refused by the current readers. `Limits` is non-exhaustive; use its builders so additional
 options do not require changing callers. Public `Refusal` values identify
 oversized items, scan exhaustion (with `needed` when the sufficient budget is
 known), changed content, replaced recordings, unsupported stores, invalid

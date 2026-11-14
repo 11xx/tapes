@@ -25,6 +25,9 @@ PAGE ONE RECORDING
   tapes read <id> --items 40 --bytes 1MiB --kind user,assistant --json
   tapes read <id> --before '<start>' --kind user,assistant --json
   tapes read <id> --after '<end>' --kind user,assistant --json
+  tapes read <id> --head --kind user,assistant --json
+  tapes read <id> --from-offset 0 --bound '<end>' --json
+  tapes read <id> --before '<end>' --bound '<start>' --json
 
   tapes-recording-page/1 has flat items with start/end, kind, role, text, ts,
   native/request IDs, recorded model/effort and origin, full tool fields and
@@ -37,6 +40,18 @@ PAGE ONE RECORDING
   processes. --after starts at the gap; --before ends there. Keep end to follow
   appends, start for older items. A Claude child is a separate --reference
   recording labelled parent::agent, with its parent linked.
+
+  --head reads forwards from the beginning. File positions are canonical: one
+  gap in one recording has one string. --from-offset reads forwards from a native
+  byte offset: zero or immediately after a newline, within committed content.
+  Construction inspects an anchor, never the prefix. Mid-record, unfinished and
+  beyond-end offsets refuse as invalid-coordinate. --bound stops either direction
+  at that gap, including filtered or itemless records; stop is bound and the page
+  endpoint equals it exactly. Wrong-side bounds are invalid-position; foreign or
+  replaced file bounds are replaced. File byte scanning stays inside the span;
+  validating endpoints inspects their anchors and internal records separately.
+  OpenCode supports head, tail and positional paging. Its adjacent part endpoints
+  have distinct strings; native record coordinates and bounds are unsupported.
 
   Tool fields are name, status, title, metadata, caller, arguments and output.
   Search arguments carry the query/action. OpenCode title/metadata, Pi details
@@ -86,7 +101,8 @@ PAGE ONE RECORDING
 
   Refusals are public library values. CLI JSON uses tapes-recording-error/1,
   refusal.kind and a nonzero exit for oversized, scan-budget, changed,
-  replaced, unsupported, invalid-position, invalid-input and unavailable cases.
+  replaced, unsupported, invalid-coordinate, invalid-position, invalid-input and
+  unavailable cases.
   Scan-budget gives needed when a sufficient budget is known. Deleted files
   are replaced; internal truncation is changed. Busy/unreadable stores are
   unavailable; busy reads retain exit 75. Error JSON also carries retryable,

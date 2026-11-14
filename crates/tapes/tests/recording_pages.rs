@@ -198,3 +198,66 @@ fn read_json_names_unavailable_stores() {
     assert_eq!(error["refusal"]["kind"], "unavailable");
     assert_eq!(error["retryable"], false);
 }
+
+// Claim: callers can enter at native offsets, persist a bound, and replay the
+// same span in either direction across processes. Rejects ignored CLI bounds,
+// a tail masquerading as head, and loss of typed native-coordinate refusals.
+#[test]
+fn span_cli_reads_head_native_offsets_and_exact_bounds() {
+    let root = tempfile::tempdir().unwrap();
+    let id = "00000000-0000-0000-0000-000000000001";
+    let file = root.path().join(format!("{id}.jsonl"));
+    let message = |n| {
+        format!(
+            "{}\n",
+            json!({"type":"assistant","sessionId":id,"message":{"role":"assistant","content":[{"type":"text","text":format!("item-{n}")}]}})
+        )
+    };
+    let first = message(0);
+    fs::write(&file, first.clone() + &message(1) + &message(2)).unwrap();
+    let read = |extra: &[&str]| {
+        let out = Command::new(env!("CARGO_BIN_EXE_tapes"))
+            .args(["read", id, "--native-store", "claude", "--native-root"])
+            .arg(root.path())
+            .arg("--native-file")
+            .arg(&file)
+            .arg("--json")
+            .args(extra)
+            .output()
+            .unwrap();
+        (
+            out.status.success(),
+            serde_json::from_slice::<Value>(&out.stdout).unwrap(),
+        )
+    };
+    let (ok, head) = read(&["--head", "--items", "1"]);
+    assert!(ok);
+    assert_eq!(head["items"][0]["text"], "item-0");
+    let offset = first.len().to_string();
+    let (ok, native) = read(&["--from-offset", &offset, "--items", "1"]);
+    assert!(ok);
+    assert_eq!(native["start"], head["end"]);
+    assert_eq!(native["items"][0]["text"], "item-1");
+    let start = native["start"].as_str().unwrap();
+    let end = native["end"].as_str().unwrap();
+    for flags in [
+        vec!["--from-offset", &offset, "--bound", end],
+        vec!["--before", end, "--bound", start],
+    ] {
+        let (ok, span) = read(&flags);
+        assert!(ok, "{span}");
+        assert_eq!(span["items"], native["items"]);
+        assert_eq!(span["start"], start);
+        assert_eq!(span["end"], end);
+        assert_eq!(span["stop"], "bound");
+    }
+    let (ok, error) = read(&["--from-offset", "1"]);
+    assert!(!ok);
+    assert_eq!(error["refusal"]["kind"], "invalid-coordinate");
+    let (ok, error) = read(&["--head", "--from-offset", "0"]);
+    assert!(!ok);
+    assert_eq!(error["refusal"]["kind"], "invalid-input");
+    let (ok, error) = read(&["--head", "--bound", "bad-position"]);
+    assert!(!ok);
+    assert_eq!(error["refusal"]["kind"], "invalid-position");
+}

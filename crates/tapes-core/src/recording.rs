@@ -3,6 +3,9 @@
 //! Positions are gaps: `forwards(page.start)` includes the page's first item,
 //! `before(page.start)` excludes it. Keep `page.end` to follow appends. Positions
 //! contain no transcript text and survive process restarts and append-only growth.
+//! File positions are canonical: one gap in one recording has one string, whether
+//! obtained from a page or a native byte offset. OpenCode part endpoints retain
+//! separate before-part and after-part coordinates for adjacent parts.
 //! File positions validate the inode and preceding record tail digest; internal
 //! record positions also validate their record. Edits elsewhere are not pinned.
 //! Use a captured recording when the whole history must remain immutable.
@@ -102,6 +105,8 @@ pub struct Limits {
     /// Empty admits every kind. Filtering precedes normalization and skips
     /// deserializing unwanted native payloads where the format separates them.
     pub kinds: Vec<Kind>,
+    /// Stop at this gap, before scanning or returning items on its far side.
+    pub bound: Option<Position>,
 }
 
 impl Default for Limits {
@@ -111,6 +116,7 @@ impl Default for Limits {
             bytes: 1024 * 1024,
             scan_bytes: 8 * 1024 * 1024,
             kinds: Vec::new(),
+            bound: None,
         }
     }
 }
@@ -130,6 +136,10 @@ impl Limits {
     }
     pub fn with_kinds(mut self, kinds: Vec<Kind>) -> Self {
         self.kinds = kinds;
+        self
+    }
+    pub fn with_bound(mut self, position: Position) -> Self {
+        self.bound = Some(position);
         self
     }
     pub fn validate(&self) -> Result<()> {
@@ -192,9 +202,17 @@ impl Position {
 
 #[derive(Clone, Copy, Debug)]
 pub enum Direction<'a> {
+    Head,
     Tail,
     Before(&'a Position),
     Forwards(&'a Position),
+}
+
+/// A coordinate defined by a recording's native storage format.
+#[derive(Clone, Copy, Debug)]
+pub enum NativeCoordinate<'a> {
+    ByteOffset(u64),
+    RecordId(&'a str),
 }
 
 mod item;
@@ -228,6 +246,9 @@ pub enum Refusal {
     InvalidPosition {
         reason: String,
     },
+    InvalidCoordinate {
+        reason: String,
+    },
     InvalidInput {
         reason: String,
     },
@@ -253,6 +274,7 @@ impl std::fmt::Display for Refusal {
             Self::Replaced { reason } => write!(f, "recording replaced or truncated: {reason}"),
             Self::Unsupported { store } => write!(f, "recording positions unsupported for {store}"),
             Self::InvalidPosition { reason } => write!(f, "invalid recording position: {reason}"),
+            Self::InvalidCoordinate { reason } => write!(f, "invalid native coordinate: {reason}"),
             Self::InvalidInput { reason } => write!(f, "invalid recording input: {reason}"),
             Self::Unavailable { reason } => write!(f, "recording unavailable: {reason}"),
         }
@@ -290,6 +312,7 @@ fn replaced(reason: &str) -> anyhow::Error {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Stop {
+    Bound,
     End,
     Items,
     Bytes,
@@ -421,6 +444,50 @@ impl Recording {
             ..self.clone()
         })
     }
+    /// Read forwards from the beginning, with the same page cost as a tail.
+    pub fn head(&self, limits: &Limits) -> Result<Page> {
+        self.page(Direction::Head, limits)
+    }
+    /// Construct the canonical file gap without reading the prefix. Only zero
+    /// and offsets immediately following a committed newline are accepted.
+    /// OpenCode native record coordinates require a canonical part-gap reader.
+    pub fn position_from_native(&self, coordinate: NativeCoordinate<'_>) -> Result<Position> {
+        if self.harness == "opencode" {
+            return Err(Refusal::Unsupported {
+                store: self
+                    .store
+                    .as_ref()
+                    .map_or_else(|| self.harness.clone(), NativeStore::coordinate),
+            }
+            .into());
+        }
+        let NativeCoordinate::ByteOffset(offset) = coordinate else {
+            return Err(Refusal::InvalidCoordinate {
+                reason: "file recordings require a byte offset".to_owned(),
+            }
+            .into());
+        };
+        (|| {
+            let path = self.path.as_ref().context("recording has no file")?;
+            let mut window = Window::new(path, self, BLOCK * 2)?;
+            if offset > window.metadata.len() {
+                return Err(Refusal::InvalidCoordinate {
+                    reason: "offset is beyond the committed end".to_owned(),
+                }
+                .into());
+            }
+            if offset > 0 && window.byte(offset - 1)? != b'\n' {
+                return Err(Refusal::InvalidCoordinate {
+                    reason: "offset is inside a record or an unfinished final line".to_owned(),
+                }
+                .into());
+            }
+            let position = window.position(offset, 0, None)?;
+            window.verify(path)?;
+            Ok(position)
+        })()
+        .map_err(unavailable)
+    }
     pub fn tail(&self, limits: &Limits) -> Result<Page> {
         self.page(Direction::Tail, limits)
     }
@@ -473,6 +540,8 @@ struct Window {
     budget: usize,
     bytes_read: usize,
     anchors: HashMap<u64, String>,
+    scan_lo: u64,
+    scan_hi: u64,
 }
 
 impl Window {
@@ -495,6 +564,7 @@ impl Window {
             )
             .as_bytes(),
         );
+        let scan_hi = metadata.len();
         Ok(Self {
             file,
             metadata,
@@ -504,6 +574,8 @@ impl Window {
             budget,
             bytes_read: 0,
             anchors: HashMap::new(),
+            scan_lo: 0,
+            scan_hi,
         })
     }
     fn hi(&self) -> u64 {
@@ -524,11 +596,16 @@ impl Window {
                 .into());
             }
             let (lo, hi) = if offset < self.lo {
-                (self.lo.saturating_sub(BLOCK.min(remaining) as u64), self.lo)
+                (
+                    self.lo
+                        .saturating_sub(BLOCK.min(remaining) as u64)
+                        .max(self.scan_lo),
+                    self.lo,
+                )
             } else {
                 (
                     self.hi(),
-                    (self.hi() + BLOCK.min(remaining) as u64).min(self.metadata.len()),
+                    (self.hi() + BLOCK.min(remaining) as u64).min(self.scan_hi),
                 )
             };
             let mut data = vec![0; (hi - lo) as usize];
@@ -558,14 +635,14 @@ impl Window {
             "position is not a record boundary"
         );
         let mut start = end - 1;
-        while start > 0 && self.byte(start - 1)? != b'\n' {
+        while start > self.scan_lo && self.byte(start - 1)? != b'\n' {
             start -= 1;
         }
         Ok((start, self.slice(start, end)))
     }
     fn line_at(&mut self, start: u64) -> Result<Option<(u64, Vec<u8>)>> {
         let mut end = start;
-        while end < self.metadata.len() {
+        while end < self.scan_hi {
             if self.byte(end)? == b'\n' {
                 return Ok(Some((end + 1, self.slice(start, end + 1))));
             }
@@ -583,7 +660,7 @@ impl Window {
                 return Err(changed("position is not a record boundary"));
             }
             let mut start = offset - 1;
-            let lower = offset.saturating_sub(ANCHOR_BYTES);
+            let lower = offset.saturating_sub(ANCHOR_BYTES).max(self.scan_lo);
             while start > lower && self.byte(start - 1)? != b'\n' {
                 start -= 1;
             }
@@ -726,9 +803,10 @@ fn file_page(recording: &Recording, direction: Direction<'_>, limits: &Limits) -
             reference: recording.id.clone(),
         });
     }
-    let backwards = !matches!(direction, Direction::Forwards(_));
+    let backwards = matches!(direction, Direction::Tail | Direction::Before(_));
     let mut pending_bytes = 0;
     let (mut offset, mut part) = match direction {
+        Direction::Head => (0, 0),
         Direction::Tail => {
             let mut end = window.metadata.len();
             while end > 0 && window.byte(end - 1)? != b'\n' {
@@ -744,15 +822,69 @@ fn file_page(recording: &Recording, direction: Direction<'_>, limits: &Limits) -
     };
     let mut start = match direction {
         Direction::Before(p) | Direction::Forwards(p) => p.clone(),
-        Direction::Tail => window.position(offset, part, None)?,
+        Direction::Head | Direction::Tail => window.position(offset, part, None)?,
     };
     let mut end = start.clone();
+    // Validate a distant bound in its own window; one scan window must never
+    // bridge the uninspected interval between the two endpoints.
+    let bound = if let Some(position) = &limits.bound {
+        let mut validation = Window::new(path, recording, limits.scan_bytes)?;
+        let cursor = validation.resume(position)?;
+        let starting = (offset, part);
+        let bounding = (cursor.offset, cursor.part);
+        if backwards && bounding > starting || !backwards && bounding < starting {
+            return Err(Refusal::InvalidPosition {
+                reason: "bound is on the wrong side of the starting position".to_owned(),
+            }
+            .into());
+        }
+        validation.verify(path)?;
+        window.bytes_read += validation.bytes_read;
+        window.anchors.extend(validation.anchors.clone());
+        if backwards {
+            window.scan_lo = cursor.offset;
+        } else {
+            window.scan_hi = if cursor.part == 0 {
+                cursor.offset
+            } else {
+                validation
+                    .line_at(cursor.offset)?
+                    .context("missing bounded record")?
+                    .0
+            };
+        }
+        // Cursor validation can prefetch outside the span. Scan only its range.
+        let lo = window.lo.max(window.scan_lo);
+        let hi = window.hi().min(window.scan_hi);
+        if lo < hi {
+            window.data = window.slice(lo, hi).into();
+            window.lo = lo;
+        } else {
+            window.data.clear();
+            window.lo = offset;
+        }
+        Some(cursor)
+    } else {
+        None
+    };
     let mut items = Vec::new();
     let mut item_bytes: usize = 0;
     let mut records_read = 0;
     let mut malformed_records = 0;
     let mut stop = Stop::End;
     loop {
+        if bound
+            .as_ref()
+            .is_some_and(|b| (offset, part) == (b.offset, b.part))
+        {
+            if backwards {
+                start = limits.bound.clone().unwrap();
+            } else {
+                end = limits.bound.clone().unwrap();
+            }
+            stop = Stop::Bound;
+            break;
+        }
         if items.len() == limits.items {
             stop = Stop::Items;
             break;
@@ -804,10 +936,18 @@ fn file_page(recording: &Recording, direction: Direction<'_>, limits: &Limits) -
         };
         let count = candidates.len();
         ensure!(!internal || part <= count, "position part outside record");
+        let first = bound
+            .as_ref()
+            .filter(|b| backwards && b.offset == lo)
+            .map_or(0, |b| b.part);
+        let last = bound
+            .as_ref()
+            .filter(|b| !backwards && b.offset == lo && b.part > 0)
+            .map_or(count, |b| b.part);
         let indices: Vec<usize> = if backwards {
-            (0..if internal { part } else { count }).rev().collect()
+            (first..if internal { part } else { count }).rev().collect()
         } else {
-            (part..count).collect()
+            (part..last).collect()
         };
         let mut full = false;
         for index in indices {
@@ -875,6 +1015,18 @@ fn file_page(recording: &Recording, direction: Direction<'_>, limits: &Limits) -
         if full {
             break;
         }
+        if bound
+            .as_ref()
+            .is_some_and(|b| b.offset == lo && (backwards || b.part > 0))
+        {
+            if backwards {
+                start = limits.bound.clone().unwrap();
+            } else {
+                end = limits.bound.clone().unwrap();
+            }
+            stop = Stop::Bound;
+            break;
+        }
         offset = if backwards { lo } else { hi };
         part = 0;
         let boundary = match window.position(offset, 0, None) {
@@ -895,6 +1047,11 @@ fn file_page(recording: &Recording, direction: Direction<'_>, limits: &Limits) -
             start = boundary;
         } else {
             end = boundary;
+        }
+    }
+    if let Some(bound) = &limits.bound {
+        if (if backwards { &start } else { &end }) == bound {
+            stop = Stop::Bound;
         }
     }
     if backwards {
@@ -1415,6 +1572,21 @@ mod tests {
             store: Some(NativeStore::opencode_v2("must-not-execute")),
             child: None,
         };
+        for result in [
+            r.head(&Limits::default()),
+            r.head(&Limits::default().with_bound(Position("unused".to_owned()))),
+        ] {
+            assert!(matches!(
+                result.unwrap_err().downcast_ref::<Refusal>(),
+                Some(Refusal::Unsupported { .. })
+            ));
+        }
+        assert!(matches!(
+            r.position_from_native(NativeCoordinate::RecordId("unused"))
+                .unwrap_err()
+                .downcast_ref::<Refusal>(),
+            Some(Refusal::Unsupported { .. })
+        ));
         assert!(matches!(
             r.tail(&Limits::default())
                 .unwrap_err()

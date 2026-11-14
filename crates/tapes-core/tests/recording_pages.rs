@@ -1429,3 +1429,321 @@ fn database_results_require_a_terminal_part_and_skip_abandoned_calls() {
     assert_eq!(results.items[0].call_id.as_deref(), Some("finished"));
     assert!(results.items.iter().all(|i| i.kind == Kind::ToolResult));
 }
+
+// Claim: head and backwards traversals enumerate the same complete stream.
+// Rejects a head implemented as tail, lost first items, and duplicated resumes.
+#[test]
+fn span_head_walk_matches_backwards_on_every_positioned_backend() {
+    let check = |reader: Recording| {
+        let options = limits(3);
+        let mut page = reader.head(&options).unwrap();
+        let beginning = page.start.clone();
+        let empty = reader.before(&beginning, &options).unwrap();
+        assert!(empty.items.is_empty());
+        assert!(matches!(empty.stop, Stop::End));
+        let mut forward = texts(&page);
+        for _ in 0..30 {
+            if matches!(page.stop, Stop::End) {
+                break;
+            }
+            let previous = page.end;
+            page = reader.forwards(&previous, &options).unwrap();
+            forward.extend(texts(&page));
+        }
+        assert!(matches!(page.stop, Stop::End));
+        let mut page = reader.tail(&options).unwrap();
+        let mut backward = texts(&page);
+        for _ in 0..30 {
+            if matches!(page.stop, Stop::End) {
+                break;
+            }
+            page = reader.before(&page.start, &options).unwrap();
+            backward = [texts(&page), backward].concat();
+        }
+        assert_eq!(forward, backward);
+        assert_eq!(forward.len(), 11);
+    };
+    for harness in ["claude", "codex", "pi"] {
+        check(Fixture::new(harness, 11).reader());
+    }
+    check(Database::new(11).reader());
+}
+
+// Claim: native offsets and page endpoints name exactly the same file gap.
+// Rejects offset-dependent anchors and admission of torn/native-wrong positions.
+#[test]
+fn span_native_offsets_are_canonical_and_refuse_uncommitted_gaps() {
+    use agent_tapes_core::recording::NativeCoordinate;
+    for harness in ["claude", "codex", "pi"] {
+        let fixture = Fixture::new(harness, 4);
+        let reader = fixture.reader();
+        let bytes = fs::read(&fixture.path).unwrap();
+        let offsets = std::iter::once(0)
+            .chain(
+                bytes
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(n, b)| (*b == b'\n').then_some(n as u64 + 1)),
+            )
+            .collect::<Vec<_>>();
+        let all = reader.head(&limits(20)).unwrap();
+        assert_eq!(
+            reader
+                .position_from_native(NativeCoordinate::ByteOffset(0))
+                .unwrap(),
+            all.start
+        );
+        for (index, item) in all.items.iter().enumerate() {
+            assert_eq!(
+                reader
+                    .position_from_native(NativeCoordinate::ByteOffset(offsets[index + 1]))
+                    .unwrap(),
+                item.start
+            );
+            assert_eq!(
+                reader
+                    .position_from_native(NativeCoordinate::ByteOffset(offsets[index + 2]))
+                    .unwrap(),
+                item.end
+            );
+        }
+        let end = bytes.len() as u64;
+        OpenOptions::new()
+            .append(true)
+            .open(&fixture.path)
+            .unwrap()
+            .write_all(b"unfinished")
+            .unwrap();
+        for offset in [1, end + 1, end + 10, end + 11] {
+            assert!(
+                matches!(
+                    reader
+                        .position_from_native(NativeCoordinate::ByteOffset(offset))
+                        .unwrap_err()
+                        .downcast_ref::<Refusal>(),
+                    Some(Refusal::InvalidCoordinate { .. })
+                ),
+                "accepted {offset}"
+            );
+        }
+        assert!(matches!(
+            reader
+                .position_from_native(NativeCoordinate::RecordId("m1"))
+                .unwrap_err()
+                .downcast_ref::<Refusal>(),
+            Some(Refusal::InvalidCoordinate { .. })
+        ));
+        assert_eq!(
+            reader
+                .position_from_native(NativeCoordinate::ByteOffset(end))
+                .unwrap(),
+            all.end
+        );
+    }
+}
+
+// Claim: filtered spans stop at native gaps, including gaps with no visible item.
+// Rejects implementations that discover the bound by looking for a returned item.
+#[test]
+fn span_filtered_reads_stop_at_empty_and_filtered_records_in_both_directions() {
+    use agent_tapes_core::recording::NativeCoordinate;
+    for harness in ["claude", "codex", "pi"] {
+        for empty_record in [true, false] {
+            let fixture = Fixture::new(harness, 2);
+            let reader = fixture.reader();
+            let start_offset = fs::metadata(&fixture.path).unwrap().len();
+            fixture.append(&if empty_record {
+                json!({"type":"ignored"})
+            } else {
+                fixture.tool(true)
+            });
+            fixture.append(&fixture.message(2, "in-span"));
+            let end_offset = fs::metadata(&fixture.path).unwrap().len();
+            fixture.append(&fixture.tool(true));
+            fixture.append(&fixture.message(3, "outside-span"));
+            let start = reader
+                .position_from_native(NativeCoordinate::ByteOffset(start_offset))
+                .unwrap();
+            let end = reader
+                .position_from_native(NativeCoordinate::ByteOffset(end_offset))
+                .unwrap();
+            let options = limits(20).with_kinds(vec![Kind::Assistant]);
+            let back = reader
+                .before(&end, &options.clone().with_bound(start.clone()))
+                .unwrap();
+            assert_eq!(texts(&back), ["in-span"]);
+            assert_eq!(back.start, start);
+            assert_eq!(back.end, end);
+            assert!(matches!(back.stop, Stop::Bound));
+            let forward = reader
+                .forwards(&start, &options.clone().with_bound(end.clone()))
+                .unwrap();
+            assert_eq!(texts(&forward), ["in-span"]);
+            assert_eq!(forward.end, end);
+            assert!(matches!(forward.stop, Stop::Bound));
+            let head = reader.head(&options.with_bound(start.clone())).unwrap();
+            assert_eq!(head.items.len(), 2);
+            assert_eq!(head.end, start);
+            assert!(matches!(head.stop, Stop::Bound));
+        }
+    }
+}
+
+// Claim: internal bounds divide a multipart record exactly where pages can.
+// Rejects crossing an internal gap when the fragment on its near side is skipped.
+#[test]
+fn span_internal_bounds_preserve_parts_and_equal_bounds_are_empty() {
+    for harness in ["claude", "codex", "pi"] {
+        let fixture = Fixture::new(harness, 0);
+        let mut row = fixture.message(0, "unused");
+        let content = if harness == "codex" {
+            &mut row["payload"]["content"]
+        } else {
+            &mut row["message"]["content"]
+        };
+        *content = if harness == "codex" {
+            json!([{"type":"output_text","text":"a"},{"type":"output_text","text":"b"},{"type":"output_text","text":"c"}])
+        } else {
+            json!([{"type":"text","text":"a"},{"type":"thinking","thinking":"b"},{"type":"text","text":"c"}])
+        };
+        fixture.append(&row);
+        let r = fixture.reader();
+        let all = r.head(&limits(20)).unwrap();
+        let gap = all.items[1].end.clone();
+        let forward = r.head(&limits(20).with_bound(gap.clone())).unwrap();
+        assert_eq!(texts(&forward), ["a", "b"]);
+        assert_eq!(forward.end, gap);
+        assert!(matches!(forward.stop, Stop::Bound));
+        let back = r
+            .before(&all.end, &limits(20).with_bound(gap.clone()))
+            .unwrap();
+        assert_eq!(texts(&back), ["c"]);
+        assert_eq!(back.start, gap);
+        assert!(matches!(back.stop, Stop::Bound));
+        for backwards in [true, false] {
+            let p = if backwards {
+                r.before(&gap, &limits(20).with_bound(gap.clone()))
+            } else {
+                r.forwards(&gap, &limits(20).with_bound(gap.clone()))
+            }
+            .unwrap();
+            assert!(p.items.is_empty());
+            assert_eq!(p.start, gap);
+            assert_eq!(p.end, gap);
+            assert!(matches!(p.stop, Stop::Bound));
+        }
+    }
+}
+
+// Claim: bounded work scales with the span and anchors, never its large prefix.
+// Rejects loading the interval between separately validated positions or scanning
+// a huge skipped record immediately before the lower bound.
+#[test]
+fn span_backward_scan_stays_within_bound_after_large_prefix() {
+    use agent_tapes_core::recording::NativeCoordinate;
+    for harness in ["claude", "codex", "pi"] {
+        let fixture = Fixture::new(harness, 1);
+        fixture.append(&fixture.message(1, &"x".repeat(3 * 1024 * 1024)));
+        let r = fixture.reader();
+        let head = r.head(&limits(1).with_scan_bytes(32 * 1024)).unwrap();
+        assert_eq!(head.items.len(), 1);
+        assert!(
+            head.bytes_read < 40_000,
+            "head read scaled with recording length"
+        );
+        let offset = fs::metadata(&fixture.path).unwrap().len();
+        let start = r
+            .position_from_native(NativeCoordinate::ByteOffset(offset))
+            .unwrap();
+        fixture.append(&fixture.message(2, "bounded"));
+        let end = r
+            .position_from_native(NativeCoordinate::ByteOffset(
+                fs::metadata(&fixture.path).unwrap().len(),
+            ))
+            .unwrap();
+        let page = r
+            .before(
+                &end,
+                &limits(20)
+                    .with_scan_bytes(32 * 1024)
+                    .with_bound(start.clone()),
+            )
+            .unwrap();
+        assert_eq!(texts(&page), ["bounded"]);
+        assert_eq!(page.records_read, 1);
+        assert_eq!(page.start, start);
+        assert!(matches!(page.stop, Stop::Bound));
+        println!(
+            "SPAN_BYTES {harness} prefix={offset} read={}",
+            page.bytes_read
+        );
+        assert!(
+            page.bytes_read < 40_000,
+            "bounded page scanned before its bound"
+        );
+    }
+}
+
+// Claim: bounds preserve source identity and directional ordering.
+// Rejects silently applying foreign, replaced, stale, or wrong-side positions.
+#[test]
+fn span_bounds_refuse_wrong_side_foreign_and_replaced_files() {
+    for harness in ["claude", "codex", "pi"] {
+        let f = Fixture::new(harness, 4);
+        let r = f.reader();
+        let page = r.head(&limits(20)).unwrap();
+        assert!(matches!(
+            r.forwards(&page.end, &limits(20).with_bound(page.start.clone()))
+                .unwrap_err()
+                .downcast_ref::<Refusal>(),
+            Some(Refusal::InvalidPosition { .. })
+        ));
+        assert!(matches!(
+            r.before(&page.start, &limits(20).with_bound(page.end.clone()))
+                .unwrap_err()
+                .downcast_ref::<Refusal>(),
+            Some(Refusal::InvalidPosition { .. })
+        ));
+        let other = Fixture::new(harness, 4);
+        let foreign = other.reader().head(&limits(20)).unwrap().start;
+        assert!(matches!(
+            r.head(&limits(20).with_bound(foreign))
+                .unwrap_err()
+                .downcast_ref::<Refusal>(),
+            Some(Refusal::Replaced { .. })
+        ));
+        let old = f.path.with_extension("old");
+        fs::rename(&f.path, &old).unwrap();
+        fs::copy(&old, &f.path).unwrap();
+        assert!(matches!(
+            r.head(&limits(20).with_bound(page.end))
+                .unwrap_err()
+                .downcast_ref::<Refusal>(),
+            Some(Refusal::Replaced { .. })
+        ));
+    }
+}
+
+// Claim: unsupported OpenCode extensions refuse explicitly while head remains
+// usable. Adjacent part endpoints are distinct, so file-canonical bounds cannot
+// be promised by this database reader.
+#[test]
+fn span_database_extensions_refuse_without_claiming_canonical_gaps() {
+    use agent_tapes_core::recording::NativeCoordinate;
+    let db = Database::new(3);
+    let r = db.reader();
+    let page = r.head(&limits(20)).unwrap();
+    assert_ne!(page.items[0].end, page.items[1].start);
+    assert!(matches!(
+        r.position_from_native(NativeCoordinate::RecordId("p000000"))
+            .unwrap_err()
+            .downcast_ref::<Refusal>(),
+        Some(Refusal::Unsupported { .. })
+    ));
+    assert!(matches!(
+        r.head(&limits(20).with_bound(page.end))
+            .unwrap_err()
+            .downcast_ref::<Refusal>(),
+        Some(Refusal::Unsupported { .. })
+    ));
+}

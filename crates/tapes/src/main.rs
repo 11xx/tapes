@@ -1433,7 +1433,9 @@ enum Command {
     },
     /// Page typed items from one native recording (tapes-recording-page/1).
     /// Default: tail. Positions are gaps: --after starts at that gap, --before
-    /// ends there. Keep end to follow appends; keep start to load older items.
+    /// ends there. --head starts at the beginning; --from-offset uses a committed
+    /// file byte offset. --bound stops a file read exactly at its gap with stop
+    /// bound. Keep end to follow appends; keep start to load older items.
     /// Claude is record-local; Codex retains runtime mirrors; Pi includes all
     /// branches. Item identity is start; native_id is a record/entry ID shared
     /// by its parts. message_id groups native messages. parent_id links Claude/Pi
@@ -1460,6 +1462,15 @@ enum Command {
         /// Read a Claude child separately, qualified by this parent session.
         #[arg(long)]
         reference: Option<String>,
+        /// Read forwards from the beginning.
+        #[arg(long)]
+        head: bool,
+        /// Stop at this opaque gap; file recordings only. The page reports bound.
+        #[arg(long)]
+        bound: Option<String>,
+        /// Read forwards from a native file byte offset (zero or after a newline).
+        #[arg(long)]
+        from_offset: Option<u64>,
         #[arg(long)]
         before: Option<String>,
         #[arg(long)]
@@ -3563,6 +3574,9 @@ fn dispatch(cli: Cli) -> Result<()> {
             native_root,
             native_file,
             reference,
+            head,
+            bound,
+            from_offset,
             before,
             after,
             items,
@@ -3571,20 +3585,28 @@ fn dispatch(cli: Cli) -> Result<()> {
             kind,
             json,
         } => {
-            use agent_tapes_core::recording::{self, Direction, Limits, Position, Recording};
+            use agent_tapes_core::recording::{
+                self, Direction, Limits, NativeCoordinate, Position, Recording,
+            };
             use agent_tapes_core::NativeStore;
             let result = (|| -> Result<recording::Page> {
-                if before.is_some() && after.is_some() {
-                    return Err(anyhow!("--before conflicts with --after"));
+                if [
+                    head,
+                    before.is_some(),
+                    after.is_some(),
+                    from_offset.is_some(),
+                ]
+                .into_iter()
+                .filter(|selected| *selected)
+                .count()
+                    > 1
+                {
+                    return Err(anyhow!("--head conflicts with --before, --after and --from-offset; select one direction"));
                 }
                 let before = before.as_deref().map(Position::parse).transpose()?;
                 let after = after.as_deref().map(Position::parse).transpose()?;
-                let direction = match (&before, &after) {
-                    (Some(p), _) => Direction::Before(p),
-                    (_, Some(p)) => Direction::Forwards(p),
-                    _ => Direction::Tail,
-                };
-                let limits = Limits::default()
+                let bound = bound.as_deref().map(Position::parse).transpose()?;
+                let mut limits = Limits::default()
                     .with_items(items)
                     .with_bytes(bytes.get_usize())
                     .with_scan_bytes(read_bytes.get_usize())
@@ -3593,6 +3615,9 @@ fn dispatch(cli: Cli) -> Result<()> {
                             .map(|kind| kind.parse())
                             .collect::<Result<Vec<_>>>()?,
                     );
+                if let Some(bound) = bound {
+                    limits = limits.with_bound(bound);
+                }
                 limits.validate()?;
                 let mut harness = harness;
                 let mut session = Some(session);
@@ -3641,6 +3666,20 @@ fn dispatch(cli: Cli) -> Result<()> {
                 if let Some(reference) = reference {
                     recording = recording.child(&reference)?;
                 }
+                let native = from_offset
+                    .map(|offset| {
+                        recording.position_from_native(NativeCoordinate::ByteOffset(offset))
+                    })
+                    .transpose()?;
+                let direction = if head {
+                    Direction::Head
+                } else if let Some(position) = &before {
+                    Direction::Before(position)
+                } else if let Some(position) = after.as_ref().or(native.as_ref()) {
+                    Direction::Forwards(position)
+                } else {
+                    Direction::Tail
+                };
                 recording.page(direction, &limits)
             })();
             let page = match result {
