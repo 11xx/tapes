@@ -1,0 +1,95 @@
+USAGE
+  usage answers where a session's quota went as tapes-usage/17: its recorded
+  launch mode when known, tokens, cost, accounting, turns, and any by-model attribution the source can
+  support — Claude's recorded cost-state or, for a request sum, the model
+  each request names; Codex's request observations; or pi's per-message
+  model each qualified by the thinking level in effect. Read
+  accounting before adding anything up — basis says
+  whether a figure is a recorded total or an observed request sum, and
+  coverage says how much of the session it covers. An observed cumulative
+  counter restart is `since-reset`; the newest recorded total remains visible
+  without being rebuilt from request rows. Codex attribution counts every
+  usage record, compactions included, and `attribution.outside_total` counts
+  the requests the cumulative total never moved for (a remote compaction, or
+  a request no token count followed), with `outside_total_tokens` their sum.
+  A compaction is the usage record a `compacted` record names by its
+  `compaction_response_id`, and it is outside the total however the next
+  total moves:
+  the model shares less those are the recorded total's movement, so a share
+  above the recorded total says what the total left out. Codex quota
+  observations preserve credits balances and reached-limit flags exactly as recorded, including false
+  and string zero; absent fields remain unknown. `usage --full` streams the
+  whole recording and folds its counters. Turns and complete request reads
+  cover the session; recorded totals keep their epoch coverage. Pi's active
+  accounting stays `read-window` when an unreadable record cuts its branch
+  or follows its last entry.
+  A Claude cost-state can count usage none of the recording's requests
+  shows: a model no request names, or a model's tokens beyond its requests'.
+  `unexplained`, beside `by_model`, names that part per model with its
+  tokens: the newest total less the requests it covers, those first written
+  in its run before it, a run restarting where a total's `startTime`
+  changes or a counter falls. It never joins a figure summed from requests,
+  and the session's own figure stays the recorded total. `explained_by`
+  says whose requests measure it: `session-requests`, the recording's own,
+  or `family-requests`, its subagent recordings' too, each request once by
+  id and set against the totals by its time, as `--reconcile` and a window
+  read measure it. A read that leaves part of the recording unread names no
+  unexplained part, and notes that --full does. Text prints a `recorded
+  total not explained by ...` line per model.
+  `usage <id> --from <RFC3339> --to <RFC3339>` answers one span of one
+  session, the half-open `[from, to)` with either bound open, and
+  `--requests FIRST..LAST` the session's counted requests 1-based and
+  inclusive in recording order. Both stream the whole recording and place
+  each counted request by its own timestamp: a Claude request id by its first
+  record, a Codex token count that moves the cumulative total or a usage
+  record the total never moved for (a remote compaction, or a request no token
+  count followed), a pi consumption event counted once, an OpenCode assistant message by its
+  creation time. The answer keeps the whole-session shape and vocabulary and
+  adds `span`: the requested bounds, the `first` and `last` request placed
+  (ordinal, timestamp, and the harness's own request id where it records
+  one), how many `requests` it placed, and the session's `session_requests`.
+  Turn counts describe the whole read. Spans conserve: requests no span
+  holds form the remainder, and spans that share no request plus the
+  remainder add up to the whole session per counter and disjoint category
+  within one accounting basis, so the span before an instant and the span
+  from it add up to `usage --full`. A request in two spans counts in each and
+  is `overlapped`. A Codex span sums its requests, `summed-requests`: a token
+  count's share is its move of the cumulative total and a usage record the
+  total never moved for counts its own usage, so the whole the spans add up
+  to is the thread's total, as `thread_token_usage` records it. A span is
+  `since-reset` when the counter restarted inside it, as a resumed `codex
+  exec` process starts its total again. `usage --full` keeps the recorded
+  total, which omits the requests `attribution.outside_total` names and,
+  after a restart, covers only the requests since it. A Claude cost-state is the running total of one run and an OpenCode session total
+  counts requests no message records, so no span divides either: their
+  spans, and the whole they add up to, sum requests, and the recorded total is
+  withheld with a note. A Claude figure carries apart the share of the
+  newest total's `unexplained` part its span holds. Cost-states write no
+  timestamp, so each one's increase is bounded by the newest timestamped
+  record before the previous total and the newest before itself: a span
+  holding that interval whole holds the increase whole (`placement.status:
+  bounded`), one cutting it holds the share of the recording's timestamped
+  records between the two totals that it holds, so a span over an idle
+  stretch holds little (`estimated`, with `basis:
+  cost-state-interval-prorated-by-records`; past a million records, the
+  share of the interval's duration, `cost-state-interval-prorated-by-time`),
+  and what no span holds is the remainder's, so spans that share no time and the
+  remainder add up to the whole's. An increase no timestamped record
+  bounds, and every increase for a `--requests` span, which places nothing
+  in time, stays with the remainder and is named under the span's
+  `unplaced`, with `unplaced_reasons` `unbounded` or `ordinal-span`. A pi span keeps the active-branch counters and the
+  retained-branch `consumption` apart, each conserving. A request with no
+  usable timestamp is held by the remainder and qualifies every span it may
+  belong to `unestablished-scope`; an unreadable record, a failed attempt or
+  unrecognized usage the read cannot place for or against a span is counted
+  under `unplaced` and qualifies it `unreadable-record`, `stopped-attempt` or
+  `unrecognized-usage`, so a span the read could not cover is never complete.
+  The library answers several spans in one pass, as tapes-usage-spans/6: a
+  figure per span, the `remainder`, and the `whole` in the spans' basis. A
+  whole-recording read asked for its timeline also carries, without another
+  pass, the request timeline the spans count (every counted request with its
+  ordinal, timestamp or none, and id) and the working stretches `stats
+  --idle` cuts from the same turns, each holding the timed requests that
+  fall in it. A read not asked keeps neither. One that counts more than
+  100,000 requests or hands over more than 1,000,000 timed turns withholds
+  both whole, with its reason, rather than keep part of them.

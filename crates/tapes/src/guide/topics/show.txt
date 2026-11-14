@@ -1,0 +1,155 @@
+PROBE BEFORE EXPORTING
+  tapes show <id> --tail 40      A window, costing no bundle.
+  tapes show <id> --turn-chars 2000  Cap each turn’s readable text, naming omitted characters.
+  tapes show <id> --json         tapes-session/24 turns, typed context events, locations, and bounded read, graph, artifact, terminal, and recorded launch evidence.
+  tapes show <id> --exchange     Operator and assistant turns only, timestamps and ordinals kept; the name for --only operator,assistant.
+  tapes show <id> --only operator --origin person  Operator turns with recorded person origin.
+  tapes show <id> --omit tool    Every turn but tool calls and results; --only and --omit take kind labels, and export takes both.
+  tapes show <id> --full         Every turn of a Claude, Codex, Pi, or OpenCode session, streamed past the read bounds; --json streams it too.
+  tapes events <id> --json       Typed tool calls, results, pairs, and content parts.
+  tapes capture <id> --json      The recording's store class and custody state.
+  tapes usage <id> --json        Tokens, cost, quota observations, and turn counts.
+  tapes usage <id> --from T --to T --json  The same answer for the requests in one span.
+  tapes usage <id> --prices FILE --json  The same answer with a list-price estimate.
+  tapes stats <id> --json        The same recording, counted with its read evidence.
+  tapes lineage <id> --json      The sessions this one names as relatives.
+  tapes brief <id> --json        What a continuation of it needs.
+  tapes workset <id> --bundle DIR  The session and its relatives, read whole and cut into lanes.
+  tapes locate --workset DIR --refs FILE --json  Whether a frozen workset still holds, and what its cited references are.
+  tapes usage --here --json      The same counters summed over a project.
+  tapes usage --global --window FROM..TO --by session,parent  What a window consumed, by session.
+  tapes usage --global --quota-window current --harness codex  The same over the running quota window.
+  tapes usage --global --allowance-rates --harness codex --since DATE --by model,variant  Allowance per lane.
+  tapes usage --global --forecast MODEL#VARIANT=LANES --harness codex  Window percent and time left for a planned mix.
+  tapes usage --range A..B       What a change's commits cost, by commit, agent and role (`tapes guide change-cost`).
+  tapes usage <id> --by commit   One session divided across its repository's commits.
+  tapes endings --here --json    What each session of a project ends on.
+
+  show returns the last 100 turns unless --tail says otherwise, and marks the
+  result truncated whenever it dropped any. It is the probe, not the archive;
+  export is what takes every turn the reader could reach. JSON says why under
+  `truncation`: a `window` names how many turns were returned and how many
+  earlier ones the --tail bound omitted, which a larger --tail or export
+  recovers; `source` lists bounds the reader itself reached (a file tail, a
+  store page, cut turn text, gaps in a supplied input). Wider turn windows retain source bounds;
+  `--read-bytes` widens the file tail (4MiB by default, at most 1GiB), `show
+  --full` streams a whole session past it and past OpenCode's store page, and
+  explicit page reads reach older Claude or Codex file history. `read`
+  includes `source_prefix_digest` when a streaming full read or a pinned
+  history walk establishes a prefix: algorithm `sha256`, lowercase hex `value`, and `span` from byte zero
+  to `source_length` (exclusive). It hashes source bytes, including malformed
+  records and newline-less tails. Identical copies share the digest even when
+  their stat-based `source_revision` differs. Replays retain the pinned prefix
+  identity after appends. Bounded reads, strict pages, and API reads omit it
+  and read no extra bytes to establish it. Absence means no digest was established.
+  `read` records the source length, configured bound, physical
+  head/tail/alignment/verification ranges, decoded record spans, context-only record spans,
+  and gaps;
+  physical coverage does not erase malformed records, and a partial gap is
+  discharged only by a successful decode of that same record. A preceding
+  newline lets an exact tail boundary retain its first record; a mid-record
+  boundary records the discarded partial prefix. Alignment bytes are not
+  normalized coverage. `read.unmapped` counts, by native record type, the
+  decoded records that became no turn: `declined` for types the reader leaves
+  out on purpose, such as accounting, headers, and records restating another
+  record's text, and `unrecognized` for every other type, whose content no
+  view shows. An empty object means every decoded record became a turn; an
+  absent one means that reader does not count. `read.reader` names the build
+  that produced the read, as `tapes --version` does on its second line: a
+  reader repair can change what the same source projects to under the same
+  schema version, and this is what tells the two apart. A terminal observation records only native stop fields
+  reached by the read, including bounded nested Codex error fields, and never
+  says that the session is stopped now or that the account is currently
+  available. A later recorded token total remains independent. An empty text
+  tail carries the reason it has no operator or assistant text.
+  Human output says the same in its closing notes, recommending only the
+  recovery that works.
+
+  Claude, Pi and Codex report `session.model_observation`: `mixed` means
+  more than one model/effort pair was observed, `distinct_observed` counts
+  those pairs, and `attribution_uncertain` marks gaps, partial reads or
+  exhausted evidence budgets. `head_read: false` means the selection read
+  did not reach the recording head; the opening metadata probe does not
+  count. A single observed pair in that tail is not a whole-session claim.
+  `session.model_selections` holds consecutive selection spans in recording
+  order, each with `model`, `first` and `last` record coordinates (`timestamp`
+  and `native_id` when recorded). A selection that returns after a switch
+  has another span. Endpoints prove the selection at observed records;
+  they do not prove it between records. At most the newest 1024 spans and
+  32 distinct keys are retained; exhaustion marks attribution uncertain
+  and withholds the count. Claude and Pi endpoints are assistant records;
+  Codex endpoints are turn-context records. Claude and Pi assistant turns
+  carry their own `model` with effort in `variant`; Pi uses the active
+  branch's preceding `thinking_level_change`, leaving effort absent when
+  that setting was not reached. The session model remains the newest
+  selection. Library consumers use `Session::newest_model_selection()` to
+  obtain a `ModelSelectionSpan` and its `last: ModelSelectionRecord` without
+  decoding the native records.
+
+  Claude, Codex, Pi and OpenCode report `locations` beside `turns`: where the
+  recording shows the session working, as changes only, in recording order.
+  Each observation has `at` (the record's time) and `cwd`, plus `branch`,
+  `head_commit` and `repository_url` where the harness recorded them; a field
+  it did not record is absent, never defaulted. Claude writes a directory and
+  branch on every message record, a subagent recording its own, and writes
+  `HEAD` where no branch is checked out (a detached head, or a directory
+  outside any repository); `HEAD` is no branch name, so the branch is absent.
+  Codex records a directory, branch, commit and repository on `session_meta`
+  and a directory on each `turn_context`; a turn in another directory is a
+  place with the directory alone, because that record says nothing of the
+  branch or commit there, and a detached head has a commit and no branch.
+  A URL's `user:password@` is dropped from `repository_url`. Pi's header
+  directory and OpenCode's session directory are each one observation, since
+  neither records a later one. `coverage` is `whole` for a --full
+  read and `from-window-start` for a bounded tail read, whose records are
+  only those its window holds: its first place is where the window opens,
+  not where the session began, and a window past the Pi header holds none.
+  At most the newest 1024 observations are kept; `omitted` counts the older
+  ones the cap dropped. Library consumers read `Transcript::locations`.
+
+  show --turn-chars N caps each turn's text at N Unicode characters after
+  selecting turns. Capped JSON turns carry text_truncated: true and text_chars
+  with the original length; human turns end with the omitted character count.
+  Without the flag text is unchanged. Zero keeps no text. This presentation
+  bound applies to full, supplied-input, and remote reads; native content
+  parts and other metadata retain their own bounds.
+
+  timeline <id> or timeline --here projects each turn as ordinal, kind and ts
+  under tapes-timeline/1, without text or payloads. Ordinals use show's
+  zero-based coordinate. Missing timestamps are omitted (a dash in human output).
+  Selection, scope and read bounds follow stats; --full streams every selected
+  recording. JSON groups records by session with truncation and read notes;
+  human output is one line per turn. A selected session that cannot be read
+  fails the command.
+
+  Every turn carries an `ordinal`, its zero-based place in the session's
+  normalized sequence. On a file-backed session (claude, codex, pi) it is kept
+  under any window: `--tail 1` returns the turn with the last ordinal, and the
+  window names the range it holds. On an OpenCode API session the read is
+  paged, so a window that stopped fetching (`omitted_exact: false`) numbers
+  from the oldest turn it fetched and a wider request renumbers; there the
+  durable coordinate is `native_id`, which OpenCode always records. With the
+  source descriptor, the session id, and `source.location` (where tapes read
+  it from, opaque) that is what to write down when filing something a session
+  produced. Human output prints the ordinal in each turn heading.
+  A turn record_ref.part_index is its normalized position within the source
+  record. A content part repeats that parent coordinate and adds
+  content_part_index for its position within the turn; any native pointer
+  remains the source pointer and is never repacked.
+
+  When a backend can verify a non-turn record after the newest rendered turn,
+  show names that trailing record's kind and timestamp. JSON carries the
+  optional `trailing_record` object; source timestamps that are absent stay
+  absent rather than being inferred.
+
+  Live state is a present-tense annotation, not part of an export bundle.
+  Export reads only the recording, so a status authority that is unavailable
+  or changes cannot alter the rescue files.
+
+  Retrieval is cheap; ingestion is not. The tail usually settles whether a
+  dead session holds anything worth having. Rescue one that holds something
+  expensive and not otherwise recorded: a design settled after real argument,
+  a diagnosis that took many probes, a half-applied migration, the exact state
+  of a long edit sequence. Start fresh when the session never reached a
+  decision worth keeping, when its approach was already failing, or when
+  redoing the task is faster than reconstructing it.

@@ -1,0 +1,50 @@
+USAGE OVER A SELECTION
+  Given a scope or a listing filter instead of a session, usage answers that
+  whole selection as tapes-usage-summary/16, using the flags list and export
+  take and grouping by --by (harness and model unless told otherwise). A
+  commit selector, or --by commit, merge, agent, role or tier, asks for a
+  change view instead (`tapes guide change-cost`). It sums
+  the counters the listing already carries, so nothing is re-read. Read
+  counted before a sum: it says how many of a group's sessions recorded that
+  counter, and a counter none recorded is absent rather than zero. coverage
+  counts the sessions behind a sum by their accounting, including those whose
+  harness recorded nothing to sum, and cost is summed only where a harness
+  recorded one. Native tokens and cost add only within one harness and
+  accounting; a group spanning more sets mixed_accounting and omits them.
+  disjoint sums each session's disjoint categories across harnesses, names
+  every convention it mapped from, and counts under missing the sessions that
+  could not supply a category; its total needs every session with tokens to
+  supply all four. Sessions of different accounting basis or coverage add in
+  neither form, and partitions keep each harness and accounting's own sums.
+
+  A summary adds sessions only where no recording relates them. Two sessions
+  are related when one declares the other as its fork origin or parent (Codex
+  `forked_from_id`, Pi's parent header, OpenCode `fork_session_id` and
+  `parent_id`), transitively, when both are forks of the same source (Codex
+  `forked_from_id`, Pi's parent header, OpenCode `fork_session_id`), whether
+  or not that source is selected, or when both recorded the same request id
+  or message uuid, which is how a Claude fork shows: it keeps its origin's
+  ids.
+  Related sessions form an overlap group. A group of two whose consumption
+  event keys establish their union adds by that exact union, its keys
+  confined to each session's active branch like the counters beside it; a
+  fork's verified copy of an entry its parent rewound past counts once; any other group
+  withholds the summary's exact token, cost and disjoint totals, keeps each
+  session's own figure in `session_figures`, and reports `identity_bounds`
+  within a compatible accounting partition: at least the largest member of
+  each group, at most the sum. A missing or partial counter leaves its upper
+  bound unmeasured. `overlap.related` lists each group with its sessions, its
+  `evidence` (declared-fork, fork-origin-unplaced, shared-declared-origin,
+  shared-request-id, shared-message-uuid), whether its `union` is exact or withheld, and why.
+  Unrelated sessions beside a withheld group stay summed in the bounds.
+  `overlap.disjointness` states how the unrelated sessions and groups were
+  added as disjoint, and is absent when every session is in one overlap
+  group. It is `inferred-from-absent-copy-evidence`: the recordings hold no
+  sign that they share events, which is evidence of absence and not proof.
+  The id check reads the ids the usage read visits and keeps a bounded sample
+  of a very long recording's, so a copy sharing only a few ids with it can go
+  unseen. When any summed session was sampled the basis is
+  `inferred-from-sampled-copy-evidence` and `overlap.sampled` names those
+  sessions by id.
+  Different bases have separate partitions, and `session_figures` preserves
+  per-counter coverage without recording locators.

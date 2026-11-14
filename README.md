@@ -91,7 +91,8 @@ installed on this machine. `--native-store` also takes `codex` and `pi`.
 
 ## Where the rest is
 
-`tapes` with no arguments prints the workflow guide, and `tapes <command>
---help` is each command's full contract. A tool that only needs to find
+`tapes` with no arguments prints a one-screen map of what it does. `tapes
+guide <topic>` goes into one subject at a time, and `tapes <command> --help`
+is each command's full contract. A tool that only needs to find
 sessions can depend on the `agent-tapes-discovery` library instead of the CLI;
 see [its README](crates/tapes-discovery/README.md).

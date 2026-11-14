@@ -1,0 +1,151 @@
+TOOL EVENTS
+  events <id> projects harness-neutral tool records as tapes-events/16.
+  --tool (alias --name) matches the recorded tool name exactly. --command
+  matches a case-insensitive substring of a shell call's recorded command
+  field (command or cmd), or the serialized input for other tools. Matching
+  uses complete retained input, including text beyond arguments.preview;
+  paired results and recorded exit status remain attached to selected calls,
+  including results whose recordings omit the tool name.
+  events --here or --global accepts the session filters and limits of stats.
+  Selection JSON uses tapes-events-selection/4: each sessions row contains
+  session, count of matching calls, partial, truncation, and a nested events
+  object. --count omits that object, including for one named session. Zero
+  matches still produce a row. Partial counts describe only the read window;
+  --full streams each selected recording. An unreadable selected recording
+  fails the command. Collection discovery diagnostics accompany the rows.
+  Shell results carry `commits`, the commits their call made or inspected.
+  An observation is {at, sha, subject?, branch?, created, found, call}: `at`
+  is the result's time, `sha` is as printed or named (abbreviated or full),
+  `call` names the call by ordinal and call_id, and only the sha, the commit
+  subject and a branch name are kept, never other output text. `created` is
+  true when the call made the commit, and `found` says how its sha was found,
+  strongest first: `git-operation` is the harness's structured record of the
+  commit (Claude's `toolUseResult.gitOperation.commit`, with its branch);
+  `summary-line` is git's `[<branch> <sha>] <subject>` line from a call that
+  ran a commit-creating command (commit including --amend, merge,
+  cherry-pick, rebase --continue, am, revert), wherever it falls in the
+  output, after hook output included, and it gives the branch unless the
+  head is detached; `chained-output` is for a quiet commit, whose sha a later
+  command of the same call printed, as `git log -1` or `git rev-parse HEAD`
+  does, and it names no branch. Most Claude commits are quiet, so a chained
+  print is the usual way a sha is found there. A printing command (`git log`,
+  `git rev-list`, `git show` or `git rev-parse HEAD`, naming no revision but
+  HEAD or a range that ends at it, and no path or filter) lists the commits at
+  HEAD newest first, so its first lines are the commits
+  made since the printer before it, one per commit-creating command; where a
+  script prints after each commit, each printer's lines are divided by its
+  own bound (`-N`, `head -N`, one line for `rev-parse`). A printer with no
+  bound leaves the lines after it unplaced. Chained lines count when the
+  printer runs only if the commits succeeded (`&&`), or when the call did not
+  fail and its output has no failure text. Otherwise the result says
+  `created_unnamed`: a commit-creating command ran without failing and the
+  result does not name its commit, as when a script makes several quiet
+  commits and prints fewer. A failed commit, a merge that fast-forwards, and
+  a summary-shaped line from a call that made no commit yield nothing. When
+  the structured record and the text of one result name different commits,
+  both are reported. A commit is inspected (`created` false, `found` is
+  `invocation`) when the call's command names it as a revision: the hex shas
+  of `git show`, `diff`, `log`, `diff-tree`, `range-diff`, `cat-file`,
+  `format-patch` and `rev-list`, each end of `A..B` and `A...B`. A branch or
+  a name such as `HEAD~1` is not a sha and is not reported, and a sha a result
+  merely prints (a `git log --oneline` listing) is not an inspection; a printed
+  sha only lengthens the name of a commit already named and gives its subject.
+  Treat inspections as weak evidence. The command is read from the call's
+  complete text by a tolerant shell split that follows quotes, heredoc
+  bodies, redirections, chains with other tools and `sh -c` operands, and for
+  Codex the `cmd` strings of `tools.exec_command` calls, because the strict
+  invocation evidence declines any script that uses substitution,
+  redirection or a heredoc. The shas come from the whole result text, not
+  the 200-character preview; Codex results are read after unwrapping the
+  JSON object each command's result is nested in, with its `exit_code`.
+  Claude `Bash`, Codex shell and exec calls (CommandExecution included) and
+  Pi `bash` take part; a result whose call is outside the read reports
+  nothing unless the harness recorded the commit itself. A result holds at
+  most 32 observations and says `truncated` when it saw more; a read holds at
+  most 1024, the first, and the events object states `commits` {kept,
+  omitted, truncated_calls} when a cap dropped any.
+  Library consumers read `EventRecord::commits`, or `session_commits` for a
+  whole session's observations in recording order.
+  File-changing results carry `edits`, the files their call changed, as
+  digests of the lines. An observation is {at, path, op, added, removed,
+  truncated?, source: {tool, shape}, call}. `added` and `removed` are line
+  digests, the git reader's `line_digest`: the first eight bytes of the
+  SHA-256 of the line without trailing whitespace, as a big-endian unsigned
+  integer, so an edit's lines compare with a commit's added and removed lines
+  directly. A blank line or one of punctuation alone has no digest, and no
+  line text is kept. `op` is `edit` (part of an existing file), `write` (a
+  file's whole content, or a patch's added file), `delete`, or for a shell
+  call `shell`, `shell-create` and `shell-delete`. `source.shape` says which
+  record gave the lines: `structured-patch` (the hunks Claude records with
+  Edit and Write results), `old-new` (the call's old and new text, diffed
+  here by dropping their common beginning and end), `content` (a written
+  file's lines), `unified-diff` (Pi's `details.patch` and Codex's
+  `FileChange` record), `apply-patch` (the `*** Begin Patch` text of an
+  `apply_patch` call that succeeded, read only when no `FileChange` record
+  holds the same call), `bash-edit-diff` (Claude's `toolUseResult.bashEditDiff`
+  for a shell call). Where a result carries hunks they win over the call's
+  text. A failed call reports nothing. Claude `MultiEdit` and `NotebookEdit`
+  are read from their documented input; no recording on the machine that
+  verified this holds either, so those two shapes are unverified. Claude
+  records `bashEditDiff` for any file change a shell call caused, so the
+  command classifies it: a call that runs a git command that moves the working
+  tree (merge, pull, checkout, switch, rebase, reset, restore, stash,
+  cherry-pick, am, revert) is no authored edit, and the result says
+  `tree_movement` {files, more_files, added_lines, removed_lines} in its
+  place; every other shell call's hunks are shell edits, formatters and
+  scripts included. Claude lists at most five files; `more_files` counts the
+  rest, and `shared` repeats the recording's own flag. A shell call that
+  writes files with no recorded hunks (`sed -i`, `perl -i`, `tee`, `patch`,
+  `git apply`, or a redirection into a source or document file outside
+  scratch directories) is `unrecognized` on its result: it is counted, never
+  parsed. A result holds at most 32 edits and says `truncated` when it saw
+  more; an edit keeps at most 1024 digests on each side and says `truncated`;
+  a read keeps its first 2048 edits and 262144 digests, keeping an edit past
+  the digest budget without digests. The events object states `edits` {kept,
+  omitted, digests_omitted, truncated_calls, tree_movements,
+  tree_movement_files, unrecognized}, each member absent at zero, when any
+  but `kept` is nonzero. Library consumers read `EventRecord::edits`, or
+  `session_edits` for a whole session's edits in recording order.
+  Each record
+  names its source turn with turn_ordinal, the same coordinate show prints;
+  ordinal retains that turn coordinate, including for call/result pairs. Pairing is
+  exact within the bounded read; an incomplete call or result says whether its
+  counterpart was not reached or not recorded. `exit` is an integer process
+  status on completed Codex CommandExecution events when exit_code is recorded.
+  Claude Bash and Pi bash results omit it because their recordings supply no
+  structured process status. Output text never supplies an exit status. Event ordinals are the same
+  turn coordinates show prints. event_id stays stable across read windows;
+  native_id is the harness record id where recorded, or a coordinate-derived
+  record-sha256 id for a tool turn without one. A recognized file read has
+  its recorded path, recorded line range or explicit whole-file scope, outcome
+  when known, and sha256 of returned UTF-8 text. content_sha256 names the
+  returned file bytes for Claude text reads only when structured file content
+  or every decimal-number/tab line establishes them exactly. Structured token
+  truncation and any unmatched line leave it absent. Partial reads digest the
+  returned range and carry its line coordinates. Unknown formats omit
+  content_sha256. Missing scope is unknown.
+  capture reports unpinned for installed recordings; exporting does not
+  pin native bytes. With no --tail, every event the bounded reader
+  reaches is returned; --name and --call-id filter only after pairing.
+  --full-arguments returns each tool call's complete recorded argument text in
+  place of the 200-character prefix, under the same members and schema
+  version. `--program`
+  filters exact nested literal or structured-runtime declarations while
+  `--name` continues to mean the recorded outer tool. JavaScript declarations
+  require a complete direct literal `cmd`/`command` property; supported string
+  escapes are decoded and dynamic, nested, incomplete, arrow, short-circuit,
+  ternary, or unsupported forms remain qualified evidence. Shell assignments
+  and reserved/control forms are also unsupported. Structured argv with
+  non-string elements or too many arguments is reported unsupported rather
+  than filtered or truncated.
+  A shortened first or second invocation token is unsupported rather than an
+  exact-looking program or subcommand name; later arguments retain their
+  bounded truncation facts.
+  Wrapper results never witness an individual nested declaration or give it
+  timing. Explicit artifact references and within-read consumption
+  observations are descriptors; tapes never opens the named object. Codex
+  lifecycle mirrors for messages, reasoning, user messages, and compaction
+  are not projected as tools; only the verified `CommandExecution` and
+  `FileChange` variants enter this event layer. events --full streams a whole
+  Claude, Codex, or Pi recording twice, pairing past the read bound and
+  writing each event as it pairs, with the same filters and counts.

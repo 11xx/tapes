@@ -1,0 +1,38 @@
+SELECT A MATERIALIZED NATIVE STORE
+  tapes list --native-store claude --native-root archive/claude --limit 5
+  tapes show --native-store codex --native-root archive/codex --latest --tail 10
+
+  --native-store <claude|codex|pi> requires --native-root <PATH>. PATH is the
+  harness configuration root: Claude reads PATH/projects, Codex and Pi read
+  PATH/sessions. Every session-reading command accepts the pair, including
+  capture, child, full reads, history paging, aggregates, and export. The pair
+  alone selects a collection for usage, stats, and export. Only this
+  store participates; missing or unreadable roots never fall back to installed
+  stores. Harness configuration environment is neither read nor changed.
+  --input and --remote conflict with the pair. --harness may name the selected
+  harness and refuses another. OpenCode uses an API or database, not a root,
+  so --native-store opencode refuses.
+  --native-file <PATH> selects the exact recording at the locator returned by
+  list, alongside --native-store and --native-root. Only that file is inspected;
+  a missing, unreadable or identity-mismatched file never selects another source.
+  Repeated directory recording IDs choose the newest modification time, with the
+  lexically first locator breaking ties, for both listing and exact lookup.
+  Codex resumed filenames retain their canonical ID before the occurrence suffix.
+  Discovery and read bounds remain explicit; a locator does not pin growing bytes.
+  IDs and prefixes resolve only in the selected store. `self` uses the caller's
+  exported identity but must resolve within that store. --latest and --title
+  default to the selected store across all recorded projects; --here,
+  --project, and --global give an explicit scope. A removed recorded working
+  directory does not prevent direct ID or global-store reads.
+  source.kind is explicit-native-store, source.location.container names PATH,
+  and source.location.locator names the exact recording. Recording reads accept
+  only regular opened files, without waiting for FIFO writers. Identity-bearing
+  records must match the selected native session (the parent for Claude children,
+  whose records must also name no agent but the child). Bounded reads and listings
+  check the opening and retained tail; full reads check every record.
+  Directory and raw-text prefilters validate the probed native identity before
+  excluding a candidate; uncertain probes defer to normalization and its diagnostics.
+  This is a selected
+  occurrence, with no live annotation or claim of immutable bytes. capture
+  reports caller-selected-native-store: the caller selected the native source,
+  and tapes has not pinned its bytes.

@@ -1,0 +1,76 @@
+tapes reads the sessions Claude Code, Codex, OpenCode and Pi record, through
+one model, and exports them for another session to continue. It never writes
+to a harness's store, so no command here can disturb a live session.
+
+This map is complete in under 80 lines: read all of it. Depth comes one topic
+at a time. `tapes guide` lists the topics; `tapes <command> --help` is a
+command's full contract.
+
+PICK UP A SESSION'S WORK
+  tapes brief <id|--latest>      short and cold: where it stopped, its directory
+                                 and commit, calls with no result, the last turns
+  agent-delegate pickup --latest --here --harness <h> --backend <scout backend>
+                                 long, or with relatives, executors or delegated
+                                 runs: scouts read it and their facts are verified
+  tapes export <id|--latest> --bundle DIR
+                                 three files for a fresh session: .context.md
+                                 whole, .json with jq, .trace.md only to search
+  A bundle is unredacted working material. Keep it in a scratch directory and
+  carry forward the distillate, never the transcript.
+  Topics: continue workset export endings
+
+FIND A SESSION
+  tapes list --here              this project's sessions, every harness, newest first
+  tapes list --search TEXT       sessions whose recent turns mention it
+  tapes show --latest --tail 40  the newest session of this project
+  The project is the current directory's repository across its worktrees.
+  --project PATH names another and --global drops the scope. From inside a live
+  session --latest is usually that session: pass --exclude self.
+  Topics: find t3
+
+LOOK BEFORE EXPORTING
+  tapes show <id> --tail 40      a window of turns; --exchange keeps only the
+                                 operator's and the assistant's
+  tapes read <id> --kind user,assistant --json
+                                 one page by position; --before and --after move
+  tapes events <id> --json       typed tool calls and results, paired
+  tapes endings --here           what each session of a project ends on
+  tapes lineage <id>             the sessions a recording names as relatives
+  Retrieval is cheap and ingestion is not. Read the tail before making a
+  bundle, and never ingest a whole bundle because it exists.
+  Topics: show read history events lineage
+
+COUNT AND PRICE
+  tapes usage <id>               tokens, cost, quota observations, turn counts
+  tapes usage --here --by model  the same counters summed over a selection
+  tapes usage --range A..B       what a change's commits cost
+  tapes stats <id>               turns, tools, durations, cache share
+  Token counters follow each harness's own convention: never add raw input
+  across harnesses. tapes ships no prices; a list-price estimate needs a table.
+  Topics: usage usage-summary usage-window usage-quota usage-counters
+  usage-branches usage-family usage-keys change-cost prices price-tables stats
+  launch
+
+READ ANOTHER SOURCE
+  --input PATH                   a ChatGPT or Perplexity export
+  --remote SSH-DESTINATION       another machine's tapes, asked over ssh
+  --native-store H --native-root DIR   a copied Claude, Codex or Pi store
+  Each names the only source read. None falls back to the installed stores.
+  Topics: input remote native-store
+
+JUDGE WHAT COMES BACK
+  A harness that is not installed is reported unavailable; the command still
+  exits 0. Every read is bounded, and an answer says when it is partial:
+  truncation, notes, coverage. State what was not read; never write over the gap.
+  A field a harness did not record is absent, never guessed.
+  Every reading command except export takes --json, and each answer names its
+  versioned schema. Exit 75 is a read that failed for a reason that can pass,
+  such as a busy store. Exit 2 is misuse.
+  Never hand-parse a transcript store. If tapes cannot express what you need,
+  add it to tapes.
+
+GO DEEPER
+  tapes guide                    every topic with a one-line description
+  tapes guide <topic>            one topic
+  tapes guide --search TEXT      the topics and command helps that mention TEXT
+  tapes guide --all              every topic at once: long, only when asked for

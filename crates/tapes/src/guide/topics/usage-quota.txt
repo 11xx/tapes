@@ -1,0 +1,115 @@
+QUOTA WINDOWS, ALLOWANCE RATES AND FORECASTS
+  `usage --quota-window current|<instant> --harness codex|claude [--quota
+  primary|secondary]` answers as --window over the provider's quota window,
+  from the recordings' own quota observations. A Codex `rate_limits`
+  observation records its window's reset and length, so the window is
+  `recorded`. Claude records a limit only on a request it refused
+  (`quotaLimits`: `five_hour` or `seven_day` and the reset), so its length is
+  the one the limit's name states and the window is `inferred`. `current`
+  reads the newest observation alone, and once its window has reset takes the
+  window after it for the same length, `inferred`; an instant reads the newest
+  observation whose window holds it. Anything else refuses and the window is
+  read with --window. `window.quota` names the observation and the session
+  whose recording holds it.
+  A window read also apportions allowance: the percent of a quota window
+  sessions spent, an estimate from observations reported beside tokens and any
+  price, never in their place. A pool is one harness's quota window for one
+  account, limit and plan as the recordings name them (Codex `session_meta`
+  `creator_account_id`, `rate_limits` `limit_id` and `plan_type`); where no
+  record names an account, one harness's store on this machine is one pool and
+  `window.allowance_assumption` says so. Every session of the pool's harness on
+  this machine with activity in the window that spends from the pool is a
+  member: its recording names the pool's account (or, like the pool, none),
+  and where its recording's observations name quota limits, inside the
+  window or before it, the pool's is among them. Members count selected or not, up to
+  10,000 sessions whatever --limit says; a pool whose member listing reached
+  that bound says `members_truncated`, its members' shares then holding what
+  the sessions left out spent.
+  Between two consecutive observations of a pool, ordered by observation time,
+  the rise in `used_percent` is apportioned over each member's disjoint tokens
+  (uncached input, cache read, cache write, output) inside that interval. A
+  new `resets_at`, beyond a minute's jitter, starts a new chain, as a falling
+  percent does where no reset is recorded; inside one period a lower percent
+  is a snapshot older than one already seen (concurrent sessions report the
+  same account) and is skipped, counted as `stale_observations`. Requests before
+  a chain's first observation, after its last, or recorded without a time are
+  `uncovered_requests`, not counted; a Codex total recorded without a time
+  still advances the running total, so the next request's move is its own.
+  Each member keeps one weight per interval it spent in, so apportioning holds
+  memory in proportion to the requests read, never to members times
+  intervals. Observed percents are whole numbers, read as the true percent
+  rounded to the nearest whole, so each figure gives `estimate`, the rises
+  apportioned as observed, with `at_least` and `at_most` that hold for every
+  true percent the observations allow: a run of equal observations hides at
+  most one unit of rise. `output_weighted` repeats the apportionment weighted
+  by output alone, a sensitivity bound on the weighting. Each share, group
+  and total carries `allowance`, one `kind: apportioned-allowance` entry per
+  pool window (`primary` or `secondary`, its length, the plan) with its
+  `coverage` (observations, intervals, uncovered requests);
+  `window.allowance` gives each pool's `observed` rise and how it divides:
+  `attributed` to the selection, `outside_selection` for the pool's other
+  sessions, and `without_recorded_use` for rises in intervals where no member
+  spent a token. The estimates of the three add up to the observed rise. A
+  group or total holds each session once, by its harness and id together,
+  and a session spends only from its own harness's pools, so each rise is
+  apportioned once whatever the grouping.
+  Claude records no used percent (its quota observations exist only on
+  refused requests), so a Claude share carries `allowance_absent` with that
+  reason and no allowance.
+  `usage --allowance-rates` turns the same apportionment into rates per lane:
+  every completed session (last activity at least fifteen minutes before the
+  read) with requests in the lookback (--window, else --since..--until) is a
+  lane, its percent of the --quota window summed over that window's pools,
+  grouped by --by (`model,variant` for cost per model and effort) and by the
+  `plan`, `limit` and `window_minutes` of the pools it was measured in, each
+  group naming them, since a percent is of one capacity: two plans or two
+  limits whose windows share a length spend different allowances, and a
+  plan change can give a window of the same kind another length. Each group
+  gives lanes, percent per lane (median, 90th percentile by nearest rank,
+  maximum) over the lanes' estimates and their bounds, tokens per one percent
+  by disjoint category (the tokens of the lanes' requests an interval of their
+  pools holds, over the percent apportioned on them), `uncovered_requests`
+  (the lanes' requests no interval held, on neither side of the rate), the
+  median minutes from a lane's first to its last
+  request, and `measured_over`, the first and last request measured: rates
+  drift with models and pricing, so a rate is read with its dates. A plan
+  whose window lacks the --quota kind (a plan with one weekly window, say)
+  leaves its lanes `excluded_without_allowance`. Percent per lane comes
+  twice, each naming its `estimator`: `percent_per_lane` is
+  `interval-apportioned`, the attribution a window read gives, and
+  `smoothed_percent_per_lane` is `period-smoothed`: within each window
+  period, the lane's share of the tokens spent in the period's intervals
+  times the period's rise, bounded by the rounding of the observations that
+  bound it. At whole-percent resolution most intervals rise by nothing and a
+  step lands on whichever lanes spent in it, so the smoothed figure is the
+  steadier lane cost. A session either estimator gives a percent is a lane
+  of both, so both sum to the same group total. `tokens_per_lane`
+  gives the lanes' tokens. Lanes come from up to 10000 sessions per harness,
+  not --limit's default of 20; an explicit --limit keeps that many in --sort
+  order, a parent reached only through its subagents taking a place after the
+  listed sessions, and none when --since does not keep it. `lanes_read`
+  names the limit, whether it is the caller's,
+  the sessions the lookback may hold that it left out (`left_out_by_limit`),
+  and `lane_bound_reached` when a listing stopped at its bound, so sessions
+  past it went unread. The answer is tapes-allowance-rates/6.
+  `usage --forecast MODEL[#VARIANT]=LANES,... --harness H [--concurrency N]
+  [--quota primary|secondary]` sizes a planned mix against that window, as
+  tapes-allowance-forecast/2. It reads the rates grouped by model and
+  variant over --window, else --since..--until, else the last 14 days, and
+  sizes each lane as its group's median lane tokens over the group's tokens
+  per one percent, with the ratio's bounds, and carries the rates'
+  `lanes_read`. The window is the one the pools'
+  newest observation is of; its length is named, never assumed, and only
+  lanes measured in pools of its plan, its limit and its length size the
+  plan, since a percent is of one capacity and plans and limits differ in
+  theirs as a plan's windows differ by kind and length. That observation gives what is
+  left (100 less its used percent, bounded by its rounding, or the whole
+  window once its reported reset has passed) and the newest period's reset,
+  which moves, so it is read rather than assumed. The answer gives the mix's
+  percent and whether it fits what is left (`yes`, `maybe`, `no`), the
+  percent per minute with N lanes at once (each lane's percent over its
+  group's median duration; all of them at once by default), the minutes
+  until the window is spent at that pace, and whether that comes before the
+  reset. A bound the measurements leave open is null. A model and variant
+  with no measured lanes refuses, naming it; a Claude forecast refuses,
+  since Claude records no used percent.

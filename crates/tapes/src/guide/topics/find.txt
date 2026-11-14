@@ -1,0 +1,222 @@
+START WITHOUT AN ID
+  tapes show --latest --tail 40  The newest session of this project.
+  tapes show --latest --exclude self
+  tapes export --latest
+
+  --latest takes the most recent session in scope, so nothing has to read a
+  table of ids and choose between them. The scope is the
+  project holding the current directory: every worktree of its repository, or
+  the directory's subtree when it is not in one. --project <path> asks about
+  another project and --global drops the scope entirely. If the bounded scan
+  cannot read candidate rows or stores, the chosen readable session remains
+  useful but every --latest view names the unreadable evidence and warns that
+  newer activity may be hidden; a missing harness alone is not a warning.
+  A candidate with no recorded activity timestamp makes --latest refuse
+  rather than guess: file modification time is never substituted.
+
+  "Most recent" is settled by recorded activity across the newest few sessions
+  each store offers — but which ones those are is the store's own answer: file
+  time for the file-backed harnesses, one page of the API for opencode.
+  Establishing it independently would mean reading every session, so a
+  transcript whose file time was disturbed by a restore, or an opencode
+  session past that page, can fall outside the window. When it matters
+  exactly, list and name the id.
+
+  Asking from inside a live session usually returns that session — it is the
+  newest one there. Nothing in a store distinguishes the session asking from
+  the session that just died, so pass --exclude <id> for any session you
+  already hold. self stands for your own session wherever an id does, read
+  from the variable your harness exports (CLAUDE_SESSION_ID or
+  CLAUDE_CODE_SESSION_ID, CODEX_THREAD_ID, OPENCODE_SESSION, PI_SESSION_ID);
+  Pi adds PI_SESSION_FILE as the active recording and prefers it for its own
+  id, while keeping configured session directories available for other ids;
+  stderr says what it became, and it refuses when none is set or the store
+  does not hold the id. Without one, read the first turns and check whose
+  they are.
+
+FIND IT
+  tapes list                     Every available harness, newest first.
+  tapes list --here              This project, across every worktree.
+  tapes list --harness codex     One backend.
+  tapes list --launch headless  Sessions with a recorded headless marker.
+  tapes list --search <text>     Recent content, across matching sessions.
+
+  --limit bounds each harness and defaults to 20. The scope applies first, so
+  a scoped listing cannot be emptied by a bound spent on other projects. An
+  empty scoped list means the search found nothing — unless it says it stopped
+  early, which is a different fact and is reported when it happens. A session
+  recorded in a directory that no longer exists (a removed worktree) cannot be
+  placed in a project: the scoped list reports those directories as Not
+  placed, and `tapes list --global --directory <substring>` reaches them.
+
+  --model <substring> matches case-insensitively against the full model
+  identity shown in MODEL: `id (variant)` when a variant exists. A session
+  without a model never matches. --directory <substring> matches
+  case-insensitively against the recorded directory path; a session without a
+  directory never matches. --launch interactive|headless uses recognized
+  launch evidence: Claude `cli` and `claude-desktop` entrypoints are
+  interactive, `sdk-cli` is headless, and a recording with both is
+  interactive; Codex `cli` and `vscode` sources are interactive, while `exec`
+  and a `subagent` source are headless. Pi records no launch mode itself:
+  `tapes install pi` adds an extension that writes a `tapes.launch` entry,
+  naming the session it was written for, each time pi opens a session. `tui`
+  is interactive, `print` and `json` are headless, `rpc` says neither, any
+  `tui` entry makes the session interactive, and entries a fork copied from
+  its parent are ignored. `tapes install opencode` adds a plugin under
+  `$OPENCODE_CONFIG_DIR/plugins`, or `$XDG_CONFIG_HOME/opencode/plugins`
+  (default `~/.config/opencode/plugins`). Restart OpenCode to load it.
+  Its session metadata `tapes.launch` contains `session` and `modes`: `tui`
+  is interactive, `run` is headless, and TUI evidence wins. A marker naming
+  another session is ignored. Creation and the first prompt in a resumed
+  session record the process mode. The plugin recognizes the process's
+  `/cli/tui/worker` entrypoint path and `run` command argument, verified
+  against OpenCode 1.18.33. A layout tapes does not recognize leaves the
+  session without a marker; attached servers record nothing.
+  Pi and OpenCode sessions without their integration carry no marker.
+  Install and uninstall refuse foreign files, symlinks, and directories;
+  `tapes uninstall opencode` preserves recorded metadata. For Claude, Pi,
+  and OpenCode, a read that stops short of a recording keeps interactive evidence it reached but never
+  concludes headless;
+  `show --full` settles Claude and Pi; OpenCode streaming exports carry its
+  complete session metadata. OpenCode listings read the complete launch marker
+  independently of transcript windows. Codex's source is its opening record,
+  so a bounded read settles it. Unknown or absent markers never match. These filters apply
+  before the per-harness limit and compose with --harness and the scope flags.
+
+  --since and --until filter `last_activity_at`, the newest recorded activity,
+  with the half-open rule `since <= last_activity_at < until`, before the
+  per-harness limit. --sort newest|oldest orders by that clock and decides
+  which sessions the limit keeps: the newest of each harness, or the oldest,
+  which inspects every candidate the scan reaches as --search does. Ties use
+  session id ascending, then harness ascending. A Claude, Codex or Pi
+  recording file last modified more than a day before --since is skipped
+  without being parsed: recordings are only appended to, so it holds no later
+  activity, and the day absorbs clock skew and coarse file times. Such a file
+  raises no unreadable-recording note, and the sessions listed are the same.
+
+  --search <text> matches case-insensitively against normalized turns in each
+  bounded read. --search-turns <N> selects the last N turns (default 32);
+  --search-turns all searches every retained turn. Byte and record bounds still
+  apply. Search precedes the per-harness limit. Partial reads are searched:
+  hits remain matches without a coverage diagnostic. partial_search names
+  nonmatching sessions whose requested window was withheld by a source bound. A miss
+  describes only the searched window. Read failures are named in unsearched.
+  Human search diagnostics group by harness and reason with counts; JSON
+  preserves per-session diagnostics. OpenCode API refusals name the store once
+  with their reason. A preflight notice goes to stderr, and a stopped candidate
+  scan is reported as scan_truncated. If the local OpenCode2 API server cannot
+  start or list candidates, search falls back to CLI API GETs and records the
+  failed stage and diagnostic in unsearched.
+
+  --search <text> --full streams each selected recording through its whole
+  reader, with memory following one record, or one 8 MiB batch of records in a
+  recording of 32 MiB or more. Metadata, scope, harness, launch, and activity
+  filters apply before reading. --limit bounds sessions read globally;
+  full_search.selection_truncated reports candidates withheld or an incomplete
+  candidate scan. --search-matches <N> caps matching turn coordinates per
+  session (default 100); matches_truncated reports overflow.
+  full_search.coverage includes nonmatches and states whole_recording_read,
+  which requires no gaps, skipped records, trailing record, or source bounds.
+  Ordinals are zero-based across the whole normalized recording. OpenCode uses
+  its database or API full reader. Stores without a whole reader are named
+  once in unsearched. --full conflicts with --search-turns.
+
+  File-backed harnesses may show a bounded first-meaningful-user-turn hint
+  prefixed with ~ when a harness recorded no title, cut at 96 characters. JSON
+  keeps that hint as derived_title and leaves the recorded title absent;
+  derived_title_truncated says whether the hint was shortened. OpenCode's API-backed
+  listing does not fetch messages merely to invent titles, so title-less OpenCode
+  title metadata stays absent in list, show, and export. Human timestamps use whole
+  RFC 3339 seconds with Z; JSON keeps recorded precision. show compares store
+  activity with the newest rendered turn at that same whole-second precision.
+  Whenever cost or tokens are present, or the read counted requests that
+  recorded no amount, JSON also carries accounting stating whether the
+  figures are a recorded total or a sum of requests and whether they cover
+  the session or only the bounded read window. A cost carries
+  kind: harness-calculated-estimate and lists pricing_basis under missing:
+  the harness priced it, and no recording says on which price table.
+  Where a recording keeps more than one conversation path, its selection says
+  which records the figures were summed over: pi's counters are
+  `active-branch`, the last
+  entry's ancestry, and cover the session only when the read linked that
+  branch from its last entry to its root.
+
+  JSON omits a fact the harness did not record rather than writing it as
+  null, an empty string, or an invented default. `launch` appears only when
+  the reader recognizes the harness's recorded marker; it is never inferred
+  from `promptSource`, the command line, or the session's content. A session
+  whose opening record the reader could not reach carries
+  start_uncertain: true: it began at or before its started_at.
+
+  A full session id uses direct native lookup. A recording file named for the id
+  whose header records another session fails the lookup, naming the path and
+  both ids, rather than reporting the session absent; a correct file for the id
+  in the same store wins even after an intervening read failure. Every bounded
+  exact filename candidate is inspected until a correct match is found.
+  The filename/header rule also applies to Pi's explicit recording file;
+  a correct directory recording takes precedence over its mismatch.
+  A forked Codex rollout copies its origin's history, `session_meta` included.
+  Its first `session_meta` is its identity; a later one naming the
+  `forked_from_id` of a record already accepted, a fork of a fork included, is
+  inherited history and supplies no identity, launch, directory, provider or
+  lineage. Any other differing id is an identity mismatch.
+  An identity mismatch remains a failure
+  when candidate enumeration finds only prefix matches. A prefix is accepted only when
+  bounded candidate coverage proves it unique; an ambiguous prefix lists its
+  candidates. A file-backed harness matches an id or prefix against the
+  identities its walk reads from filenames and recording headers and reads
+  only the matching recordings whole, so a recording another session is
+  still writing never decides a miss; a candidate whose header it could not
+  read keeps the miss from reading as absence. A whole read whose recording
+  changes under it starts again, up to three reads. --harness <h> restricts ID and prefix lookup to that harness's
+  stores. Lookup diagnostics retain the failure causes alongside incomplete
+  and completely searched harness stores, distinguishing store generations
+  when a harness has several. Incomplete coverage asks for the full id or
+  --harness <h>; a single observed prefix
+  match cannot prove uniqueness across incomplete stores. A harness whose
+  binary or store is absent reports itself unavailable and never fails a
+  listing. If one stored session row cannot be read, listing keeps every other
+  session and reports that one as unreadable, with its id and the diagnostic —
+  a separate fact from an unavailable harness, since the store itself was fine.
+  OpenCode keeps two stores, and the first answers for a session id both hold;
+  a session it could not read fails the read naming both stores rather than
+  answering from the other one.
+  A store read that fails for a reason that can pass, an OpenCode database
+  another reader or writer holds busy or locked or an API that answers 429 or
+  503, is retried within a third of a second. One that still fails says it
+  failed transiently and exits 75, so it never reads as a session with no
+  usage; a failure that cannot pass exits 1.
+  A content search that cannot read one candidate's bounded tail reports that
+  session separately in unsearched. A Codex row without model metadata can
+  mean its model-bearing turn_context was before the bounded file tail; JSON
+  leaves model absent rather than inventing one.
+  Show and export still fail when the session they were given cannot be
+  resolved.
+
+  Each harness's store is found where the harness itself writes it, and the
+  harness's own variable moves it: claude under $CLAUDE_CONFIG_DIR/projects
+  (~/.claude/projects), codex under $CODEX_HOME/sessions (~/.codex/sessions),
+  pi under $PI_CODING_AGENT_SESSION_DIR or $PI_CODING_AGENT_DIR/sessions
+  (~/.pi/agent/sessions), and opencode in opencode.db and, when opencode2 is
+  installed, opencode-next.db under $XDG_DATA_HOME/opencode
+  (~/.local/share/opencode). A path is used as written, never expanded or
+  canonicalized, so an empty or relative one resolves from the current
+  directory.
+
+  A session recorded in a directory that no longer exists cannot be placed in
+  any project, so a scoped search will not find it. Its id still resolves.
+
+  When the optional agent-status command answers, list puts matching
+  sessions' working or idle state in its separate LIVE column, and the JSON
+  form carries the same `live` field. A missing, failed, malformed, oversized,
+  or status snapshot slower than 250 ms leaves that field out and does not
+  change retrieval.
+  An unrecognized state for one thread is ignored while recognized states for
+  other threads remain usable. show applies the same join to its header.
+
+RECORDED TITLE
+  tapes show --title "Exact recorded title" --harness claude
+  The same selector works on brief, usage, stats, lineage, events and export.
+  It defaults to this project; --global or --project changes scope. Derived
+  display hints never match. An incomplete lookup reports observed candidates
+  without claiming uniqueness; choose an explicit ID or narrower scope.

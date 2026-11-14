@@ -1,0 +1,151 @@
+READ MANY ENDINGS
+  tapes endings --here --since 2026-01-01 --json
+  tapes endings --global --harness codex --limit 50 --text
+
+  endings answers what each session of a selection ends on, as
+  tapes-endings/10, including a session's recorded launch mode when known, so
+  choosing which few endings deserve reading costs one
+  bounded read each instead of a transcript apiece. The selection is the one
+  list and export take, and the scope and filters apply before any transcript
+  is opened. --tail sets how many of each session's newest turns are read (12
+  by default) and --text adds the operator and assistant text of those turns,
+  cut at 400 characters.
+
+  It states facts and classifies nothing. Each rests on the normalized turn
+  kinds and typed tool events of the turns that were read, never on their
+  text: operator-turn-after-assistant for a request nothing answers,
+  control-turn-last or notice-turn-last for a harness command or injected
+  message recorded after the last exchange, call-without-result for a call the
+  read never saw a result for, results-without-narration for results no turn
+  narrates, assistant-close for a closing assistant turn. More than one can
+  hold at once. What the ending means — and whether it is worth rescuing — is
+  the reading below, and it is yours.
+
+  incomplete says what the read did not establish, and it qualifies every fact
+  beside it: read-window and tail-window for turns the read or the window did
+  not reach, kind-unknown for a user turn the harness left no evidence for,
+  no-timestamps for an order resting on the normalized sequence alone. lineage
+  counts the relatives a store records without reading any of them.
+
+  source is what to write down when filing a follow-up: the harness, the
+  session id, the last read turn's ordinal and native id, and coverage saying
+  how much of the session the read covered. It carries no transcript text, so
+  it can be quoted anywhere the conclusion can. A session whose read fails is
+  named in unread with its diagnostic and does not stop the report.
+
+READ THE ENDING
+  tapes reports what a transcript contains and never classifies why it ended.
+  That inference is yours, and it decides the shape of the handoff.
+
+  Last turn is an operator turn  The ask was never processed; answer it first.
+  Last turn is control or notice  The harness recorded its own message after
+                                 the last exchange. The ending is decided by
+                                 the turn before it.
+  A tool call, no result         The call may have left side effects. Name the
+                                 command and whether its result was ever seen.
+  Results, then no text          Results landed but were never narrated. The
+                                 successor must re-read them; no summary of
+                                 them was ever written.
+  A compaction notice            A recorded model-context reduction, not source
+                                 deletion or completion. Use show --full or
+                                 history pages to recover retained earlier
+                                 messages; summaries remain ambient evidence.
+  An error or limit message      A crash or a quota cut. The cut is arbitrary
+                                 and often mid-tool, so say what was in flight
+                                 and whether it landed.
+  A closing summary, nothing open  Finished. A post-mortem, not a rescue.
+
+  Claude attachment records carry context outside `message`: file attachments
+  name paths in `displayPath` and `filename`, with text in
+  `content.file.content` under `content.type = text`. Compact file references
+  name paths without a body. Both carriers become ambient turns with file
+  references under the system role; the path is `displayPath`, then the nested
+  `filePath`, then `filename`. Text bodies retain at most 64Ki characters, with truncation
+  explicit, and record inclusive line ranges and an optional total line count.
+  Unsupported or malformed bodies remain reference-only. References are never
+  opened. Instruction attachments become ambient turns with one file reference
+  per recorded `files` entry, retaining `path` and optional `content`. At most
+  64 files and 128 parts are retained per turn. Environment attachments become
+  ambient notices carrying bounded JSON text from `snapshot` and `changes`:
+  snapshot fields are workingDirectory, additionalWorkingDirectories, isGitRepo,
+  isWorktree, osVersion, platform, scratchpadDirectory and shell; change fields
+  are field, from, added and removed, with at most 128 changes. Other fields
+  and unsupported shapes produce explicit coverage facts.
+  Prompt snapshots are reference-only descriptors: system_prompt_chars counts
+  characters across the recorded systemPrompt strings, tool_count counts tools,
+  and system_turns retains the recorded systemTurns boolean. Missing values are
+  omitted. System prompt bodies are excluded because repeating them would bury
+  the conversation. Other attachment types remain unrecognized.
+  Every retained attachment body has a 64Ki-character field budget. A cut body
+  has ReadBound availability (`read-bound` in JSON) and an omitted_reason;
+  collection and descriptor bounds are also explicit coverage facts. These
+  content bounds apply independently of source-file and page read bounds.
+  Repeated records remain separate turns even when their text matches.
+  Claude's `api-request-blob` records are the exception: each restates one
+  message of a request Claude sent, its system prompt included, under no
+  timestamp or uuid, so it becomes no turn, names no spawn and no model, and
+  counts as `declined` in `read.unmapped`.
+
+  A Claude tool-result string with a complete `<persisted-output>` envelope
+  shows its recorded preview and a reference-only file under `tool-results/`.
+  The reference retains the rounded native `recorded_size` label, not an
+  inferred exact byte count, and the originating `tool_call_id` when recorded.
+  show --json and events --json include an opaque versioned `reference` token.
+  tapes artifact <id> --reference <token> [--bytes 64KiB] [--json]
+  reads only the named body beside that recording. The budget is 1 byte to
+  4 MiB. tapes-artifact/1 reports bytes returned, truncated, SHA-256 over those
+  bytes, encoding (utf-8 or lossless hex), and body. Tokens bind the native
+  session ID, source descriptor and originating result; changed results and
+  other sources refuse. The envelope must name the selected session directory.
+  Session directory, tool-results and file symlinks refuse, as do non-regular
+  files. Platforms without confined no-follow opens refuse retrieval.
+  Ordinary transcript and event reads never open the body. Malformed envelopes
+  remain ordinary tool payloads; path-like text
+  outside a tool result does not establish a persisted-output reference.
+
+  Every turn carries a `kind`, filled only from what the harness itself
+  wrote, a field beside the text or an element it wraps its own text in:
+  `operator` for a message addressed to the agent, `control` for a harness
+  command such as `/exit`, `notice` for a message the harness injected,
+  `ambient` for context it attached, and the role's own name for assistant,
+  reasoning, and tool turns. A user turn the harness left no evidence for is
+  `unknown`, which is an answer rather than a gap — read its text before
+  deciding what it was.
+
+  Operator turns carry an orthogonal `origin` only with positive sender
+  evidence. Headless sessions assign `program` to every operator turn.
+  Otherwise Claude assigns `harness` for `isMeta: true`, or `person` for
+  `promptSource: typed`; `queued` and absent promptSource do not identify a
+  person. Pi assigns `harness` to extension `custom_message` entries and
+  `person` to user `message` entries only with interactive launch evidence.
+  Codex records no sender: interactive operator turns have no origin.
+  All other cases omit origin. No message text establishes origin. `show`
+  and `export` accept --origin person|program|harness alongside --only;
+  absent origins never match. The projection records the origin selector
+  and counts rejected turns by kind. Origin does not identify a launcher or
+  resolve agent-delegate
+  handles; agent-delegate status names its session, and a pi handle is already
+  the session id.
+
+  A session the user deliberately aborted is a frozen handoff whatever its
+  last turn looks like: report what was abandoned, and do not resume it on
+  your own initiative. When two readings fit, take the more cautious one —
+  telling a successor that a tool call may have left side effects costs a
+  sentence, and not telling it costs a duplicated migration.
+
+SIGNALS THAT THE PICTURE IS PARTIAL
+  A truncated transcript is a window, not the session, and `truncation` says
+  which kind: a turn window you can widen, or a source bound retained by
+  ordinary show/export reads. Explicit page reads have their own byte budget.
+  Transcript notes carry
+  what the normalized model has no field for: pi's abandoned branches, where a
+  large remainder means the user changed direction and `usage` reports what
+  those branches consumed; a claude session's
+  subagent transcripts, which live in separate files and whose endings are not
+  the parent's; lines that would not parse; an opencode page boundary. A
+  subagent count requires successful directory enumeration; failed enumeration
+  produces a diagnostic note instead of a count. Codex
+  reasoning is frequently encrypted and arrives as `[encrypted reasoning]`, so
+  that placeholder marks reasoning you cannot read rather than reasoning that
+  did not happen. Read both signals and state what is missing rather than
+  writing over the gap.

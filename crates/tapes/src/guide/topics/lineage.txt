@@ -1,0 +1,73 @@
+LINEAGE
+  lineage answers which sessions a recording names as relatives, as
+  tapes-lineage/5: the session it was spawned or forked from, and the children
+  its own store records, each with the role, model, spawn and completion
+  stamps, and outcome its harness wrote. A relationship exists only where a
+  record states it — a child header naming a parent, a spawn or completion
+  event, a transcript file under the parent's directory, a session row's
+  parent column. Nothing is inferred from directories, titles, or times, and a
+  reference the store cannot resolve is kept with resolved: false, because a
+  child whose recording is gone is exactly what a reader is looking for.
+  A parent refers to a child and never absorbs it. Use `show` with an ordinary
+  child session ID, or `child PARENT --reference CHILD` for a Claude subagent.
+  Claude child references do not become ordinary session IDs.
+  Claude lineage fails when subagent directory enumeration or a required
+  child-ending read fails, naming the source and retaining the I/O error.
+  An absent subagent directory establishes no stored child transcripts.
+  A Claude session that continued another while a subagent was running keeps
+  that subagent's recording as a link into the earlier session's subagent
+  directory, beside a fresh meta record. Lineage names that child with
+  carried_from, the session it was spawned under: its records name that
+  session, and the ones written after the continuation name the continuing
+  session, whose link is what admits them. Its consumption is the spawning
+  session's: family reconciliation and window shares count it there once,
+  and the continuing session's notes say it is carried over. A child whose
+  records name a session its location does not explain fails.
+  Codex lineage notes retain candidate header probe failures with their source
+  and I/O error; an unreadable header does not establish an absent relationship.
+  These notes apply to bounded reads and lineage --full.
+  What each harness records differs: claude names its subagent transcripts and
+  the Agent calls that spawned them, codex joins spawn and wait calls to the
+  rollout headers naming this session as their parent, opencode reads the
+  parent column on either projection, and pi carries a parent reference on the
+  child alone. lineage --full streams every record, so a child spawned before
+  the tail window is still named.
+  A Claude subagent run in the background answers its Agent call at once as
+  async_launched; its end reaches the parent later as a task notification
+  naming the call, written each time the subagent stops, on a queued-command
+  attachment or a user record of task-notification origin. The latest one is
+  its completion, its status the disposition, its record id in source. A
+  shell task notifies the same way and names no child.
+  A Claude subagent a plugin launched has no Agent call in the parent, so the
+  parent states neither its spawn nor its end. Where the parent states no end, for that
+  reason or because the notification lies outside the read, the completion is
+  read from the subagent's own recording: the timestamp of its final record
+  when its meta record says it finished, or, for a plugin subagent that takes
+  no further input, when that final record is an assistant record that
+  stopped on end_turn (known trailing housekeeping records, including
+  cost-state and system turn_duration/stop_hook_summary, are skipped), with
+  that record's id in source after the recording's file. Identity-bearing records in the bounded opening
+  and tail must name the session that spawned the child, and a record that names an agent
+  must name this child; absent or conflicting identity fails the ending read.
+  Child endings inspect a 64 KiB tail and the bounded opening first,
+  expanding to the configured read bound when no complete substantive tail
+  record is available. Counting children reads transcript filenames only.
+  Recording and child metadata reads accept only regular opened files and never
+  wait for a FIFO writer. Without that ending there is no completion
+  stamp, which means not seen to finish rather than running: a child killed
+  mid-turn reads the same. A completion the parent's own records state is
+  preferred, and the spawn stays unstamped, since the child's first record is
+  its own first activity and not the parent's launch.
+
+CHILD RECORDINGS
+  tapes lineage PARENT --json
+  tapes child PARENT --reference CHILD --tail 40 --json
+  Read a Claude child's own transcript, usage and ending as tapes-child/11,
+  retaining its parent and reference. It is not an ordinary listed session; nested lineage
+  remains uninspected and child activity is never added to parent totals.
+  The child's id is qualified as PARENT::CHILD, and a child whose recorded
+  native session ids do not name the parent, or name none, is refused.
+  --full streams the child's whole recording: usage covers every turn, and the
+  transcript and ending keep the newest --tail turns. The transcript's
+  `locations` are the places the child's own recording shows, as show reports
+  them.

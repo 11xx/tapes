@@ -1862,7 +1862,7 @@ fn malformed_opencode_program(root: &Path) -> OpenCodeAlias {
     OpenCodeAlias { path: program }
 }
 
-/// Bare `tapes` is a guide request, not a usage error; every mistyped
+/// Bare `tapes` asks for the map, not a usage error; every mistyped
 /// invocation still fails at clap's exit code 2.
 #[test]
 fn bare_invocation_guides_while_misuse_still_fails() {
@@ -8086,7 +8086,8 @@ fn lineage_stamps_a_finished_plugin_steered_child_and_not_a_running_one() {
 /// a plugin-steered subagent's own recording.
 #[test]
 fn the_guide_names_where_a_plugin_steered_subagents_completion_comes_from() {
-    let guide = tapes().output().unwrap();
+    let guide = tapes().args(["guide", "lineage"]).output().unwrap();
+    assert!(guide.status.success());
     let text = String::from_utf8_lossy(&guide.stdout);
     assert!(
         text.contains("a plugin launched has no Agent call"),
@@ -8095,7 +8096,7 @@ fn the_guide_names_where_a_plugin_steered_subagents_completion_comes_from() {
     assert!(text.contains("stopped on end_turn"), "{text}");
 }
 
-/// An agent that reads only the head of the guide still learns where picking
+/// An agent that reads only the head of the map still learns where picking
 /// up a session's work goes, short or long.
 #[test]
 fn the_guide_names_session_pickup_in_its_first_screen() {
@@ -8111,17 +8112,123 @@ fn the_guide_names_session_pickup_in_its_first_screen() {
 /// agent-delegate pickup from the section that teaches continuing a session.
 #[test]
 fn the_continuation_section_points_long_sessions_at_pickup() {
-    let guide = tapes().output().unwrap();
-    let text = String::from_utf8_lossy(&guide.stdout);
-    let start = text
-        .find("CONTINUE A COLD SESSION")
-        .expect("continuation section");
-    let end = text[start..]
-        .find("FREEZE A WORKING SET")
-        .map_or(text.len(), |at| start + at);
-    let section = &text[start..end];
+    let guide = tapes().args(["guide", "continue"]).output().unwrap();
+    assert!(guide.status.success());
+    let section = String::from_utf8_lossy(&guide.stdout);
     assert!(section.contains("agent-delegate pickup"), "{section}");
     assert!(section.contains("tapes workset"), "{section}");
+}
+
+/// The lines of the topic index that route to a topic, as its names.
+fn guide_topics() -> Vec<String> {
+    let index = tapes().arg("guide").output().unwrap();
+    assert!(index.status.success());
+    String::from_utf8_lossy(&index.stdout)
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix("tapes guide "))
+        .filter_map(|rest| rest.split_whitespace().next())
+        .filter(|name| !name.starts_with('-') && !name.starts_with('<'))
+        .map(str::to_owned)
+        .collect()
+}
+
+/// Bare `tapes` prints a map short enough to be read whole, and its opening
+/// says so and names where the depth is. Rejects a guide so long that a reader
+/// cuts it with `head` and never learns what the rest held.
+#[test]
+fn the_bare_map_is_bounded_and_says_where_the_depth_is() {
+    let map = tapes().output().unwrap();
+    assert!(map.status.success());
+    let text = String::from_utf8_lossy(&map.stdout);
+    assert!(text.lines().count() <= 80, "{} lines", text.lines().count());
+    assert!(text.len() <= 6_144, "{} bytes", text.len());
+    let opening: String = text.lines().take(8).collect::<Vec<_>>().join("\n");
+    assert!(opening.contains("read all of it"), "{opening}");
+    assert!(opening.contains("`tapes guide`"), "{opening}");
+    assert!(opening.contains("--help"), "{opening}");
+}
+
+/// `tapes guide` lists every topic and each one prints within its bound.
+/// Rejects an index naming a topic that does not print, and a topic too long
+/// to be one read.
+#[test]
+fn the_guide_index_routes_to_bounded_topics() {
+    let topics = guide_topics();
+    assert!(topics.len() >= 20, "{topics:?}");
+    for topic in &topics {
+        let output = tapes().args(["guide", topic]).output().unwrap();
+        assert!(output.status.success(), "tapes guide {topic}");
+        assert!(!output.stdout.is_empty(), "tapes guide {topic} is empty");
+        assert!(
+            output.stdout.len() <= 16_384,
+            "tapes guide {topic} prints {} bytes",
+            output.stdout.len()
+        );
+    }
+}
+
+/// `--all` prints every topic, each exactly as it prints alone. Rejects a
+/// full print that drops or alters a topic.
+#[test]
+fn the_whole_guide_holds_every_topic() {
+    let whole = tapes().args(["guide", "--all"]).output().unwrap();
+    assert!(whole.status.success());
+    let whole = String::from_utf8_lossy(&whole.stdout).into_owned();
+    for topic in guide_topics() {
+        let output = tapes().args(["guide", &topic]).output().unwrap();
+        let body = String::from_utf8_lossy(&output.stdout).into_owned();
+        assert!(whole.contains(&body), "--all lacks `{topic}`");
+    }
+}
+
+/// An unknown topic is misuse, and the refusal lists the topics that exist.
+/// Rejects a silent empty answer or a dump of the whole guide.
+#[test]
+fn an_unknown_guide_topic_is_refused_with_the_topic_names() {
+    let output = tapes().args(["guide", "no-such-topic"]).output().unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+    let refusal = String::from_utf8_lossy(&output.stderr);
+    assert!(refusal.contains("continue"), "{refusal}");
+    assert!(refusal.contains("usage-family"), "{refusal}");
+}
+
+/// `--search` finds text whatever its case, in topics and in command help,
+/// and answers with routes and a few lines each. Rejects a search that misses
+/// a command's help, and one that prints a matching topic whole.
+#[test]
+fn guide_search_lists_routes_without_printing_them_whole() {
+    let output = tapes()
+        .args(["guide", "--search", "TAPES-PARENT:"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let found = String::from_utf8_lossy(&output.stdout);
+    assert!(found.contains("\ntapes guide launch\n"), "{found}");
+    assert!(found.contains("\ntapes usage --help\n"), "{found}");
+    let launch = tapes().args(["guide", "launch"]).output().unwrap();
+    assert!(
+        found.len() < launch.stdout.len(),
+        "the search answer is as long as a topic it lists"
+    );
+
+    let common = tapes()
+        .args(["guide", "--search", "--JSON"])
+        .output()
+        .unwrap();
+    let common = String::from_utf8_lossy(&common.stdout);
+    assert!(common.contains("more matching lines"), "{common}");
+
+    let nothing = tapes()
+        .args(["guide", "--search", "zzz-no-such-text-zzz"])
+        .output()
+        .unwrap();
+    assert!(nothing.status.success());
+    let nothing = String::from_utf8_lossy(&nothing.stdout);
+    assert!(
+        nothing.contains("`tapes guide` lists the topics"),
+        "{nothing}"
+    );
 }
 
 /// The command reports the relationships a store recorded, keeps a reference

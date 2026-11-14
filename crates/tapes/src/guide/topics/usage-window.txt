@@ -1,0 +1,76 @@
+USAGE INSIDE A WINDOW
+  `usage --window FROM..TO` (RFC 3339, either end open) answers the
+  consumption inside a window over the sessions the scope and filters select.
+  --since and --until select sessions by their newest activity; --window cuts
+  consumption at its edges. Every selected session with activity inside the
+  window contributes the span of its own requests inside it, read whole as
+  `usage --from/--to` reads one session, so a session that straddles an edge
+  contributes what it consumed inside and nothing else; a Claude parent's
+  subagent recordings, which no listing returns, contribute their own spans as
+  `<parent>::<agent>`, a subagent a continued session carries over contributing
+  once, under the session that spawned it, and a parent whose own records end before the window is
+  reached through subagent recordings written since it opened, and since
+  --since where that is later; under --since it is kept only when it or one of
+  its subagents has recorded activity since it. Every other filter applies to
+  the parent as to a listed session, --search over the parent's own turns
+  included, but the parent is reached beyond --limit. The shares are
+  summed under the summary's partitions, withholding and overlap rules, so the
+  window total is the sum of its shares within one accounting basis, and a
+  request a span cannot place qualifies its share as it qualifies a span.
+  A Claude parent's share carries `unexplained` placed as a span places
+  it and measured against its family, since its subagents' requests are
+  shares of their own; each group and the total add their shares' parts
+  per model under `unexplained`, apart from `tokens` and `disjoint`, priced
+  by each model's row when a table is given.
+  Related sessions are never added by an exact union, since event keys cover
+  whole recordings. `window` names the edges,
+  how they were established (`requested`, `recorded`, `inferred`), the
+  selected sessions that placed nothing inside it, and each session's share,
+  largest first: its requests inside the window out of its own, its launch,
+  the `parent` its recording names and how (`parent_evidence`), the `root`
+  that chain of parents ends at, the harness holding it (`root_harness`),
+  and whether the store holds it, and its disjoint categories. --limit still
+  bounds the sessions each harness lists. `--by session`, `launch` and
+  `parent` group any summary by session, by recorded launch, and under the
+  root of each session's named parents. A session group's key names its
+  session by `session` and `session_harness`, and a parent group's names its
+  root by `parent` and `parent_harness`: an id names a session only within
+  one harness, so sessions or roots sharing an id in different harnesses
+  stay apart, and a table writes such an id as `<harness>:<id>`.
+  A recording names its parent in one of four ways, and a share's
+  `parent_evidence` says which: `subagent` (a Claude subagent's recording,
+  kept under its parent's), `spawn` (a Codex child's `parent_thread_id`),
+  `fork-origin` (a declared fork origin), or `declared-launch-parent` (a
+  marker the tool that launched the session wrote into it). A fork copies its
+  origin's first prompt, so a fork origin outranks a marker the copy carries.
+  The launch marker is the contract a launcher writes to. The first line of
+  the prompt a launched session starts with is exactly
+      tapes-parent: <harness>:<session-id>
+  with nothing before it: `tapes-parent:`, one space, the launching session's
+  harness (`claude`, `codex`, `pi` or `opencode`), a colon, and that
+  session's native id, 1 to 128 ASCII letters, digits, `-`, `_` or `.`. The
+  line ends at a line feed, or at the end of the prompt; the rest of the
+  prompt follows it. tapes reads the marker from the session's first user
+  message that is not wholly context the harness attached (Codex records its
+  AGENTS.md and environment blocks first), within the recording's first MiB
+  in Claude, Codex and pi recordings, and from the first 256 characters of
+  the first user message's first text part in OpenCode: one query per page of
+  sessions, or one request per session through the API. Only an answer that
+  uses a parent reads it, and only such an answer looks up a parent outside
+  the selection: `--by parent` (in a summary or allowance rates), a window
+  read, whose shares carry `parent` and `root`, one session's `usage`,
+  whose notes report a marker that names no parent, and `usage --family`,
+  which reads the marker of every launched-session candidate that began
+  inside a member's interval. Listings, every other
+  grouping of a summary or of allowance rates, and forecasts read no marker
+  and look up no parent. A marker is read only for a session its store names
+  no parent or fork origin for, a parent outside the selection included. A
+  parent is looked up by its id in the stores of the harness that holds it:
+  the one a marker names, and the session's own for a subagent, a spawn or a
+  fork origin. One those stores do not hold stays the named, unresolved root,
+  as a missing fork origin does, even where another harness holds a session of
+  that id. A first prompt opening with `tapes-parent:` in any other form, or
+  naming the session itself by its harness and id, names no parent, and the
+  session's usage notes say so. A launched session holds no copy of its parent, so the marker never
+  makes the two an overlap group: their consumption adds. A derived title
+  leaves the marker line out.

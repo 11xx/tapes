@@ -1,0 +1,94 @@
+PI BRANCHES AND CLAUDE RECONCILIATION
+  A pi rewind appends a new branch and keeps the old one, and the abandoned
+  requests were consumed all the same. pi usage therefore carries
+  `consumption` beside the active-branch counters: tokens and cost summed over
+  every retained branch, with `accounting.selection` `retained-branches`.
+  Both figures count assistant requests, tool results with usage, compactions,
+  branch summaries, and usage entries. They agree when all consumption is on
+  the active branch. Missing usage leaves the affected event unmeasured.
+  Each event counts once:
+  an entry seen again, or another entry naming the same provider response, is
+  a repeat and adds nothing, so a re-read or a copied entry consumes nothing
+  new. `events` splits the counted events between the active branch and the
+  others; `identity` says how many use an observed (provider, response)
+  identifier within the read and how many use the recording's own entry.
+  `provider_account_namespace` is `unestablished`: response identifiers
+  alone do not establish cross-recording equality without an account
+  namespace. `forked_from` is the parent session id derived from the
+  header's recording filename, never its path. The first underscore separates
+  the timestamp from the full id. Timestamp-prefixed basenames are recording
+  references; other bare values, including `parent.jsonl`, are ids.
+  Parent ids hold at most 128 ASCII bytes,
+  begin and end with a letter or digit, and allow dots, hyphens, and underscores
+  inside. A header whose parent id cannot be derived sets
+  `fork_parent_unestablished` instead.
+  Coverage is `session` for a read from the first byte and `read-window`
+  for a bounded tail, independently of the active branch: a branch that
+  restarted from a new root can lie wholly in the tail while what it replaced
+  does not. Active counters and recorded model splits carry their own
+  `measurement_coverage` and `measurement_incomplete` qualifications.
+  `measurement_coverage` counts measured, missing, and unpriced events
+  for each token dimension and cost. Missing dimensions and missing or
+  unpriced costs leave qualified known subtotals in both figures. A harness-written cost of
+  zero beside nonzero token usage, including a native total without individual
+  dimensions, is unpriced; it is never a zero estimate. Consumption cost is
+  absent when no counted event is priced; its measurement coverage and
+  incomplete reason still report the unpriced events.
+  Consumption cost uses the same estimate kind and missing pricing basis as
+  every other cost. Its `cost_coverage` marks missing or unpriced event costs
+  incomplete, counts every zero-written event as an observation, and counts
+  assistant-message requests under `zero_written_requests`.
+  `incomplete` names these quantities, unreadable records, and requests
+  that stopped on an error or an abort, whose usage stopped with them.
+  Quantities are complete only with `session` coverage and no
+  `incomplete` reason. Cross-recording identity still needs an established
+  account namespace. Nothing is counted for a branch the read did not reach.
+
+  Plain Claude usage chooses a request sum when the newest cost-state is
+  below it or omits its counters. The accounting note names that total and
+  the fallback reason; recorded_total retains its counters and dollar facts
+  under recorded-total/session accounting, separate from the request sum.
+  Requests' dimensions retain compatible source evidence independently of the
+  token witness. A sparse later record erases no known dimension. TTL splits
+  apply only when they match the selected cache-write count; incompatible
+  categorical values, TTL splits and tool observations are withheld and
+  counted per request under conflicting. Tool counters select their own
+  dominant observation without summing alternatives; only fresh evidence
+  dominating all earlier observations can discharge a tool conflict.
+  At most 16 TTL-count
+  witnesses are held per request; excess observations join omitted_values.
+
+  `usage SESSION --reconcile` is Claude-only. It reads the parent and every
+  subagent recording whole and retains the newest cost-state's counters and
+  dollar facts, including per-model estimates, under their own accounting.
+  Its `unexplained` is measured against the family's requests.
+  Request IDs deduplicate across a validated native family: children under
+  the parent's subagents directory must positively witness its native session
+  identity and name no agent but their own. Such children share the parent's
+  request namespace, reported as validated-family under identity_coverage.
+  A subagent carried over from the session that spawned it is that session's
+  family member, and the continuing session names it in a note instead.
+  Per-recording figures remain visible. Foreign, unvalidated or unenumerated
+  children, and sources outside the family, withhold request-namespace and
+  leave family counts, counters and differences absent. Failed assistant records leave consumption unmeasured
+  whether usage is an object, absent or null; hook answers made no request.
+  A later witness dominating every earlier counter discharges provisional
+  request ambiguity. The newest cumulative observation, count and reset
+  evidence are held incrementally with constant observation memory.
+
+  Comparable counters keep a signed recorded-minus-identified difference:
+  zero reconciles, a negative value conflicts, and a positive difference or
+  an incomplete measurement is a discrepancy. No positive difference proves
+  consumption beyond the requests: recorded-total membership is missing.
+  Resets, unresolved witnesses, absent counters or an unmatched comparison
+  frontier withhold differences. Parent file positions order parent requests;
+  child requests are ordered by time against the total's own timestamp or,
+  for a cost-state, which writes none, the newest timestamp of the parent
+  records written before it. A child request without a timestamp, a total no
+  timestamp orders (named in a note), or a child request after the total
+  cannot contradict that total. Each source names the exact
+  revision, length and SHA-256 read under the report's rules. A source that
+  could not be used carries `error`, and an unenumerated family a note: the
+  session id and one fixed reason (foreign-identity, no-identity,
+  source-unreadable-or-changed, subagents-unenumerated), never error text,
+  which can name a recording path.

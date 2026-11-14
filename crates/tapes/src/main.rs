@@ -324,11 +324,11 @@ fn parse_request_range(value: &str) -> std::result::Result<SpanBounds, String> {
     name = "tapes",
     version,
     about = "Read and export coding-agent sessions",
-    after_help = "Run `tapes` with no arguments for the workflow guide.\n\nA read that fails for a reason that can pass, such as a busy store, exits 75."
+    after_help = "Run `tapes` with no arguments for the map of what it does, and `tapes guide` for the topics behind it.\n\nA read that fails for a reason that can pass, such as a busy store, exits 75."
 )]
 struct Cli {
-    /// Absent prints the workflow guide: what tapes owns, the order the
-    /// commands are used in, and how to judge what comes back.
+    /// Absent prints the map: what tapes owns, the order the commands are
+    /// used in, and how to judge what comes back.
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -1920,8 +1920,8 @@ enum Command {
         /// spawn's `parent_thread_id`, a declared fork origin (Codex, pi,
         /// OpenCode), a Claude subagent's parent, or the launcher a first
         /// prompt names on its first line as `tapes-parent:
-        /// <harness>:<session-id>` (Claude, Codex, pi, OpenCode; the guide
-        /// gives the exact form). A session that names none is its own group, and a
+        /// <harness>:<session-id>` (Claude, Codex, pi, OpenCode; `tapes guide
+        /// launch` gives the exact form). A session that names none is its own group, and a
         /// parent the store of its harness does not hold is a group of its
         /// own under that id, never joined to a guessed one. A group's key
         /// names its root as `parent` and `parent_harness`, so roots sharing
@@ -2313,8 +2313,8 @@ enum Command {
         concurrency: Option<u64>,
         #[command(flatten)]
         change: Box<ChangeAsk>,
-        /// Price the answer with this tapes-price-table/1, /2 or /3 file (the
-        /// guide gives each format): each figure gains `list_price_estimate`
+        /// Price the answer with this tapes-price-table/1, /2 or /3 file (`tapes
+        /// guide price-tables` gives each format): each figure gains `list_price_estimate`
         /// beside any cost its harness wrote, never in its place. A /2 row may
         /// carry a long-context rate for the whole request above a prompt
         /// size, for the billing it names (per-token API billing unless it
@@ -2715,6 +2715,22 @@ enum Command {
     Prices {
         #[command(subcommand)]
         command: prices::PricesCommand,
+    },
+    /// Print the guide's topic index, or one topic. Bare `tapes` prints the
+    /// map that names the topics. Reads no session and no store.
+    Guide {
+        /// The topic to print. Without one, the index of topics.
+        #[arg(value_parser = clap::builder::PossibleValuesParser::new(guide::topic_names()), conflicts_with_all = ["all", "search"])]
+        topic: Option<String>,
+        /// Print every topic at once. The result is long: ask for it only
+        /// when one topic at a time will not do.
+        #[arg(long, conflicts_with = "search")]
+        all: bool,
+        /// List the topics and command helps that mention TEXT, each with
+        /// its first matching lines. The match is literal and ignores case,
+        /// and TEXT may look like a flag.
+        #[arg(long, value_name = "TEXT", allow_hyphen_values = true)]
+        search: Option<String>,
     },
 }
 
@@ -3218,7 +3234,7 @@ fn usage_change(
 
 fn dispatch(cli: Cli) -> Result<()> {
     let Some(mut command) = cli.command else {
-        guide::print();
+        guide::print_map();
         return Ok(());
     };
     let remote = command.remote_destination().map(str::to_owned);
@@ -4828,6 +4844,9 @@ fn dispatch(cli: Cli) -> Result<()> {
                     ));
                 }
             }
+        }
+        Command::Guide { topic, all, search } => {
+            guide::run(&Cli::command(), topic.as_deref(), all, search.as_deref())?;
         }
     }
     Ok(())

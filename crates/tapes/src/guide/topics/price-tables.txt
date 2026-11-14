@@ -1,0 +1,183 @@
+PRICE TABLES AND LIST-PRICE ESTIMATES
+  Money beyond what a harness wrote comes from a price table: tapes ships no
+  prices, so the table is the caller's, or the one tapes fetches from the
+  vendors' pages and keeps fresh (see `tapes guide prices`). Every command
+  that reports a session's cost prices it the same way and puts
+  `list_price_estimate` beside it: `usage`, `list --json` and
+  `show --json` (on each session), `stats` and `brief` (in `usage`), and
+  the per-session figures of a summary's overlap groups. Text adds the estimate, labelled as one, only where it prints a
+  cost: `usage`, the `stats` usage block, and a summary's session figures.
+  A replica's answer under `--remote` is not priced, and the replica runs
+  its command with `TAPES_OFFLINE=1`, so a remote read refreshes no price
+  table on either side. `--prices FILE` reads
+  a table, else the file `TAPES_PRICES` names, each used alone; else the
+  config table `$XDG_CONFIG_HOME/tapes/prices.toml`
+  (`~/.config/tapes/prices.toml`) merged over the fetched data table
+  `$XDG_DATA_HOME/tapes/prices.toml` (`~/.local/share/tapes/prices.toml`).
+  The merge keeps every config row, and every data row whose id and
+  aliases no config row names by id or alias, so a config row overrides
+  one model and the fetched rows price the rest; the config table's plan
+  rules apply. A table named by the flag or the variable that is missing
+  or invalid refuses the command; an invalid config table is reported once
+  on stderr and the estimate is absent, as it is with no table; an invalid
+  data table, or one in another currency than the config table, is
+  reported and left out. Override a price by writing it to the config
+  path, or price with a table of your own alone through `TAPES_PRICES`.
+  The format is TOML,
+  tapes-price-table/1:
+
+      schema = "tapes-price-table/1"
+      currency = "USD"
+      [[models]]
+      id = "model-id-as-recorded"     # the id a harness records
+      aliases = ["other-recorded-id"] # optional
+      effective = 2026-10-01          # the date the prices were read
+      source = "where they were read"
+      per_million = { uncached_input = 3.0, cache_read = 0.3,
+                      cache_write_5m = 3.75, cache_write_1h = 6.0, output = 15.0 }
+
+  Prices are per million tokens of each disjoint category; reasoning is a
+  share of output and priced as output. A category a row leaves out has no
+  price. Unknown keys, negative or non-finite prices, a non-date
+  `effective`, and an id or alias named twice refuse, naming the entry. A
+  recorded id ending in `-YYYYMMDD` that no row names is priced by the row
+  naming the id without that date.
+  tapes-price-table/2 takes the same rows, and a row may add terms priced
+  by the request:
+
+      schema = "tapes-price-table/2"
+      [[models]]
+      ...                              # as in /1
+      effective_from = 2027-01-01      # optional: a date (midnight UTC) or
+      effective_until = 2027-07-01     # an instant with an offset; until is
+                                       # exclusive
+      [models.long_context]
+      above_prompt_tokens = 272000     # or from_prompt_tokens: at or above
+      prompt_tokens = ["uncached_input", "cache_read", "cache_write"]
+      billing = ["api"]                # optional; "api", "subscription"
+      multipliers = { uncached_input = 2.0, cache_read = 2.0, output = 1.5 }
+                                       # or per_million = { ... }
+      [[models.time_of_day]]
+      from = "16:30"                   # UTC, inclusive
+      until = "00:30"                  # UTC, exclusive; past midnight when
+      per_million = { ... }            # not after `from`
+      days = ["mon", "tue", "wed", "thu", "fri"]
+                                       # optional: the UTC days it opens on,
+                                       # mon..sun; every day when left out
+
+  A long-context term charges the whole request, every category, once the
+  request's prompt — the sum of the categories `prompt_tokens` names —
+  passes the threshold (`above_prompt_tokens`, more than; or
+  `from_prompt_tokens`, at least): its `per_million` replaces the request's
+  rates, or its `multipliers` scale them, a category it leaves out keeping
+  its rate. It applies to the billing it names, per-token API billing
+  unless it says otherwise. A time-of-day window's rates replace the row's
+  for a request made inside it on a UTC day of the week its `days` names,
+  or on any day when it names none; a window past midnight belongs to the
+  day it opens on, so Friday's 22:00 to 02:00 holds early Saturday. Public
+  holidays are not expressed: a window holds on a holiday as on any other
+  day of its weekday. A row is in effect from `effective_from`
+  until `effective_until`; one id may name several rows whose windows do
+  not meet, so a dated price change is two rows. A /1 table refuses these
+  keys, and prices exactly as it always has. tapes-price-table/3 takes
+  everything /2 does, and top-level plan rules:
+
+      schema = "tapes-price-table/3"
+      [[plans]]
+      id = "opencode-go"               # a plan a recording names
+      billing = "subscription"         # "api" or "subscription"
+
+  A plan rule overrides the built-in rule of its id, or adds one. A
+  duplicate plan id, any other `billing`, an unknown key, and `[[plans]]`
+  in a /1 or /2 table refuse. A figure is priced by these
+  terms request by request where its reader kept its requests — a Claude,
+  Codex or pi session, span or window share, a pi retained-branch
+  `consumption`, each event at its own time on whichever branch holds it,
+  and an OpenCode span or window share, up to 100000 per read — and they
+  sum to no more than the figure; what they leave of it, a kept request
+  whose recording holds no time for it, or a figure whose requests are not
+  known one by one (a recorded total such as a Claude cost-state or an
+  OpenCode session row), is priced between every rate it could pay, as
+  `at_least` and `at_most`, its categories qualified
+  request-terms-unknown, and never reads complete. A request no row of its
+  model is in effect for is unpriced, its categories outside-validity;
+  usage of no known time that
+  the rows in effect leave part of the figure's span uncovered for is
+  priced by the rows that cover it, its categories outside-validity too.
+  Each recording's billing comes
+  from what it records, named with its `plan` where known and its evidence
+  in the estimate's `billing` wherever a used row has a long-context term:
+  a Codex `rate_limits` window reporting a used percent is a ChatGPT plan's
+  quota, plan `chatgpt-subscription`; a Codex `model_provider` other than
+  `openai` bills per token, the plan that provider names; a Claude
+  `api-request` record carrying the `oauth-2025-04-20` beta, or a
+  `quotaLimits` refusal naming a plan quota, is plan `claude-subscription`,
+  and one sent without that beta is plan `anthropic-api`; a pi recording
+  whose every token-carrying event is a request on the
+  `openai-codex-responses` API, which takes only a ChatGPT account's
+  sign-in, is plan `chatgpt-subscription`, and one whose every
+  token-carrying event names one and the same other `provider` is the plan
+  that provider names, such as `opencode-go`; any other pi recording, mixed
+  providers or a compaction or tool result naming none included, and every
+  OpenCode recording name no billing. A span or window share is
+  billed as its whole recording is, whatever records it holds, and names
+  no billing where the whole recording names none. A bounded read that
+  leaves part of its recording unread — the default `usage` view, a
+  listing or a summary of a recording past --read-bytes — establishes no
+  billing: its billing is unestablished, its evidence naming what the read
+  window shows, or that it shows none, since a record the read skipped can
+  contradict that, and `--full` reads the recording's billing whole. A
+  plan rule decides which terms a plan pays, the table's rule before the
+  built-in one: built in, `claude-subscription` and `chatgpt-subscription`
+  pay `subscription` terms, so no term naming only `api` reaches them, and
+  `anthropic-api` and `opencode-go`, a subscription billed at API rates,
+  pay `api` terms. A plan with no rule keeps the billing its reader
+  established: a Codex provider bills per token, and a pi provider names
+  none. The estimate's `billing` carries the resolved `terms`. Billing the
+  recording establishes neither way is priced between base and surcharged
+  rates, its categories billing-unestablished.
+  Each figure — a session, each model of `by_model`, a pi `consumption`, a
+  span, a summary group, total or partition — gains `list_price_estimate`
+  beside the harness's own `cost`, never in its place: `kind:
+  list-price-estimate`, `currency`, an `amount`, the table `schema`, each
+  row it used in `models` (`id`, `effective`, `source`), `billing` where
+  a used row has a long-context term, and
+  `measurement_completeness` over uncached_input, cache_read, cache_write and
+  output. A cache write that recorded no TTL is priced between the 5-minute
+  and 1-hour prices, as `at_least` and `at_most` in place of `amount`, and
+  its category says ttl-unrecorded. Each served model's share is priced by
+  its own row: a figure whose records name one model is that model's share
+  whole; one that names several, or whose uncertain attribution leaves part
+  of it out of its model shares (a Codex request made before any model was
+  in effect), is priced share by share from the split its harness recorded,
+  and what the shares leave uncovered is incomplete-attribution; with
+  neither, nothing is priced. A model the table
+  lacks qualifies its share unlisted-model and a missing category price
+  missing-price. Every reason a category's counters carry (missing-counter,
+  stopped-attempt, unrecognized-usage, read-window, ...) carries into the
+  estimate, whose amount is then a known subtotal. A model share carries
+  each reason its figure carries that describes the read rather than one
+  model's events (unreadable-record, unrecognized-usage, read-window,
+  since-reset, unestablished-scope, incomplete-attribution), so a
+  share-by-share estimate carries it too, and a share prices the cache
+  writes its own requests explain at the TTLs they recorded, wherever those
+  writes are no more than the share's, and what the share holds beyond them
+  as ttl-unrecorded. Each model of `unexplained` is priced by its own row,
+  its cache writes at no recorded TTL. Library consumers price one model
+  share they hold as disjoint categories with `PricedShare::estimate`,
+  exactly as a figure prices that share: each category keeps the reasons
+  the share gives it, and one it holds no amount for is missing-counter
+  only where it gives none. Pi consumption is split by
+  the model each event names. On the active branch alone it is priced as
+  the session figure is, share by share where every event names a model;
+  with events on other branches it is priced by that split, and usage no
+  model names is incomplete-attribution. The estimate is
+  absent, never zero, when nothing could be priced. A summary adds estimates
+  where its disjoint categories add and otherwise withholds them, naming why
+  in `list_price_withheld`: mixed-accounting, identity-unestablished, or
+  exact-union for related sessions added by their events' union. Text output
+  prints `list-price estimate <amount> <currency> (from the price table:
+  ...)` with a completeness line and a `list-price billing:` line per
+  billing it names, its plan and the terms it resolved to where known, such
+  as `opencode-go plan, billed as api`, then its evidence, and a summary adds a LIST-PRICE ESTIMATE column when a
+  table is given.

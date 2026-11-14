@@ -27,11 +27,16 @@ server, no session *writing* — `tapes` never mutates a harness's store.
 
 ## Working here
 
-- The binary is the reference: bare `tapes` (the guide) teaches the
-  retrieval order and the judgment around it, and `tapes <command> --help`
-  carries each command's contract. There is no other documentation and no
-  external skill to fall back on, so a behaviour change updates the guide and
-  `--help` in the same change. After integrating a CLI change, refresh the
+- The binary is the reference. Bare `tapes` prints a map of at most 80
+  lines and 6,144 bytes: the retrieval order and the judgment around it.
+  `tapes guide <topic>` carries the depth, one topic of at most 16,384 bytes
+  at a time, and `tapes <command> --help` carries each command's contract.
+  Tests hold the bounds; a topic that outgrows its bound is split, never
+  trimmed. There is no other documentation and no external skill to fall
+  back on, so a behaviour change updates the topic or `--help` that owns the
+  rule in the same change, and the map only when a route or a rule every
+  reader needs changes. The sources are `crates/tapes/src/guide/map.txt` and
+  `crates/tapes/src/guide/topics/`. After integrating a CLI change, refresh the
   installed binary: `cargo install --path crates/tapes --locked`.
 - The repo dogfoods arc: run non-trivial changes through
   `begin` → implement → `snapshot` → `review` → `verify --all` → `integrate`

@@ -1,0 +1,48 @@
+EXPORT, THEN INGEST PROGRESSIVELY
+  tapes export <id|--latest> [--bundle <dir>]
+  tapes export <id> --full       Every turn of a Claude, Codex, or Pi recording, streamed into the bundle.
+  tapes export --global --since 2026-01-01 --until 2026-01-08
+
+  Three files share one timestamped prefix, and stdout is exactly their paths
+  and sizes, in the order they are meant to be read:
+
+  1. .context.md, whole. The turns show --exchange returns: operator turns and
+     assistant-visible text — the session's argument, and the small part of
+     it. The harness's own commands, notices, attached context, and user turns
+     of unknown sender stay out of it and remain in the trace. --only and
+     --omit and --origin narrow all three files.
+  2. .json, narrowly, with jq. The canonical object plus turns, cost, tokens,
+     and the session directory's git head and branch when they resolve. Query
+     it for facts; do not print it.
+  3. .trace.md, only when free-text search is genuinely easier than JSON.
+     Every reasoning and tool turn the transcript carries, in order. A tool
+     turn is headed by the tool's name where its envelope carries one, by
+     `result` for a bare result, and by `unnamed` otherwise.
+
+  A bundle holds what the transcript held, and reads are capped, so a large
+  session exports as a window and says so. --full streams a whole Claude,
+  Codex, or Pi recording into all three files instead; OpenCode refuses it.
+  Probe with show first: a whole bundle of a large session is large.
+
+  Given the listing flags instead of an id — the scope flags, --harness,
+  --model, --launch, --directory, --since, --until, --sort, --limit, --search — export
+  takes the set list would return, in the same order, and writes one bundle
+  per session. Bundles are never joined: each session keeps its own three
+  files, bounded unless --full, and manifest.json beside them is the only file spanning the
+  set. It records the selection, every bundle's paths, the sessions whose
+  store could not be read, and the listing's own diagnostics, including scoped
+  `unplaced` directories, so the set can be audited against the bounded scan
+  and store. Each invocation reserves a unique sibling
+  prefix before writing, so concurrent exports do not replace one another; a
+  session that fails costs its own bundle and nothing else.
+
+  Never ingest a whole bundle merely because it exists. A large trace read in
+  full buys little over the context file and costs the budget the actual work
+  needs.
+
+EXPORTED BUNDLES ARE UNREDACTED
+  tapes redacts nothing, and a transcript holds whatever was pasted or printed
+  into it: tokens captured in a tool result, credentials echoed by a command,
+  personal data the user shared. Keep bundles in /tmp, attach them nowhere,
+  and quote a conclusion rather than the raw material. Nothing upstream
+  filters this.

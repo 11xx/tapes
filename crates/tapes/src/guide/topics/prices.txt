@@ -1,0 +1,96 @@
+KEEP A PRICE TABLE
+  tapes prices update                  Fetch the vendors' prices into the data table.
+  tapes prices update --from DIR       Read copies of the sources instead of fetching.
+  tapes usage <id> --offline           Price without refreshing the data table first.
+  tapes prices show                    Which table usage reads, the fetch times, each model's rates now.
+  tapes prices show MODEL --json       Every row naming MODEL, with its validity window.
+
+  `prices update` fetches, with `curl` over HTTPS, Anthropic's pricing
+  page (platform.claude.com/docs/en/about-claude/pricing.md), OpenAI's
+  (platform.openai.com/docs/pricing.md), and LiteLLM's
+  community-maintained model_prices_and_context_window.json for models
+  neither page prices. It keeps a tapes-price-table/2 table at
+  `$XDG_DATA_HOME/tapes/prices.toml` (`~/.local/share/tapes/prices.toml`
+  when that is unset), which carries no plan rules: plans come from the
+  built-in rules and a /3 table the user writes. Beside it, it keeps
+  `prices-fetch.json` (tapes-price-fetch/1): the attempt's time and, per
+  source, its URL, whether it succeeded, the error, and the time and model
+  count of its last success. `--from DIR` reads `anthropic.md`,
+  `openai.md` and `litellm.json` from DIR instead, for an offline machine;
+  a file missing there fails that source. Without `--from`,
+  `TAPES_PRICES_FROM=DIR` does the same, for every update. It waits for an
+  update or refresh another command is running, for at most as long as an
+  update can take, and past that fails without updating. Both files are
+  replaced whole, through a temporary file and a
+  rename; an update that leaves no table and finds no row writes the
+  record alone.
+
+  No one needs to run it. A command that prices, with neither `--prices`
+  nor `TAPES_PRICES` naming a table and outside `--remote`, first runs the
+  same update when the data table is absent or no source succeeded in the
+  last 24 hours, and the last attempt is over an hour old or unrecorded:
+  so about once a day, and at most hourly while fetches fail. Only a
+  command that prices refreshes: `stats` over a selection, and `usage
+  --forecast` and `--allowance-rates`, price nothing and never do, though
+  a table `--prices` names that cannot be read still refuses them. A
+  replica answering a `--remote` read runs offline, so it never refreshes
+  either. Concurrent commands refresh once: a refresh holds a lock on
+  `prices.lock` beside the table, a command that finds it held skips its
+  refresh silently when a data table exists and prices with it, or, when
+  none does, waits for the holder for at most as long as a refresh can
+  take, 45 seconds, and prices with the table it wrote, or, past that,
+  warns and prices without a fetched table, so with the config table alone
+  when there is one; whoever takes the lock decides again first. It
+  records the attempt before fetching, so a refresh that dies midway still
+  waits its hour. The refresh gives each source 5 seconds to connect and
+  10 to finish. It prints nothing when it succeeds. When a source fails it
+  prints one line: `warning: prices refreshed, except <source>: <error>;
+  …` when another source succeeded, else `warning: prices not refreshed
+  (<source>: <error>; …); using the table fetched <date>` (or `no fetched
+  table`). The command goes on, its exit status unchanged. `--offline` on
+  any command that prices, or `TAPES_OFFLINE=1`, skips the refresh; the
+  table already fetched still prices.
+
+  The pages show only current prices, so the table keeps history as
+  validity windows. A fetched price equal to the row in effect, from the
+  same source, keeps that row; a different one closes it at the update
+  instant (`effective_until`) and opens a new row there
+  (`effective_from`), so last month's sessions keep last month's price; an
+  id seen for the first time gets a row with no start, which also prices
+  earlier sessions. Rows are never dropped, and an id a fetch no longer
+  lists keeps its rows. Each row records the date it was read
+  (`effective`) and its source: the page's URL, or LiteLLM.
+
+  Each source fails closed. A page whose table no longer has the shape
+  tapes reads (a changed header, an unparseable price, a parenthetical it
+  does not know, half of a prompt-size pair, OpenAI's page without its
+  long-context sentence, or one model priced two ways) fails that source:
+  it contributes nothing and keeps its earlier rows, the other sources
+  still update, every outcome is reported, and the command exits non-zero.
+  `--json` reports the outcomes as tapes-prices-update/1.
+
+  Anthropic's `## Model pricing` table gives every category; a model
+  priced in two rows, for prompts up to and over a size, gets one row
+  whose long-context term starts above that size, counting uncached input,
+  cache reads and cache writes. OpenAI's `### Standard pricing data`
+  tables give uncached input, cache reads and output; long-context columns
+  give a term above the size the page states (272K), counting uncached
+  input and cache reads. OpenAI's 30m and 12h cache writes have no tapes
+  category and are left unpriced, and those rows' source says so. LiteLLM
+  gives bare chat model ids whose prices have no `_above_` tier, never an
+  id an official page priced nor a dated form (`-YYYYMMDD`) of one, which
+  the official row prices instead. When an official page prices an id,
+  every dated form of it the table holds takes that price and source too,
+  unless a page prices that dated form itself, so a LiteLLM row written
+  while the page failed does not outlive the official price.
+
+  Any table, not only this one, answers a recorded id ending in `-YYYYMMDD`
+  that no row names with the row named by the id without that date, so
+  `claude-sonnet-4-5-20250929` is priced by a `claude-sonnet-4-5` row.
+
+  `prices show` names the table usage pricing reads and how it was chosen
+  (`named`, `environment`, `config`, `data`, `config+data`, or `absent`),
+  any table the lookup set aside and why, the config and data tables'
+  paths, and whether a refresh is due now and why: the last success, the
+  last attempt, or `TAPES_OFFLINE`. Its rows are the data table's. JSON is
+  tapes-prices-show/2.
