@@ -1431,6 +1431,52 @@ enum Command {
         #[arg(long, value_name = "SSH-DESTINATION", conflicts_with = "input")]
         remote: Option<String>,
     },
+    /// Page typed items from one native recording (tapes-recording-page/1).
+    /// Default: tail. Positions are gaps: --after starts at that gap, --before
+    /// ends there. Keep end to follow appends; keep start to load older items.
+    /// Claude is record-local; Codex retains runtime mirrors; Pi includes all
+    /// branches. OpenCode requires the stable database and rejects changed parts.
+    /// Supplied exports and remote reads have no recording positions.
+    Read {
+        /// Native session ID or unambiguous prefix. Resolve once, then retain
+        /// the returned positions. Discovery uses bounded identity openings.
+        session: String,
+        #[arg(long)]
+        harness: Option<String>,
+        #[arg(long, requires = "native_root")]
+        native_store: Option<String>,
+        #[arg(long, requires = "native_store")]
+        native_root: Option<PathBuf>,
+        #[arg(long, requires = "native_store")]
+        native_file: Option<PathBuf>,
+        /// Read a Claude child separately, qualified by this parent session.
+        #[arg(long)]
+        reference: Option<String>,
+        #[arg(long, conflicts_with = "after")]
+        before: Option<String>,
+        #[arg(long)]
+        after: Option<String>,
+        #[arg(long, default_value_t = 40)]
+        items: usize,
+        /// Sum of serialized item bytes; envelope bytes are additional.
+        /// An individually oversized item refuses without clipping.
+        #[arg(long, default_value_t = ByteSize::new(1024 * 1024))]
+        bytes: ByteSize,
+        /// Source scan budget (1B..64MiB); independent of output bytes.
+        /// A scan stop can underfill filtered pages: resume from start/end.
+        /// Files also read a <=1MiB identity header, reread the source window
+        /// for verification, and read 64B position anchors. An oversized record
+        /// requires a larger scan budget. OpenCode parts are limited to 4MiB
+        /// by its 8MiB transport; SQLite internal I/O is not measured/bounded.
+        #[arg(long, default_value_t = ByteSize::new(8 * 1024 * 1024))]
+        read_bytes: ByteSize,
+        /// Wanted item kinds, comma-separated; empty selects every kind.
+        /// user,assistant,reasoning,tool-call,tool-result,control,ambient,notice,unknown.
+        #[arg(long, value_delimiter = ',')]
+        kind: Vec<String>,
+        #[arg(long)]
+        json: bool,
+    },
     /// Read one bounded page of older Claude or Codex history as tapes-page/12,
     /// including absolute record references and read evidence. A page decodes
     /// only the records inside its byte range, so a turn's kind matches the one
@@ -3487,6 +3533,103 @@ fn dispatch(cli: Cli) -> Result<()> {
                 print_json(&transcript, &selection.input)?;
             } else {
                 print_transcript(&transcript, by_latest, turns.map(|(_, flag)| flag));
+            }
+        }
+        Command::Read {
+            session,
+            harness,
+            native_store,
+            native_root,
+            native_file,
+            reference,
+            before,
+            after,
+            items,
+            bytes,
+            read_bytes,
+            kind,
+            json,
+        } => {
+            use agent_tapes_core::recording::{self, Direction, Limits, Position, Recording};
+            use agent_tapes_core::NativeStore;
+            let mut harness = harness;
+            let mut session = Some(session);
+            t3_reference::rewrite(
+                &mut session,
+                &mut [],
+                &mut harness,
+                if native_store.is_some() {
+                    t3_reference::Origin::Supplied
+                } else {
+                    t3_reference::Origin::Installed
+                },
+            )?;
+            let mut session = session.expect("read has a required session argument");
+            if session == self_token::TOKEN {
+                let detected = self_token::detect(|name| std::env::var(name).ok())?;
+                if harness
+                    .as_deref()
+                    .is_some_and(|harness| harness != detected.harness)
+                {
+                    return Err(anyhow!("{} conflicts with --harness", detected.report()));
+                }
+                eprintln!("Note: {}.", detected.report());
+                session = detected.id;
+                harness = Some(detected.harness.to_owned());
+            }
+            let mut stores = if let Some(name) = native_store {
+                let root =
+                    native_root.ok_or_else(|| anyhow!("--native-store requires --native-root"))?;
+                vec![match (name.as_str(), native_file) {
+                    ("claude", Some(file)) => NativeStore::claude_file(file),
+                    ("codex", Some(file)) => NativeStore::codex_file(file),
+                    ("pi", Some(file)) => NativeStore::pi_file(file),
+                    ("claude", None) => NativeStore::claude(root.join("projects")),
+                    ("codex", None) => NativeStore::codex(root.join("sessions")),
+                    ("pi", None) => NativeStore::pi(root.join("sessions")),
+                    _ => return Err(anyhow!("--native-store must be claude, codex, or pi")),
+                }]
+            } else {
+                recording::native_stores()
+            };
+            if let Some(harness) = harness {
+                stores.retain(|store| store.harness().as_str() == harness);
+            }
+            let mut recording = Recording::resolve(&stores, &session)?;
+            if let Some(reference) = reference {
+                recording = recording.child(&reference)?;
+            }
+            let before = before.as_deref().map(Position::parse).transpose()?;
+            let after = after.as_deref().map(Position::parse).transpose()?;
+            let direction = match (&before, &after) {
+                (Some(p), _) => Direction::Before(p),
+                (_, Some(p)) => Direction::Forwards(p),
+                _ => Direction::Tail,
+            };
+            let limits = Limits {
+                items,
+                bytes: bytes.get_usize(),
+                scan_bytes: read_bytes.get_usize(),
+                kinds: kind
+                    .iter()
+                    .map(|kind| kind.parse())
+                    .collect::<Result<Vec<_>>>()?,
+            };
+            let page = recording.page(direction, &limits)?;
+            if json {
+                println!("{}", serde_json::to_string(&page)?);
+            } else {
+                for item in &page.items {
+                    println!("[{:?}] {}", item.kind, item.turn.text);
+                }
+                println!("Start: {}\nEnd: {}", page.start.as_str(), page.end.as_str());
+                println!(
+                    "Stop: {:?}; {} item bytes; {} source bytes read; {} pending bytes",
+                    page.stop, page.item_bytes, page.bytes_read, page.pending_bytes
+                );
+                for note in &page.notes {
+                    eprintln!("{note}");
+                }
             }
         }
         Command::Page {

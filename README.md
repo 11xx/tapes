@@ -50,6 +50,49 @@ worktree of its repository, so picking one up needs no session id. A bundle
 carries whatever the transcript holds, including anything pasted into it;
 `tapes` redacts nothing.
 
+## Page a growing recording
+
+```sh
+tapes read <id> --items 40 --bytes 1MiB --kind user,assistant --json
+tapes read <id> --before '<start>' --kind user,assistant --json
+tapes read <id> --after '<end>' --kind user,assistant --json
+```
+
+`tapes-recording-page/1` carries typed items, complete native content and tool
+arguments/results, native IDs and timestamps, and opaque `start`/`end` gap
+positions. Store positions verbatim across processes. `--after` includes the
+item at the gap; `--before` excludes it. Keep `end` to follow appends. Claude
+children are separate recordings selected with `--reference <child>`; parent
+and fork links accompany pages.
+
+`--bytes` bounds the sum of serialized items; the response envelope is extra.
+An oversized item refuses without clipping. `--read-bytes` bounds source
+scanning (default 8MiB, maximum 64MiB), independently of output size. A filter
+fills the item budget unless source, output or scan bounds stop it; `stop`
+names which, and `start`/`end` retain progress. File reads also inspect a
+bounded identity header (at most 1MiB), verify the source window once, and
+read 64-byte position anchors. Incomplete final lines wait for their newline.
+Positions check local source evidence; they do not pin untouched history.
+
+Claude normalizes each record independently. Codex runtime tool mirrors remain
+separate occurrences labelled `runtime`. Pi pages the physical tree log,
+including abandoned branches, and exposes `parent_id`; its active branch needs
+a whole-recording ancestry pass. OpenCode's stable database pages native parts
+by `time_created,id` without the transcript reader's text/tool/message caps.
+A changed positioned part refuses and requires reopening at the tail. Its
+transport limits one native part to 4MiB; SQL response bytes are measured, but
+SQLite's internal scan/sort work depends on its indexes. The OpenCode API and
+supplied JSON/ZIP exports have no supported recording positions.
+
+In `agent-tapes-core`, `recording::Recording::resolve` selects a native
+recording using discovery's bounded identity openings. `from_native` reuses
+an existing discovery result; `from_session` reuses a resolved file session.
+`tail`, `before` and `forwards` take `Limits { items, bytes, scan_bytes, kinds }`
+and return `Page`. `Item::tool` holds complete normalized tool fields;
+`Item::content` holds the native part, including fields whose normalized
+content descriptors apply preview bounds. Readers retain no global state and
+never write to a recording or store.
+
 ## Look across sessions
 
 ```sh

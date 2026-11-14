@@ -21,6 +21,38 @@ PICKING UP A SESSION'S WORK
   freezes it, fans cheap scouts over it and verifies their facts; bare
   `agent-delegate` (PICK UP A SESSION) carries the procedure.
 
+PAGE ONE RECORDING
+  tapes read <id> --items 40 --bytes 1MiB --kind user,assistant --json
+  tapes read <id> --before '<start>' --kind user,assistant --json
+  tapes read <id> --after '<end>' --kind user,assistant --json
+
+  A recording page is tapes-recording-page/1: typed items, native IDs and
+  timestamps, complete native parts and tool fields, parent/fork links, and
+  opaque start/end gap positions. Store positions verbatim across processes.
+  --after starts at the gap; --before ends there. Keep end to follow appends,
+  start to load older items. A Claude child is its own --reference recording.
+
+  --bytes caps serialized items, excluding the response envelope. Oversized
+  items refuse without clipping. --read-bytes caps source scanning, separately
+  from output: default 8MiB, maximum 64MiB. A filter fills the item budget until
+  output, source or scan bounds stop it; stop names which. Resume at start/end
+  after a scan stop. File reads add a <=1MiB identity opening, one verification
+  reread of the scanned window, and 64-byte position anchors. Partial final
+  lines wait for their newline. Positions validate local evidence, not an
+  untouched prefix; a captured copy preserves history through rewrites.
+
+  Claude records decode independently. Codex runtime tool mirrors remain
+  distinct recorded occurrences labelled runtime. Pi exposes its physical tree
+  log, abandoned branches included, with parent_id; an active-branch projection
+  requires an ancestry pass over the recording. OpenCode database parts page
+  by time_created,id, with caller budgets instead of transcript field/count
+  caps. A changed positioned part refuses: reopen at the tail to refresh it.
+  Its 8MiB transport caps native parts at 4MiB. bytes_read counts SQL response
+  bytes; SQLite internal scan/sort costs depend on its indexes. OpenCode API
+  messages and supplied JSON/ZIP exports have no supported recording positions.
+  Discovering an ID/prefix has its own bounded opening/catalog cost; retaining
+  the library Recording descriptor avoids repeating discovery between pages.
+
 SELECT A MATERIALIZED NATIVE STORE
   tapes list --native-store claude --native-root archive/claude --limit 5
   tapes show --native-store codex --native-root archive/codex --latest --tail 10
