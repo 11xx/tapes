@@ -208,10 +208,17 @@ pub enum Direction<'a> {
     Forwards(&'a Position),
 }
 
-/// A coordinate defined by a recording's native storage format.
+/// A coordinate defined by a recording's native storage format. Further
+/// kinds may be added, so a match on it needs a wildcard arm.
+#[non_exhaustive]
 #[derive(Clone, Copy, Debug)]
 pub enum NativeCoordinate<'a> {
+    /// A byte offset into a line-oriented file recording: zero, or the byte
+    /// after a committed newline. Any other offset is `InvalidCoordinate`.
     ByteOffset(u64),
+    /// The native id of a record in a record store. File recordings refuse
+    /// it as `InvalidCoordinate`; the OpenCode database refuses every
+    /// coordinate as `Unsupported`.
     RecordId(&'a str),
 }
 

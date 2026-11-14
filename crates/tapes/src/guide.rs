@@ -115,7 +115,7 @@ PAGE ONE RECORDING
   boundary; an unfamiliar refusal needs an explicit recovery policy.
   Validate kinds, positions and budgets before discovering a session.
   Library callers build the non-exhaustive Limits with Default and with_items,
-  with_bytes, with_scan_bytes and with_kinds; additional options preserve callers.
+  with_bytes, with_scan_bytes, with_kinds and with_bound; additional options preserve callers.
 
 SELECT A MATERIALIZED NATIVE STORE
   tapes list --native-store claude --native-root archive/claude --limit 5

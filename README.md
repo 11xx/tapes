@@ -150,12 +150,15 @@ reuses a file session. `head`, `tail`, `before` and `forwards` take
 `Limits::default().with_items(n).with_bytes(bytes).with_scan_bytes(scan_bytes)
 .with_kinds(kinds)`. File spans use `.with_bound(position)`;
 `position_from_native(NativeCoordinate::ByteOffset(offset))` constructs their
-endpoints. `NativeCoordinate::RecordId` is reserved for native record stores and
-is refused by the current readers. `Limits` is non-exhaustive; use its builders so additional
-options do not require changing callers. Public `Refusal` values identify
+endpoints. `NativeCoordinate::RecordId` names a record of a native record
+store; file recordings refuse it as `invalid-coordinate` and the OpenCode
+database refuses every coordinate as `unsupported`. `Limits` and
+`NativeCoordinate` are non-exhaustive: use the builders, and match
+coordinates with a wildcard arm, so additions do not require changing
+callers. Public `Refusal` values identify
 oversized items, scan exhaustion (with `needed` when the sufficient budget is
 known), changed content, replaced recordings, unsupported stores, invalid
-input/positions and unavailable stores. A deleted retained file is replaced;
+input, positions and coordinates, and unavailable stores. A deleted retained file is replaced;
 an internal truncated record is changed. Busy/unreadable stores are unavailable;
 busy reads retain exit 75. CLI JSON errors use `tapes-recording-error/1` with
 the same `refusal.kind` values, a nonzero exit and `retryable`, equal to the
