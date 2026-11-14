@@ -3638,7 +3638,7 @@ fn envelope_text(content: &Value) -> Option<&str> {
     }
 }
 
-fn claude_user_kind(value: &Value, content: Option<&str>) -> TurnKind {
+pub(crate) fn claude_user_kind(value: &Value, content: Option<&str>) -> TurnKind {
     let origin = value["origin"]["kind"].as_str();
     let prompt_source = value["promptSource"].as_str();
     let is_meta = value["isMeta"].as_bool() == Some(true);

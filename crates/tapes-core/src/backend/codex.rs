@@ -3068,7 +3068,7 @@ fn codex_unmapped(value: &Value) -> (String, bool) {
     (native_type, declined)
 }
 
-fn parse_turns(value: &Value, completed_only: bool) -> Vec<Turn> {
+pub(crate) fn parse_turns(value: &Value, completed_only: bool) -> Vec<Turn> {
     if value["type"] == "event_msg"
         && matches!(
             value["payload"]["type"].as_str(),

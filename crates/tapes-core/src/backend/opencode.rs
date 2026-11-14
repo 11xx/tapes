@@ -1254,6 +1254,9 @@ impl OpenCodeBackend {
     }
 }
 
+#[path = "opencode/recording.rs"]
+mod recording;
+
 impl Backend for OpenCodeBackend {
     fn store_label(&self) -> Option<&str> {
         self.store.store_label()

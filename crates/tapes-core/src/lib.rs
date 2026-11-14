@@ -57,6 +57,7 @@ pub mod projection;
 pub mod pull_request;
 pub mod reader;
 pub mod reconcile;
+pub mod recording;
 pub mod scope;
 pub mod search;
 mod shell_commands;

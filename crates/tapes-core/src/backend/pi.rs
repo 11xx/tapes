@@ -2036,7 +2036,7 @@ fn pi_selections(
     selections.finish(!read.truncated)
 }
 
-fn parse_turns(value: &Value) -> Vec<Turn> {
+pub(crate) fn parse_turns(value: &Value) -> Vec<Turn> {
     if value["type"] == "custom_message" {
         let mut normalized = value.clone();
         normalized["type"] = Value::String("message".to_owned());
