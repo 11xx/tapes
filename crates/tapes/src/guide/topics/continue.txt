@@ -32,8 +32,8 @@ CONTINUE A COLD SESSION
   executors or delegated runs hold half the work. `agent-delegate pickup`
   does: it freezes the session with tapes workset, fans cheap read-only scouts
   over the lanes, and keeps only the facts tapes locate verifies, then names
-  what the lead rereads before writing the continuation. Its guide (bare
-  `agent-delegate`, PICK UP A SESSION) carries the procedure.
+  what the lead rereads before writing the continuation. `agent-delegate
+  guide pickup` carries the procedure.
 
 CARRY IT FORWARD
   Bundles are working material, not artifacts — leave them in /tmp. What
