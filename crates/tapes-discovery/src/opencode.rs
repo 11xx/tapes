@@ -964,7 +964,7 @@ fn run_command(
 
 /// Run a metadata command, again after a pause when it failed because the
 /// store was busy, up to the transient attempt bound.
-fn run_command_with_xdg(
+pub(crate) fn run_command_with_xdg(
     program: &OsStr,
     args: &[OsString],
     coordinate: &str,

@@ -13,6 +13,7 @@ name = "agent-tapes"
 version = "2026.9.29"
 dependencies = [
  "agent-tapes-core",
+ "agent-tapes-discovery",
  "anyhow",
  "chrono",
  "clap",

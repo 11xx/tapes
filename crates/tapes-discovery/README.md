@@ -1,8 +1,9 @@
 # agent-tapes-discovery
 
 `agent-tapes-discovery` is a small library for finding canonical identities in
-native Claude, Codex, Pi, and OpenCode stores. It returns an identity, harness,
-store coordinate, native locator, and bounded session metadata. It does not
+native Claude, Codex, Pi, OpenCode, and T3-managed Antigravity stores. It
+returns an identity, harness, store coordinate, native locator, and bounded
+session metadata. It does not
 normalize transcript turns, read supplied exports, determine liveness, or
 select a delivery adapter.
 
@@ -18,7 +19,7 @@ println!("{} {} {}", session.id(), session.harness(), session.store_coordinate()
 ```
 
 Use `Discovery::new` with explicit `NativeStore::{claude,codex,pi,pi_file,
-pi_with_file,opencode_stable,opencode_v2}` values when the caller owns a
+pi_with_file,opencode_stable,opencode_v2,antigravity}` values when the caller owns a
 specific root or program. `NativeSession` is created only from those native
 sources. A copied UUID or imported recording alone does not establish native
 identity.
@@ -56,6 +57,18 @@ filename candidate until it finds a correct recording, retaining mismatch and
 read failures until then. A correct exact recording takes precedence;
 without one, identity mismatches refuse prefix fallback. Incomplete candidate
 coverage remains an error for prefix selection.
+
+Antigravity uses `NativeStore::antigravity(t3_home)`, also added by
+`Discovery::from_env` from `T3CODE_HOME` or `~/.t3`. It recognizes UUIDv4
+database names under `userdata/providers/antigravity/<profile>/antigravity-acp/conversations`.
+A bounded read-only `sqlite3` query must corroborate the filename with
+`trajectory_meta.cascade_id`. The result has harness `Antigravity`, store
+kind `AntigravityAcp`, identity basis `Database`, and the conversation database
+as its locator. Discovery does not need the T3 state database or the matching
+transcript. Duplicate profile copies, contradictory identities and unreadable
+databases refuse selection. Prefix discovery examines up to 1,000 matching
+identities and 10,000 directory entries. Gemini CLI uses a different store
+and identity format.
 
 OpenCode metadata responses are capped at 8 MiB with a 30-second command
 deadline and at most 1,000 candidate rows. Stable and v2 stores share the

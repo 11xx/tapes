@@ -28,7 +28,7 @@ pub struct CandidatePage<R = NativeSession, E = DiscoveryError> {
 }
 
 impl CandidatePage<NativeSession, DiscoveryError> {
-    fn empty() -> Self {
+    pub(crate) fn empty() -> Self {
         Self {
             records: Vec::new(),
             scanned: 0,
@@ -613,7 +613,7 @@ fn walk_with_entry_limit(store: &NativeStore, root: &Path, entry_limit: usize) -
     match store.harness() {
         Harness::Claude => walk_claude(store, root, &mut walk, &mut visited),
         Harness::Codex | Harness::Pi => visit_tree(store, root, 0, &mut walk, &mut visited),
-        Harness::OpenCode => {}
+        Harness::Antigravity | Harness::OpenCode => {}
     }
     walk
 }
@@ -840,7 +840,7 @@ fn native_filename(harness: Harness, path: &Path) -> bool {
         Harness::Claude => true,
         Harness::Codex => codex_filename_id(stem).is_some(),
         Harness::Pi => pi_filename_id(stem).is_some(),
-        Harness::OpenCode => false,
+        Harness::Antigravity | Harness::OpenCode => false,
     }
 }
 
@@ -850,7 +850,7 @@ fn filename_id(harness: Harness, path: &Path) -> Option<String> {
         Harness::Claude => Some(stem.to_owned()),
         Harness::Codex => codex_filename_id(stem).map(str::to_owned),
         Harness::Pi => pi_filename_id(stem).map(str::to_owned),
-        Harness::OpenCode => None,
+        Harness::Antigravity | Harness::OpenCode => None,
     }
 }
 

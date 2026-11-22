@@ -117,8 +117,7 @@ impl T3Store {
     /// The store this process's environment names; `None` without a home
     /// directory to find it in.
     pub fn from_env() -> Option<Self> {
-        let cwd = std::env::current_dir().ok();
-        location(|name| std::env::var(name).ok(), cwd.as_deref()).map(Self::at)
+        agent_tapes_discovery::t3_home().map(Self::at)
     }
 
     pub fn at(base: impl Into<PathBuf>) -> Self {
@@ -300,6 +299,63 @@ impl T3Store {
         Ok(index)
     }
 
+    /// Read failed or interrupted provider turns tied to one exact native ID.
+    /// T3's errors are separate evidence from the ACP transcript.
+    pub(crate) fn antigravity_turn_notes(&self, id: &str) -> Result<Vec<String>> {
+        if !self.exists() {
+            return Ok(Vec::new());
+        }
+        let id = sql_literal(id)?;
+        let native = payload_member("$.nativeThreadRef.nativeId");
+        let driver = payload_member("$.nativeThreadRef.driver");
+        let sql = format!(
+            "WITH matched AS MATERIALIZED (
+                SELECT thread_id, provider_thread_id FROM {PROVIDER_THREADS}
+                WHERE {driver} = 'antigravity' AND {native} = {id} LIMIT 2
+             )
+             SELECT (SELECT count(*) FROM matched) AS bindings,
+                    t.status, t.ordinal, coalesce(t.completed_at, t.started_at) AS at,
+                    CASE WHEN json_valid(i.payload_json)
+                      THEN substr(json_extract(i.payload_json, '$.failure.message'), 1, 2048) END AS message
+             FROM matched AS p
+             LEFT JOIN orchestration_v2_projection_provider_turns AS t
+               ON t.provider_thread_id = p.provider_thread_id AND t.thread_id = p.thread_id
+               AND t.status IN ('failed', 'interrupted', 'cancelled', 'canceled', 'aborted')
+             LEFT JOIN orchestration_v2_projection_turn_items AS i
+               ON i.provider_turn_id = t.provider_turn_id AND i.provider_thread_id = p.provider_thread_id
+               AND i.thread_id = p.thread_id AND i.type = 'error'
+             ORDER BY t.ordinal, i.ordinal LIMIT 129"
+        );
+        let rows = self.query(&sql, MAX_RESOLVE_BYTES)?;
+        if rows.first().and_then(|row| row["bindings"].as_u64()) == Some(2) {
+            anyhow::bail!("multiple T3 provider threads claim the same Antigravity session");
+        }
+        let mut notes = rows
+            .iter()
+            .take(128)
+            .filter_map(|row| {
+                let status = row["status"].as_str()?;
+                let ordinal = row["ordinal"].as_u64()?;
+                let at = row["at"].as_str().unwrap_or_default();
+                let mut note = format!("T3 provider turn {ordinal} {status}");
+                if !at.is_empty() {
+                    note.push_str(&format!(" at {at}"));
+                }
+                if let Some(message) = row["message"]
+                    .as_str()
+                    .filter(|message| !message.is_empty())
+                {
+                    note.push_str(&format!(": {message}"));
+                }
+                Some(note)
+            })
+            .collect::<Vec<_>>();
+        if rows.len() > 128 {
+            notes.push("T3 failed or interrupted turn evidence exceeds 128 rows".to_owned());
+        }
+        Ok(notes)
+    }
+
     fn query(&self, sql: &str, bound: u64) -> Result<Vec<Value>> {
         let database = self.database();
         if !program_available(OsStr::new("sqlite3")) {
@@ -323,7 +379,7 @@ fn sqlite3_missing(database: &Path) -> anyhow::Error {
 
 fn sqlite_attempt(database: &Path, sql: &str, bound: u64, source: &str) -> Result<Attempt> {
     let mut child = match Command::new("sqlite3")
-        .args(["-readonly", "-batch", "-json"])
+        .args(["-readonly", "-batch", "-init", "/dev/null", "-json"])
         .arg(database)
         .arg(sql)
         .stdin(Stdio::null())
@@ -436,6 +492,7 @@ fn embedded(row: &Value, column: &str) -> Result<Option<Value>> {
 /// The tapes harness that reads a T3 provider driver's recordings.
 fn harness_of(driver: &str) -> Option<&'static str> {
     match driver {
+        "antigravity" => Some("antigravity"),
         "codex" => Some("codex"),
         "claudeAgent" => Some("claude"),
         "pi" => Some("pi"),
@@ -453,31 +510,6 @@ fn native_session_id(harness: &str, native_id: &str) -> String {
         }
     }
     native_id.to_owned()
-}
-
-/// The base directory `T3CODE_HOME` or the home directory names.
-fn location(var: impl Fn(&str) -> Option<String>, cwd: Option<&Path>) -> Option<PathBuf> {
-    let home = || {
-        var("HOME")
-            .filter(|home| !home.is_empty())
-            .map(PathBuf::from)
-    };
-    let configured = var("T3CODE_HOME");
-    let configured = configured.as_deref().map(str::trim).unwrap_or_default();
-    if configured.is_empty() {
-        return Some(home()?.join(".t3"));
-    }
-    if configured == "~" {
-        return home();
-    }
-    if let Some(rest) = configured.strip_prefix("~/") {
-        return Some(home()?.join(rest));
-    }
-    let path = Path::new(configured);
-    if path.is_absolute() {
-        return Some(path.to_path_buf());
-    }
-    Some(cwd?.join(path))
 }
 
 /// Read an argument as a T3 link. `Ok(None)` means it is not written as a
@@ -685,27 +717,6 @@ mod tests {
     fn a_sql_literal_doubles_quotes_and_refuses_control_characters() {
         assert_eq!(sql_literal("a'b").unwrap(), "'a''b'");
         assert!(sql_literal("a\nb").is_err());
-    }
-
-    /// T3's base directory rules, each of which names a different store.
-    #[test]
-    fn the_store_location_follows_t3code_home_then_home() {
-        let at = |t3: Option<&str>, home: Option<&str>| {
-            let var = |name: &str| match name {
-                "T3CODE_HOME" => t3.map(str::to_owned),
-                "HOME" => home.map(str::to_owned),
-                _ => None,
-            };
-            location(var, Some(Path::new("/cwd")))
-        };
-        let path = |text: &str| Some(PathBuf::from(text));
-        assert_eq!(at(None, Some("/h")), path("/h/.t3"));
-        assert_eq!(at(Some("  "), Some("/h")), path("/h/.t3"));
-        assert_eq!(at(Some(" /x "), Some("/h")), path("/x"));
-        assert_eq!(at(Some("~"), Some("/h")), path("/h"));
-        assert_eq!(at(Some("~/x"), Some("/h")), path("/h/x"));
-        assert_eq!(at(Some("x/y"), Some("/h")), path("/cwd/x/y"));
-        assert_eq!(at(None, None), None);
     }
 
     /// Past its bound the index says what it left out instead of implying the

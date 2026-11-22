@@ -4175,7 +4175,7 @@ fn list_without_stores_is_empty_and_successful() {
     assert!(output.status.success());
     assert!(String::from_utf8_lossy(&output.stdout).contains("No harnesses available."));
     assert!(String::from_utf8_lossy(&output.stdout)
-        .contains("Unavailable: claude, codex, opencode, pi"));
+        .contains("Unavailable: claude, codex, opencode, pi, antigravity"));
     assert!(output.stderr.is_empty());
 }
 

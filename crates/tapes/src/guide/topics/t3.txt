@@ -34,3 +34,32 @@ T3 CODE THREADS
     Claude subagent        run the printed tapes child <parent> --reference <agent>
   --remote leaves a reference for the replica's own store. --input and
   --native-store refuse a link and --t3, and do not look a bare id up.
+
+
+ANTIGRAVITY ACP
+  tapes list --global --t3 --harness antigravity
+  tapes show <native-id> --harness antigravity --full
+  tapes workset <native-id> --harness antigravity --bundle <directory>
+
+  The provider profile is under
+  userdata/providers/antigravity/<profile>/antigravity-acp in the T3 home.
+  conversations/<id>.db corroborates the UUID in trajectory_meta.cascade_id.
+  The native transcript is brain/<id>/.system_generated/logs/transcript_full.jsonl.
+  The short transcript and chunks are alternate projections of that recording.
+  Identity discovery needs the conversation database. Transcript pickup also
+  needs the native JSONL, and fails explicitly if it is unavailable. Multiple
+  profile databases for the same id refuse selection.
+
+  The reader keeps visible messages, reasoning, tool calls and generic tool
+  results. The native JSONL supplies no call id for generic results. Recorded
+  step status is kept per turn. Failed or interrupted provider turns from T3
+  statev2.sqlite appear separately in the read notes, joined by exact provider
+  identity. A provider switch keeps each native session independent. A T3 link
+  follows the active-provider rule above. Recover an earlier provider session
+  by its native id. Use --global for listings because the JSONL does not
+  establish the session's working directory.
+
+  Native Gemini CLI files live under ~/.gemini/tmp/<project>/chats.
+  Its session-*.json and session-*.jsonl formats carry a sessionId in
+  conversation metadata. The filename suffix is a short id. Gemini CLI
+  sessions have no established binding to these Antigravity ACP recordings.

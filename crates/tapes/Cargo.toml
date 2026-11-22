@@ -26,6 +26,7 @@ agent-tapes-core.workspace = true
 zip = { workspace = true, optional = true }
 
 [dev-dependencies]
+agent-tapes-discovery.workspace = true
 chrono.workspace = true
 sha2.workspace = true
 tempfile.workspace = true

@@ -24,6 +24,7 @@ use agent_tapes_discovery::{
     IdentityRecord, IdentitySource, NativeSession, NativeStore,
 };
 
+mod antigravity;
 pub mod claude;
 pub mod codex;
 pub mod opencode;
@@ -1330,6 +1331,9 @@ pub fn backends_from_stores(
     Ok(stores
         .into_iter()
         .map(|store| match store.harness() {
+            NativeHarness::Antigravity => {
+                Box::new(antigravity::AntigravityBackend::new(store, read_bytes))
+            }
             NativeHarness::Claude => {
                 Box::new(claude::ClaudeBackend::from_store(Some(store)).with_read_bytes(read_bytes))
                     as Box<dyn Backend>
@@ -1354,6 +1358,9 @@ pub fn backends_from_native_root(
 ) -> Result<Vec<Box<dyn Backend>>> {
     validate_read_bytes(read_bytes)?;
     let backend: Box<dyn Backend> = match store.harness() {
+        NativeHarness::Antigravity => {
+            anyhow::bail!("Antigravity uses a managed T3 home; select it with backends_from_stores")
+        }
         NativeHarness::Claude => Box::new(
             claude::ClaudeBackend::from_store(Some(store))
                 .with_read_bytes(read_bytes)
@@ -1407,6 +1414,11 @@ fn backends_reading(read_bytes: u64) -> Vec<Box<dyn Backend>> {
     backends.push(Box::new(
         pi::PiBackend::from_store(store(NativeHarness::Pi)).with_read_bytes(read_bytes),
     ));
+    if let Some(store) = store(NativeHarness::Antigravity) {
+        backends.push(Box::new(antigravity::AntigravityBackend::new(
+            store, read_bytes,
+        )));
+    }
     backends
 }
 
@@ -2141,7 +2153,11 @@ pub(crate) struct ActivityRange(Option<(DateTime<Utc>, DateTime<Utc>)>);
 
 impl ActivityRange {
     pub(crate) fn observe(&mut self, value: &Value) {
-        if let Some(stamp) = timestamp(&value["timestamp"]) {
+        self.observe_timestamp(timestamp(&value["timestamp"]));
+    }
+
+    pub(crate) fn observe_timestamp(&mut self, stamp: Option<DateTime<Utc>>) {
+        if let Some(stamp) = stamp {
             self.0 = Some(match self.0 {
                 Some((earliest, latest)) => (earliest.min(stamp), latest.max(stamp)),
                 None => (stamp, stamp),

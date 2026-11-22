@@ -3,6 +3,7 @@
 //! This crate returns native identity and store location only. Transcript
 //! interpretation and any delivery decision belong to its caller.
 
+mod antigravity;
 mod error;
 mod file;
 mod opencode;
@@ -20,6 +21,7 @@ use std::path::{Path, PathBuf};
 /// A native harness identity. OpenCode store generations share one harness.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Harness {
+    Antigravity,
     Claude,
     Codex,
     OpenCode,
@@ -29,6 +31,7 @@ pub enum Harness {
 impl Harness {
     pub const fn as_str(self) -> &'static str {
         match self {
+            Self::Antigravity => "antigravity",
             Self::Claude => "claude",
             Self::Codex => "codex",
             Self::OpenCode => "opencode",
@@ -48,11 +51,13 @@ impl std::fmt::Display for Harness {
 pub enum IdentityBasis {
     Header,
     Filename,
+    Database,
 }
 
 /// The native storage projection selected for a session.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NativeStoreKind {
+    AntigravityAcp,
     ClaudeFiles,
     CodexFiles,
     OpenCode(OpenCodeFlavor),
@@ -62,6 +67,7 @@ pub enum NativeStoreKind {
 /// Store configuration captured at construction time.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum NativeStore {
+    Antigravity { t3_home: PathBuf },
     Claude { root: PathBuf },
     Codex { root: PathBuf },
     ClaudeFile { path: PathBuf },
@@ -73,6 +79,13 @@ pub enum NativeStore {
 }
 
 impl NativeStore {
+    /// T3's home directory, containing the managed provider profiles.
+    pub fn antigravity(t3_home: impl Into<PathBuf>) -> Self {
+        Self::Antigravity {
+            t3_home: t3_home.into(),
+        }
+    }
+
     pub fn claude(root: impl Into<PathBuf>) -> Self {
         Self::Claude { root: root.into() }
     }
@@ -136,6 +149,7 @@ impl NativeStore {
 
     pub fn harness(&self) -> Harness {
         match self {
+            Self::Antigravity { .. } => Harness::Antigravity,
             Self::Claude { .. } | Self::ClaudeFile { .. } => Harness::Claude,
             Self::Codex { .. } | Self::CodexFile { .. } => Harness::Codex,
             Self::Pi { .. } | Self::PiFile { .. } | Self::PiWithFile { .. } => Harness::Pi,
@@ -156,6 +170,7 @@ impl NativeStore {
 
     pub fn root(&self) -> Option<&Path> {
         match self {
+            Self::Antigravity { t3_home } => Some(t3_home),
             Self::Claude { root }
             | Self::Codex { root }
             | Self::Pi { root }
@@ -179,6 +194,7 @@ impl NativeStore {
 
     pub fn coordinate(&self) -> String {
         match self {
+            Self::Antigravity { t3_home } => format!("antigravity:{}", t3_home.display()),
             Self::Claude { root } | Self::Codex { root } | Self::Pi { root } => {
                 format!("{}:{}", self.harness(), root.display())
             }
@@ -199,6 +215,7 @@ impl NativeStore {
 
     pub fn kind(&self) -> NativeStoreKind {
         match self {
+            Self::Antigravity { .. } => NativeStoreKind::AntigravityAcp,
             Self::Claude { .. } | Self::ClaudeFile { .. } => NativeStoreKind::ClaudeFiles,
             Self::Codex { .. } | Self::CodexFile { .. } => NativeStoreKind::CodexFiles,
             Self::Pi { .. } | Self::PiFile { .. } | Self::PiWithFile { .. } => {
@@ -218,6 +235,7 @@ impl NativeStore {
     /// Whether the selected native source has a store to inspect.
     pub fn available(&self) -> bool {
         match self {
+            Self::Antigravity { t3_home } => antigravity::available(t3_home),
             Self::OpenCode(store) => store.available(),
             _ => file::available(self),
         }
@@ -225,6 +243,7 @@ impl NativeStore {
 
     pub fn locate_exact(&self, id: &str) -> Result<Option<NativeSession>, DiscoveryError> {
         match self {
+            Self::Antigravity { t3_home } => antigravity::locate(t3_home, id),
             Self::OpenCode(store) => store.locate_exact(id),
             _ => file::locate_exact(self, id),
         }
@@ -232,8 +251,17 @@ impl NativeStore {
 
     pub fn candidates(&self, limit: usize) -> CandidatePage {
         match self {
+            Self::Antigravity { t3_home } => antigravity::candidates(t3_home, limit, None),
             Self::OpenCode(store) => store.candidates(limit),
             _ => file::candidates(self, limit),
+        }
+    }
+
+    /// Antigravity checks only database names in the requested identity range.
+    pub fn candidates_with_prefix(&self, limit: usize, prefix: Option<&str>) -> CandidatePage {
+        match self {
+            Self::Antigravity { t3_home } => antigravity::candidates(t3_home, limit, prefix),
+            _ => self.candidates(limit),
         }
     }
 
@@ -246,6 +274,7 @@ impl NativeStore {
         id: &str,
     ) -> Result<Option<NativeSession>, DiscoveryError> {
         match self {
+            Self::Antigravity { t3_home } => antigravity::locate(t3_home, id),
             Self::OpenCode(store) => store.locate_exact(id),
             _ => file::locate_exact_in(self, catalog, id),
         }
@@ -261,6 +290,7 @@ impl NativeStore {
         id: &str,
     ) -> Result<Option<NativeSession>, DiscoveryError> {
         match self {
+            Self::Antigravity { t3_home } => antigravity::locate(t3_home, id),
             Self::OpenCode(store) => store.locate_exact(id),
             _ => file::locate_named_in(self, catalog, id),
         }
@@ -270,6 +300,7 @@ impl NativeStore {
     /// once per `catalog`.
     pub fn candidates_in(&self, catalog: &StoreCatalog, limit: usize) -> CandidatePage {
         match self {
+            Self::Antigravity { t3_home } => antigravity::candidates(t3_home, limit, None),
             Self::OpenCode(store) => store.candidates(limit),
             _ => file::candidates_in(self, catalog, limit),
         }
@@ -285,6 +316,7 @@ impl NativeStore {
         limit: usize,
     ) -> (CandidatePage, Option<usize>) {
         match self {
+            Self::Antigravity { t3_home } => (antigravity::candidates(t3_home, limit, None), None),
             Self::OpenCode(store) => (store.candidates(limit), None),
             _ => file::candidates_in_walk(self, catalog, limit),
         }
@@ -350,6 +382,7 @@ impl NativeSession {
             locator: Some(locator),
             identity_basis: Some(identity_basis),
             store_kind: match harness {
+                Harness::Antigravity => NativeStoreKind::AntigravityAcp,
                 Harness::Claude => NativeStoreKind::ClaudeFiles,
                 Harness::Codex => NativeStoreKind::CodexFiles,
                 Harness::OpenCode => NativeStoreKind::OpenCode(OpenCodeFlavor::Stable),
@@ -438,6 +471,9 @@ impl Discovery {
                 .into_iter()
                 .map(NativeStore::OpenCode),
         );
+        if let Some(root) = t3_home() {
+            stores.push(NativeStore::antigravity(root));
+        }
         Self::new(stores)
     }
 
@@ -453,6 +489,36 @@ impl Discovery {
             .collect::<Vec<_>>();
         resolve_with_sources(&sources, query).map(|resolved| resolved.record)
     }
+}
+
+/// Resolve the T3 home without opening the application database.
+pub fn t3_home() -> Option<PathBuf> {
+    t3_location(|key| env::var(key).ok(), env::current_dir().ok().as_deref())
+}
+
+/// The base directory `T3CODE_HOME` or the home directory names.
+fn t3_location(var: impl Fn(&str) -> Option<String>, cwd: Option<&Path>) -> Option<PathBuf> {
+    let home = || {
+        var("HOME")
+            .filter(|home| !home.is_empty())
+            .map(PathBuf::from)
+    };
+    let configured = var("T3CODE_HOME");
+    let configured = configured.as_deref().map(str::trim).unwrap_or_default();
+    if configured.is_empty() {
+        return Some(home()?.join(".t3"));
+    }
+    if configured == "~" {
+        return home();
+    }
+    if let Some(rest) = configured.strip_prefix("~/") {
+        return Some(home()?.join(rest));
+    }
+    let path = Path::new(configured);
+    if path.is_absolute() {
+        return Some(path.to_path_buf());
+    }
+    Some(cwd?.join(path))
 }
 
 /// Candidate enumeration coverage for one present or unreadable store.
@@ -779,14 +845,41 @@ impl IdentitySource<NativeSession> for NativeStore {
         query: &str,
     ) -> Result<Option<NativeSession>, ExactLookupFailure> {
         NativeStore::locate_exact(self, query).map_err(|error| ExactLookupFailure {
-            refuses_prefix: matches!(error, DiscoveryError::IdentityMismatch { .. }),
+            refuses_prefix: self.harness() == Harness::Antigravity
+                || matches!(error, DiscoveryError::IdentityMismatch { .. }),
             transient: error.is_transient(),
             message: error.to_string(),
         })
     }
 
     fn candidates(&self, limit: usize) -> CandidatePage<NativeSession, String> {
-        let page = NativeStore::candidates(self, limit);
+        self.candidate_strings(limit, None)
+    }
+
+    fn candidates_matching(
+        &self,
+        prefix: &str,
+        limit: usize,
+    ) -> CandidatePage<NativeSession, String> {
+        self.candidate_strings(limit, Some(prefix))
+    }
+
+    fn available(&self) -> bool {
+        self.harness() != Harness::Antigravity || NativeStore::available(self)
+    }
+
+    fn shares_session_ids(&self) -> bool {
+        self.harness() == Harness::OpenCode
+    }
+}
+
+impl NativeStore {
+    fn candidate_strings(
+        &self,
+        limit: usize,
+        prefix: Option<&str>,
+    ) -> CandidatePage<NativeSession, String> {
+        let page = self.candidates_with_prefix(limit, prefix);
         CandidatePage {
             records: page.records,
             scanned: page.scanned,
@@ -799,10 +892,6 @@ impl IdentitySource<NativeSession> for NativeStore {
                 .collect(),
             unreadable_ids: page.unreadable_ids,
         }
-    }
-
-    fn shares_session_ids(&self) -> bool {
-        self.harness() == Harness::OpenCode
     }
 }
 
@@ -1170,4 +1259,30 @@ fn open_regular_file(path: &Path) -> std::io::Result<std::fs::File> {
         ));
     }
     Ok(file)
+}
+
+#[cfg(test)]
+mod t3_path_tests {
+    use super::*;
+
+    /// T3's base directory rules, each of which names a different store.
+    #[test]
+    fn the_store_location_follows_t3code_home_then_home() {
+        let at = |t3: Option<&str>, home: Option<&str>| {
+            let var = |name: &str| match name {
+                "T3CODE_HOME" => t3.map(str::to_owned),
+                "HOME" => home.map(str::to_owned),
+                _ => None,
+            };
+            t3_location(var, Some(Path::new("/cwd")))
+        };
+        let path = |text: &str| Some(PathBuf::from(text));
+        assert_eq!(at(None, Some("/h")), path("/h/.t3"));
+        assert_eq!(at(Some("  "), Some("/h")), path("/h/.t3"));
+        assert_eq!(at(Some(" /x "), Some("/h")), path("/x"));
+        assert_eq!(at(Some("~"), Some("/h")), path("/h"));
+        assert_eq!(at(Some("~/x"), Some("/h")), path("/h/x"));
+        assert_eq!(at(Some("x/y"), Some("/h")), path("/cwd/x/y"));
+        assert_eq!(at(None, None), None);
+    }
 }

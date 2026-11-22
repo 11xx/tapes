@@ -203,6 +203,9 @@ FIND IT
   canonicalized, so an empty or relative one resolves from the current
   directory.
 
+  T3-managed Antigravity discovery uses T3CODE_HOME or ~/.t3 and the
+  provider's native conversation database. See `tapes guide t3`.
+
   A session recorded in a directory that no longer exists cannot be placed in
   any project, so a scoped search will not find it. Its id still resolves.
 

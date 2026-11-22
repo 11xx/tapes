@@ -646,7 +646,7 @@ fn price_table(
 #[derive(Args, Clone, Copy, Debug, Default)]
 struct ReadArgs {
     /// Read at most this much from the end of each installed Claude, Codex,
-    /// or Pi recording [default: 4MiB], between 64KiB and 1GiB. The window is
+    /// Pi, or T3-managed Antigravity recording [default: 4MiB], between 64KiB and 1GiB. The window is
     /// held in memory whole. Supplied inputs keep their own byte budgets.
     #[arg(long, value_name = "BYTES")]
     read_bytes: Option<ByteSize>,
@@ -888,6 +888,7 @@ struct SelectionArgs {
     /// records must match the selected native session in the opening and bounded
     /// tail, or throughout a full read. Repeated directory recording IDs choose the newest
     /// modification time, then the lexically first locator, as listing does.
+    /// Antigravity refuses duplicate identities across provider profiles.
     /// --native-file selects one locator explicitly. Listing prefilters with uncertain native
     /// identity defer to normalization and its diagnostics.
     #[arg(
@@ -1743,7 +1744,7 @@ enum Command {
         /// Stream the whole recording record by record instead of its bounded
         /// tail, naming every child reference and parent fact it holds, with
         /// memory following the references kept rather than the file.
-        /// Installed Claude, Codex, Pi, and OpenCode sessions.
+        /// Installed Claude, Codex, Pi, OpenCode, and T3-managed Antigravity sessions.
         #[arg(long, conflicts_with = "read_bytes")]
         full: bool,
         /// Render the versioned tapes-lineage/5 object as JSON.
@@ -9047,7 +9048,10 @@ fn print_diagnostics(
     if unavailable.is_empty() {
         return;
     }
-    if unavailable.len() == 4 {
+    if agent_tapes_core::backend::backends()
+        .iter()
+        .all(|backend| unavailable.iter().any(|name| name == backend.harness()))
+    {
         println!("No harnesses available.");
     }
     println!("Unavailable: {}", unavailable.join(", "));
