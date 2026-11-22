@@ -59,6 +59,17 @@ ANTIGRAVITY ACP
   by its native id. Use --global for listings because the JSONL does not
   establish the session's working directory.
 
+  A projected Antigravity child thread can have a task reference in place of
+  a native session reference. Its exact launch run must belong to the
+  parent's active Antigravity provider instance. For detached launches the
+  parent descriptor names the child and its spawn step. The parent database
+  step and the child's inbox must agree on the launch tool call ID, and both
+  conversation databases must corroborate their IDs in the same profile.
+  Parent worksets include children with that native evidence. Missing or
+  conflicting evidence refuses the child link and is reported in the parent
+  workset's lineage coverage. The T3 listing index uses provider-thread
+  native references.
+
   Native Gemini CLI files live under ~/.gemini/tmp/<project>/chats.
   Its session-*.json and session-*.jsonl formats carry a sessionId in
   conversation metadata. The filename suffix is a short id. Gemini CLI

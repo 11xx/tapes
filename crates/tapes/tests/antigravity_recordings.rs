@@ -320,3 +320,133 @@ fn exact_discovery_rejects_a_symlinked_conversations_directory() {
     assert!(!exact.status.success());
     assert!(String::from_utf8_lossy(&exact.stderr).contains("expected a native directory"));
 }
+
+/// A T3 child link resolves the independently recorded child, and a parent
+/// workset includes that recording. The task ID alone cannot select either.
+#[test]
+fn detached_child_requires_exact_native_launch_provenance() {
+    let Some(f) = Fixture::new() else { return };
+    let child_db = f.database(PROFILE, OTHER, OTHER);
+    let profile = f.profile(PROFILE);
+    let child = profile.join(format!("brain/{OTHER}/.system_generated"));
+    let descriptors = profile.join(format!("brain/{ID}/.system_generated/subagents"));
+    fs::create_dir_all(child.join("messages")).unwrap();
+    fs::create_dir_all(child.join("logs")).unwrap();
+    fs::create_dir_all(&descriptors).unwrap();
+    let descriptor = descriptors.join(format!("{OTHER}.json"));
+    fs::write(
+        descriptor,
+        format!(r#"{{"conversationId":"{OTHER}","spawnStepIndex":4}}"#),
+    )
+    .unwrap();
+    let launch = child.join("messages/launch.json");
+    let launch_json = format!(
+        r#"{{"sender":"{ID}","sourceMetadata":{{"tool":{{"conversationId":"{ID}","toolCall":{{"id":"call_123","name":"invoke_subagent"}}}}}}}}"#
+    );
+    fs::write(&launch, &launch_json).unwrap();
+    fs::write(
+        child.join("logs/transcript_full.jsonl"),
+        include_bytes!("fixtures/antigravity/transcript_full.jsonl"),
+    )
+    .unwrap();
+    let parent_db = profile.join(format!("conversations/{ID}.db"));
+    sqlite(
+        &parent_db,
+        "CREATE TABLE steps (idx INTEGER PRIMARY KEY, step_type INTEGER, step_format INTEGER, step_payload BLOB);
+         INSERT INTO steps VALUES (4,132,0,X'2A1D221B0A0863616C6C5F313233120F696E766F6B655F7375626167656E74');",
+    );
+    let state = f.0.path().join("userdata/statev2.sqlite");
+    sqlite(
+        &state,
+        r#"UPDATE orchestration_v2_projection_provider_threads
+           SET provider_instance_id='agy' WHERE provider_thread_id='pt-example-acp';
+           CREATE TABLE orchestration_v2_projection_runs (
+             run_id TEXT PRIMARY KEY, thread_id TEXT, provider_thread_id TEXT, provider_instance_id TEXT
+           );
+           INSERT INTO orchestration_v2_projection_runs VALUES ('run-launch','switch-thread','pt-example-acp','agy');
+           CREATE TABLE orchestration_v2_projection_run_attempts (
+             thread_id TEXT, run_id TEXT, root_node_id TEXT, provider_thread_id TEXT, provider_instance_id TEXT
+           );
+           INSERT INTO orchestration_v2_projection_run_attempts VALUES ('switch-thread','run-launch','node-parent','pt-example-acp','agy');
+           INSERT INTO orchestration_v2_projection_threads
+             (thread_id, project_id, title, default_provider, runtime_mode, interaction_mode, created_at, updated_at, payload_json)
+             VALUES ('projected-child','p','Child','antigravity','m','i','2026-01-01','2026-01-10','{}');
+           INSERT INTO orchestration_v2_projection_subagents
+             (subagent_id, thread_id, run_id, parent_node_id, provider, child_thread_id, origin, status, updated_at, payload_json, driver, provider_instance_id)
+             VALUES ('node-child','switch-thread','run-launch','node-parent','antigravity','projected-child','provider_native','completed','2026-01-10',
+               '{"nativeTaskRef":{"driver":"antigravity","nativeId":"call_123","strength":"strong"}}','antigravity','agy');"#,
+    );
+    let link = ["show", "t3-thread://v1/projected-child", "--json"];
+    let shown: Value = serde_json::from_str(success(&f.run(&link))).unwrap();
+    assert_eq!(shown["session"]["id"], OTHER);
+
+    let bundle = f.0.path().join("family");
+    success(&f.run(&[
+        "workset",
+        ID,
+        "--harness",
+        "antigravity",
+        "--bundle",
+        bundle.to_str().unwrap(),
+    ]));
+    let manifest: Value =
+        serde_json::from_slice(&fs::read(bundle.join("workset.json")).unwrap()).unwrap();
+    assert_eq!(manifest["sources"][1]["session_id"], OTHER);
+    assert_eq!(manifest["sources"][1]["role"], "child");
+
+    fs::write(&launch, launch_json.replace("call_123", "call_456")).unwrap();
+    assert!(!f.run(&link).status.success());
+    fs::write(&launch, &launch_json).unwrap();
+    sqlite(&parent_db, "UPDATE steps SET step_payload=X'00'");
+    assert!(!f.run(&link).status.success());
+    sqlite(&parent_db, "UPDATE steps SET step_payload=X'2A1D221B0A0863616C6C5F313233120F696E766F6B655F7375626167656E74'");
+    assert!(f.run(&link).status.success());
+
+    let duplicate = f.database(SECOND, OTHER, OTHER);
+    assert!(!f.run(&link).status.success());
+    fs::remove_file(child_db).unwrap();
+    let cross_profile = f.run(&link);
+    assert!(!cross_profile.status.success());
+    assert!(String::from_utf8_lossy(&cross_profile.stderr).contains("different profile"));
+    fs::remove_file(duplicate).unwrap();
+    assert!(!f.run(&link).status.success());
+    f.database(PROFILE, OTHER, OTHER);
+
+    let hidden_parent = parent_db.with_extension("hidden");
+    fs::rename(&parent_db, &hidden_parent).unwrap();
+    assert!(!f.run(&link).status.success());
+    fs::rename(&hidden_parent, &parent_db).unwrap();
+    fs::write(child.join("messages/duplicate.json"), &launch_json).unwrap();
+    assert!(!f.run(&link).status.success());
+    fs::remove_file(child.join("messages/duplicate.json")).unwrap();
+
+    sqlite(
+        &state,
+        "INSERT INTO orchestration_v2_projection_subagents
+        SELECT 'second-projection',thread_id,run_id,parent_node_id,provider,provider_thread_id,
+          child_thread_id,origin,status,started_at,completed_at,updated_at,payload_json,driver,
+          provider_instance_id,completion_delivery_state
+        FROM orchestration_v2_projection_subagents WHERE subagent_id='node-child'",
+    );
+    assert!(!f.run(&link).status.success());
+    sqlite(
+        &state,
+        "DELETE FROM orchestration_v2_projection_subagents WHERE subagent_id='second-projection'",
+    );
+
+    sqlite(&state, "UPDATE orchestration_v2_projection_provider_threads SET driver='codex' WHERE provider_thread_id='pt-example-acp'");
+    assert!(!f.run(&link).status.success());
+    sqlite(&state, "UPDATE orchestration_v2_projection_provider_threads SET driver='antigravity' WHERE provider_thread_id='pt-example-acp'");
+    sqlite(
+        &state,
+        "UPDATE orchestration_v2_projection_runs SET provider_instance_id='other'",
+    );
+    assert!(!f.run(&link).status.success());
+    sqlite(
+        &state,
+        "UPDATE orchestration_v2_projection_runs SET provider_instance_id='agy'",
+    );
+    assert!(f.run(&link).status.success());
+    sqlite(&state, "UPDATE orchestration_v2_projection_threads SET active_provider_thread_id='pt-example-codex' WHERE thread_id='switch-thread'");
+    assert!(!f.run(&link).status.success());
+}

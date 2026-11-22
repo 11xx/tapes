@@ -10,9 +10,11 @@ use std::io::{ErrorKind, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use anyhow::{anyhow, Context, Result};
+use agent_tapes_discovery::NativeStore;
+use anyhow::{anyhow, ensure, Context, Result};
 use serde_json::Value;
 
+use crate::antigravity_children::detached_children;
 use crate::backend::opencode::{
     bounded_stderr, finished_stderr, program_available, retry_transient, Attempt,
 };
@@ -158,6 +160,14 @@ impl T3Store {
         if thread.is_none() && subagent.is_none() {
             return Ok(Resolution::Absent);
         }
+        if subagent.as_ref().is_some_and(|row| row.antigravity_native) {
+            return Ok(match self.resolve_antigravity_child(thread_id, thread) {
+                Ok(native) => Resolution::Native(native),
+                Err(error) => Resolution::Refused(format!(
+                    "T3 thread {thread_id}: Antigravity child identity unproven: {error:#}"
+                )),
+            });
+        }
         if let Some(chosen) = choose(&providers, thread.as_ref()) {
             let others = others_of(&providers, chosen);
             let Some(harness) = harness_of(&chosen.driver) else {
@@ -192,6 +202,78 @@ impl T3Store {
         )))
     }
 
+    fn resolve_antigravity_child(
+        &self,
+        thread_id: &str,
+        thread: Option<ThreadRow>,
+    ) -> Result<NativeThread> {
+        let thread = thread.context("missing projected child thread")?;
+        ensure!(
+            thread.active.is_none(),
+            "child thread has an active provider"
+        );
+        let id = sql_literal(thread_id)?;
+        let rows = self.query(
+            &format!(
+                "WITH child AS MATERIALIZED (
+                   SELECT * FROM {SUBAGENTS} WHERE child_thread_id = {id} LIMIT 2
+                 )
+                 SELECT
+                   CASE WHEN json_valid(s.payload_json) THEN json_extract(s.payload_json, '$.nativeTaskRef') END AS task,
+                   CASE WHEN json_valid(p.payload_json) THEN json_extract(p.payload_json, '$.nativeThreadRef') END AS parent
+                 FROM child AS s
+                 JOIN orchestration_v2_projection_runs AS r
+                   ON r.run_id = s.run_id AND r.thread_id = s.thread_id
+                 JOIN {THREADS} AS t ON t.thread_id = s.thread_id
+                 JOIN {PROVIDER_THREADS} AS p
+                   ON p.thread_id = s.thread_id AND p.provider_thread_id = r.provider_thread_id
+                 WHERE (SELECT count(*) FROM child) = 1
+                   AND NOT EXISTS (SELECT 1 FROM {PROVIDER_THREADS} WHERE thread_id = {id})
+                   AND s.origin = 'provider_native' AND s.driver = 'antigravity'
+                   AND p.driver = 'antigravity' AND s.thread_id != {id}
+                   AND r.provider_thread_id = t.active_provider_thread_id
+                   AND (s.provider_thread_id IS NULL OR s.provider_thread_id = p.provider_thread_id)
+                   AND s.provider_instance_id = p.provider_instance_id
+                   AND s.provider_instance_id = r.provider_instance_id
+                   AND s.provider_instance_id != ''
+                   AND EXISTS (
+                     SELECT 1 FROM orchestration_v2_projection_run_attempts AS a
+                     WHERE a.thread_id = s.thread_id AND a.run_id = s.run_id
+                       AND a.root_node_id = s.parent_node_id
+                       AND a.provider_thread_id = p.provider_thread_id
+                       AND a.provider_instance_id = s.provider_instance_id
+                   )
+                   AND NOT EXISTS (
+                     SELECT 1 FROM {SUBAGENTS} AS other
+                     WHERE other.thread_id = s.thread_id AND other.subagent_id != s.subagent_id
+                       AND other.origin = 'provider_native'
+                       AND CASE WHEN json_valid(other.payload_json) AND json_valid(s.payload_json)
+                           THEN json_extract(other.payload_json, '$.nativeTaskRef.nativeId')
+                              = json_extract(s.payload_json, '$.nativeTaskRef.nativeId') END
+                   )"
+            ),
+            MAX_RESOLVE_BYTES,
+        )?;
+        let [binding] = rows.as_slice() else {
+            anyhow::bail!("missing, ambiguous or switched T3 parent provider binding");
+        };
+        let task = exact_antigravity_ref(binding, "task")?;
+        let parent = exact_antigravity_ref(binding, "parent")?;
+        let store = NativeStore::antigravity(&self.base);
+        let child = detached_children(&store, &parent)?
+            .into_iter()
+            .find(|child| child.task == task)
+            .context("no detached child corroborates the exact launch tool call")?;
+        Ok(NativeThread {
+            thread_id: thread_id.to_owned(),
+            title: thread.title,
+            harness: "antigravity",
+            native_id: child.id,
+            others: Vec::new(),
+            deleted: thread.deleted,
+        })
+    }
+
     fn refuse_subagent(&self, thread_id: &str, parent: &str, agent: &str) -> Result<Resolution> {
         let (thread, providers, _) = self.thread_rows(parent)?;
         let session = choose(&providers, thread.as_ref())
@@ -215,6 +297,9 @@ impl T3Store {
         let driver = payload_member("$.nativeThreadRef.driver");
         let native = payload_member("$.nativeThreadRef.nativeId");
         let agent = payload_member("$.nativeTaskRef.nativeId");
+        let task_driver = payload_member("$.nativeTaskRef.driver");
+        let antigravity_task =
+            format!("origin = 'provider_native' AND (driver = 'antigravity' OR {task_driver} = 'antigravity')");
         let sql = format!(
             "SELECT \
              (SELECT json_object('title', title, 'active', active_provider_thread_id, 'deleted', deleted_at IS NOT NULL) \
@@ -223,8 +308,8 @@ impl T3Store {
               FROM (SELECT provider_thread_id, last_run_ordinal, {driver} AS driver, {native} AS native \
                     FROM {PROVIDER_THREADS} WHERE thread_id = {id} \
                     ORDER BY last_run_ordinal DESC, provider_thread_id LIMIT {MAX_PROVIDER_THREADS})) AS providers, \
-             (SELECT json_object('parent', thread_id, 'driver', driver, 'agent', {agent}) \
-              FROM {SUBAGENTS} WHERE child_thread_id = {id} LIMIT 1) AS subagent"
+             (SELECT json_object('parent', thread_id, 'driver', driver, 'agent', {agent}, 'antigravity', {antigravity_task}) \
+              FROM {SUBAGENTS} WHERE child_thread_id = {id} ORDER BY ({antigravity_task}) DESC LIMIT 1) AS subagent"
         );
         let rows = self.query(&sql, MAX_RESOLVE_BYTES)?;
         let row = rows
@@ -246,6 +331,7 @@ impl T3Store {
                 parent: text(&value, "parent")?,
                 driver: text(&value, "driver"),
                 agent: text(&value, "agent"),
+                antigravity_native: value["antigravity"].as_u64() == Some(1),
             })
         });
         Ok((thread, providers, subagent))
@@ -357,22 +443,25 @@ impl T3Store {
     }
 
     fn query(&self, sql: &str, bound: u64) -> Result<Vec<Value>> {
-        let database = self.database();
-        if !program_available(OsStr::new("sqlite3")) {
-            return Err(sqlite3_missing(&database));
-        }
-        let source = format!("T3 store {}", database.display());
-        let bytes = retry_transient(&source, || sqlite_attempt(&database, sql, bound, &source))?;
-        if bytes.iter().all(u8::is_ascii_whitespace) {
-            return Ok(Vec::new());
-        }
-        serde_json::from_slice(&bytes).with_context(|| format!("{source} returned invalid JSON"))
+        query_sqlite(&self.database(), sql, bound)
     }
+}
+
+pub(crate) fn query_sqlite(database: &Path, sql: &str, bound: u64) -> Result<Vec<Value>> {
+    if !program_available(OsStr::new("sqlite3")) {
+        return Err(sqlite3_missing(database));
+    }
+    let source = format!("SQLite store {}", database.display());
+    let bytes = retry_transient(&source, || sqlite_attempt(database, sql, bound, &source))?;
+    if bytes.iter().all(u8::is_ascii_whitespace) {
+        return Ok(Vec::new());
+    }
+    serde_json::from_slice(&bytes).with_context(|| format!("{source} returned invalid JSON"))
 }
 
 fn sqlite3_missing(database: &Path) -> anyhow::Error {
     anyhow!(
-        "reading the T3 store {} takes the sqlite3 program, which is not available",
+        "reading the SQLite store {} takes the sqlite3 program, which is not available",
         database.display()
     )
 }
@@ -451,6 +540,7 @@ struct SubagentRow {
     parent: String,
     driver: Option<String>,
     agent: Option<String>,
+    antigravity_native: bool,
 }
 
 /// The active provider thread, else the one with the highest run ordinal,
@@ -487,6 +577,18 @@ fn embedded(row: &Value, column: &str) -> Result<Option<Value>> {
                 .with_context(|| format!("the T3 store returned an invalid {column} column"))
         })
         .transpose()
+}
+
+fn exact_antigravity_ref(row: &Value, column: &str) -> Result<String> {
+    let reference = embedded(row, column)?.context("missing Antigravity reference payload")?;
+    ensure!(
+        reference["driver"].as_str() == Some("antigravity")
+            && reference["strength"].as_str() == Some("strong"),
+        "Antigravity reference is not a strong provider identity"
+    );
+    text(&reference, "nativeId")
+        .filter(|id| !id.is_empty())
+        .context("missing Antigravity native reference ID")
 }
 
 /// The tapes harness that reads a T3 provider driver's recordings.

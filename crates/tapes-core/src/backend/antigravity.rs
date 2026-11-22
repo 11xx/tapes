@@ -9,8 +9,10 @@ use super::{
     transcript_from_recording, ActivityRange, Backend, FoldedSession, Listing, Query,
     StreamCoordinates, StreamOptions, StreamedTranscript, UnmappedTally,
 };
+use crate::antigravity_children::detached_children;
 use crate::content::{text_part, tool_coverage, tool_part};
 use crate::event::{Bounded, EventKind, ToolEvent};
+use crate::lineage::{ChildRef, Lineage, SourceRef};
 use crate::model::{
     EntryMetadata, KindDeclaration, Model, Role, Session, SourceDescriptor, Transcript, Turn,
     TurnKind, TurnSelection,
@@ -235,6 +237,30 @@ impl Backend for AntigravityBackend {
 
     fn supports_full_search(&self) -> bool {
         true
+    }
+
+    fn lineage(&self, session: &Session) -> Result<Lineage> {
+        let children = detached_children(&self.store, &session.id)?
+            .into_iter()
+            .map(|child| {
+                let mut reference = ChildRef::new(child.id.clone(), HARNESS);
+                reference.session_id = Some(child.id);
+                reference.resolved = true;
+                reference.source = vec![
+                    SourceRef::File {
+                        path: child.descriptor.display().to_string(),
+                    },
+                    SourceRef::Record {
+                        native_id: child.task,
+                    },
+                ];
+                reference
+            })
+            .collect();
+        Ok(Lineage {
+            children,
+            ..Lineage::default()
+        })
     }
 
     fn stream_lineage(&self, session: &Session) -> Result<crate::lineage::Lineage> {
